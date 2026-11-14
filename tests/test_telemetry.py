@@ -153,7 +153,7 @@ def test_is_disabled_github_actions(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_is_disabled_none_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When none of the opt-out vars are set, telemetry is enabled."""
+    """With no opt-out set, Coral still sends no telemetry."""
     _ci_vars = [
         "OMNIGENT_ANALYTICS",
         "OMNIGENT_DISABLE_TELEMETRY",
@@ -175,7 +175,7 @@ def test_is_disabled_none_set(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
     from omnigent.telemetry.client import is_disabled
 
-    assert is_disabled() is False
+    assert is_disabled() is True  # CORAL(S98): Coral sends no usage telemetry
 
 
 # ── is_disabled — DISABLE_TELEMETRY alias ───────────────────────────────────
@@ -243,7 +243,7 @@ def test_is_disabled_config_yaml(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 def test_is_disabled_config_yaml_telemetry_true(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``telemetry: true`` in config.yaml does NOT disable telemetry."""
+    """``telemetry: true`` in config.yaml cannot turn Coral's telemetry on."""
     config_file = tmp_path / "config.yaml"
     config_file.write_text("telemetry: true\n", encoding="utf-8")
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
@@ -251,7 +251,7 @@ def test_is_disabled_config_yaml_telemetry_true(
         monkeypatch.delenv(var, raising=False)
     from omnigent.telemetry.client import is_disabled
 
-    assert is_disabled() is False
+    assert is_disabled() is True  # CORAL(S98): Coral sends no usage telemetry
 
 
 # ── init_client — server_config ──────────────────────────────────────────────

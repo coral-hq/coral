@@ -213,11 +213,12 @@ Out of scope (section 3 of the prompt), left unchanged:
 Telemetry and update checks that contact Omnigent services (behaviour unchanged):
 
 - **Server usage telemetry** (`omnigent/telemetry/client.py`, started in
-  `omnigent/server/app.py`): fetches its config from
-  `https://config.omnigent-telemetry.io/<version>.json` (staging:
-  `config-staging.omnigent-telemetry.io`) and sends events to the ingestion URL
-  that config names. Off with `OMNIGENT_DISABLE_TELEMETRY`, `OMNIGENT_ANALYTICS=0`,
-  `DO_NOT_TRACK=1` or in CI.
+  `omnigent/server/app.py`): upstream, it fetches its config from
+  `https://config.omnigent-telemetry.io/<version>.json` and sends events to the
+  ingestion URL that config names. Coral switches it off for good (seam S98,
+  2026-11-14): `is_disabled()` is always true, so the client never starts,
+  never fetches the config, sends no events and adds no installation-id
+  headers.
 - **CLI update reminder** (`omnigent/update_check.py`): for wheel installs it
   looks up the `omnigent` package on the configured index (default pypi.org)
   and points at `omni upgrade`; for git clones it runs `git fetch` on

@@ -73,12 +73,7 @@ exactly as Omnigent documents them. `uv run coral --help` lists them all.
 
 ## Telemetry
 
-Coral sends anonymous usage data by default, through the telemetry service of
-Omnigent, which Coral builds on. To turn it off:
-
-```bash
-export OMNIGENT_DISABLE_TELEMETRY=1   # or DO_NOT_TRACK=1
-```
+Coral doesn't collect or send usage telemetry.
 
 ## Documentation
 

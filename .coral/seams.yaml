@@ -872,3 +872,25 @@ seams:
       - openapi.json
     upstream_first: false
     upstream_candidate: false
+
+  - id: S98
+    title: Coral sends no usage telemetry
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      The telemetry gate (_compute_is_disabled) always answers disabled, so
+      Omnigent's client never starts, fetches its remote config, emits events
+      or adds installation-id request headers. The module and its call sites
+      stay unchanged so upstream merges stay cheap.
+    files:
+      - omnigent/telemetry/client.py
+      - tests/test_telemetry.py
+      - tests/server/integration/test_lifespan.py
+    tests:
+      - tests/test_telemetry.py
+      - tests/server/integration/test_lifespan.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

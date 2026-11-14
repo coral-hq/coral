@@ -30,7 +30,7 @@ async def test_lifespan_usage_telemetry_uses_server_ci_environment(
     tmp_path: Path,
     ci: bool,
 ) -> None:
-    """Server CI suppresses usage telemetry without a runner or host opt-out."""
+    """The server never starts usage telemetry, in CI or out of it."""
     import omnigent.telemetry.client as telemetry
     from omnigent.telemetry.environment import CI_ENV_VARS
     from omnigent.telemetry.events import SessionStoppedEvent
@@ -55,14 +55,10 @@ async def test_lifespan_usage_telemetry_uses_server_ci_environment(
 
     async with app.router.lifespan_context(app):
         telemetry.emit(event)
-        if ci:
-            assert telemetry.get_client() is None
-            client_factory.assert_not_called()
-            installation_id.assert_not_called()
-        else:
-            client_factory.assert_called_once_with()
-            client_factory.return_value._ensure_started.assert_called_once_with()
-            client_factory.return_value.emit.assert_called_once_with(event)
+        # CORAL(S98): Coral sends no usage telemetry, so no client starts either way
+        assert telemetry.get_client() is None
+        client_factory.assert_not_called()
+        installation_id.assert_not_called()
 
 
 async def test_lifespan_shutdown_invokes_registry_shutdown(

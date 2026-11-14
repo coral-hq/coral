@@ -78,7 +78,6 @@ from typing import TYPE_CHECKING, TypedDict, cast
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
-from omnigent.telemetry.environment import is_disabled_by_env
 from omnigent.version import VERSION
 
 _logger = logging.getLogger(__name__)
@@ -272,10 +271,12 @@ def is_disabled() -> bool:
 
 
 def _compute_is_disabled() -> bool:
-    """Compute whether telemetry is disabled (uncached)."""
-    if is_disabled_by_env(os.environ):
-        return True
-    return _config_telemetry_disabled()
+    """Compute whether telemetry is disabled (uncached).
+
+    Coral never sends usage telemetry, so the opt-outs above never decide it.
+    """
+    # CORAL(S98): Coral sends no usage telemetry to Omnigent's service
+    return True
 
 
 def _detect_environment() -> str | None:
