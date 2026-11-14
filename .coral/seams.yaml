@@ -580,6 +580,69 @@ seams:
     upstream_first: false
     upstream_candidate: false
 
+
+  - id: S29
+    title: coral console script
+    owner: WS-PLATFORM
+    status: landed
+    category: coral-specific
+    note: >-
+      Interim: `coral` points at omnigent.cli:main, the same CLI as omnigent
+      and omni. FND-01 repoints it to coral.cli:main and adds the package
+      include and package data.
+    files:
+      - pyproject.toml
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S96
+    title: CLI hints, crash reports and /bug name Coral
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      Run as `coral`, the CLI sets OMNIGENT_WRAPPER_COMMAND=coral unless an
+      operator already set it, so every cli_invocation() hint, in this process
+      and the daemons it starts, names coral; run as omnigent, hints are
+      unchanged. The crash handler and the REPL's /bug file issues on
+      coral-hq/coral.
+    files:
+      - omnigent/cli_invocation.py
+      - omnigent/cli.py
+      - omnigent/repl/_repl.py
+      - tests/cli/test_crash_handler.py
+      - tests/repl/test_report_command.py
+    tests:
+      - tests/coral/test_coral_cli_name.py
+      - tests/cli/test_crash_handler.py
+      - tests/repl/test_report_command.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S94
+    title: GitHub community files point to Coral
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      Security reports go to Coral's private security advisories or its
+      support address; questions go to Coral's Discussions.
+    files:
+      - CONTRIBUTING.md
+      - SECURITY.md
+      - .github/ISSUE_TEMPLATE/config.yml
+      - .github/ISSUE_TEMPLATE/bug_report.yml
+    tests: []
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
   - id: S95
     title: Brand transform of user-visible Python text
     owner: WS-BRAND
@@ -707,10 +770,8 @@ seams:
       - tests/cli/test_import.py
       - tests/cli/test_login_databricks.py
       - tests/db/test_crdb_core.py
-      - tests/e2e/integrations/deploy/cwsandbox/e2e_managed.py
       - tests/e2e/integrations/deploy/gensee/test_managed_lifecycle.py
       - tests/e2e/integrations/deploy/kubernetes/e2e_managed_host_config.py
-      - tests/e2e/integrations/deploy/microsandbox/microsandbox_smoke_test.py
       - tests/e2e/omnigent/_snapshot.py
       - tests/e2e/omnigent/conftest.py
       - tests/e2e/omnigent/test_per_harness_antigravity.py
@@ -744,7 +805,6 @@ seams:
       - tests/e2e_ui/chat/test_failure_error_card.py
       - tests/e2e_ui/start_session/test_unpinned_codex_default_model.py
       - tests/extensions/test_registry.py
-      - tests/harness_bench/__main__.py
       - tests/harness_bench/driver.py
       - tests/harness_bench/full_server_driver.py
       - tests/harness_bench/manifest.py
@@ -808,74 +868,12 @@ seams:
       - tests/coral/test_rebrand.py
     budget_lines: 120
     budget_exception:
-      lines: 385
+      lines: 153
       reason: >-
         Mechanical rewrite by a committed script that every upstream sync
         re-applies; the size does not add merge cost.
       approver: pending
     anchor_exempt:
       - openapi.json
-    upstream_first: false
-    upstream_candidate: false
-
-  - id: S29
-    title: coral console script
-    owner: WS-PLATFORM
-    status: landed
-    category: coral-specific
-    note: >-
-      Interim: `coral` points at omnigent.cli:main, the same CLI as omnigent
-      and omni. FND-01 repoints it to coral.cli:main and adds the package
-      include and package data.
-    files:
-      - pyproject.toml
-    tests: []
-    budget_lines: 10
-    anchor_exempt: []
-    upstream_first: false
-    upstream_candidate: false
-
-  - id: S96
-    title: CLI hints, crash reports and /bug name Coral
-    owner: WS-BRAND
-    status: landed
-    category: coral-specific
-    note: >-
-      Run as `coral`, the CLI sets OMNIGENT_WRAPPER_COMMAND=coral unless an
-      operator already set it, so every cli_invocation() hint, in this process
-      and the daemons it starts, names coral; run as omnigent, hints are
-      unchanged. The crash handler and the REPL's /bug file issues on
-      coral-hq/coral.
-    files:
-      - omnigent/cli_invocation.py
-      - omnigent/cli.py
-      - omnigent/repl/_repl.py
-      - tests/cli/test_crash_handler.py
-      - tests/repl/test_report_command.py
-    tests:
-      - tests/coral/test_coral_cli_name.py
-      - tests/cli/test_crash_handler.py
-      - tests/repl/test_report_command.py
-    budget_lines: 40
-    anchor_exempt: []
-    upstream_first: false
-    upstream_candidate: false
-
-  - id: S94
-    title: GitHub community files point to Coral
-    owner: WS-BRAND
-    status: landed
-    category: coral-specific
-    note: >-
-      Security reports go to Coral's private security advisories or its
-      support address; questions go to Coral's Discussions.
-    files:
-      - CONTRIBUTING.md
-      - SECURITY.md
-      - .github/ISSUE_TEMPLATE/config.yml
-      - .github/ISSUE_TEMPLATE/bug_report.yml
-    tests: []
-    budget_lines: 40
-    anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

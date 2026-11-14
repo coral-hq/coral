@@ -25,7 +25,7 @@ OPS-01's generator will maintain this file later.
 | `SECURITY.md` | S94 | coral-specific | Vulnerability reports go to Coral's private security advisories or coralai.team@gmail.com; the code-scanning link points to Coral's repository. |
 | `justfile` | S87 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build, and `electron-mdm` writes and imports Coral's app-id preference domains (S87). |
 | `omnigent/chat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/cli.py` | S95, S96 | coral-specific | Calls `name_invoked_command` after the wrapper guard; the crash handler shows Coral and files issues on coral-hq/coral. Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/cli.py` | S96, S95 | coral-specific | Calls `name_invoked_command` after the wrapper guard; the crash handler shows Coral and files issues on coral-hq/coral. Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/cli_config.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/cli_diagnostics.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/cli_invocation.py` | S96 | coral-specific | Adds `name_invoked_command`: run as `coral`, hints name `coral` unless a wrapper command is configured. |
@@ -144,14 +144,12 @@ OPS-01's generator will maintain this file later.
 | `tests/cli/test_chat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/cli/test_cli.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/cli/test_cli_diagnostics.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `tests/cli/test_crash_handler.py` | S95, S96 | coral-specific | Renders the crash screen with the `coral` app name the CLI now passes. Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/cli/test_crash_handler.py` | S96, S95 | coral-specific | Renders the crash screen with the `coral` app name the CLI now passes. Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/cli/test_import.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/cli/test_login_databricks.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/db/test_crdb_core.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `tests/e2e/integrations/deploy/cwsandbox/e2e_managed.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e/integrations/deploy/gensee/test_managed_lifecycle.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e/integrations/deploy/kubernetes/e2e_managed_host_config.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `tests/e2e/integrations/deploy/microsandbox/microsandbox_smoke_test.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e/omnigent/_snapshot.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e/omnigent/conftest.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e/omnigent/test_host_no_open.py` | S38 | coral-specific | `--open-in-desktop` opens a `coral://` link (S38). |
@@ -193,7 +191,6 @@ OPS-01's generator will maintain this file later.
 | `tests/e2e_ui/start_session/test_unpinned_codex_default_model.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e_ui/visual/test_landing_snapshot.py` | S79 | coral-specific | Docstring names the new hero (S79); CI regenerates the baseline. |
 | `tests/extensions/test_registry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `tests/harness_bench/__main__.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/harness_bench/driver.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/harness_bench/full_server_driver.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/harness_bench/manifest.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |

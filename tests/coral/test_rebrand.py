@@ -90,10 +90,10 @@ def test_comments_and_ordinary_docstrings_stay() -> None:
     assert transform(source) == source
 
 
-def test_click_help_names_coral_and_its_command() -> None:
+def test_click_help_names_coral_but_keeps_the_omnigent_commands() -> None:
     source = (
         "@cli.command()\n"
-        '@click.option("--server", help="Remote omnigent server URL.")\n'
+        '@click.option("--server", help="Remote Omnigent server URL.")\n'
         "def usage():\n"
         '    """Show your Omnigent usage.\n'
         "\n"
@@ -104,9 +104,9 @@ def test_click_help_names_coral_and_its_command() -> None:
     )
     result = body(source)
     assert '"""Show your Coral usage.' in result
-    assert "      coral usage --json\n" in result
-    assert "      coral usage\n" in result
-    assert 'help="Remote coral server URL."' in result
+    assert "      omnigent usage --json\n" in result
+    assert "      omni usage\n" in result
+    assert 'help="Remote Coral server URL."' in result
 
 
 def test_runtime_messages_keep_the_command_name() -> None:

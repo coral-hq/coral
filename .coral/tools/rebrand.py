@@ -5,7 +5,8 @@ Coral inherits from Omnigent's Python code: prose string literals (messages,
 prompts, option help) and the docstrings click shows as command help. The
 `omnigent` package, imports, identifiers, comments, wire contracts (header
 names, paths, single-word values), credits and statements about upstream
-installs or documentation stay unchanged.
+installs or documentation stay unchanged. So do the CLI's commands: `coral`
+wraps the same CLI, so every `omnigent <command>` also runs as `coral <command>`.
 
 Upstream syncs apply it to each upstream snapshot before merging, so the
 transformed lines never conflict (docs/coral/UPSTREAM_SYNC.md).
@@ -54,11 +55,6 @@ EXCLUDED_FILES = frozenset(
 PRODUCT_WORD = re.compile(r"(?<![\w\-./@#$])Omnigent(?!\w|-[A-Z]|\.[a-z])")
 
 COMPOUND = re.compile(r"(?<![\w\-./@#$])Omnigent-[a-z]")
-
-# The CLI command in help text, rewritten only where click shows it as help.
-COMMAND_WORD = re.compile(
-    r"(?<![\w\-./@#$~])(?:omnigent|omni)(?=[ \t]+(?:--?[a-z]|[a-z][a-z-]*\b))"
-)
 
 # A literal containing any of these speaks about upstream as a fact (install
 # commands, documentation, telemetry, credits) and keeps "Omnigent".
@@ -122,10 +118,6 @@ def keeps_omnigent(text: str) -> bool:
 
 def rewrite_product(text: str) -> str:
     return PRODUCT_WORD.sub("Coral", ARTICLE.sub(r"\1\2", text))
-
-
-def rewrite_help(text: str) -> str:
-    return COMMAND_WORD.sub("coral", rewrite_product(text))
 
 
 def click_help_docstrings(source: str) -> set[tuple[int, int]]:
@@ -254,9 +246,8 @@ def transform_source(source: str, path: str = "<string>") -> tuple[str, list[Kep
         if group_start in docstrings and not is_help:
             continue
         has_product = bool(PRODUCT_WORD.search(text))
-        has_command = is_help and bool(COMMAND_WORD.search(text))
         line = group_start[0]
-        if not has_product and not has_command:
+        if not has_product:
             if "Omnigent" in text:
                 kept.append(Kept(path, line, "identifier or compound", text))
             continue
@@ -266,7 +257,7 @@ def transform_source(source: str, path: str = "<string>") -> tuple[str, list[Kep
         if not is_help and not is_prose(text):
             kept.append(Kept(path, line, "single-word value", text))
             continue
-        rewrite = rewrite_help if is_help else rewrite_product
+        rewrite = rewrite_product
         for begin, end in spans:
             replacement = rewrite(source[begin:end])
             if replacement != source[begin:end]:
@@ -302,7 +293,7 @@ def verify_only_strings_changed(before: str, after: str, path: str) -> None:
     if masked(before, old_constants) != masked(after, new_constants):
         raise ValueError(f"{path}: rebrand changed code outside string literals")
     for old, new in zip(old_constants, new_constants, strict=True):
-        if new not in (old, rewrite_product(old), rewrite_help(old)):
+        if new not in (old, rewrite_product(old)):
             raise ValueError(f"{path}: unexpected rewrite {old[:80]!r} -> {new[:80]!r}")
 
 

@@ -216,11 +216,11 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral claude
-          coral claude --resume conv_abc123
-          coral claude --resume                  # interactive picker
-          coral claude --server https://<app>.databricksapps.com
-          coral claude --smart-routing           # first message picks the model
+          omnigent claude
+          omnigent claude --resume conv_abc123
+          omnigent claude --resume                  # interactive picker
+          omnigent claude --server https://<app>.databricksapps.com
+          omnigent claude --smart-routing           # first message picks the model
         """
         _reject_native_on_windows("claude")
         if smart_routing:
@@ -394,11 +394,11 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral codex
-          coral codex --resume conv_abc123
-          coral codex --resume                  # interactive picker
-          coral codex --server https://<app>.databricksapps.com
-          coral codex --smart-routing           # first message picks the model
+          omnigent codex
+          omnigent codex --resume conv_abc123
+          omnigent codex --resume                  # interactive picker
+          omnigent codex --server https://<app>.databricksapps.com
+          omnigent codex --smart-routing           # first message picks the model
         """
         _reject_native_on_windows("codex")
         if smart_routing:
@@ -522,10 +522,10 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral opencode
-          coral opencode --resume conv_abc123
-          coral opencode --resume                  # interactive picker
-          coral opencode --server https://<app>.databricksapps.com
+          omnigent opencode
+          omnigent opencode --resume conv_abc123
+          omnigent opencode --resume                  # interactive picker
+          omnigent opencode --server https://<app>.databricksapps.com
         """
         from omnigent.harnesses.opencode_native.main import run_opencode_native
 
@@ -613,10 +613,10 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral pi
-          coral pi --resume conv_abc123
-          coral pi --resume                    # interactive picker
-          coral pi --model local-deepseek/deepseek-v4-flash
+          omnigent pi
+          omnigent pi --resume conv_abc123
+          omnigent pi --resume                    # interactive picker
+          omnigent pi --model local-deepseek/deepseek-v4-flash
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -722,12 +722,12 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral cursor
-          coral cursor --model MODEL_ID
-          coral cursor --resume conv_abc123
-          coral cursor --resume                 # interactive picker
-          coral cursor --mode plan              # start in plan (read-only) mode
-          coral cursor --mode ask               # start in ask (Q&A) mode
+          omnigent cursor
+          omnigent cursor --model MODEL_ID
+          omnigent cursor --resume conv_abc123
+          omnigent cursor --resume                 # interactive picker
+          omnigent cursor --mode plan              # start in plan (read-only) mode
+          omnigent cursor --mode ask               # start in ask (Q&A) mode
         """
         _reject_native_on_windows("cursor")
         choice = _split_resume_value(resume)
@@ -862,11 +862,11 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral devin
-          coral devin --resume conv_abc123
-          coral devin --resume                       # interactive picker
-          coral devin --model opus --effort xhigh
-          coral devin --permission-mode smart -p "review this repo"
+          omnigent devin
+          omnigent devin --resume conv_abc123
+          omnigent devin --resume                       # interactive picker
+          omnigent devin --model opus --effort xhigh
+          omnigent devin --permission-mode smart -p "review this repo"
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -988,10 +988,10 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral kiro
-          coral kiro --resume conv_abc123
-          coral kiro --resume                  # interactive picker
-          coral kiro --model auto -p "review this repo"
+          omnigent kiro
+          omnigent kiro --resume conv_abc123
+          omnigent kiro --resume                  # interactive picker
+          omnigent kiro --model auto -p "review this repo"
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -1088,9 +1088,9 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral goose
-          coral goose --resume conv_abc123
-          coral goose --resume                 # interactive picker
+          omnigent goose
+          omnigent goose --resume conv_abc123
+          omnigent goose --resume                 # interactive picker
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -1175,9 +1175,9 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral hermes
-          coral hermes --resume conv_abc123
-          coral hermes --resume                 # interactive picker
+          omnigent hermes
+          omnigent hermes --resume conv_abc123
+          omnigent hermes --resume                 # interactive picker
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -1264,10 +1264,10 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral agy
-          coral agy --resume conv_abc123
-          coral agy --resume                  # interactive picker
-          coral agy --server https://<app>.databricksapps.com
+          omni agy
+          omni agy --resume conv_abc123
+          omni agy --resume                  # interactive picker
+          omni agy --server https://<app>.databricksapps.com
         """
         # Validate option combinations BEFORE any side effects (daemon spawn,
         # server discovery) -- see the same comment in the claude command.
@@ -1366,9 +1366,9 @@ def register_native_commands(cli: click.Group) -> None:
 
         \b
         Examples:
-          coral qwen
-          coral qwen --resume conv_abc123
-          coral qwen --resume                  # interactive picker
+          omnigent qwen
+          omnigent qwen --resume conv_abc123
+          omnigent qwen --resume                  # interactive picker
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -1458,13 +1458,13 @@ def register_native_commands(cli: click.Group) -> None:
         own backend (``kimi login`` for OAuth, or a Moonshot API key).
 
         For the headless SDK harness (per-turn ``kimi -p`` behind the Coral
-        REPL) use ``coral run --harness kimi`` instead.
+        REPL) use ``omnigent run --harness kimi`` instead.
 
         \b
         Examples:
-          coral kimi
-          coral kimi --resume conv_abc123
-          coral kimi --resume                   # interactive picker
+          omnigent kimi
+          omnigent kimi --resume conv_abc123
+          omnigent kimi --resume                   # interactive picker
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):

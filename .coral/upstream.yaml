@@ -4,7 +4,7 @@
 # commit the next sync builds on (docs/coral/UPSTREAM_SYNC.md).
 repo: omnigent-ai/omnigent
 merged_sha: 2a9cbe2c205e49f6fe2b676f2a61bdeb25d57896
-transformed_sha: 93d9e2c881406082dc13d8cb30534f9e7caca35b
+transformed_sha: 5e58872a6f756e750b4841b29a8f47a1cf727bcc
 source: main
 merged_at: "2026-11-08T14:21:45+00:00"
 history: []
