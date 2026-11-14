@@ -93,3 +93,32 @@ seams:
       - pnpm-lock.yaml
     upstream_first: false
     upstream_candidate: false
+
+  - id: S82
+    title: Coral Clay Score tokens in the default omni palette slot
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    files:
+      - web/src/lib/themePalette.ts
+      - web/src/themePalettes.generated.css
+      - web/src/lib/themePalette.test.ts
+      - web/src/lib/customTheme.test.ts
+      - tests/browser_ui/chat/test_color_theme.py
+    tests:
+      - web/src/lib/themePalette.test.ts
+      - web/src/lib/customTheme.test.ts
+      - web/src/brand/coral.css.test.ts
+      - tests/browser_ui/chat/test_color_theme.py
+    budget_lines: 40
+    budget_exception:
+      lines: 140
+      reason: >-
+        The omni entry's token data is rewritten in place (id and
+        DEFAULT_PALETTE unchanged), its two generated CSS blocks follow, and
+        the Omnigent-only palette pins in the tests are rebaselined.
+      approver: pending
+    anchor_exempt:
+      - web/src/themePalettes.generated.css
+    upstream_first: false
+    upstream_candidate: false

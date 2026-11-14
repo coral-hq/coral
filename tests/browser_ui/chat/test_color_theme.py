@@ -2,10 +2,10 @@
 
 Alongside the light/dark **mode** tiles, ``AppearanceSection``
 (``pages/SettingsPage.tsx``) renders a "Color theme" dropdown (a shadcn
-``Select``) — one option per palette (Omnigent, Dracula, GitHub, Catppuccin,
+``Select``) — one option per palette (Coral, Dracula, GitHub, Catppuccin,
 Gruvbox, Solarized, Nord). Choosing one calls ``applyThemePalette``
 (``lib/themePalette.ts``), which sets ``data-theme`` on ``<html>`` and persists the id to
-``localStorage["omnigent:ui-theme-palette"]``. The default "Omnigent" palette
+``localStorage["omnigent:ui-theme-palette"]``. The default "Coral" palette
 carries no override, so choosing it removes the attribute and clears the key.
 
 The palette axis is orthogonal to the light/dark class next-themes toggles, so
@@ -243,17 +243,18 @@ def test_color_palette_applies_persists_and_resets(
 ) -> None:
     """Selecting a palette skins ``<html>`` + persists; the default clears it.
 
-    Fresh load is the default "Omnigent" (its name shown, nothing stored, no
+    Fresh load is the default "Coral" (its name shown, nothing stored, no
     ``data-theme``). Picking GitHub sets ``data-theme="github"`` and persists it —
-    and survives a reload (re-applied at boot). Returning to Omnigent removes the
+    and survives a reload (re-applied at boot). Returning to Coral removes the
     attribute and clears the stored key.
     """
     base_url = chat_session_contract.base_url
     _open_appearance(page, base_url)
 
-    # Fresh context → default "Omnigent": the trigger shows it, no override, and
+    # CORAL(S82): the default palette's label is "Coral".
+    # Fresh context → default "Coral": the trigger shows it, no override, and
     # nothing persisted.
-    expect(_color_theme_select(page)).to_contain_text("Omnigent")
+    expect(_color_theme_select(page)).to_contain_text("Coral")
     assert _data_theme(page) is None, "expected no data-theme override on a fresh load"
     assert _stored_palette(page) is None, "expected no persisted palette on a fresh load"
 
@@ -270,11 +271,11 @@ def test_color_palette_applies_persists_and_resets(
     assert _data_theme(page) == "github", "saved palette not re-applied after reload"
     expect(_color_theme_select(page)).to_contain_text("GitHub")
 
-    # → back to Omnigent (the default): the override is removed and the stored
+    # → back to Coral (the default): the override is removed and the stored
     # key cleared, since the default reverts to the base brand tokens.
-    _pick_palette(page, "Omnigent")
-    expect(_color_theme_select(page)).to_contain_text("Omnigent")
-    assert _data_theme(page) is None, "<html> kept data-theme after returning to Omnigent"
+    _pick_palette(page, "Coral")
+    expect(_color_theme_select(page)).to_contain_text("Coral")
+    assert _data_theme(page) is None, "<html> kept data-theme after returning to Coral"
     assert _stored_palette(page) is None, "the palette key was not cleared for the default"
 
 
@@ -484,11 +485,11 @@ def test_custom_theme_colors_can_be_randomized(
 def test_omnigent_selection_keeps_the_brand_tint(
     page: Page, chat_session_contract: ChatSessionContract
 ) -> None:
-    """Selected chat text on the default palette is the translucent brand pink.
+    """Selected chat text on the default palette is a translucent brand wash.
 
-    Omnigent's selection is the sidebar's active-item tint, not an opaque
-    primary-colour block: ``rgba(223, 60, 133, 0.1)`` with plum text in light
-    mode and ``rgba(223, 60, 133, 0.15)`` with pink text in dark mode.
+    Coral's selection is a wash of its primary, not an opaque primary-colour
+    block: ``rgba(134, 74, 49, 0.15)`` clay with ink text in light mode and
+    ``rgba(193, 154, 85, 0.2)`` mustard with cream text in dark mode.
     """
     base_url, session_id = chat_session_contract.base_url, chat_session_contract.session_id
     chat_session_contract.set_items(
@@ -500,11 +501,12 @@ def test_omnigent_selection_keeps_the_brand_tint(
         ]
     )
     expected = {
-        "Light": ["rgba(223, 60, 133, 0.1)", "rgb(101, 18, 73)"],
-        "Dark": ["rgba(223, 60, 133, 0.15)", "rgb(249, 168, 212)"],
+        # CORAL(S82): Coral's clay and mustard selection washes.
+        "Light": ["rgba(134, 74, 49, 0.15)", "rgb(82, 62, 49)"],
+        "Dark": ["rgba(193, 154, 85, 0.2)", "rgb(254, 247, 241)"],
     }
     _open_appearance(page, base_url)
-    _pick_palette(page, "Omnigent")
+    _pick_palette(page, "Coral")
     for mode, colors in expected.items():
         _open_appearance(page, base_url)
         _theme_radiogroup(page).get_by_role("radio", name=mode).click()

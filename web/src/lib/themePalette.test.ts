@@ -183,8 +183,9 @@ describe("themePalette", () => {
     for (const palette of PALETTES) {
       expect(palette.tokens.dark.shellBackground, palette.label).toBe("var(--background)");
     }
-    expect(PALETTES[0].tokens.dark.background).toBe("#0e0b19");
-    expect(PALETTES[0].tokens.dark.sidebar).toBe("#0e0b19");
+    // CORAL(S82): Coral's dark canvas and sidebar (UI§2.3) replace the Omnigent pins.
+    expect(PALETTES[0].tokens.dark.background).toBe("#2a211c");
+    expect(PALETTES[0].tokens.dark.sidebar).toBe("#241c18");
   });
 
   it("uses white as the base for Omnigent dark form controls", () => {
@@ -192,24 +193,52 @@ describe("themePalette", () => {
     expect(omni.tokens.dark.input).toBe("rgb(255 255 255 / 15%)");
   });
 
-  it("uses the Omnigent brand pink as the primary accent in both modes", () => {
+  // CORAL(S82): Coral rules replace the Omnigent pink-primary and magenta-link rules.
+  it("uses Coral terracotta as the light primary and mustard as the dark primary", () => {
     const omni = PALETTES.find((palette) => palette.id === "omni")!;
-    expect(omni.tokens.light.primary).toBe("#df3c85");
-    expect(omni.tokens.dark.primary).toBe("#df3c85");
+    expect(omni.label).toBe("Coral");
+    expect(omni.tokens.light.primary).toBe("#864a31");
+    expect(omni.tokens.dark.primary).toBe("#c19a55");
   });
 
-  it("uses magenta links with neutral support controls in Omnigent", () => {
+  it("uses clay links with warm support controls in Coral", () => {
     const omni = PALETTES.find((palette) => palette.id === "omni")!;
     for (const mode of ["light", "dark"] as const) {
       const tokens = omni.tokens[mode];
       const [red, green, blue] = parseColor(tokens.link).rgb;
-      expect(red).toBeGreaterThan(blue);
-      expect(blue).toBeGreaterThan(green);
-      const accent = parseColor(tokens.accent).rgb;
-      expect(Math.max(...accent) - Math.min(...accent)).toBeLessThanOrEqual(8);
+      expect(red).toBeGreaterThan(green);
+      expect(green).toBeGreaterThan(blue);
+      const [accentRed, accentGreen, accentBlue] = parseColor(tokens.accent).rgb;
+      expect(accentRed).toBeGreaterThanOrEqual(accentGreen);
+      expect(accentGreen).toBeGreaterThanOrEqual(accentBlue);
+      const accent = [accentRed, accentGreen, accentBlue] as Rgb;
       expect(contrast(parseColor(tokens.accentForeground).rgb, accent)).toBeGreaterThanOrEqual(4.5);
       expect(tokens.sidebarPrimary).toBe("var(--link)");
     }
+  });
+
+  it("keeps Coral body text and primary labels readable", () => {
+    // mutedForeground (#8a7566, 4.11:1 on the cream canvas) awaits a design
+    // decision on the OQ-1 contrast baseline, so it is not asserted here.
+    const omni = PALETTES.find((palette) => palette.id === "omni")!;
+    for (const mode of ["light", "dark"] as const) {
+      const { foreground, background, cardSolid, primary, primaryForeground } = omni.tokens[mode];
+      for (const surface of [background, cardSolid]) {
+        expect(
+          contrast(parseColor(foreground).rgb, parseColor(surface).rgb),
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+      expect(
+        contrast(parseColor(primaryForeground).rgb, parseColor(primary).rgb),
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("renders Coral's Clay Score look for a stored omni preference", () => {
+    localStorage.setItem(STORAGE_KEY, "omni");
+    applyThemePalette(readThemePalette());
+    expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
+    expect(PALETTES[0].tokens.light.background).toBe("#fef7f1");
   });
 
   it.each(PALETTES)("keeps $label links readable on page and table surfaces", (palette) => {

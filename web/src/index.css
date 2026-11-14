@@ -6,6 +6,8 @@
 /* CORAL(S83): bundle Newsreader offline for Coral brand moments (--font-display) */
 @import "@fontsource-variable/newsreader";
 @import "./themePalettes.generated.css";
+/* CORAL(S83): Coral ramps, default-palette status remaps and the working-mark pulse */
+@import "./brand/coral.css";
 
 /* Streamdown ships utility classes pre-compiled in its dist; this @source
  * pragma tells Tailwind v4 to scan those files so the classes survive the

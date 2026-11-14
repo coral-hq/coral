@@ -1,0 +1,108 @@
+/* Coral brand layer (BRD-01, UI§2): the Clay Score ramps, the working-mark
+ * pulse, and the default-palette remaps. The remap blocks use the same
+ * selectors as the generated `omni` palette rules, so they outrank index.css's
+ * `:root` and `.dark` blocks in any import order while leaving every other
+ * palette (`data-theme="…"`) untouched. True destructive red is not remapped. */
+
+:root {
+  --coral-cream: #fef7f1;
+  --coral-forest: #4d7356;
+  --coral-sage: #9eab92;
+  --coral-mint: #b9cdb0;
+  --coral-mustard: #c19a55;
+  --coral-clay: #864a31;
+  --coral-deep-red: #6e2b22;
+  --coral-ink: #523e31;
+}
+
+/* Dark accent ramp, lifted for contrast (UI§2.3). */
+.dark {
+  --coral-forest: #9eab92;
+  --coral-sage: #6b8574;
+  --coral-mustard: #c19a55;
+  --coral-clay: #c47a58;
+  --coral-ink: #fef7f1;
+}
+
+:root:not(.dark):not([data-theme]) {
+  --success: var(--coral-forest);
+  --warning: var(--coral-mustard);
+  --info: var(--coral-sage);
+  --session-active: var(--coral-forest);
+  --status-green: var(--coral-forest);
+  --status-yellow: var(--coral-mustard);
+  --status-blue: var(--coral-sage);
+  --status-gray: #8a7566;
+  --chart-1: var(--coral-forest);
+  --chart-2: var(--coral-sage);
+  --chart-3: var(--coral-mustard);
+  --chart-4: var(--coral-clay);
+  --chart-5: var(--coral-ink);
+  /* Legacy token name: a clay wash, not Omnigent pink. */
+  --tag-pink: rgba(134, 74, 49, 0.08);
+  --primary-cta: var(--coral-clay);
+  --primary-cta-foreground: var(--coral-cream);
+  --onboarding-wizard-background: var(--coral-cream);
+}
+
+.dark:not([data-theme]) {
+  --success: var(--coral-forest);
+  --warning: var(--coral-mustard);
+  --info: var(--coral-sage);
+  --session-active: var(--coral-forest);
+  --status-green: var(--coral-forest);
+  --status-yellow: var(--coral-mustard);
+  --status-blue: var(--coral-sage);
+  --status-gray: #a8968a;
+  --chart-1: var(--coral-forest);
+  --chart-2: var(--coral-sage);
+  --chart-3: var(--coral-mustard);
+  --chart-4: var(--coral-clay);
+  --chart-5: var(--coral-ink);
+  --tag-pink: rgba(196, 122, 88, 0.16);
+  --primary-cta: var(--coral-mustard);
+  --primary-cta-foreground: #2a211c;
+  --onboarding-wizard-background: #241c18;
+  --tooltip-bg: #3a2f28;
+}
+
+/* The Share button's glassy pink becomes glassy clay in the default palette. */
+:root:not(.dark):not([data-theme]) .share-button-glassy {
+  background: linear-gradient(to bottom, #a0603f 0%, #864a31 40%, #6f3c28 100%);
+}
+
+:root:not(.dark):not([data-theme]) .share-button-glassy:hover {
+  background: linear-gradient(to bottom, #935638 0%, #7a432c 40%, #633523 100%);
+}
+
+.dark:not([data-theme]) .share-button-glassy {
+  background: linear-gradient(150deg, #b06c4a 0%, #864a31 40%, #6e2b22 100%);
+}
+
+.dark:not([data-theme]) .share-button-glassy:hover {
+  background: linear-gradient(150deg, #a3623f 0%, #7a432c 40%, #5f251d 100%);
+}
+
+/* Working indicator: the Coral mark breathes instead of Otto's blink. */
+@keyframes coral-mark-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.9);
+  }
+}
+
+.coral-mark.otto-working {
+  transform-origin: center;
+  animation: coral-mark-pulse 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coral-mark.otto-working {
+    animation: none;
+  }
+}

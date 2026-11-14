@@ -136,22 +136,23 @@ describe("customTheme", () => {
     }
   });
 
-  it("keeps Omnigent's selection tint after contrast changes", () => {
+  // CORAL(S82): the default palette's selection tint is now Coral's clay and mustard washes.
+  it("keeps the default palette's selection tint after contrast changes", () => {
     const theme = createCustomThemeFromPalette(PALETTES[0]);
     const variants = deriveCustomTheme({ ...theme, contrast: 53 });
 
-    expect(variants.light.selectionBackground).toBe("rgba(223, 60, 133, 0.1)");
-    expect(variants.light.selectionForeground).toBe("#651249");
-    expect(variants.dark.selectionBackground).toBe("rgba(223, 60, 133, 0.15)");
-    expect(variants.dark.selectionForeground).toBe("#f9a8d4");
+    expect(variants.light.selectionBackground).toBe("rgba(134, 74, 49, 0.15)");
+    expect(variants.light.selectionForeground).toBe("#523e31");
+    expect(variants.dark.selectionBackground).toBe("rgba(193, 154, 85, 0.2)");
+    expect(variants.dark.selectionForeground).toBe("#fef7f1");
   });
 
   it("tints the text selection with a custom accent, like the sidebar's active row", () => {
     const theme = createCustomThemeFromPalette(PALETTES[0]);
     const variants = deriveCustomTheme({ ...theme, accent: "#2563eb", darkAccent: "#f59e0b" });
 
-    expect(variants.light.selectionBackground).toBe("rgba(37, 99, 235, 0.1)");
-    expect(variants.dark.selectionBackground).toBe("rgba(245, 158, 11, 0.15)");
+    expect(variants.light.selectionBackground).toBe("rgba(37, 99, 235, 0.15)");
+    expect(variants.dark.selectionBackground).toBe("rgba(245, 158, 11, 0.2)");
     expect(variants.light.selectionForeground).toBe(variants.light.foreground);
     expect(variants.dark.selectionForeground).toBe(variants.dark.foreground);
   });
