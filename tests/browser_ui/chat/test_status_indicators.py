@@ -278,19 +278,19 @@ def test_turn_end_eases_a_transcript_at_its_end_down(
 
 
 # Pauses the indicator's animations and steps them through 3.4s, recording what moves.
+# CORAL(S79): the working mark is the Coral mark, which pulses its opacity instead of blinking.
 _STEP_WORKING_ANIMATIONS = """(indicator) => {
-  const starfish = indicator.querySelector(".otto-working");
-  const eye = starfish.querySelector(".otto-eye");
+  const mark = indicator.querySelector(".otto-working");
   const label = indicator.querySelector(".text-shimmer");
   const animations = indicator.getAnimations({ subtree: true });
   for (const animation of animations) animation.pause();
   const frames = [];
   for (let time = 0; time <= 3400; time += 100) {
     for (const animation of animations) animation.currentTime = time;
-    const row = starfish.parentElement.getBoundingClientRect();
+    const row = mark.parentElement.getBoundingClientRect();
     frames.push({
-      starfishTop: starfish.getBoundingClientRect().top - row.top,
-      eyeHeight: eye.getBoundingClientRect().height,
+      markTop: mark.getBoundingClientRect().top - row.top,
+      markOpacity: getComputedStyle(mark).opacity,
       labelShimmer: getComputedStyle(label).backgroundPosition,
     });
   }
@@ -298,11 +298,11 @@ _STEP_WORKING_ANIMATIONS = """(indicator) => {
 }"""
 
 
-def test_working_starfish_holds_still_while_it_blinks_and_the_label_shimmers(
+def test_working_mark_holds_still_while_it_pulses_and_the_label_shimmers(
     page: Page,
     chat_session_contract: ChatSessionContract,
 ) -> None:
-    """Only the starfish's eyes and the label animate while Working shows."""
+    """Only the mark's opacity and the label animate while Working shows."""
     chat = chat_session_contract
     page.goto(chat.url)
     expect(page.get_by_label("Message the agent")).to_be_visible(timeout=20_000)
@@ -313,9 +313,9 @@ def test_working_starfish_holds_still_while_it_blinks_and_the_label_shimmers(
     expect(working).to_be_visible(timeout=10_000)
 
     frames = working.evaluate(_STEP_WORKING_ANIMATIONS)
-    tops = sorted({frame["starfishTop"] for frame in frames})
-    assert len(tops) == 1, f"the starfish moved between offsets {tops}"
-    assert len({frame["eyeHeight"] for frame in frames}) > 1, "the eyes stopped blinking"
+    tops = sorted({frame["markTop"] for frame in frames})
+    assert len(tops) == 1, f"the mark moved between offsets {tops}"
+    assert len({frame["markOpacity"] for frame in frames}) > 1, "the mark stopped pulsing"
     assert len({frame["labelShimmer"] for frame in frames}) > 1, "the label stopped shimmering"
 
 

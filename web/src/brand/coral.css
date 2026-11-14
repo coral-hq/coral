@@ -83,21 +83,19 @@
   background: linear-gradient(150deg, #a3623f 0%, #7a432c 40%, #5f251d 100%);
 }
 
-/* Working indicator: the Coral mark breathes instead of Otto's blink. */
+/* Working indicator: the Coral mark pulses in place (opacity only, so it never
+ * shifts the row) instead of Otto's blink. */
 @keyframes coral-mark-pulse {
   0%,
   100% {
     opacity: 1;
-    transform: scale(1);
   }
   50% {
-    opacity: 0.55;
-    transform: scale(0.9);
+    opacity: 0.45;
   }
 }
 
 .coral-mark.otto-working {
-  transform-origin: center;
   animation: coral-mark-pulse 1.8s ease-in-out infinite;
 }
 
