@@ -1,7 +1,9 @@
 # Security Policy
 
-To report a security vulnerability, use
-[GitHub private security advisories](https://github.com/omnigent-ai/omnigent/security/advisories/new).
+<!-- CORAL(S94): vulnerability reports and scan results go to Coral -->
+To report a security vulnerability in Coral, email coralai.team@gmail.com.
+If the problem is in code Coral inherits unchanged from Omnigent, we will help
+you report it to Omnigent as well.
 
 Please do not open a public issue for security problems, and do not include live
 credentials, tokens, or customer data in any report.
@@ -25,7 +27,7 @@ Trivy excludes root-level `dev/` directories from its filesystem traversal.
 The initial rollout is **report-only**: vulnerabilities do not fail the Trivy
 jobs, but scanner, report-generation, or upload errors do. A green check does
 not mean there are no CVEs. SARIF results are published to
-[Security > Code scanning](https://github.com/omnigent-ai/omnigent/security/code-scanning)
+[Security > Code scanning](https://github.com/coral-hq/coral/security/code-scanning)
 with stable categories `trivy-repository` and `trivy-dev-tools`. Source paths
 resolve against the scanned directory so development-tool alerts link to files
 under `dev/`. Uploading alerts does not itself configure a merge-blocking rule;

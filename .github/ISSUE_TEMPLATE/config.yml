@@ -1,5 +1,6 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Questions & Help
-    url: https://github.com/omnigent-ai/omnigent/discussions
-    about: Ask questions and get help from the community. Issues are for actionable bugs and feature requests.
+  # CORAL(S94): Coral has no discussion forum yet; point to its documentation
+  - name: Coral documentation
+    url: https://github.com/coral-hq/coral/blob/main/docs/coral/README.md
+    about: Coral's design, roadmap and status. Issues are for actionable bugs and feature requests.

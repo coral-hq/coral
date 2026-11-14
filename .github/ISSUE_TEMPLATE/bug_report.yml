@@ -33,8 +33,9 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `omnigent --version` or the commit/tag you're running.
-      placeholder: e.g. 0.5.2 or abc1234
+      # CORAL(S94): Coral has no releases; ask for the commit
+      description: The Coral commit you're running (`git rev-parse --short HEAD`).
+      placeholder: e.g. abc1234
     validations:
       required: false
 

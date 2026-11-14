@@ -47,14 +47,25 @@ seams:
     upstream_candidate: false
 
   - id: S91
-    title: README banner with the Coral attribution
+    title: Coral's README, with the attribution to Omnigent
     owner: WS-BRAND
     status: landed
     category: coral-specific
+    note: >-
+      README.md is Coral's own file. Upstream syncs keep Coral's version
+      (docs/coral/UPSTREAM_SYNC.md); Omnigent's README stays in Omnigent's
+      repository.
     files:
       - README.md
     tests: []
     budget_lines: 10
+    budget_exception:
+      lines: 900
+      reason: >-
+        The whole README is rewritten as Coral's: what Coral is, its status,
+        running it from source, telemetry, what still says Omnigent and why,
+        and the attribution.
+      approver: pending
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -784,6 +795,25 @@ seams:
       - tests/coral/test_coral_cli_name.py
       - tests/cli/test_crash_handler.py
       - tests/repl/test_report_command.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S94
+    title: GitHub community files point to Coral
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      Security reports go to Coral's support address, because the repository
+      has private vulnerability reporting and Discussions turned off.
+    files:
+      - CONTRIBUTING.md
+      - SECURITY.md
+      - .github/ISSUE_TEMPLATE/config.yml
+      - .github/ISSUE_TEMPLATE/bug_report.yml
+    tests: []
     budget_lines: 40
     anchor_exempt: []
     upstream_first: false

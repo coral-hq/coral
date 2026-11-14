@@ -1,7 +1,14 @@
-# Contributing to Omnigent
+<!-- CORAL(S94): contributing to Coral -->
+# Contributing to Coral
 
-Thanks for your interest in improving Omnigent. Issues and pull requests are
+Thanks for your interest in improving Coral. Issues and pull requests are
 welcome. For larger changes, open an issue first so we can discuss the approach.
+
+Coral is built on Omnigent. Changes to Omnigent's own files follow the seam
+rules in [docs/coral/README.md](docs/coral/README.md), and fixes that belong
+in Omnigent itself should also go to Omnigent. The rest of this guide is
+inherited from Omnigent; its development setup and checks apply to Coral as
+written.
 
 Please don't include secrets, internal URLs, customer data, or private
 configuration in issues, tests, examples, or logs.
@@ -49,7 +56,7 @@ missing from the model. Automation preserves those overrides and does not
 replace a maintainer-set priority with its own proposal. The queue is rerun as
 issues change, while unchanged LLM classifications are reused.
 
-For bugs, include the observed impact, reproduction evidence, Omnigent version,
+For bugs, include the observed impact, reproduction evidence, Coral commit,
 platform, and affected harness or authentication mode. Direct steps are best,
 but a clear intermittent observation, controlled test, diagnostics, or concrete
 analysis of the failing code path can also give maintainers enough to
@@ -122,8 +129,8 @@ Install local prerequisites first:
 - A Rust toolchain for the recommended `omnidev` local development supervisor.
 
 ```bash
-git clone https://github.com/omnigent-ai/omnigent.git
-cd omnigent
+git clone https://github.com/coral-hq/coral.git
+cd coral
 
 uv python install
 uv venv --python "$(cat .python-version)"
