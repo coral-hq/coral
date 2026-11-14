@@ -321,7 +321,8 @@ def test_share_modal_qr_code_opens_mobile_deep_link(
     qr_dialog = page.get_by_role("dialog").filter(has_text="Scan with your phone").last
     expect(qr_dialog).to_be_visible(timeout=10_000)
     # The QR code is an SVG element inside the dialog.
-    qr_svg = qr_dialog.locator("[aria-label='QR code to open this session in the Omnigent app']")
+    # CORAL(S89): the QR code's label names the default app, Coral.
+    qr_svg = qr_dialog.locator("[aria-label='QR code to open this session in the Coral app']")
     expect(qr_svg).to_be_visible(timeout=10_000)
 
     # Closing the QR dialog returns to the share modal (not dismissed

@@ -713,8 +713,9 @@ describe("PermissionsModal", () => {
         wrapper: createSharingWrapper("off"),
       });
 
+      // CORAL(S89): sharing notices now name the default app, Coral.
       expect(
-        await screen.findByText("Sharing has been disabled for this Omnigent server."),
+        await screen.findByText("Sharing has been disabled for this Coral server."),
       ).toBeInTheDocument();
       // Off short-circuits before the grant-list query and hides all controls.
       expect(listMock).not.toHaveBeenCalled();
@@ -732,11 +733,11 @@ describe("PermissionsModal", () => {
       await waitFor(() => expect(listMock).toHaveBeenCalledWith("conv_abc"));
       expect(screen.getByRole("button", { name: /^add$/i })).toBeInTheDocument();
       expect(
-        screen.getByText(/This Omnigent server allows Read and Edit access for added people\./),
+        screen.getByText(/This Coral server allows Read and Edit access for added people\./),
       ).toBeInTheDocument();
       expect(screen.queryByText(/Please be careful when sharing/)).not.toBeInTheDocument();
       expect(
-        screen.queryByText("Sharing has been disabled for this Omnigent server."),
+        screen.queryByText("Sharing has been disabled for this Coral server."),
       ).not.toBeInTheDocument();
     });
 
@@ -750,7 +751,7 @@ describe("PermissionsModal", () => {
       await waitFor(() => expect(listMock).toHaveBeenCalledWith("conv_abc"));
       expect(
         screen.getByText(
-          /This Omnigent server allows read-only sharing\. Invite others to read this session\./,
+          /This Coral server allows read-only sharing\. Invite others to read this session\./,
         ),
       ).toBeInTheDocument();
       // Read grants are still allowed, so the Grant control stays.
@@ -775,7 +776,7 @@ describe("PermissionsModal", () => {
       await waitFor(() => expect(listMock).toHaveBeenCalledWith("conv_abc"));
       expect(
         screen.getByText(
-          /This Omnigent server allows read-only sharing\. Invite others to read this session\./,
+          /This Coral server allows read-only sharing\. Invite others to read this session\./,
         ),
       ).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /^add$/i })).toBeInTheDocument();

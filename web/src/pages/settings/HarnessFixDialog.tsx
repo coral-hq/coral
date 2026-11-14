@@ -37,6 +37,8 @@ import {
 } from "@/hooks/useHosts";
 import { useHarnessSetupSteps } from "@/lib/agentLabels";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
+// CORAL(S89): the tmux setup hint names the app via useAppName().
+import { useAppName } from "@/lib/branding";
 import { copyText } from "@/lib/clipboard";
 import {
   HARNESS_CREDENTIAL_COPY,
@@ -1182,6 +1184,7 @@ function TmuxSetup({
   hostName: string;
   stillNotReady: boolean;
 }) {
+  const appName = useAppName();
   return (
     <>
       <DialogDescription>
@@ -1193,8 +1196,8 @@ function TmuxSetup({
         On macOS, use Homebrew (run{" "}
         <code className="font-mono text-foreground">brew upgrade tmux</code> if it&apos;s already
         installed but outdated); on Linux, use your package manager. Check that{" "}
-        <code className="font-mono text-foreground">tmux -V</code> works in a terminal. If Omnigent
-        still can&apos;t find it, quit and reopen the Omnigent app.
+        <code className="font-mono text-foreground">tmux -V</code> works in a terminal. If {appName}{" "}
+        still can&apos;t find it, quit and reopen the {appName} app.
       </p>
       {stillNotReady && (
         <p role="status" className="text-sm text-destructive">

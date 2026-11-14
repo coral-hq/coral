@@ -4,6 +4,8 @@ import { ALT_KEY, CTRL_KEY, MOD_KEY, SHIFT_KEY } from "@/components/KeyboardShor
 import { SettingsLabel } from "@/components/SettingsLabel";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+// CORAL(S89): the shortcut label and description name the app via useAppName().
+import { useAppName } from "@/lib/branding";
 import { isMacPlatform } from "@/lib/hotkeys";
 import {
   cancelGlobalShortcutRecording,
@@ -63,6 +65,7 @@ function formatAccelerator(accelerator: string): string {
  * shell registers it; this control reads and saves the setting.
  */
 export function GlobalShortcutControl() {
+  const appName = useAppName();
   const [setting, setSetting] = useState<GlobalShortcutSetting | null>(null);
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -143,11 +146,11 @@ export function GlobalShortcutControl() {
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-6">
         <SettingsLabel
-          label="Show Omnigent from anywhere"
+          label={`Show ${appName} from anywhere`}
           labelId={labelId}
           descriptionId={descriptionId}
           className="flex-1"
-          description="Brings Omnigent to the front from any app."
+          description={`Brings ${appName} to the front from any app.`}
           descriptionClassName="text-ui"
         />
         <div className="flex shrink-0 items-center gap-3">

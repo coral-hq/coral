@@ -117,6 +117,8 @@ import {
   nativeCodingAgentForSubagentWrapper,
   WRAPPER_LABEL_KEY,
 } from "@/lib/nativeCodingAgents";
+// CORAL(S89): the sharing-off Share reason names the app via useAppName() (default Coral).
+import { useAppName } from "@/lib/branding";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled, isSingleUserMode } from "@/lib/capabilities";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
@@ -883,11 +885,12 @@ function AppShellImpl() {
   // /v1/info. Fail open (share enabled) while the capability probe loads.
   const sharingOff = serverInfo !== "loading" && serverInfo.sharing_mode === "off";
   const shareDisabled = canShare && (isCurrentServerLocal() || sharingOff);
+  const appName = useAppName();
   const shareDisabledReason = !shareDisabled
     ? undefined
     : isCurrentServerLocal()
       ? "Sharing is unavailable from a local server."
-      : "Sharing has been disabled for this Omnigent server.";
+      : `Sharing has been disabled for this ${appName} server.`;
   // Any viewer can fork a shared session, sub-agents included — forking a
   // child is how it gets promoted to a top-level session of its own. Gated on
   // knowing which the session is (sidebar row or loaded snapshot) so the

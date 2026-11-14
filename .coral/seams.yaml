@@ -210,8 +210,52 @@ seams:
       - web/src/pages/onboarding/AuthCardShell.tsx
       - web/src/pages/RegisterPage.tsx
       - web/src/pages/onboarding/JoinTeamStep.tsx
+      - web/src/components/BrowserPane/BrowserPane.tsx
+      - web/src/components/BrowserPane/BrowserPane.test.tsx
+      - web/src/components/KeyboardShortcutsDialog.tsx
+      - web/src/components/KeyboardShortcutsDialog.test.tsx
+      - web/src/components/PageLoading.tsx
+      - web/src/components/PermissionsModal.tsx
+      - web/src/components/PermissionsModal.test.tsx
+      - web/src/components/PermissionsModal.designs.stories.tsx
+      - web/src/components/UpdateBanner.tsx
+      - web/src/components/UpdateBanner.test.tsx
+      - web/src/components/blocks/ApprovalCard.tsx
+      - web/src/components/blocks/ApprovalCard.test.tsx
+      - web/src/components/scheduled/triggerTemplates.ts
+      - web/src/components/scheduled/triggerTemplates.test.ts
+      - web/src/components/scheduled/CreateScheduledTaskDialog.test.tsx
+      - web/src/lib/harnessSetup.ts
+      - web/src/lib/settingsPortability.ts
+      - web/src/lib/terminalClipboardPreferences.test.ts
+      - web/src/pages/SettingsPage.tsx
+      - web/src/pages/SettingsPage.test.tsx
+      - web/src/pages/settings/GlobalShortcutControl.tsx
+      - web/src/pages/settings/GlobalShortcutControl.test.tsx
+      - web/src/pages/settings/HarnessFixDialog.tsx
+      - web/src/pages/settings/HarnessFixDialog.test.tsx
+      - web/src/shell/AppShell.tsx
+      - web/src/shell/AppShell.test.tsx
+      - web/src/shell/CloseWindowDialog.tsx
+      - web/src/shell/CloseWindowDialog.test.tsx
+      - web/src/shell/MarkdownRichTextViewer.tsx
+      - web/src/shell/MarkdownRichTextViewer.test.tsx
+      - web/src/shell/NewChatDialog.tsx
+      - web/src/shell/NewChatDialog.test.tsx
+      - web/src/shell/QuitDialog.tsx
+      - web/src/shell/QuitDialog.test.tsx
+      - web/src/shell/Sidebar.tsx
+      - web/update-overlay.html
+      - tests/e2e_ui/collaboration/test_permissions_modal.py
+      - tests/e2e_ui/collaboration/test_sharing_mode_off.py
+      - tests/e2e_ui/sessions/test_settings_export_import.py
     tests:
       - web/src/brand/brand.test.tsx
+      - web/src/components/scheduled/triggerTemplates.test.ts
+      - web/src/pages/SettingsPage.test.tsx
+      - web/src/shell/AppShell.test.tsx
+      - tests/e2e_ui/collaboration/test_sharing_mode_off.py
+      - tests/e2e_ui/sessions/test_settings_export_import.py
     budget_lines: 40
     anchor_exempt:
       - web/public/coral-mark.svg
@@ -425,6 +469,28 @@ seams:
         accent rail (UI§7), and the onboarding tests' button and heading
         queries follow the Coral copy.
       approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S92
+    title: Server-rendered browser pages name Coral
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      Only the HTML the server renders for browsers: the API-only landing page
+      and the CLI and device consent pages. omnigent login, upgrade text, other
+      server messages and FastAPI(title=...) stay Omnigent (section 3).
+    files:
+      - omnigent/server/static/api_only_landing.html
+      - omnigent/server/routes/auth.py
+      - omnigent/server/routes/device_auth.py
+    tests:
+      - tests/server/test_device_auth.py
+      - tests/server/test_oidc_cli_ticket.py
+      - tests/server/test_app.py
+    budget_lines: 40
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

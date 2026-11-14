@@ -168,7 +168,8 @@ import {
   sandboxProfilesEnabled,
 } from "@/lib/capabilities";
 import { isBootFallbackInfo } from "@/lib/bootCapabilities";
-import { useHeading, usePoweredBy } from "@/lib/branding";
+// CORAL(S89): the tmux hint in harnessWarningMessage names Coral via DEFAULT_APP_NAME (plain function, no hooks).
+import { DEFAULT_APP_NAME, useHeading, usePoweredBy } from "@/lib/branding";
 import {
   isSlashCommandText,
   matchSlashCommandInvocation,
@@ -908,8 +909,8 @@ function harnessWarningMessage(
     return (
       <>
         {agentName} needs tmux {MIN_TMUX_VERSION} or newer on {hostName}. Install it (macOS:{" "}
-        <code>brew install tmux</code>), then check again. If Omnigent still can&apos;t find it,
-        quit and reopen the Omnigent app.
+        <code>brew install tmux</code>), then check again. If {DEFAULT_APP_NAME} still can&apos;t
+        find it, quit and reopen the {DEFAULT_APP_NAME} app.
       </>
     );
   }

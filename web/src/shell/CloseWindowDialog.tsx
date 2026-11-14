@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { useAppName } from "@/lib/branding";
 
 interface CloseWindowDialogProps {
   /** Set while a close awaits confirmation; `quits` when closing ends the app. */
@@ -22,6 +23,8 @@ interface CloseWindowDialogProps {
 
 export function CloseWindowDialog({ prompt, onConfirm, onCancel }: CloseWindowDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null);
+  // CORAL(S89): the quit copy names the app via useAppName() (Coral by default), not "Omnigent".
+  const appName = useAppName();
   // Keep the last prompt's copy on screen while the dialog fades out.
   const [shown, setShown] = useState(prompt);
   if (prompt !== null && prompt !== shown) setShown(prompt);
@@ -37,10 +40,10 @@ export function CloseWindowDialog({ prompt, onConfirm, onCancel }: CloseWindowDi
         }}
       >
         <DialogHeader>
-          <DialogTitle>{quits ? "Quit Omnigent?" : "Close this window?"}</DialogTitle>
+          <DialogTitle>{quits ? `Quit ${appName}?` : "Close this window?"}</DialogTitle>
           <DialogDescription>
             {quits
-              ? "This is the only open window, so closing it quits Omnigent."
+              ? `This is the only open window, so closing it quits ${appName}.`
               : "Your sessions keep running."}
           </DialogDescription>
         </DialogHeader>

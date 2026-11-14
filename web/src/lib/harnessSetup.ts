@@ -9,6 +9,8 @@
  */
 
 import { isAutoHarness, type SetupStepWire } from "@/lib/agentLabels";
+// CORAL(S89): the tmux setup step names the app via resolveSetupSteps' appName (default Coral).
+import { DEFAULT_APP_NAME } from "@/lib/branding";
 import type { Host } from "@/hooks/useHosts";
 import { isFeatureEnabled, type ServerInfo } from "@/lib/capabilities";
 import { canonicalNativeHarness } from "@/lib/nativeHarnessModes";
@@ -426,12 +428,14 @@ function stepStatus(
  * @param serverSteps The ``setup_steps`` the server published for this harness.
  * @param harness The harness id the session declares, e.g. ``"codex-native"``.
  * @param host The selected host (its ``configured_harnesses`` supplies status).
+ * @param appName Product name shown in the tmux step (pass ``useAppName()``).
  * @returns Ordered resolved steps; ``[]`` when the harness has no descriptor.
  */
 export function resolveSetupSteps(
   serverSteps: SetupStepWire[] | undefined,
   harness: string | null | undefined,
   host: Host | undefined | null,
+  appName: string = DEFAULT_APP_NAME,
 ): ResolvedSetupStep[] {
   if (!harness) return [];
   const availability = host?.configured_harnesses?.[harness];
@@ -451,7 +455,7 @@ export function resolveSetupSteps(
       title: `Install tmux ${MIN_TMUX_VERSION} or newer`,
       detail:
         "Native terminals run in tmux on the host. On Linux, use your package manager. " +
-        "If Omnigent still can't find tmux after you install it, quit and reopen the Omnigent app.",
+        `If ${appName} still can't find tmux after you install it, quit and reopen the ${appName} app.`,
       action: "command",
       command: "brew install tmux",
       status: "todo",

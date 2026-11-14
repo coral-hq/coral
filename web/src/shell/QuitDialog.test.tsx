@@ -15,7 +15,8 @@ describe("QuitDialog", () => {
       />,
     );
 
-    expect(screen.getByRole("heading", { name: "Quit Omnigent?" })).toBeInTheDocument();
+    // CORAL(S89): the title names the default app, Coral, not Omnigent.
+    expect(screen.getByRole("heading", { name: "Quit Coral?" })).toBeInTheDocument();
     expect(
       screen.getByText("Sessions running on this computer will go offline."),
     ).toBeInTheDocument();

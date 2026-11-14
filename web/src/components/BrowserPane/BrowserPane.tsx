@@ -59,6 +59,8 @@ import {
   type ChromeCookiePreviewResult,
 } from "@/lib/nativeBridge";
 import { browserViewOwnerId } from "@/lib/browserTabs";
+// CORAL(S89): the Chrome cookie-import dialog names the app via useAppName() instead of "Omnigent".
+import { useAppName } from "@/lib/branding";
 import { fetchSessionHostId } from "@/lib/fetchSessionHostId";
 import { normalizeTypedUrl } from "@/lib/normalizeTypedUrl";
 import { cn } from "@/lib/utils";
@@ -188,6 +190,7 @@ export function BrowserPane({
   const addressBarRef = useRef<HTMLInputElement | null>(null);
   const lastBoundsRef = useRef<Bounds | null>(null);
   const browserSupported = supportsBrowser();
+  const appName = useAppName();
   // A detached view still exists; only `active` controls its attachment.
   const [hasView, setHasView] = useState(false);
 
@@ -787,7 +790,7 @@ export function BrowserPane({
             <DialogDescription>
               Copies {activeCookieScope}'s cookies into this conversation's browser, so the site
               reuses the sign-in you already have in Chrome. Nothing is written back to Chrome, and
-              the copy disappears when Omnigent quits.
+              the copy disappears when {appName} quits.
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-3">
@@ -835,7 +838,7 @@ export function BrowserPane({
             <p className="text-muted-foreground text-xs">
               {countForScope(activeCookieScope)}{" "}
               {countForScope(activeCookieScope) === 1 ? "cookie" : "cookies"} for{" "}
-              {activeCookieScope} and its subdomains. Other sites' cookies stay out of Omnigent
+              {activeCookieScope} and its subdomains. Other sites' cookies stay out of {appName}{" "}
               entirely.
             </p>
             {activeCookieScope !== cookiePreview?.host && (

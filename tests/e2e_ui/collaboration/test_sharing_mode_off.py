@@ -32,7 +32,8 @@ from tests.e2e_ui.collaboration._multi_user_server import (
 _ADMIN_EMAIL = "sharing-off@ui.test"
 
 # Mirrors AppShell.tsx's shareDisabledReason for the sharing-off case.
-_OFF_REASON = "Sharing has been disabled for this Omnigent server."
+# CORAL(S89): the web copy names the default app, Coral; the server's 403 text is unchanged.
+_OFF_REASON = "Sharing has been disabled for this Coral server."
 
 
 @pytest.fixture(scope="module")

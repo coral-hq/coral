@@ -176,6 +176,7 @@ def test_import_rejects_invalid_json(page: Page, live_server: str) -> None:
         # Dialog stays open and shows error.
         expect(page.get_by_role("dialog", name="Import settings")).to_be_visible()
         expect(page.get_by_role("alert")).to_be_visible()
-        expect(page.get_by_role("alert")).to_contain_text("valid Omnigent settings")
+        # CORAL(S89): the import error now names Coral.
+        expect(page.get_by_role("alert")).to_contain_text("valid Coral settings")
     finally:
         Path(temp_path).unlink()

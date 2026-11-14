@@ -55,6 +55,7 @@ import {
 } from "@/components/ui/dialog";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
+import { useAppName } from "@/lib/branding";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
@@ -172,14 +173,17 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
 
 // Desktop menu commands (File → Close, Session → Pin/Archive, Quit), present
 // only when the shell hands them to the page.
-const DESKTOP_COMMAND_SHORTCUTS: Shortcut[] = [
-  { label: "Close tab, or leave the session", keys: [...CLOSE_KEYS] },
-  { label: "Close window", keys: [...CLOSE_WINDOW_KEYS] },
-  { label: "Pin or unpin current session", keys: [...PIN_SESSION_KEYS] },
-  { label: "Archive current session", keys: [...ARCHIVE_SESSION_KEYS] },
-  { label: "Fork current session", keys: [...FORK_SESSION_KEYS] },
-  { label: "Quit Omnigent", keys: [...QUIT_KEYS] },
-];
+// CORAL(S89): built per render so the Quit row names the app via useAppName() (Coral by default).
+function desktopCommandShortcuts(appName: string): Shortcut[] {
+  return [
+    { label: "Close tab, or leave the session", keys: [...CLOSE_KEYS] },
+    { label: "Close window", keys: [...CLOSE_WINDOW_KEYS] },
+    { label: "Pin or unpin current session", keys: [...PIN_SESSION_KEYS] },
+    { label: "Archive current session", keys: [...ARCHIVE_SESSION_KEYS] },
+    { label: "Fork current session", keys: [...FORK_SESSION_KEYS] },
+    { label: `Quit ${appName}`, keys: [...QUIT_KEYS] },
+  ];
+}
 
 // Desktop menu chords for the workspace rail's tabs.
 const DESKTOP_TAB_SHORTCUTS: Shortcut[] = [
@@ -217,6 +221,7 @@ function shortcutGroupsFor(
   splitTerminal: boolean,
   desktopCommands: boolean,
   siblingSessions: boolean,
+  appName: string,
 ): ShortcutGroup[] {
   const groups = SHORTCUT_GROUPS.map((group) => {
     if (group.title === "General") {
@@ -233,7 +238,7 @@ function shortcutGroupsFor(
               ? { ...item, keys: settingsShortcutKeys(desktopCommands) }
               : item,
           ),
-          ...(desktopCommands ? DESKTOP_COMMAND_SHORTCUTS : []),
+          ...(desktopCommands ? desktopCommandShortcuts(appName) : []),
         ],
       };
     }
@@ -336,6 +341,7 @@ export function KeyboardShortcutsList({
   const isCoarsePointer = useIsCoarsePointer();
   const preventsKeyboardSubmit = isMobileViewport || isCoarsePointer;
   const serverInfo = useServerInfo();
+  const appName = useAppName();
   const groups = shortcutGroupsFor(
     isNativeShell(),
     isElectronShell(),
@@ -347,6 +353,7 @@ export function KeyboardShortcutsList({
     !isMobileViewport && isFeatureEnabled(serverInfo, "splittable_terminal_view_ui"),
     supportsDesktopCommands(),
     serverInfo !== "loading" && serverInfo.sibling_sessions === true,
+    appName,
   );
   const settings = variant === "settings";
   return (

@@ -5266,7 +5266,8 @@ describe("AppShell share action", () => {
       expect(
         screen.getByText(/This session's working directory \(a home or root directory\)/),
       ).toBeInTheDocument();
-      expect(screen.getByText(/This Omnigent server allows read-only sharing/)).toBeInTheDocument();
+      // CORAL(S89): sharing copy now names the default app, Coral.
+      expect(screen.getByText(/This Coral server allows read-only sharing/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /^add$/i })).toBeDisabled();
     });
   });
@@ -5315,7 +5316,7 @@ describe("AppShell share action", () => {
       expect(shareButton).toBeDisabled();
       expect(shareButton).toHaveAttribute(
         "title",
-        "Sharing has been disabled for this Omnigent server.",
+        "Sharing has been disabled for this Coral server.",
       );
     });
   });

@@ -316,7 +316,10 @@ describe("HarnessFixDialog", () => {
     expect(screen.getByRole("heading", { name: "Set up tmux on Local laptop" })).toBeVisible();
     expect(screen.getByText("brew install tmux")).toBeVisible();
     expect(screen.getByText("brew upgrade tmux")).toBeVisible();
-    expect(screen.getByText(/quit and reopen the Omnigent app/)).toBeVisible();
+    // CORAL(S89): the tmux hint now names Coral.
+    expect(
+      screen.getByText(/If Coral still can't find it, quit and reopen the Coral app\./),
+    ).toBeVisible();
     expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Check again" }));

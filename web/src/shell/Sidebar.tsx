@@ -195,7 +195,8 @@ import { useHosts, type Host } from "@/hooks/useHosts";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled, isSingleUserMode, sandboxOptionLabel } from "@/lib/capabilities";
-import { useBranding } from "@/lib/branding";
+// CORAL(S89): the sharing-off Share tooltip names the app via useAppName() (default Coral).
+import { useAppName, useBranding } from "@/lib/branding";
 import { relativeTime } from "@/lib/relativeTime";
 import { showToast } from "@/components/ui/toast";
 import { showArchiveUndoToast } from "./archiveUndoToast";
@@ -4515,6 +4516,7 @@ function ConversationMenuItems({
   reorder?: { previousId?: string; nextId?: string };
 }) {
   const info = useContext(ServerInfoContext);
+  const appName = useAppName();
   const atPinCap = useContext(PinCapacityContext);
   const pinSaving = useContext(PinSavingContext);
   const moveSession = useContext(SessionReorderContext);
@@ -4659,7 +4661,7 @@ function ConversationMenuItems({
                 reason when both apply. */}
             <TooltipContent side="left">
               {sharingOff
-                ? "Sharing has been disabled for this Omnigent server."
+                ? `Sharing has been disabled for this ${appName} server.`
                 : "Only the session owner can share this session"}
             </TooltipContent>
           </Tooltip>

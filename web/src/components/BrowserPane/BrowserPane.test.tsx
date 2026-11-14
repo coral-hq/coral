@@ -701,7 +701,8 @@ describe("BrowserPane Chrome cookie import", () => {
     expect(within(dialog).getByText("Work")).toBeInTheDocument();
     expect(
       within(dialog).getByText(
-        `4 cookies for ${HOST} and its subdomains. Other sites' cookies stay out of Omnigent entirely.`,
+        // CORAL(S89): the cookie-import dialog names Coral (the default app name).
+        `4 cookies for ${HOST} and its subdomains. Other sites' cookies stay out of Coral entirely.`,
       ),
     ).toBeInTheDocument();
     expect(bridge.browserChromeCookiePreview).toHaveBeenCalledWith("conv_cookie");

@@ -376,7 +376,8 @@ describe("SettingsPage", () => {
   it("groups General settings into titled outlined cards and hides its description on mobile", () => {
     renderPage("/settings/general");
 
-    expect(screen.getByText("Configure general Omnigent behavior.")).toHaveClass("max-md:hidden");
+    // CORAL(S89): settings section descriptions and the shortcut switch now name Coral.
+    expect(screen.getByText("Configure general Coral behavior.")).toHaveClass("max-md:hidden");
 
     for (const testId of [
       "settings-group-composer",
@@ -421,7 +422,7 @@ describe("SettingsPage", () => {
     };
     renderPage("/settings/general");
     expect(
-      await screen.findByRole("switch", { name: "Show Omnigent from anywhere" }),
+      await screen.findByRole("switch", { name: "Show Coral from anywhere" }),
     ).toBeInTheDocument();
   });
 
@@ -587,9 +588,7 @@ describe("SettingsPage", () => {
     expect(
       screen.getByText("Sets interface and conversation text. Icons and spacing stay fixed."),
     ).toHaveClass("max-md:hidden");
-    expect(screen.getByText("Choose how Omnigent looks on this device.")).toHaveClass(
-      "max-md:hidden",
-    );
+    expect(screen.getByText("Choose how Coral looks on this device.")).toHaveClass("max-md:hidden");
     for (const testId of [
       "settings-group-theme",
       "settings-group-chat",

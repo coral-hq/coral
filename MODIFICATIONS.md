@@ -19,12 +19,18 @@ OPS-01's generator will maintain this file later.
 | `README.md` | S91 | coral-specific | Adds a four-line Coral banner (attribution and a pointer to `docs/coral/README.md`) above the unchanged Omnigent README. |
 | `justfile` | S87 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build (S87). |
 | `omnigent/conversation_browser.py` | S38 | coral-specific | `deep_link_url` generates `coral://` links for `--open-in-desktop` (S38). |
+| `omnigent/server/routes/auth.py` | S92 | coral-specific | The CLI login consent page now says "A Coral client", "this Coral server" and "from Coral", and its title suffix is "— Coral"; the upgrade notice, the omnigent login text and the server messages stay as they were (S92) |
+| `omnigent/server/routes/device_auth.py` | S92 | coral-specific | The device-grant consent page now says "this Coral server" and its title is "Authorize access — Coral"; env var names, protocol headers and client ids stay as they were (S92) |
+| `omnigent/server/static/api_only_landing.html` | S92 | coral-specific | On the API-only landing page the title and heading name Coral, and the Details link points to the coral-hq/coral README; the OMNIGENT_SKIP_WEB_UI mentions and the uv cache clean omnigent command stay as they were (S92) |
 | `pnpm-lock.yaml` | S83 | coral-specific | Locks `@fontsource-variable/newsreader` 5.3.0 (S83). |
 | `tests/browser_ui/chat/test_color_theme.py` | S82 | coral-specific | The default palette is labelled "Coral" with Coral's selection washes (S82). |
 | `tests/browser_ui/chat/test_status_indicators.py` | S79 | coral-specific | The working indicator's Coral mark holds still while its opacity pulses, replacing the Otto blink check (S79). |
 | `tests/e2e/omnigent/test_host_no_open.py` | S38 | coral-specific | `--open-in-desktop` opens a `coral://` link (S38). |
 | `tests/e2e_ui/branding/test_branding.py` | S79, S80 | coral-specific | The default hero heading is "Direct the run…" (S79) and the default sidebar link reads "Coral" (S80). |
+| `tests/e2e_ui/collaboration/test_permissions_modal.py` | S89 | coral-specific | The QR code locator now matches the aria-label 'QR code to open this session in the Coral app' (S89). |
+| `tests/e2e_ui/collaboration/test_sharing_mode_off.py` | S89 | coral-specific | _OFF_REASON, which mirrors AppShell's shareDisabledReason, now expects 'Sharing has been disabled for this Coral server.'; the server's 403 text is unchanged (S89). |
 | `tests/e2e_ui/desktop/test_about_dialog.py` | S87 | coral-specific | Expects the Coral heading, the attribution and the Licence and Notices buttons (S87). |
+| `tests/e2e_ui/sessions/test_settings_export_import.py` | S89 | coral-specific | Settings import e2e test expects the 'valid Coral settings' alert text (S89). |
 | `tests/e2e_ui/sessions/test_sidebar_view_options.py` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
 | `tests/e2e_ui/visual/test_landing_snapshot.py` | S79 | coral-specific | Docstring names the new hero (S79); CI regenerates the baseline. |
 | `tests/test_conversation_browser.py` | S38 | coral-specific | Expects `coral://` deep links; fake openers key on `coral:` (S38). |
@@ -108,19 +114,36 @@ OPS-01's generator will maintain this file later.
 | `web/server-selector-v2.html` | S89b | coral-specific | Window title "Coral — Connect" (S89b). |
 | `web/src/components/BrandLogo.test.tsx` | S79 | coral-specific | Fallback cases expect the Coral mark (S79). |
 | `web/src/components/BrandLogo.tsx` | S79 | coral-specific | The no-logo and failed-logo fallback is `CoralMark` instead of the Otto mascot (S79). |
-| `web/src/components/PermissionsModal.designs.stories.tsx` | S38 | coral-specific | The sample QR link uses `coral://` (S38). |
-| `web/src/components/PermissionsModal.test.tsx` | S38 | coral-specific | Expects `coral://` QR links (S38). |
-| `web/src/components/PermissionsModal.tsx` | S38 | coral-specific | The share QR encodes a `coral://` link from `web/src/brand/urlScheme.ts` (S38). |
+| `web/src/components/BrowserPane/BrowserPane.test.tsx` | S89 | coral-specific | The cookie-import dialog assertion now expects "Other sites' cookies stay out of Coral entirely." (S89). |
+| `web/src/components/BrowserPane/BrowserPane.tsx` | S89 | coral-specific | The Chrome cookie-import dialog names the app through useAppName() ("disappears when Coral quits", "stay out of Coral entirely") instead of Omnigent (S89). |
+| `web/src/components/KeyboardShortcutsDialog.test.tsx` | S89 | coral-specific | The desktop-commands test now expects the "Quit Coral" shortcut row instead of "Quit Omnigent" (S89). |
+| `web/src/components/KeyboardShortcutsDialog.tsx` | S89 | coral-specific | The desktop command list is now built per render by desktopCommandShortcuts(appName), so the Quit row reads `Quit ${useAppName()}` (Coral by default) instead of the fixed "Quit Omnigent" (S89). |
+| `web/src/components/PageLoading.tsx` | S89 | coral-specific | When no label prop is passed, PageLoading now shows `Loading ${useAppName()}…` (Coral by default) instead of "Loading Omnigent…" (S89). |
+| `web/src/components/PermissionsModal.designs.stories.tsx` | S89, S38 | coral-specific | The sample QR link uses `coral://` (S38) and the sample sharing copy names Coral (S89). |
+| `web/src/components/PermissionsModal.test.tsx` | S89, S38 | coral-specific | Expects `coral://` QR links (S38). Test assertions on the sharing-off and server-mode notices now expect 'Coral server' (S89). |
+| `web/src/components/PermissionsModal.tsx` | S89, S38 | coral-specific | The share QR encodes a `coral://` link from `web/src/brand/urlScheme.ts` (S38). The share modal's sharing-off notice, server-mode notices, blocked-workspace notice, and the QR dialog's description and aria-label now name the app through useAppName() (default Coral) instead of Omnigent (S89). |
+| `web/src/components/UpdateBanner.test.tsx` | S89 | coral-specific | The update banner tests now expect "Coral Desktop" copy for the available, downloading and ready-to-install states (S89). |
+| `web/src/components/UpdateBanner.tsx` | S89 | coral-specific | The update banner's available, downloading and ready-to-install lines now say "{appName} Desktop" via useAppName() (Coral by default) instead of "Omnigent Desktop" (S89). |
+| `web/src/components/blocks/ApprovalCard.test.tsx` | S89 | coral-specific | The Antigravity always-allow title assertion now expects "for this Coral session" (S89). |
+| `web/src/components/blocks/ApprovalCard.tsx` | S89 | coral-specific | The Antigravity always-allow button title and the hint under it name the app's session through useAppName() ("this Coral session") instead of "this Omnigent session" (S89). |
 | `web/src/components/onboarding/AnimatedOmnigentPanel.tsx` | S89 | coral-specific | Shows the Coral mark; its `alt` and the card's `aria-label` follow `useAppName()` (S89). |
 | `web/src/components/onboarding/BlobGraphic.tsx` | S89 | coral-specific | Blob colours become forest, mustard and terracotta (S89). |
 | `web/src/components/onboarding/ImportContextModal.tsx` | S89 | coral-specific | Shows the Coral mark instead of the Omnigent starfish (S89). |
+| `web/src/components/scheduled/CreateScheduledTaskDialog.test.tsx` | S89 | coral-specific | Updated the expected trigger attribution note ("Sent with Coral") and link-back prompt text ("Coral session:") in the trigger dialog tests (S89). |
+| `web/src/components/scheduled/triggerTemplates.test.ts` | S89 | coral-specific | Updated the expected attribution and link-back text to say Coral, and added a test for each source showing that a rendered prompt with its attribution swapped back to "Sent with Omnigent" still splits into the same userPrompt and round-trips through combineTriggerPrompt (S89). |
+| `web/src/components/scheduled/triggerTemplates.ts` | S89 | coral-specific | Trigger templates now use the Jira label placeholder "coral", the link-back text "Coral session:" and OMNIGENT_ATTRIBUTION "Sent with Coral"; splitTriggerPrompt and combineTriggerPrompt also accept the legacy posting instructions built from "Sent with Omnigent", so saved prompts still split and round-trip byte for byte (S89). |
 | `web/src/index.css` | S83 | coral-specific | Imports Newsreader and `./brand/coral.css`, and adds `--font-display` (S83). |
 | `web/src/index.css.test.ts` | S83 | coral-specific | Asserts the Newsreader import and `--font-display`, and that `--font-heading` stays sans (S83). |
 | `web/src/lib/branding.ts` | S79 | coral-specific | Built-in defaults become "Coral" and "Direct the run…"; operator branding still overrides them (S79). |
 | `web/src/lib/customTheme.test.ts` | S82 | coral-specific | Rebaselines the default palette's selection tint to Coral's washes (S82). |
+| `web/src/lib/harnessSetup.ts` | S89 | coral-specific | resolveSetupSteps takes an optional appName (default DEFAULT_APP_NAME), and the synthesized tmux step's detail uses it instead of hard-coded Omnigent (S89). |
+| `web/src/lib/settingsPortability.ts` | S89 | coral-specific | Settings export now downloads as coral-settings.json and the invalid-file import error names DEFAULT_APP_NAME; import checks only the .json extension and content shape, so omnigent-settings.json exports still load (S89). |
+| `web/src/lib/terminalClipboardPreferences.test.ts` | S89 | coral-specific | Clipboard-preference import test expects the 'valid Coral settings' error (S89). |
 | `web/src/lib/themePalette.test.ts` | S82 | coral-specific | Replaces the Omnigent pink/magenta pins with Coral rules and adds stored-`omni`, storage-failure and readable-text checks (S82). |
 | `web/src/lib/themePalette.ts` | S82 | coral-specific | The default `omni` palette carries Coral's Clay Score tokens and the label "Coral"; its id and `DEFAULT_PALETTE` are unchanged (S82). |
 | `web/src/pages/RegisterPage.tsx` | S89 | coral-specific | "this Omnigent server" follows `useAppName()` (S89). |
+| `web/src/pages/SettingsPage.test.tsx` | S89 | coral-specific | SettingsPage tests expect the Coral General/Appearance descriptions and the 'Show Coral from anywhere' switch (S89). |
+| `web/src/pages/SettingsPage.tsx` | S89 | coral-specific | Settings Appearance, Git and General descriptions, the import dialog copy and the Updates 'Check when ... starts' label now use useAppName(), and the custom-theme 'Based on' fallback reads Coral (S89). |
 | `web/src/pages/onboarding/AuthCardShell.tsx` | S89 | coral-specific | Shows the Coral mark with `alt` from `useAppName()` (S89). |
 | `web/src/pages/onboarding/JoinTeamStep.tsx` | S89 | coral-specific | "their Omnigent server" follows `useAppName()` (S89). |
 | `web/src/pages/onboarding/LandingFooter.tsx` | S89b | coral-specific | GitHub points at Coral's repository, the iOS App, Android App and Discord buttons are removed, and the maintained-by line reads "Built on Omnigent" (S89b). |
@@ -132,9 +155,22 @@ OPS-01's generator will maintain this file later.
 | `web/src/pages/onboarding/ServerSelectorV2.tsx` | S89b | coral-specific | Onboarding copy names Coral (`DEFAULT_APP_NAME`) (S89b). |
 | `web/src/pages/onboarding/SetupTerminalStep.tsx` | S89b | coral-specific | Onboarding copy names Coral (`DEFAULT_APP_NAME`) (S89b). |
 | `web/src/pages/onboarding/primitives.tsx` | S89b | coral-specific | The connect action reads "Install Coral", "Start Coral" or "Open Coral" (S89b). |
+| `web/src/pages/settings/GlobalShortcutControl.test.tsx` | S89 | coral-specific | GlobalShortcutControl tests find the switch by its new name 'Show Coral from anywhere' (S89). |
+| `web/src/pages/settings/GlobalShortcutControl.tsx` | S89 | coral-specific | Global shortcut label and description name the app via useAppName() (S89). |
+| `web/src/pages/settings/HarnessFixDialog.test.tsx` | S89 | coral-specific | HarnessFixDialog tmux test expects the full 'If Coral still can't find it, quit and reopen the Coral app.' sentence (S89). |
+| `web/src/pages/settings/HarnessFixDialog.tsx` | S89 | coral-specific | Tmux setup hint in the harness fix dialog names the app via useAppName() (S89). |
 | `web/src/server-selector-v2.test.tsx` | S89b | coral-specific | Queries follow the Coral onboarding copy (S89b). |
-| `web/src/shell/NewChatDialog.test.tsx` | S81 | coral-specific | The default-heading case expects Coral's display heading in the hero (S81). |
-| `web/src/shell/NewChatDialog.tsx` | S81 | coral-specific | The desktop default hero renders `CoralHero` (mark beside the heading); sibling, project and mobile branches are unchanged (S81). |
+| `web/src/shell/AppShell.test.tsx` | S89 | coral-specific | Share-action tests now expect 'Coral server' in the read-only notice and in the sharing-off title (S89). |
+| `web/src/shell/AppShell.tsx` | S89 | coral-specific | The header Share button's sharing-off reason (shareDisabledReason) now reads 'Sharing has been disabled for this <appName> server.' through useAppName() (default Coral) (S89). |
+| `web/src/shell/CloseWindowDialog.test.tsx` | S89 | coral-specific | The last-window test now expects "Quit Coral?" and "...closing it quits Coral." (S89). |
+| `web/src/shell/CloseWindowDialog.tsx` | S89 | coral-specific | The last-window close dialog's title and description now name the app via useAppName() ("Quit Coral?", "...closing it quits Coral.") instead of Omnigent (S89). |
+| `web/src/shell/MarkdownRichTextViewer.test.tsx` | S89 | coral-specific | The agent-running warning tests match /Coral is still working/, both where the warning should show and where it should not (S89). |
+| `web/src/shell/MarkdownRichTextViewer.tsx` | S89 | coral-specific | The agent-running warning in the markdown editor reads "<app name> is still working" through useAppName() instead of "Omnigent is still working" (S89). |
+| `web/src/shell/NewChatDialog.test.tsx` | S81, S89 | coral-specific | The default-heading case expects Coral's display heading in the hero (S81). The expected tmux-unavailable warning text in the landing harness table now names Coral (S89). |
+| `web/src/shell/NewChatDialog.tsx` | S81, S89 | coral-specific | The desktop default hero renders `CoralHero` (mark beside the heading); sibling, project and mobile branches are unchanged (S81). The tmux-unavailable harness hint says "If Coral still can't find it, quit and reopen the Coral app" using DEFAULT_APP_NAME, because harnessWarningMessage is a plain function that cannot call hooks (S89). |
+| `web/src/shell/QuitDialog.test.tsx` | S89 | coral-specific | The quit dialog test now expects the "Quit Coral?" heading (S89). |
+| `web/src/shell/QuitDialog.tsx` | S89 | coral-specific | The quit confirmation title now reads `Quit ${useAppName()}?` (Coral by default) instead of "Quit Omnigent?" (S89). |
 | `web/src/shell/Sidebar.subagentHighlight.test.tsx` | S80 | coral-specific | Expects the Coral wordmark in the default sidebar brand (S80). |
-| `web/src/shell/Sidebar.tsx` | S80 | coral-specific | With no operator app name, the sidebar brand renders `CoralWordmark` instead of the Omnigent wordmark image; test ids unchanged (S80). |
+| `web/src/shell/Sidebar.tsx` | S80, S89 | coral-specific | With no operator app name, the sidebar brand renders `CoralWordmark` instead of the Omnigent wordmark image; test ids unchanged (S80). The sidebar row menu's sharing-off Share tooltip now names the app through useAppName() (default Coral) instead of Omnigent (S89). |
 | `web/src/themePalettes.generated.css` | S82 | coral-specific | Regenerated: the two `omni` blocks carry Coral's tokens; every other palette is byte-identical (S82). |
+| `web/update-overlay.html` | S89 | coral-specific | The desktop update overlay window's title is now "Coral Update" instead of "Omnigent Update" (S89). |

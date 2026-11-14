@@ -63,6 +63,8 @@ import {
   exitPlanModePlan,
 } from "@/lib/askUserQuestion";
 import { askUserQuestionSignature } from "@/lib/askUserQuestionDrafts";
+// CORAL(S89): Antigravity always-allow copy names the app's session via useAppName() instead of "Omnigent".
+import { useAppName } from "@/lib/branding";
 import { isNativePolicyName, nativeCodingAgentForPolicyName } from "@/lib/nativeCodingAgents";
 import { formatPreview } from "@/lib/previewFormat";
 import type { RenderItem } from "@/lib/renderItems";
@@ -339,6 +341,7 @@ export function ApprovalCard({
   // Only the prompt that ⌘↵ and Esc act on names them on its buttons.
   const hotkeyTarget = useApprovesOnHotkey(elicitationId, status === "pending");
   useApprovalPromptOnScreen(elicitationId, inChat && status === "pending");
+  const appName = useAppName();
   const approveKeys = hotkeyTarget ? APPROVE_KEYS : undefined;
   const declineKeys = hotkeyTarget && inChat ? DECLINE_KEYS : undefined;
   // In a side-chat pane this resolves to the child id, so the verdict targets
@@ -563,7 +566,7 @@ export function ApprovalCard({
             variant="outline"
             className={cn("h-auto max-w-full whitespace-normal text-left", MOBILE_CHOICE_CLASS)}
             onClick={() => submitPersist("always")}
-            title={`Ask Antigravity to save a rule allowing commands starting with “${agyPermission.alwaysAllowPattern}” for this Omnigent session`}
+            title={`Ask Antigravity to save a rule allowing commands starting with “${agyPermission.alwaysAllowPattern}” for this ${appName} session`}
             data-testid="approval-card-agy-always-allow"
             componentId="approval.approve_always_agy"
           >
@@ -1015,7 +1018,7 @@ export function ApprovalCard({
             )}
             {agyPermission?.alwaysAllowPattern && (
               <span className="text-sm text-muted-foreground">
-                Always allow saves a rule for this Omnigent session. New sessions have separate
+                Always allow saves a rule for this {appName} session. New sessions have separate
                 rules.
               </span>
             )}

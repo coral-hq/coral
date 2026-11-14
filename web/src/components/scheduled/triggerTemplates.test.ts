@@ -156,9 +156,10 @@ describe("saved trigger prompts", () => {
     const [manager, posting] = parts.systemPrompt!.split(
       "\n\nPosting instructions for each session:\n",
     );
+    // CORAL(S89): prompts sign "Sent with Coral"; legacy "Sent with Omnigent" prompts still split.
     const editedPosting =
       edit === "replace attribution"
-        ? posting.replace("Sent with Omnigent", "Automated reply")
+        ? posting.replace("Sent with Coral", "Automated reply")
         : posting + (edit === "append text" ? "\nInclude a summary." : "\n");
     const systemPrompt = `${manager}\n\nPosting instructions for each session:\n${editedPosting}`;
     const saved = combineTriggerPrompt("New user prompt.", systemPrompt);
@@ -188,6 +189,20 @@ describe("saved trigger prompts", () => {
       'This automation watches Jira issues.\n\nEach run:\nStart a session for each match.\n\nPosting instructions for each session:\nAnything you post for this, such as a comment, reply, message, issue or pull request, ends with a line "Sent with Omnigent", since it posts with the owner\'s account.';
     expect(splitTriggerPrompt(saved)).toEqual({ userPrompt: "Triage the ticket.", systemPrompt });
     expect(combineTriggerPrompt("Triage the ticket.", systemPrompt)).toBe(saved);
+  });
+
+  it.each(TRIGGER_SOURCES)("splits a %s prompt saved with the legacy attribution", (source) => {
+    const rendered = renderTriggerPrompt(source, fields(), CTX);
+    const legacy = rendered.replace(/"Sent with Coral"/g, '"Sent with Omnigent"');
+    expect(legacy).not.toBe(rendered);
+    const parts = splitTriggerPrompt(legacy);
+    expect(parts.userPrompt).toBe("Investigate the ticket.");
+    expect(parts.userPrompt).toBe(splitTriggerPrompt(rendered).userPrompt);
+    expect(parts.systemPrompt).toContain('"Sent with Omnigent"');
+    expect(combineTriggerPrompt(parts.userPrompt, parts.systemPrompt)).toBe(legacy);
+    expect(combineTriggerPrompt("Updated instructions.", parts.systemPrompt)).toBe(
+      legacy.replace(parts.userPrompt, "Updated instructions."),
+    );
   });
 
   it.each([
@@ -564,7 +579,7 @@ describe("renderTriggerPrompt", () => {
       "These sessions share your workspace, so the message also tells the session to make its own git worktree before changing any files.",
     );
     expect(prompt).toContain(
-      'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each ticket',
+      'Comment "Coral session: https://omni.example.com/c/CONVERSATION_ID" on each ticket',
     );
     expect(prompt).toContain(
       "Replace CONVERSATION_ID with the conversation_id that sys_session_create returned",
@@ -595,7 +610,7 @@ describe("renderTriggerPrompt", () => {
     );
     const [manager, worker] = prompt.split("Instructions for each session:\n");
     expect(manager).not.toContain("Link-back pending:");
-    expect(manager).not.toContain('Reply "Omnigent session:');
+    expect(manager).not.toContain('Reply "Coral session:');
     expect(worker).toContain(
       "Reply in the source thread when you have a useful result or a blocker",
     );
@@ -613,11 +628,11 @@ describe("renderTriggerPrompt", () => {
 
     // Link-backs and worker posts go out under the owner's account, so both are signed.
     expect(prompt).toContain(
-      'on each ticket you started a session for. End each one with a line "Sent with Omnigent", since it posts with the owner\'s account.',
+      'on each ticket you started a session for. End each one with a line "Sent with Coral", since it posts with the owner\'s account.',
     );
     expect(
       prompt.endsWith(
-        'Investigate the ticket.\nAnything you post for this, such as a comment, reply, message, issue or pull request, ends with a line "Sent with Omnigent", since it posts with the owner\'s account.',
+        'Investigate the ticket.\nAnything you post for this, such as a comment, reply, message, issue or pull request, ends with a line "Sent with Coral", since it posts with the owner\'s account.',
       ),
     ).toBe(true);
     expect(prompt).toContain(
@@ -635,7 +650,7 @@ describe("renderTriggerPrompt", () => {
     // Workers still sign their posts when the manager doesn't post a link.
     const noLink = renderTriggerPrompt("jira", fields({ linkBack: false }), CTX);
     expect(noLink).not.toContain("End each one with a line");
-    expect(noLink).toContain('ends with a line "Sent with Omnigent"');
+    expect(noLink).toContain('ends with a line "Sent with Coral"');
   });
 
   it("walks newly created matches oldest first and only checkpoints what it fully read", () => {
@@ -740,7 +755,7 @@ describe("renderTriggerPrompt", () => {
   it("numbers the steps without a link-back step when it is off", () => {
     const prompt = renderTriggerPrompt("jira", fields({ linkBack: false }), CTX);
 
-    expect(prompt).not.toContain("Omnigent session:");
+    expect(prompt).not.toContain("Coral session:");
     expect(prompt).not.toContain("Link-back pending:");
     expect(prompt).toContain(
       "\n6. Reply with the title and session ID of each session you started,",
@@ -815,7 +830,7 @@ describe("renderTriggerPrompt", () => {
       "gives the issue's identifier, link, title and description between <linear-issue> and </linear-issue> lines.",
     );
     expect(prompt).toContain(
-      'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each issue you started a session for.',
+      'Comment "Coral session: https://omni.example.com/c/CONVERSATION_ID" on each issue you started a session for.',
     );
     expect(prompt).toContain("say that this automation needs a Linear MCP server where it runs.");
 

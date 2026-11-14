@@ -24,6 +24,8 @@ import type { Comment } from "@/hooks/useComments";
 import type { ActiveSelection } from "./codeViewerHelpers";
 import { useCanEdit } from "@/hooks/usePermissions";
 import { useSessionActive } from "@/hooks/useWorkspaceChangedFiles";
+// CORAL(S89): the agent-running warning names the app via useAppName() instead of "Omnigent".
+import { useAppName } from "@/lib/branding";
 import { followLinkWithPopupFallback } from "@/lib/openLinkInApp";
 import { useFileViewer } from "./FileViewerContext";
 import { isWorkspaceRelativeSrc, resolveWorkspacePath } from "./TipTapWorkspaceImage";
@@ -242,6 +244,7 @@ function MarkdownRichTextViewerInner({
   setContentRef,
 }: InnerProps) {
   const openFile = useFileViewer();
+  const appName = useAppName();
   const [isCopied, setIsCopied] = useState(false);
   const copyTimeoutRef = useRef<number>(0);
   useEffect(
@@ -559,8 +562,8 @@ function MarkdownRichTextViewerInner({
       {canEdit && sessionActive && !isDirty && !hasExternalUpdate && (
         <div className="absolute bottom-0 left-0 right-0 z-10 flex items-center gap-1.5 border-t border-border bg-warning/10 px-4 py-1.5 text-sm text-foreground backdrop-blur-sm">
           <AlertTriangleIcon className="size-3.5 shrink-0 text-warning" />
-          Omnigent is still working — edits you make now may be overwritten when it saves this file.
-          Wait for it to finish, or copy your changes first.
+          {appName} is still working — edits you make now may be overwritten when it saves this
+          file. Wait for it to finish, or copy your changes first.
         </div>
       )}
       {canEdit && isDirty && hasExternalUpdate && (

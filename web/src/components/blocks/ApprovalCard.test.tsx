@@ -817,7 +817,8 @@ describe("ApprovalCard — Antigravity permission prompt details", () => {
       name: "Always allow commands starting with pwd",
     });
     expect(alwaysAllow.getAttribute("title")).toBe(
-      "Ask Antigravity to save a rule allowing commands starting with “pwd” for this Omnigent session",
+      // CORAL(S89): the always-allow title names Coral (the default app name).
+      "Ask Antigravity to save a rule allowing commands starting with “pwd” for this Coral session",
     );
     fireEvent.click(alwaysAllow);
     expect(submitSpy).toHaveBeenCalledWith("elic_agy_perm", "accept", undefined, {

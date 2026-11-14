@@ -23,9 +23,10 @@ describe("CloseWindowDialog", () => {
 
   it("says closing quits when it is the last window", () => {
     render(<CloseWindowDialog prompt={{ quits: true }} onConfirm={() => {}} onCancel={() => {}} />);
-    expect(screen.getByRole("heading", { name: "Quit Omnigent?" })).toBeInTheDocument();
+    // CORAL(S89): the quit copy names the default app, Coral, not Omnigent.
+    expect(screen.getByRole("heading", { name: "Quit Coral?" })).toBeInTheDocument();
     expect(
-      screen.getByText("This is the only open window, so closing it quits Omnigent."),
+      screen.getByText("This is the only open window, so closing it quits Coral."),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Quit" })).toHaveFocus();
   });

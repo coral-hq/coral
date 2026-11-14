@@ -6,6 +6,8 @@
 // field for future compatibility, plus one entry per localStorage key that
 // holds a non-default value.
 
+// CORAL(S89): export file is coral-settings.json and errors name Coral; import ignores the file name, so omnigent-settings.json still loads.
+import { DEFAULT_APP_NAME } from "@/lib/branding";
 import { DELETE_WORKTREES_ON_ARCHIVE_STORAGE_KEY } from "./archiveWorktreePreferences";
 import { COMPOSER_SEND_SHORTCUT_STORAGE_KEY } from "./composerSendShortcutPreferences";
 import {
@@ -104,7 +106,7 @@ export function downloadSettings(exported: ExportedSettings): void {
   try {
     const a = document.createElement("a");
     a.href = url;
-    a.download = "omnigent-settings.json";
+    a.download = "coral-settings.json";
     a.click();
   } finally {
     URL.revokeObjectURL(url);
@@ -126,7 +128,7 @@ export function readSettingsFile(file: File): Promise<ExportedSettings> {
       try {
         const parsed: unknown = JSON.parse(reader.result as string);
         if (!isExportedSettings(parsed)) {
-          reject(new Error("The file doesn't contain valid Omnigent settings."));
+          reject(new Error(`The file doesn't contain valid ${DEFAULT_APP_NAME} settings.`));
           return;
         }
         resolve(parsed);

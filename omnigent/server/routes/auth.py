@@ -1231,11 +1231,12 @@ def _cli_consent_html(
     else:
         body = (
             "<h1>Authorize sign-in</h1>"
-            f"<p>An Omnigent client is requesting a session as "
-            f"<b>{esc(user_id)}</b> on this Omnigent server.</p>"
+            # CORAL(S92): consent page title and client/server wording say Coral, not Omnigent.
+            f"<p>A Coral client is requesting a session as "
+            f"<b>{esc(user_id)}</b> on this Coral server.</p>"
             f'<p class="muted">Code: {esc(user_code)}</p>'
             '<p class="warn">⚠️ Only approve if you just started this sign-in '
-            "from Omnigent. For CLI or Slack sign-in, also check that this code "
+            "from Coral. For CLI or Slack sign-in, also check that this code "
             "matches the one shown in your terminal or Slack. If you didn't "
             "start this sign-in, click Deny — approving gives that client "
             "access as you.</p>"
@@ -1250,7 +1251,7 @@ def _cli_consent_html(
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{'Update required' if upgrade_required else 'Authorize access'}"
-        " — Omnigent</title><style>"
+        " — Coral</title><style>"
         "body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;"
         "padding:0 1rem;line-height:1.5}h1{font-size:1.4rem}.muted{color:#666;"
         "font-size:.9rem}.warn{color:#8a5a00;background:#fff7e6;padding:.6rem .8rem;"

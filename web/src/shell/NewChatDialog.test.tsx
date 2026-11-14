@@ -7480,7 +7480,8 @@ describe("NewChatLandingScreen", () => {
       badgeName: "needs tmux",
       warning:
         "Devin needs tmux 3.3 or newer on machine-1. Install it (macOS: brew install tmux), " +
-        "then check again. If Omnigent still can't find it, quit and reopen the Omnigent app.",
+        // CORAL(S89): the tmux hint names Coral (the default app name).
+        "then check again. If Coral still can't find it, quit and reopen the Coral app.",
     },
     {
       id: "a_polly",

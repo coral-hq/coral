@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GlobalShortcutSaveResult, GlobalShortcutStatus } from "@/lib/nativeBridge";
 import { GlobalShortcutControl } from "./GlobalShortcutControl";
 
-const SWITCH_NAME = "Show Omnigent from anywhere";
+// CORAL(S89): the shortcut switch now names Coral.
+const SWITCH_NAME = "Show Coral from anywhere";
 const RECORDER_TEST_ID = "global-shortcut-recorder";
 
 /** Installs a fake Electron preload with the shortcut calls; `saveResult` is what a save resolves to. */

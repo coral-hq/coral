@@ -41,6 +41,8 @@ import { useGrantPermission, usePermissions, useRevokePermission } from "@/hooks
 import { useSession } from "@/hooks/useSession";
 import { usePublicSharingMaxLevel } from "@/hooks/useSharing";
 import { useUserSearch } from "@/hooks/useUserSearch";
+// CORAL(S89): sharing notices and the QR dialog name the app via useAppName() (default Coral).
+import { useAppName } from "@/lib/branding";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { copyText } from "@/lib/clipboard";
 import { updateSession } from "@/lib/sessionsApi";
@@ -80,6 +82,7 @@ export function PermissionsModal({
   open,
   onOpenChange,
 }: PermissionsModalProps) {
+  const appName = useAppName();
   const info = useServerInfo();
   const sharingMode = info === "loading" ? "on" : info.sharing_mode;
   const sharingOff = sharingMode === "off";
@@ -207,7 +210,7 @@ export function PermissionsModal({
           <DialogHeader>
             <DialogTitle>Sharing unavailable</DialogTitle>
             <DialogDescription>
-              Sharing has been disabled for this Omnigent server.
+              Sharing has been disabled for this {appName} server.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -233,8 +236,8 @@ export function PermissionsModal({
         <div className="space-y-4 border-b border-border pb-5">
           <p className="text-xs leading-relaxed text-muted-foreground">
             {sharingReadOnly
-              ? "This Omnigent server allows read-only sharing. Invite others to read this session."
-              : "This Omnigent server allows Read and Edit access for added people."}
+              ? `This ${appName} server allows read-only sharing. Invite others to read this session.`
+              : `This ${appName} server allows Read and Edit access for added people.`}
             {publicSharingEnabled
               ? ` Anyone signed in is limited to ${sharingReadOnly || publicMaxLevel === 1 ? "Read" : "Edit"} access.`
               : " Access is limited to added people on this server."}
@@ -305,7 +308,7 @@ export function PermissionsModal({
           {workspaceBlocked && (
             <p id={blockedNoticeId} className="text-sm text-destructive">
               This session&apos;s working directory (a home or root directory) cannot be shared on
-              this Omnigent server.
+              this {appName} server.
             </p>
           )}
         </div>
@@ -696,6 +699,7 @@ function QrCodeDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const appName = useAppName();
   const rebasePath = useRebasePath();
   const deepLink = getDeepLink(sessionId, rebasePath);
 
@@ -708,7 +712,7 @@ function QrCodeDialog({
             Open in mobile app
           </DialogTitle>
           <DialogDescription>
-            Scan with your phone's camera to open this session in the Omnigent app.
+            Scan with your phone's camera to open this session in the {appName} app.
           </DialogDescription>
         </DialogHeader>
         <div className="flex justify-center">
@@ -721,7 +725,7 @@ function QrCodeDialog({
               // mode; the padding also serves as the QR quiet zone.
               bgColor="#ffffff"
               fgColor="#000000"
-              aria-label="QR code to open this session in the Omnigent app"
+              aria-label={`QR code to open this session in the ${appName} app`}
             />
           </div>
         </div>

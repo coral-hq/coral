@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useAppName } from "@/lib/branding";
 
 interface QuitDialogProps {
   /** Set while a quit awaits confirmation; `detail` names what quitting stops. */
@@ -24,6 +25,8 @@ interface QuitDialogProps {
 export function QuitDialog({ prompt, onConfirm, onCancel }: QuitDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null);
   const checkboxId = useId();
+  // CORAL(S89): the title names the app via useAppName() (Coral by default), not "Omnigent".
+  const appName = useAppName();
   const [dontAskAgain, setDontAskAgain] = useState(false);
   // Keep the last prompt's copy on screen while the dialog fades out, and start
   // each new prompt unchecked.
@@ -43,7 +46,7 @@ export function QuitDialog({ prompt, onConfirm, onCancel }: QuitDialogProps) {
         }}
       >
         <DialogHeader>
-          <DialogTitle>Quit Omnigent?</DialogTitle>
+          <DialogTitle>{`Quit ${appName}?`}</DialogTitle>
           <DialogDescription>{shown?.detail ?? "Your sessions keep running."}</DialogDescription>
         </DialogHeader>
         <div className="flex items-center gap-2">

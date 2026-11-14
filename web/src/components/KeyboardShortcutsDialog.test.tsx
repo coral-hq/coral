@@ -266,7 +266,8 @@ describe("KeyboardShortcutsDialog", () => {
     supportsBrowser.mockReturnValue(true);
     const { rerender } = render(<KeyboardShortcutsList />);
     expect(screen.queryByText("Close tab, or leave the session")).toBeNull();
-    expect(screen.queryByText("Quit Omnigent")).toBeNull();
+    // CORAL(S89): the Quit row names the default app, Coral, not Omnigent.
+    expect(screen.queryByText("Quit Coral")).toBeNull();
     expect(screen.queryByText("Reload the browser tab")).toBeNull();
     expect(screen.queryByText("Open a new browser tab")).toBeNull();
     expect(keysFor("Open Settings")).toEqual(["Ctrl", "Alt", ","]);
@@ -279,7 +280,7 @@ describe("KeyboardShortcutsDialog", () => {
     expect(keysFor("Pin or unpin current session")).toEqual(["Ctrl", "Alt", "P"]);
     expect(keysFor("Archive current session")).toEqual(["Ctrl", "⇧", "A"]);
     expect(keysFor("Fork current session")).toEqual(["Ctrl", "Alt", "F"]);
-    expect(keysFor("Quit Omnigent")).toEqual(["Ctrl", "Q"]);
+    expect(keysFor("Quit Coral")).toEqual(["Ctrl", "Q"]);
     expect(keysFor("Open a new browser tab")).toEqual(["Ctrl", "T"]);
     expect(keysFor("Reload the browser tab")).toEqual(["Ctrl", "R"]);
     expect(keysFor("Focus the browser address bar")).toEqual(["Ctrl", "L"]);

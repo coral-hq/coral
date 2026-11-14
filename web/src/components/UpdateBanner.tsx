@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangleIcon, DownloadIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { useAppName } from "@/lib/branding";
 import { type UpdateStatus, updateBridge } from "@/lib/nativeBridge";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +26,8 @@ function formatPercent(percent: number | undefined): number {
  */
 export function UpdateBanner({ variant = "floating" }: { variant?: "floating" | "bare" } = {}) {
   const bridge = updateBridge();
+  // CORAL(S89): the update copy names the app via useAppName() (Coral by default), not "Omnigent".
+  const appName = useAppName();
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [skippedVersion, setSkippedVersion] = useState<string | null | "loading">("loading");
   const [autoInstall, setAutoInstall] = useState(true);
@@ -153,7 +156,7 @@ export function UpdateBanner({ variant = "floating" }: { variant?: "floating" | 
           {visibleStatus.state === "available" && (
             <>
               <p className="font-medium text-foreground">
-                Omnigent Desktop {visibleStatus.info?.version ?? "update"} is available
+                {appName} Desktop {visibleStatus.info?.version ?? "update"} is available
               </p>
               {visibleStatus.currentVersion && (
                 <p className="mt-0.5 text-sm text-muted-foreground">
@@ -168,7 +171,7 @@ export function UpdateBanner({ variant = "floating" }: { variant?: "floating" | 
           {visibleStatus.state === "downloading" && (
             <>
               <p className="font-medium text-foreground">
-                Downloading Omnigent Desktop update… {progress}%
+                Downloading {appName} Desktop update… {progress}%
               </p>
               <Progress
                 value={progress}
@@ -180,7 +183,7 @@ export function UpdateBanner({ variant = "floating" }: { variant?: "floating" | 
           {visibleStatus.state === "downloaded" && (
             <>
               <p className="font-medium text-foreground">
-                Omnigent Desktop {visibleStatus.info?.version ?? "update"} is ready to install
+                {appName} Desktop {visibleStatus.info?.version ?? "update"} is ready to install
               </p>
               {visibleStatus.currentVersion && (
                 <p className="mt-0.5 text-sm text-muted-foreground">

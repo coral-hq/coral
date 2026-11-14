@@ -385,12 +385,13 @@ function ShareExploration({
     </div>
   );
 
+  // CORAL(S89): the sample sharing copy names Coral, as the modal does.
   const linkContent = (
     <div className="space-y-4">
       <p className="text-xs leading-relaxed text-muted-foreground">
         {sharingReadOnly
-          ? "This Omnigent server allows read-only sharing. Invite others to view or comment on this session."
-          : "This Omnigent server allows sharing. Invite others to view or edit this session."}
+          ? "This Coral server allows read-only sharing. Invite others to view or comment on this session."
+          : "This Coral server allows sharing. Invite others to view or edit this session."}
       </p>
       <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
         <label className="text-sm font-medium" htmlFor={`${inputId}-access`}>

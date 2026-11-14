@@ -3335,8 +3335,9 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(screen.getByTestId("task-trigger-fields")).toHaveTextContent(
       "Runs your automation on all new tickets that match these conditions. Older tickets are skipped, even if they are edited to match later.",
     );
+    // CORAL(S89): trigger attribution and link-back text now say Coral.
     expect(screen.getByTestId("task-trigger-fields")).toHaveTextContent(
-      'Up to 10 matches per run; remaining matches wait for the next run · Posts include "Sent with Omnigent".',
+      'Up to 10 matches per run; remaining matches wait for the next run · Posts include "Sent with Coral".',
     );
     expect(screen.queryByRole("tooltip")).toBeNull();
     expect(screen.getByTestId("task-trigger-untrusted-note")).toBeVisible();
@@ -3359,7 +3360,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(screen.getByTestId("task-trigger-untrusted-note")).toHaveTextContent(
       "Links are posted with your Jira account.",
     );
-    expect(note).toHaveTextContent('Posts include "Sent with Omnigent".');
+    expect(note).toHaveTextContent('Posts include "Sent with Coral".');
     // Runs can only search where the agent has the service's tools.
     expect(showWarnings().getByTestId("task-trigger-tools-note")).toHaveTextContent(
       "This only works if the agent has a Jira MCP server where this task runs. Without one, each run stops and says so in its reply.",
@@ -3381,7 +3382,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(screen.getByTestId("task-trigger-untrusted-note")).not.toHaveTextContent(
       "Links are posted",
     );
-    expect(note).toHaveTextContent("Sent with Omnigent");
+    expect(note).toHaveTextContent("Sent with Coral");
     fireEvent.click(screen.getByText("Comment the session link on the ticket"));
     expect(linkBack).toBeChecked();
     expect(screen.getByTestId("task-trigger-untrusted-note")).toHaveTextContent(
@@ -3499,7 +3500,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     );
     expect(prompt).toContain('placement "same_host"');
     expect(prompt).toContain(
-      'Comment "Omnigent session: https://host.example.com/embed#/c/CONVERSATION_ID?o=42" on each ticket',
+      'Comment "Coral session: https://host.example.com/embed#/c/CONVERSATION_ID?o=42" on each ticket',
     );
     expect(prompt).toContain("Instructions for each session:\nTriage it.\n");
   });
@@ -3554,7 +3555,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(prompt).toContain(
       'Watch: new Slack messages in #eng-support whose text contains "error"',
     );
-    expect(prompt).not.toContain("Omnigent session:");
+    expect(prompt).not.toContain("Coral session:");
     expect(prompt).toContain("call sys_session_create");
   });
 
@@ -3618,7 +3619,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(mutateAsync.mock.calls[0][0].templateId).toBe("linear");
     expect(prompt).toContain("Watch: new Linear issues in team ENG that are unassigned");
     expect(prompt).toContain(
-      'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each issue',
+      'Comment "Coral session: https://omni.example.com/c/CONVERSATION_ID" on each issue',
     );
   });
 

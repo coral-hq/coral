@@ -120,6 +120,8 @@ import {
 } from "@/lib/databricksIntegration";
 import { getCurrentIsAdmin, resolveIdentity } from "@/lib/identity";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
+// CORAL(S89): settings copy names the app via useAppName() and the omni palette fallback reads Coral.
+import { useAppName } from "@/lib/branding";
 import { useOmnigentAnalytics, useOmnigentPageView } from "@/lib/analytics";
 import {
   type Conversation,
@@ -805,7 +807,7 @@ function ColorThemeControl() {
       : selectedPalette!;
   const paletteDescription =
     selection === "custom"
-      ? `Based on ${PALETTES.find((palette) => palette.id === customTheme.basePalette)?.label ?? "Omnigent"}`
+      ? `Based on ${PALETTES.find((palette) => palette.id === customTheme.basePalette)?.label ?? "Coral"}`
       : selectedPalette?.blurb;
 
   return (
@@ -1036,6 +1038,7 @@ function ProjectFolderPaginationControl() {
 }
 
 function AppearanceSection() {
+  const appName = useAppName();
   const { setTheme } = useTheme();
   const [resetKey, setResetKey] = useState(0);
   const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
@@ -1145,7 +1148,7 @@ function AppearanceSection() {
   };
 
   return (
-    <Section title="Appearance" description="Choose how Omnigent looks on this device.">
+    <Section title="Appearance" description={`Choose how ${appName} looks on this device.`}>
       <div className="flex flex-col gap-6">
         <div key={resetKey} className="flex flex-col gap-6">
           <SettingsGroup title="Theme" testId="settings-group-theme">
@@ -1277,7 +1280,7 @@ function AppearanceSection() {
           <DialogHeader>
             <DialogTitle>Import settings</DialogTitle>
             <DialogDescription>
-              Choose an exported Omnigent settings file to apply. This will overwrite your current
+              Choose an exported {appName} settings file to apply. This will overwrite your current
               appearance and preference settings.
             </DialogDescription>
           </DialogHeader>
@@ -1309,10 +1312,11 @@ function AppearanceSection() {
 
 /** Git behavior settings. */
 function GitSection() {
+  const appName = useAppName();
   const info = useServerInfo();
   const archiveWorktreeCleanup = info !== "loading" && info.archive_worktree_cleanup === true;
   return (
-    <Section title="Git" description="Configure how Omnigent works with Git.">
+    <Section title="Git" description={`Configure how ${appName} works with Git.`}>
       <SettingsGroup title="Worktrees" testId="settings-group-worktrees">
         <AlwaysUseWorktreeControl />
         <div className="mt-4 border-t border-border pt-4">
@@ -1934,8 +1938,9 @@ function TerminalClipboardControl() {
 
 /** App-wide behavior settings. */
 function GeneralSection() {
+  const appName = useAppName();
   return (
-    <Section title="General" description="Configure general Omnigent behavior.">
+    <Section title="General" description={`Configure general ${appName} behavior.`}>
       <div className="flex flex-col gap-6">
         <SettingsGroup title="Composer" testId="settings-group-composer">
           <ComposerSendShortcutControl />
@@ -2522,14 +2527,17 @@ function LocalCliSection() {
   );
 }
 
-const UPDATE_MODE_LABELS: Record<UpdateMode, string> = {
-  default: "Automatic (check periodically, ask before installing)",
-  start: "Check when Omnigent starts",
-  manual: "Manual only",
-  none: "Off",
-};
+function updateModeLabels(appName: string): Record<UpdateMode, string> {
+  return {
+    default: "Automatic (check periodically, ask before installing)",
+    start: `Check when ${appName} starts`,
+    manual: "Manual only",
+    none: "Off",
+  };
+}
 
 function UpdatesSection() {
+  const modeLabels = updateModeLabels(useAppName());
   const bridge = updateBridge();
   const [config, setConfig] = useState<UpdateConfig | null | "loading">("loading");
   const [saving, setSaving] = useState(false);
@@ -2629,9 +2637,9 @@ function UpdatesSection() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {(Object.keys(UPDATE_MODE_LABELS) as UpdateMode[]).map((mode) => (
+                  {(Object.keys(modeLabels) as UpdateMode[]).map((mode) => (
                     <SelectItem key={mode} value={mode}>
-                      {UPDATE_MODE_LABELS[mode]}
+                      {modeLabels[mode]}
                     </SelectItem>
                   ))}
                 </SelectContent>
