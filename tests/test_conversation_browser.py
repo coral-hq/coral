@@ -358,11 +358,12 @@ def test_announce_conversation_url_defaults_to_stderr(
     assert err.strip() == f"{browser.SESSION_URL_ANNOUNCE_PREFIX}http://127.0.0.1:6767/c/x"
 
 
+# CORAL(S38): generated deep links use Coral's coral:// scheme.
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
         # A plain conversation link keeps host + route only.
-        ("http://127.0.0.1:6767/c/conv_abc", "omnigent://127.0.0.1:6767/c/conv_abc"),
+        ("http://127.0.0.1:6767/c/conv_abc", "coral://127.0.0.1:6767/c/conv_abc"),
         # Mounts and selectors cannot be represented faithfully.
         (
             "https://ws.databricks.com/omnigent/c/conv_abc?o=123",
@@ -374,9 +375,9 @@ def test_announce_conversation_url_defaults_to_stderr(
             None,
         ),
         # Server-home URLs (what `omnigent start` opens) map to the root link.
-        ("http://127.0.0.1:6767", "omnigent://127.0.0.1:6767/"),
+        ("http://127.0.0.1:6767", "coral://127.0.0.1:6767/"),
         ("https://ws.databricks.com/omnigent/", None),
-        ("https://example.com/", "omnigent://example.com/"),
+        ("https://example.com/", "coral://example.com/"),
         ("http://localhost:6767/?o=123", None),
         ("http://localhost:6767/#settings", None),
         ("http://user:password@localhost:6767/", None),
@@ -384,14 +385,14 @@ def test_announce_conversation_url_defaults_to_stderr(
         # The desktop shell would infer the wrong scheme, so keep the browser URL.
         ("http://10.0.0.5:6767/c/conv_abc", None),
         ("https://localhost:6767/c/conv_abc", None),
-        ("http://[::1]:6767/", "omnigent://[::1]:6767/"),
+        ("http://[::1]:6767/", "coral://[::1]:6767/"),
         # Non-http(s) input has no deep link.
         ("omnigent://x/c/y", None),
         ("not a url", None),
     ],
 )
 def test_deep_link_url(url: str, expected: str | None) -> None:
-    """Web UI URLs rewrite to omnigent:// deep links carrying host + SPA route.
+    """Web UI URLs rewrite to coral:// deep links carrying host + SPA route.
 
     :param url: Input browser URL.
     :param expected: Expected deep link, or None.
@@ -412,14 +413,14 @@ def test_open_conversation_url_desktop_falls_back_to_browser(
 
     def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         """
-        Reject ``omnigent://`` URLs the way ``open`` does with no handler.
+        Reject ``coral://`` URLs the way ``open`` does with no handler.
 
-        :param args: Opener argv, e.g. ``["open", "omnigent://h/c/x"]``.
+        :param args: Opener argv, e.g. ``["open", "coral://h/c/x"]``.
         :param kwargs: Ignored subprocess options.
         :returns: A completed process; non-zero for deep links.
         """
         calls.append(args)
-        return subprocess.CompletedProcess(args, 1 if args[1].startswith("omnigent:") else 0)
+        return subprocess.CompletedProcess(args, 1 if args[1].startswith("coral:") else 0)
 
     monkeypatch.setattr(browser.sys, "platform", "darwin")
     monkeypatch.setattr(browser.subprocess, "run", fake_run)
@@ -429,7 +430,7 @@ def test_open_conversation_url_desktop_falls_back_to_browser(
     assert opened is True
     assert len(calls) == 2
     assert calls[0][0] == "open"
-    assert calls[0][1].startswith("omnigent://127.0.0.1:6767/c/conv_abc?desktop_ack=")
+    assert calls[0][1].startswith("coral://127.0.0.1:6767/c/conv_abc?desktop_ack=")
     assert calls[1] == ["open", "http://127.0.0.1:6767/c/conv_abc"]
 
 
@@ -442,7 +443,7 @@ def test_desktop_requires_acknowledgment(monkeypatch: pytest.MonkeyPatch, handle
     def open_url(url: str) -> bool:
         """Emulate installed handlers, including one that ignores root links."""
         opened.append(url)
-        if not url.startswith("omnigent:"):
+        if not url.startswith("coral:"):
             return True
         if handler == "missing":
             raise FileNotFoundError("no opener")
@@ -496,7 +497,7 @@ def test_desktop_linux_delayed_opener_failure(
     def open_url(url: str) -> bool:
         """Use the real asynchronous controller for desktop dispatch."""
         opened.append(url)
-        if url.startswith("omnigent:"):
+        if url.startswith("coral:"):
             assert controller.open(url) is True
         return True
 

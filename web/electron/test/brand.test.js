@@ -86,6 +86,13 @@ describe("package.json publisher identity", () => {
     }
   });
 
+  // CORAL(S38): packaged builds register only Coral's session-link scheme.
+  it("registers only the coral:// session-link scheme", () => {
+    assert.deepEqual(packageConfig.build.protocols, [
+      { name: "Coral session link", schemes: [brand.URL_SCHEME] },
+    ]);
+  });
+
   it("credits Databricks for Omnigent in the copyright line", () => {
     assert.match(packageConfig.build.copyright, /The Coral Authors/);
     assert.match(packageConfig.build.copyright, /Portions Copyright \(2026\) Databricks, Inc\./);

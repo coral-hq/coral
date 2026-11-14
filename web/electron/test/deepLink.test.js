@@ -18,46 +18,43 @@ const {
 
 describe("parseOmnigentDeepLink", () => {
   it("parses a loopback host with a port as http", () => {
-    assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc"), {
+    assert.deepEqual(parseOmnigentDeepLink("coral://localhost:8000/c/conv_abc"), {
       origin: "http://localhost:8000",
       path: "/c/conv_abc",
     });
-    assert.deepEqual(parseOmnigentDeepLink("omnigent://127.0.0.1:8000/c/x"), {
+    assert.deepEqual(parseOmnigentDeepLink("coral://127.0.0.1:8000/c/x"), {
       origin: "http://127.0.0.1:8000",
       path: "/c/x",
     });
   });
 
   it("parses a remote host as https", () => {
-    assert.deepEqual(parseOmnigentDeepLink("omnigent://my-workspace.cloud.databricks.com/c/x"), {
+    assert.deepEqual(parseOmnigentDeepLink("coral://my-workspace.cloud.databricks.com/c/x"), {
       origin: "https://my-workspace.cloud.databricks.com",
       path: "/c/x",
     });
   });
 
   it("preserves a non-default port on a remote host", () => {
-    assert.deepEqual(parseOmnigentDeepLink("omnigent://example.com:8443/c/x"), {
+    assert.deepEqual(parseOmnigentDeepLink("coral://example.com:8443/c/x"), {
       origin: "https://example.com:8443",
       path: "/c/x",
     });
   });
 
   it("accepts an IPv6 loopback host as http", () => {
-    assert.deepEqual(parseOmnigentDeepLink("omnigent://[::1]:8000/c/x"), {
+    assert.deepEqual(parseOmnigentDeepLink("coral://[::1]:8000/c/x"), {
       origin: "http://[::1]:8000",
       path: "/c/x",
     });
   });
 
   it("accepts an optional trailing slash on the path", () => {
-    assert.equal(
-      parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc/").path,
-      "/c/conv_abc/",
-    );
+    assert.equal(parseOmnigentDeepLink("coral://localhost:8000/c/conv_abc/").path, "/c/conv_abc/");
   });
 
   it("drops a query string and hash (v1 forwards only the path)", () => {
-    const parsed = parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc?reply=1#frag");
+    const parsed = parseOmnigentDeepLink("coral://localhost:8000/c/conv_abc?reply=1#frag");
     assert.equal(parsed.path, "/c/conv_abc");
     assert.equal(parsed.origin, "http://localhost:8000");
   });
@@ -68,27 +65,29 @@ describe("parseOmnigentDeepLink", () => {
   });
 
   it("rejects a link with no host", () => {
-    assert.equal(parseOmnigentDeepLink("omnigent://"), null);
-    assert.equal(parseOmnigentDeepLink("omnigent:///c/x"), null);
+    assert.equal(parseOmnigentDeepLink("coral://"), null);
+    assert.equal(parseOmnigentDeepLink("coral:///c/x"), null);
   });
 
   it("accepts the server-home root path", () => {
     // `omnigent start` opens the host UI root, not a conversation.
-    assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000/"), {
+    assert.deepEqual(parseOmnigentDeepLink("coral://localhost:8000/"), {
       origin: "http://localhost:8000",
       path: "/",
     });
-    assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000"), {
+    assert.deepEqual(parseOmnigentDeepLink("coral://localhost:8000"), {
       origin: "http://localhost:8000",
       path: "/",
     });
   });
 
   it("rejects non-/c/<id> paths", () => {
-    assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/inbox"), null);
-    assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/settings/appearance"), null);
-    assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/c/"), null); // empty id
-    assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/c/a/b"), null); // nested path
+    assert.equal(parseOmnigentDeepLink("coral://localhost:8000/inbox"), null);
+    assert.equal(parseOmnigentDeepLink("coral://localhost:8000/settings/appearance"), null);
+    assert.equal(parseOmnigentDeepLink("coral://localhost:8000/c/"), null); // empty id
+    assert.equal(parseOmnigentDeepLink("coral://localhost:8000/c/a/b"), null); // nested path
+    // CORAL(S38): links on the Omnigent scheme are not Coral links.
+    assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc"), null);
   });
 
   it("rejects unparseable / non-string input", () => {
@@ -200,7 +199,7 @@ describe("CLI navigation acknowledgment", () => {
   const token = "a".repeat(64);
   it("preserves ordinary links without contacting a callback", async (t) => {
     const request = t.mock.method(globalThis, "fetch", () => assert.fail("unexpected callback"));
-    assert.equal(await acceptCliDeepLink("omnigent://localhost:6767/"), true);
+    assert.equal(await acceptCliDeepLink("coral://localhost:6767/"), true);
     assert.equal(request.mock.callCount(), 0);
   });
 
@@ -214,7 +213,7 @@ describe("CLI navigation acknowledgment", () => {
     it(`rejects malformed callback ${acknowledgment}`, async (t) => {
       t.mock.method(globalThis, "fetch", () => assert.fail("unexpected callback"));
       assert.equal(
-        await acceptCliDeepLink(`omnigent://localhost/?desktop_ack=${acknowledgment}`),
+        await acceptCliDeepLink(`coral://localhost/?desktop_ack=${acknowledgment}`),
         false,
       );
     });
@@ -224,12 +223,12 @@ describe("CLI navigation acknowledgment", () => {
     t.mock.method(globalThis, "fetch", () => assert.fail("unexpected callback"));
     assert.equal(
       await acceptCliDeepLink(
-        `omnigent://localhost/?desktop_ack=123:${token}&desktop_ack=123:${token}`,
+        `coral://localhost/?desktop_ack=123:${token}&desktop_ack=123:${token}`,
       ),
       false,
     );
     assert.equal(
-      await acceptCliDeepLink(`omnigent://localhost/settings?desktop_ack=123:${token}`),
+      await acceptCliDeepLink(`coral://localhost/settings?desktop_ack=123:${token}`),
       false,
     );
   });
@@ -243,7 +242,7 @@ describe("CLI navigation acknowledgment", () => {
         return { status };
       });
       assert.equal(
-        await acceptCliDeepLink(`omnigent://localhost/?desktop_ack=1234:${token}`),
+        await acceptCliDeepLink(`coral://localhost/?desktop_ack=1234:${token}`),
         status === 204,
       );
     });
@@ -253,6 +252,6 @@ describe("CLI navigation acknowledgment", () => {
     t.mock.method(globalThis, "fetch", async () => {
       throw new Error("connection refused");
     });
-    assert.equal(await acceptCliDeepLink(`omnigent://localhost/?desktop_ack=1234:${token}`), false);
+    assert.equal(await acceptCliDeepLink(`coral://localhost/?desktop_ack=1234:${token}`), false);
   });
 });

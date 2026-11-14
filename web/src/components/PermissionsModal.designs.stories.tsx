@@ -516,7 +516,8 @@ function ShareExploration({
           </DialogHeader>
           <div className="mx-auto rounded-xl bg-white p-4">
             <QRCodeSVG
-              value="omnigent://omnigent.example/c/sharing-design-preview"
+              // CORAL(S38): the sample session link uses Coral's scheme.
+              value="coral://coral.example/c/sharing-design-preview"
               size={192}
               level="M"
               bgColor="#ffffff"

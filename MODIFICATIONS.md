@@ -18,13 +18,16 @@ OPS-01's generator will maintain this file later.
 | `NOTICE` | S77 | coral-specific | Appends the Coral addendum after Omnigent's unchanged NOTICE: Coral's copyright, the attribution to Omnigent, the CORAL anchor rule, and notices for fonts Coral adds or newly documents. |
 | `README.md` | S91 | coral-specific | Adds a four-line Coral banner (attribution and a pointer to `docs/coral/README.md`) above the unchanged Omnigent README. |
 | `justfile` | S87 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build (S87). |
+| `omnigent/conversation_browser.py` | S38 | coral-specific | `deep_link_url` generates `coral://` links for `--open-in-desktop` (S38). |
 | `pnpm-lock.yaml` | S83 | coral-specific | Locks `@fontsource-variable/newsreader` 5.3.0 (S83). |
 | `tests/browser_ui/chat/test_color_theme.py` | S82 | coral-specific | The default palette is labelled "Coral" with Coral's selection washes (S82). |
 | `tests/browser_ui/chat/test_status_indicators.py` | S79 | coral-specific | The working indicator's Coral mark holds still while its opacity pulses, replacing the Otto blink check (S79). |
+| `tests/e2e/omnigent/test_host_no_open.py` | S38 | coral-specific | `--open-in-desktop` opens a `coral://` link (S38). |
 | `tests/e2e_ui/branding/test_branding.py` | S79, S80 | coral-specific | The default hero heading is "Direct the run…" (S79) and the default sidebar link reads "Coral" (S80). |
 | `tests/e2e_ui/desktop/test_about_dialog.py` | S87 | coral-specific | Expects the Coral heading, the attribution and the Licence and Notices buttons (S87). |
 | `tests/e2e_ui/sessions/test_sidebar_view_options.py` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
 | `tests/e2e_ui/visual/test_landing_snapshot.py` | S79 | coral-specific | Docstring names the new hero (S79); CI regenerates the baseline. |
+| `tests/test_conversation_browser.py` | S38 | coral-specific | Expects `coral://` deep links; fake openers key on `coral:` (S38). |
 | `web/electron/about/index.html` | S87 | coral-specific | Coral title and headings, the Apache-2.0 attribution, and Licence and Notices buttons (S87). |
 | `web/electron/about/index.js` | S87 | coral-specific | Coral headings and the Licence and Notices button handlers (S87). |
 | `web/electron/connection-loading/index.html` | S87 | coral-specific | "Opening Coral…" (S87). |
@@ -39,16 +42,17 @@ OPS-01's generator will maintain this file later.
 | `web/electron/e2e/desktop_saved_server_unresponsive.e2e.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
 | `web/electron/e2e/desktop_session_expiry_browser_view.e2e.js` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
 | `web/electron/e2e/desktop_update_window.e2e.js` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
-| `web/electron/package.json` | S87 | coral-specific | Coral product name, description, homepage, repository, author, app id and dev overrides, Coral update feed, copyright with the Databricks credit, unsigned mac identity, microphone copy, maintainer, DMG background and LICENSE/NOTICE/MODIFICATIONS.md/OFL texts in `legal/` (S87). npm name unchanged. |
+| `web/electron/package.json` | S87, S38 | coral-specific | Coral product name, description, homepage, repository, author, app id and dev overrides, Coral update feed, copyright with the Databricks credit, unsigned mac identity, microphone copy, maintainer, DMG background and LICENSE/NOTICE/MODIFICATIONS.md/OFL texts in `legal/` (S87); registers the `coral` session-link scheme (S38). npm name unchanged. |
 | `web/electron/return-banner/index.html` | S87 | coral-specific | The return banner names Coral (S87). |
 | `web/electron/src/about_preload.js` | S87 | coral-specific | Exposes `openLegalFile` to the About page (S87). |
 | `web/electron/src/about_window.js` | S87 | coral-specific | Coral window title, a taller window, and an IPC handler that opens the shipped LICENSE, NOTICE or MODIFICATIONS.md (S87). |
 | `web/electron/src/brand.js` | S87 | coral-specific | Added. Coral's desktop identity: product names, app ids, `coral` scheme, CLI names, install command, update feed and contact links (S87). |
 | `web/electron/src/browserIpc.js` | S87 | coral-specific | Shell copy names Coral via `brand.js` `PRODUCT_NAME` (S87). |
 | `web/electron/src/databricks-oauth.js` | S87 | coral-specific | Shell copy names Coral via `brand.js` `PRODUCT_NAME` (S87). |
+| `web/electron/src/deepLink.js` | S38 | coral-specific | Accepts only `coral://` session links (`brand.js` `URL_SCHEME`) (S38). |
 | `web/electron/src/desktop_updater.js` | S87 | coral-specific | Shell copy names Coral via `brand.js` `PRODUCT_NAME` (S87). |
 | `web/electron/src/dev_preferences.js` | S87 | coral-specific | Dev defaults domain is `DEV_APP_ID` (S87). |
-| `web/electron/src/main.js` | S87 | coral-specific | Product name, app name, dev userData folder and Windows AppUserModelId come from `brand.js`; the About window gets the licence-file location (S87). |
+| `web/electron/src/main.js` | S87, S38 | coral-specific | Product name, app name, dev userData folder and Windows AppUserModelId come from `brand.js`; the About window gets the licence-file location (S87); argv scans and protocol registration use `URL_SCHEME` (S38). |
 | `web/electron/src/oidc-credentials.js` | S87 | coral-specific | Shell copy names Coral via `brand.js` `PRODUCT_NAME` (S87). |
 | `web/electron/src/omnigent_cli.js` | S87 | coral-specific | CLI names (adding `coral`) and the install command come from `brand.js`; the version check accepts `coral` (S87). |
 | `web/electron/src/quitConfirmation.js` | S87 | coral-specific | Shell copy names Coral via `brand.js` `PRODUCT_NAME` (S87). |
@@ -57,11 +61,12 @@ OPS-01's generator will maintain this file later.
 | `web/electron/ssh-connect/console.js` | S87 | coral-specific | The SSH console names Coral (S87). |
 | `web/electron/test/about_page.test.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
 | `web/electron/test/about_window.test.js` | S87 | coral-specific | Covers the licence-file handler and the attribution markup, and expects Coral headings (S87). |
-| `web/electron/test/brand.test.js` | S87 | coral-specific | Added. Refuses Omnigent or Databricks publisher identity in package.json, checks it mirrors `brand.js`, and checks the legal files ship (S87). |
+| `web/electron/test/brand.test.js` | S87, S38 | coral-specific | Added. Refuses Omnigent or Databricks publisher identity in package.json, checks it mirrors `brand.js`, and checks the legal files ship (S87) and that only `coral` is registered (S38). |
 | `web/electron/test/chromeCookieImportPrompt.test.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
 | `web/electron/test/databricks-oauth.test.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
+| `web/electron/test/deepLink.test.js` | S38 | coral-specific | Fixtures use `coral://`; `omnigent://` is rejected (S38). |
 | `web/electron/test/desktop_updater.test.js` | S87 | coral-specific | Expects Coral consent copy and pins the dev updater cache name (S87). |
-| `web/electron/test/main.test.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
+| `web/electron/test/main.test.js` | S87, S38 | coral-specific | Assertions follow the shell copy, which names Coral (S87), and the `coral://` scan and registration (S38). |
 | `web/electron/test/omnigent_cli.test.js` | S87 | coral-specific | Covers `coral` CLI detection (S87). |
 | `web/electron/test/quitConfirmation.test.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
 | `web/electron/test/ssh_connect.test.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
@@ -74,6 +79,9 @@ OPS-01's generator will maintain this file later.
 | `web/public/licenses/newsreader-OFL-1.1.txt` | S77 | coral-specific | Added. Verbatim SIL OFL 1.1 text of Newsreader (`@fontsource-variable/newsreader`), shipped with the web UI. |
 | `web/src/components/BrandLogo.test.tsx` | S79 | coral-specific | Fallback cases expect the Coral mark (S79). |
 | `web/src/components/BrandLogo.tsx` | S79 | coral-specific | The no-logo and failed-logo fallback is `CoralMark` instead of the Otto mascot (S79). |
+| `web/src/components/PermissionsModal.designs.stories.tsx` | S38 | coral-specific | The sample QR link uses `coral://` (S38). |
+| `web/src/components/PermissionsModal.test.tsx` | S38 | coral-specific | Expects `coral://` QR links (S38). |
+| `web/src/components/PermissionsModal.tsx` | S38 | coral-specific | The share QR encodes a `coral://` link from `web/src/brand/urlScheme.ts` (S38). |
 | `web/src/components/onboarding/AnimatedOmnigentPanel.tsx` | S89 | coral-specific | Shows the Coral mark; its `alt` and the card's `aria-label` follow `useAppName()` (S89). |
 | `web/src/components/onboarding/BlobGraphic.tsx` | S89 | coral-specific | Blob colours become forest, mustard and terracotta (S89). |
 | `web/src/components/onboarding/ImportContextModal.tsx` | S89 | coral-specific | Shows the Coral mark instead of the Omnigent starfish (S89). |

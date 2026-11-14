@@ -13,6 +13,7 @@ vi.mock("@/components/BrandLogo", () => ({
 import { CORAL_MARK_PATHS, CoralMark } from "./CoralMark";
 import { CoralHero } from "./CoralHero";
 import { CoralWordmark } from "./CoralWordmark";
+import { CORAL_URL_SCHEME } from "./urlScheme";
 
 // Relative to the vitest root (web/).
 const markAssetSource = readFileSync("src/brand/assets/coral-mark.svg", "utf8");
@@ -51,6 +52,14 @@ describe("CoralMark", () => {
 
   it.each(MARK_COPIES)("keeps the %s copy identical to the asset", (copy) => {
     expect(readFileSync(copy, "utf8")).toBe(markAssetSource);
+  });
+});
+
+describe("CORAL_URL_SCHEME", () => {
+  it("matches the scheme the desktop shell registers and checks", () => {
+    const desktopBrand = readFileSync("electron/src/brand.js", "utf8");
+    expect(CORAL_URL_SCHEME).toBe("coral");
+    expect(desktopBrand).toContain(`const URL_SCHEME = "${CORAL_URL_SCHEME}";`);
   });
 });
 

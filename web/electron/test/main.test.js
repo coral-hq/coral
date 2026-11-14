@@ -3521,7 +3521,7 @@ describe("CLI deep-link handoff", () => {
           },
         },
       });
-      const url = "omnigent://localhost:6767/";
+      const url = "coral://localhost:6767/";
       await h.api.handleDeepLink(url);
       assert.deepEqual(acknowledgments, [url]);
       assert.deepEqual(
@@ -3548,10 +3548,11 @@ describe("deep-link ingestion wiring (src/main.js)", () => {
     );
   });
 
-  it("scans second-instance argv for omnigent:// and enqueues as live code", () => {
+  // CORAL(S38): the shell scans for and registers Coral's scheme (brand.js URL_SCHEME).
+  it("scans second-instance argv for coral:// and enqueues as live code", () => {
     assert.match(
       liveCode,
-      /app\.on\("second-instance"[\s\S]{0,220}startsWith\("omnigent:\/\/"\)[\s\S]{0,60}enqueueDeepLink\(/,
+      /app\.on\("second-instance"[\s\S]{0,220}startsWith\(`\$\{URL_SCHEME\}:\/\/`\)[\s\S]{0,60}enqueueDeepLink\(/,
       [
         "main.js no longer scans second-instance argv for omnigent://. Windows/Linux",
         "warm-start deep links (a second launch funneled by the single-instance lock)",
@@ -3560,10 +3561,10 @@ describe("deep-link ingestion wiring (src/main.js)", () => {
     );
   });
 
-  it("registers the omnigent:// scheme as live code", () => {
+  it("registers the coral:// scheme as live code", () => {
     assert.match(
       liveCode,
-      /setAsDefaultProtocolClient\("omnigent"\)/,
+      /setAsDefaultProtocolClient\(URL_SCHEME\)/,
       [
         "main.js no longer calls app.setAsDefaultProtocolClient('omnigent'), so dev",
         "(`electron .`) clicks on an omnigent:// link won't route to the running dev",

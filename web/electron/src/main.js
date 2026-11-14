@@ -84,7 +84,7 @@ const { createHostThisMachineChecker, SESSION_HOST_PROTOCOL } = require("./hostI
 const { isDeveloperModeEnabled } = require("./developer_mode");
 const { getDevUserDefault } = require("./dev_preferences");
 // CORAL(S87): Coral's product name and app ids replace the Omnigent literals in this file.
-const { APP_ID, DEV_APP_ID, DEV_PRODUCT_NAME, PRODUCT_NAME } = require("./brand");
+const { APP_ID, DEV_APP_ID, DEV_PRODUCT_NAME, PRODUCT_NAME, URL_SCHEME } = require("./brand");
 const {
   excludingManagedServers,
   getDatabricksInternalFeaturesEnabled,
@@ -6059,8 +6059,9 @@ if (!gotLock) {
   // running `electron .` instance), so we scan argv on ALL platforms to let
   // `npm start -- 'omnigent://...'` exercise the real code path on macOS too.
   // Safe: a packaged macOS launch has no omnigent:// in argv, so no double-handling.
+  // CORAL(S38): session links arrive on Coral's scheme (brand.js URL_SCHEME).
   for (const arg of process.argv) {
-    if (typeof arg === "string" && arg.startsWith("omnigent://")) enqueueDeepLink(arg);
+    if (typeof arg === "string" && arg.startsWith(`${URL_SCHEME}://`)) enqueueDeepLink(arg);
   }
 
   // macOS: `open-url` fires for omnigent:// links, including BEFORE
@@ -6082,7 +6083,7 @@ if (!gotLock) {
     // scan above). A plain second launch (no URL) just focuses an existing window.
     let handledUrl = false;
     for (const arg of argv) {
-      if (typeof arg === "string" && arg.startsWith("omnigent://")) {
+      if (typeof arg === "string" && arg.startsWith(`${URL_SCHEME}://`)) {
         enqueueDeepLink(arg);
         handledUrl = true;
       }
@@ -6128,7 +6129,7 @@ if (!gotLock) {
     // per-install registration that survives reinstalls; this lets dev
     // (`electron .`) clicks route to the running dev instance too. No-op
     // (returns false) when another app is already the default handler.
-    app.setAsDefaultProtocolClient("omnigent");
+    app.setAsDefaultProtocolClient(URL_SCHEME);
     // If a deep link arrived before ready (macOS open-url, or Windows/Linux
     // argv), open it instead of the default launch window; the drain's
     // fallback opens a default window if a consent is cancelled. Otherwise

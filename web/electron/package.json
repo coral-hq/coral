@@ -47,9 +47,9 @@
     },
     "protocols": [
       {
-        "name": "Omnigent session link",
+        "name": "Coral session link",
         "schemes": [
-          "omnigent"
+          "coral"
         ]
       }
     ],

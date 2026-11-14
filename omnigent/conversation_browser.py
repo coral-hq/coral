@@ -32,7 +32,7 @@ _DEEP_LINK_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 def deep_link_url(url: str) -> str | None:
     """
-    Convert an http(s) Omnigent web URL to an ``omnigent://`` deep link.
+    Convert an http(s) web UI URL to a ``coral://`` deep link.
 
     The link carries only the host and the conversation route: the desktop app
     infers the scheme and discovers any workspace mount itself, so mount
@@ -40,8 +40,8 @@ def deep_link_url(url: str) -> str | None:
 
     :param url: Absolute browser URL, e.g.
         ``"http://localhost:6767/c/conv_abc"``.
-    :returns: The deep link, e.g. ``"omnigent://localhost:6767/c/conv_abc"``
-        (``omnigent://<host>/`` without a conversation route), or ``None`` when
+    :returns: The deep link, e.g. ``"coral://localhost:6767/c/conv_abc"``
+        (``coral://<host>/`` without a conversation route), or ``None`` when
         *url* cannot be represented without losing its scheme, mount, or selectors.
     """
     try:
@@ -57,7 +57,8 @@ def deep_link_url(url: str) -> str | None:
     path = parsed.path or "/"
     if path != "/" and _CONVERSATION_PATH_RE.fullmatch(path) is None:
         return None
-    return urllib.parse.urlunsplit(("omnigent", parsed.netloc, path, "", ""))
+    # CORAL(S38): links open in the Coral desktop app, which registers coral://.
+    return urllib.parse.urlunsplit(("coral", parsed.netloc, path, "", ""))
 
 
 def strip_conversation_path(url: str) -> str:
@@ -137,7 +138,7 @@ def open_conversation_url(url: str, *, desktop: bool = False) -> bool:
     :param url: Absolute browser URL, e.g.
         ``"http://127.0.0.1:6767/c/conv_abc123"``.
     :param desktop: When ``True``, hand the desktop app (web/electron) an
-        ``omnigent://`` deep link first, falling back to the browser.
+        ``coral://`` deep link first, falling back to the browser.
     :returns: ``True`` when an opener accepted the URL, otherwise
         ``False``.
     :raises OSError: If the platform opener cannot be executed.

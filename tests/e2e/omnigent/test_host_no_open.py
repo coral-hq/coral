@@ -22,17 +22,18 @@ from tests.e2e.omnigent.test_host_ctrl_c_stop_server import (
 )
 
 
+# CORAL(S38): --open-in-desktop opens a coral:// link.
 @pytest.mark.parametrize(
     ("extra_args", "extra_env", "expect_open"),
     [
         pytest.param([], {}, "http://127.0.0.1:{port}", id="default-opens"),
         pytest.param(["--no-open"], {}, None, id="flag-suppresses"),
         pytest.param([], {"OMNIGENT_HOST_NO_OPEN": "1"}, None, id="env-suppresses"),
-        pytest.param(["--open-in-desktop"], {}, "omnigent://127.0.0.1:{port}/", id="flag-desktop"),
+        pytest.param(["--open-in-desktop"], {}, "coral://127.0.0.1:{port}/", id="flag-desktop"),
         pytest.param(
             [],
             {"OMNIGENT_HOST_OPEN_IN_DESKTOP": "1"},
-            "omnigent://127.0.0.1:{port}/",
+            "coral://127.0.0.1:{port}/",
             id="env-desktop",
         ),
     ],

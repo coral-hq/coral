@@ -34,10 +34,11 @@ seams:
     tests: []
     budget_lines: 10
     budget_exception:
-      lines: 100
+      lines: 250
       reason: >-
-        NOTICE gains the append-only Coral addendum; MODIFICATIONS.md and the
-        verbatim OFL licence texts are new Coral files outside allowed_roots.
+        NOTICE gains the append-only Coral addendum; MODIFICATIONS.md (one row
+        per changed file) and the verbatim OFL licence texts are new Coral files
+        outside allowed_roots.
       approver: pending
     anchor_exempt:
       - web/public/licenses/geist-mono-OFL-1.1.txt
@@ -280,5 +281,48 @@ seams:
     anchor_exempt:
       - web/electron/package.json
       - web/electron/dmg/coral-background.tiff
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S38
+    title: coral:// session-link scheme (scheme half)
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      Scheme half only: coral replaces omnigent wherever a session link is
+      registered, checked or generated; accepted paths are unchanged. The run
+      paths (/workflows/runs/<id>) wait for BRD-02. The internal URI
+      omnigent://internal and the OAuth redirect schemes are untouched.
+    files:
+      - web/electron/src/deepLink.js
+      - web/electron/src/main.js
+      - web/electron/package.json
+      - web/electron/test/deepLink.test.js
+      - web/electron/test/main.test.js
+      - web/electron/test/brand.test.js
+      - web/src/components/PermissionsModal.tsx
+      - web/src/components/PermissionsModal.test.tsx
+      - web/src/components/PermissionsModal.designs.stories.tsx
+      - omnigent/conversation_browser.py
+      - tests/test_conversation_browser.py
+      - tests/e2e/omnigent/test_host_no_open.py
+    tests:
+      - web/electron/test/deepLink.test.js
+      - web/electron/test/main.test.js
+      - web/electron/test/brand.test.js
+      - web/src/components/PermissionsModal.test.tsx
+      - web/src/brand/brand.test.tsx
+      - tests/test_conversation_browser.py
+      - tests/e2e/omnigent/test_host_no_open.py
+    budget_lines: 10
+    budget_exception:
+      lines: 50
+      reason: >-
+        Every deep-link fixture in the Electron, web and Python tests moves
+        from omnigent:// to coral://; the production edits stay within XS.
+      approver: pending
+    anchor_exempt:
+      - web/electron/package.json
     upstream_first: false
     upstream_candidate: false

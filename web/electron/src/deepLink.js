@@ -15,6 +15,8 @@
 "use strict";
 
 const { defaultSchemeFor } = require("./url");
+// CORAL(S38): session links use Coral's scheme (brand.js URL_SCHEME); omnigent:// is rejected.
+const { URL_SCHEME } = require("./brand");
 
 /**
  * Accepts the server root or a one-segment conversation route.
@@ -42,7 +44,7 @@ function parseOmnigentDeepLink(raw) {
   } catch {
     return null;
   }
-  if (url.protocol !== "omnigent:") return null;
+  if (url.protocol !== `${URL_SCHEME}:`) return null;
   // No host → a bare `omnigent://` or `omnigent:`; nothing to connect to.
   if (url.host === "") return null;
   // A non-special scheme keeps an EMPTY pathname for `omnigent://host` —

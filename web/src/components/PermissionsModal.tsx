@@ -55,6 +55,7 @@ import {
 } from "@/lib/permissionsApi";
 import { useRebasePath } from "@/lib/routing";
 import { cn } from "@/lib/utils";
+import { CORAL_URL_SCHEME } from "@/brand/urlScheme";
 
 const PUBLIC_USER = "__public__";
 
@@ -627,7 +628,7 @@ function AddUserCombobox({ value, onChange, disabled }: AddUserFieldProps) {
 }
 
 /**
- * The `omnigent://<host>/c/<session_id>` deep link encoded into the share QR
+ * The `coral://<host>/c/<session_id>` deep link encoded into the share QR
  * code. The host (with port when non-default) is parsed from the same shareable
  * URL `getShareableSessionLink` resolves — so standalone and embedded (host-transformed)
  * origins agree on the same server the desktop shell's deep-link handler keys
@@ -638,10 +639,11 @@ function getDeepLink(sessionId: string, rebasePath: (path: string) => string): s
   const url = getShareableSessionLink(sessionId, rebasePath);
   try {
     const { host } = new URL(url);
-    return `omnigent://${host}/c/${sessionId}`;
+    // CORAL(S38): share links use Coral's scheme (web/src/brand/urlScheme.ts).
+    return `${CORAL_URL_SCHEME}://${host}/c/${sessionId}`;
   } catch {
     // Unparseable transform output: fall back to the current origin's host.
-    return `omnigent://${window.location.host}/c/${sessionId}`;
+    return `${CORAL_URL_SCHEME}://${window.location.host}/c/${sessionId}`;
   }
 }
 
@@ -679,7 +681,7 @@ function CopyLinkButton({ sessionId }: { sessionId: string }) {
 
 /**
  * A separate modal showing a QR code encoding the session's
- * `omnigent://<host>/c/<id>` deep link so a user can scan it with their phone
+ * `coral://<host>/c/<id>` deep link so a user can scan it with their phone
  * to open the session in the Omnigent app. The code is rendered on a fixed
  * white tile so it stays scannable regardless of the app's dark/light theme
  * (a dark-on-dark QR won't read). Error correction is bumped to M for
