@@ -10,48 +10,29 @@ vi.mock("@/components/BrandLogo", () => ({
   ),
 }));
 
-import { CORAL_MARK_PATHS, CoralMark } from "./CoralMark";
+import { CoralMark } from "./CoralMark";
 import { CoralHero } from "./CoralHero";
 import { CoralWordmark } from "./CoralWordmark";
 import { CORAL_URL_SCHEME } from "./urlScheme";
 
-// Relative to the vitest root (web/).
-const markAssetSource = readFileSync("src/brand/assets/coral-mark.svg", "utf8");
-// Static copies served outside the bundle (favicon); they must stay byte-identical.
-const MARK_COPIES = ["public/coral-mark.svg"];
-
 afterEach(cleanup);
 
 describe("CoralMark", () => {
-  it("draws the Clay mosaic and leaf on a transparent ground, hidden from assistive tech", () => {
+  it("shows the Coral logo image, hidden from assistive tech", () => {
     const { container } = render(<CoralMark className="size-7" />);
-    const svg = container.querySelector("svg")!;
+    const image = container.querySelector("img")!;
 
-    expect(svg).toHaveAttribute("aria-hidden", "true");
-    expect(svg).toHaveAttribute("viewBox", "0 0 64 64");
-    expect(svg).toHaveClass("coral-mark", "size-7");
-    expect(svg.querySelector("rect")).toBeNull();
-    expect([...svg.querySelectorAll("path")].map((path) => path.getAttribute("fill"))).toEqual([
-      "#4D7356",
-      "#9EAB92",
-      "#B9CDB0",
-      "#C19A55",
-      "#864A31",
-      "#6E2B22",
-      "#4D7356",
-    ]);
+    expect(image.getAttribute("src")).toMatch(/coral-logo\.png$/);
+    expect(image).toHaveAttribute("alt", "");
+    expect(image).toHaveAttribute("aria-hidden", "true");
+    expect(image).toHaveClass("coral-mark", "aspect-square", "object-contain", "size-7");
   });
 
-  it("matches the static placeholder asset used outside React", () => {
-    expect(markAssetSource).toContain("Placeholder Coral mark");
-    for (const path of CORAL_MARK_PATHS) {
-      expect(markAssetSource).toContain(`<path d="${path.d}" fill="${path.fill}"/>`);
-    }
-    expect(markAssetSource.match(/<path /g)).toHaveLength(CORAL_MARK_PATHS.length);
-  });
-
-  it.each(MARK_COPIES)("keeps the %s copy identical to the asset", (copy) => {
-    expect(readFileSync(copy, "utf8")).toBe(markAssetSource);
+  it("is the favicon the web UI serves", () => {
+    // Relative to the vitest root (web/).
+    const indexHtml = readFileSync("index.html", "utf8");
+    expect(indexHtml).toContain('href="%BASE_URL%coral-favicon.png"');
+    expect(readFileSync("public/coral-favicon.png").subarray(1, 4).toString()).toBe("PNG");
   });
 });
 
@@ -69,7 +50,7 @@ describe("CoralWordmark", () => {
     const wordmark = screen.getByTestId("wordmark");
 
     expect(wordmark).toHaveClass("inline-flex", "items-center");
-    expect(wordmark.querySelector("svg.coral-mark")).not.toBeNull();
+    expect(wordmark.querySelector("img.coral-mark")).not.toBeNull();
     expect(screen.getByText("Coral")).toHaveClass("font-display", "font-medium", "leading-none");
   });
 

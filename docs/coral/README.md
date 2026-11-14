@@ -60,6 +60,7 @@ it with the first real skill.
 
 ## Other artifacts
 
-Anything that is not in the roadmap package, such as the UI prototype the UI
-design language mentions or final logo artwork, goes in `docs/coral/design/`
-when someone adds it.
+Anything that is not in the roadmap package goes in `docs/coral/design/`.
+[`design/coral.png`](design/coral.png) is the Coral logo: run
+`.venv/bin/python -I .coral/tools/brand_assets.py generate` after changing it,
+and every icon and in-app copy is regenerated from it.

@@ -6,7 +6,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { AnimatedOmnigentPanel } from "@/components/onboarding/AnimatedOmnigentPanel";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 // CORAL(S89): the Coral mark and app name replace the Omnigent starfish and name.
-import coralMark from "@/brand/assets/coral-mark.svg";
+import coralMark from "@/brand/assets/coral-logo.png";
 import { useAppName } from "@/lib/branding";
 
 const DEFAULT_PANEL_HEIGHT = 220;

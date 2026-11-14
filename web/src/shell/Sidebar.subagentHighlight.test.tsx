@@ -123,7 +123,7 @@ describe("sidebar highlight while viewing a sub-agent", () => {
     const wordmark = screen.getByTestId("sidebar-wordmark");
     expect(wordmark.tagName).not.toBe("IMG");
     expect(wordmark).toHaveTextContent("Coral");
-    expect(wordmark.querySelector("svg.coral-mark")).not.toBeNull();
+    expect(wordmark.querySelector("img.coral-mark")).not.toBeNull();
     expect(screen.getByTestId("sidebar-brand")).toContainElement(wordmark);
   });
 

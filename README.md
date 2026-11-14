@@ -1,7 +1,7 @@
 <!-- CORAL(S91): Coral's README; Omnigent's README is at https://github.com/omnigent-ai/omnigent#readme -->
 <div align="center">
 
-# <img src="web/src/brand/assets/coral-mark.svg" alt="" height="38" valign="middle" /> Coral
+# <img src="web/src/brand/assets/coral-logo.png" alt="" height="38" valign="middle" /> Coral
 
 ### Workflows for your coding agents.
 

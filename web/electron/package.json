@@ -170,7 +170,7 @@
       ]
     },
     "linux": {
-      "icon": "icons/coral-icon.svg",
+      "icon": "icons/coral-linux",
       "category": "Development",
       "maintainer": "The Coral Authors <coralai.team@gmail.com>",
       "target": [

@@ -144,11 +144,13 @@ building or distributing app builds or packages.
 2. **GitHub Actions on `coral-hq/coral`** stay off until OPS-02 reviews the 94
    inherited workflows (12 run on push, 19 on a schedule, including nightly
    releases and image publishing).
-3. **Placeholder mark and artwork (PKG-02).** The Coral mark is a placeholder
-   drawn from UI§4.1, and so is every icon generated from it: favicon,
-   apple-touch icon, Electron `coral-icon.*`, DMG background, Android launcher,
-   monochrome, notification and connect drawables, iOS imagesets and the iOS
-   Icon Composer bundle. Not replaced at all: `web/electron/icons/Assets.car`,
+3. **Mark and artwork (PKG-02).** The final Coral logo is
+   `docs/coral/design/coral.png` (added 2026-11-14). `.coral/tools/brand_assets.py`
+   generates every copy from it: the web mark, favicon, apple-touch icon,
+   Electron `coral-icon.*` and Linux icon sizes, the Android launcher,
+   monochrome, notification and connect bitmaps, the iOS imagesets and the iOS
+   Icon Composer layer. The logo is a raster; a vector (SVG) export would keep
+   the smallest sizes sharper. Not replaced at all: `web/electron/icons/Assets.car`,
    the macOS 26 dynamic icon, still holds the Omnigent starfish (rebuilding it
    needs Xcode 26; `afterPack` copies it into every packaged mac build). The
    hand-authored `web/platform-assets/coral/AppIcon.icon` mirrors the upstream

@@ -214,7 +214,7 @@ seams:
     category: coral-specific
     files:
       - web/index.html
-      - web/public/coral-mark.svg
+      - web/public/coral-favicon.png
       - web/public/coral-apple-touch-icon.png
       - web/src/components/onboarding/AnimatedOmnigentPanel.tsx
       - web/src/components/onboarding/ImportContextModal.tsx
@@ -271,7 +271,7 @@ seams:
       - tests/e2e_ui/sessions/test_settings_export_import.py
     budget_lines: 40
     anchor_exempt:
-      - web/public/coral-mark.svg
+      - web/public/coral-favicon.png
       - web/public/coral-apple-touch-icon.png
     upstream_first: false
     upstream_candidate: false
@@ -399,7 +399,8 @@ seams:
     status: landed
     category: coral-specific
     note: >-
-      Icons and artwork are generated from the placeholder mark (PKG-02).
+      Icons and artwork are generated from the Coral logo,
+      docs/coral/design/coral.png, by .coral/tools/brand_assets.py.
       Electron's Assets.car (macOS 26 dynamic icon) needs Xcode 26 and is not
       replaced; the hand-authored iOS AppIcon.icon is unverified without it.
       Mobile bundle ids, store listings, signing and push stay with OQ-31.
@@ -408,18 +409,38 @@ seams:
       - web/ios/Omnigent/Info-Debug.plist
       - web/ios/Omnigent/Info-Release.plist
       - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/Contents.json
-      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-mark.svg
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-logo.png
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-logo@2x.png
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-logo@3x.png
       - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/Contents.json
-      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-mark.svg
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-logo.png
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-logo@2x.png
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-logo@3x.png
       - web/platform-assets/coral/AppIcon.icon/icon.json
-      - web/platform-assets/coral/AppIcon.icon/Assets/Coral Mark.svg
-      - web/platform-assets/logos/coral-mark.svg
+      - web/platform-assets/coral/AppIcon.icon/Assets/Coral Logo.png
+      - web/platform-assets/logos/coral-logo.png
       - web/android/app/src/main/res/values/strings.xml
       - web/android/app/src/main/res/values/coral_colors.xml
-      - web/android/app/src/main/res/drawable/coral_launcher_foreground.xml
-      - web/android/app/src/main/res/drawable/coral_launcher_monochrome.xml
-      - web/android/app/src/main/res/drawable/coral_notification.xml
-      - web/android/app/src/main/res/drawable/coral_logo.xml
+      - web/android/app/src/main/res/drawable-mdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-hdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-xhdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-xxhdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-xxxhdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-mdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-hdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-xhdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-xxhdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-xxxhdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-mdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-hdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-xhdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-xxhdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-xxxhdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-mdpi/coral_logo.png
+      - web/android/app/src/main/res/drawable-hdpi/coral_logo.png
+      - web/android/app/src/main/res/drawable-xhdpi/coral_logo.png
+      - web/android/app/src/main/res/drawable-xxhdpi/coral_logo.png
+      - web/android/app/src/main/res/drawable-xxxhdpi/coral_logo.png
       - web/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
       - web/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
       - web/android/app/src/main/res/layout/activity_connect.xml
@@ -429,7 +450,14 @@ seams:
       - web/electron/icons/coral-icon.png
       - web/electron/icons/coral-icon.icns
       - web/electron/icons/coral-icon.ico
-      - web/electron/icons/coral-icon.svg
+      - web/electron/icons/coral-linux/16x16.png
+      - web/electron/icons/coral-linux/24x24.png
+      - web/electron/icons/coral-linux/32x32.png
+      - web/electron/icons/coral-linux/48x48.png
+      - web/electron/icons/coral-linux/64x64.png
+      - web/electron/icons/coral-linux/128x128.png
+      - web/electron/icons/coral-linux/256x256.png
+      - web/electron/icons/coral-linux/512x512.png
       - web/electron/package.json
       - web/electron/src/main.js
       - web/electron/about/index.html
@@ -444,14 +472,47 @@ seams:
       approver: pending
     anchor_exempt:
       - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/Contents.json
-      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-mark.svg
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-logo.png
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-logo@2x.png
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-logo@3x.png
       - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/Contents.json
-      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-mark.svg
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-logo.png
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-logo@2x.png
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-logo@3x.png
       - web/platform-assets/coral/AppIcon.icon/icon.json
-      - web/platform-assets/logos/coral-mark.svg
+      - web/platform-assets/logos/coral-logo.png
       - web/electron/icons/coral-icon.png
       - web/electron/icons/coral-icon.icns
       - web/electron/icons/coral-icon.ico
+      - web/platform-assets/coral/AppIcon.icon/Assets/Coral Logo.png
+      - web/electron/icons/coral-linux/16x16.png
+      - web/electron/icons/coral-linux/24x24.png
+      - web/electron/icons/coral-linux/32x32.png
+      - web/electron/icons/coral-linux/48x48.png
+      - web/electron/icons/coral-linux/64x64.png
+      - web/electron/icons/coral-linux/128x128.png
+      - web/electron/icons/coral-linux/256x256.png
+      - web/electron/icons/coral-linux/512x512.png
+      - web/android/app/src/main/res/drawable-mdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-hdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-xhdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-xxhdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-xxxhdpi/coral_launcher_foreground.png
+      - web/android/app/src/main/res/drawable-mdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-hdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-xhdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-xxhdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-xxxhdpi/coral_launcher_monochrome.png
+      - web/android/app/src/main/res/drawable-mdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-hdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-xhdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-xxhdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-xxxhdpi/coral_notification.png
+      - web/android/app/src/main/res/drawable-mdpi/coral_logo.png
+      - web/android/app/src/main/res/drawable-hdpi/coral_logo.png
+      - web/android/app/src/main/res/drawable-xhdpi/coral_logo.png
+      - web/android/app/src/main/res/drawable-xxhdpi/coral_logo.png
+      - web/android/app/src/main/res/drawable-xxxhdpi/coral_logo.png
       - web/electron/package.json
     upstream_first: false
     upstream_candidate: false

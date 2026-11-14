@@ -11,7 +11,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import BlobGraphic from "./BlobGraphic";
 // CORAL(S89): the Coral mark and app name replace the Omnigent starfish and name.
-import coralMark from "@/brand/assets/coral-mark.svg";
+import coralMark from "@/brand/assets/coral-logo.png";
 import { useAppName } from "@/lib/branding";
 import "./AnimatedOmnigentPanel.css";
 

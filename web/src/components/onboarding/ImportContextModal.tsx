@@ -5,7 +5,7 @@
 import type { ReactNode } from "react";
 import { ArrowRight, Check, XIcon } from "lucide-react";
 // CORAL(S89): the Coral mark replaces the Omnigent starfish.
-import coralMark from "@/brand/assets/coral-mark.svg";
+import coralMark from "@/brand/assets/coral-logo.png";
 import BlobGraphic from "@/components/onboarding/BlobGraphic";
 import {
   BRAND_HARNESSES,
