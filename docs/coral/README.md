@@ -5,8 +5,9 @@ Start here for everything Coral-specific in this repository.
 ## What Coral is
 
 Coral is an open-source workflow product built on a clone of Omnigent. It lives
-in its own repository, keeps Omnigent's full git history so upstream merges stay
-cheap, and changes Omnigent's own files only through small, ledgered seams.
+in its own repository and keeps Omnigent's full git history so upstream merges
+stay cheap. It changes Omnigent's own files through small, ledgered seams, plus
+one scripted brand transform that each upstream sync re-applies.
 
 Coral is built on Omnigent (https://github.com/omnigent-ai/omnigent), Copyright (2026) Databricks, Inc., used under the Apache License, Version 2.0. Coral is not affiliated with or endorsed by Databricks, Inc.
 
@@ -40,6 +41,14 @@ Coral is built on Omnigent (https://github.com/omnigent-ai/omnigent), Copyright 
   in the rebranded areas, with its class and reason.
 - [Rebrand report](REBRAND_REPORT.md): commits, release blockers, checks, design
   decisions pending and questions for counsel.
+- [`.coral/tools/rebrand.py`](../../.coral/tools/rebrand.py): the brand
+  transform (seam S95). It rewrites "Omnigent" to "Coral" in user-visible
+  Python strings and CLI help, and lists what it keeps with `report`.
+
+## Upstream sync
+
+- [Syncing with Omnigent](UPSTREAM_SYNC.md): how Coral merges new Omnigent
+  commits, applying the brand transform to each snapshot first.
 
 ## Skills
 
