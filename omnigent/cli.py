@@ -2271,12 +2271,18 @@ def main() -> None:
     # dispatch, imports — are all caught. See omnigent/crash_handler.py.
     from omnigent.crash_handler import install_crash_handler
 
-    install_crash_handler(app_name="omnigent", repo="omnigent-ai/omnigent")
+    # CORAL(S96): crash reports name Coral and file issues on Coral's repository
+    install_crash_handler(app_name="coral", repo="coral-hq/coral")
 
     # Operators can force all use through a wrapper (e.g. `isaac omni`) by
     # setting OMNIGENT_REQUIRE_WRAPPER; the wrapper sets OMNIGENT_WRAPPER_BYPASS
     # to pass through. Refuse naked calls before any work happens.
     _enforce_wrapper_guard()
+
+    # CORAL(S96): after the guard, so its redirect still names the operator's wrapper
+    from omnigent.cli_invocation import name_invoked_command
+
+    name_invoked_command(sys.argv[0], os.environ)
 
     # Legacy-codepage stdio (Windows ANSI, C locale, PYTHONIOENCODING)
     # can't encode the CLI's glyphs; harden the streams before any command

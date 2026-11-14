@@ -153,7 +153,7 @@ def test_render_non_tty_is_plain_no_box(data_dir: Path) -> None:
     exc = _make_exc("plain path crash")
     buf = io.StringIO()
     crash_ui.render_crash_screen(
-        app_name="omnigent",
+        app_name="coral",  # CORAL(S96): the CLI installs the handler as coral
         report_path="/tmp/crash-x.md",
         exc=exc,
         tb=exc.__traceback__,
@@ -173,7 +173,7 @@ def test_render_tty_shows_header_and_copyable_path(data_dir: Path) -> None:
     exc = _make_exc("tty path crash")
     buf = FakeTTY()
     crash_ui.render_crash_screen(
-        app_name="omnigent",
+        app_name="coral",  # CORAL(S96): the CLI installs the handler as coral
         report_path="/tmp/crash-y.md",
         exc=exc,
         tb=exc.__traceback__,

@@ -415,6 +415,8 @@ dev = [
 # `omni` ship, internal and OSS alike.)
 omnigent = "omnigent.cli:main"
 omni = "omnigent.cli:main"
+# CORAL(S29): Coral's command, the same CLI until FND-01 adds coral.cli
+coral = "omnigent.cli:main"
 
 [tool.uv]
 # Keep plain `uv sync` aligned with the published base package. Repository

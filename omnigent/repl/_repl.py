@@ -6559,7 +6559,8 @@ def _build_github_issue_url(
     ]
 
     body = "\n".join(body_parts)
-    base = "https://github.com/omnigent-ai/omnigent/issues/new"
+    # CORAL(S96): /bug files issues on Coral's repository
+    base = "https://github.com/coral-hq/coral/issues/new"
     return (
         f"{base}"
         f"?title={quote('[Bug] TUI issue')}"

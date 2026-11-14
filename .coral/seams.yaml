@@ -34,11 +34,11 @@ seams:
     tests: []
     budget_lines: 10
     budget_exception:
-      lines: 250
+      lines: 500
       reason: >-
         NOTICE gains the append-only Coral addendum; MODIFICATIONS.md (one row
-        per changed file) and the verbatim OFL licence texts are new Coral files
-        outside allowed_roots.
+        per changed file, about 380 rows once S95 lands) and the verbatim OFL
+        licence texts are new Coral files outside allowed_roots.
       approver: pending
     anchor_exempt:
       - web/public/licenses/geist-mono-OFL-1.1.txt
@@ -743,5 +743,48 @@ seams:
       approver: pending
     anchor_exempt:
       - openapi.json
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S29
+    title: coral console script
+    owner: WS-PLATFORM
+    status: landed
+    category: coral-specific
+    note: >-
+      Interim: `coral` points at omnigent.cli:main, the same CLI as omnigent
+      and omni. FND-01 repoints it to coral.cli:main and adds the package
+      include and package data.
+    files:
+      - pyproject.toml
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S96
+    title: CLI hints, crash reports and /bug name Coral
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      Run as `coral`, the CLI sets OMNIGENT_WRAPPER_COMMAND=coral unless an
+      operator already set it, so every cli_invocation() hint, in this process
+      and the daemons it starts, names coral; run as omnigent, hints are
+      unchanged. The crash handler and the REPL's /bug file issues on
+      coral-hq/coral.
+    files:
+      - omnigent/cli_invocation.py
+      - omnigent/cli.py
+      - omnigent/repl/_repl.py
+      - tests/cli/test_crash_handler.py
+      - tests/repl/test_report_command.py
+    tests:
+      - tests/coral/test_coral_cli_name.py
+      - tests/cli/test_crash_handler.py
+      - tests/repl/test_report_command.py
+    budget_lines: 40
+    anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
