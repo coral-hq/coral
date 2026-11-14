@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 Smoke test for the microsandbox sandbox provider.
 
@@ -97,7 +96,7 @@ def main() -> int:
         "--image",
         default="python:alpine",
         help="OCI image to boot (default: python:alpine - small and carries "
-        "the python3 the port-forward bridge needs; pass the coral host "
+        "the python3 the port-forward bridge needs; pass the omnigent host "
         "image to smoke the real thing).",
     )
     parser.add_argument("--keep", action="store_true", help="don't terminate at the end")

@@ -232,7 +232,7 @@ def sandbox() -> None:
     "repo_root",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
-    help="Path to the coral checkout.",
+    help="Path to the omnigent checkout.",
 )
 @click.option(
     "--no-auth",
@@ -258,16 +258,16 @@ def sandbox_create(
     Provision a sandbox and ship Coral into it.
 
     The server's workspace is derived from ``--server`` (the same
-    unauthenticated probe ``coral login`` uses), and for lakebox
+    unauthenticated probe ``omnigent login`` uses), and for lakebox
     the sandbox is created IN that workspace — so the sandbox always
     lives where the server lives, regardless of the local default
     profile. Builds the Coral wheels from your local checkout,
     installs them into the fresh sandbox, and finishes by logging the
-    sandbox in to the server (``coral login`` runs inside the
+    sandbox in to the server (``omnigent login`` runs inside the
     sandbox; the browser step is driven from this machine). Sandboxes
     are disposable — when your code changes, just create a new one.
 
-    After this finishes, run ``coral sandbox connect`` to register
+    After this finishes, run ``omnigent sandbox connect`` to register
     the sandbox as a host with your server.
     """
     from omnigent.onboarding.sandboxes import (
@@ -392,8 +392,8 @@ def sandbox_connect(
     """
     Register the sandbox as a host with your server.
 
-    Runs ``coral host --server <url>`` inside the sandbox — the
-    host resolves its own credentials (a stored ``coral login``
+    Runs ``omnigent host --server <url>`` inside the sandbox — the
+    host resolves its own credentials (a stored ``omnigent login``
     token, or the sandbox's ambient Databricks credentials such as the
     Lakebox image's baked workspace PAT). The remote command holds a
     WebSocket open until interrupted — Ctrl-C tears down the
@@ -431,11 +431,11 @@ def sandbox_connect(
 @click.pass_context
 def lakebox(ctx: click.Context) -> None:
     """
-    Alias for ``coral sandbox … --provider lakebox``.
+    Alias for ``omnigent sandbox … --provider lakebox``.
 
     Kept so existing muscle memory and scripts keep working. The
     subcommands (``create`` / ``auth`` / ``connect``) are the exact
-    ``coral sandbox`` commands with ``--provider lakebox``
+    ``omnigent sandbox`` commands with ``--provider lakebox``
     pre-filled.
     """
     # Pre-fill --provider for the shared sandbox subcommands so

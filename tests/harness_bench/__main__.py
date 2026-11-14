@@ -1,4 +1,3 @@
-# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Command-line entry point for the harness bench."""
 
 from __future__ import annotations
@@ -46,7 +45,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         metavar="NAME",
         default=None,
         help="Databricks gateway profile override. Optional: without it the "
-        "bench derives creds the way `coral run` does (a configured "
+        "bench derives creds the way `omni run` does (a configured "
         "~/.omnigent profile or ambient OPENAI_*). The live layer turns on "
         "whenever creds are resolvable; use --no-live for the offline matrix.",
     )
