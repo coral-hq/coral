@@ -1,6 +1,9 @@
 blank_issues_enabled: false
 contact_links:
-  # CORAL(S94): Coral has no discussion forum yet; point to its documentation
+  # CORAL(S94): questions go to Coral's Discussions; its documentation is linked too
+  - name: Questions & Help
+    url: https://github.com/coral-hq/coral/discussions
+    about: Ask questions and get help from the community. Issues are for actionable bugs and feature requests.
   - name: Coral documentation
     url: https://github.com/coral-hq/coral/blob/main/docs/coral/README.md
-    about: Coral's design, roadmap and status. Issues are for actionable bugs and feature requests.
+    about: Coral's design, roadmap and status.

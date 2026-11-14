@@ -73,9 +73,9 @@ integration tests, which cannot import their optional dependencies here.
 
 **For the owner:**
 
-- The repository has private vulnerability reporting and Discussions turned
-  off, so `SECURITY.md` uses the support address and the issue chooser links
-  to the docs. Turning either on is a repository setting.
+- The owner turned on private vulnerability reporting and Discussions:
+  `SECURITY.md` links Coral's private advisories (the support address stays
+  as a fallback), and the issue chooser links Discussions and the docs.
 - A local web UI built before this pass still says Omnigent. Rebuild it with
   `OMNIGENT_BUILD_WEB_UI=1 uv sync --extra all --group dev --reinstall-package omnigent`.
   That also installs the `coral` script.

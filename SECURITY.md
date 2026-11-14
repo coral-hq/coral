@@ -1,9 +1,10 @@
 # Security Policy
 
 <!-- CORAL(S94): vulnerability reports and scan results go to Coral -->
-To report a security vulnerability in Coral, email coralai.team@gmail.com.
-If the problem is in code Coral inherits unchanged from Omnigent, we will help
-you report it to Omnigent as well.
+To report a security vulnerability in Coral, use
+[GitHub private security advisories](https://github.com/coral-hq/coral/security/advisories/new),
+or email coralai.team@gmail.com. If the problem is in code Coral inherits
+unchanged from Omnigent, we will help you report it to Omnigent as well.
 
 Please do not open a public issue for security problems, and do not include live
 credentials, tokens, or customer data in any report.

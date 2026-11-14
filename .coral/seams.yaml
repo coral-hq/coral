@@ -806,8 +806,8 @@ seams:
     status: landed
     category: coral-specific
     note: >-
-      Security reports go to Coral's support address, because the repository
-      has private vulnerability reporting and Discussions turned off.
+      Security reports go to Coral's private security advisories or its
+      support address; questions go to Coral's Discussions.
     files:
       - CONTRIBUTING.md
       - SECURITY.md
