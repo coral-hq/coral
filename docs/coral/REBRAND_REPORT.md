@@ -10,6 +10,76 @@ blocks a release. Base commit: Omnigent `2a9cbe2c2`
 
 Coral is built on Omnigent (https://github.com/omnigent-ai/omnigent), Copyright (2026) Databricks, Inc., used under the Apache License, Version 2.0. Coral is not affiliated with or endorsed by Databricks, Inc.
 
+## 0. Second pass: Coral branding with the `omnigent` package kept (2026-11-14)
+
+After the run, the owner asked for Coral branding throughout. The `omnigent`
+Python package, its imports and its distribution stay, as FND-01 and OPS-03
+plan. This pass supersedes these rows of section 3:
+
+- `README.md` below the banner;
+- the `omnigent` CLI and its output;
+- server-generated messages and `FastAPI(title=…)`;
+- the server copy of the sharing-off reason.
+
+| Commit | Subject | What changed |
+|---|---|---|
+| `0788f36b5` | CORAL: S95: brand transform script and upstream sync procedure | `.coral/tools/rebrand.py`, its 27 tests in `tests/coral/test_rebrand.py`, and `docs/coral/UPSTREAM_SYNC.md`. |
+| `93d9e2c88` | CORAL: S95: brand transform of Omnigent 2a9cbe2c2 | Omnigent's base tree after the script: 217 Python files and a regenerated `openapi.json`. Its only parent is the base. It starts the transformed upstream line (`transformed_sha` in `.coral/upstream.yaml`). |
+| `39203877c` | CORAL: S95: merge the brand transform of Omnigent 2a9cbe2c2 | Merges that line into `main`. Where a hand seam had changed a file, the merge keeps the seam's text with the transform applied on top. Adds the S95 ledger entry (212 files). |
+| `84b6b9d11` | CORAL: S29, S96: coral command, and hints, crash reports and /bug name Coral | The `coral` console script (same CLI). Run as `coral`, the CLI names `coral` in every `cli_invocation()` hint, in its own process and in the daemons it starts. The crash handler and `/bug` file issues on `coral-hq/coral`. |
+| `f3fabb9b0` | CORAL: S91, S94: Coral's README and GitHub community files | Coral's own README; `SECURITY.md`, `CONTRIBUTING.md` and the issue templates point to Coral. |
+| (this commit) | CORAL: S93: rebrand report update and inventory | This section and the regenerated inventory: 4 server-page rows now count as changed. |
+
+**What the transform changes.** In `omnigent/` and `tests/` Python files:
+
+- "Omnigent" in prose string literals becomes "Coral", and "an Omnigent" becomes "a Coral";
+- in click command help and `help=` text, `omnigent <command>` and `omni <command>` also become `coral <command>`.
+
+Each rewritten file gets one `CORAL(S95)` line at the top. The script checks
+that only string literals changed before it writes.
+
+**What it keeps** (`rebrand.py report` lists 163 literals with their reasons):
+
+- identifiers, comments and other docstrings;
+- single-word values, `X-Omnigent-*` header names, paths and file names;
+- upstream facts: omnigent.ai links, install commands, credits, and the upstream installer's text;
+- text shared with code outside its scope: the `sdks/ui` config header;
+- text the web UI matches exactly: the automation note, the pane-snapshot status, trigger prompts and the default automation project.
+
+**Still says Omnigent after this pass:**
+
+- `coral --version` prints `omnigent 0.22.0.dev0`. OPS-03 owns the Coral version line.
+- `coral upgrade` upgrades a wheel install to Omnigent's release on PyPI. Its help says so. OPS-03 blocks it for `coral`.
+- The `sandbox` and `upgrade` command summaries. Their help mixes Coral steps with upstream install commands, so the script keeps them whole.
+- About 200 runtime messages that hard-code `omnigent <command>` instead of calling `cli_invocation()`. Routing them through `cli_invocation()` is an upstream candidate.
+- Everything in the README's "What still says Omnigent" list. The other areas in section 3 are unchanged: `editors/`, `sdks/`, `integrations/`, `examples/`, `docs/`, `feature-map/`, mobile ids, and the deferred web rows.
+
+**Checks for this pass:**
+
+| Check | Result |
+|---|---|
+| Full default pytest lanes (`-n 8 -m "not databricks"`) on the rebranded tree, before the final rule and hint changes | 49,838 passed, 194 failed, 5 errors. Rerun alone, 53 of those failed identically on the base tree: no ripgrep, no PyYAML in the system `python3`, Linux-only `os.waitid`, macOS socket-path limits, tmux sockets. The rest passed alone, except 32 caused by a first hint design (changing the default name), which was replaced. |
+| The same 197 tests on the final tree | Identical to the base tree's failures, except one load-flaky zygote test that passes alone (its files are unchanged). |
+| The 72 changed test files, `tests/server/test_openapi_drift.py` and `tests/cli/test_cli_invocation.py` on the committed tree | 6,858 passed; 3 failed, all of which fail on the base tree too (`test_claude_native_bridge.py` relay timing). |
+| `tests/coral/` (transform and `coral` hint tests) | 36 passed |
+| `rebrand.py check` on `main` | clean |
+| Ledger check (roots, anchors, budgets, no deletions or renames) | 0 problems, 387 ledgered files |
+| Audits: LICENSE files, NOTICE prefix, `PoweredByOmnigent.tsx`, every modified file in `MODIFICATIONS.md` with an anchor | passed |
+| Hooks | Passed on every commit. `93d9e2c88` was recorded with `git commit-tree` from a scratch worktree, where every hook passed except pyrefly: it could not resolve `sdks/python-client` imports, because the editable install points at the main checkout. The merge commit then ran every hook, pyrefly included, on the same files in the real checkout, and they passed. |
+| Smoke | `coral --help` reads "Coral CLI." with Coral command help. An unreachable server says "run `coral stop`" under `coral` and "run `omnigent stop`" under `omnigent`. The rebuilt web UI's title is Coral. |
+
+Not run: the browser lanes, `tests/e2e`, `tests/integration`, and the Slack
+integration tests, which cannot import their optional dependencies here.
+
+**For the owner:**
+
+- The repository has private vulnerability reporting and Discussions turned
+  off, so `SECURITY.md` uses the support address and the issue chooser links
+  to the docs. Turning either on is a repository setting.
+- A local web UI built before this pass still says Omnigent. Rebuild it with
+  `OMNIGENT_BUILD_WEB_UI=1 uv sync --extra all --group dev --reinstall-package omnigent`.
+  That also installs the `coral` script.
+
 ## 1. Commits
 
 | Commit | Subject | What changed |
@@ -91,6 +161,8 @@ building or distributing app builds or packages.
    mascot when operator branding is set, unchanged until counsel answers.
 
 ## 3. What still says Omnigent, and why
+
+Section 0 supersedes some rows below: the README, CLI output and server messages now say Coral.
 
 Inventory classes (`rebrand-inventory.md`, 8,997 rows, 1 pending):
 

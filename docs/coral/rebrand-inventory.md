@@ -8,12 +8,12 @@ Areas: `web/src`, `web/electron`, `web/ios`, `web/android`, `web/*.html`, and th
 
 | Class | Meaning | Rows |
 |---|---|---|
-| change | Product-name text shown to users, or a test or copy that pinned it. | 395 |
+| change | Product-name text shown to users, or a test or copy that pinned it. | 399 |
 | change-identity | Lowercase ids that follow the desktop app id or the `coral` URL scheme. | 19 |
 | change-asset | Images or drawables that show Omnigent artwork (replacement added beside it). | 33 |
 | keep-origin | Where Coral comes from (L6 a-c): upstream project, package or docs as facts, attribution; also the Databricks platform as an integration target (workspace sign-in, Unity Gateway), which is not Coral's publisher. | 405 |
 | keep-internal | Internal identifiers (package, imports, `OMNIGENT_*`, storage keys, IPC channels, CSS classes, test ids), comments, and tests that do not assert visible text. | 8027 |
-| keep-deferred | Install commands, omnigent.ai docs links, the `omnigent` CLI, server messages, App Store metadata and mobile ids, each with the feature that will change it. | 111 |
+| keep-deferred | Install commands, omnigent.ai docs links, the `omnigent` CLI, server messages, App Store metadata and mobile ids, each with the feature that will change it. | 107 |
 | keep-L7 | The Powered-by-Omnigent credit (L7), unchanged until counsel answers OQ-30. | 7 |
 
 Total rows: 8997. Pending planned changes: 1.
@@ -43,7 +43,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 59 | from omnigent.server.routes._oauth imp… | keep-internal |  | code identifier |
 | 60 | from omnigent.server.routes.device_aut… | keep-internal |  | code identifier |
 | 64 | from omnigent.stores.permission_store … | keep-internal |  | code identifier |
-| 80 | "Upgrade Omnigent to sign in: this server requires a newer login client. " | keep-deferred |  | _CLI_UPGRADE_MESSAGE is a server JSON error string for CLI/mobile/Slack clients, outside the S92 pages; server messages stay. |
+| 80 | "Upgrade Omnigent to sign in: this server requires a newer login client. " | change | S92,S95 | Changed with its seam: _CLI_UPGRADE_MESSAGE is a server JSON error string for CLI/mobile/Slack clients, outside the S92 pages; server messag |
 | 81 | "For the CLI, run ˋomni upgradeˋ, then retry ˋomnigent loginˋ. " | keep-deferred |  | Server error text naming ˋomni upgradeˋ / ˋomnigent loginˋ CLI commands; CLI name changes with OPS-03/FND-01. |
 | 100 | {"ai.omnigent.android:/oauth/callback"… | keep-internal |  | NATIVE_APP_REDIRECT_URIS: OAuth redirect schemes |
 | 114 | from omnigent.server.oidc import OIDCC… | keep-internal |  | code identifier |
@@ -60,10 +60,10 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 723 | If ˋˋOMNIGENT_OIDC_LOGOUT_REDIRECT_URI… | keep-internal |  | Docstring naming OMNIGENT_OIDC_LOGOUT_REDIRECT_U |
 | 918 | "Run ˋomnigent loginˋ again and sign in when prompted." | keep-deferred |  | Error shown on S92 consent page tells user to run ˋomnigent loginˋ; CLI name changes with OPS-03/FND-01. |
 | 1016 | …ders.get("X-Omnigent-Code-Verifier") | keep-internal |  | X-Omnigent-Code-Verifier protocol header the ser |
-| 1207 | "<h1>Update Omnigent to sign in</h1>" | keep-deferred |  | Upgrade-notice text about updating the client (the omnigent CLI, OPS-03/FND-01); prompt keeps upgrade text. Tests pin it. |
+| 1207 | "<h1>Update Omnigent to sign in</h1>" | change | S92,S95 | Changed with its seam: Upgrade-notice text about updating the client (the omnigent CLI, OPS-03/FND-01); prompt keeps upgrade text. Tests pin |
 | 1212 | "<code>omnigent login</code> command again. If the upgrade command " | keep-deferred |  | Upgrade instruction naming the ˋomnigent loginˋ CLI command; changes with OPS-03/FND-01. |
-| 1214 | "<li><b>iOS or Android:</b> Update the Omnigent app through your " | keep-deferred |  | Upgrade instruction for the mobile app via app stores; store listings/bundle ids still Omnigent (OQ-31). |
-| 1217 | "<li><b>Slack:</b> Ask your administrator to update the Omnigent " | keep-deferred |  | Names the Omnigent Slack integration; integrations/ is out of scope and stays Omnigent-named. |
+| 1214 | "<li><b>iOS or Android:</b> Update the Omnigent app through your " | change | S92,S95 | Changed with its seam: Upgrade instruction for the mobile app via app stores; store listings/bundle ids still Omnigent (OQ-31). |
+| 1217 | "<li><b>Slack:</b> Ask your administrator to update the Omnigent " | change | S92,S95 | Changed with its seam: Names the Omnigent Slack integration; integrations/ is out of scope and stays Omnigent-named. |
 | 1234 | f"<p>An Omnigent client is requesting a session as " | change | S92 | S92 CLI consent page body: product name in user-visible consent prompt. |
 | 1235 | f"<b>{esc(user_id)}</b> on this Omnigent server.</p>" | change | S92 | S92 CLI consent page: 'this Omnigent server' product wording becomes Coral server. |
 | 1238 | "from Omnigent. For CLI or Slack sign-in, also check that this code " | change | S92 | S92 CLI consent warning: product name in user-visible text. |
