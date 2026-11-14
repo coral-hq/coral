@@ -1,3 +1,7 @@
+<!-- CORAL(S91): Coral banner -->
+> Coral is built on Omnigent (https://github.com/omnigent-ai/omnigent), Copyright (2026) Databricks, Inc., used under the Apache License, Version 2.0. Coral is not affiliated with or endorsed by Databricks, Inc.
+> See [docs/coral/README.md](docs/coral/README.md) for Coral. The rest of this README describes upstream Omnigent.
+
 <div align="center">
 
 # <img src="https://raw.githubusercontent.com/omnigent-ai/omnigent/main/docs/images/omnigent-logo.svg" alt="" height="38" valign="middle" /> Omnigent

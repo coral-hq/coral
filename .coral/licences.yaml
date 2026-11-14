@@ -1,0 +1,25 @@
+# Third-party dependencies Coral adds, or inherits from Omnigent and touches or
+# newly documents (licence inventory, OPS-02; rule L9 in
+# docs/coral/roadmap/REBRAND_PROMPT.md).
+#
+# Fields per row:
+#   name, version     the package as resolved in the lockfile
+#   spdx              SPDX licence id
+#   class             permissive | weak-copyleft | strong-copyleft | font | unknown
+#                     (font: OFL-1.1, whose notice and full text travel with the
+#                     software). Counsel sets the policy per class (OQ-30).
+#   counsel_status    pending | approved | rejected
+#   inherited         true for an Omnigent dependency Coral touches or documents
+#   notes             where it ships and how the licence obligations are met
+dependencies:
+  - name: "@fontsource-variable/geist-mono"
+    version: 5.3.0
+    spdx: OFL-1.1
+    class: font
+    counsel_status: pending
+    inherited: true
+    notes: >-
+      Bundled by web/src/index.css into the web UI and the Electron
+      server-selector-v2 bundle. Full licence text copied verbatim to
+      web/public/licenses/geist-mono-OFL-1.1.txt; copyright line in the NOTICE
+      addendum.

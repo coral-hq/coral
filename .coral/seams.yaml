@@ -1,0 +1,70 @@
+# Coral's seam ledger (K16, OPS-01). Every Coral change to an Omnigent file is
+# a landed seam entry here, and every changed file carries a CORAL(<seam id>)
+# anchor unless it is listed in anchor_exempt (files that cannot hold a
+# comment: JSON, lockfiles, binaries; and generated files).
+#
+# OPS-01 seeds the remaining S1-S90 entries around these and may reshape
+# allowed_roots. Budgets: XS 10, S 40, M 120 changed lines per file.
+allowed_roots:
+  - path: .coral/
+    new_files_only: false
+  - path: coral/
+    new_files_only: false
+  - path: docs/coral/
+    new_files_only: false
+  - path: tests/coral/
+    new_files_only: false
+  - path: web/src/brand/
+    new_files_only: false
+  - path: .claude/skills/
+    new_files_only: true
+
+seams:
+  - id: S77
+    title: NOTICE addendum, shipped licence texts and change-ledger tracking
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    files:
+      - NOTICE
+      - .gitignore
+      - MODIFICATIONS.md
+      - web/public/licenses/geist-mono-OFL-1.1.txt
+    tests: []
+    budget_lines: 10
+    budget_exception:
+      lines: 100
+      reason: >-
+        NOTICE gains the append-only Coral addendum; MODIFICATIONS.md and the
+        verbatim OFL licence texts are new Coral files outside allowed_roots.
+      approver: pending
+    anchor_exempt:
+      - web/public/licenses/geist-mono-OFL-1.1.txt
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S91
+    title: README banner with the Coral attribution
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    files:
+      - README.md
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S93
+    title: Large-file hook exemption for the committed Coral roadmap
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    files:
+      - .pre-commit-config.yaml
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

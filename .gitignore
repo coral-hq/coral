@@ -48,6 +48,8 @@ omnigent/_build_info.py
 
 # Exception: track .oss-scanner/ (OSS Scanner config) despite the .*/ rule above.
 !.oss-scanner/
+# CORAL(S77): track Coral's change ledger despite the .*/ rule above.
+!.coral/
 
 # Local helper scripts
 run-ap-chat.sh

@@ -150,3 +150,21 @@ Copyright (c) 2011-2012 by Selectel. Copyright (c) 2012-2017 by pyte authors and
 
 psycopg - https://pypi.org/project/psycopg/
 Copyright (C) 2003-2019 Federico Di Gregorio. Copyright (C) 2020-2021 The Psycopg Team.
+
+________________
+
+CORAL(S77): Coral addendum. Everything above the preceding line is Omnigent's NOTICE, unchanged.
+
+Coral
+Copyright (2026) The Coral Authors
+
+The Coral Authors are the people who have contributed to Coral, as recorded in its git history.
+
+Coral is built on Omnigent (https://github.com/omnigent-ai/omnigent), Copyright (2026) Databricks, Inc., used under the Apache License, Version 2.0. Coral is not affiliated with or endorsed by Databricks, Inc.
+
+Coral's changes to Omnigent files are marked CORAL(<seam id>) in each changed file and summarised in MODIFICATIONS.md, and Coral's own files and changes are licensed under the Apache License, Version 2.0.
+
+This Software contains the following fonts, licensed under the SIL Open Font License, Version 1.1 (https://openfontlicense.org). The full licence text of each font ships with the Software: in the web UI at licenses/<font>-OFL-1.1.txt, and in the desktop app at legal/<font>-OFL-1.1.txt.
+
+Geist Mono - https://www.npmjs.com/package/@fontsource-variable/geist-mono
+Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font.git)
