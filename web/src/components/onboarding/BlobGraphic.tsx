@@ -7,9 +7,10 @@ import "./BlobGraphic.css";
 
 // Per-blob placement/color/timing, straight from the prototype. Kept inline so
 // the three blobs read as data rather than three near-identical CSS rules.
+// CORAL(S89): Clay Score blobs (forest, mustard, terracotta) replace Omnigent's pink, orange and blue.
 const BLOBS = [
   {
-    color: "224, 68, 199", // pink
+    color: "77, 115, 86", // forest
     gradientAt: "36% 32%",
     left: "34%",
     top: "68%",
@@ -18,7 +19,7 @@ const BLOBS = [
     animation: "9.6s cubic-bezier(0.45, 0, 0.55, 1) -2.8s infinite blob-float-pink",
   },
   {
-    color: "249, 115, 22", // orange
+    color: "193, 154, 85", // mustard
     gradientAt: "62% 38%",
     left: "50%",
     top: "18%",
@@ -27,7 +28,7 @@ const BLOBS = [
     animation: "12.2s cubic-bezier(0.45, 0, 0.55, 1) -7.2s infinite blob-float-orange",
   },
   {
-    color: "32, 158, 214", // blue
+    color: "134, 74, 49", // terracotta
     gradientAt: "42% 64%",
     left: "66%",
     top: "68%",

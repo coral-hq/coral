@@ -193,3 +193,27 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S89
+    title: Coral brand strings and art across the web UI
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    files:
+      - web/index.html
+      - web/public/coral-mark.svg
+      - web/public/coral-apple-touch-icon.png
+      - web/src/components/onboarding/AnimatedOmnigentPanel.tsx
+      - web/src/components/onboarding/ImportContextModal.tsx
+      - web/src/components/onboarding/BlobGraphic.tsx
+      - web/src/pages/onboarding/AuthCardShell.tsx
+      - web/src/pages/RegisterPage.tsx
+      - web/src/pages/onboarding/JoinTeamStep.tsx
+    tests:
+      - web/src/brand/brand.test.tsx
+    budget_lines: 40
+    anchor_exempt:
+      - web/public/coral-mark.svg
+      - web/public/coral-apple-touch-icon.png
+    upstream_first: false
+    upstream_candidate: false

@@ -5,7 +5,9 @@
 import type { CSSProperties, ReactNode } from "react";
 import { AnimatedOmnigentPanel } from "@/components/onboarding/AnimatedOmnigentPanel";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
-import omnigentLogo from "@/assets/omnigent-starfish-icon.png";
+// CORAL(S89): the Coral mark and app name replace the Omnigent starfish and name.
+import coralMark from "@/brand/assets/coral-mark.svg";
+import { useAppName } from "@/lib/branding";
 
 const DEFAULT_PANEL_HEIGHT = 220;
 const MIN_PANEL_HEIGHT = 200;
@@ -18,6 +20,7 @@ export function AuthCardShell({
   children: ReactNode;
 }) {
   const isMobile = useIsMobileViewport();
+  const appName = useAppName();
 
   if (isMobile) {
     // Base padding folded into the safe-area inset (an inline padding would
@@ -30,8 +33,8 @@ export function AuthCardShell({
       <div className="flex min-h-screen flex-col items-center bg-background px-4" style={padding}>
         <div className="flex w-full max-w-sm flex-1 flex-col justify-center gap-6">
           <img
-            src={omnigentLogo}
-            alt="Omnigent"
+            src={coralMark}
+            alt={appName}
             className="mx-auto size-14 object-contain"
             aria-hidden="true"
           />

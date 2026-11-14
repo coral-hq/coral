@@ -16,6 +16,8 @@ import { CoralWordmark } from "./CoralWordmark";
 
 // Relative to the vitest root (web/).
 const markAssetSource = readFileSync("src/brand/assets/coral-mark.svg", "utf8");
+// Static copies served outside the bundle (favicon); they must stay byte-identical.
+const MARK_COPIES = ["public/coral-mark.svg"];
 
 afterEach(cleanup);
 
@@ -45,6 +47,10 @@ describe("CoralMark", () => {
       expect(markAssetSource).toContain(`<path d="${path.d}" fill="${path.fill}"/>`);
     }
     expect(markAssetSource.match(/<path /g)).toHaveLength(CORAL_MARK_PATHS.length);
+  });
+
+  it.each(MARK_COPIES)("keeps the %s copy identical to the asset", (copy) => {
+    expect(readFileSync(copy, "utf8")).toBe(markAssetSource);
   });
 });
 

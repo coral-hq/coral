@@ -26,11 +26,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { register as registerRequest } from "@/lib/accountsApi";
 import { withBasePath } from "@/lib/basePath";
+import { useAppName } from "@/lib/branding";
 
 const MIN_PASSWORD_LENGTH = 8;
 
 export function RegisterPage() {
   const loginV2 = useLoginV2();
+  const appName = useAppName();
   const [params] = useSearchParams();
   const invite = params.get("invite") ?? "";
 
@@ -80,7 +82,8 @@ export function RegisterPage() {
       <div className="space-y-1 text-center">
         <h1 className="text-2xl font-semibold tracking-tight">Create your account</h1>
         <p className="text-ui text-muted-foreground">
-          You were invited to join this Omnigent server.
+          {/* CORAL(S89): the product name follows the app name, not "Omnigent". */}
+          You were invited to join this {appName} server.
         </p>
       </div>
 

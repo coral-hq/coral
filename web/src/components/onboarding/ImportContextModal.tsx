@@ -4,7 +4,8 @@
 
 import type { ReactNode } from "react";
 import { ArrowRight, Check, XIcon } from "lucide-react";
-import omnigentLogo from "@/assets/omnigent-starfish-icon.png";
+// CORAL(S89): the Coral mark replaces the Omnigent starfish.
+import coralMark from "@/brand/assets/coral-mark.svg";
 import BlobGraphic from "@/components/onboarding/BlobGraphic";
 import {
   BRAND_HARNESSES,
@@ -50,7 +51,7 @@ function ImportBand() {
         </div>
         <ArrowRight className="size-4 text-muted-foreground" />
         <HarnessIconTile>
-          <img src={omnigentLogo} alt="" className="size-8 object-contain" />
+          <img src={coralMark} alt="" className="size-8 object-contain" />
         </HarnessIconTile>
       </div>
     </div>

@@ -13,11 +13,12 @@
     -->
     <base href="/" />
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="%BASE_URL%favicon.svg" />
-    <meta name="theme-color" content="#0d1218" />
-    <link rel="apple-touch-icon" href="%BASE_URL%apple-touch-icon.png" />
+    <!-- CORAL(S89): Coral favicon, apple-touch icon, theme colour, title and cream boot screen -->
+    <link rel="icon" type="image/svg+xml" href="%BASE_URL%coral-mark.svg" />
+    <meta name="theme-color" content="#fef7f1" />
+    <link rel="apple-touch-icon" href="%BASE_URL%coral-apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Omnigent</title>
+    <title>Coral</title>
     <style>
       #boot-loading {
         position: fixed;
@@ -26,8 +27,8 @@
         align-items: center;
         justify-content: center;
         gap: 12px;
-        background: #fff;
-        color: #6f6f6f;
+        background: #fef7f1;
+        color: #8a7566;
         font:
           14px system-ui,
           sans-serif;
@@ -47,8 +48,8 @@
       }
       @media (prefers-color-scheme: dark) {
         #boot-loading {
-          background: #0d1218;
-          color: #92a4b3;
+          background: #2a211c;
+          color: #bba796;
         }
       }
       @media (prefers-reduced-motion: reduce) {
@@ -61,7 +62,7 @@
   <body>
     <div id="root">
       <div id="boot-loading" role="status" aria-busy="true">
-        <span aria-hidden="true"></span>Loading Omnigent…
+        <span aria-hidden="true"></span>Loading Coral…
       </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>

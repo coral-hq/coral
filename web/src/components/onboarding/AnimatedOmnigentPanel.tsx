@@ -1,4 +1,4 @@
-// The onboarding card + animated blob panel + centered starfish logo.
+// The onboarding card + animated blob panel + centered brand mark.
 //
 // Ported from the design handoff, with `motion` replaced by CSS transitions
 // (see AnimatedOmnigentPanel.css) so we add no animation-library dependency —
@@ -10,7 +10,9 @@
 
 import type { CSSProperties, ReactNode } from "react";
 import BlobGraphic from "./BlobGraphic";
-import omnigentLogo from "@/assets/omnigent-starfish-icon.png";
+// CORAL(S89): the Coral mark and app name replace the Omnigent starfish and name.
+import coralMark from "@/brand/assets/coral-mark.svg";
+import { useAppName } from "@/lib/branding";
 import "./AnimatedOmnigentPanel.css";
 
 // Fixed card width + logo size — the flow only varies height/panelHeight per
@@ -46,6 +48,7 @@ export function AnimatedOmnigentPanel({
   contracted = false,
   children,
 }: AnimatedOmnigentPanelProps) {
+  const appName = useAppName();
   // Top-anchored fade to transparent for the contracted (server-list) panel.
   const maskStyle: CSSProperties = contracted
     ? { maskImage: "linear-gradient(black 0px, black 4px, transparent 100%)" }
@@ -54,7 +57,7 @@ export function AnimatedOmnigentPanel({
     <section
       className={`omnigent-card${autoHeight ? " omnigent-card--auto" : ""}`}
       style={{ width: CARD_WIDTH, ...(autoHeight ? {} : { height }) }}
-      aria-label="Omnigent onboarding"
+      aria-label={`${appName} onboarding`}
     >
       <div className="omnigent-animated-panel" style={{ height: panelHeight, ...maskStyle }}>
         <BlobGraphic />
@@ -63,8 +66,8 @@ export function AnimatedOmnigentPanel({
           <div className="omnigent-panel-band-content">{bandContent}</div>
         ) : (
           <img
-            src={omnigentLogo}
-            alt="Omnigent"
+            src={coralMark}
+            alt={appName}
             className={`omnigent-panel-logo${centeredLogo ? " omnigent-panel-logo--centered" : ""}`}
             style={{ width: LOGO_SIZE, height: LOGO_SIZE }}
           />
