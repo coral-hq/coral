@@ -106,7 +106,8 @@ class BlobSaver(
         // "" / "." / ".." aren't usable names — on the API 28 File path "." and
         // ".." resolve to a directory, so the write would fail. Fall back instead.
         return if (cleaned.isBlank() || cleaned == "." || cleaned == "..") {
-            "omnigent-${System.currentTimeMillis()}"
+            // CORAL(S88): saved files default to a Coral name.
+            "coral-${System.currentTimeMillis()}"
         } else {
             cleaned
         }

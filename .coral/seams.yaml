@@ -326,3 +326,65 @@ seams:
       - web/electron/package.json
     upstream_first: false
     upstream_candidate: false
+
+  - id: S88
+    title: Mobile and desktop display names, icons and connect-screen artwork
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      Icons and artwork are generated from the placeholder mark (PKG-02).
+      Electron's Assets.car (macOS 26 dynamic icon) needs Xcode 26 and is not
+      replaced; the hand-authored iOS AppIcon.icon is unverified without it.
+      Mobile bundle ids, store listings, signing and push stay with OQ-31.
+    files:
+      - web/ios/Omnigent.xcodeproj/project.pbxproj
+      - web/ios/Omnigent/Info-Debug.plist
+      - web/ios/Omnigent/Info-Release.plist
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/Contents.json
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-mark.svg
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/Contents.json
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-mark.svg
+      - web/platform-assets/coral/AppIcon.icon/icon.json
+      - web/platform-assets/coral/AppIcon.icon/Assets/Coral Mark.svg
+      - web/platform-assets/logos/coral-mark.svg
+      - web/android/app/src/main/res/values/strings.xml
+      - web/android/app/src/main/res/values/coral_colors.xml
+      - web/android/app/src/main/res/drawable/coral_launcher_foreground.xml
+      - web/android/app/src/main/res/drawable/coral_launcher_monochrome.xml
+      - web/android/app/src/main/res/drawable/coral_notification.xml
+      - web/android/app/src/main/res/drawable/coral_logo.xml
+      - web/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+      - web/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+      - web/android/app/src/main/res/layout/activity_connect.xml
+      - web/android/app/src/main/java/ai/omnigent/android/NativeNotificationManager.kt
+      - web/android/app/src/main/java/ai/omnigent/android/BlobSaver.kt
+      - web/android/app/src/androidTest/java/ai/omnigent/android/ScreenshotTest.kt
+      - web/electron/icons/coral-icon.png
+      - web/electron/icons/coral-icon.icns
+      - web/electron/icons/coral-icon.ico
+      - web/electron/icons/coral-icon.svg
+      - web/electron/package.json
+      - web/electron/src/main.js
+      - web/electron/about/index.html
+    tests: []
+    budget_lines: 40
+    budget_exception:
+      lines: 60
+      reason: >-
+        The Coral Icon Composer bundle's icon.json mirrors the upstream
+        bundle's schema in full.
+      approver: pending
+    anchor_exempt:
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/Contents.json
+      - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-mark.svg
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/Contents.json
+      - web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-mark.svg
+      - web/platform-assets/coral/AppIcon.icon/icon.json
+      - web/platform-assets/logos/coral-mark.svg
+      - web/electron/icons/coral-icon.png
+      - web/electron/icons/coral-icon.icns
+      - web/electron/icons/coral-icon.ico
+      - web/electron/package.json
+    upstream_first: false
+    upstream_candidate: false

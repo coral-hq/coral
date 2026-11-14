@@ -206,7 +206,8 @@ class ScreenshotTest {
         // ConnectActivity's URL-field hint (R.string.connect_hint) — unique, so
         // we match by text rather than resource-id to avoid app-vs-test
         // application-id ambiguity in By.res(pkg, id).
-        const val FIELD_HINT = "https://omnigent.example.com"
+        // CORAL(S88): the connect field hint names a Coral server.
+        const val FIELD_HINT = "https://coral.example.com"
 
         // Placeholder session id for the `session` screen when no real id is
         // supplied. The SPA renders the session-page chrome and attempts to

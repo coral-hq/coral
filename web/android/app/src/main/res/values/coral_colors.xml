@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- CORAL(S88): Coral's launcher background, the cream plate behind the mark (UI§4.4). -->
+<resources>
+    <color name="coral_launcher_background">#FEF7F1</color>
+</resources>

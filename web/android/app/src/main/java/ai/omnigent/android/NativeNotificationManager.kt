@@ -59,10 +59,11 @@ class NativeNotificationManager(
         navigatePath: String?,
     ) {
         val id = nextId.getAndIncrement()
+        // CORAL(S88): notifications use the Coral silhouette.
         val builder =
             NotificationCompat
                 .Builder(context, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_notification)
+                .setSmallIcon(R.drawable.coral_notification)
                 .setContentTitle(title)
                 .setContentText(body.orEmpty())
                 .setAutoCancel(true)
@@ -104,7 +105,7 @@ class NativeNotificationManager(
         val builder =
             NotificationCompat
                 .Builder(context, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_notification)
+                .setSmallIcon(R.drawable.coral_notification)
                 .setContentTitle(title ?: context.getString(R.string.app_name))
                 .setContentText(
                     body ?: context.resources.getQuantityString(R.plurals.badge_text, count, count),

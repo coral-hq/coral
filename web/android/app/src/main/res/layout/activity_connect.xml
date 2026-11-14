@@ -29,7 +29,8 @@
             android:adjustViewBounds="true"
             android:contentDescription="@string/connect_logo_desc"
             android:maxHeight="56dp"
-            android:src="@drawable/omnigents_logo" />
+            android:src="@drawable/coral_logo" />
+        <!-- CORAL(S88): the connect screen shows the Coral mark -->
 
         <TextView
             android:layout_width="match_parent"

@@ -28,7 +28,19 @@ OPS-01's generator will maintain this file later.
 | `tests/e2e_ui/sessions/test_sidebar_view_options.py` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
 | `tests/e2e_ui/visual/test_landing_snapshot.py` | S79 | coral-specific | Docstring names the new hero (S79); CI regenerates the baseline. |
 | `tests/test_conversation_browser.py` | S38 | coral-specific | Expects `coral://` deep links; fake openers key on `coral:` (S38). |
-| `web/electron/about/index.html` | S87 | coral-specific | Coral title and headings, the Apache-2.0 attribution, and Licence and Notices buttons (S87). |
+| `web/android/app/src/androidTest/java/ai/omnigent/android/ScreenshotTest.kt` | S88 | coral-specific | The connect field hint names a Coral server (S88). |
+| `web/android/app/src/main/java/ai/omnigent/android/BlobSaver.kt` | S88 | coral-specific | Saved files default to a `coral-` name (S88). |
+| `web/android/app/src/main/java/ai/omnigent/android/NativeNotificationManager.kt` | S88 | coral-specific | Notifications use the Coral silhouette (S88). |
+| `web/android/app/src/main/res/drawable/coral_launcher_foreground.xml` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). |
+| `web/android/app/src/main/res/drawable/coral_launcher_monochrome.xml` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). |
+| `web/android/app/src/main/res/drawable/coral_logo.xml` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). Connect-screen artwork. |
+| `web/android/app/src/main/res/drawable/coral_notification.xml` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). Notification silhouette. |
+| `web/android/app/src/main/res/layout/activity_connect.xml` | S88 | coral-specific | The connect screen shows the Coral mark (S88). |
+| `web/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml` | S88 | coral-specific | Adaptive launcher icon uses the Coral drawables on cream (S88). |
+| `web/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml` | S88 | coral-specific | Adaptive launcher icon uses the Coral drawables on cream (S88). |
+| `web/android/app/src/main/res/values/coral_colors.xml` | S88 | coral-specific | Added. Cream launcher background colour (S88). |
+| `web/android/app/src/main/res/values/strings.xml` | S88 | coral-specific | User-visible app strings name Coral (S88). |
+| `web/electron/about/index.html` | S87, S88 | coral-specific | Coral title and headings, the Apache-2.0 attribution, and Licence and Notices buttons (S87); the fallback icon is the Coral icon (S88). |
 | `web/electron/about/index.js` | S87 | coral-specific | Coral headings and the Licence and Notices button handlers (S87). |
 | `web/electron/connection-loading/index.html` | S87 | coral-specific | "Opening Coral…" (S87). |
 | `web/electron/dev-app-update.yml` | S87 | coral-specific | Dev builds read Coral's feed with a `coral-desktop-updater-dev` cache (S87). |
@@ -42,7 +54,11 @@ OPS-01's generator will maintain this file later.
 | `web/electron/e2e/desktop_saved_server_unresponsive.e2e.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
 | `web/electron/e2e/desktop_session_expiry_browser_view.e2e.js` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
 | `web/electron/e2e/desktop_update_window.e2e.js` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
-| `web/electron/package.json` | S87, S38 | coral-specific | Coral product name, description, homepage, repository, author, app id and dev overrides, Coral update feed, copyright with the Databricks credit, unsigned mac identity, microphone copy, maintainer, DMG background and LICENSE/NOTICE/MODIFICATIONS.md/OFL texts in `legal/` (S87); registers the `coral` session-link scheme (S38). npm name unchanged. |
+| `web/electron/icons/coral-icon.icns` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). Static macOS icon. |
+| `web/electron/icons/coral-icon.ico` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). Windows installer icon. |
+| `web/electron/icons/coral-icon.png` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). Runtime and Windows icon. |
+| `web/electron/icons/coral-icon.svg` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). Linux launcher icon. |
+| `web/electron/package.json` | S87, S38, S88 | coral-specific | Coral product name, description, homepage, repository, author, app id and dev overrides, Coral update feed, copyright with the Databricks credit, unsigned mac identity, microphone copy, maintainer, DMG background and LICENSE/NOTICE/MODIFICATIONS.md/OFL texts in `legal/` (S87); registers the `coral` session-link scheme (S38); Coral icons for macOS, Windows and Linux (S88). npm name unchanged. |
 | `web/electron/return-banner/index.html` | S87 | coral-specific | The return banner names Coral (S87). |
 | `web/electron/src/about_preload.js` | S87 | coral-specific | Exposes `openLegalFile` to the About page (S87). |
 | `web/electron/src/about_window.js` | S87 | coral-specific | Coral window title, a taller window, and an IPC handler that opens the shipped LICENSE, NOTICE or MODIFICATIONS.md (S87). |
@@ -52,7 +68,7 @@ OPS-01's generator will maintain this file later.
 | `web/electron/src/deepLink.js` | S38 | coral-specific | Accepts only `coral://` session links (`brand.js` `URL_SCHEME`) (S38). |
 | `web/electron/src/desktop_updater.js` | S87 | coral-specific | Shell copy names Coral via `brand.js` `PRODUCT_NAME` (S87). |
 | `web/electron/src/dev_preferences.js` | S87 | coral-specific | Dev defaults domain is `DEV_APP_ID` (S87). |
-| `web/electron/src/main.js` | S87, S38 | coral-specific | Product name, app name, dev userData folder and Windows AppUserModelId come from `brand.js`; the About window gets the licence-file location (S87); argv scans and protocol registration use `URL_SCHEME` (S38). |
+| `web/electron/src/main.js` | S87, S38, S88 | coral-specific | Product name, app name, dev userData folder and Windows AppUserModelId come from `brand.js`; the About window gets the licence-file location (S87); argv scans and protocol registration use `URL_SCHEME` (S38); the runtime icon is `coral-icon.png` (S88). |
 | `web/electron/src/oidc-credentials.js` | S87 | coral-specific | Shell copy names Coral via `brand.js` `PRODUCT_NAME` (S87). |
 | `web/electron/src/omnigent_cli.js` | S87 | coral-specific | CLI names (adding `coral`) and the install command come from `brand.js`; the version check accepts `coral` (S87). |
 | `web/electron/src/quitConfirmation.js` | S87 | coral-specific | Shell copy names Coral via `brand.js` `PRODUCT_NAME` (S87). |
@@ -72,7 +88,17 @@ OPS-01's generator will maintain this file later.
 | `web/electron/test/ssh_connect.test.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
 | `web/electron/test/update-main.test.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
 | `web/index.html` | S89 | coral-specific | Coral favicon, apple-touch icon, theme colour and tab title, and a cream "Loading Coral…" boot screen (S89). |
+| `web/ios/Omnigent.xcodeproj/project.pbxproj` | S88 | coral-specific | `APP_DISPLAY_NAME` is Coral and the app icon source is `platform-assets/coral/AppIcon.icon` (S88). |
+| `web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/Contents.json` | S88 | coral-specific | Added. Coral connect-screen logo imageset (S88). |
+| `web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-mark.svg` | S88 | coral-specific | Added. Symlink to `platform-assets/logos/coral-mark.svg` (S88). |
+| `web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/Contents.json` | S88 | coral-specific | Added. Coral connect-screen logo imageset for dark mode (S88). |
+| `web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-mark.svg` | S88 | coral-specific | Added. Symlink to `platform-assets/logos/coral-mark.svg` (S88). |
+| `web/ios/Omnigent/Info-Debug.plist` | S88 | coral-specific | Camera, microphone and speech permission prompts name Coral (S88). |
+| `web/ios/Omnigent/Info-Release.plist` | S88 | coral-specific | Camera, microphone and speech permission prompts name Coral (S88). |
 | `web/package.json` | S83 | coral-specific | Adds the `@fontsource-variable/newsreader` dependency (S83). |
+| `web/platform-assets/coral/AppIcon.icon/Assets/Coral Mark.svg` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). |
+| `web/platform-assets/coral/AppIcon.icon/icon.json` | S88 | coral-specific | Added. Coral Icon Composer source: cream fill, Coral mark layer; same schema as the upstream bundle (S88). |
+| `web/platform-assets/logos/coral-mark.svg` | S88 | coral-specific | Added. Placeholder Coral mark shared by the Electron setup page and the iOS connect screen; a copy of `web/src/brand/assets/coral-mark.svg` (S88). |
 | `web/public/coral-apple-touch-icon.png` | S89 | coral-specific | Added. Placeholder Coral apple-touch icon: the mark on a cream plate (S89). |
 | `web/public/coral-mark.svg` | S89 | coral-specific | Added. Placeholder Coral mark served as the favicon; a byte-identical copy of `web/src/brand/assets/coral-mark.svg` (S89). |
 | `web/public/licenses/geist-mono-OFL-1.1.txt` | S77 | coral-specific | Added. Verbatim SIL OFL 1.1 text of Geist Mono (`@fontsource-variable/geist-mono`), shipped with the web UI. |

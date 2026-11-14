@@ -310,7 +310,8 @@ const ERR_BLOCKED_BY_CLIENT = -20;
 const POPUP_PRELOAD = path.join(__dirname, "popup_preload.js");
 
 /** Absolute path to the app icon (PNG works for the macOS dock at runtime). */
-const ICON_PNG = path.join(__dirname, "..", "icons", "icon.png");
+// CORAL(S88): the Coral app icon for windows, dialogs and the dev dock.
+const ICON_PNG = path.join(__dirname, "..", "icons", "coral-icon.png");
 
 const isDevBuild = !app.isPackaged || omnigentBuild === "dev";
 const getUserDefault =

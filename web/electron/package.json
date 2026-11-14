@@ -112,7 +112,7 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "icon": "icons/icon.icns",
+      "icon": "icons/coral-icon.icns",
       "artifactName": "${productName}-${version}-${arch}-mac.${ext}",
       "identity": null,
       "hardenedRuntime": true,
@@ -170,7 +170,7 @@
       ]
     },
     "linux": {
-      "icon": "icons/icon.svg",
+      "icon": "icons/coral-icon.svg",
       "category": "Development",
       "maintainer": "The Coral Authors <coralai.team@gmail.com>",
       "target": [
@@ -185,7 +185,7 @@
       ]
     },
     "win": {
-      "icon": "icons/icon.ico",
+      "icon": "icons/coral-icon.ico",
       "target": [
         "nsis"
       ],
