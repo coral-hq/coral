@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the always-on CLI diagnostics log."""
 
 from __future__ import annotations
@@ -268,7 +269,7 @@ def test_stale_host_hint_recommends_generic_stop_command(
     assert "runner tunnel rejection (HTTP 401)" in hint
     assert "stale host processes" in hint
     assert "`omnigent stop`" in hint
-    assert "existing Omnigent host instances" in hint
+    assert "existing Coral host instances" in hint
     assert "omnigent setup" not in hint
 
 
@@ -784,7 +785,7 @@ def test_daemon_exit_error_carries_server_log_tail(
         cli._discover_local_server_url(timeout=1.0)
 
     message = str(excinfo.value)
-    assert "daemon exited before its Omnigent server became ready" in message
+    assert "daemon exited before its Coral server became ready" in message
     assert "Server log" in message
     assert "omnigent[postgres]" in message  # the actionable cause, inline
 
@@ -816,7 +817,7 @@ def test_daemon_exit_error_omits_tail_without_attributable_record(
         cli._discover_local_server_url(timeout=1.0)
 
     message = str(excinfo.value)
-    assert "daemon exited before its Omnigent server became ready" in message
+    assert "daemon exited before its Coral server became ready" in message
     assert "unrelated humming server" not in message
     assert "Last 50 lines" not in message
 

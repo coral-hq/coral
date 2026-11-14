@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Unit tests for :mod:`omnigent.inner.terminal`."""
 
 from __future__ import annotations
@@ -2384,7 +2385,7 @@ def test_require_supported_tmux_rejects_missing_binary(
     assert classify_exception(caught.value) == (ErrorCategory.CONFIG, ErrorImpact.BLOCKING)
     assert "brew install tmux" in str(caught.value)
     # Desktop hosts keep the app's startup PATH, so restarting the host alone can't help.
-    assert "quit and reopen the Omnigent app" in str(caught.value)
+    assert "quit and reopen the Coral app" in str(caught.value)
 
 
 @pytest.mark.parametrize(

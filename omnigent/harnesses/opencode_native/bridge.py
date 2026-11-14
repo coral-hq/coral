@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Bridge state for native OpenCode (``opencode serve``) sessions.
 
 The OpenCode native harness mirrors the Codex native bridge, but the
@@ -86,9 +87,9 @@ _PLUGIN_ENTRYPOINT = "server.js"
 # bridge-dir plugin cannot resolve ``@opencode/plugin`` (no node_modules above it).
 # Raw string so JS escapes survive verbatim.
 _OPENCODE_POLICY_PLUGIN_JS = r"""
-// Omnigent policy bridge for opencode-native (generated; do not edit).
+// Coral policy bridge for opencode-native (generated; do not edit).
 // Gates prompt submission (REQUEST) and tool output (TOOL_RESULT) through
-// the Omnigent policy engine; tool calls are gated by permission.asked instead.
+// the Coral policy engine; tool calls are gated by permission.asked instead.
 import fs from "node:fs"
 
 const BASE = (process.env.OMNIGENT_POLICY_URL || "").replace(/\/+$/, "")
@@ -174,7 +175,7 @@ export default {
       const verdict = await evaluate("PHASE_REQUEST", "", { text })
       if (verdict.result === DENY) {
         const reason = verdict.reason || "request denied"
-        throw new Error("Omnigent policy blocked this prompt: " + reason)
+        throw new Error("Coral policy blocked this prompt: " + reason)
       }
     })
     // TOOL_RESULT phase: the tool already ran; a DENY withholds its output.
@@ -184,7 +185,7 @@ export default {
       const verdict = await evaluate("PHASE_TOOL_RESULT", event.tool, data)
       if (verdict.result === DENY) {
         const reason = verdict.reason || "denied"
-        event.result = { content: "[Omnigent policy withheld this tool result: " + reason + "]" }
+        event.result = { content: "[Coral policy withheld this tool result: " + reason + "]" }
       }
     })
   },

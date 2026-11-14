@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Background daemon entry point for auto-launched host processes.
 
 Spawned by ``_ensure_host_daemon`` in ``cli.py`` when ``run`` /
@@ -48,7 +49,7 @@ def main() -> None:
     parser.add_argument(
         "--local",
         action="store_true",
-        help="Start (or reuse) a local Omnigent server and connect to it.",
+        help="Start (or reuse) a local Coral server and connect to it.",
     )
     args = parser.parse_args()
 

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 E2B sandbox launcher.
 
@@ -74,7 +75,7 @@ Create one at https://e2b.dev/dashboard."""
 
 TEMPLATE_ENV_VAR: str = "OMNIGENT_E2B_TEMPLATE"
 """Environment variable overriding :data:`DEFAULT_E2B_TEMPLATE` — the
-NAME (or id) of the pre-built E2B template the Omnigent host image was
+NAME (or id) of the pre-built E2B template the Coral host image was
 built into (``e2b template build``). NOT a registry image reference:
 E2B boots from templates, not arbitrary images."""
 
@@ -199,7 +200,7 @@ def _template_build_hint(template: str, exc: Exception) -> click.ClickException:
     """
     return click.ClickException(
         f"E2B sandbox creation failed: template '{template}' is unavailable or "
-        "incompatible. Build the Omnigent host image into an E2B template first "
+        "incompatible. Build the Coral host image into an E2B template first "
         "(`e2b template build` — see deploy/e2b/README.md), or set the correct "
         f"template via sandbox.e2b.template / {TEMPLATE_ENV_VAR}. ({exc})"
     )

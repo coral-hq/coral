@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the profile-config and interactive flows in :mod:`omnigent.onboarding.setup`.
 
 ``test_setup.py`` covers env hygiene, CLI discovery and workspace login. This
@@ -500,7 +501,7 @@ def test_maybe_run_aliases_silently_without_prompting(
     maybe_run_onboarding()
 
     assert aliased == [("mine", "oss")]
-    assert "aliased 1 existing profile(s) to Omnigent names: oss" in capsys.readouterr().out
+    assert "aliased 1 existing profile(s) to Coral names: oss" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("answer", ["", "y", "YES"])
@@ -519,7 +520,7 @@ def test_maybe_run_delegates_to_onboarding_on_consent(
     maybe_run_onboarding()
 
     assert ran == [True]
-    assert "Omnigent needs Databricks profiles: oss, jira" in capsys.readouterr().out
+    assert "Coral needs Databricks profiles: oss, jira" in capsys.readouterr().out
 
 
 def test_maybe_run_lists_wrong_host_profiles_and_prints_hint_on_decline(

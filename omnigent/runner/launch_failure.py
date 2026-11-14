@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Classify harness launch/terminal failures into human-readable diagnoses.
 
 When a harness terminal exits unexpectedly (or a launch/connection step
@@ -272,9 +273,9 @@ def _claude_install_is_broken(output: str) -> bool:
 # A tmux kill run inside the pane acts on Omnigent's private server via $TMUX;
 # ``killall tmux`` run anywhere on the host stops that server too.
 TERMINAL_CLOSED_OUTSIDE_OMNIGENT = FailureDiagnosis(
-    title="Claude Code's terminal was closed outside Omnigent",
+    title="Claude Code's terminal was closed outside Coral",
     cause=(
-        "Claude Code's tmux session, or the tmux server running it, was ended and Omnigent "
+        "Claude Code's tmux session, or the tmux server running it, was ended and Coral "
         "did not end it. A tmux command such as `tmux kill-session`, `tmux kill-server` or "
         "`killall tmux`, or another tool on the host, closes it this way."
     ),

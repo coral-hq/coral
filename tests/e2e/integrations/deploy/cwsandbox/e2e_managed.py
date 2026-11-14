@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 End-to-end test: create a managed session against an Omnigent server, and have
 the agent run a REAL workload — an LLM turn against the CoreWeave / W&B inference
@@ -331,7 +332,7 @@ def main() -> int:
     parser.add_argument(
         "--server",
         default=None,
-        help="Use an EXISTING omnigent server at this URL (e.g. http://host:6767) "
+        help="Use an EXISTING coral server at this URL (e.g. http://host:6767) "
         "instead of spinning one up in a CW sandbox. The server must already be "
         "configured with sandbox.provider=cwsandbox. No public-IP sandbox needed.",
     )

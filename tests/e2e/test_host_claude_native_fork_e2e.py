@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """End-to-end regression tests for claude-native fork-resume history.
 
 Covers the two flows verified by hand when implementing the
@@ -798,7 +799,7 @@ def test_fork_sdk_source_into_native_builds_history(
             )
             assert marker in text, (
                 f"native clone did not recall {marker!r} (got {text!r}) — the SDK "
-                "source's Omnigent items were not rebuilt into the clone's Claude "
+                "source's Coral items were not rebuilt into the clone's Claude "
                 "transcript, so it launched fresh without history"
             )
 

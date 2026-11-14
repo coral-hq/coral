@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """``omnigent run ./folder`` must upload MCP ``${VAR}`` references resolved.
 
 Journey: an agent folder declares an MCP server whose ``url`` (sidecar
@@ -50,7 +51,7 @@ _REGION = "eu-west-1"
 # bring-up and a single mocked tool round-trip (~30s observed).
 _RUN_TIMEOUT_S = 240
 
-_SESSION_LINE_RE = re.compile(r"Omnigent session: (?P<base>https?://[^/\s]+)/c/(?P<sid>[0-9a-f]+)")
+_SESSION_LINE_RE = re.compile(r"Coral session: (?P<base>https?://[^/\s]+)/c/(?P<sid>[0-9a-f]+)")
 _PROXY_VARS = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"})
 
 

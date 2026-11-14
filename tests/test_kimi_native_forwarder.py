@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Unit tests for the kimi-native transcript forwarder.
 
 Covers the pure parsing/discovery helpers against kimi's real ``wire.jsonl``
@@ -104,13 +105,13 @@ class TestRowToItem:
             "event": {
                 "type": "content.part",
                 "uuid": "67ce67f7",
-                "part": {"type": "text", "text": "This is **Omnigent**."},
+                "part": {"type": "text", "text": "This is **Coral**."},
             },
         }
         item = _row_to_item(9, row)
         assert item is not None
         assert item.role == "assistant"
-        assert item.text == "This is **Omnigent**."
+        assert item.text == "This is **Coral**."
         assert item.response_id == "kimi:67ce67f7"
 
     def test_think_part_is_reasoning(self) -> None:

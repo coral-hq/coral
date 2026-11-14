@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 Databricks profile onboarding for Omnigent.
 
@@ -384,8 +385,8 @@ def run_onboarding() -> bool:
 
     console.print(
         Panel(
-            "[bold]Omnigent onboarding[/bold]\n\n"
-            "Setting up the Databricks profiles Omnigent needs "
+            "[bold]Coral onboarding[/bold]\n\n"
+            "Setting up the Databricks profiles Coral needs "
             f"({', '.join(f'`{s.name}`' for s in DEFAULT_PROFILES)}).",
             border_style="cyan",
             padding=(1, 2),
@@ -629,7 +630,7 @@ def maybe_run_onboarding() -> None:
         if n:
             console.print(
                 f"omnigent: aliased {n} existing profile(s) "
-                f"to Omnigent names: "
+                f"to Coral names: "
                 f"{', '.join(spec.name for _, spec in actions.aliasable)}"
             )
         existing = _existing_profile_hosts()
@@ -641,7 +642,7 @@ def maybe_run_onboarding() -> None:
     missing_parts = [s.name for s in actions.oauth]
     missing_parts += [f"{s.name} (wrong host)" for s, _ in actions.wrong_host]
     console.print(
-        f"\n  [yellow]Omnigent needs Databricks profiles: {', '.join(missing_parts)}[/yellow]"
+        f"\n  [yellow]Coral needs Databricks profiles: {', '.join(missing_parts)}[/yellow]"
     )
     try:
         answer = input("  Run onboarding now? [Y/n] ").strip().lower()

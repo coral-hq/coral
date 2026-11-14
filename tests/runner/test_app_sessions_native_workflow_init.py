@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for native session initialization, dispatch, status, and streams."""
 
 from __future__ import annotations
@@ -2942,7 +2943,7 @@ async def test_session_stream_emits_heartbeat_on_idle() -> None:
         heartbeats = [e for e in collected if e.get("type") == "session.heartbeat"]
         assert len(heartbeats) >= 1, f"Expected at least 1 session.heartbeat, got {collected}"
         assert collected[0] == {"type": "session.heartbeat"}, (
-            "The first stream frame must be the ready heartbeat. Omnigent waits "
+            "The first stream frame must be the ready heartbeat. Coral waits "
             "for this before forwarding fast no-replay user input."
         )
     finally:

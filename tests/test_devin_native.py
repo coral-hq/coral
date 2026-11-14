@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the devin-native launcher, bridge and lifecycle hook."""
 
 from __future__ import annotations
@@ -1055,18 +1056,18 @@ class TestReservedLaunchArgs:
         # Omnigent only passes --resume when it means to; an injected one would
         # attach a different Devin session to this conversation.
         for flag in ("--resume", "-r", "--continue", "-c"):
-            with pytest.raises(RuntimeError, match="Omnigent-owned"):
+            with pytest.raises(RuntimeError, match="Coral-owned"):
                 self._args([flag, "someone-elses-session"])
 
     def test_rejects_overriding_the_policy_gate_and_transcript(self) -> None:
         # --config carries the Omnigent hooks block: replacing it would disable
         # the PreToolUse policy gate. --export is where the forwarder reads.
         for flag in ("--config", "--export", "--respect-workspace-trust"):
-            with pytest.raises(RuntimeError, match="Omnigent-owned"):
+            with pytest.raises(RuntimeError, match="Coral-owned"):
                 self._args([flag, "/tmp/other"])
 
     def test_rejects_the_equals_form(self) -> None:
-        with pytest.raises(RuntimeError, match="Omnigent-owned"):
+        with pytest.raises(RuntimeError, match="Coral-owned"):
             self._args(["--config=/tmp/evil.json"])
 
     def test_allows_the_permission_mode_omnigent_itself_passes(self) -> None:

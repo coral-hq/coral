@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Session creation refuses unavailable harnesses before persisting a child."""
 
 import json
@@ -142,7 +143,7 @@ async def test_child_create_gates_only_the_tmux_backed_harness(
         error = response.json()["error"]
         assert error["code"] == "harness_not_configured"
         assert "tmux 3.3 or newer" in error["message"]
-        assert "quit and reopen the Omnigent app" in error["message"]
+        assert "quit and reopen the Coral app" in error["message"]
 
 
 @pytest.mark.parametrize("bundle", [False, True])

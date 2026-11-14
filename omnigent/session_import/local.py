@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Read and normalize local coding-harness transcripts."""
 
 from __future__ import annotations
@@ -595,7 +596,7 @@ def load_claude_session(
         raise SessionImportNotFoundError(f"Claude Code session {session_id!r} was not found")
     if transcript_path.with_suffix(RESUME_COPY_MARKER_SUFFIX).exists():
         raise SessionImportNotFoundError(
-            f"Claude Code session {session_id!r} is an Omnigent resume copy"
+            f"Claude Code session {session_id!r} is a Coral resume copy"
         )
 
     parsed = read_transcript_items_from_offset(

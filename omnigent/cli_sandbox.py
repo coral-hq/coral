@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Sandbox CLI commands: run an Omnigent host in a remote sandbox.
 
 ``omnigent sandbox …`` bootstraps an Omnigent host inside a sandbox
@@ -231,7 +232,7 @@ def sandbox() -> None:
     "repo_root",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
-    help="Path to the omnigent checkout.",
+    help="Path to the coral checkout.",
 )
 @click.option(
     "--no-auth",
@@ -254,19 +255,19 @@ def sandbox_create(
     skip_auth: bool,
 ) -> None:
     """
-    Provision a sandbox and ship Omnigent into it.
+    Provision a sandbox and ship Coral into it.
 
     The server's workspace is derived from ``--server`` (the same
-    unauthenticated probe ``omnigent login`` uses), and for lakebox
+    unauthenticated probe ``coral login`` uses), and for lakebox
     the sandbox is created IN that workspace — so the sandbox always
     lives where the server lives, regardless of the local default
-    profile. Builds the Omnigent wheels from your local checkout,
+    profile. Builds the Coral wheels from your local checkout,
     installs them into the fresh sandbox, and finishes by logging the
-    sandbox in to the server (``omnigent login`` runs inside the
+    sandbox in to the server (``coral login`` runs inside the
     sandbox; the browser step is driven from this machine). Sandboxes
     are disposable — when your code changes, just create a new one.
 
-    After this finishes, run ``omnigent sandbox connect`` to register
+    After this finishes, run ``coral sandbox connect`` to register
     the sandbox as a host with your server.
     """
     from omnigent.onboarding.sandboxes import (
@@ -391,8 +392,8 @@ def sandbox_connect(
     """
     Register the sandbox as a host with your server.
 
-    Runs ``omnigent host --server <url>`` inside the sandbox — the
-    host resolves its own credentials (a stored ``omnigent login``
+    Runs ``coral host --server <url>`` inside the sandbox — the
+    host resolves its own credentials (a stored ``coral login``
     token, or the sandbox's ambient Databricks credentials such as the
     Lakebox image's baked workspace PAT). The remote command holds a
     WebSocket open until interrupted — Ctrl-C tears down the
@@ -430,11 +431,11 @@ def sandbox_connect(
 @click.pass_context
 def lakebox(ctx: click.Context) -> None:
     """
-    Alias for ``omnigent sandbox … --provider lakebox``.
+    Alias for ``coral sandbox … --provider lakebox``.
 
     Kept so existing muscle memory and scripts keep working. The
     subcommands (``create`` / ``auth`` / ``connect``) are the exact
-    ``omnigent sandbox`` commands with ``--provider lakebox``
+    ``coral sandbox`` commands with ``--provider lakebox``
     pre-filled.
     """
     # Pre-fill --provider for the shared sandbox subcommands so

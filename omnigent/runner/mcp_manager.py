@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Runner-side MCP pool. See ``designs/RUNNER_MCP.md``."""
 
 from __future__ import annotations
@@ -307,7 +308,7 @@ class RunnerMcpManager:
             """
             if server_client is None:
                 _logger.warning(
-                    "MCP elicitation callback: no Omnigent server client available — declining",
+                    "MCP elicitation callback: no Coral server client available — declining",
                     extra={"session_id": session_id},
                 )
                 return ElicitResult(action="decline")
@@ -335,7 +336,7 @@ class RunnerMcpManager:
                     data: object = resp.json()
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning(
-                        "MCP elicitation callback: Omnigent server POST failed (%s) — declining",
+                        "MCP elicitation callback: Coral server POST failed (%s) — declining",
                         exc,
                         extra={"session_id": session_id},
                     )
@@ -344,7 +345,7 @@ class RunnerMcpManager:
                 elicitation_id = data.get("elicitation_id") if isinstance(data, dict) else None
                 if not isinstance(elicitation_id, str) or not elicitation_id:
                     _logger.warning(
-                        "MCP elicitation callback: Omnigent server returned no "
+                        "MCP elicitation callback: Coral server returned no "
                         "elicitation_id — declining",
                         extra={"session_id": session_id},
                     )

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Policy type hierarchy for Omnigent.
 
 Policies intercept messages at various phases (request, response, tool_call,
@@ -80,7 +81,7 @@ class _PolicySession(Protocol):
 
 
 _POLICY_SYSTEM_PROMPT = (
-    "You are an Omnigent policy evaluator. Return exactly one JSON object and nothing else."
+    "You are a Coral policy evaluator. Return exactly one JSON object and nothing else."
 )
 
 

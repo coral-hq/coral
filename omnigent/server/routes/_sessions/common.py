@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Shared constants, state, and small dataclasses for the sessions routes.
 
 Leaf module: imports no sibling ``_sessions`` module. Holds the mutable
@@ -493,7 +494,7 @@ _BROWSER_ACTION_NO_RENDERER_RESULT: dict[str, Any] = {"error": "no browser rende
 
 
 _BROWSER_ACTION_TIMEOUT_RESULT: dict[str, Any] = {
-    "error": "browser action timed out — is the session open in the Omnigent desktop app?"
+    "error": "browser action timed out — is the session open in the Coral desktop app?"
 }
 
 

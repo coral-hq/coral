@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 Provider-agnostic sandbox bootstrap for Omnigent hosts.
 
@@ -121,7 +122,7 @@ def build_wheels(
             "`curl -LsSf https://astral.sh/uv/install.sh | sh` and retry."
         )
 
-    click.echo(f"▸ Building Omnigent wheels → {tgz_path}")
+    click.echo(f"▸ Building Coral wheels → {tgz_path}")
     env = os.environ.copy()
     if pypi_proxy is not None:
         env.setdefault("UV_INDEX_URL", pypi_proxy)

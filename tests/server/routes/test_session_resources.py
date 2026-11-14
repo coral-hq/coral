@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for server session resource endpoints (Phase 1a + 1b + 1c)."""
 
 from __future__ import annotations
@@ -10936,7 +10937,7 @@ async def test_native_send_rechecks_runtime_after_upload(
         json={"type": "message", "data": {"role": "user", "content": content}},
     )
     assert response.status_code == 409, response.text
-    assert "Update Omnigent" in response.text
+    assert "Update Coral" in response.text
     assert runner.post_json_calls == []
     assert len(file_conv_store.appended_items) == 1 + int(retained_history)
 

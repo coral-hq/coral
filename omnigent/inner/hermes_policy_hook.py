@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Hermes ``pre_tool_call`` shell hook for Omnigent policy enforcement.
 
 Registered as a ``pre_tool_call`` hook in the per-session
@@ -143,9 +144,9 @@ def main() -> None:
     if action == "POLICY_ACTION_DENY":
         out: dict[str, str] = {"decision": "block"}
         if reason:
-            out["reason"] = f"Tool '{tool_name}' denied by Omnigent policy: {reason}"
+            out["reason"] = f"Tool '{tool_name}' denied by Coral policy: {reason}"
         else:
-            out["reason"] = f"Tool '{tool_name}' denied by Omnigent policy"
+            out["reason"] = f"Tool '{tool_name}' denied by Coral policy"
         json.dump(out, sys.stdout)
     elif action == "POLICY_ACTION_ASK":
         # The server resolves ASK by parking the HTTP request until the

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the codex-native policy hook entrypoint (``evaluate-policy``)."""
 
 from __future__ import annotations
@@ -132,7 +133,7 @@ class _RaisesIfCalled:
         """
         del url, json
         raise AssertionError(
-            "evaluate-policy POSTed to Omnigent when it should have short-circuited "
+            "evaluate-policy POSTed to Coral when it should have short-circuited "
             "(missing bridge state or policy_hook config)."
         )
 

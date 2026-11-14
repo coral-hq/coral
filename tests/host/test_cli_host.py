@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for host CLI commands and auto-launch."""
 
 from __future__ import annotations
@@ -344,7 +345,7 @@ def test_host_enable_subcommand_installs_user_service(
 
     assert result.exit_code == 0, result.output
     assert captured == [(None, {"HOME": str(tmp_path)})]
-    assert "Enabled the Omnigent host user service for local" in result.output
+    assert "Enabled the Coral host user service for local" in result.output
 
 
 def _record_for(target: str) -> cli_module._HostDaemonRecord:
@@ -496,7 +497,7 @@ def test_host_disable_subcommand_removes_user_service(
 
     assert result.exit_code == 0, result.output
     assert removed == [True]
-    assert "Disabled the Omnigent host user service" in result.output
+    assert "Disabled the Coral host user service" in result.output
 
 
 def test_host_rejects_unknown_plain_token_as_subcommand(

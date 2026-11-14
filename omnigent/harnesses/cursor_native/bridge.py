@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Filesystem bridge + tmux injection for the cursor-native terminal harness.
 
 The runner launches the ``cursor-agent`` TUI in a private tmux pane and records
@@ -355,7 +356,7 @@ def write_mcp_config(
     omnigent_entry = build_mcp_config(bridge_dir, python_executable=python_executable)
     omnigent_servers = omnigent_entry["mcpServers"]
     if not isinstance(omnigent_servers, dict):  # pragma: no cover - build_mcp_config invariant
-        raise ValueError("Omnigent MCP config is missing mcpServers")
+        raise ValueError("Coral MCP config is missing mcpServers")
     servers[_MCP_SERVER_NAME] = omnigent_servers[_MCP_SERVER_NAME]
 
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -452,7 +453,7 @@ def write_hooks_config(
     payload = build_hooks_config(bridge_dir, python_executable=python_executable)
     omnigent_hooks = payload["hooks"]
     if not isinstance(omnigent_hooks, dict):  # pragma: no cover - build_hooks_config invariant
-        raise ValueError("Omnigent hooks config is missing its hooks mapping")
+        raise ValueError("Coral hooks config is missing its hooks mapping")
     for event, entries in omnigent_hooks.items():
         current = hooks.get(event)
         if not isinstance(current, list):

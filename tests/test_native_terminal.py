@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for shared native terminal helpers."""
 
 from __future__ import annotations
@@ -314,7 +315,7 @@ async def test_bind_session_runner_raises_click_exception_on_connect_error() -> 
         base_url="https://example.databricks.com",
         transport=httpx.MockTransport(_handler),
     ) as client:
-        with pytest.raises(click.ClickException, match="Couldn't reach the Omnigent server"):
+        with pytest.raises(click.ClickException, match="Couldn't reach the Coral server"):
             await native_terminal.bind_session_runner(client, "conv_abc", "runner_abc")
 
 
@@ -342,7 +343,7 @@ async def test_bind_session_runner_treats_connect_timeout_as_unreachable() -> No
         base_url="https://example.databricks.com",
         transport=httpx.MockTransport(_handler),
     ) as client:
-        with pytest.raises(click.ClickException, match="Couldn't reach the Omnigent server"):
+        with pytest.raises(click.ClickException, match="Couldn't reach the Coral server"):
             await native_terminal.bind_session_runner(client, "conv_abc", "runner_abc")
 
 

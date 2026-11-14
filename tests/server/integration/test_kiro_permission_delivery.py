@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Kiro delivery state through the real hook, resolve, snapshot and event routes."""
 
 from __future__ import annotations
@@ -151,9 +152,7 @@ async def test_kiro_delivery_stays_pending_and_retries_only_the_current_attempt(
         await _wait_for_state(eid, "unconfirmed")
         unsupported = await client.post(resolve_url, json={"action": "accept"})
         assert unsupported.status_code == 400
-        assert (
-            "Update Omnigent or answer in the terminal" in unsupported.json()["error"]["message"]
-        )
+        assert "Update Coral or answer in the terminal" in unsupported.json()["error"]["message"]
         assert not retry.done()
         stale = await client.post(
             resolve_url,

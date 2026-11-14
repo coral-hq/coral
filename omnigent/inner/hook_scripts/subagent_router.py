@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Shared subagent-routing decision logic for harness hooks.
 
 Stdlib-only on purpose (bar the equally light
@@ -625,7 +626,7 @@ def _no_spawn_tool_instruction(model: str, picked: str) -> str:
     del model
     return (
         f"{_SMART_ROUTING_PREAMBLE} It selected {picked} for this sub-task, which "
-        "your built-in spawn tool cannot launch, and this session holds no Omnigent "
+        "your built-in spawn tool cannot launch, and this session holds no Coral "
         "tool that can start one either. This is not an error and the sub-task is "
         "approved — do the work yourself on your current model instead of spawning, "
         "then continue."

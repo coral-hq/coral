@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """OIDC authentication routes: login, callback, logout, CLI and native login.
 
 Provides ``/auth/login``, ``/auth/callback``, ``/auth/logout``,
@@ -77,7 +78,7 @@ _ID_TOKEN_LEEWAY_SECONDS = 60
 # An upgrade notice, never a key in the login-ticket store.
 _CLI_UPGRADE_TICKET = "upgrade-required"
 _CLI_UPGRADE_MESSAGE = (
-    "Upgrade Omnigent to sign in: this server requires a newer login client. "
+    "Upgrade Coral to sign in: this server requires a newer login client. "
     "For the CLI, run `omni upgrade`, then retry `omnigent login`. "
     "For mobile, update the app. For Slack, ask your administrator to update the integration."
 )
@@ -1204,17 +1205,17 @@ def _cli_consent_html(
 
     if upgrade_required:
         body = (
-            "<h1>Update Omnigent to sign in</h1>"
+            "<h1>Update Coral to sign in</h1>"
             "<p>This server has a security update that requires a newer version "
             "of the app you used to start sign-in. This login attempt did not "
             "grant access.</p>"
             "<ul><li><b>CLI:</b> Run <code>omni upgrade</code>, then run your "
             "<code>omnigent login</code> command again. If the upgrade command "
             "is unavailable, update using your original installer.</li>"
-            "<li><b>iOS or Android:</b> Update the Omnigent app through your "
+            "<li><b>iOS or Android:</b> Update the Coral app through your "
             "app store or your organization's distribution channel, then "
             "start sign-in again.</li>"
-            "<li><b>Slack:</b> Ask your administrator to update the Omnigent "
+            "<li><b>Slack:</b> Ask your administrator to update the Coral "
             "Slack integration, then restart setup in Slack.</li></ul>"
             "<p>If no compatible update is available, contact your server "
             "administrator. Retrying with this version will not sign you in.</p>"

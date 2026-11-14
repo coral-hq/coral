@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Runtime package — public API for accessing runtime state.
 
 Workflow code imports getter functions from here rather than
@@ -419,7 +420,7 @@ def get_harness_process_manager() -> HarnessProcessManager:
     pm = _globals._harness_process_manager
     if pm is None:
         raise RuntimeError(
-            "HarnessProcessManager not initialized — Omnigent lifespan startup "
+            "HarnessProcessManager not initialized — Coral lifespan startup "
             "must call set_harness_process_manager() before any workflow "
             "dispatches to a non-default harness"
         )

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Fixtures for Omnigent e2e tests (mock LLM).
 
 All tests use the in-process mock LLM server via :func:`mock_credentials_env`
@@ -90,7 +91,7 @@ def omnigent_python() -> Path:
     """
     if not _OMNIGENT_VENV_PYTHON.is_file():
         raise RuntimeError(
-            f"Omnigent venv python not found at {_OMNIGENT_VENV_PYTHON}. "
+            f"Coral venv python not found at {_OMNIGENT_VENV_PYTHON}. "
             f"These e2e tests require the sibling checkout at "
             f"{_OMNIGENT_REPO} with .venv set up."
         )

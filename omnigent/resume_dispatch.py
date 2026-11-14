@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Top-level ``omnigent resume`` dispatch.
 
 Glue layer that converts the user's "take me back to where I was"
@@ -313,7 +314,7 @@ def _read_wrapper_label_local(*, conv_id: str) -> str | None:
     if conversation is None:
         raise click.ClickException(
             f"Conversation {conv_id!r} not found in the local persistent store. "
-            "Pass --server if the conversation lives on a remote Omnigent server.",
+            "Pass --server if the conversation lives on a remote Coral server.",
         )
     labels = conversation.labels
     return labels.get(_WRAPPER_LABEL_KEY) if isinstance(labels, dict) else None

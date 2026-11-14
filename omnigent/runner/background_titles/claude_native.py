@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Background title generation through isolated Claude Code print mode."""
 
 from __future__ import annotations
@@ -89,7 +90,7 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
             except ClaudeNativeHookInterpreterMismatchError:
                 _logger.warning(
                     "background Claude Code title skipped: %s is Windows-native "
-                    "under WSL and cannot run Omnigent's hook command",
+                    "under WSL and cannot run Coral's hook command",
                     resolved_claude,
                 )
                 return None

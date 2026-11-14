@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Native Pi TUI wrapper for the Omnigent CLI."""
 
 from __future__ import annotations
@@ -94,7 +95,7 @@ def check_pi_cli_version_floor(version: tuple[int, int, int]) -> None:
         return
     installed = ".".join(str(part) for part in version)
     raise PiNativeCliOutdatedError(
-        f"The installed Pi CLI ({installed}) is older than the minimum Omnigent "
+        f"The installed Pi CLI ({installed}) is older than the minimum Coral "
         f"supports ({floor}). Upgrade with: {harness_install_display(PI_KEY)}, "
         "then start the session again."
     )
@@ -268,7 +269,7 @@ def run_pi_native(
     _preflight_local_tools()
     if server is None:
         raise click.ClickException(
-            "Pi requires a resolved Omnigent server URL. The CLI should call "
+            "Pi requires a resolved Coral server URL. The CLI should call "
             "_ensure_backend before run_pi_native."
         )
     with TemporaryDirectory(prefix="omnigent-pi-native-") as tmpdir:

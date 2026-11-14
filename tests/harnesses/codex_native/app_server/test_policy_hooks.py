@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Policy hooks tests for Codex app server."""
 
 from __future__ import annotations
@@ -497,7 +498,7 @@ async def test_trust_failure_is_fail_open_with_reason(
         _self: CodexNativeAppServer, *, client: CodexAppServerClient | None = None
     ) -> None:
         del client
-        raise RuntimeError("Omnigent policy hook was not discovered for cwd ...")
+        raise RuntimeError("Coral policy hook was not discovered for cwd ...")
 
     monkeypatch.setattr(CodexNativeAppServer, "_trust_policy_hooks", _raise_trust)
 

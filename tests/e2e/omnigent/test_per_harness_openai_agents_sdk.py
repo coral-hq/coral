@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Phase 0 characterization test — openai-agents-sdk harness, one-shot prompt.
 
 Runs ``omnigent run hello_world.yaml --harness openai-agents
@@ -117,7 +118,7 @@ def test_per_harness_openai_agents_sdk_one_shot(
         pytest.skip(
             "openai-agents-sdk harness prerequisite missing: "
             "the 'agents' Python package (openai-agents) must be "
-            "installed in the Omnigent venv. Skipping — package absent."
+            "installed in the Coral venv. Skipping — package absent."
         )
 
     model = f"mock-harness-openai-{uuid.uuid4().hex[:8]}"

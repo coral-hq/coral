@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """CA certificate generation, caching, and combined bundle creation.
 
 Generates a self-signed CA used by the MITM proxy to sign per-host
@@ -101,7 +102,7 @@ def _generate_ca(cert_path: Path, key_path: Path) -> None:
 
     subject = issuer = x509.Name(
         [
-            x509.NameAttribute(NameOID.COMMON_NAME, "Omnigent Egress MITM CA"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Coral Egress MITM CA"),
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, "omnigent"),
         ]
     )

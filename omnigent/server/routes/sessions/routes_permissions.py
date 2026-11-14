@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Permission management routes."""
 
 from __future__ import annotations
@@ -123,7 +124,7 @@ def register_permissions_routes(
         _sharing_mode = getattr(request.app.state, "sharing_mode", lambda: SharingMode.ON)()
         if _sharing_mode == SharingMode.OFF:
             raise OmnigentError(
-                "Sharing has been disabled for this Omnigent server.",
+                "Sharing has been disabled for this Coral server.",
                 code=ErrorCode.FORBIDDEN,
             )
         # RESTRICTED_READ_ONLY blocks sharing entirely (even read) for a session
@@ -134,7 +135,7 @@ def register_permissions_routes(
             if _conv is not None and workspace_sharing_blocked(_conv.workspace):
                 raise OmnigentError(
                     "This session's working directory (a home or root directory) "
-                    "cannot be shared on this Omnigent server.",
+                    "cannot be shared on this Coral server.",
                     code=ErrorCode.FORBIDDEN,
                 )
         if (
@@ -142,7 +143,7 @@ def register_permissions_routes(
             and body.level > LEVEL_READ
         ):
             raise OmnigentError(
-                "Sharing is limited to read-only access on this Omnigent server.",
+                "Sharing is limited to read-only access on this Coral server.",
                 code=ErrorCode.FORBIDDEN,
             )
         if permission_store is None:
@@ -162,7 +163,7 @@ def register_permissions_routes(
             # default mirrors the sharing_mode read above (hand-built apps).
             if not getattr(request.app.state, "public_sharing", lambda: True)():
                 raise OmnigentError(
-                    "Public access has been disabled for this Omnigent server.",
+                    "Public access has been disabled for this Coral server.",
                     code=ErrorCode.FORBIDDEN,
                 )
             from omnigent.server.sharing_settings import PublicSharingMaxLevel

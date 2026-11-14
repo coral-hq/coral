@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Forward Codex app-server notifications into Omnigent sessions."""
 
 from __future__ import annotations
@@ -2968,7 +2969,7 @@ async def _maybe_rotate_session_on_thread_started(
     await old_usage_coalescer.close()
     await old_elicitation_tracker.close()
     _logger.info(
-        "Codex forwarder rotated Omnigent session after native thread switch: "
+        "Codex forwarder rotated Coral session after native thread switch: "
         "old_session=%s new_session=%s new_thread=%s",
         old_session_id,
         new_session_id,
@@ -4304,7 +4305,7 @@ async def _sync_background_work_running(
             and "Unknown event type" in response.text
         ):
             # The server predates the sidebar flag, so no later post can succeed.
-            log_info_once(_logger, "Omnigent server does not accept external_background_work")
+            log_info_once(_logger, "Coral server does not accept external_background_work")
             forwarder_state.background_work_unsupported = True
             return
         if (
@@ -4314,7 +4315,7 @@ async def _sync_background_work_running(
             and "requires data.running" in response.text
         ):
             # The server predates the composer list, so only flag changes can reach it.
-            log_info_once(_logger, "Omnigent server does not accept background terminal lists")
+            log_info_once(_logger, "Coral server does not accept background terminal lists")
             forwarder_state.background_tasks_unsupported = True
             return
         _log_failed_session_event_post(_EXTERNAL_BACKGROUND_WORK_TYPE, response)
@@ -7929,7 +7930,7 @@ def _codex_tool_call_from_item(item: _JsonObject) -> _CodexToolCall | None:
 # Access" preset's ``danger-full-access`` (or a config ``sandbox_mode``) does.
 _CODEX_SANDBOX_NAMESPACE_ERROR_MARKER = "No permissions to create new namespace"
 _CODEX_SANDBOX_BYPASS_GUIDANCE = (
-    "Omnigent: Codex's command sandbox could not start because this container "
+    "Coral: Codex's command sandbox could not start because this container "
     "disallows unprivileged user namespaces, so the command did not run. To run "
     'shell commands here, start a new Codex session with the "Full Access" '
     "approval preset (New chat → permissions dropdown), or set "
@@ -9112,7 +9113,7 @@ def _note_forward_failure(event_type: str, result: _PostResult, session_id: str)
         and not _forward_health.degraded_logged
     ):
         _logger.error(
-            "codex-native forward sync degraded: %d consecutive Omnigent "
+            "codex-native forward sync degraded: %d consecutive Coral "
             "event-post failures; transcript/usage mirroring may be incomplete "
             "(latest type=%s)",
             _forward_health.consecutive_failures,

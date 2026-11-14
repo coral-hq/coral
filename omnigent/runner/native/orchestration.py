@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Runner FastAPI app — spawns harness subprocesses and dispatches to them.
 
 Per ``designs/RUNNER.md`` §1, the runner owns harness subprocesses.
@@ -3199,7 +3200,7 @@ async def _post_native_launch_notice(
 
 
 _CODEX_THREAD_RESET_NOTICE = (
-    "Codex could not load this session's saved transcript, so Omnigent started a fresh "
+    "Codex could not load this session's saved transcript, so Coral started a fresh "
     "Codex thread instead of failing the turn. The chat history here is intact, but "
     "Codex's own memory of the earlier turns is not restored."
 )
@@ -4638,7 +4639,7 @@ async def _auto_create_qwen_terminal(
             mcp_enabled = False
             _logger.warning(
                 "qwen-native: bridge dir failed secure validation; skipping "
-                "Omnigent MCP wiring for session %s.",
+                "Coral MCP wiring for session %s.",
                 session_id,
                 exc_info=True,
             )
@@ -6462,7 +6463,7 @@ async def _codex_discover_thread_and_forward(
         )
         write_bridge_startup_error(
             bridge_dir,
-            "Codex is not signed in and no Omnigent provider routes the codex "
+            "Codex is not signed in and no Coral provider routes the codex "
             "harness, so the Codex TUI is parked on its sign-in screen and "
             f"cannot run this turn. Launch routing: {routing_summary}. "
             "Sign in from the session terminal, or configure a provider "
@@ -8607,7 +8608,7 @@ def _native_terminal_start_error_payload(
                 message += f"\n{runtime_name} startup terminal output:\n{output}"
     elif isinstance(exc, ClaudeNativeHookInterpreterMismatchError):
         message = (
-            "Claude Code is Windows-native, but Omnigent is running under WSL. "
+            "Claude Code is Windows-native, but Coral is running under WSL. "
             "Install @anthropic-ai/claude-code from WSL so a WSL-native `claude` "
             "binary wins PATH resolution, then retry."
         )

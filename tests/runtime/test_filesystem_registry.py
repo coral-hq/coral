@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for :mod:`omnigent.runtime.filesystem_registry`.
 
 Covers the ``list_changed_files`` merge logic for :class:`AgentEditFilesystemRegistry`
@@ -164,7 +165,7 @@ def test_ephemeral_files_are_suppressed(registry: AgentEditFilesystemRegistry) -
 
     assert sorted(paths) == [".cursor/rules/style.md", "real_file.md"], (
         f"Expected only the real files, got {paths}. "
-        "Ephemeral artifacts and Omnigent's .cursor plumbing must be suppressed."
+        "Ephemeral artifacts and Coral's .cursor plumbing must be suppressed."
     )
     for f in hidden:
         assert registry.get_changed_file(conv_id, f) is None, f

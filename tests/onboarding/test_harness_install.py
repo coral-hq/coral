@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for :mod:`omnigent.onboarding.harness_install`."""
 
 from __future__ import annotations
@@ -1227,7 +1228,7 @@ def test_opencode_install_script_blocks_when_v1_present(
 
     assert result.returncode == 1
     assert "opencode-ai" in result.stderr
-    assert "Omnigent does not remove packages" in result.stderr
+    assert "Coral does not remove packages" in result.stderr
     calls = npm_log.read_text().splitlines() if npm_log.exists() else []
     assert not any(call.startswith("rm") for call in calls)
     assert not any(call.startswith("install") for call in calls)

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for native Antigravity bridge state helpers."""
 
 from __future__ import annotations
@@ -1565,7 +1566,7 @@ def test_write_mcp_config_tolerates_malformed_user_config(
         for record in caplog.records
         if record.name == _mod.__name__ and record.levelno == logging.WARNING
     ]
-    assert len(warnings) == 1 and "seeding only the Omnigent relay" in warnings[0]
+    assert len(warnings) == 1 and "seeding only the Coral relay" in warnings[0]
 
 
 @pytest.mark.posix_only

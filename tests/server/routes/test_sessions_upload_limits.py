@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Attachment upload type/size enforcement on POST /v1/sessions/{id}/resources/files."""
 
 from __future__ import annotations
@@ -689,7 +690,7 @@ def test_old_host_refuses_new_types_without_storing(
     client.app.state.host_registry.get("d75381f2c94b4e49a3c684946d4ddbc4").hello.capabilities = []
     response = _upload(client, session_id, filename, b"data", "application/octet-stream")
     assert response.status_code == 409, response.text
-    assert "Update Omnigent" in response.text
+    assert "Update Coral" in response.text
     assert SqlAlchemyFileStore(db_uri).list(session_id).data == []
 
 

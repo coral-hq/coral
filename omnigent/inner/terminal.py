@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Terminal environment: managed tmux sessions with optional OS environments.
 
 Each terminal instance runs a command in its own tmux server (isolated socket)
@@ -297,7 +298,7 @@ def _tmux_status_option_commands() -> list[list[str]]:
             "set-option",
             "-g",
             "status-left",
-            f"Omnigent: #{{{_TMUX_CONVERSATION_LINK_OPTION}}}",
+            f"Coral: #{{{_TMUX_CONVERSATION_LINK_OPTION}}}",
         ],
         ["set-option", "-g", "status-left-style", "fg=default,bg=default"],
         ["set-option", "-g", "status-left-length", "200"],

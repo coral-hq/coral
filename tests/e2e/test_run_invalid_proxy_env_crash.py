@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Launch-crash e2e test: malformed proxy env must not crash ``omnigent run``.
 
 Journey: a user's shell carries a proxy-bypass environment value with an
@@ -90,7 +91,7 @@ _CRASH_MARKERS = (
 _POST_PROBE_MARKERS = (
     "Connecting",
     "Launching your agent",
-    "Omnigent session:",
+    "Coral session:",
     "No provider credentials",
 )
 

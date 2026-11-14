@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Lightweight server performance metrics for the FastAPI app."""
 
 from __future__ import annotations
@@ -807,12 +808,12 @@ def _create_request_otel_instruments(meter: MeterLike) -> _RequestOtelInstrument
         started=meter.create_counter(
             "omnigent.server.http.requests.started",
             unit="{request}",
-            description="HTTP requests started by the Omnigent server.",
+            description="HTTP requests started by the Coral server.",
         ),
         completed=meter.create_counter(
             "omnigent.server.http.requests.completed",
             unit="{request}",
-            description="HTTP requests completed by the Omnigent server.",
+            description="HTTP requests completed by the Coral server.",
         ),
         failed=meter.create_counter(
             "omnigent.server.http.requests.failed",

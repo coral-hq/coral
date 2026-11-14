@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Real SDK Pi startup preserves user setup against a scripted provider.
 
 Run serially: the scenarios share the session-scoped mock provider.
@@ -162,5 +163,5 @@ def test_pi_gateway_run_loads_global_extensions(
     assert "DISABLED_EXTENSION_71AB" not in system
     names = {tool["function"]["name"] for request in requests for tool in request["tools"]}
     assert not (names & {"mcp__setup__echo", "codemode", "tool_search"}), (
-        "SDK tools must remain restricted to the Omnigent bridge"
+        "SDK tools must remain restricted to the Coral bridge"
     )

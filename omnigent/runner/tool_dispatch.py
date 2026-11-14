@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Runner-local tool dispatch for intercepted action_required events.
 
 Per designs/RUNNER_TOOL_DISPATCH.md, the runner dispatches most tools
@@ -467,7 +468,7 @@ _BROWSER_ACTION_TIMEOUT = httpx.Timeout(60.0, connect=30.0)
 # browser-action await elapses with no renderer result — a clear
 # "is the session open?" message so the LLM gets a clean, actionable error.
 _BROWSER_TIMEOUT_ERROR = (
-    '{"error": "browser action timed out — is the session open in the Omnigent desktop app?"}'
+    '{"error": "browser action timed out — is the session open in the Coral desktop app?"}'
 )
 
 # Builtin tools the claude-native / codex-native relay advertises to the
@@ -4900,7 +4901,7 @@ async def _scheduled_task_session_fields_refusal(
         return None
     return json.dumps(
         {
-            "error": f"{tool_name}: this Omnigent server does not support session_mode or "
+            "error": f"{tool_name}: this Coral server does not support session_mode or "
             "session_id; omit them to start a new session on every run"
         }
     )

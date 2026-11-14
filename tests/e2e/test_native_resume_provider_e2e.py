@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Claude and Pi runner restarts use the current configured inference provider.
 
 Real server, runner, native CLI and tmux processes exercise web/API delivery and
@@ -285,7 +286,7 @@ def test_connected_native_resume_routes_to_configured_provider(
                     for role, text in (("user", prompt), ("assistant", replies[expected]))
                 )
 
-            _wait(mirrored_reply, f"{harness} assistant reply mirrored into Omnigent")
+            _wait(mirrored_reply, f"{harness} assistant reply mirrored into Coral")
             if harness == "pi":
                 expected_input_tokens += input_tokens
                 expected_cache_tokens += cache_tokens

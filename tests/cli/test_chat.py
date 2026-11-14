@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for omnigent.chat — omnigent chat CLI logic."""
 
 from __future__ import annotations
@@ -4470,7 +4471,7 @@ def test_prepare_chat_session_via_daemon_reports_unparseable_proxy_env(
     # Exact match: proves the error names the target server and the parse
     # failure (a substring URL probe here trips CodeQL's url-sanitization rule).
     assert str(excinfo.value) == (
-        "Could not connect to the Omnigent server at "
+        "Could not connect to the Coral server at "
         "https://example.databricksapps.com. "
         "Check the URL, your network connection, and any HTTP proxy settings. "
         "(the proxy environment could not be parsed: Invalid port: ':')"
@@ -5471,10 +5472,10 @@ def test_cursor_native_resume_never_drives_an_omnigent_turn(
     )
 
     def _fail_repl(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("_run_repl drove an Omnigent turn for a cursor-native resume")
+        raise AssertionError("_run_repl drove a Coral turn for a cursor-native resume")
 
     def _fail_one_shot(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("_run_one_shot drove an Omnigent turn for a cursor-native resume")
+        raise AssertionError("_run_one_shot drove a Coral turn for a cursor-native resume")
 
     monkeypatch.setattr(chat_module, "_run_repl", _fail_repl)
     monkeypatch.setattr(chat_module, "_run_one_shot", _fail_one_shot)

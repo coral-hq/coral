@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Cursor preToolUse hook script for Omnigent policy enforcement.
 
 Runs as a subprocess of the Cursor SDK bridge process, not the harness.
@@ -92,7 +93,7 @@ def main() -> None:
 
     if resp is None:
         detail = api_error or (reauth.failure_reason if reauth else None)
-        message = f"Tool '{tool_name}' blocked: Omnigent policy evaluation unavailable"
+        message = f"Tool '{tool_name}' blocked: Coral policy evaluation unavailable"
         if detail:
             message += f" ({detail})"
         json.dump({"permission": "deny", "agent_message": message}, sys.stdout)
@@ -104,7 +105,7 @@ def main() -> None:
         json.dump(
             {
                 "permission": "deny",
-                "agent_message": f"Tool '{tool_name}' blocked: malformed Omnigent policy response",
+                "agent_message": f"Tool '{tool_name}' blocked: malformed Coral policy response",
             },
             sys.stdout,
         )
@@ -116,7 +117,7 @@ def main() -> None:
     if action == "POLICY_ACTION_DENY":
         out: dict[str, str] = {"permission": "deny"}
         if reason:
-            out["agent_message"] = f"Tool '{tool_name}' denied by Omnigent policy: {reason}"
+            out["agent_message"] = f"Tool '{tool_name}' denied by Coral policy: {reason}"
         json.dump(out, sys.stdout)
     elif action == "POLICY_ACTION_ASK":
         # The server resolves ASK by parking the HTTP request until the

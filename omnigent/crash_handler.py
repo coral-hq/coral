@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Friendly crash reporting with one-tap GitHub issue filing.
 
 Replaces Python's default wall-of-red traceback with a calm, branded
@@ -445,7 +446,7 @@ def _issue_body(exc: BaseException, tb_text: str) -> str:
     exc_type = type(exc).__qualname__
     msg = str(exc).strip() or "(no message)"
     return (
-        "This crash was auto-reported by Omnigent's crash handler.\n\n"
+        "This crash was auto-reported by Coral's crash handler.\n\n"
         f"**Exception:** `{exc_type}: {msg}`\n\n"
         "**Command:**\n"
         f"```\n{_command_line()}\n```\n\n"

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Offline tests for the native-tui driver's tool/policy observation.
 
 Network-free: a fake HTTP client feeds the driver canned session items (the
@@ -404,7 +405,7 @@ def test_mcp_tool_turn_skips_non_mcp_native_relay() -> None:
 
     result = driver._drive_mcp_tool_turn()
 
-    assert result.error and "no Omnigent MCP bridge" in result.error
+    assert result.error and "no Coral MCP bridge" in result.error
     assert client.posted_events == []
 
 

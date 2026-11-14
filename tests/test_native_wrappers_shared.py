@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Unit tests for the CLI-side orchestration shared by the goose/kimi/pi native wrappers.
 
 ``omnigent.harnesses.{goose,kimi,pi}_native.main`` are structurally identical: resolve
@@ -755,7 +756,7 @@ async def test_prepare_surfaces_launch_arg_update_failures(w: _Wrapper, daemon: 
 def test_run_native_requires_a_server(w: _Wrapper, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(w.module, "_preflight_local_tools", lambda: None)
 
-    with pytest.raises(click.ClickException, match="requires a resolved Omnigent server URL"):
+    with pytest.raises(click.ClickException, match="requires a resolved Coral server URL"):
         w.fn("run_{k}_native")(server=None, session_id=None)
 
 

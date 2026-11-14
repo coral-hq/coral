@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Native Goose TUI wrapper for the Omnigent CLI.
 
 ``omnigent goose`` launches Block's Goose CLI interactive TUI (``goose session``)
@@ -183,7 +184,7 @@ def run_goose_native(
     _preflight_local_tools()
     if server is None:
         raise click.ClickException(
-            "Goose requires a resolved Omnigent server URL. The CLI should call "
+            "Goose requires a resolved Coral server URL. The CLI should call "
             "_ensure_backend before run_goose_native."
         )
     with TemporaryDirectory(prefix="omnigent-goose-native-") as tmpdir:

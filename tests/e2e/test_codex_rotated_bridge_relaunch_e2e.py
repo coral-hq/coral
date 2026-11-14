@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """A real Codex /new session keeps working after its host relaunches the runner.
 
 The server, host, runner, Codex app-server, TUI, and transports are real; only
@@ -221,7 +222,7 @@ def test_rotated_codex_session_relaunches_into_its_bridge_directory(
                 and s.session_id != original_id
                 and s
             ),
-            "native /new to rotate the Omnigent session",
+            "native /new to rotate the Coral session",
         )
         rotated_id = rotated.session_id
         assert rotated.thread_id != original.thread_id

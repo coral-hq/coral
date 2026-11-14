@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Drive native-TUI harnesses through a live server and host daemon.
 
 Native sessions use the standard session HTTP surface, but require host/runner
@@ -652,7 +653,7 @@ class NativeTuiDriver:
         result = TurnResult()
         if self._vendor.harness not in _NATIVE_OMNIGENT_MCP_HARNESSES:
             result.error = (
-                f"{self._vendor.harness!r} has no Omnigent MCP bridge; "
+                f"{self._vendor.harness!r} has no Coral MCP bridge; "
                 "its relayed tools use another native mechanism"
             )
             return result

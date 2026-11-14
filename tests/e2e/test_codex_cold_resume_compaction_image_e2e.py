@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """E2E: a Codex cold resume must not replay compaction-omitted images as invalid URLs.
 
 Reproduces the reported journey end to end with the real ``codex`` CLI:
@@ -356,7 +357,7 @@ async def test_codex_cold_resume_survives_compaction_omitted_screenshot(
         _stored_session_items(item_type), codex_home, workspace
     )
     assert rollout.exists()
-    assert _VALID_IMAGE_URL in rollout.read_text(), "Omnigent dropped the valid image reference"
+    assert _VALID_IMAGE_URL in rollout.read_text(), "Coral dropped the valid image reference"
 
     provider = _LoopbackResponsesProvider()
     threading.Thread(target=provider.serve_forever, daemon=True).start()

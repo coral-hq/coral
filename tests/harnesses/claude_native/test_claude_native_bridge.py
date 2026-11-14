@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for native Claude Code bridge helpers."""
 
 from __future__ import annotations
@@ -4461,7 +4462,7 @@ def test_augment_claude_args_appends_caller_system_prompt(
     def refuse_caller_prompt_file(real_open: Callable[..., Any]) -> Callable[..., Any]:
         def guarded_open(file: Any, *args: Any, **kwargs: Any) -> Any:
             if isinstance(file, str | os.PathLike) and os.path.basename(file) == "profile.md":
-                raise AssertionError("Omnigent opened the caller's prompt file")
+                raise AssertionError("Coral opened the caller's prompt file")
             return real_open(file, *args, **kwargs)
 
         return guarded_open
@@ -7486,7 +7487,7 @@ async def test_channel_server_relays_active_omnigent_tools(
             tools=[
                 {
                     "name": "sys_custom",
-                    "description": "Test-only active Omnigent tool.",
+                    "description": "Test-only active Coral tool.",
                     "parameters": {
                         "type": "object",
                         "properties": {"value": {"type": "string"}},
@@ -7510,7 +7511,7 @@ async def test_channel_server_relays_active_omnigent_tools(
         assert custom_tools == [
             {
                 "name": "sys_custom",
-                "description": "Test-only active Omnigent tool.",
+                "description": "Test-only active Coral tool.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"value": {"type": "string"}},
@@ -7627,7 +7628,7 @@ def test_call_relay_tool_returns_mcp_error_on_read_timeout(
     # The result is a well-formed MCP error result, NOT a raised exception.
     assert result["isError"] is True
     error_text = json.loads(result["content"][0]["text"])["error"]
-    assert "failed to call Omnigent tool relay" in error_text
+    assert "failed to call Coral tool relay" in error_text
 
 
 @pytest.mark.parametrize(
@@ -8089,7 +8090,7 @@ async def test_start_tool_relay_accepts_pi_native_bridge_root(
             tools=[
                 {
                     "name": "sys_session_list",
-                    "description": "List Omnigent sessions.",
+                    "description": "List Coral sessions.",
                     "parameters": {"type": "object", "properties": {}},
                 }
             ],
@@ -8257,7 +8258,7 @@ async def test_start_tool_relay_accepts_antigravity_native_bridge_root(
             tools=[
                 {
                     "name": "sys_session_create",
-                    "description": "Spawn an Omnigent sub-agent session.",
+                    "description": "Spawn a Coral sub-agent session.",
                     "parameters": {"type": "object", "properties": {}},
                 }
             ],
@@ -8314,7 +8315,7 @@ async def test_start_tool_relay_accepts_opencode_native_bridge_root(
             tools=[
                 {
                     "name": "sys_session_list",
-                    "description": "List Omnigent sessions.",
+                    "description": "List Coral sessions.",
                     "parameters": {"type": "object", "properties": {}},
                 }
             ],
@@ -15823,7 +15824,7 @@ async def test_lifecycle_hooks_record_through_the_relay_without_starting_python(
         "PreCompact",
     ]
     assert json.loads(outputs["SessionStart"]) == {
-        "systemMessage": "Open this session in Omnigent: "
+        "systemMessage": "Open this session in Coral: "
         + conversation_url("http://127.0.0.1:9", "conv_hook_eval")
     }
     assert outputs["UserPromptSubmit"] == outputs["PreCompact"] == ""

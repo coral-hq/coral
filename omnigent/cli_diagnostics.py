@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 Always-on CLI diagnostics log.
 
@@ -396,7 +397,7 @@ def print_stale_host_hint() -> None:
     dest = getattr(sys.stderr, "_original_stderr", sys.stderr)
     print(
         "If this is a runner tunnel rejection (HTTP 401), stale host processes "
-        f"may be the cause. Run `{cli_invocation()} stop` to stop existing Omnigent "
+        f"may be the cause. Run `{cli_invocation()} stop` to stop existing Coral "
         "host instances, then try again.",
         file=dest,
     )

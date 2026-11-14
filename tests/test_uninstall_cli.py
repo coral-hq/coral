@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 from __future__ import annotations
 
 import os
@@ -53,7 +54,7 @@ def test_uninstall_cli_refuses_without_install_signal(monkeypatch) -> None:
     result = runner.invoke(cli_module.cli, ["uninstall", "--json"])
 
     assert result.exit_code == 3
-    assert "no Omnigent install detected" in result.output
+    assert "no Coral install detected" in result.output
 
 
 def test_uninstall_cli_defaults_to_dry_run_without_destructive_flags(
@@ -89,7 +90,7 @@ def test_uninstall_cli_human_refusal_exits_three(monkeypatch) -> None:
     result = runner.invoke(cli_module.cli, ["uninstall"])
 
     assert result.exit_code == 3
-    assert "No Omnigent install detected" in result.output
+    assert "No Coral install detected" in result.output
 
 
 def test_uninstall_cli_uses_exclusive_manifest_and_cleans_temp_script(

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """E2E: ``omnigent codex`` honors an ambient Codex-native built-in Bedrock config.
 
 With ``~/.codex/config.toml`` selecting ``model_provider = "amazon-bedrock"``, no
@@ -59,7 +60,7 @@ region = "us-east-1"
 # Turn executor failures carry this prefix; pre-turn rig notices do not.
 _TURN_EXECUTOR_ERROR = "inner executor error"
 # Both claim nothing routes the codex harness, which the ambient config refutes.
-_NO_ROUTE_MARKER = "no Omnigent provider routes the codex harness"
+_NO_ROUTE_MARKER = "no Coral provider routes the codex harness"
 _NO_PROVIDER_SUMMARY_MARKER = "no provider configured for the codex harness"
 
 

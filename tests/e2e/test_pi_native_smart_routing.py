@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """CLI e2e: Smart Routing picks must be applied to a running pi-native session.
 
 Drives the *real* ``omnigent pi`` CLI under a pseudo-TTY (pexpect), against an
@@ -166,7 +167,7 @@ def _launch_pi(env: dict[str, str]) -> tuple[Any, str, str]:
     child.logfile_read = transcript.open("w")
     try:
         child.expect(
-            r"(?:Web UI|Omnigent):[ \t]*(https?://[^\s\x1b]+/c/[0-9a-f]{32})",
+            r"(?:Web UI|Coral):[ \t]*(https?://[^\s\x1b]+/c/[0-9a-f]{32})",
             timeout=_LAUNCH_TIMEOUT,
         )
         startup_output = strip_ansi(child.before or "")

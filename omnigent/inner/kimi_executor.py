@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Kimi Code CLI executor.
 
 Drives Moonshot AI's upstream ``kimi`` CLI from
@@ -710,7 +711,7 @@ class KimiExecutor(Executor):
     ) -> AsyncIterator[ExecutorEvent]:
         if tools and not self._warned_tools_without_bridge:
             _logger.warning(
-                "kimi executor received %d declared tool(s) but Omnigent has no "
+                "kimi executor received %d declared tool(s) but Coral has no "
                 "tool-injection bridge for the upstream kimi binary yet (no "
                 "per-spawn --mcp-config-file). The tools will not be exposed to "
                 "kimi for this session (MCP tool-injection is a deferred follow-up).",

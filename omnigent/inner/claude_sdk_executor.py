@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """ClaudeSDKExecutor: run agents using the Claude Agent SDK.
 
 Uses the ``claude-agent-sdk`` Python package to run Claude Code as the
@@ -1153,14 +1154,14 @@ def _augment_system_prompt_for_omnigent_mcp_tools(
             f"use `mcp__omnigent__{name}` when instructions say `{name}`" for name in examples
         )
         note = (
-            "Claude SDK tool naming: Omnigent tools are exposed as MCP tools. "
-            f"{example_text}. For any other Omnigent tool, use "
+            "Claude SDK tool naming: Coral tools are exposed as MCP tools. "
+            f"{example_text}. For any other Coral tool, use "
             "`mcp__omnigent__<tool_name>` rather than the bare name."
         )
     else:
         note = (
-            "Claude SDK tool naming: Omnigent tools are exposed as MCP tools. "
-            "When instructions mention a bare Omnigent tool name, invoke "
+            "Claude SDK tool naming: Coral tools are exposed as MCP tools. "
+            "When instructions mention a bare Coral tool name, invoke "
             "`mcp__omnigent__<tool_name>` rather than the bare name."
         )
 
@@ -2638,7 +2639,7 @@ class ClaudeSDKExecutor(Executor):
             if handler is None or not isinstance(payload, dict):
                 # Defensive / can't-happen (exposure is gated on the handler):
                 # deny deterministically rather than fall through to consent.
-                return _deny("AskUserQuestion unavailable via Omnigent")
+                return _deny("AskUserQuestion unavailable via Coral")
             tool_input = payload.get("tool_input") or {}
             # A raised hook reaches the CLI as "no opinion" and falls back to
             # native handling; deny instead. Cancellation still propagates.
@@ -2648,13 +2649,12 @@ class ClaudeSDKExecutor(Executor):
                 )
                 if getattr(policy_result, "behavior", None) == "deny":
                     return _deny(
-                        getattr(policy_result, "message", "")
-                        or "Denied by Omnigent TOOL_CALL policy"
+                        getattr(policy_result, "message", "") or "Denied by Coral TOOL_CALL policy"
                     )
                 updated_input = await handler(tool_input)
             except Exception:
                 logger.exception("AskUserQuestion hook failed; denying the call")
-                return _deny("AskUserQuestion failed in Omnigent; ask in plain text instead.")
+                return _deny("AskUserQuestion failed in Coral; ask in plain text instead.")
             if isinstance(updated_input, str):
                 return _deny(updated_input)
             return {
@@ -2722,7 +2722,7 @@ class ClaudeSDKExecutor(Executor):
         allowed = await self._elicitation_handler(tool_name, tool_input)
         if allowed:
             return PermissionResultAllow()
-        return PermissionResultDeny(message="Denied via Omnigent elicitation")
+        return PermissionResultDeny(message="Denied via Coral elicitation")
 
     async def _evaluate_tool_call_policy(
         self,
@@ -2795,7 +2795,7 @@ class ClaudeSDKExecutor(Executor):
         if _action == "POLICY_ACTION_ASK":
             from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-            reason = _verdict.reason or "Approval required by Omnigent TOOL_CALL policy"
+            reason = _verdict.reason or "Approval required by Coral TOOL_CALL policy"
             if self._elicitation_handler is None:
                 logger.warning(
                     "TOOL_CALL policy ASK had no elicitation handler; denying tool=%s reason=%s",
@@ -2810,12 +2810,12 @@ class ClaudeSDKExecutor(Executor):
         if _action == "POLICY_ACTION_DENY":
             from claude_agent_sdk import PermissionResultDeny
 
-            reason = _verdict.reason or "Denied by Omnigent TOOL_CALL policy"
+            reason = _verdict.reason or "Denied by Coral TOOL_CALL policy"
             logger.info("TOOL_CALL policy denied tool=%s reason=%s", tool_name, reason)
             return PermissionResultDeny(message=reason)
         from claude_agent_sdk import PermissionResultDeny
 
-        reason = f"Unexpected Omnigent TOOL_CALL policy verdict: {_action!r}"
+        reason = f"Unexpected Coral TOOL_CALL policy verdict: {_action!r}"
         logger.warning("TOOL_CALL policy failed closed tool=%s reason=%s", tool_name, reason)
         return PermissionResultDeny(message=reason)
 

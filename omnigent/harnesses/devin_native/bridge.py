@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Bridge utilities for native Devin TUI sessions.
 
 The devin-native harness wraps the resident ``devin`` TUI in a runner-owned
@@ -1542,8 +1543,7 @@ def _reject_reserved_passthrough(passthrough: Sequence[str]) -> None:
     reserved = sorted(named & _RESERVED_PASSTHROUGH_FLAGS)
     if reserved:
         raise RuntimeError(
-            "devin-native launch args may not override Omnigent-owned flags: "
-            f"{', '.join(reserved)}"
+            f"devin-native launch args may not override Coral-owned flags: {', '.join(reserved)}"
         )
 
 

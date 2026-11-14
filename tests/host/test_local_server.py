@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the persistent background local Omnigent server helpers.
 
 Covers ``omnigent.host.local_server``: reuse-vs-respawn detection
@@ -1185,7 +1186,7 @@ def test_stop_untracked_local_server_noop_when_nothing_listening(
     monkeypatch.setattr(
         local_server,
         "subprocess",
-        _fake_subprocess(raises=AssertionError("lsof consulted despite no Omnigent server")),
+        _fake_subprocess(raises=AssertionError("lsof consulted despite no Coral server")),
     )
     monkeypatch.setattr(local_server, "_terminate_pid", _raise_if_called)
 

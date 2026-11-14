@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the shared CLI styling layer (``omnigent.inner.ui``)."""
 
 from __future__ import annotations
@@ -41,11 +42,11 @@ def test_warnings_and_errors_go_to_stderr(capsys: pytest.CaptureFixture[str]) ->
 def test_status_lines_go_to_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     """Normal status (step/success/info) prints to stdout."""
 
-    ui.step("Installing Omnigent")
+    ui.step("Installing Coral")
     ui.success("Verified omnigent")
     ui.info("Using ~/.omnigent")
     captured = capsys.readouterr()
-    assert "Installing Omnigent" in captured.out
+    assert "Installing Coral" in captured.out
     assert "✓ Verified omnigent" in captured.out
     assert captured.err == ""
 

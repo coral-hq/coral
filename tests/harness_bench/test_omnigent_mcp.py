@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Verdict tests for the native Omnigent-MCP probe."""
 
 from __future__ import annotations
@@ -53,12 +54,12 @@ async def test_skipped_for_unrelated_suffix_match() -> None:
 
 async def test_skipped_when_native_has_no_mcp_bridge() -> None:
     result = await OmnigentMcpProbe().run(
-        _Driver(TurnResult(error="'pi-native' has no Omnigent MCP bridge")),
+        _Driver(TurnResult(error="'pi-native' has no Coral MCP bridge")),
         _PROFILE,
     )
 
     assert result.verdict is Verdict.SKIPPED
-    assert "no Omnigent MCP bridge" in result.note
+    assert "no Coral MCP bridge" in result.note
 
 
 async def test_skipped_when_model_calls_another_tool() -> None:

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Native coding-agent (TUI) CLI subcommands.
 
 Each ``omnigent <tool>`` command (``claude``, ``codex``, ``pi``, …) launches a
@@ -114,7 +115,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to claude-native sessions."
         ),
@@ -211,15 +212,15 @@ def register_native_commands(cli: click.Group) -> None:
         # :param smart_routing: When True, arm Smart Routing for the session so
         #     the first typed message picks the model.
         # :param claude_args: Pass-through args for ``claude``.
-        """Launch Claude Code with Omnigent.
+        """Launch Claude Code with Coral.
 
         \b
         Examples:
-          omnigent claude
-          omnigent claude --resume conv_abc123
-          omnigent claude --resume                  # interactive picker
-          omnigent claude --server https://<app>.databricksapps.com
-          omnigent claude --smart-routing           # first message picks the model
+          coral claude
+          coral claude --resume conv_abc123
+          coral claude --resume                  # interactive picker
+          coral claude --server https://<app>.databricksapps.com
+          coral claude --smart-routing           # first message picks the model
         """
         _reject_native_on_windows("claude")
         if smart_routing:
@@ -339,7 +340,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to codex-native sessions."
         ),
@@ -389,15 +390,15 @@ def register_native_commands(cli: click.Group) -> None:
         # :param smart_routing: When True, arm Smart Routing for the session so
         #     the first typed message picks the model.
         # :param codex_args: Pass-through args for ``codex`` before ``resume``.
-        """Launch Codex with Omnigent.
+        """Launch Codex with Coral.
 
         \b
         Examples:
-          omnigent codex
-          omnigent codex --resume conv_abc123
-          omnigent codex --resume                  # interactive picker
-          omnigent codex --server https://<app>.databricksapps.com
-          omnigent codex --smart-routing           # first message picks the model
+          coral codex
+          coral codex --resume conv_abc123
+          coral codex --resume                  # interactive picker
+          coral codex --server https://<app>.databricksapps.com
+          coral codex --smart-routing           # first message picks the model
         """
         _reject_native_on_windows("codex")
         if smart_routing:
@@ -485,7 +486,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to opencode-native sessions."
         ),
@@ -517,14 +518,14 @@ def register_native_commands(cli: click.Group) -> None:
         # (opencode-native resolves its binary on the runner side; if a spec/env
         # path to thread a client override through is added later, this stays
         # consistent with the other native commands' env/config override model.)
-        """Launch OpenCode with Omnigent.
+        """Launch OpenCode with Coral.
 
         \b
         Examples:
-          omnigent opencode
-          omnigent opencode --resume conv_abc123
-          omnigent opencode --resume                  # interactive picker
-          omnigent opencode --server https://<app>.databricksapps.com
+          coral opencode
+          coral opencode --resume conv_abc123
+          coral opencode --resume                  # interactive picker
+          coral opencode --server https://<app>.databricksapps.com
         """
         from omnigent.harnesses.opencode_native.main import run_opencode_native
 
@@ -588,7 +589,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to pi-native sessions."
         ),
@@ -608,14 +609,14 @@ def register_native_commands(cli: click.Group) -> None:
         session_id: str | None,
         pi_args: tuple[str, ...],
     ) -> None:
-        """Launch Pi with Omnigent.
+        """Launch Pi with Coral.
 
         \b
         Examples:
-          omnigent pi
-          omnigent pi --resume conv_abc123
-          omnigent pi --resume                    # interactive picker
-          omnigent pi --model local-deepseek/deepseek-v4-flash
+          coral pi
+          coral pi --resume conv_abc123
+          coral pi --resume                    # interactive picker
+          coral pi --model local-deepseek/deepseek-v4-flash
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -677,7 +678,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to cursor-native sessions."
         ),
@@ -717,16 +718,16 @@ def register_native_commands(cli: click.Group) -> None:
     ) -> None:
         # Param docs live in comments — Click uses the docstring for --help.
         # :param model: Cursor model id passed to cursor-agent as ``--model``.
-        """Launch Cursor with Omnigent.
+        """Launch Cursor with Coral.
 
         \b
         Examples:
-          omnigent cursor
-          omnigent cursor --model MODEL_ID
-          omnigent cursor --resume conv_abc123
-          omnigent cursor --resume                 # interactive picker
-          omnigent cursor --mode plan              # start in plan (read-only) mode
-          omnigent cursor --mode ask               # start in ask (Q&A) mode
+          coral cursor
+          coral cursor --model MODEL_ID
+          coral cursor --resume conv_abc123
+          coral cursor --resume                 # interactive picker
+          coral cursor --mode plan              # start in plan (read-only) mode
+          coral cursor --mode ask               # start in ask (Q&A) mode
         """
         _reject_native_on_windows("cursor")
         choice = _split_resume_value(resume)
@@ -794,7 +795,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to devin-native sessions."
         ),
@@ -857,15 +858,15 @@ def register_native_commands(cli: click.Group) -> None:
         prompt: str | None,
         devin_args: tuple[str, ...],
     ) -> None:
-        """Launch Devin with Omnigent.
+        """Launch Devin with Coral.
 
         \b
         Examples:
-          omnigent devin
-          omnigent devin --resume conv_abc123
-          omnigent devin --resume                       # interactive picker
-          omnigent devin --model opus --effort xhigh
-          omnigent devin --permission-mode smart -p "review this repo"
+          coral devin
+          coral devin --resume conv_abc123
+          coral devin --resume                       # interactive picker
+          coral devin --model opus --effort xhigh
+          coral devin --permission-mode smart -p "review this repo"
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -933,7 +934,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to kiro-native sessions."
         ),
@@ -983,14 +984,14 @@ def register_native_commands(cli: click.Group) -> None:
         prompt: str | None,
         kiro_args: tuple[str, ...],
     ) -> None:
-        """Launch Kiro with Omnigent.
+        """Launch Kiro with Coral.
 
         \b
         Examples:
-          omnigent kiro
-          omnigent kiro --resume conv_abc123
-          omnigent kiro --resume                  # interactive picker
-          omnigent kiro --model auto -p "review this repo"
+          coral kiro
+          coral kiro --resume conv_abc123
+          coral kiro --resume                  # interactive picker
+          coral kiro --model auto -p "review this repo"
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -1063,7 +1064,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to goose-native sessions."
         ),
@@ -1083,13 +1084,13 @@ def register_native_commands(cli: click.Group) -> None:
         session_id: str | None,
         goose_args: tuple[str, ...],
     ) -> None:
-        """Launch Goose with Omnigent.
+        """Launch Goose with Coral.
 
         \b
         Examples:
-          omnigent goose
-          omnigent goose --resume conv_abc123
-          omnigent goose --resume                 # interactive picker
+          coral goose
+          coral goose --resume conv_abc123
+          coral goose --resume                 # interactive picker
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -1150,7 +1151,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to hermes-native sessions."
         ),
@@ -1170,13 +1171,13 @@ def register_native_commands(cli: click.Group) -> None:
         session_id: str | None,
         hermes_args: tuple[str, ...],
     ) -> None:
-        """Launch Hermes with Omnigent.
+        """Launch Hermes with Coral.
 
         \b
         Examples:
-          omnigent hermes
-          omnigent hermes --resume conv_abc123
-          omnigent hermes --resume                 # interactive picker
+          coral hermes
+          coral hermes --resume conv_abc123
+          coral hermes --resume                 # interactive picker
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -1237,7 +1238,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to antigravity-native sessions."
         ),
@@ -1259,14 +1260,14 @@ def register_native_commands(cli: click.Group) -> None:
         model: str | None,
         antigravity_args: tuple[str, ...],
     ) -> None:
-        """Launch Antigravity (agy) with Omnigent.
+        """Launch Antigravity (agy) with Coral.
 
         \b
         Examples:
-          omni agy
-          omni agy --resume conv_abc123
-          omni agy --resume                  # interactive picker
-          omni agy --server https://<app>.databricksapps.com
+          coral agy
+          coral agy --resume conv_abc123
+          coral agy --resume                  # interactive picker
+          coral agy --server https://<app>.databricksapps.com
         """
         # Validate option combinations BEFORE any side effects (daemon spawn,
         # server discovery) -- see the same comment in the claude command.
@@ -1341,7 +1342,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to qwen-native sessions."
         ),
@@ -1361,13 +1362,13 @@ def register_native_commands(cli: click.Group) -> None:
         session_id: str | None,
         qwen_args: tuple[str, ...],
     ) -> None:
-        """Launch Qwen Code with Omnigent.
+        """Launch Qwen Code with Coral.
 
         \b
         Examples:
-          omnigent qwen
-          omnigent qwen --resume conv_abc123
-          omnigent qwen --resume                  # interactive picker
+          coral qwen
+          coral qwen --resume conv_abc123
+          coral qwen --resume                  # interactive picker
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
@@ -1428,7 +1429,7 @@ def register_native_commands(cli: click.Group) -> None:
         flag_value=_RESUME_PICKER_SENTINEL,
         default=None,
         help=(
-            "Resume a prior Omnigent conversation. With a conversation id "
+            "Resume a prior Coral conversation. With a conversation id "
             "(e.g. ``--resume conv_abc123``) attaches directly; with no value "
             "opens an interactive picker scoped to kimi-native sessions."
         ),
@@ -1448,22 +1449,22 @@ def register_native_commands(cli: click.Group) -> None:
         session_id: str | None,
         kimi_args: tuple[str, ...],
     ) -> None:
-        """Launch Kimi Code with Omnigent.
+        """Launch Kimi Code with Coral.
 
         Boots Moonshot AI's interactive ``kimi`` TUI
         (https://github.com/MoonshotAI/Kimi-Code) in a runner-owned terminal and
-        attaches your TTY — the native experience, embedded in the Omnigent web
-        UI. No Omnigent provider config is needed: kimi authenticates against its
+        attaches your TTY — the native experience, embedded in the Coral web
+        UI. No Coral provider config is needed: kimi authenticates against its
         own backend (``kimi login`` for OAuth, or a Moonshot API key).
 
-        For the headless SDK harness (per-turn ``kimi -p`` behind the Omnigent
-        REPL) use ``omnigent run --harness kimi`` instead.
+        For the headless SDK harness (per-turn ``kimi -p`` behind the Coral
+        REPL) use ``coral run --harness kimi`` instead.
 
         \b
         Examples:
-          omnigent kimi
-          omnigent kimi --resume conv_abc123
-          omnigent kimi --resume                   # interactive picker
+          coral kimi
+          coral kimi --resume conv_abc123
+          coral kimi --resume                   # interactive picker
         """
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):

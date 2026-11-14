@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Devin lifecycle-hook entrypoint for the devin-native harness.
 
 Devin runs a configured hook as a subprocess per event, hands it the event JSON
@@ -206,7 +207,7 @@ def _post_elicitation(
                     if refreshed:
                         headers = refreshed
                         print(
-                            f"omnigent devin {endpoint} hook: Omnigent auth "
+                            f"omnigent devin {endpoint} hook: Coral auth "
                             "expired; re-minted token and retrying",
                             file=sys.stderr,
                         )

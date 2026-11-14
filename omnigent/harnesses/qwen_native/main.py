@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Native qwen TUI wrapper for the Omnigent CLI.
 
 ``omnigent qwen`` launches Qwen Code's interactive TUI (``qwen``) inside an
@@ -182,7 +183,7 @@ def run_qwen_native(
     _preflight_local_tools()
     if server is None:
         raise click.ClickException(
-            "qwen requires a resolved Omnigent server URL. The CLI should call "
+            "qwen requires a resolved Coral server URL. The CLI should call "
             "_ensure_backend before run_qwen_native."
         )
     with TemporaryDirectory(prefix="omnigent-qwen-native-") as tmpdir:

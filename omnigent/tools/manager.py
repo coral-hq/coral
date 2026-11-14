@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Registry-based tool manager for agent execution.
 
 Registers builtin, client-specified, and local-python tools.
@@ -843,7 +844,7 @@ class ToolManager:
         for callable_tool in load_local_callable_tools(server_local_tools):
             if not is_valid_tool_name(callable_tool.name()):
                 _logger.warning(
-                    "Omnigent callable tool %r has invalid name — skipping",
+                    "Coral callable tool %r has invalid name — skipping",
                     callable_tool.name(),
                 )
                 continue

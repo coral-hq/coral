@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Native Kiro TUI wrapper for the Omnigent CLI."""
 
 from __future__ import annotations
@@ -225,7 +226,7 @@ def run_kiro_native(
     _preflight_local_tools()
     if server is None:
         raise click.ClickException(
-            "Kiro requires a resolved Omnigent server URL. The CLI should call "
+            "Kiro requires a resolved Coral server URL. The CLI should call "
             "_ensure_backend before run_kiro_native."
         )
     with TemporaryDirectory(prefix="omnigent-kiro-native-") as tmpdir:

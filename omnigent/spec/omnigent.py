@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Bidirectional translator between omnigent ``AgentSpec`` and omnigent ``AgentDef``.
 
 Two functions live here:
@@ -1538,7 +1539,7 @@ def _fail_on_unsupported_tool(
                 f"omnigent agent {agent_name!r} declares tool "
                 f"{tool_name!r} of type `mcp` with "
                 f"``databricks_server={tool.databricks_server!r}`` — "
-                f"Omnigent' MCPServerConfig doesn't understand the "
+                f"Coral' MCPServerConfig doesn't understand the "
                 f"named-Databricks-server shape. Translate to an "
                 f"explicit HTTP ``url`` or stdio ``command``+``args`` "
                 f"MCP first.",

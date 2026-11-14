@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 A reasoning-effort change made in the embedded Codex terminal (native mode)
 must be reflected in the chat session composer's effort control.
@@ -208,7 +209,7 @@ def test_turn_started_mirrors_terminal_effort_change_to_composer(tmp_path: Path)
     # The terminal effort change must reach the server so the composer updates.
     assert effort_posts, (
         "turn/started after an in-TUI /model effort change did not "
-        "mirror the new effort to Omnigent (no external_reasoning_effort_change "
+        "mirror the new effort to Coral (no external_reasoning_effort_change "
         "POST), so the chat composer gear stays stale. Posts observed: "
         f"{[body.get('type') for _u, body in client.posts]}"
     )

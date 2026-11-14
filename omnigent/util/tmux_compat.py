@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Shared tmux compatibility checks for managed terminals."""
 
 from __future__ import annotations
@@ -52,8 +53,8 @@ def tmux_unavailable_reason() -> str | None:
         return (
             "tmux is not installed or not on PATH. Native terminals need tmux "
             f"{MIN_TMUX_VERSION_HINT} or newer: install it (macOS: `brew install tmux`) and "
-            "check that `tmux -V` works in a terminal. If Omnigent still can't find it, "
-            "quit and reopen the Omnigent app, or restart a CLI-started host from a shell "
+            "check that `tmux -V` works in a terminal. If Coral still can't find it, "
+            "quit and reopen the Coral app, or restart a CLI-started host from a shell "
             "where `tmux -V` works."
         )
     version = tmux_version(tmux)

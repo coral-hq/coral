@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Executor that bridges Omnigent messages into a native Codex TUI thread."""
 
 from __future__ import annotations
@@ -123,7 +124,7 @@ _CODEX_SHELL_AUTHORIZATION_REQUIRED = CodexStartupFailure(
     "native shell execution.",
     code="codex_shell_authorization_required",
     title="Shell command authorization required",
-    remediation="Update the Omnigent server and runner, then send the command again "
+    remediation="Update the Coral server and runner, then send the command again "
     "as the session owner.",
 )
 

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Credential redaction at the opt-in harness diagnostic boundary."""
 
 from __future__ import annotations
@@ -218,7 +219,7 @@ def test_detect_sign_in_prompt_requires_an_address(screen: str | None) -> None:
     [
         # An agent banner quoting its instructions, with a docs pointer.
         "│ Logfood ingests eng data. Look them up at https://go/eng-data-access.\n"
-        "└ SessionStart says: Open this session in Omnigent: http://127.0.0.1:8931/c/abc\n",
+        "└ SessionStart says: Open this session in Coral: http://127.0.0.1:8931/c/abc\n",
         # Ordinary tool output.
         "Opened https://github.com/omnigent-ai/omnigent/pull/3792) for review.\n",
         "Tracked in https://linear.app/omnigent/issues/OMNI-1006\n",

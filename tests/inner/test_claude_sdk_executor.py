@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for ClaudeSDKExecutor."""
 
 import asyncio
@@ -5208,7 +5209,7 @@ class TestToolCallPolicyGate(unittest.TestCase):
             )
 
             self.assertIsInstance(result, PermissionResultDeny)
-            self.assertIn("Unexpected Omnigent TOOL_CALL policy verdict", result.message)
+            self.assertIn("Unexpected Coral TOOL_CALL policy verdict", result.message)
 
         _run(_t())
 
@@ -6528,7 +6529,7 @@ class TestAskUserQuestionHook(unittest.TestCase):
                 self.assertEqual(hso["permissionDecision"], "deny")
                 self.assertEqual(
                     hso["permissionDecisionReason"],
-                    "AskUserQuestion failed in Omnigent; ask in plain text instead.",
+                    "AskUserQuestion failed in Coral; ask in plain text instead.",
                 )
 
     def test_hook_lets_cancellation_propagate(self):

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """PiExecutor: run agents through the Pi coding agent's RPC mode.
 
 Spawns Pi (``pi --mode rpc``) as a subprocess and communicates via a JSONL
@@ -581,8 +582,8 @@ def _generate_extension_js(port: int, tool_schemas: list[ToolSpec], token: str) 
     token_json = json.dumps(token)
 
     return f"""\
-// Auto-generated Omnigent tool bridge extension for Pi.
-// Connects to the Omnigent TCP tool server on port {port}.
+// Auto-generated Coral tool bridge extension for Pi.
+// Connects to the Coral TCP tool server on port {port}.
 const net = require("net");
 
 const TOOLS = {tools_json};
@@ -648,7 +649,7 @@ function callTool(toolName, args, callId) {{
 }}
 
 /**
- * Ask the Omnigent tool server for a TOOL_CALL policy verdict on a native
+ * Ask the Coral tool server for a TOOL_CALL policy verdict on a native
  * (non-bridged) Pi tool. Resolves to the verdict object {{ block, reason }}
  * or null. Fail-open (null) on any transport error: a wedged native tool
  * would break Pi worse than a missed gate, and bridged tools stay gated
@@ -682,7 +683,7 @@ function evalNativePolicy(toolName, args) {{
 }}
 
 module.exports = function(pi) {{
-  // Gate native (non-bridged) tool calls through Omnigent policy. Pi's
+  // Gate native (non-bridged) tool calls through Coral policy. Pi's
   // native tools (e.g. ``read``, enabled for skill loading) run in-process
   // and never traverse the bridged /mcp path, so without this hook they
   // escape all guardrails. Bridged tools ARE evaluated server-side at /mcp,
@@ -692,13 +693,13 @@ module.exports = function(pi) {{
     if (BRIDGED.has(event.toolName)) return;
     const verdict = await evalNativePolicy(event.toolName, event.input || {{}});
     if (verdict && verdict.block) {{
-      return {{ block: true, reason: verdict.reason || "blocked by Omnigent policy" }};
+      return {{ block: true, reason: verdict.reason || "blocked by Coral policy" }};
     }}
   }});
 
   for (const tool of TOOLS) {{
     // Pi passes tool.parameters directly to the LLM as JSON Schema, so we
-    // can use the Omnigent schema as-is without TypeBox conversion.
+    // can use the Coral schema as-is without TypeBox conversion.
     pi.registerTool({{
       name: tool.name,
       label: tool.name,

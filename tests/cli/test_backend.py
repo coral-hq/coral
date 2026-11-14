@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the daemon-backed server resolution in the CLI.
 
 Under the daemon model every ``run`` / ``claude`` invocation
@@ -2435,7 +2436,7 @@ def test_host_stop_local_daemon_points_at_full_stop(
     result = CliRunner().invoke(cli_group, ["host", "stop", "--server", ""])
 
     assert result.exit_code == 0, result.output
-    assert "the local Omnigent server (web UI / history)" in result.output
+    assert "the local Coral server (web UI / history)" in result.output
     assert f"{cli.cli_invocation()} stop" in result.output
 
 
@@ -2468,7 +2469,7 @@ def test_host_stop_remote_daemon_omits_local_server_hint(
     )
 
     assert result.exit_code == 0, result.output
-    assert "the local Omnigent server" not in result.output
+    assert "the local Coral server" not in result.output
     assert f"{cli.cli_invocation()} stop" not in result.output
 
 
