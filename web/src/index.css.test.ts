@@ -1271,6 +1271,15 @@ describe("index.css electron-mac window drag region", () => {
   });
 });
 
+// CORAL(S83): Newsreader is bundled offline for --font-display; headings stay sans
+describe("index.css display font", () => {
+  it("bundles Newsreader for --font-display and keeps --font-heading sans", () => {
+    expect(indexCssSource).toContain('@import "@fontsource-variable/newsreader";');
+    expect(indexCssSource).toMatch(/--font-display:\s*"Newsreader Variable", "Iowan Old Style"/);
+    expect(indexCssSource).toContain("--font-heading: var(--font-sans);");
+  });
+});
+
 describe("index.css shared UI font smoothing", () => {
   const SMOOTHING_DECL = /-webkit-font-smoothing\s*:\s*antialiased/;
   const smoothingRules = cssBlocks

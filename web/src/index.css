@@ -3,6 +3,8 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist-mono";
+/* CORAL(S83): bundle Newsreader offline for Coral brand moments (--font-display) */
+@import "@fontsource-variable/newsreader";
 @import "./themePalettes.generated.css";
 
 /* Streamdown ships utility classes pre-compiled in its dist; this @source
@@ -50,6 +52,9 @@
     ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol",
     "Noto Color Emoji";
   --font-mono: "Geist Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+  /* CORAL(S83): Coral display serif; --font-heading above stays sans */
+  --font-display:
+    "Newsreader Variable", "Iowan Old Style", Palatino, Georgia, "Times New Roman", serif;
   /* Hero/title step — overrides Tailwind's default text-3xl (30/36)
      * with a slightly larger 32px face on the same 36px line. */
   --text-3xl: 32px;

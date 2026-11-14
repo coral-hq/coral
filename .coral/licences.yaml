@@ -23,3 +23,14 @@ dependencies:
       server-selector-v2 bundle. Full licence text copied verbatim to
       web/public/licenses/geist-mono-OFL-1.1.txt; copyright line in the NOTICE
       addendum.
+  - name: "@fontsource-variable/newsreader"
+    version: 5.3.0
+    spdx: OFL-1.1
+    class: font
+    counsel_status: pending
+    inherited: false
+    notes: >-
+      Added by BRD-01 (S83) for Coral's display serif (--font-display), bundled
+      offline into the web UI by web/src/index.css. Full licence text copied
+      verbatim to web/public/licenses/newsreader-OFL-1.1.txt; copyright line
+      in the NOTICE addendum.

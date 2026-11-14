@@ -30,6 +30,7 @@ seams:
       - .gitignore
       - MODIFICATIONS.md
       - web/public/licenses/geist-mono-OFL-1.1.txt
+      - web/public/licenses/newsreader-OFL-1.1.txt
     tests: []
     budget_lines: 10
     budget_exception:
@@ -40,6 +41,7 @@ seams:
       approver: pending
     anchor_exempt:
       - web/public/licenses/geist-mono-OFL-1.1.txt
+      - web/public/licenses/newsreader-OFL-1.1.txt
     upstream_first: false
     upstream_candidate: false
 
@@ -66,5 +68,28 @@ seams:
     tests: []
     budget_lines: 10
     anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S83
+    title: Newsreader display font and --font-display
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      web/package.json and pnpm-lock.yaml carry the new
+      @fontsource-variable/newsreader dependency (OPS-01 may re-ledger them as
+      an MF entry).
+    files:
+      - web/src/index.css
+      - web/src/index.css.test.ts
+      - web/package.json
+      - pnpm-lock.yaml
+    tests:
+      - web/src/index.css.test.ts
+    budget_lines: 10
+    anchor_exempt:
+      - web/package.json
+      - pnpm-lock.yaml
     upstream_first: false
     upstream_candidate: false
