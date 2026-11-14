@@ -33,7 +33,7 @@ catalog:
   react: ^18.2.0
   react-dom: ^18.2.0
   # KaTeX 0.18.11 was accidentally published with breaking changes.
-  katex: 0.18.10
+  katex: 0.19.1
   # Upgrade Shiki and its Monaco adapter together with their shared packages.
   shiki: 4.5.0
   '@shikijs/monaco': 4.5.0
