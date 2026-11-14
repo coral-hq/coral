@@ -388,3 +388,43 @@ seams:
       - web/electron/package.json
     upstream_first: false
     upstream_candidate: false
+
+  - id: S89b
+    title: Coral connect and setup pages and onboarding copy
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      Split from BRD-01's S89 row. Coral hex values on the Electron setup page
+      are duplicated from the default palette and web/src/brand/coral.css. The
+      LandingFooter's iOS App, Android App and Discord buttons are removed until
+      Coral has its own; the omnigent CLI and install copy stay (OPS-03, OPS-09).
+    files:
+      - web/electron/setup/index.html
+      - web/server-selector-v2.html
+      - web/src/pages/onboarding/LandingFooter.tsx
+      - web/src/pages/onboarding/LandingStep.tsx
+      - web/src/pages/onboarding/LocalIntroStep.tsx
+      - web/src/pages/onboarding/ServerSelectStep.tsx
+      - web/src/pages/onboarding/ServerSelectorV2.tsx
+      - web/src/pages/onboarding/SetupTerminalStep.tsx
+      - web/src/pages/onboarding/primitives.tsx
+      - web/src/pages/onboarding/ServerSelectorV2.test.tsx
+      - web/src/pages/onboarding/ServerSelectStep.render.test.tsx
+      - web/src/server-selector-v2.test.tsx
+      - web/electron/e2e/desktop_arca_onboarding.e2e.js
+    tests:
+      - web/src/pages/onboarding/ServerSelectorV2.test.tsx
+      - web/src/pages/onboarding/ServerSelectStep.render.test.tsx
+      - web/src/server-selector-v2.test.tsx
+    budget_lines: 40
+    budget_exception:
+      lines: 110
+      reason: >-
+        The Electron setup page takes Coral's tokens, washes, brand row and
+        accent rail (UI§7), and the onboarding tests' button and heading
+        queries follow the Coral copy.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

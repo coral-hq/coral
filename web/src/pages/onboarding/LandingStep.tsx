@@ -19,6 +19,7 @@ import { normalizeServerUrl } from "@/pages/onboarding/ServerSelectStep";
 import type { ConnectProgress } from "@/pages/onboarding/ServerSelectorV2";
 import { ConnectStatus } from "@/pages/onboarding/primitives";
 import { ownServerName } from "@/lib/serverNames";
+import { DEFAULT_APP_NAME } from "@/lib/branding";
 
 /** Team name for a preset server URL: the host's first label. */
 function teamName(url: string): string {
@@ -99,7 +100,8 @@ export function LandingStep({
     <div className="flex min-w-0 flex-1 flex-col gap-2 px-2 pb-1">
       <div className="text-center flex-1 flex flex-col justify-center">
         <h1 className="text-2xl font-normal leading-9 tracking-[-0.03em] text-foreground">
-          Meet Omnigent
+          {/* CORAL(S89b): onboarding names Coral (the default app name). */}
+          Meet {DEFAULT_APP_NAME}
         </h1>
         <p className="mt-1 text-base text-muted-foreground">
           One interface for all your coding agents
@@ -201,7 +203,7 @@ export function LandingStep({
                   onKeyDown={(e) => {
                     if (e.key === "Enter") selectTyped();
                   }}
-                  placeholder="Enter Omnigent server URL"
+                  placeholder={`Enter ${DEFAULT_APP_NAME} server URL`}
                   aria-label="Server URL"
                   aria-invalid={invalid}
                 />

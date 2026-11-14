@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, Download, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { ConnectProgress } from "@/pages/onboarding/ServerSelectorV2";
+import { DEFAULT_APP_NAME } from "@/lib/branding";
 
 export function OnboardingHeading({
   children,
@@ -26,8 +27,9 @@ export function OnboardingHeading({
 /** Main action label: install the CLI first, start the stopped local server, or
  *  just open (a running local server or a remote one). */
 export function installActionLabel(installed?: boolean, startsLocal?: boolean): string {
-  if (!installed) return "Install Omnigent";
-  return startsLocal ? "Start Omnigent" : "Open Omnigent";
+  // CORAL(S89b): the connect actions name Coral (the default app name).
+  if (!installed) return `Install ${DEFAULT_APP_NAME}`;
+  return startsLocal ? `Start ${DEFAULT_APP_NAME}` : `Open ${DEFAULT_APP_NAME}`;
 }
 
 /** Leading icon for the install/start/open action, paired with installActionLabel. */

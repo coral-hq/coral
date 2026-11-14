@@ -1,36 +1,19 @@
-// Landing-screen footer: app/community links + a "Maintained by" note. Links
+// Landing-screen footer: project links + a "Built on Omnigent" note. Links
 // open in the user's real browser (window.open on the file:// page is routed
 // out by the shell's popup policy, same as the Cloud-docs button).
 
 import GithubMono from "@lobehub/icons/es/Github/components/Mono";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { AndroidGlyph, AppleGlyph, DiscordGlyph } from "@/pages/onboarding/brandGlyphs";
+import { CORAL_HOMEPAGE } from "@/brand/links";
 
+// CORAL(S89b): Coral's GitHub only; the iOS, Android and Discord links return when Coral has its own.
 const LINKS: { key: string; label: string; icon: ReactNode; href: string }[] = [
-  {
-    key: "ios",
-    label: "iOS App",
-    icon: <AppleGlyph />,
-    href: "https://apps.apple.com/us/app/omnigent/id6783102694",
-  },
-  {
-    key: "android",
-    label: "Android App",
-    icon: <AndroidGlyph />,
-    href: "https://omnigent.ai/docs/interact/mobile#android-app",
-  },
   {
     key: "github",
     label: "GitHub",
     icon: <GithubMono size={16} />,
-    href: "https://github.com/omnigent-ai/omnigent",
-  },
-  {
-    key: "discord",
-    label: "Join Discord",
-    icon: <DiscordGlyph />,
-    href: "https://discord.gg/omnigent",
+    href: CORAL_HOMEPAGE,
   },
 ];
 
@@ -53,7 +36,7 @@ export function LandingFooter() {
         •
       </span>
       <span className="whitespace-nowrap px-2 text-base text-muted-foreground">
-        Maintained by Databricks and the Omnigent community
+        Built on Omnigent
       </span>
     </div>
   );

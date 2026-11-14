@@ -46,6 +46,7 @@ OPS-01's generator will maintain this file later.
 | `web/electron/dev-app-update.yml` | S87 | coral-specific | Dev builds read Coral's feed with a `coral-desktop-updater-dev` cache (S87). |
 | `web/electron/dmg/coral-background.tiff` | S87 | coral-specific | Added. Coral DMG background: cream ground with Clay washes and an install arrow (S87). |
 | `web/electron/e2e/desktopHarness.js` | S87 | coral-specific | Seeds the "Coral Dev" profile folder (S87). |
+| `web/electron/e2e/desktop_arca_onboarding.e2e.js` | S89b | coral-specific | Queries follow the Coral onboarding copy (S89b). |
 | `web/electron/e2e/desktop_connect.e2e.js` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
 | `web/electron/e2e/desktop_cookie_isolation.e2e.js` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
 | `web/electron/e2e/desktop_navigation_policy.e2e.js` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
@@ -60,6 +61,7 @@ OPS-01's generator will maintain this file later.
 | `web/electron/icons/coral-icon.svg` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). Linux launcher icon. |
 | `web/electron/package.json` | S87, S38, S88 | coral-specific | Coral product name, description, homepage, repository, author, app id and dev overrides, Coral update feed, copyright with the Databricks credit, unsigned mac identity, microphone copy, maintainer, DMG background and LICENSE/NOTICE/MODIFICATIONS.md/OFL texts in `legal/` (S87); registers the `coral` session-link scheme (S38); Coral icons for macOS, Windows and Linux (S88). npm name unchanged. |
 | `web/electron/return-banner/index.html` | S87 | coral-specific | The return banner names Coral (S87). |
+| `web/electron/setup/index.html` | S89b | coral-specific | "Coral — Connect": Coral tokens and washes, the Coral mark beside a serif "Coral", the accent rail, and "Run a Coral server…" (S89b). |
 | `web/electron/src/about_preload.js` | S87 | coral-specific | Exposes `openLegalFile` to the About page (S87). |
 | `web/electron/src/about_window.js` | S87 | coral-specific | Coral window title, a taller window, and an IPC handler that opens the shipped LICENSE, NOTICE or MODIFICATIONS.md (S87). |
 | `web/electron/src/brand.js` | S87 | coral-specific | Added. Coral's desktop identity: product names, app ids, `coral` scheme, CLI names, install command, update feed and contact links (S87). |
@@ -103,6 +105,7 @@ OPS-01's generator will maintain this file later.
 | `web/public/coral-mark.svg` | S89 | coral-specific | Added. Placeholder Coral mark served as the favicon; a byte-identical copy of `web/src/brand/assets/coral-mark.svg` (S89). |
 | `web/public/licenses/geist-mono-OFL-1.1.txt` | S77 | coral-specific | Added. Verbatim SIL OFL 1.1 text of Geist Mono (`@fontsource-variable/geist-mono`), shipped with the web UI. |
 | `web/public/licenses/newsreader-OFL-1.1.txt` | S77 | coral-specific | Added. Verbatim SIL OFL 1.1 text of Newsreader (`@fontsource-variable/newsreader`), shipped with the web UI. |
+| `web/server-selector-v2.html` | S89b | coral-specific | Window title "Coral — Connect" (S89b). |
 | `web/src/components/BrandLogo.test.tsx` | S79 | coral-specific | Fallback cases expect the Coral mark (S79). |
 | `web/src/components/BrandLogo.tsx` | S79 | coral-specific | The no-logo and failed-logo fallback is `CoralMark` instead of the Otto mascot (S79). |
 | `web/src/components/PermissionsModal.designs.stories.tsx` | S38 | coral-specific | The sample QR link uses `coral://` (S38). |
@@ -120,6 +123,16 @@ OPS-01's generator will maintain this file later.
 | `web/src/pages/RegisterPage.tsx` | S89 | coral-specific | "this Omnigent server" follows `useAppName()` (S89). |
 | `web/src/pages/onboarding/AuthCardShell.tsx` | S89 | coral-specific | Shows the Coral mark with `alt` from `useAppName()` (S89). |
 | `web/src/pages/onboarding/JoinTeamStep.tsx` | S89 | coral-specific | "their Omnigent server" follows `useAppName()` (S89). |
+| `web/src/pages/onboarding/LandingFooter.tsx` | S89b | coral-specific | GitHub points at Coral's repository, the iOS App, Android App and Discord buttons are removed, and the maintained-by line reads "Built on Omnigent" (S89b). |
+| `web/src/pages/onboarding/LandingStep.tsx` | S89b | coral-specific | Onboarding copy names Coral (`DEFAULT_APP_NAME`) (S89b). |
+| `web/src/pages/onboarding/LocalIntroStep.tsx` | S89b | coral-specific | Onboarding copy names Coral (`DEFAULT_APP_NAME`) (S89b). |
+| `web/src/pages/onboarding/ServerSelectStep.render.test.tsx` | S89b | coral-specific | Queries follow the Coral onboarding copy (S89b). |
+| `web/src/pages/onboarding/ServerSelectStep.tsx` | S89b | coral-specific | Onboarding copy names Coral (`DEFAULT_APP_NAME`); "Create server" opens Coral's repository (S89b). |
+| `web/src/pages/onboarding/ServerSelectorV2.test.tsx` | S89b | coral-specific | Queries follow the Coral onboarding copy (S89b). |
+| `web/src/pages/onboarding/ServerSelectorV2.tsx` | S89b | coral-specific | Onboarding copy names Coral (`DEFAULT_APP_NAME`) (S89b). |
+| `web/src/pages/onboarding/SetupTerminalStep.tsx` | S89b | coral-specific | Onboarding copy names Coral (`DEFAULT_APP_NAME`) (S89b). |
+| `web/src/pages/onboarding/primitives.tsx` | S89b | coral-specific | The connect action reads "Install Coral", "Start Coral" or "Open Coral" (S89b). |
+| `web/src/server-selector-v2.test.tsx` | S89b | coral-specific | Queries follow the Coral onboarding copy (S89b). |
 | `web/src/shell/NewChatDialog.test.tsx` | S81 | coral-specific | The default-heading case expects Coral's display heading in the hero (S81). |
 | `web/src/shell/NewChatDialog.tsx` | S81 | coral-specific | The desktop default hero renders `CoralHero` (mark beside the heading); sibling, project and mobile branches are unchanged (S81). |
 | `web/src/shell/Sidebar.subagentHighlight.test.tsx` | S80 | coral-specific | Expects the Coral wordmark in the default sidebar brand (S80). |

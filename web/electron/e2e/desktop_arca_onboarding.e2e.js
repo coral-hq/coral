@@ -1,3 +1,4 @@
+// CORAL(S89b): onboarding copy names Coral (the default app name).
 // Real initial onboarding UI, preload, main process, and subprocess runners.
 // Arca, SSH, Companion, SSO, and the destination server are local fixtures;
 // this does not validate live sign-in or remote callback forwarding.
@@ -329,7 +330,7 @@ it(
           readEvents().some((event) => event.args?.[0] === "ssh"),
           false,
         );
-        await page.getByRole("button", { name: "Open Omnigent", exact: true }).click();
+        await page.getByRole("button", { name: "Open Coral", exact: true }).click();
         await waitUntil(
           () => readEvents().some((event) => event.name === "provider-sign-in"),
           "Provider sign-in did not start",
@@ -397,7 +398,7 @@ it(
         global.fixtureKeepAlive = new BrowserWindow({ show: false });
       });
       await chooseArca(page);
-      await page.getByRole("button", { name: "Open Omnigent", exact: true }).click();
+      await page.getByRole("button", { name: "Open Coral", exact: true }).click();
       await waitUntil(
         () => readEvents().some((event) => event.name === "setup-start"),
         "Setup did not start",

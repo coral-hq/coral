@@ -3,32 +3,38 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Omnigents — Connect</title>
+    <!-- CORAL(S89b): Coral connect page (UI§7): cream ground, Coral mark and wordmark, accent rail -->
+    <title>Coral — Connect</title>
     <style>
-      /* Design tokens lifted from web/src/index.css (:root and .dark) so
-         this bundled page matches the web UI it hands off to. */
+      /* Coral tokens duplicated from the default palette
+         (web/src/lib/themePalette.ts) and web/src/brand/coral.css so this
+         bundled page matches the web UI it hands off to. */
       :root {
         color-scheme: light dark;
-        --background: #fff;
-        --foreground: #11171c;
-        --muted-foreground: #6f6f6f;
-        --border: #e8ecf0;
-        --primary: #11171c;
-        --primary-foreground: #fff;
+        --background: #fef7f1;
+        --foreground: #523e31;
+        --muted-foreground: #8a7566;
+        --border: #e0d2c4;
+        --primary: #864a31;
+        --primary-foreground: #fef7f1;
         --destructive: #c8324c;
-        --ring: #11171c;
+        --ring: #864a31;
         --radius-lg: 0.5rem;
+        --shell-washes:
+          radial-gradient(circle at 0% 0%, rgba(77, 115, 86, 0.08), transparent 42%),
+          radial-gradient(circle at 100% 0%, rgba(193, 154, 85, 0.1), transparent 42%),
+          radial-gradient(circle at 100% 100%, rgba(134, 74, 49, 0.07), transparent 48%);
       }
       @media (prefers-color-scheme: dark) {
         :root {
-          --background: #1e1927;
-          --foreground: oklch(0.965 0.003 240);
-          --muted-foreground: #92a4b3;
-          --border: oklch(0.28 0.005 240);
-          --primary: #e8ecf0;
-          --primary-foreground: #11171c;
+          --background: #2a211c;
+          --foreground: #fef7f1;
+          --muted-foreground: #bba796;
+          --border: #4a3c33;
+          --primary: #c19a55;
+          --primary-foreground: #2a211c;
           --destructive: #e65b77;
-          --ring: #e8ecf0;
+          --ring: #c19a55;
         }
       }
       * {
@@ -43,7 +49,7 @@
         font-family:
           ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
           "Segoe UI Symbol", "Noto Color Emoji";
-        background: var(--background);
+        background: var(--shell-washes), var(--background);
         color: var(--foreground);
         padding: 0 16px;
         /* App chrome, not a document — suppress text selection everywhere
@@ -55,10 +61,50 @@
         width: 100%;
         max-width: 24rem;
       }
-      .logo {
-        display: block;
+      .brand {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
         margin: 0 auto 12px;
-        height: 80px;
+      }
+      .brand .mark {
+        display: block;
+        width: 44px;
+        height: 44px;
+      }
+      .brand .wordmark {
+        font-family: Newsreader, "Iowan Old Style", Palatino, Georgia, "Times New Roman", serif;
+        font-size: 34px;
+        font-weight: 500;
+        letter-spacing: -0.03em;
+        line-height: 1;
+      }
+      .rail {
+        display: flex;
+        justify-content: center;
+        gap: 6px;
+        margin: 0 0 16px;
+      }
+      .rail span {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+      }
+      .rail span:nth-child(1) {
+        background: #4d7356;
+      }
+      .rail span:nth-child(2) {
+        background: #9eab92;
+      }
+      .rail span:nth-child(3) {
+        background: #c19a55;
+      }
+      .rail span:nth-child(4) {
+        background: #864a31;
+      }
+      .rail span:nth-child(5) {
+        background: #523e31;
       }
       p.sub {
         margin: 0 0 24px;
@@ -445,14 +491,14 @@
       </svg>
     </button>
     <div class="card">
-      <picture>
-        <source
-          srcset="../../platform-assets/logos/omnigents-logo-reverse.svg"
-          media="(prefers-color-scheme: dark)"
-        />
-        <img class="logo" src="../../platform-assets/logos/omnigents-logo.svg" alt="Omnigents" />
-      </picture>
-      <p class="sub">Run an Omnigent server on this machine, or connect to an existing one.</p>
+      <div class="brand">
+        <img class="mark" src="../../platform-assets/logos/coral-mark.svg" alt="" />
+        <span class="wordmark">Coral</span>
+      </div>
+      <div class="rail" aria-hidden="true">
+        <span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <p class="sub">Run a Coral server on this machine, or connect to an existing one.</p>
       <div id="local-section">
         <!-- Always enabled: when the CLI is missing this opens the settings
              modal (install / set path) instead of failing to start. -->

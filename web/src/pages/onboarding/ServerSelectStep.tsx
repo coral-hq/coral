@@ -43,9 +43,12 @@ import {
 import { cn } from "@/lib/utils";
 import { ownServerName } from "@/lib/serverNames";
 import "../../../electron/src/url.js";
+import { CORAL_HOMEPAGE } from "@/brand/links";
+import { DEFAULT_APP_NAME } from "@/lib/branding";
 
 const DEFAULT_LOCAL = "http://localhost:6767";
-const CREATE_SERVER_URL = "https://omnigent.ai/";
+// CORAL(S89b): Coral copy and links; "Create server" opens Coral's repository.
+const CREATE_SERVER_URL = CORAL_HOMEPAGE;
 // A URL pointing at the loopback interface is a local install.
 const LOCAL_HOST_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i;
 
@@ -151,7 +154,7 @@ export function ServerSelectStep({
   managedServerNames?: Record<string, string>;
   /** Names servers gave themselves, origin → name. */
   serverNames?: Record<string, string>;
-  /** CLI status for local setup; remote servers always offer "Open Omnigent". */
+  /** CLI status for local setup; remote servers always offer "Open Coral". */
   installed?: boolean;
   /** Reports whether the URL-input ("add") view is showing, so the parent can
    *  swap the panel band (hero icons) for it. */
@@ -345,7 +348,7 @@ export function ServerSelectStep({
                     {check === "checking"
                       ? "Checking…"
                       : check === "ok"
-                        ? "Omnigent server"
+                        ? `${DEFAULT_APP_NAME} server`
                         : check === "reachable"
                           ? "Reachable"
                           : isLocalInstall(url)
@@ -438,7 +441,7 @@ export function ServerSelectStep({
                 onKeyDown={(e) => {
                   if (e.key === "Enter") addServer();
                 }}
-                placeholder="Enter Omnigent server URL"
+                placeholder={`Enter ${DEFAULT_APP_NAME} server URL`}
                 className="border-0 px-0 shadow-none focus-visible:ring-0"
                 aria-label="Server URL"
               />

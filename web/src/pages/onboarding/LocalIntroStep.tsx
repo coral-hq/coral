@@ -4,6 +4,7 @@
 // locally").
 
 import { Laptop } from "lucide-react";
+import { DEFAULT_APP_NAME } from "@/lib/branding";
 import {
   BRAND_HARNESSES,
   HarnessBrandIcon,
@@ -38,16 +39,17 @@ export function LocalIntroStep({
   onBack,
   onInstall,
 }: {
-  /** CLI installed → "Start"/"Open Omnigent"; missing → "Install Omnigent". */
+  /** CLI installed → "Start"/"Open Coral"; missing → "Install Coral". */
   installed?: boolean;
-  /** The local server is stopped, so the action boots it ("Start Omnigent"). */
+  /** The local server is stopped, so the action boots it ("Start Coral"). */
   startsLocal?: boolean;
   onBack: () => void;
   onInstall: () => void;
 }) {
   return (
     <div className="flex h-full flex-col px-2 pb-1 pt-8">
-      <OnboardingHeading>Set up Omnigent locally</OnboardingHeading>
+      {/* CORAL(S89b): onboarding names Coral (the default app name). */}
+      <OnboardingHeading>Set up {DEFAULT_APP_NAME} locally</OnboardingHeading>
 
       <p className="flex-1 text-base text-muted-foreground max-w-sm mx-auto text-center">
         Use Claude Code, Codex, Cursor, and other local harnesses from one UI. Keep history and

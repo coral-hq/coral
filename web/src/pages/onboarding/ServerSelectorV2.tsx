@@ -29,6 +29,7 @@ import {
 } from "@/pages/onboarding/ServerSelectStep";
 import { SetupTerminalStep } from "@/pages/onboarding/SetupTerminalStep";
 import { CliInstallStep } from "@/pages/onboarding/CliInstallStep";
+import { DEFAULT_APP_NAME } from "@/lib/branding";
 
 /**
  * Outcome of a connect attempt. `error` → the connect was rejected and the
@@ -546,7 +547,8 @@ function terminalRunningCopy(
     return { label: "Connecting this laptop", hint: "Connecting this laptop to the server…" };
   }
   if (kind === "connect") return { label: "Connecting", hint: "Connecting to the server…" };
+  // CORAL(S89b): the local-server steps name Coral (the default app name).
   return localServerRunning
-    ? { label: "Opening Omnigent", hint: "Connecting to the local server…" }
-    : { label: "Starting Omnigent", hint: "Starting the local server…" };
+    ? { label: `Opening ${DEFAULT_APP_NAME}`, hint: "Connecting to the local server…" }
+    : { label: `Starting ${DEFAULT_APP_NAME}`, hint: "Starting the local server…" };
 }

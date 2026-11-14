@@ -12,6 +12,7 @@ import { RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ConnectProgress, SetupResult } from "@/pages/onboarding/ServerSelectorV2";
 import { ConnectStatus } from "@/pages/onboarding/primitives";
+import { DEFAULT_APP_NAME } from "@/lib/branding";
 
 type Phase = "installing" | "running" | "ready" | "failed";
 
@@ -26,7 +27,8 @@ export function SetupTerminalStep({
   onSetupLog,
   onBack,
   onConnectAnyway,
-  runningLabel = "Starting Omnigent",
+  // CORAL(S89b): setup progress names Coral (the default app name); the CLI keeps its name.
+  runningLabel = `Starting ${DEFAULT_APP_NAME}`,
   runningHint = "Starting the local server…",
   connection = null,
   onCancelConnect,
@@ -152,9 +154,9 @@ export function SetupTerminalStep({
   const streamed = lines.length > 0;
   const baseLabel =
     phase === "ready"
-      ? "Omnigent is ready"
+      ? `${DEFAULT_APP_NAME} is ready`
       : phase === "failed"
-        ? "Couldn't set up Omnigent"
+        ? `Couldn't set up ${DEFAULT_APP_NAME}`
         : phase === "installing"
           ? "Installing the Omnigent CLI"
           : runningLabel;
@@ -212,7 +214,7 @@ export function SetupTerminalStep({
               <span className="select-none" aria-hidden="true">
                 ✕
               </span>{" "}
-              {error ?? "Could not set up Omnigent."}
+              {error ?? `Could not set up ${DEFAULT_APP_NAME}.`}
             </div>
             {errorAction && (
               <div className="text-cyan-700 dark:text-cyan-300">
