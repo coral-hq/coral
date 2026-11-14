@@ -379,6 +379,7 @@ import {
   rankMentionEntries,
 } from "@/lib/composerMentions";
 import { BrandLogo } from "@/components/BrandLogo";
+import { CoralHero } from "@/brand/CoralHero";
 import { PoweredByOmnigent } from "@/components/PoweredByOmnigent";
 import { SkillPills } from "@/components/SkillPills";
 import { ComposerMicButton } from "@/components/ComposerMicButton";
@@ -7033,16 +7034,19 @@ function NewChatLandingContent({
                 (configProjectId === null || storedProjectConfig !== undefined)
               }
             />
-          ) : (
+          ) : isMobileViewport ? (
             <BrandLogo variant="eyes" className="h-14 w-auto shrink-0" />
+          ) : (
+            // CORAL(S81): the desktop default hero puts the Coral mark beside the heading.
+            <CoralHero heading={heading} />
           )}
-          {siblingSourceId || isMobileViewport || selectedProject || heading ? (
+          {siblingSourceId || isMobileViewport || selectedProject ? (
             <h1 className="min-w-0 break-words text-center text-[28px] md:text-[2.15em] font-normal tracking-[-0.05em] text-foreground line-clamp-2 sm:text-left">
               {siblingSourceId
                 ? "Add nested agent"
                 : isMobileViewport
                   ? "Start a new session in"
-                  : selectedProject || heading}
+                  : selectedProject}
             </h1>
           ) : null}
           {siblingSourceId && (

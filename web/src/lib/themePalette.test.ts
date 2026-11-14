@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { setEmbedRoot, setEmbedScopeRoot } from "./host";
 import {
   applyThemePalette,
@@ -239,6 +239,15 @@ describe("themePalette", () => {
     applyThemePalette(readThemePalette());
     expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
     expect(PALETTES[0].tokens.light.background).toBe("#fef7f1");
+  });
+
+  it("falls back to the Coral palette when storage throws", () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage disabled");
+    });
+    expect(readThemePalette()).toBe(DEFAULT_PALETTE);
+    expect(PALETTES[0].label).toBe("Coral");
+    getItem.mockRestore();
   });
 
   it.each(PALETTES)("keeps $label links readable on page and table surfaces", (palette) => {

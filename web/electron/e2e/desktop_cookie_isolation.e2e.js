@@ -128,9 +128,8 @@ describe(
         });
         const conversationId = "browser-actions";
         try {
-          await window
-            .getByText("What should we build?")
-            .waitFor({ state: "visible", timeout: 20_000 });
+          // CORAL(S79): the default hero heading is "Direct the run…".
+          await window.getByText("Direct the run…").waitFor({ state: "visible", timeout: 20_000 });
           await window.waitForFunction(() => !!window.omnigentDesktop?.browserPerformAction);
           const opened = await openView(window, conversationId, `${server.serverUrl}/health`);
           assert.equal(opened.ok, true, opened.error);
@@ -213,9 +212,7 @@ describe(
           await urlField.waitFor({ state: "visible", timeout: 15_000 });
           await urlField.fill(server.serverUrl);
           await window.locator("#connect").click();
-          await window
-            .getByText("What should we build?")
-            .waitFor({ state: "visible", timeout: 20_000 });
+          await window.getByText("Direct the run…").waitFor({ state: "visible", timeout: 20_000 });
           // The SPA is up — its preload bridge carries the browser APIs.
           await window.waitForFunction(
             () =>

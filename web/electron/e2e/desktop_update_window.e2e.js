@@ -128,7 +128,8 @@ describe(
         /* oxlint-enable no-await-in-loop */
         assert.ok(!window.url().includes("update-overlay"), "shell window never appeared");
         await window.waitForLoadState("domcontentloaded");
-        const landed = window.getByText("What should we build?");
+        // CORAL(S79): the default hero heading is "Direct the run…".
+        const landed = window.getByText("Direct the run…");
         await landed.waitFor({ state: "visible", timeout: 20_000 });
 
         // 2. A newer version becomes available: point the app's REAL updater

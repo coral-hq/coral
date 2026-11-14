@@ -14,11 +14,9 @@ vi.mock("@/lib/host", () => ({
 vi.mock("@/lib/identity", () => ({
   authenticatedFetch: (path: string) => authenticatedFetch(path),
 }));
-vi.mock("@/components/OttoEyes", () => ({
-  OttoEyes: () => <span data-testid="otto-eyes" />,
-}));
-vi.mock("@/components/icons/OttoIcon", () => ({
-  OttoIcon: () => <span data-testid="otto-icon" />,
+// CORAL(S79): the fallback is the Coral mark, not the Otto mascot.
+vi.mock("@/brand/CoralMark", () => ({
+  CoralMark: () => <span data-testid="coral-mark" />,
 }));
 
 import type { BrandLogo as BrandLogoComponent } from "./BrandLogo";
@@ -84,13 +82,13 @@ describe("BrandLogo", () => {
     expect(authenticatedFetch).not.toHaveBeenCalled();
   });
 
-  it("falls back to Otto when a standalone image fails to load", () => {
+  it("falls back to the Coral mark when a standalone image fails to load", () => {
     getOmnigentHostConfig.mockReturnValue({ fetcher: undefined });
     render(logoTree(serverInfo("/v1/branding/logo/missing")));
 
     fireEvent.error(screen.getByRole("img", { name: "Acme Agent" }));
 
-    expect(screen.getByTestId("otto-eyes")).toBeInTheDocument();
+    expect(screen.getByTestId("coral-mark")).toBeInTheDocument();
   });
 
   it("uses the host transport and an object URL in embedded deployments", async () => {
@@ -100,7 +98,7 @@ describe("BrandLogo", () => {
 
     render(logoTree(serverInfo("/v1/branding/logo/embed")));
 
-    expect(screen.getByTestId("otto-eyes")).toBeInTheDocument();
+    expect(screen.getByTestId("coral-mark")).toBeInTheDocument();
     expect(await screen.findByRole("img", { name: "Acme Agent" })).toHaveAttribute(
       "src",
       "blob:brand-logo",
@@ -109,14 +107,14 @@ describe("BrandLogo", () => {
     expect(createObjectURL).toHaveBeenCalledWith(blob);
   });
 
-  it("keeps the mascot fallback when the embedded fetch fails", async () => {
+  it("keeps the Coral mark fallback when the embedded fetch fails", async () => {
     getOmnigentHostConfig.mockReturnValue({ fetcher: () => {} });
     authenticatedFetch.mockResolvedValue({ ok: false, status: 404 });
 
     render(logoTree(serverInfo("/v1/branding/logo/missing")));
 
     await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledOnce());
-    expect(screen.getByTestId("otto-eyes")).toBeInTheDocument();
+    expect(screen.getByTestId("coral-mark")).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "Acme Agent" })).not.toBeInTheDocument();
   });
 
@@ -131,7 +129,7 @@ describe("BrandLogo", () => {
 
     fireEvent.error(image);
 
-    expect(screen.getByTestId("otto-eyes")).toBeInTheDocument();
+    expect(screen.getByTestId("coral-mark")).toBeInTheDocument();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:brand-logo");
   });
 

@@ -65,7 +65,8 @@ describe(
         //    Key on the home composer heading, reliably visible on the desktop
         //    layout (the sidebar brand collapses into the macOS title-bar row
         //    and reads as hidden there).
-        const landed = window.getByText("What should we build?");
+        // CORAL(S79): the default hero heading is "Direct the run…".
+        const landed = window.getByText("Direct the run…");
         await landed.waitFor({ state: "visible", timeout: 20_000 });
         assert.ok(await landed.isVisible(), "app shell did not render after connect");
       } finally {

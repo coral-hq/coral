@@ -8555,8 +8555,10 @@ describe("NewChatLandingScreen", () => {
     renderLanding();
 
     await screen.findByTestId("new-chat-landing-input");
-    expect(screen.getByRole("heading", { name: "What should we build?" })).toHaveClass(
-      "text-[28px]",
+    // CORAL(S81): the desktop default hero is Coral's display heading beside the mark.
+    expect(screen.getByRole("heading", { name: "Direct the run…" })).toHaveClass("font-display");
+    expect(screen.getByTestId("coral-hero")).toContainElement(
+      screen.getByRole("heading", { name: "Direct the run…" }),
     );
     expect(screen.queryByTestId("new-chat-landing-project-chip")).toBeNull();
   });

@@ -90,8 +90,9 @@ describe(
         await urlField.waitFor({ state: "visible", timeout: 15_000 });
         await urlField.fill(server.serverUrl);
         await app.window.locator("#connect").click();
+        // CORAL(S79): the default hero heading is "Direct the run…".
         await app.window
-          .getByText("What should we build?")
+          .getByText("Direct the run…")
           .waitFor({ state: "visible", timeout: 30_000 });
 
         const [opened] = await browserOpens(app.electronApp);
@@ -135,7 +136,7 @@ describe(
       app = await launch(userDataDir, home);
       try {
         await app.window
-          .getByText("What should we build?")
+          .getByText("Direct the run…")
           .waitFor({ state: "visible", timeout: 30_000 });
         assert.deepEqual(await browserOpens(app.electronApp), []);
         assert.equal(idp.authorizeRequests.length, 1);

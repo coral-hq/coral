@@ -122,3 +122,51 @@ seams:
       - web/src/themePalettes.generated.css
     upstream_first: false
     upstream_candidate: false
+
+  - id: S79
+    title: Coral default app name, hero heading and brand-logo fallback
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    files:
+      - web/src/lib/branding.ts
+      - web/src/components/BrandLogo.tsx
+      - web/src/components/BrandLogo.test.tsx
+      - tests/e2e_ui/branding/test_branding.py
+      - tests/e2e_ui/sessions/test_sidebar_view_options.py
+      - tests/e2e_ui/visual/test_landing_snapshot.py
+      - web/electron/e2e/desktop_connect.e2e.js
+      - web/electron/e2e/desktop_cookie_isolation.e2e.js
+      - web/electron/e2e/desktop_navigation_policy.e2e.js
+      - web/electron/e2e/desktop_oidc_browser_sign_in.e2e.js
+      - web/electron/e2e/desktop_recording_shows_views.e2e.js
+      - web/electron/e2e/desktop_session_expiry_browser_view.e2e.js
+      - web/electron/e2e/desktop_update_window.e2e.js
+    tests:
+      - web/src/components/BrandLogo.test.tsx
+      - tests/e2e_ui/branding/test_branding.py
+    budget_lines: 10
+    budget_exception:
+      lines: 20
+      reason: >-
+        BrandLogo's fallback drops both Otto imports and branches, and its test
+        swaps the two Otto mocks for the Coral mark.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S81
+    title: Desktop new-session hero renders CoralHero
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    files:
+      - web/src/shell/NewChatDialog.tsx
+      - web/src/shell/NewChatDialog.test.tsx
+    tests:
+      - web/src/shell/NewChatDialog.test.tsx
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

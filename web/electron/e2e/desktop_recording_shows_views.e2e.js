@@ -162,9 +162,8 @@ describe(
           await urlField.waitFor({ state: "visible", timeout: 15_000 });
           await urlField.fill(server.serverUrl);
           await window.locator("#connect").click();
-          await window
-            .getByText("What should we build?")
-            .waitFor({ state: "visible", timeout: 20_000 });
+          // CORAL(S79): the default hero heading is "Direct the run…".
+          await window.getByText("Direct the run…").waitFor({ state: "visible", timeout: 20_000 });
           await window.waitForFunction(
             () =>
               !!window.omnigentDesktop &&

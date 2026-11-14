@@ -1,7 +1,7 @@
 """Visual-regression snapshot of the default empty view ("/").
 
 A single committed baseline of the whole app shell at ``/`` -- the open left
-sidebar plus the ``NewChatLandingScreen`` ("What should we build?") hero and
+sidebar plus the ``NewChatLandingScreen`` ("Direct the run…") hero and
 composer. The gate lives in ``.github/workflows/ui-snapshot.yml``, which renders
 inside a *digest-pinned Playwright image* so the committed baseline and the PR
 comparison come from the exact same renderer (screenshots differ across
@@ -27,6 +27,7 @@ masks: the host/workspace/agent chips render fixed, known values. ``/v1/info`` /
 ``/v1/me`` are left to the (deterministic) real server.
 """
 
+# CORAL(S79): the default hero is the Coral mark beside "Direct the run…".
 from __future__ import annotations
 
 import re

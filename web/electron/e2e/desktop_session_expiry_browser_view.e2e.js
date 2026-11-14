@@ -268,9 +268,8 @@ describe(
           // firstWindow() may be an auxiliary shell surface; wait for the
           // real app window (the one on an http(s) URL).
           const window = await shellWindow(electronApp);
-          await window
-            .getByText("What should we build?")
-            .waitFor({ state: "visible", timeout: 90_000 });
+          // CORAL(S79): the default hero heading is "Direct the run…".
+          await window.getByText("Direct the run…").waitFor({ state: "visible", timeout: 90_000 });
           await window.waitForFunction(
             () =>
               !!window.omnigentDesktop &&
@@ -323,9 +322,7 @@ describe(
           // button navigates back to the app.
           gate.setExpired(false);
           await window.locator("#signin").click();
-          await window
-            .getByText("What should we build?")
-            .waitFor({ state: "visible", timeout: 30_000 });
+          await window.getByText("Direct the run…").waitFor({ state: "visible", timeout: 30_000 });
           await window.waitForTimeout(2_500); // hold the signed-in state on film
           attachedAfterSignIn = await attachedChildViewCount(electronApp);
           // Diagnostics: both counts, so a partial failure is visible even

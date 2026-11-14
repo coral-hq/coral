@@ -232,7 +232,8 @@ it(
       desktop = await launchDesktop({ serverUrl: server.serverUrl, recordDir, preload: [preload] });
       const { electronApp, window } = desktop;
       evidence.electronVersion = await electronApp.evaluate(() => process.versions.electron);
-      await window.getByText("What should we build?").waitFor({ timeout: 30_000 });
+      // CORAL(S79): the default hero heading is "Direct the run…".
+      await window.getByText("Direct the run…").waitFor({ timeout: 30_000 });
       const phase = async (message) => {
         console.log(message);
         await window.evaluate((text) => {
