@@ -170,3 +170,24 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S80
+    title: Sidebar shows the Coral wordmark by default
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    note: >-
+      Default branch only: with operator branding.app_name unset the sidebar
+      renders CoralWordmark. The operator branch, the Workflows entry and the
+      desk headers stay with BRD-02.
+    files:
+      - web/src/shell/Sidebar.tsx
+      - web/src/shell/Sidebar.subagentHighlight.test.tsx
+      - tests/e2e_ui/branding/test_branding.py
+    tests:
+      - web/src/shell/Sidebar.subagentHighlight.test.tsx
+      - tests/e2e_ui/branding/test_branding.py
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

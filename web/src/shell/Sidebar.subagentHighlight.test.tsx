@@ -115,14 +115,16 @@ function rowFor(id: string): HTMLElement {
 }
 
 describe("sidebar highlight while viewing a sub-agent", () => {
-  it("renders the official Omnigent wordmark instead of styled text", () => {
+  // CORAL(S80): the default sidebar brand is the Coral mark beside "Coral" in the display face.
+  it("renders the Coral wordmark when no operator app name is set", () => {
     mockConversations([]);
     renderAt("/");
 
     const wordmark = screen.getByTestId("sidebar-wordmark");
-    expect(wordmark).toHaveAttribute("alt", "Omnigent");
-    expect(wordmark).toHaveClass("h-[15px]", "dark:invert");
-    expect(wordmark.getAttribute("src")).toContain("omnigent-wordmark");
+    expect(wordmark.tagName).not.toBe("IMG");
+    expect(wordmark).toHaveTextContent("Coral");
+    expect(wordmark.querySelector("svg.coral-mark")).not.toBeNull();
+    expect(screen.getByTestId("sidebar-brand")).toContainElement(wordmark);
   });
 
   it("sits flush to the window edge, no floating margin or border", () => {

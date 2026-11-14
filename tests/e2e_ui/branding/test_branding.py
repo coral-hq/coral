@@ -121,6 +121,7 @@ def test_unbranded_keeps_defaults_and_hides_credit(page: Page, live_server: str)
     _open_landing(page, base_url)
 
     expect(page.get_by_role("heading", name="Direct the run…")).to_be_visible()
+    # CORAL(S80): the default sidebar wordmark reads "Coral".
     # Exact, so a project such as "Omnigent Automation" another test created can't match.
-    expect(page.get_by_role("link", name="Omnigent", exact=True)).to_be_visible()
+    expect(page.get_by_role("link", name="Coral", exact=True)).to_be_visible()
     expect(page.get_by_test_id("powered-by-omnigent")).to_have_count(0)

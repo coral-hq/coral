@@ -129,7 +129,7 @@ import {
   SidebarSearchButton,
   SidebarSettingsButton,
 } from "./SidebarHeaderActions";
-import omnigentWordmark from "@/assets/omnigent-wordmark.svg";
+import { CoralWordmark } from "@/brand/CoralWordmark";
 import { Button } from "@/components/ui/button";
 import { OmniGlassSurface } from "@/components/OmniGlassSurface";
 import {
@@ -1268,12 +1268,8 @@ function SidebarImpl({
                     {branding.app_name}
                   </span>
                 ) : (
-                  <img
-                    src={omnigentWordmark}
-                    alt="Omnigent"
-                    data-testid="sidebar-wordmark"
-                    className="h-[15px] w-auto shrink-0 translate-y-px dark:invert"
-                  />
+                  // CORAL(S80): the default branch shows the Coral wordmark; the operator name branch is unchanged.
+                  <CoralWordmark data-testid="sidebar-wordmark" />
                 )}
               </Link>
               {isMacElectronShell() && (
