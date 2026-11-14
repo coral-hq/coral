@@ -1,4 +1,5 @@
 "use strict";
+// CORAL(S87): assertions follow the shell copy, which names Coral (brand.js PRODUCT_NAME).
 
 const { it } = require("node:test");
 const assert = require("node:assert/strict");
@@ -95,7 +96,7 @@ it(
     }
     assert.ok(
       state.shellUrl && !state.loadingIndicatorVisible,
-      `still on "Opening Omnigent…" ${LEAVE_LOADING_WITHIN_MS / 1000}s after launch: ${JSON.stringify(state)}`,
+      `still on "Opening Coral…" ${LEAVE_LOADING_WITHIN_MS / 1000}s after launch: ${JSON.stringify(state)}`,
     );
     const setup = new URL(state.shellUrl);
     assert.equal(setup.protocol, "file:");

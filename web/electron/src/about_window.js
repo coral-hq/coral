@@ -6,10 +6,21 @@
 
 "use strict";
 
+const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+// CORAL(S87): Coral's name, a taller window for the attribution, and licence files opened from it.
+const { PRODUCT_NAME } = require("./brand");
 
 const ABOUT_WIDTH = 760;
-const ABOUT_HEIGHT = 480;
+const ABOUT_HEIGHT = 560;
+
+/** Licence files shipped with the app (package.json `build.extraResources` → legal/). */
+const LEGAL_FILES = new Set(["LICENSE", "NOTICE", "MODIFICATIONS.md"]);
+
+/** Where the licence files live: the packaged `resources/legal`, or the repo root in dev. */
+function legalDirectory({ isPackaged, resourcesPath, appRoot }) {
+  return isPackaged ? path.join(resourcesPath, "legal") : path.resolve(appRoot, "..", "..");
+}
 
 function platformDisplayName(platform) {
   if (platform === "darwin") return "macOS";
@@ -63,6 +74,9 @@ async function resolveAppIconDataUrl({
  * @param {(parent: Electron.BrowserWindow) => void} deps.onClosed
  * @param {string} deps.aboutPage Absolute path to the bundled About HTML.
  * @param {string} deps.preloadPath Absolute path to about_preload.js.
+ * @param {{ isPackaged: boolean, resourcesPath?: string, appRoot: string }} [deps.legalLocation]
+ *   Where the files in LEGAL_FILES live; see legalDirectory().
+ * @param {(filePath: string) => Promise<string>} [deps.openPath] `shell.openPath`.
  * @param {NodeJS.Platform} [deps.platform]
  */
 function createAboutWindow({
@@ -77,6 +91,8 @@ function createAboutWindow({
   onClosed = () => {},
   aboutPage,
   preloadPath,
+  legalLocation = null,
+  openPath = async () => "Opening files is unavailable.",
   platform = process.platform,
 }) {
   const aboutPageUrl = pathToFileURL(aboutPage);
@@ -122,7 +138,7 @@ function createAboutWindow({
     about = new BrowserWindow({
       ...(parent ? { parent } : {}),
       modal: Boolean(parent),
-      title: "About Omnigent",
+      title: `About ${PRODUCT_NAME}`,
       width: ABOUT_WIDTH,
       height: ABOUT_HEIGHT,
       minWidth: 640,
@@ -207,6 +223,16 @@ function createAboutWindow({
       }
     });
 
+    // Window navigation is locked to the About page, so the page asks the shell to
+    // open a bundled licence file in the system viewer instead of linking to it.
+    ipcMain.handle("omnigent:about-open-legal-file", async (event, name) => {
+      guard(event);
+      if (!LEGAL_FILES.has(name)) throw new Error(`Unknown licence file: ${name}`);
+      if (!legalLocation) return { ok: false, error: "Licence files are unavailable." };
+      const error = await openPath(path.join(legalDirectory(legalLocation), name));
+      return { ok: !error, error: error || null };
+    });
+
     ipcMain.on("omnigent:about-close", (event) => {
       if (senderIsAbout(event)) closeAbout();
     });
@@ -219,6 +245,8 @@ module.exports = {
   createAboutWindow,
   resolveAppIconDataUrl,
   platformDisplayName,
+  legalDirectory,
+  LEGAL_FILES,
   ABOUT_WIDTH,
   ABOUT_HEIGHT,
 };

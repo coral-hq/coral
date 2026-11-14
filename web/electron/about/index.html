@@ -7,7 +7,8 @@
       content="default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'self'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>About Omnigent</title>
+    <!-- CORAL(S87): Coral name, Apache-2.0 attribution, and Licence and Notices buttons -->
+    <title>About Coral</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -114,8 +115,16 @@
         display: flex;
         min-width: 0;
         flex-direction: column;
-        justify-content: center;
+        justify-content: safe center;
+        overflow-y: auto;
         padding: 28px 32px;
+      }
+
+      .attribution {
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
       }
 
       .component {
@@ -338,7 +347,7 @@
       <aside class="brand">
         <img id="app-icon" src="../icons/icon.png" alt="" />
         <div>
-          <h1>Omnigent</h1>
+          <h1>Coral</h1>
           <div id="product-kind" class="product-kind">Desktop</div>
         </div>
       </aside>
@@ -346,7 +355,7 @@
       <div class="content">
         <section class="component" aria-labelledby="desktop-heading">
           <div class="component-header">
-            <h2 id="desktop-heading">Omnigent Desktop app</h2>
+            <h2 id="desktop-heading">Coral Desktop app</h2>
           </div>
           <dl>
             <dt>Version</dt>
@@ -390,6 +399,19 @@
             <dd><code id="cli-path">Loading…</code></dd>
           </dl>
           <p class="cli-update">Run <code>omni update</code> to update.</p>
+        </section>
+
+        <section class="component" aria-label="Licence and notices">
+          <p id="attribution" class="attribution">
+            Coral is built on Omnigent (https://github.com/omnigent-ai/omnigent), Copyright (2026)
+            Databricks, Inc., used under the Apache License, Version 2.0. Coral is not affiliated
+            with or endorsed by Databricks, Inc.
+          </p>
+          <div class="actions">
+            <button id="open-licence" type="button">Licence</button>
+            <button id="open-notices" type="button">Notices</button>
+            <span id="legal-result" class="result" role="status" aria-live="polite"></span>
+          </div>
         </section>
 
         <footer class="footer">

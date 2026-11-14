@@ -18,6 +18,7 @@ const {
   parseLocalServerPidfile,
   localServerHealthy,
   candidatePaths,
+  getCliStatus,
   resolveCliPath,
   cliCommandParts,
   runCli,
@@ -244,6 +245,32 @@ describe("candidatePaths", () => {
     const omni = paths.indexOf("/opt/homebrew/bin/omni");
     assert.ok(og !== -1 && omni !== -1 && og < omni);
   });
+
+  // CORAL(S87): CLI detection also accepts a `coral` binary, after the upstream names.
+  it("also probes the coral CLI after the upstream names", () => {
+    const paths = candidatePaths();
+    assert.ok(paths.some((p) => p.endsWith("/.local/bin/coral")));
+    const omni = paths.indexOf("/opt/homebrew/bin/omni");
+    const coral = paths.indexOf("/opt/homebrew/bin/coral");
+    assert.ok(omni !== -1 && coral !== -1 && omni < coral);
+  });
+
+  it(
+    "accepts a coral CLI that reports its own name",
+    { skip: process.platform === "win32" },
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "coral-cli-"));
+      const binary = path.join(dir, "coral");
+      fs.writeFileSync(binary, '#!/bin/sh\necho "coral 0.1.0"\n', { mode: 0o755 });
+      try {
+        const status = await getCliStatus(binary);
+        assert.equal(status.installed, true);
+        assert.equal(status.version, "coral 0.1.0");
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("resolveCliPath", () => {

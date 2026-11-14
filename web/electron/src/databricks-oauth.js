@@ -25,6 +25,8 @@
 "use strict";
 
 const { diagnostics } = require("./diagnostics");
+// CORAL(S87): user-facing copy names the product from brand.js.
+const { PRODUCT_NAME } = require("./brand");
 
 const crypto = require("node:crypto");
 const { shell } = require("electron");
@@ -432,15 +434,15 @@ async function runInteractiveLogin(origin, { signal } = {}) {
     pages: {
       received: [
         "Databricks sign-in received",
-        "Return to Omnigent to finish connecting, then close this tab.",
+        `Return to ${PRODUCT_NAME} to finish connecting, then close this tab.`,
       ],
       failed: [
         "Databricks sign-in was not completed",
-        "Close this tab and try connecting again in Omnigent.",
+        `Close this tab and try connecting again in ${PRODUCT_NAME}.`,
       ],
       incomplete: [
         "Databricks sign-in could not be completed",
-        "Close this tab and try connecting again in Omnigent.",
+        `Close this tab and try connecting again in ${PRODUCT_NAME}.`,
       ],
     },
     signal,

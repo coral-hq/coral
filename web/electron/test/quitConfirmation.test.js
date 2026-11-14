@@ -1,3 +1,4 @@
+// CORAL(S87): assertions follow the shell copy, which names Coral (brand.js PRODUCT_NAME).
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -56,11 +57,11 @@ describe("quitPromptDetail", () => {
     );
     assert.equal(
       quitPromptDetail({ hosts: 0, localServer: true }),
-      "The local Omnigent server will stop.",
+      "The local Coral server will stop.",
     );
     assert.equal(
       quitPromptDetail({ hosts: 1, localServer: true }),
-      "Sessions running on this computer will go offline, and the local Omnigent server will stop.",
+      "Sessions running on this computer will go offline, and the local Coral server will stop.",
     );
   });
 });

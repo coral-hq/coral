@@ -1,3 +1,4 @@
+// CORAL(S87): assertions follow the shell copy, which names Coral (brand.js PRODUCT_NAME).
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
@@ -9,6 +10,7 @@ const {
   createAboutWindow,
   resolveAppIconDataUrl,
   platformDisplayName,
+  legalDirectory,
   ABOUT_HEIGHT,
   ABOUT_WIDTH,
 } = require("../src/about_window");
@@ -90,6 +92,8 @@ function makeAbout({
   installReady = true,
   appIconDataUrl = "data:image/png;base64,native-icon",
   platform = "darwin",
+  legalLocation = null,
+  openPathError = "",
 } = {}) {
   const windows = [];
   class BrowserWindow extends FakeWindow {
@@ -106,6 +110,7 @@ function makeAbout({
     desktopDownloadParents: [],
     desktopInstalls: 0,
     closedParents: [],
+    openedPaths: [],
   };
   const updater = {
     getStatus: () => desktopStatus ?? { state: "none" },
@@ -142,6 +147,11 @@ function makeAbout({
     onClosed: (parent) => calls.closedParents.push(parent),
     aboutPage: ABOUT_PAGE,
     preloadPath: "/app/src/about_preload.js",
+    legalLocation,
+    openPath: async (filePath) => {
+      calls.openedPaths.push(filePath);
+      return openPathError;
+    },
     platform,
   });
   controller.registerIpc();
@@ -246,8 +256,15 @@ describe("About window", () => {
     assert.match(html, /id="desktop-restart"[^>]*>Restart to update<\/button>/);
     assert.match(html, /Run <code>omni update<\/code> to update\./);
     assert.match(html, /id="close"[^>]*>Close<\/button>/);
+    assert.match(
+      html,
+      /Coral is built on Omnigent \(https:\/\/github\.com\/omnigent-ai\/omnigent\)/,
+    );
+    assert.match(html, /id="open-licence"[^>]*>Licence<\/button>/);
+    assert.match(html, /id="open-notices"[^>]*>Notices<\/button>/);
+    assert.match(preload, /openLegalFile:[\s\S]*omnigent:about-open-legal-file/);
     assert.match(script, /info\.appIconDataUrl\.startsWith\("data:image\/"\)/);
-    assert.match(script, /desktopHeading\.textContent = `Omnigent \$\{platformName\} app`/);
+    assert.match(script, /desktopHeading\.textContent = `Coral \$\{platformName\} app`/);
     assert.match(script, /event\.key !== "Escape"/);
     assert.match(script, /api\?\.close\(\)/);
     assert.match(preload, /downloadDesktopUpdate:[\s\S]*about-download-desktop-update/);
@@ -395,6 +412,60 @@ describe("About window", () => {
 
     await h.handleHandlers.get("omnigent:about-install-desktop-update")(event);
     assert.equal(h.calls.desktopInstalls, 1);
+  });
+
+  // CORAL(S87): the About page's Licence and Notices buttons open the shipped licence files.
+  it("opens only the shipped licence files, and only for the bundled About page", async () => {
+    const legalLocation = {
+      isPackaged: true,
+      resourcesPath: "/Applications/Coral.app/Contents/Resources",
+      appRoot: "/app",
+    };
+    const h = makeAbout({ legalLocation });
+    const about = h.controller.open(new FakeWindow());
+    const openLegal = h.handleHandlers.get("omnigent:about-open-legal-file");
+
+    assert.deepEqual(await openLegal(eventFor(about), "LICENSE"), { ok: true, error: null });
+    assert.deepEqual(await openLegal(eventFor(about), "NOTICE"), { ok: true, error: null });
+    assert.deepEqual(h.calls.openedPaths, [
+      "/Applications/Coral.app/Contents/Resources/legal/LICENSE",
+      "/Applications/Coral.app/Contents/Resources/legal/NOTICE",
+    ]);
+    await assert.rejects(openLegal(eventFor(about), "../../etc/passwd"), /Unknown licence file/);
+    await assert.rejects(
+      openLegal(eventFor(about, "https://evil.example/"), "LICENSE"),
+      /bundled About/,
+    );
+    assert.equal(h.calls.openedPaths.length, 2);
+  });
+
+  it("reports a licence file the system could not open", async () => {
+    const h = makeAbout({
+      legalLocation: { isPackaged: false, appRoot: "/repo/web/electron" },
+      openPathError: "No application knows how to open it",
+    });
+    const about = h.controller.open(new FakeWindow());
+
+    assert.deepEqual(
+      await h.handleHandlers.get("omnigent:about-open-legal-file")(eventFor(about), "NOTICE"),
+      { ok: false, error: "No application knows how to open it" },
+    );
+    assert.deepEqual(h.calls.openedPaths, ["/repo/NOTICE"]);
+  });
+
+  it("finds the licence files in resources/legal when packaged and at the repo root in dev", () => {
+    assert.equal(
+      legalDirectory({
+        isPackaged: true,
+        resourcesPath: "/opt/Coral/resources",
+        appRoot: "/ignored",
+      }),
+      "/opt/Coral/resources/legal",
+    );
+    const devDir = legalDirectory({ isPackaged: false, appRoot: path.join(__dirname, "..") });
+    for (const name of ["LICENSE", "NOTICE", "MODIFICATIONS.md"]) {
+      assert.ok(fs.existsSync(path.join(devDir, name)), name);
+    }
   });
 
   it("rejects install when no downloaded update is ready", async () => {

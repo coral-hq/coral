@@ -64,7 +64,7 @@ function renderDesktopUpdate(status) {
     desktopCheck.hidden = false;
     showResult(desktopResult, {
       state: "up-to-date",
-      message: "Omnigent Desktop is up to date.",
+      message: "Coral Desktop is up to date.",
     });
     return;
   }
@@ -125,7 +125,7 @@ async function loadInfo() {
     }
     const platformName = info?.platformName || "Desktop";
     productKind.textContent = platformName;
-    desktopHeading.textContent = `Omnigent ${platformName} app`;
+    desktopHeading.textContent = `Coral ${platformName} app`;
     desktopVersion.textContent = info?.desktopVersion || "Unavailable";
 
     const cli = info?.cli;
@@ -178,6 +178,25 @@ desktopRestart.addEventListener("click", async () => {
     showResult(desktopResult, { state: "error", message: "Unable to install the update." });
   }
 });
+
+// CORAL(S87): Licence and Notices open the LICENSE and NOTICE files shipped with the app.
+for (const [buttonId, fileName] of [
+  ["open-licence", "LICENSE"],
+  ["open-notices", "NOTICE"],
+]) {
+  document.getElementById(buttonId)?.addEventListener("click", async () => {
+    const legalResult = document.getElementById("legal-result");
+    try {
+      const result = await api.openLegalFile(fileName);
+      showResult(
+        legalResult,
+        result?.ok ? null : { state: "error", message: `Unable to open ${fileName}.` },
+      );
+    } catch {
+      showResult(legalResult, { state: "error", message: `Unable to open ${fileName}.` });
+    }
+  });
+}
 
 closeButton.addEventListener("click", () => api?.close());
 document.addEventListener("keydown", (event) => {

@@ -1,28 +1,28 @@
 {
   "name": "omnigent-desktop-electron",
-  "productName": "Omnigent",
+  "productName": "Coral",
   "version": "0.21.0",
-  "description": "Omnigent desktop shell (Electron edition) \u2014 a thin native wrapper around the server-served web UI.",
+  "description": "Coral desktop shell, built on Omnigent",
   "private": true,
   "main": "src/main.js",
-  "homepage": "https://omnigent.ai",
+  "homepage": "https://github.com/coral-hq/coral",
   "repository": {
     "type": "git",
-    "url": "https://github.com/omnigent-ai/omnigent.git"
+    "url": "https://github.com/coral-hq/coral.git"
   },
   "author": {
-    "name": "Databricks, Inc.",
-    "email": "support@omnigent.ai"
+    "name": "The Coral Authors",
+    "email": "coralai.team@gmail.com"
   },
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
     "test": "node --test",
-    "build": "electron-builder -c.appId=ai.omnigent.desktop-dev -c.productName='Omnigent Dev' -c.directories.output=dist-dev -c.extraMetadata.omnigentBuild=dev",
-    "build:mac": "electron-builder --mac -c.appId=ai.omnigent.desktop-dev -c.productName='Omnigent Dev' -c.directories.output=dist-dev -c.extraMetadata.omnigentBuild=dev",
+    "build": "electron-builder -c.appId=io.github.coral-hq.coral-dev -c.productName='Coral Dev' -c.directories.output=dist-dev -c.extraMetadata.omnigentBuild=dev",
+    "build:mac": "electron-builder --mac -c.appId=io.github.coral-hq.coral-dev -c.productName='Coral Dev' -c.directories.output=dist-dev -c.extraMetadata.omnigentBuild=dev",
     "build:mac:release": "OMNIGENT_NOTARIZE_DMG=true electron-builder --mac -c.mac.notarize=true -c.dmg.sign=true",
-    "build:linux": "electron-builder --linux -c.appId=ai.omnigent.desktop-dev -c.productName='Omnigent Dev' -c.directories.output=dist-dev -c.extraMetadata.omnigentBuild=dev",
-    "build:win": "electron-builder --win -c.appId=ai.omnigent.desktop-dev -c.productName='Omnigent Dev' -c.directories.output=dist-dev -c.extraMetadata.omnigentBuild=dev",
+    "build:linux": "electron-builder --linux -c.appId=io.github.coral-hq.coral-dev -c.productName='Coral Dev' -c.directories.output=dist-dev -c.extraMetadata.omnigentBuild=dev",
+    "build:win": "electron-builder --win -c.appId=io.github.coral-hq.coral-dev -c.productName='Coral Dev' -c.directories.output=dist-dev -c.extraMetadata.omnigentBuild=dev",
     "build:overlay": "pnpm --filter web run build:overlay && pnpm --filter web run build:server-selector-v2",
     "predev": "pnpm run build:overlay",
     "prestart": "pnpm run build:overlay",
@@ -39,8 +39,9 @@
     "playwright": "^1.62.1"
   },
   "build": {
-    "appId": "ai.omnigent.desktop",
-    "productName": "Omnigent",
+    "appId": "io.github.coral-hq.coral",
+    "productName": "Coral",
+    "copyright": "Copyright © 2026 The Coral Authors. Portions Copyright (2026) Databricks, Inc. (Omnigent, Apache-2.0).",
     "directories": {
       "output": "dist"
     },
@@ -55,7 +56,7 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://omnigent.ai/_desktop/updates/"
+        "url": "https://github.com/coral-hq/coral/releases/latest/download/"
       }
     ],
     "afterPack": "build/afterPack.js",
@@ -87,18 +88,38 @@
       {
         "from": "../../scripts/install_oss.sh",
         "to": "install_oss.sh"
+      },
+      {
+        "from": "../../LICENSE",
+        "to": "legal/LICENSE"
+      },
+      {
+        "from": "../../NOTICE",
+        "to": "legal/NOTICE"
+      },
+      {
+        "from": "../../MODIFICATIONS.md",
+        "to": "legal/MODIFICATIONS.md"
+      },
+      {
+        "from": "../public/licenses/geist-mono-OFL-1.1.txt",
+        "to": "legal/geist-mono-OFL-1.1.txt"
+      },
+      {
+        "from": "../public/licenses/newsreader-OFL-1.1.txt",
+        "to": "legal/newsreader-OFL-1.1.txt"
       }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "icons/icon.icns",
       "artifactName": "${productName}-${version}-${arch}-mac.${ext}",
-      "identity": "Databricks, Inc. (8RMX4WU6F8)",
+      "identity": null,
       "hardenedRuntime": true,
       "entitlements": "signing/entitlements.mac.plist",
       "entitlementsInherit": "signing/entitlements.mac.inherit.plist",
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Omnigent uses the microphone for voice dictation in the message composer.",
+        "NSMicrophoneUsageDescription": "Coral uses the microphone for voice dictation in the message composer.",
         "CFBundleIconName": "AppIcon",
         "NSPrefersDisplaySafeAreaCompatibilityMode": false
       },
@@ -123,13 +144,13 @@
       "publish": [
         {
           "provider": "generic",
-          "url": "https://omnigent.ai/_desktop/updates/"
+          "url": "https://github.com/coral-hq/coral/releases/latest/download/"
         }
       ]
     },
     "dmg": {
       "artifactName": "${productName}-${version}-${arch}.${ext}",
-      "background": "dmg/background.tiff",
+      "background": "dmg/coral-background.tiff",
       "window": {
         "width": 640,
         "height": 465
@@ -151,7 +172,7 @@
     "linux": {
       "icon": "icons/icon.svg",
       "category": "Development",
-      "maintainer": "Databricks, Inc. <support@omnigent.ai>",
+      "maintainer": "The Coral Authors <coralai.team@gmail.com>",
       "target": [
         "AppImage",
         "deb"
@@ -159,7 +180,7 @@
       "publish": [
         {
           "provider": "generic",
-          "url": "https://omnigent.ai/_desktop/updates/"
+          "url": "https://github.com/coral-hq/coral/releases/latest/download/"
         }
       ]
     },
@@ -171,7 +192,7 @@
       "publish": [
         {
           "provider": "generic",
-          "url": "https://omnigent.ai/_desktop/updates/"
+          "url": "https://github.com/coral-hq/coral/releases/latest/download/"
         }
       ]
     }

@@ -217,3 +217,68 @@ seams:
       - web/public/coral-apple-touch-icon.png
     upstream_first: false
     upstream_candidate: false
+
+  - id: S87
+    title: Electron desktop identity, publisher metadata, update feed and copy
+    owner: WS-BRAND
+    status: landed
+    category: coral-specific
+    files:
+      - web/electron/src/brand.js
+      - web/electron/test/brand.test.js
+      - web/electron/package.json
+      - web/electron/dev-app-update.yml
+      - web/electron/dmg/coral-background.tiff
+      - web/electron/src/main.js
+      - web/electron/src/desktop_updater.js
+      - web/electron/src/dev_preferences.js
+      - web/electron/src/omnigent_cli.js
+      - web/electron/src/quitConfirmation.js
+      - web/electron/src/ssh_connect.js
+      - web/electron/src/ssh_connect_window.js
+      - web/electron/src/browserIpc.js
+      - web/electron/src/databricks-oauth.js
+      - web/electron/src/oidc-credentials.js
+      - web/electron/src/about_window.js
+      - web/electron/src/about_preload.js
+      - web/electron/about/index.html
+      - web/electron/about/index.js
+      - web/electron/connection-loading/index.html
+      - web/electron/return-banner/index.html
+      - web/electron/ssh-connect/console.js
+      - web/electron/e2e/desktopHarness.js
+      - web/electron/e2e/desktop_saved_server_unresponsive.e2e.js
+      - web/electron/test/about_page.test.js
+      - web/electron/test/about_window.test.js
+      - web/electron/test/chromeCookieImportPrompt.test.js
+      - web/electron/test/databricks-oauth.test.js
+      - web/electron/test/desktop_updater.test.js
+      - web/electron/test/main.test.js
+      - web/electron/test/omnigent_cli.test.js
+      - web/electron/test/quitConfirmation.test.js
+      - web/electron/test/ssh_connect.test.js
+      - web/electron/test/update-main.test.js
+      - tests/e2e_ui/desktop/test_about_dialog.py
+      - justfile
+    tests:
+      - web/electron/test/brand.test.js
+      - web/electron/test/about_window.test.js
+      - web/electron/test/about_page.test.js
+      - web/electron/test/desktop_updater.test.js
+      - web/electron/test/omnigent_cli.test.js
+      - web/electron/test/update-main.test.js
+      - tests/e2e_ui/desktop/test_about_dialog.py
+    budget_lines: 40
+    budget_exception:
+      lines: 125
+      reason: >-
+        New brand.js and its brand.test.js, the package.json identity and
+        legal-file block, about 20 main.js literals moved to brand.js, and the
+        About window's attribution, Licence and Notices buttons with their
+        IPC handler and tests.
+      approver: pending
+    anchor_exempt:
+      - web/electron/package.json
+      - web/electron/dmg/coral-background.tiff
+    upstream_first: false
+    upstream_candidate: false

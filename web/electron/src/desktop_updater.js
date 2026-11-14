@@ -24,6 +24,9 @@
 
 "use strict";
 
+// CORAL(S87): user-facing copy names the product from brand.js.
+const { PRODUCT_NAME } = require("./brand");
+
 /** Update modes persisted in settings.json under `update_mode`. */
 const UPDATE_MODES = new Set(["none", "manual", "start", "default"]);
 const UPDATES_UNAVAILABLE_IN_DEV = "Desktop updates are unavailable in development builds.";
@@ -344,21 +347,21 @@ function createDesktopUpdater({
 
     const copy = {
       download: {
-        message: "Download an Omnigent update?",
+        message: `Download a ${PRODUCT_NAME} update?`,
         detail:
-          `${host} wants to download a desktop update for this Omnigent app.\n\n` +
+          `${host} wants to download a desktop update for this ${PRODUCT_NAME} app.\n\n` +
           `Only allow servers you trust.`,
       },
       install: {
-        message: "Restart Omnigent to install an update?",
+        message: `Restart ${PRODUCT_NAME} to install an update?`,
         detail:
-          `${host} wants to restart Omnigent and install the downloaded desktop update.\n\n` +
+          `${host} wants to restart ${PRODUCT_NAME} and install the downloaded desktop update.\n\n` +
           `Only allow servers you trust.`,
       },
       config: {
-        message: "Change Omnigent update settings?",
+        message: `Change ${PRODUCT_NAME} update settings?`,
         detail:
-          `${host} wants to change how this Omnigent app checks for and installs updates.\n\n` +
+          `${host} wants to change how this ${PRODUCT_NAME} app checks for and installs updates.\n\n` +
           `Only allow servers you trust.`,
       },
     }[action];
@@ -368,7 +371,7 @@ function createDesktopUpdater({
     const { response } = await dialog.showMessageBox(win, {
       type: "warning",
       icon: icon.isEmpty() ? undefined : icon,
-      title: "Omnigent",
+      title: PRODUCT_NAME,
       message: copy.message,
       detail: copy.detail,
       buttons: ["Don't Allow", "Allow Once"],

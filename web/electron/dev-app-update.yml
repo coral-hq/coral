@@ -1,3 +1,4 @@
 provider: generic
-url: https://omnigent.ai/_desktop/updates/
-updaterCacheDirName: omnigent-desktop-electron-updater-dev
+# CORAL(S87): dev builds read Coral's update feed and their own updater cache.
+url: https://github.com/coral-hq/coral/releases/latest/download/
+updaterCacheDirName: coral-desktop-updater-dev

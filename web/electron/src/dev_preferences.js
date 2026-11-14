@@ -2,7 +2,10 @@
 
 const { execFileSync } = require("node:child_process");
 
-const DEV_DOMAIN = "ai.omnigent.desktop-dev";
+// CORAL(S87): local dev defaults live in the Coral dev app id's domain.
+const { DEV_APP_ID } = require("./brand");
+
+const DEV_DOMAIN = DEV_APP_ID;
 
 /** Electron's unpackaged macOS binary has its own bundle ID. Read our dev
  * domain explicitly so local defaults can be used without repackaging it. */

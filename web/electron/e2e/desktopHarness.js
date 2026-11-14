@@ -382,7 +382,8 @@ async function launchDesktop(opts) {
   fs.mkdirSync(userDataDir, { recursive: true });
   if (opts.serverUrl) {
     // Seed both profile locations, matching main.js's development userData path.
-    for (const profile of [userDataDir, path.join(userDataDir, "Omnigent Dev")]) {
+    // CORAL(S87): the dev profile folder is "Coral Dev".
+    for (const profile of [userDataDir, path.join(userDataDir, "Coral Dev")]) {
       fs.mkdirSync(profile, { recursive: true });
       fs.writeFileSync(
         path.join(profile, "settings.json"),

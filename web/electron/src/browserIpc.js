@@ -8,6 +8,8 @@
 "use strict";
 
 const crypto = require("node:crypto");
+// CORAL(S87): user-facing copy names the product from brand.js.
+const { PRODUCT_NAME } = require("./brand");
 const { buildBrowserActionScript } = require("./browserActionScript.mjs");
 const chromeCookieStoreModule = require("./chromeCookieStore");
 const { decodeLegacyBrowserAction } = require("./browserLegacyAction");
@@ -62,11 +64,11 @@ function buildCookieImportPrompt({ host, scope, profileName, cookieCount }) {
       ? `${scope} and its subdomains (this tab is on ${host})`
       : `${scope} and its subdomains`;
   return {
-    message: `Import ${what} into Omnigent?`,
+    message: `Import ${what} into ${PRODUCT_NAME}?`,
     detail:
       `From Chrome profile "${flattenProfileLabel(profileName, scope)}" for ${where}.\n\n` +
       "They stay available to this conversation's embedded browser tabs, including any the " +
-      "agent controls, until you quit Omnigent.",
+      `agent controls, until you quit ${PRODUCT_NAME}.`,
   };
 }
 

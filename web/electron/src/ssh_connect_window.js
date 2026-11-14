@@ -12,6 +12,9 @@
  * All Electron surfaces are injected so the flow is unit-testable.
  */
 
+// CORAL(S87): user-facing copy names the product from brand.js.
+const { PRODUCT_NAME } = require("./brand");
+
 const CONFIRM_CHANNEL = "ssh-connect:confirm";
 const CANCEL_CHANNEL = "ssh-connect:cancel";
 const ANSWER_CHANNEL = "ssh-connect:answer";
@@ -187,7 +190,7 @@ function createSshConnectFlow({
       askInstall: async () =>
         (await ask(
           "install",
-          `Omnigent isn't installed on ${destination}. Install it now? This runs the Omnigent installer there, which also installs uv and the Databricks CLI.`,
+          `${PRODUCT_NAME} isn't installed on ${destination}. Install it now? This runs the ${PRODUCT_NAME} installer there, which also installs uv and the Databricks CLI.`,
         )) === "yes",
     };
 

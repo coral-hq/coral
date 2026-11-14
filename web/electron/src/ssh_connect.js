@@ -29,6 +29,8 @@ const { isDatabricksOAuthServerUrl } = require("./url");
 const { readArcaIdentity, IDENTITY_START, IDENTITY_END } = require("./arcaIdentity");
 const { UV_INSTALLER } = require("./cli_install");
 const { createAskpass } = require("./ssh_askpass");
+// CORAL(S87): user-facing copy names the product from brand.js.
+const { PRODUCT_NAME } = require("./brand");
 
 /** Includes time for the user to type a password or trust a new host. */
 const OPEN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -752,12 +754,16 @@ async function runSshConnect(ctx) {
     let login = await signIn({ ...full, openExternal: openSafely });
     if (!login.ok && login.missingCli) {
       if (!(await full.askInstall())) {
-        return { ok: false, canceled: true, error: `Omnigent isn't installed on ${destination}.` };
+        return {
+          ok: false,
+          canceled: true,
+          error: `${PRODUCT_NAME} isn't installed on ${destination}.`,
+        };
       }
       if (full.isCanceled()) return canceledResult();
       const installer = full.readInstallScript();
       if (!installer)
-        return { ok: false, error: "This build doesn't include the Omnigent installer." };
+        return { ok: false, error: `This build doesn't include the ${PRODUCT_NAME} installer.` };
       onStatus({ step: "installing" });
       const install = await session.exec(installScript(), {
         stdin: installer,
@@ -770,15 +776,15 @@ async function runSshConnect(ctx) {
         return {
           ok: false,
           error: install.timedOut
-            ? `Installing Omnigent on ${destination} timed out.`
-            : `Installing Omnigent on ${destination} failed: ${detail || `exit code ${install.code}`}`,
+            ? `Installing ${PRODUCT_NAME} on ${destination} timed out.`
+            : `Installing ${PRODUCT_NAME} on ${destination} failed: ${detail || `exit code ${install.code}`}`,
         };
       }
       login = await signIn({ ...full, openExternal: openSafely });
     }
     if (!login.ok) {
       return login.missingCli
-        ? { ok: false, error: `Omnigent still isn't on the PATH on ${destination}.` }
+        ? { ok: false, error: `${PRODUCT_NAME} still isn't on the PATH on ${destination}.` }
         : login;
     }
 
@@ -795,8 +801,8 @@ async function runSshConnect(ctx) {
       return {
         ok: false,
         error: host.timedOut
-          ? `Starting the Omnigent host on ${destination} timed out.`
-          : `Starting the Omnigent host on ${destination} failed: ${detail || `exit code ${host.code}`}`,
+          ? `Starting the ${PRODUCT_NAME} host on ${destination} timed out.`
+          : `Starting the ${PRODUCT_NAME} host on ${destination} failed: ${detail || `exit code ${host.code}`}`,
       };
     }
     const identity = readArcaIdentity(host.stdout, serverUrl, full.onIdentityUnavailable);

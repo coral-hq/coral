@@ -1,3 +1,4 @@
+// CORAL(S87): assertions follow the shell copy, which names Coral (brand.js PRODUCT_NAME).
 // Regression guard for how src/main.js WIRES workspace-chrome injection, run
 // with `node --test` (no extra deps). The wiring itself lives in
 // src/workspace-chrome.js (registerWorkspaceChromeHide registers a
@@ -5115,7 +5116,7 @@ it("keeps native feedback through cold authentication and the server document lo
   assert.equal(h.calls.loadURL.length, 0);
   finishAuth(new URL(target).origin);
   await tick();
-  assert.equal(h.calls.loading.at(-1).label, "Opening Omnigent…");
+  assert.equal(h.calls.loading.at(-1).label, "Opening Coral…");
   assert.equal(h.calls.loadURL.length, 1);
   const attempt = h.calls.loading.at(-1).attempt;
   finishLoad();
@@ -5137,7 +5138,7 @@ it("dismisses native loading feedback when the server document fails", async (t)
   h.api.setServerResponseTimeoutMs(20);
   await assert.rejects(h.api.loadServerUrl(h.win, "https://example.com/"), /connection lost/);
   const shown = h.calls.loading.find((call) => call.action === "show");
-  assert.equal(shown.label, "Opening Omnigent…");
+  assert.equal(shown.label, "Opening Coral…");
   assert.deepEqual(h.calls.loading.at(-1), { action: "hide", attempt: shown.attempt });
   await wait(40);
   assert.equal(stops, 0);
@@ -5180,7 +5181,7 @@ describe("server response deadline (src/main.js)", () => {
       ["ERR_TIMED_OUT (-7)", `${server}/`],
     );
     const shown = h.calls.loading.find((call) => call.action === "show");
-    assert.equal(shown.label, "Opening Omnigent…");
+    assert.equal(shown.label, "Opening Coral…");
     assert.deepEqual(h.calls.loading.at(-1), { action: "hide", attempt: shown.attempt });
     const recorded = (name) =>
       events.filter(([event]) => event === name).map(([, fields]) => fields);

@@ -1,5 +1,8 @@
 "use strict";
 
+// CORAL(S87): user-facing copy names the product from brand.js.
+const { PRODUCT_NAME } = require("./brand");
+
 // The Quit menu item (⌘Q / Ctrl+Q) asks before quitting, because quitting also
 // disconnects the hosts this app runs and stops a local server it started.
 // The window's page asks, in an in-app dialog. Only the menu item asks: Dock
@@ -25,10 +28,10 @@ function confirmBeforeQuitEnabled(settings) {
  */
 function quitPromptDetail({ hosts, localServer }) {
   if (hosts > 0 && localServer) {
-    return "Sessions running on this computer will go offline, and the local Omnigent server will stop.";
+    return `Sessions running on this computer will go offline, and the local ${PRODUCT_NAME} server will stop.`;
   }
   if (hosts > 0) return "Sessions running on this computer will go offline.";
-  if (localServer) return "The local Omnigent server will stop.";
+  if (localServer) return `The local ${PRODUCT_NAME} server will stop.`;
   return null;
 }
 

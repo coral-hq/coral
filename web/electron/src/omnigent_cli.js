@@ -36,8 +36,8 @@ const LOGIN_TIMEOUT_MS = 305000;
  * One-liner shown on the setup page when the CLI is missing. Mirrors the
  * install instructions in the repo root README.
  */
-const INSTALL_COMMAND =
-  "curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh";
+// CORAL(S87): the install command and CLI names come from brand.js; detection also accepts `coral`.
+const { CLI_NAMES, INSTALL_COMMAND } = require("./brand");
 
 /**
  * Strip a trailing slash so URL comparisons survive the difference between
@@ -267,14 +267,6 @@ async function localServerHealthy(timeoutMs = 1500) {
   }
   return null;
 }
-
-/**
- * The CLI binary's two console-script names — both resolve to the same entry
- * point (`omnigent.cli:main`); `omni` is the short alias. We probe `omnigent`
- * first (canonical) but accept `omni` so a machine that only installed the
- * alias still resolves. See pyproject.toml `[project.scripts]`.
- */
-const CLI_NAMES = ["omnigent", "omni"];
 
 /**
  * Well-known install locations for the CLI binary, in priority order. For each
@@ -611,7 +603,7 @@ async function getCliStatus(configuredPath) {
   // e.g. "omnigent 0.3.0.dev0 (…)". The exit-code alone isn't enough: an
   // unrelated binary (e.g. /bin/echo) also exits 0 on `--version`, and we must
   // not accept it as the CLI (it would later fail to run a server / host).
-  const ok = res.code === 0 && /\bomni/i.test(version);
+  const ok = res.code === 0 && /\b(omni|coral)/i.test(version);
   return {
     installed: ok,
     path: ok ? resolved.path : null,

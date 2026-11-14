@@ -88,14 +88,15 @@ window.sshConnect.onStarted(() => {
   showStatus("", `Connecting to ${destination}...`);
 });
 
+// CORAL(S87): the console names Coral (this page cannot load brand.js).
 const STATUS_TEXT = {
   connecting: () => `Connecting to ${destination}...`,
   "signing-in": () => `Signing in to the server on ${destination}...`,
   "waiting-for-browser": () =>
     "Finish signing in in your browser. This window updates when you're done.",
   "confirm-code": (status) => `Confirm this code in your browser: ${status.code}`,
-  installing: () => `Installing Omnigent on ${destination}. This can take a few minutes.`,
-  "starting-host": () => `Starting the Omnigent host on ${destination}...`,
+  installing: () => `Installing Coral on ${destination}. This can take a few minutes.`,
+  "starting-host": () => `Starting the Coral host on ${destination}...`,
 };
 
 function showStatus(kind, text) {
@@ -119,7 +120,7 @@ const PROMPT_COPY = {
   confirm: { title: "Trust this machine?", ok: "Trust", input: null },
   secret: { title: "SSH asks for a secret", ok: "Continue", input: "password" },
   text: { title: "SSH asks a question", ok: "Continue", input: "text" },
-  install: { title: "Install Omnigent?", ok: "Install", input: null },
+  install: { title: "Install Coral?", ok: "Install", input: null },
 };
 
 window.sshConnect.onPrompt(({ id, kind, text }) => {

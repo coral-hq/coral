@@ -159,7 +159,8 @@ electron-run *flags:
         arm64) archdir="mac-arm64" ;;
         *) archdir="mac" ;;  # electron-builder names the x64 output "mac"
     esac
-    find_app() { ls -d "web/electron/dist-dev/$archdir/Omnigent Dev.app" 2>/dev/null | head -1 || true; }
+    # CORAL(S87): the dev desktop build is named "Coral Dev".
+    find_app() { ls -d "web/electron/dist-dev/$archdir/Coral Dev.app" 2>/dev/null | head -1 || true; }
     app="$(find_app)"
     if [ "$rebuild" = 1 ] || [ -z "$app" ]; then
         echo "Building the packaged app (this takes a few minutes)…"
@@ -168,9 +169,9 @@ electron-run *flags:
         app="$(find_app)"
     fi
     [ -n "$app" ] || { echo "No $archdir build found after building."; exit 1; }
-    echo "Quitting any running Omnigent Dev…"
-    osascript -e 'quit app "Omnigent Dev"' 2>/dev/null || true
-    pkill -x 'Omnigent Dev' 2>/dev/null || true
+    echo "Quitting any running Coral Dev…"
+    osascript -e 'quit app "Coral Dev"' 2>/dev/null || true
+    pkill -x 'Coral Dev' 2>/dev/null || true
     sleep 1
     if [ "$reset_state" = 1 ]; then
         # Uninstall the CLI. The shared uninstaller exits non-zero both when no
@@ -189,9 +190,9 @@ electron-run *flags:
         # Wipe the desktop app data directly so a fresh-user reset works even with
         # no CLI installed (the uninstaller's global guard skips desktop-data in
         # that case). Intentional destroy — see the confirmation above.
-        rm -rf "$HOME/Library/Application Support/Omnigent Dev" \
-               "$HOME/Library/Caches/Omnigent Dev" \
-               "$HOME/Library/Logs/Omnigent Dev"
+        rm -rf "$HOME/Library/Application Support/Coral Dev" \
+               "$HOME/Library/Caches/Coral Dev" \
+               "$HOME/Library/Logs/Coral Dev"
     fi
     if [ "$v2" = 1 ]; then
         echo "Launching $app (v2 flow forced)"

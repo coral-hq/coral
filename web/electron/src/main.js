@@ -82,7 +82,9 @@ const { goBack, goForward, registerBrowserIpc } = require("./browserIpc");
 const { arcaTarget, createArcaIdentityStore, isArcaAgentContext } = require("./arcaIdentity");
 const { createHostThisMachineChecker, SESSION_HOST_PROTOCOL } = require("./hostIdentity");
 const { isDeveloperModeEnabled } = require("./developer_mode");
-const { DEV_DOMAIN, getDevUserDefault } = require("./dev_preferences");
+const { getDevUserDefault } = require("./dev_preferences");
+// CORAL(S87): Coral's product name and app ids replace the Omnigent literals in this file.
+const { APP_ID, DEV_APP_ID, DEV_PRODUCT_NAME, PRODUCT_NAME } = require("./brand");
 const {
   excludingManagedServers,
   getDatabricksInternalFeaturesEnabled,
@@ -1698,11 +1700,11 @@ async function confirmGlobalShortcut(win, accelerator) {
   const { response } = await dialog.showMessageBox(win, {
     type: "question",
     icon: icon.isEmpty() ? undefined : icon,
-    title: "Omnigent",
-    message: `Use ${label} to show Omnigent from any app?`,
+    title: PRODUCT_NAME,
+    message: `Use ${label} to show ${PRODUCT_NAME} from any app?`,
     detail:
-      `${host} wants to set a system-wide shortcut. While Omnigent is running, pressing ` +
-      `${label} in any app brings Omnigent to the front.\n\nOnly allow servers you trust.`,
+      `${host} wants to set a system-wide shortcut. While ${PRODUCT_NAME} is running, pressing ` +
+      `${label} in any app brings ${PRODUCT_NAME} to the front.\n\nOnly allow servers you trust.`,
     buttons: ["Don't Allow", "Allow"],
     defaultId: 0,
     cancelId: 0,
@@ -1769,6 +1771,13 @@ const aboutWindow = createAboutWindow({
   onClosed: (parent) => updateOverlay.unsuppress(parent),
   aboutPage: ABOUT_PAGE,
   preloadPath: path.join(__dirname, "about_preload.js"),
+  // CORAL(S87): the About page's Licence and Notices buttons open the shipped licence files.
+  legalLocation: {
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    appRoot: path.join(__dirname, ".."),
+  },
+  openPath: (filePath) => shell.openPath(filePath),
 });
 
 const connectionLoading = createConnectionLoading({ BrowserWindow });
@@ -2442,7 +2451,8 @@ async function loadServerUrl(
         if (current()) setWindowServerManifest(win, nextManifest);
       });
     }
-    if (!reconnectOverlay.isShown(win)) connectionLoading.show(win, attempt, "Opening Omnigent…");
+    if (!reconnectOverlay.isShown(win))
+      connectionLoading.show(win, attempt, `Opening ${PRODUCT_NAME}…`);
     await loadServerDocument(win, target, signal);
     assertCurrent();
     diagnostics.record("connection_result", { origin: originOf(serverUrl), outcome: "loaded" });
@@ -2674,7 +2684,7 @@ function createWindow(targetUrl, opts = {}) {
     // Tall enough that the bundled setup page (logo, Start-locally, divider,
     // URL field, Connect, and a few recents) fits without overflowing.
     minHeight: 600,
-    title: "Omnigent",
+    title: PRODUCT_NAME,
     backgroundColor: "#0b0b0c",
     // macOS: hide the native title bar but keep the traffic lights, inset
     // into the content. The web layer provides the drag surface + clearance
@@ -3450,8 +3460,8 @@ async function confirmHostEnrollment(win) {
   const { response } = await dialog.showMessageBox(win, {
     type: "warning",
     icon: icon.isEmpty() ? undefined : icon,
-    title: "Omnigent",
-    message: `Allow ${host} to manage Omnigent on this machine?`,
+    title: PRODUCT_NAME,
+    message: `Allow ${host} to manage ${PRODUCT_NAME} on this machine?`,
     detail:
       `${pinned} wants to connect this machine as a runner. While connected, it ` +
       `can execute agent code and commands here on its behalf.\n\n` +
@@ -3652,8 +3662,8 @@ async function exportDiagnostics() {
   const parent = activeWindow();
   try {
     const options = {
-      title: "Export Omnigent Desktop Diagnostics",
-      defaultPath: `Omnigent-desktop-diagnostics-${new Date().toISOString().slice(0, 10)}.jsonl`,
+      title: `Export ${PRODUCT_NAME} Desktop Diagnostics`,
+      defaultPath: `${PRODUCT_NAME}-desktop-diagnostics-${new Date().toISOString().slice(0, 10)}.jsonl`,
       filters: [{ name: "Diagnostic logs", extensions: ["jsonl"] }],
     };
     const { canceled, filePath } = parent
@@ -3665,7 +3675,7 @@ async function exportDiagnostics() {
     const options = {
       type: "error",
       title: "Could not export diagnostics",
-      message: "Omnigent could not save the desktop diagnostics.",
+      message: `${PRODUCT_NAME} could not save the desktop diagnostics.`,
       detail: error?.message ?? "Check that the destination is writable and try again.",
       buttons: ["OK"],
     };
@@ -3676,7 +3686,7 @@ async function exportDiagnostics() {
 
 function buildMenu() {
   const isMac = process.platform === "darwin";
-  const aboutItem = aboutMenuItem("Omnigent", () => {
+  const aboutItem = aboutMenuItem(PRODUCT_NAME, () => {
     aboutWindow.open(activeWindow());
   });
   const settingsItem = settingsMenuItem(() => {
@@ -3703,7 +3713,7 @@ function buildMenu() {
         if (!updater.installUpdateNow()) {
           await dialog.showMessageBox(activeWindow(), {
             type: "info",
-            title: "Omnigent",
+            title: PRODUCT_NAME,
             message: "No update is ready to install",
             detail: "Check for updates first, then download the new version.",
             buttons: ["OK"],
@@ -5589,9 +5599,9 @@ function registerIpc() {
         return "Reconnect was declined. Wait a moment, then retry the preview to show the prompt again.";
       }
       if (arcaPreviewRecoveries.has(target)) {
-        return "Finish the Arca reconnect in Omnigent, then retry the preview.";
+        return `Finish the Arca reconnect in ${PRODUCT_NAME}, then retry the preview.`;
       }
-      return "Omnigent couldn't restore the Arca connection details. Retry the preview to reconnect.";
+      return `${PRODUCT_NAME} couldn't restore the Arca connection details. Retry the preview to reconnect.`;
     },
   });
 }
@@ -5859,10 +5869,10 @@ async function confirmOpenDeepLink(parent, targetOrigin) {
   const { response } = await dialog.showMessageBox(parent, {
     type: "warning",
     icon: icon.isEmpty() ? undefined : icon,
-    title: "Omnigent",
-    message: `Open this Omnigent link?`,
+    title: PRODUCT_NAME,
+    message: `Open this ${PRODUCT_NAME} link?`,
     detail:
-      `This link will connect Omnigent to ${host}.\n\n` +
+      `This link will connect ${PRODUCT_NAME} to ${host}.\n\n` +
       `Only open links from a server you trust — once connected, it can show ` +
       `notifications and (when you allow it) manage this machine as a runner.`,
     buttons: ["Cancel", "Open"],
@@ -6028,9 +6038,10 @@ async function handleDeepLink(raw) {
 // ---------------------------------------------------------------------------
 
 // Name drives the macOS app menu title and the notification source name.
-app.setName(isDevBuild ? "Omnigent Dev" : "Omnigent");
+// CORAL(S87): Coral names; packaged userData follows productName, so it is separate from Omnigent's.
+app.setName(isDevBuild ? DEV_PRODUCT_NAME : PRODUCT_NAME);
 if (isDevBuild) {
-  const devData = path.join(app.getPath("appData"), "Omnigent Dev");
+  const devData = path.join(app.getPath("appData"), DEV_PRODUCT_NAME);
   fs.mkdirSync(devData, { recursive: true });
   app.setPath("userData", devData);
 }
@@ -6088,8 +6099,7 @@ if (!gotLock) {
   app.whenReady().then(() => {
     diagnostics.initialize(app);
     // App User Model ID so Windows attributes notifications/taskbar correctly.
-    if (process.platform === "win32")
-      app.setAppUserModelId(isDevBuild ? DEV_DOMAIN : "ai.omnigent.desktop");
+    if (process.platform === "win32") app.setAppUserModelId(isDevBuild ? DEV_APP_ID : APP_ID);
     applyDockIcon();
     registerPermissions();
     registerLocalhostAccess();

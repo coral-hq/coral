@@ -1,3 +1,4 @@
+// CORAL(S87): assertions follow the shell copy, which names Coral (brand.js PRODUCT_NAME).
 // Direct unit tests for the desktop auto-updater module.
 //
 // Unlike update-main.test.js (which boots the whole main.js in a vm to prove
@@ -163,6 +164,7 @@ describe("desktop_updater — pure helpers", () => {
 
     assert.equal(devConfig.url, packageConfig.build.publish[0].url);
     assert.match(devConfig.url, /^https:\/\//);
+    assert.equal(devConfig.updaterCacheDirName, "coral-desktop-updater-dev");
   });
 
   it("classifies signing/integrity errors as security errors", () => {
@@ -423,7 +425,7 @@ describe("desktop_updater — IPC trust + consent", () => {
     h.updater.registerIpc();
     await h.ipcHandlers.get("omnigent:update-download")(h.event);
     assert.equal(h.calls.showMessageBox.length, 1);
-    assert.equal(h.calls.showMessageBox[0].options.message, "Download an Omnigent update?");
+    assert.equal(h.calls.showMessageBox[0].options.message, "Download a Coral update?");
     assert.equal(h.calls.downloadUpdate, 1);
 
     // set-config
@@ -431,7 +433,7 @@ describe("desktop_updater — IPC trust + consent", () => {
     h.updater.init();
     h.updater.registerIpc();
     await h.ipcHandlers.get("omnigent:set-update-config")(h.event, { mode: "manual" });
-    assert.equal(h.calls.showMessageBox[0].options.message, "Change Omnigent update settings?");
+    assert.equal(h.calls.showMessageBox[0].options.message, "Change Coral update settings?");
     assert.equal(h.readSettings().update_mode, "manual");
   });
 

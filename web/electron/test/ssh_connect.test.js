@@ -1,4 +1,5 @@
 "use strict";
+// CORAL(S87): assertions follow the shell copy, which names Coral (brand.js PRODUCT_NAME).
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
@@ -490,7 +491,7 @@ describe("runSshConnect", () => {
     "this build has no bundled installer": [
       { logins: [{ lines: [], code: 127 }] },
       { readInstallScript: () => null },
-      "This build doesn't include the Omnigent installer.",
+      "This build doesn't include the Coral installer.",
     ],
     "the installer fails": [
       {
@@ -498,12 +499,12 @@ describe("runSshConnect", () => {
         install: { code: 1, stderr: "Error: uv: no space left" },
       },
       {},
-      "Installing Omnigent on my-ec2 failed: uv: no space left",
+      "Installing Coral on my-ec2 failed: uv: no space left",
     ],
     "the installer times out": [
       { logins: [{ lines: [], code: 127 }], install: { code: null, timedOut: true } },
       {},
-      "Installing Omnigent on my-ec2 timed out.",
+      "Installing Coral on my-ec2 timed out.",
     ],
     "omnigent is still missing after installing": [
       {
@@ -513,7 +514,7 @@ describe("runSshConnect", () => {
         ],
       },
       {},
-      "Omnigent still isn't on the PATH on my-ec2.",
+      "Coral still isn't on the PATH on my-ec2.",
     ],
   };
   for (const [label, [script, overrides, error]] of Object.entries(installFailures)) {
@@ -691,7 +692,7 @@ describe("runSshConnect", () => {
 
     assert.equal(
       (await runSshConnect(ctx)).error,
-      "Starting the Omnigent host on my-ec2 failed: not signed in",
+      "Starting the Coral host on my-ec2 failed: not signed in",
     );
   });
 });
@@ -943,7 +944,7 @@ describe("createSshSession", () => {
 
     assert.deepEqual(result, {
       ok: false,
-      error: "Starting the Omnigent host on my-ec2 failed: the connection closed",
+      error: "Starting the Coral host on my-ec2 failed: the connection closed",
     });
     assert.ok(spawned.some((line) => line.includes("omnigent login")));
     assert.ok(!spawned.some((line) => line.includes("omnigent host")), spawned.join("\n"));
