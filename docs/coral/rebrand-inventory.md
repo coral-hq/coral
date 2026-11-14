@@ -8,30 +8,20 @@ Areas: `web/src`, `web/electron`, `web/ios`, `web/android`, `web/*.html`, and th
 
 | Class | Meaning | Rows |
 |---|---|---|
-| change | Product-name text shown to users, or a test or copy that pinned it. | 351 |
+| change | Product-name text shown to users, or a test or copy that pinned it. | 395 |
 | change-identity | Lowercase ids that follow the desktop app id or the `coral` URL scheme. | 19 |
 | change-asset | Images or drawables that show Omnigent artwork (replacement added beside it). | 33 |
 | keep-origin | Where Coral comes from (L6 a-c): upstream project, package or docs as facts, attribution; also the Databricks platform as an integration target (workspace sign-in, Unity Gateway), which is not Coral's publisher. | 405 |
-| keep-internal | Internal identifiers (package, imports, `OMNIGENT_*`, storage keys, IPC channels, CSS classes, test ids), comments, and tests that do not assert visible text. | 8071 |
+| keep-internal | Internal identifiers (package, imports, `OMNIGENT_*`, storage keys, IPC channels, CSS classes, test ids), comments, and tests that do not assert visible text. | 8027 |
 | keep-deferred | Install commands, omnigent.ai docs links, the `omnigent` CLI, server messages, App Store metadata and mobile ids, each with the feature that will change it. | 111 |
 | keep-L7 | The Powered-by-Omnigent credit (L7), unchanged until counsel answers OQ-30. | 7 |
 
-Total rows: 8997. Pending planned changes: 11.
+Total rows: 8997. Pending planned changes: 1.
 
 ### Pending
 
 | File:line | Class | Seam | Reason |
 |---|---|---|---|
-| `web/ios/Omnigent/AppRootView.swift:135` | change | S38 | PENDING: Deep-link consent alert title shown to users; roadmap ties AppRootView consent copy to the S38 scheme change. |
-| `web/ios/Omnigent/AppRootView.swift:144` | change | S88 | PENDING: Deep-link consent alert copy shown to users. |
-| `web/ios/Omnigent/ConnectView.swift:29` | change-asset | S88 | PENDING: Connect-screen artwork references the Omnigent wordmark imagesets. |
-| `web/ios/Omnigent/ConnectView.swift:35` | change | S88 | PENDING: Connect-screen subtitle uses 'Omnigent server' product wording. |
-| `web/ios/Omnigent/ConnectView.swift:154` | change | S88 | PENDING: VoiceOver accessibility label of the info menu names the product. |
-| `web/ios/Omnigent/ConnectView.swift:239` | change | S89b | PENDING: Info-menu Website link points at the Omnigent site; becomes CORAL_HOMEPAGE. |
-| `web/ios/Omnigent/ConnectView.swift:241` | change | S89b | PENDING: Info-menu Privacy Policy link points at Omnigent; becomes CORAL_PRIVACY_URL. |
-| `web/ios/Omnigent/DeepLink.swift:101` | change-identity | S38 | PENDING: Deep-link scheme check for session links; must follow new URL scheme coral. |
-| `web/ios/Omnigent/Info-Debug.plist:30` | change-identity | S38 | PENDING: CFBundleURLSchemes registration of session deep-link scheme; becomes coral. |
-| `web/ios/Omnigent/Info-Release.plist:30` | change-identity | S38 | PENDING: CFBundleURLSchemes registration of session deep-link scheme; becomes coral. |
 | `web/electron/icons/Assets.car:0` | change-asset | S88 | PENDING: compiled macOS 26 dynamic icon (starfish); regenerating it needs Xcode 26. Release blocker. |
 
 ## Rows by file
@@ -238,7 +228,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 1 | package ai.omnigent.android | keep-internal |  | test code |
 | 31 | …t needs the omnigent | keep-internal |  | test code |
 | 51 | …process ˋai.omnigent.android.testˋ; wr… | keep-internal |  | test code |
-| 209 | const val FIELD_HINT = "https://omnigent.example.com" | change | S88 | Test pins visible text the rebrand changed; updated in step. |
+| 209 | const val FIELD_HINT = "https://omnigent.example.com" | change | S88 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/android/app/src/debug/java/ai/omnigent/android/DatabricksAuthDebugMenu.kt`
 
@@ -2198,7 +2188,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 219 | "from omnigent.cli import main; main()… | keep-internal |  | test code |
 | 239 | OMNIGENT_WEB_UI_DIST: WEB_UI_DIST, | keep-internal |  | test code |
 | 271 | …}/healthˋ, "omnigent server", serverLo… | keep-internal |  | test code |
-| 385 | for (const profile of [userDataDir, path.join(userDataDir, "Omnigent Dev")]) { | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 385 | for (const profile of [userDataDir, path.join(userDataDir, "Omnigent Dev")]) { | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 403 | ˋglobal.omnigentTestBrowserRegistries … | keep-internal |  | test code |
 | 404 | …gs); global.omnigentTestBrowserRegistr… | keep-internal |  | test code |
 | 413 | …process.env.OMNIGENT_PW_NO_SANDBOX) { | keep-internal |  | test code |
@@ -2226,8 +2216,8 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 258 | OMNIGENT_CONFIG_HOME: path.join(stateD… | keep-internal |  | test code |
 | 259 | OMNIGENT_DATA_DIR: path.join(stateDir,… | keep-internal |  | test code |
 | 267 | window.omnigentSetup.onRunnerConnectLo… | keep-internal |  | test code |
-| 332 | await page.getByRole("button", { name: "Open Omnigent", exact: true }).click(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 400 | await page.getByRole("button", { name: "Open Omnigent", exact: true }).click(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
+| 332 | await page.getByRole("button", { name: "Open Omnigent", exact: true }).click(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 400 | await page.getByRole("button", { name: "Open Omnigent", exact: true }).click(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/electron/e2e/desktop_cookie_isolation.e2e.js`
 
@@ -2333,7 +2323,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
 | 50 | process.env.OMNIGENT_DESKTOP_RECORD_DI… | keep-internal |  | test code |
-| 98 | ˋstill on "Opening Omnigent…" ${LEAVE_LOADING_WITHIN_MS / 1000}s after launch: ${JSON.stringify(stat… | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 98 | ˋstill on "Opening Omnigent…" ${LEAVE_LOADING_WITHIN_MS / 1000}s after launch: ${JSON.stringify(stat… | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/electron/e2e/desktop_session_expiry_browser_view.e2e.js`
 
@@ -3808,7 +3798,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
 | 90 | omnigentAbout: api, | keep-internal |  | test code |
-| 117 | assert.equal(page.elements["desktop-heading"].textContent, "Omnigent macOS app"); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 117 | assert.equal(page.elements["desktop-heading"].textContent, "Omnigent macOS app"); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/electron/test/about_window.test.js`
 
@@ -3819,7 +3809,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 139 | installCommand: "install omnigent", | keep-internal |  | test code |
 | 190 | …pplications/Omnigent.app/Contents/MacO… | keep-internal |  | test code |
 | 206 | …pplications/Omnigent.app/Contents/MacO… | keep-internal |  | test code |
-| 250 | assert.match(script, /desktopHeading\.textContent = ˋOmnigent \$\{platformName\} appˋ/); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 250 | assert.match(script, /desktopHeading\.textContent = ˋOmnigent \$\{platformName\} appˋ/); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 255 | …atus:[\s\S]*omnigent:update-status/); | keep-internal |  | test code |
 | 256 | …rer\.send\("omnigent:about-close"\)/); | keep-internal |  | test code |
 | 326 | …ndlers.get("omnigent:about-get-info"); | keep-internal |  | test code |
@@ -4064,7 +4054,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 44 | assert.equal(message, "Import 3 cookies into Omnigent?"); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 44 | assert.equal(message, "Import 3 cookies into Omnigent?"); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/electron/test/chromeCookieStore.test.js`
 
@@ -4183,7 +4173,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 68 | process.env.OMNIGENT_DATABRICKS_OAUTH_… | keep-internal |  | test code |
 | 71 | …ocess.env, "OMNIGENT_DATABRICKS_OAUTH_… | keep-internal |  | test code |
 | 72 | …process.env.OMNIGENT_DATABRICKS_OAUTH_… | keep-internal |  | test code |
-| 126 | assert.match(response.body, /Return to Omnigent/i); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 126 | assert.match(response.body, /Return to Omnigent/i); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 141 | process.env.OMNIGENT_DATABRICKS_OAUTH_… | keep-internal |  | test code |
 | 142 | …ocess.env, "OMNIGENT_DATABRICKS_OAUTH_… | keep-internal |  | test code |
 | 310 | …e("isTrustedDatabricksOrigin", () => { | keep-internal |  | test code |
@@ -4248,37 +4238,37 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 3 | //   - parseOmnigentDeepLink: scheme i… | keep-internal |  | test code |
 | 14 | parseOmnigentDeepLink, | keep-internal |  | test code |
 | 19 | …cribe("parseOmnigentDeepLink", () => { | keep-internal |  | test code |
-| 21 | assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc"), { | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 25 | assert.deepEqual(parseOmnigentDeepLink("omnigent://127.0.0.1:8000/c/x"), { | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 32 | assert.deepEqual(parseOmnigentDeepLink("omnigent://my-workspace.cloud.databricks.com/c/x"), { | change | S38 | Test pins visible text the rebrand changed; updated in step. |
+| 21 | assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc"), { | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 25 | assert.deepEqual(parseOmnigentDeepLink("omnigent://127.0.0.1:8000/c/x"), { | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 32 | assert.deepEqual(parseOmnigentDeepLink("omnigent://my-workspace.cloud.databricks.com/c/x"), { | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 33 | …space.cloud.databricks.com", | keep-internal |  | test code |
-| 39 | assert.deepEqual(parseOmnigentDeepLink("omnigent://example.com:8443/c/x"), { | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 46 | assert.deepEqual(parseOmnigentDeepLink("omnigent://[::1]:8000/c/x"), { | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 54 | parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc/").path, | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 60 | const parsed = parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc?reply=1#frag"); | change | S38 | Test pins visible text the rebrand changed; updated in step. |
+| 39 | assert.deepEqual(parseOmnigentDeepLink("omnigent://example.com:8443/c/x"), { | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 46 | assert.deepEqual(parseOmnigentDeepLink("omnigent://[::1]:8000/c/x"), { | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 54 | parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc/").path, | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 60 | const parsed = parseOmnigentDeepLink("omnigent://localhost:8000/c/conv_abc?reply=1#frag"); | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 65 | …jects a non-omnigent scheme", () => { | keep-internal |  | test code |
 | 66 | ….equal(parseOmnigentDeepLink("https://… | keep-internal |  | test code |
 | 67 | ….equal(parseOmnigentDeepLink("vscode:/… | keep-internal |  | test code |
-| 71 | assert.equal(parseOmnigentDeepLink("omnigent://"), null); | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 72 | assert.equal(parseOmnigentDeepLink("omnigent:///c/x"), null); | change | S38 | Test pins visible text the rebrand changed; updated in step. |
+| 71 | assert.equal(parseOmnigentDeepLink("omnigent://"), null); | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 72 | assert.equal(parseOmnigentDeepLink("omnigent:///c/x"), null); | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 76 | // ˋomnigent startˋ opens the host UI … | keep-internal |  | test code |
-| 77 | assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000/"), { | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 81 | assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000"), { | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 88 | assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/inbox"), null); | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 89 | assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/settings/appearance"), null); | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 90 | assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/c/"), null); // empty id | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 91 | assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/c/a/b"), null); // nested path | change | S38 | Test pins visible text the rebrand changed; updated in step. |
+| 77 | assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000/"), { | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 81 | assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000"), { | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 88 | assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/inbox"), null); | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 89 | assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/settings/appearance"), null); | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 90 | assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/c/"), null); // empty id | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 91 | assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/c/a/b"), null); // nested path | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 95 | ….equal(parseOmnigentDeepLink("not a ur… | keep-internal |  | test code |
 | 96 | ….equal(parseOmnigentDeepLink(null), nu… | keep-internal |  | test code |
 | 97 | ….equal(parseOmnigentDeepLink(undefined… | keep-internal |  | test code |
 | 98 | ….equal(parseOmnigentDeepLink(123), nul… | keep-internal |  | test code |
 | 103 | …space.cloud.databricks.com"; | keep-internal |  | test code |
-| 203 | assert.equal(await acceptCliDeepLink("omnigent://localhost:6767/"), true); | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 217 | await acceptCliDeepLink(ˋomnigent://localhost/?desktop_ack=${acknowledgment}ˋ), | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 227 | ˋomnigent://localhost/?desktop_ack=123:${token}&desktop_ack=123:${token}ˋ, | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 232 | await acceptCliDeepLink(ˋomnigent://localhost/settings?desktop_ack=123:${token}ˋ), | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 246 | await acceptCliDeepLink(ˋomnigent://localhost/?desktop_ack=1234:${token}ˋ), | change | S38 | Test pins visible text the rebrand changed; updated in step. |
-| 256 | assert.equal(await acceptCliDeepLink(ˋomnigent://localhost/?desktop_ack=1234:${token}ˋ), false); | change | S38 | Test pins visible text the rebrand changed; updated in step. |
+| 203 | assert.equal(await acceptCliDeepLink("omnigent://localhost:6767/"), true); | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 217 | await acceptCliDeepLink(ˋomnigent://localhost/?desktop_ack=${acknowledgment}ˋ), | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 227 | ˋomnigent://localhost/?desktop_ack=123:${token}&desktop_ack=123:${token}ˋ, | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 232 | await acceptCliDeepLink(ˋomnigent://localhost/settings?desktop_ack=123:${token}ˋ), | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 246 | await acceptCliDeepLink(ˋomnigent://localhost/?desktop_ack=1234:${token}ˋ), | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 256 | assert.equal(await acceptCliDeepLink(ˋomnigent://localhost/?desktop_ack=1234:${token}ˋ), false); | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/electron/test/desktop_updater.test.js`
 
@@ -4296,9 +4286,9 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 406 | ["omnigent:update-install", []], | keep-internal |  | test code |
 | 407 | ["omnigent:set-update-config", [{ mode… | keep-internal |  | test code |
 | 424 | …ndlers.get("omnigent:update-download")… | keep-internal |  | test code |
-| 426 | assert.equal(h.calls.showMessageBox[0].options.message, "Download an Omnigent update?"); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 426 | assert.equal(h.calls.showMessageBox[0].options.message, "Download an Omnigent update?"); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 433 | …ndlers.get("omnigent:set-update-config… | keep-internal |  | test code |
-| 434 | assert.equal(h.calls.showMessageBox[0].options.message, "Change Omnigent update settings?"); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 434 | assert.equal(h.calls.showMessageBox[0].options.message, "Change Omnigent update settings?"); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 447 | …ndlers.get("omnigent:update-download")… | keep-internal |  | test code |
 | 459 | …ndlers.get("omnigent:update-install")(… | keep-internal |  | test code |
 | 474 | …ndlers.get("omnigent:update-install")(… | keep-internal |  | test code |
@@ -4362,7 +4352,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 664 | "./omnigent_cli": { | keep-internal |  | test code |
 | 667 | …ire("../src/omnigent_cli").cliCommandP… | keep-internal |  | test code |
 | 668 | …ire("../src/omnigent_cli").normalizeSe… | keep-internal |  | test code |
-| 704 | "\nmodule.exports.testApi = { handleDeepLink, buildMenu, openFindBar, signOutOfServer, createWindow, | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
+| 704 | "\nmodule.exports.testApi = { handleDe | keep-internal |  | test code |
 | 721 | …rocess.env, OMNIGENT_SERVER_SELECTOR_V… | keep-internal |  | test code |
 | 787 | …space.cloud.databricks.com/omnigent"; | keep-internal |  | test code |
 | 795 | … h.ipc.get("omnigent:arca-extend"); | keep-internal |  | test code |
@@ -4511,7 +4501,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 2783 | …r\.invoke\("omnigent:get-managed-serve… | keep-internal |  | test code |
 | 2787 | …n\.handle\("omnigent:get-managed-serve… | keep-internal |  | test code |
 | 2794 | …r\.invoke\("omnigent:get-runner-option… | keep-internal |  | test code |
-| 2798 | /ipcMain\.handle\("omnigent:get-runner-options"[\s\S]{0,120}!isSetupPageSender\(event\)[\s\S]{0,200}… | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
+| 2798 | …n\.handle\("omnigent:get-runner-option… | keep-internal |  | test code |
 | 2805 | …r\.invoke\("omnigent:connect-runner",\… | keep-internal |  | test code |
 | 2809 | …ain.handle("omnigent:connect-runner"')… | keep-internal |  | test code |
 | 2810 | …ain.handle("omnigent:copy-setup-text"'… | keep-internal |  | test code |
@@ -4571,14 +4561,14 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 3480 | … (origin + /omnigent", | keep-internal |  | test code |
 | 3488 | …NTITY (for ˋomnigent host --serverˋ et… | keep-internal |  | test code |
 | 3496 | …ath out of ˋomnigent host --serverˋ.", | keep-internal |  | test code |
-| 3523 | const url = "omnigent://localhost:6767/"; | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
+| 3523 | const url = "omnigent://localhost:6767/"; | change | S38,S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 3527 | …hannel === "omnigent:open-path"), | keep-internal |  | test code |
 | 3528 | …{ channel: "omnigent:open-path", data:… | keep-internal |  | test code |
-| 3550 | it("scans second-instance argv for omnigent:// and enqueues as live code", () => { | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
-| 3553 | /app\.on\("second-instance"[\s\S]{0,220}startsWith\("omnigent:\/\/"\)[\s\S]{0,60}enqueueDeepLink\(/, | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
+| 3550 | it("scans second-instance argv for omnigent:// and enqueues as live code", () => { | change | S38,S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 3553 | /app\.on\("second-instance"[\s\S]{0,220}startsWith\("omnigent:\/\/"\)[\s\S]{0,60}enqueueDeepLink\(/, | change | S38,S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 3555 | …ce argv for omnigent://. Windows/Linux… | keep-internal |  | test code |
-| 3562 | it("registers the omnigent:// scheme as live code", () => { | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
-| 3565 | /setAsDefaultProtocolClient\("omnigent"\)/, | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
+| 3562 | it("registers the omnigent:// scheme as live code", () => { | change | S38,S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 3565 | /setAsDefaultProtocolClient\("omnigent"\)/, | change | S38,S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 3567 | …ocolClient('omnigent'), so dev", | keep-internal |  | test code |
 | 3568 | …licks on an omnigent:// link won't rou… | keep-internal |  | test code |
 | 3598 | …through the omnigent:open-path channel… | keep-internal |  | test code |
@@ -4666,9 +4656,9 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 5076 | … h.ipc.get("omnigent:take-onboarding-r… | keep-internal |  | test code |
 | 5104 | …space.cloud.databricks.com/omnigent"; | keep-internal |  | test code |
 | 5107 | databricksMode: "browser", | keep-internal |  | test code |
-| 5118 | assert.equal(h.calls.loading.at(-1).label, "Opening Omnigent…"); | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
-| 5140 | assert.equal(shown.label, "Opening Omnigent…"); | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
-| 5183 | assert.equal(shown.label, "Opening Omnigent…"); | change | S38,S87 | Test pins visible text the rebrand changed; updated in step. |
+| 5118 | assert.equal(h.calls.loading.at(-1).label, "Opening Omnigent…"); | change | S38,S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 5140 | assert.equal(shown.label, "Opening Omnigent…"); | change | S38,S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 5183 | assert.equal(shown.label, "Opening Omnigent…"); | change | S38,S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 5399 | … h.ipc.get("omnigent:get-server-picker… | keep-internal |  | test code |
 | 5400 | … h.ipc.get("omnigent:sign-out-of-serve… | keep-internal |  | test code |
 | 5458 | … h.ipc.get("omnigent:get-server-picker… | keep-internal |  | test code |
@@ -4849,8 +4839,8 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
 | 22 | appName: () => "Omnigent", | keep-internal |  | test code |
-| 59 | "The local Omnigent server will stop.", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
-| 63 | "Sessions running on this computer will go offline, and the local Omnigent server will stop.", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 59 | "The local Omnigent server will stop.", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 63 | "Sessions running on this computer will go offline, and the local Omnigent server will stop.", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 142 | …abel, "Quit Omnigent"); | keep-internal |  | test code |
 
 ### `web/electron/test/reconnect_overlay.test.js`
@@ -4964,17 +4954,17 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 336 | …t.includes("omnigent login")) { | keep-internal |  | test code |
 | 352 | …t.includes("omnigent host")) { | keep-internal |  | test code |
 | 462 | …h: 1: exec: omnigent: not found"], cod… | keep-internal |  | test code |
-| 493 | "This build doesn't include the Omnigent installer.", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
-| 501 | "Installing Omnigent on my-ec2 failed: uv: no space left", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
-| 506 | "Installing Omnigent on my-ec2 timed out.", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 493 | "This build doesn't include the Omnigent installer.", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 501 | "Installing Omnigent on my-ec2 failed: uv: no space left", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 506 | "Installing Omnigent on my-ec2 timed out.", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 508 | "omnigent is still missing after insta… | keep-internal |  | test code |
-| 516 | "Omnigent still isn't on the PATH on my-ec2.", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 516 | "Omnigent still isn't on the PATH on my-ec2.", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 537 | "a Databricks sign-in on another site"… | keep-internal |  | test code |
 | 539 | …server or a Databricks workspace/, | keep-internal |  | test code |
 | 612 | "a Databricks sign-in, which does, sto… | keep-internal |  | test code |
-| 694 | "Starting the Omnigent host on my-ec2 failed: not signed in", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 694 | "Starting the Omnigent host on my-ec2 failed: not signed in", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 929 | …e.includes("omnigent login")) master.e… | keep-internal |  | test code |
-| 946 | error: "Starting the Omnigent host on my-ec2 failed: the connection closed", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 946 | error: "Starting the Omnigent host on my-ec2 failed: the connection closed", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 948 | …e.includes("omnigent login"))); | keep-internal |  | test code |
 | 949 | …e.includes("omnigent host")), spawned.… | keep-internal |  | test code |
 
@@ -5011,8 +5001,8 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 356 | …{ channel: "omnigent:open-path", paylo… | keep-internal |  | test code |
 | 365 | channel: "omnigent:open-path", | keep-internal |  | test code |
 | 386 | …ndlers.has("omnigent:export-diagnostic… | keep-internal |  | test code |
-| 425 | assert.equal(aboutItem.label, "About Omnigent"); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
-| 443 | assert.equal(aboutItem.label, "About Omnigent"); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 425 | assert.equal(aboutItem.label, "About Omnigent"); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 443 | assert.equal(aboutItem.label, "About Omnigent"); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 468 | "Omnigent", | keep-internal |  | test code |
 | 477 | …uIds(menu, "Omnigent"), [ | keep-internal |  | test code |
 | 569 | …teners.get("omnigent:set-desktop-comma… | keep-internal |  | test code |
@@ -5033,7 +5023,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 887 | …ndlers.get("omnigent:record-global-sho… | keep-internal |  | test code |
 | 891 | …ndlers.get("omnigent:cancel-global-sho… | keep-internal |  | test code |
 | 902 | …ndlers.get("omnigent:set-global-shortc… | keep-internal |  | test code |
-| 909 | assert.match(options.message, /show Omnigent from any app/); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 909 | assert.match(options.message, /show Omnigent from any app/); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 923 | …ndlers.get("omnigent:set-global-shortc… | keep-internal |  | test code |
 | 937 | …ndlers.get("omnigent:set-global-shortc… | keep-internal |  | test code |
 | 966 | …teners.get("omnigent:set-desktop-comma… | keep-internal |  | test code |
@@ -5053,12 +5043,12 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 1186 | ["omnigent:update-install", []], | keep-internal |  | test code |
 | 1187 | ["omnigent:set-update-config", [{ mode… | keep-internal |  | test code |
 | 1203 | channel: "omnigent:update-download", | keep-internal |  | test code |
-| 1205 | message: "Download an Omnigent update?", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 1205 | message: "Download an Omnigent update?", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 1212 | channel: "omnigent:update-install", | keep-internal |  | test code |
-| 1214 | message: "Restart Omnigent to install an update?", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 1214 | message: "Restart Omnigent to install an update?", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 1224 | channel: "omnigent:set-update-config", | keep-internal |  | test code |
-| 1226 | message: "Change Omnigent update settings?", | change | S87 | Test pins visible text the rebrand changed; updated in step. |
-| 1250 | assert.equal(harness.calls.showMessageBox[0].options.title, "Omnigent"); | change | S87 | Test pins visible text the rebrand changed; updated in step. |
+| 1226 | message: "Change Omnigent update settings?", | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 1250 | assert.equal(harness.calls.showMessageBox[0].options.title, "Omnigent"); | change | S87 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 1264 | channel: "omnigent:update-download", | keep-internal |  | test code |
 | 1272 | channel: "omnigent:update-install", | keep-internal |  | test code |
 | 1283 | channel: "omnigent:set-update-config", | keep-internal |  | test code |
@@ -5454,8 +5444,8 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 105 | …ved, error: DatabricksSessionError.sig… | keep-internal |  | code identifier |
 | 124 | …link (e.g. ˋomnigent://host/c/<id>ˋ), … | keep-internal |  | code comment |
 | 128 | …processInfo.omnigentOpenURLArgument el… | keep-internal |  | code identifier |
-| 135 | "Open this Omnigent link?", | change | S38 | PENDING: Deep-link consent alert title shown to users; roadmap ties AppRootView consent copy to the S38 scheme change. |
-| 144 | This link will connect Omnigent to \(consentDeepLink.origin.hostLabel) and open a conversation. | change | S88 | PENDING: Deep-link consent alert copy shown to users. |
+| 135 | "Open this Omnigent link?", | change | S38 | Deep-link consent alert title shown to users; roadmap ties AppRootView consent copy to the S38 scheme change. |
+| 144 | This link will connect Omnigent to \(consentDeepLink.origin.hostLabel) and open a conversation. | change | S38 | Deep-link consent alert copy shown to users. |
 | 170 | …nvironment["OMNIGENT_SCREENSHOT_APP_UR… | keep-internal |  | OMNIGENT_SCREENSHOT_APP_URL env var (DEBUG scree |
 | 180 | /// The ˋ--omnigent-open-url <url>ˋ DE… | keep-internal |  | code comment |
 | 183 | …private var omnigentOpenURLArgument: U… | keep-internal |  | code identifier |
@@ -5494,12 +5484,12 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 29 | Image(colorScheme == .dark ? "OmnigentLogoReverse" : "OmnigentLogo") | change-asset | S88 | PENDING: Connect-screen artwork references the Omnigent wordmark imagesets. |
-| 35 | Text("Enter the URL of the Omnigent server.") | change | S88 | PENDING: Connect-screen subtitle uses 'Omnigent server' product wording. |
-| 154 | .accessibilityLabel("About Omnigent") | change | S88 | PENDING: VoiceOver accessibility label of the info menu names the product. |
-| 239 | case .website: URL(string: "https://omnigent.ai")! | change | S89b | PENDING: Info-menu Website link points at the Omnigent site; becomes CORAL_HOMEPAGE. |
+| 29 | Image(colorScheme == .dark ? "OmnigentLogoReverse" : "OmnigentLogo") | change-asset | S88 | Connect-screen artwork references the Omnigent wordmark imagesets. |
+| 35 | Text("Enter the URL of the Omnigent server.") | change | S88 | Connect-screen subtitle uses 'Omnigent server' product wording. |
+| 154 | .accessibilityLabel("About Omnigent") | change | S88 | VoiceOver accessibility label of the info menu names the product. |
+| 239 | case .website: URL(string: "https://omnigent.ai")! | change | S89b | Info-menu Website link points at the Omnigent site; becomes CORAL_HOMEPAGE. |
 | 240 | case .docs: URL(string: "https://omnigent.ai/docs")! | keep-deferred |  | omnigent.ai/docs documentation link; stays until Coral has its own docs (OPS-09). |
-| 241 | case .privacy: URL(string: "https://omnigent.ai/privacy")! | change | S89b | PENDING: Info-menu Privacy Policy link points at Omnigent; becomes CORAL_PRIVACY_URL. |
+| 241 | case .privacy: URL(string: "https://omnigent.ai/privacy")! | change | S89b | Info-menu Privacy Policy link points at Omnigent; becomes CORAL_PRIVACY_URL. |
 
 ### `web/ios/Omnigent/DatabricksCredentialStore.swift`
 
@@ -5833,7 +5823,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 46 | /// ˋURL.omnigentOriginˋ, which return… | keep-internal |  | code comment |
 | 96 | …/ Parse an ˋomnigent://ˋ URL. Returns … | keep-internal |  | code comment |
 | 97 | /// ˋomnigent://<host>/c/<id>ˋ link (w… | keep-internal |  | code comment |
-| 101 | guard raw.scheme?.lowercased() == "omnigent" else { return nil } | change-identity | S38 | PENDING: Deep-link scheme check for session links; must follow new URL scheme coral. |
+| 101 | guard raw.scheme?.lowercased() == "omnigent" else { return nil } | change-identity | S38 | Deep-link scheme check for session links; must follow new URL scheme coral. |
 | 105 | … link like ˋomnigent://host/c/id%3Fvie… | keep-internal |  | code comment |
 
 ### `web/ios/Omnigent/Info-Debug.plist`
@@ -5841,7 +5831,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
 | 27 | <string>ai.omnigent.ios.deeplink</string> | keep-deferred |  | CFBundleURLName reverse-DNS label derived from iOS bundle id ai.omnigent.ios; not compared by code; follows mobile bundle ids (OQ-31). |
-| 30 | <string>omnigent</string> | change-identity | S38 | PENDING: CFBundleURLSchemes registration of session deep-link scheme; becomes coral. |
+| 30 | <string>omnigent</string> | change-identity | S38 | CFBundleURLSchemes registration of session deep-link scheme; becomes coral. |
 | 34 | <key>DatabricksOAuthClientID</key> | keep-internal |  | Info.plist config key for Databricks OAuth integ |
 | 35 | <string>$(DATABRICKS_OAUTH_CLIENT_ID)<… | keep-internal |  | Build-setting reference for the Databricks OAuth |
 | 36 | <key>DatabricksOAuthRedirectURL</key> | keep-internal |  | Info.plist config key for Databricks OAuth redir |
@@ -5855,7 +5845,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
 | 27 | <string>ai.omnigent.ios.deeplink</string> | keep-deferred |  | CFBundleURLName reverse-DNS label derived from iOS bundle id ai.omnigent.ios; not compared by code; follows mobile bundle ids (OQ-31). |
-| 30 | <string>omnigent</string> | change-identity | S38 | PENDING: CFBundleURLSchemes registration of session deep-link scheme; becomes coral. |
+| 30 | <string>omnigent</string> | change-identity | S38 | CFBundleURLSchemes registration of session deep-link scheme; becomes coral. |
 | 34 | <key>DatabricksOAuthClientID</key> | keep-internal |  | Info.plist config key for Databricks OAuth integ |
 | 35 | <string>$(DATABRICKS_OAUTH_CLIENT_ID)<… | keep-internal |  | Build-setting reference for the Databricks OAuth |
 | 36 | <key>DatabricksOAuthRedirectURL</key> | keep-internal |  | Info.plist config key for Databricks OAuth redir |
@@ -6743,42 +6733,42 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
 | 3 | @testable import Omnigent | keep-internal |  | test code |
-| 12 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 16 | …RL(string: "omnigent://127.0.0.1:8000/… | keep-internal |  | test code |
-| 22 | …RL(string: "omnigent://my-workspace.cl… | keep-internal |  | test code |
+| 12 | let dl = DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex)")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 16 | let dl2 = DeepLink.parse(URL(string: "omnigent://127.0.0.1:8000/c/\(hex)")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 22 | let dl = DeepLink.parse(URL(string: "omnigent://my-workspace.cloud.databricks.com/c/\(hex)")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 23 | …space.cloud.databricks.com") | keep-internal |  | test code |
-| 28 | …RL(string: "omnigent://example.com:844… | keep-internal |  | test code |
-| 34 | …RL(string: "omnigent://[::1]:8000/c/\(… | keep-internal |  | test code |
-| 42 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 49 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 57 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 62 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 69 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
+| 28 | let dl = DeepLink.parse(URL(string: "omnigent://example.com:8443/c/\(hex)")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 34 | let dl = DeepLink.parse(URL(string: "omnigent://[::1]:8000/c/\(hex)")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 42 | let dl = DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex)/")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 49 | let dl = DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(dashed)")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 57 | let dl = DeepLink.parse(URL(string: "omnigent://localhost:8000/c/conv_\(hex)")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 62 | let dl = DeepLink.parse(URL(string: "omnigent://localhost:8000/c/ag_\(hex)")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 69 | let dl = DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(upper)")!) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 73 | func testRejectsNonOmnigentScheme() { | keep-internal |  | test code |
-| 79 | …RL(string: "omnigent://")!)) | keep-internal |  | test code |
-| 80 | …RL(string: "omnigent:///c/\(hex)")!)) | keep-internal |  | test code |
-| 84 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 85 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 86 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 87 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 88 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 98 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 105 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 113 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 119 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 120 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 121 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 127 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 128 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 129 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 135 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 147 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 148 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 149 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 150 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 152 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 154 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 156 | …RL(string: "omnigent://localhost:8000/… | keep-internal |  | test code |
+| 79 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 80 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent:///c/\(hex)")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 84 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/inbox")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 85 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/settings/appearance")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 86 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 87 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex)/extra")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 88 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 98 | let url = URL(string: "omnigent://localhost:8000/c/\(hex)%3Fview=terminal")! | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 105 | let url = URL(string: "omnigent://localhost:8000/c/\(hex)%23frag")! | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 113 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex)%2Fextra")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 119 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex)%2E.")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 120 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/%2e%2e")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 121 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/..")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 127 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex)%00x")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 128 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex)%0Ax")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 129 | XCTAssertNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex)%7Fx")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 135 | let url = URL(string: "omnigent://localhost:8000/c/\(hex)%zz")! | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 147 | XCTAssertNotNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/conv_abc")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 148 | XCTAssertNotNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/x")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 149 | XCTAssertNotNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/not-a-uuid")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 150 | XCTAssertNotNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex.dropLast())")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 152 | XCTAssertNotNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/\(hex)g")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 154 | XCTAssertNotNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/host_\(hex)")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 156 | XCTAssertNotNil(DeepLink.parse(URL(string: "omnigent://localhost:8000/c/conv_\(hex)")!)) | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 163 | …//workspace.databricks.com/omnigent?o=… | keep-internal |  | test code |
 | 164 | …//workspace.databricks.com/omnigent/c/… | keep-internal |  | test code |
 | 167 | …//workspace.databricks.com/omnigent/?o… | keep-internal |  | test code |
@@ -7212,18 +7202,18 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 54 | …tifier: "ai.omnigent.ios") | keep-internal |  | test code |
 | 55 | …ents += ["--omnigent-open-url", link, … | keep-internal |  | test code |
 | 60 | …// A valid ˋomnigent://ˋ deep link to … | keep-internal |  | test code |
-| 67 | openURL: "omnigent://localhost:8000/c/… | keep-internal |  | test code |
-| 69 | …["Open this Omnigent link?"] | keep-internal |  | test code |
-| 88 | "omnigent://localhost:8000/c/e4f5a6b7c… | keep-internal |  | test code |
-| 94 | …["Open this Omnigent link?"] | keep-internal |  | test code |
-| 104 | openURL: "omnigent://localhost:8000/c/… | keep-internal |  | test code |
-| 107 | …["Open this Omnigent link?"] | keep-internal |  | test code |
-| 123 | …p(openURL: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 125 | …["Open this Omnigent link?"] | keep-internal |  | test code |
-| 136 | …p(openURL: "omnigent://localhost:8000/… | keep-internal |  | test code |
-| 139 | …["Open this Omnigent link?"] | keep-internal |  | test code |
-| 149 | openURL: "omnigent://localhost:8000/c/… | keep-internal |  | test code |
-| 152 | …["Open this Omnigent link?"] | keep-internal |  | test code |
+| 67 | openURL: "omnigent://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9") | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 69 | let alert = app.alerts["Open this Omnigent link?"] | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 88 | "omnigent://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9%3Fview=terminal") | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 94 | let alert = app.alerts["Open this Omnigent link?"] | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 104 | openURL: "omnigent://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9%23evil") | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 107 | let alert = app.alerts["Open this Omnigent link?"] | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 123 | let app = launchApp(openURL: "omnigent://localhost:8000/c/conv_abc") | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 125 | let alert = app.alerts["Open this Omnigent link?"] | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 136 | let app = launchApp(openURL: "omnigent://localhost:8000/c/%2e%2e") | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 139 | let alert = app.alerts["Open this Omnigent link?"] | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 149 | openURL: "omnigent://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9%00x") | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 152 | let alert = app.alerts["Open this Omnigent link?"] | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 204 | …nvironment["OMNIGENT_SCREENSHOT_APP_UR… | keep-internal |  | test code |
 | 205 | …chArguments.omnigentServerURL | keep-internal |  | test code |
 | 206 | …Arguments().omnigentServerURL | keep-internal |  | test code |
@@ -7242,11 +7232,11 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 4 | …BUG-only ˋ--omnigent-open-urlˋ | keep-internal |  | test code |
 | 15 | …to-end: an ˋomnigent://ˋ deep link to … | keep-internal |  | test code |
 | 22 | …t marker = "OMNIGENT_DEEPLINK_CONSENT_… | keep-internal |  | test code |
-| 30 | …deepLink = "omnigent://localhost:\(ser… | keep-internal |  | test code |
+| 30 | let deepLink = "omnigent://localhost:\(server.port)/c/conv_smoke" | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 32 | …tifier: "ai.omnigent.ios") | keep-internal |  | test code |
 | 34 | "--omnigent-open-url", deepLink, | keep-internal |  | test code |
 | 35 | "--omnigent-reset-state", | keep-internal |  | test code |
-| 39 | …["Open this Omnigent link?"] | keep-internal |  | test code |
+| 39 | let alert = app.alerts["Open this Omnigent link?"] | change | S38 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/ios/README.md`
 
@@ -7712,7 +7702,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 56 | …mal ˋwindow.omnigentDesktopˋ stub. The… | keep-internal |  | test code |
 | 84 | …nknown as { omnigentDesktop?: unknown … | keep-internal |  | test code |
 | 109 | …nknown as { omnigentDesktop?: unknown … | keep-internal |  | test code |
-| 704 | ˋ4 cookies for ${HOST} and its subdomains. Other sites' cookies stay out of Omnigent entirely.ˋ, | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 704 | ˋ4 cookies for ${HOST} and its subdomains. Other sites' cookies stay out of Omnigent entirely.ˋ, | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/components/BrowserPane/BrowserPane.tsx`
 
@@ -7817,8 +7807,8 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 269 | expect(screen.queryByText("Quit Omnigent")).toBeNull(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 282 | expect(keysFor("Quit Omnigent")).toEqual(["Ctrl", "Q"]); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 269 | expect(screen.queryByText("Quit Omnigent")).toBeNull(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 282 | expect(keysFor("Quit Omnigent")).toEqual(["Ctrl", "Q"]); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/components/KeyboardShortcutsDialog.tsx`
 
@@ -7896,9 +7886,9 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 66 | … = useState<OmnigentHostConfig>(() => … | keep-internal |  | test code |
 | 87 | …h, "https://omnigent.example").pathnam… | keep-internal |  | test code |
 | 119 | workspace: "/projects/omnigent", | keep-internal |  | test code |
-| 392 | ? "This Omnigent server allows read-only sharing. Invite others to view or comment on this session." | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 393 | : "This Omnigent server allows sharing. Invite others to view or edit this session."} | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 519 | value="omnigent://omnigent.example/c/sharing-design-preview" | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
+| 392 | ? "This Omnigent server allows read-only sharing. Invite others to view or comment on this session." | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 393 | : "This Omnigent server allows sharing. Invite others to view or edit this session."} | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 519 | value="omnigent://omnigent.example/c/sharing-design-preview" | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/components/PermissionsModal.test.tsx`
 
@@ -7909,17 +7899,17 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 84 | …ked(host.getOmnigentUserSearch); | keep-internal |  | test code |
 | 85 | …ked(host.getOmnigentTransformShareLink… | keep-internal |  | test code |
 | 107 | databricks_features: false, | keep-internal |  | test code |
-| 717 | await screen.findByText("Sharing has been disabled for this Omnigent server."), | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 735 | screen.getByText(/This Omnigent server allows Read and Edit access for added people\./), | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 739 | screen.queryByText("Sharing has been disabled for this Omnigent server."), | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 753 | /This Omnigent server allows read-only sharing\. Invite others to read this session\./, | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 778 | /This Omnigent server allows read-only sharing\. Invite others to read this session\./, | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 1061 | // The QR encodes an ˋomnigent://<host>/c/<id>ˋ deep link (the same scheme | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 1083 | it("encodes the omnigent:// deep link for the session from the server origin", async () => { | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 1096 | expect(qr).toHaveAttribute("data-value", "omnigent://app.example.com/c/conv_abc"); | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 1101 | // Mirrors the deep-link convention: ˋomnigent://localhost:8000/c/<id>ˋ. | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 1112 | expect(qr).toHaveAttribute("data-value", "omnigent://localhost:8000/c/conv_abc"); | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
-| 1129 | expect(qr).toHaveAttribute("data-value", "omnigent://host.example.com/c/conv_xyz"); | change | S38,S89 | Test pins visible text the rebrand changed; updated in step. |
+| 717 | await screen.findByText("Sharing has been disabled for this Omnigent server."), | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 735 | screen.getByText(/This Omnigent server allows Read and Edit access for added people\./), | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 739 | screen.queryByText("Sharing has been disabled for this Omnigent server."), | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 753 | /This Omnigent server allows read-only sharing\. Invite others to read this session\./, | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 778 | /This Omnigent server allows read-only sharing\. Invite others to read this session\./, | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 1061 | // The QR encodes an ˋomnigent://<host>/c/<id>ˋ deep link (the same scheme | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 1083 | it("encodes the omnigent:// deep link for the session from the server origin", async () => { | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 1096 | expect(qr).toHaveAttribute("data-value", "omnigent://app.example.com/c/conv_abc"); | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 1101 | // Mirrors the deep-link convention: ˋomnigent://localhost:8000/c/<id>ˋ. | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 1112 | expect(qr).toHaveAttribute("data-value", "omnigent://localhost:8000/c/conv_abc"); | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 1129 | expect(qr).toHaveAttribute("data-value", "omnigent://host.example.com/c/conv_xyz"); | change | S38,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/components/PermissionsModal.tsx`
 
@@ -7992,13 +7982,13 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 27 | …, unknown>).omnigentDesktop = { | keep-internal |  | test code |
 | 41 | …, unknown>).omnigentDesktop; | keep-internal |  | test code |
 | 46 | …, unknown>).omnigentDesktop; | keep-internal |  | test code |
-| 63 | expect(await screen.findByText("Omnigent Desktop 0.4.0 is available")).toBeInTheDocument(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 74 | expect(await screen.findByText("Downloading Omnigent Desktop update… 42%")).toBeInTheDocument(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 80 | await screen.findByText("Omnigent Desktop 0.4.0 is ready to install"), | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 101 | await screen.findByText("Omnigent Desktop 0.4.0 is ready to install"), | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 114 | expect(await screen.findByText("Omnigent Desktop 0.4.0 is available")).toBeInTheDocument(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 133 | expect(await screen.findByText("Omnigent Desktop 0.4.0 is available")).toBeInTheDocument(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 138 | expect(screen.queryByText("Omnigent Desktop 0.4.0 is available")).toBeNull(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 63 | expect(await screen.findByText("Omnigent Desktop 0.4.0 is available")).toBeInTheDocument(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 74 | expect(await screen.findByText("Downloading Omnigent Desktop update… 42%")).toBeInTheDocument(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 80 | await screen.findByText("Omnigent Desktop 0.4.0 is ready to install"), | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 101 | await screen.findByText("Omnigent Desktop 0.4.0 is ready to install"), | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 114 | expect(await screen.findByText("Omnigent Desktop 0.4.0 is available")).toBeInTheDocument(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 133 | expect(await screen.findByText("Omnigent Desktop 0.4.0 is available")).toBeInTheDocument(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 138 | expect(screen.queryByText("Omnigent Desktop 0.4.0 is available")).toBeNull(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/components/UpdateBanner.tsx`
 
@@ -8048,7 +8038,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
 | 754 | …{'Allow the omnigent MCP server to run… | keep-internal |  | test code |
-| 820 | "Ask Antigravity to save a rule allowing commands starting with “pwd” for this Omnigent session", | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 820 | "Ask Antigravity to save a rule allowing commands starting with “pwd” for this Omnigent session", | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/components/blocks/ApprovalCard.tsx`
 
@@ -8490,15 +8480,15 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 2438 | …extContent("Omnigent Automation"); | keep-internal |  | test code |
 | 2441 | …CalledWith("Omnigent Automation"); | keep-internal |  | test code |
 | 2865 | … starts one Omnigent session for each … | keep-internal |  | test code |
-| 3339 | …t run · Posts include "Sent with Omnigent".', | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 3362 | expect(note).toHaveTextContent('Posts include "Sent with Omnigent".'); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 3384 | expect(note).toHaveTextContent("Sent with Omnigent"); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 3339 | …t run · Posts include "Sent with Omnigent".', | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 3362 | expect(note).toHaveTextContent('Posts include "Sent with Omnigent".'); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 3384 | expect(note).toHaveTextContent("Sent with Omnigent"); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 3458 | …-0-value", "omnigent"); | keep-internal |  | test code |
 | 3477 | …-0-value", "omnigent"); | keep-internal |  | test code |
 | 3498 | …D labels = "omnigent" AND issuetype !=… | keep-internal |  | test code |
-| 3502 | 'Comment "Omnigent session: https://host.example.com/embed#/c/CONVERSATION_ID?o=42" on each ticket', | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 3557 | expect(prompt).not.toContain("Omnigent session:"); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 3621 | 'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each issue', | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 3502 | 'Comment "Omnigent session: https://host.example.com/embed#/c/CONVERSATION_ID?o=42" on each ticket', | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 3557 | expect(prompt).not.toContain("Omnigent session:"); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 3621 | 'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each issue', | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/components/scheduled/CreateScheduledTaskDialog.tsx`
 
@@ -8534,21 +8524,21 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 34 | … ES labeled omnigent, unless overridde… | keep-internal |  | test code |
 | 39 | conditions: [LABEL_OMNIGENT], | keep-internal |  | test code |
 | 46 | …D labels = "omnigent"'; | keep-internal |  | test code |
-| 161 | ? posting.replace("Sent with Omnigent", "Automated reply") | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 186 | …est, ends with a line "Sent with Omnigent", since it posts with the owner\'s acc | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 161 | ? posting.replace("Sent with Omnigent", "Automated reply") | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 186 | … "Sent with Omnigent", since it posts … | keep-internal |  | test code |
 | 188 | … "Sent with Omnigent", since it posts … | keep-internal |  | test code |
 | 237 | …[{ ...LABEL_OMNIGENT, value: " " }] },… | keep-internal |  | test code |
 | 384 | …s", value: "omnigent" }, | keep-internal |  | test code |
 | 390 | …D labels = "omnigent" AND issuetype !=… | keep-internal |  | test code |
 | 551 | "starts one Omnigent session for each … | keep-internal |  | test code |
-| 567 | 'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each ticket', | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 598 | expect(manager).not.toContain('Reply "Omnigent session:'); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 616 | … each one with a line "Sent with Omnigent", since it posts with the owner\'s account.', | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 620 | …est, ends with a line "Sent with Omnigent", since it posts with the owner\'s account.', | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 638 | expect(noLink).toContain('ends with a line "Sent with Omnigent"'); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 743 | expect(prompt).not.toContain("Omnigent session:"); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 567 | 'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each ticket', | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 598 | expect(manager).not.toContain('Reply "Omnigent session:'); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 616 | … each one with a line "Sent with Omnigent", since it posts with the owner\'s account.', | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 620 | …est, ends with a line "Sent with Omnigent", since it posts with the owner\'s account.', | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 638 | expect(noLink).toContain('ends with a line "Sent with Omnigent"'); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 743 | expect(prompt).not.toContain("Omnigent session:"); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 802 | … starts one Omnigent session for each … | keep-internal |  | test code |
-| 818 | 'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each issue you started a … | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 818 | 'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each issue you started a … | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 878 | "starts one Omnigent session for each … | keep-internal |  | test code |
 
 ### `web/src/components/scheduled/triggerTemplates.ts`
@@ -8561,7 +8551,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 403 | …h a line "${OMNIGENT_ATTRIBUTION}", si… | keep-internal |  | The hit is only the JS identifier OMNIGENT_ATTRI |
 | 548 | return ˋThis automation watches ${triggerServiceName(source)} and starts one Omnigent sessionˋ; | keep-deferred |  | Persisted prompt opening, matched by prefix in the server's fire.py; the needed server change is outside the rebrand seams. Deferred to the |
 | 983 | text.linkBack(ˋOmnigent session: ${ctx.sessionLink}ˋ) + | change | S89 | Link-back text that agents post on tickets and that the Preview prompt shows. Uses Omnigent as the product name. |
-| 984 | ˋ End each one with a line "${OMNIGENT_ATTRIBUTION}", since it posts with the owner's account. Repla… | change | S89 | Changed with its seam: The hit is only the JS identifier OMNIGENT_ATTRIBUTION, interpolated here. The visible text changes through :399. |
+| 984 | …h a line "${OMNIGENT_ATTRIBUTION}", si… | keep-internal |  | The hit is only the JS identifier OMNIGENT_ATTRI |
 
 ### `web/src/components/theme/CardRadioGroup.tsx`
 
@@ -9788,7 +9778,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
 | 14 | …RAGE_KEY = "omnigent:custom-theme"; | keep-internal |  | test code |
-| 139 | it("keeps Omnigent's selection tint after contrast changes", () => { | change | S82 | Test pins visible text the rebrand changed; updated in step. |
+| 139 | it("keeps Omnigent's selection tint after contrast changes", () => { | change | S82 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 159 | it("keeps Omnigent's selected-session … | keep-internal |  | test code |
 
 ### `web/src/lib/customTheme.ts`
@@ -11024,7 +11014,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 67 | …i.mocked(getOmnigentServerIdentity).mo… | keep-internal |  | test code |
 | 72 | …i.mocked(getOmnigentServerIdentity).mo… | keep-internal |  | test code |
 | 124 | storageChange("omnigent:unrelated"); | keep-internal |  | test code |
-| 195 | ).rejects.toThrow("valid Omnigent settings"); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 195 | ).rejects.toThrow("valid Omnigent settings"); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/lib/terminalClipboardPreferences.ts`
 
@@ -11054,8 +11044,8 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 |---|---|---|---|---|
 | 15 | …RAGE_KEY = "omnigent:ui-theme-palette"… | keep-internal |  | test code |
 | 190 | …he base for Omnigent dark form control… | keep-internal |  | test code |
-| 195 | it("uses the Omnigent brand pink as the primary accent in both modes", () => { | change | S82 | Test pins visible text the rebrand changed; updated in step. |
-| 201 | it("uses magenta links with neutral support controls in Omnigent", () => { | change | S82 | Test pins visible text the rebrand changed; updated in step. |
+| 195 | it("uses the Omnigent brand pink as the primary accent in both modes", () => { | change | S82 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 201 | it("uses magenta links with neutral support controls in Omnigent", () => { | change | S82 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/lib/themePalette.ts`
 
@@ -11509,13 +11499,13 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 287 | …, unknown>).omnigentDesktop; | keep-internal |  | test code |
 | 303 | …, unknown>).omnigentDesktop; | keep-internal |  | test code |
 | 357 | …, unknown>).omnigentDesktop = { | keep-internal |  | test code |
-| 379 | expect(screen.getByText("Configure general Omnigent behavior.")).toHaveClass("max-md:hidden"); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 379 | expect(screen.getByText("Configure general Omnigent behavior.")).toHaveClass("max-md:hidden"); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 405 | …, unknown>).omnigentDesktop = { | keep-internal |  | test code |
 | 415 | …, unknown>).omnigentDesktop = { | keep-internal |  | test code |
-| 424 | await screen.findByRole("switch", { name: "Show Omnigent from anywhere" }), | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 424 | await screen.findByRole("switch", { name: "Show Omnigent from anywhere" }), | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 514 | …onst key = ˋomnigent:terminal-clipboar… | keep-internal |  | test code |
 | 521 | …n(host, "getOmnigentServerIdentity").m… | keep-internal |  | test code |
-| 590 | expect(screen.getByText("Choose how Omnigent looks on this device.")).toHaveClass( | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 590 | expect(screen.getByText("Choose how Omnigent looks on this device.")).toHaveClass( | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 618 | …ser mode to Databricks settings", () =… | keep-internal |  | test code |
 | 621 | …n(host, "getOmnigentThemeSettingsUrl")… | keep-internal |  | test code |
 | 627 | ["Use Databricks setting", "system"], | keep-internal |  | test code |
@@ -11815,11 +11805,11 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 26 | fireEvent.click(screen.getByRole("button", { name: /open omnigent/i })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 78 | expect(screen.getByRole("button", { name: /open omnigent/i })).toBeEnabled(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 98 | expect(screen.getByRole("button", { name: /open omnigent/i })).toBeEnabled(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 100 | await waitFor(() => expect(screen.getByText("Omnigent server")).toBeInTheDocument()); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 123 | fireEvent.click(screen.getByRole("button", { name: /open omnigent/i })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
+| 26 | fireEvent.click(screen.getByRole("button", { name: /open omnigent/i })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 78 | expect(screen.getByRole("button", { name: /open omnigent/i })).toBeEnabled(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 98 | expect(screen.getByRole("button", { name: /open omnigent/i })).toBeEnabled(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 100 | await waitFor(() => expect(screen.getByText("Omnigent server")).toBeInTheDocument()); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 123 | fireEvent.click(screen.getByRole("button", { name: /open omnigent/i })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/pages/onboarding/ServerSelectStep.test.ts`
 
@@ -11848,42 +11838,42 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 29 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 36 | // only after clicking Install Omnigent. | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 37 | expect(screen.getByRole("heading", { name: /set up omnigent locally/i })).toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 41 | it("Install Omnigent from the local intro starts the install", () => { | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 44 | fireEvent.click(screen.getByRole("button", { name: /install omnigent/i })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 53 | expect(screen.queryByRole("heading", { name: "Meet Omnigent" })).not.toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 58 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 101 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 135 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 141 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 150 | it("a local install that's down reads 'Start Omnigent' and boots it", async () => { | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 166 | fireEvent.click(screen.getByRole("button", { name: "Start Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 172 | it("a local install that's up reads 'Open Omnigent' and opens the exact URL", async () => { | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 185 | expect(await screen.findByText("Omnigent server")).toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 186 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 207 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 230 | expect(await screen.findByText("Omnigent server")).toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 231 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 252 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 261 | expect(screen.getByRole("button", { name: "Start Omnigent" })).toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 265 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 339 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 370 | fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 401 | fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 412 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 418 | action: string \| RegExp = /(install\|open) omnigent/i, | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 577 | return screen.getByRole("button", { name: /open omnigent/i }); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 681 | "Open Omnigent", | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 705 | "Install Omnigent", | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 858 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 874 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 886 | await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }))); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 889 | await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }))); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 905 | fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 921 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 934 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
+| 29 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 36 | // only after clicking Install Omnigent. | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 37 | expect(screen.getByRole("heading", { name: /set up omnigent locally/i })).toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 41 | it("Install Omnigent from the local intro starts the install", () => { | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 44 | fireEvent.click(screen.getByRole("button", { name: /install omnigent/i })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 53 | expect(screen.queryByRole("heading", { name: "Meet Omnigent" })).not.toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 58 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 101 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 135 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 141 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 150 | it("a local install that's down reads 'Start Omnigent' and boots it", async () => { | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 166 | fireEvent.click(screen.getByRole("button", { name: "Start Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 172 | it("a local install that's up reads 'Open Omnigent' and opens the exact URL", async () => { | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 185 | expect(await screen.findByText("Omnigent server")).toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 186 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 207 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 230 | expect(await screen.findByText("Omnigent server")).toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 231 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 252 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 261 | expect(screen.getByRole("button", { name: "Start Omnigent" })).toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 265 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 339 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 370 | fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 401 | fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 412 | expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument(); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 418 | action: string \| RegExp = /(install\|open) omnigent/i, | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 577 | return screen.getByRole("button", { name: /open omnigent/i }); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 681 | "Open Omnigent", | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 705 | "Install Omnigent", | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 858 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 874 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 886 | await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }))); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 889 | await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }))); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 905 | fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 921 | fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 934 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/pages/onboarding/ServerSelectorV2.tsx`
 
@@ -11945,7 +11935,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 7 | const SWITCH_NAME = "Show Omnigent from anywhere"; | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 7 | const SWITCH_NAME = "Show Omnigent from anywhere"; | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 22 | …, unknown>).omnigentDesktop = bridge; | keep-internal |  | test code |
 | 28 | …, unknown>).omnigentDesktop; | keep-internal |  | test code |
 
@@ -11964,7 +11954,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 102 | [{ family: "databricks", source: "isaa… | keep-internal |  | test code |
 | 122 | …[{ family: "databricks", source: "isaa… | keep-internal |  | test code |
 | 187 | …x, then the Databricks Unity Gateway c… | keep-internal |  | test code |
-| 319 | expect(screen.getByText(/quit and reopen the Omnigent app/)).toBeVisible(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 319 | expect(screen.getByText(/quit and reopen the Omnigent app/)).toBeVisible(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 1264 | …for %s when Databricks is detected", (… | keep-internal |  | test code |
 | 1274 | ["without a Databricks entry", [], "Pe… | keep-internal |  | test code |
 | 1276 | "with a Databricks entry", | keep-internal |  | test code |
@@ -12009,12 +11999,12 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 8 | …window as { omnigentSetup?: unknown })… | keep-internal |  | test code |
 | 11 | … a minimal ˋomnigentSetupˋ bridge; ˋov… | keep-internal |  | test code |
 | 13 | …window as { omnigentSetup?: unknown })… | keep-internal |  | test code |
-| 27 | await screen.findByRole("button", { name: /open omnigent/i }); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 63 | const openButton = await screen.findByRole("button", { name: /open omnigent/i }); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 93 | fireEvent.click(await screen.findByRole("button", { name: /open omnigent/i })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
-| 117 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
+| 27 | await screen.findByRole("button", { name: /open omnigent/i }); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 63 | const openButton = await screen.findByRole("button", { name: /open omnigent/i }); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 93 | fireEvent.click(await screen.findByRole("button", { name: /open omnigent/i })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 117 | fireEvent.click(screen.getByRole("button", { name: "Install Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 120 | "https://omnigent.ai/quickstart/instal… | keep-internal |  | test code |
-| 145 | fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" })); | change | S89b | Test pins visible text the rebrand changed; updated in step. |
+| 145 | fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" })); | change | S89b | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/server-selector-v2.tsx`
 
@@ -12108,8 +12098,8 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 4801 | labels: { "omnigent.side_chat": "1" }, | keep-internal |  | test code |
 | 4832 | …", null, { "omnigent.side_chat": "1" }… | keep-internal |  | test code |
 | 4894 | labels: { "omnigent.side_chat": "1" }, | keep-internal |  | test code |
-| 5269 | expect(screen.getByText(/This Omnigent server allows read-only sharing/)).toBeInTheDocument(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 5318 | "Sharing has been disabled for this Omnigent server.", | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 5269 | expect(screen.getByText(/This Omnigent server allows read-only sharing/)).toBeInTheDocument(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 5318 | "Sharing has been disabled for this Omnigent server.", | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 5571 | … labels: { "omnigent.ui": "terminal" }… | keep-internal |  | test code |
 | 5608 | … labels: { "omnigent.ui": "terminal" }… | keep-internal |  | test code |
 | 5822 | vi.stubGlobal("omnigentDesktop", { | keep-internal |  | test code |
@@ -12173,8 +12163,8 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 26 | expect(screen.getByRole("heading", { name: "Quit Omnigent?" })).toBeInTheDocument(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 28 | screen.getByText("This is the only open window, so closing it quits Omnigent."), | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 26 | expect(screen.getByRole("heading", { name: "Quit Omnigent?" })).toBeInTheDocument(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 28 | screen.getByText("This is the only open window, so closing it quits Omnigent."), | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/shell/CloseWindowDialog.tsx`
 
@@ -12348,11 +12338,11 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 326 | expect(screen.getByText(/Omnigent is still working/)).toBeDefined(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 333 | expect(screen.queryByText(/Omnigent is still working/)).toBeNull(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 349 | expect(screen.queryByText(/Omnigent is still working/)).toBeNull(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 357 | expect(screen.queryByText(/Omnigent is still working/)).toBeNull(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
-| 367 | expect(screen.queryByText(/Omnigent is still working/)).toBeNull(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 326 | expect(screen.getByText(/Omnigent is still working/)).toBeDefined(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 333 | expect(screen.queryByText(/Omnigent is still working/)).toBeNull(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 349 | expect(screen.queryByText(/Omnigent is still working/)).toBeNull(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 357 | expect(screen.queryByText(/Omnigent is still working/)).toBeNull(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 367 | expect(screen.queryByText(/Omnigent is still working/)).toBeNull(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 375 | … = "https://omnigent.ai/docs/build/har… | keep-internal |  | test code |
 
 ### `web/src/shell/MarkdownRichTextViewer.tsx`
@@ -12566,7 +12556,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 | 7173 | …ect(labels["omnigent.codex_native.coll… | keep-internal |  | test code |
 | 7174 | …ect(labels["omnigent.wrapper"]).toBe("… | keep-internal |  | test code |
 | 7225 | …, string>)["omnigent.codex_native.bypa… | keep-internal |  | test code |
-| 7483 | "then check again. If Omnigent still can't find it, quit and reopen the Omnigent app.", | change | S81,S89 | Test pins visible text the rebrand changed; updated in step. |
+| 7483 | "then check again. If Omnigent still can't find it, quit and reopen the Omnigent app.", | change | S81,S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 | 8281 | setOmnigentHostConfig({ | keep-internal |  | test code |
 | 8573 | …ers).get("X-Omnigent-Background-Sessio… | keep-internal |  | test code |
 | 8677 | name: "not-configured OmnigentError", | keep-internal |  | test code |
@@ -12697,7 +12687,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 18 | expect(screen.getByRole("heading", { name: "Quit Omnigent?" })).toBeInTheDocument(); | change | S89 | Test pins visible text the rebrand changed; updated in step. |
+| 18 | expect(screen.getByRole("heading", { name: "Quit Omnigent?" })).toBeInTheDocument(); | change | S89 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/shell/QuitDialog.tsx`
 
@@ -12907,9 +12897,9 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| 118 | it("renders the official Omnigent wordmark instead of styled text", () => { | change | S80 | Test pins visible text the rebrand changed; updated in step. |
-| 123 | expect(wordmark).toHaveAttribute("alt", "Omnigent"); | change | S80 | Test pins visible text the rebrand changed; updated in step. |
-| 125 | expect(wordmark.getAttribute("src")).toContain("omnigent-wordmark"); | change | S80 | Test pins visible text the rebrand changed; updated in step. |
+| 118 | it("renders the official Omnigent wordmark instead of styled text", () => { | change | S80 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 123 | expect(wordmark).toHaveAttribute("alt", "Omnigent"); | change | S80 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
+| 125 | expect(wordmark.getAttribute("src")).toContain("omnigent-wordmark"); | change | S80 | Test updated with its seam: it pinned changed text or used a changed id or scheme. |
 
 ### `web/src/shell/Sidebar.test.tsx`
 
