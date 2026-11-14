@@ -97,12 +97,17 @@ OPS-01's generator will maintain this file later.
 | `web/electron/test/update-main.test.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
 | `web/index.html` | S89 | coral-specific | Coral favicon, apple-touch icon, theme colour and tab title, and a cream "Loading Coral…" boot screen (S89). |
 | `web/ios/Omnigent.xcodeproj/project.pbxproj` | S88 | coral-specific | `APP_DISPLAY_NAME` is Coral and the app icon source is `platform-assets/coral/AppIcon.icon` (S88). |
+| `web/ios/Omnigent/AppRootView.swift` | S38 | coral-specific | The deep-link consent alert names Coral (S38). |
 | `web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/Contents.json` | S88 | coral-specific | Added. Coral connect-screen logo imageset (S88). |
 | `web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-mark.svg` | S88 | coral-specific | Added. Symlink to `platform-assets/logos/coral-mark.svg` (S88). |
 | `web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/Contents.json` | S88 | coral-specific | Added. Coral connect-screen logo imageset for dark mode (S88). |
 | `web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-mark.svg` | S88 | coral-specific | Added. Symlink to `platform-assets/logos/coral-mark.svg` (S88). |
-| `web/ios/Omnigent/Info-Debug.plist` | S88 | coral-specific | Camera, microphone and speech permission prompts name Coral (S88). |
-| `web/ios/Omnigent/Info-Release.plist` | S88 | coral-specific | Camera, microphone and speech permission prompts name Coral (S88). |
+| `web/ios/Omnigent/DeepLink.swift` | S38 | coral-specific | Accepts only `coral://` session links (S38). |
+| `web/ios/Omnigent/Info-Debug.plist` | S38, S88 | coral-specific | Camera, microphone and speech permission prompts name Coral (S88); the session-link URL scheme is `coral` (S38). |
+| `web/ios/Omnigent/Info-Release.plist` | S38, S88 | coral-specific | Camera, microphone and speech permission prompts name Coral (S88); the session-link URL scheme is `coral` (S38). |
+| `web/ios/OmnigentTests/DeepLinkTests.swift` | S38 | coral-specific | Fixtures use `coral://`; `omnigent://` is rejected (S38). |
+| `web/ios/OmnigentUITests/OmnigentUITests.swift` | S38 | coral-specific | Deep links use `coral://` and the consent alert names Coral (S38). |
+| `web/ios/OmnigentUITests/RedirectConsentUITests.swift` | S38 | coral-specific | Deep links use `coral://` and the consent alert names Coral (S38). |
 | `web/package.json` | S83 | coral-specific | Adds the `@fontsource-variable/newsreader` dependency (S83). |
 | `web/platform-assets/coral/AppIcon.icon/Assets/Coral Mark.svg` | S88 | coral-specific | Added. Generated from the placeholder Coral mark (S88). |
 | `web/platform-assets/coral/AppIcon.icon/icon.json` | S88 | coral-specific | Added. Coral Icon Composer source: cream fill, Coral mark layer; same schema as the upstream bundle (S88). |

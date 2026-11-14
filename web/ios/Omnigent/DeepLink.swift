@@ -98,7 +98,8 @@ struct DeepLink: Equatable {
   /// empty/nested id, an id that isn't a real conversation id, or unparseable
   /// input) — an unrecognized deep link must never crash or mis-navigate.
   static func parse(_ raw: URL) -> DeepLink? {
-    guard raw.scheme?.lowercased() == "omnigent" else { return nil }
+    // CORAL(S38): only Coral's coral:// scheme is a session link.
+    guard raw.scheme?.lowercased() == "coral" else { return nil }
     guard let host = raw.host, !host.isEmpty else { return nil }
 
     // v1 accepts only `/c/<id>`. CRUCIALLY, `URL.path` returns the

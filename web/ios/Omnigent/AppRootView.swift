@@ -131,8 +131,9 @@ struct AppRootView: View {
         DispatchQueue.main.async { handleDeepLink(url) }
       }
     #endif
+    // CORAL(S38): the deep-link consent names Coral.
     .alert(
-      "Open this Omnigent link?",
+      "Open this Coral link?",
       isPresented: $showDeepLinkConsent
     ) {
       Button("Cancel", role: .cancel) { consentDeepLink = nil }
@@ -141,7 +142,7 @@ struct AppRootView: View {
       if let consentDeepLink {
         Text(
           """
-          This link will connect Omnigent to \(consentDeepLink.origin.hostLabel) and open a conversation.
+          This link will connect Coral to \(consentDeepLink.origin.hostLabel) and open a conversation.
 
           Only open links from a server you trust.
           """

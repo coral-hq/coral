@@ -1,5 +1,7 @@
 import XCTest
 
+// CORAL(S38): deep links use the coral:// scheme and the consent names Coral.
+
 /// UI smoke test for the deep-link consent flow (the surface the [F-CR-7] fix
 /// lives behind), driven in the simulator via the DEBUG-only `--omnigent-open-url`
 /// launch seam added by F-CR-6 (#3179).
@@ -27,7 +29,7 @@ final class RedirectConsentUITests: XCTestCase {
       )
     }
 
-    let deepLink = "omnigent://localhost:\(server.port)/c/conv_smoke"
+    let deepLink = "coral://localhost:\(server.port)/c/conv_smoke"
 
     let app = XCUIApplication(bundleIdentifier: "ai.omnigent.ios")
     app.launchArguments += [
@@ -36,7 +38,7 @@ final class RedirectConsentUITests: XCTestCase {
     ]
     app.launch()
 
-    let alert = app.alerts["Open this Omnigent link?"]
+    let alert = app.alerts["Open this Coral link?"]
     XCTAssertTrue(
       alert.waitForExistence(timeout: 15), "Expected the consent alert for \(deepLink).")
     alert.buttons["Open"].tap()

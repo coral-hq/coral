@@ -351,7 +351,15 @@ seams:
       - omnigent/conversation_browser.py
       - tests/test_conversation_browser.py
       - tests/e2e/omnigent/test_host_no_open.py
+      - web/ios/Omnigent/Info-Debug.plist
+      - web/ios/Omnigent/Info-Release.plist
+      - web/ios/Omnigent/DeepLink.swift
+      - web/ios/Omnigent/AppRootView.swift
+      - web/ios/OmnigentTests/DeepLinkTests.swift
+      - web/ios/OmnigentUITests/OmnigentUITests.swift
+      - web/ios/OmnigentUITests/RedirectConsentUITests.swift
     tests:
+      - web/ios/OmnigentTests/DeepLinkTests.swift
       - web/electron/test/deepLink.test.js
       - web/electron/test/main.test.js
       - web/electron/test/brand.test.js
@@ -361,9 +369,9 @@ seams:
       - tests/e2e/omnigent/test_host_no_open.py
     budget_lines: 10
     budget_exception:
-      lines: 50
+      lines: 70
       reason: >-
-        Every deep-link fixture in the Electron, web and Python tests moves
+        Every deep-link fixture in the Electron, web, Python and iOS tests moves
         from omnigent:// to coral://; the production edits stay within XS.
       approver: pending
     anchor_exempt:

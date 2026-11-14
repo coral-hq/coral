@@ -1,5 +1,7 @@
 import XCTest
 
+// CORAL(S38): deep links use the coral:// scheme and the consent names Coral.
+
 @MainActor
 final class OmnigentUITests: XCTestCase {
   override func setUpWithError() throws {
@@ -64,9 +66,9 @@ final class OmnigentUITests: XCTestCase {
   func testValidDeepLinkShowsConsent() throws {
     // A real 32-char-hex conversation id — the canonical form the API emits.
     let app = launchApp(
-      openURL: "omnigent://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9")
+      openURL: "coral://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9")
 
-    let alert = app.alerts["Open this Omnigent link?"]
+    let alert = app.alerts["Open this Coral link?"]
     XCTAssertTrue(
       alert.waitForExistence(timeout: 10),
       "A valid deep link to an unknown server should show the consent alert."
@@ -85,13 +87,13 @@ final class OmnigentUITests: XCTestCase {
     // F-CR-6. The id grammar (hex only) rejects the `?`, so no alert.
     let app = launchApp(
       openURL:
-        "omnigent://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9%3Fview=terminal")
+        "coral://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9%3Fview=terminal")
     // Sanity: the app reached a responsive state where a VALID link would have
     // shown the alert — so the alert's absence means the link was rejected, not
     // that delivery silently failed.
     assertAppReachedSetup(app)
 
-    let alert = app.alerts["Open this Omnigent link?"]
+    let alert = app.alerts["Open this Coral link?"]
     XCTAssertFalse(
       alert.waitForExistence(timeout: 6),
       "A deep link with a smuggled query (encoded `?`) must be rejected — no consent alert."
@@ -101,10 +103,10 @@ final class OmnigentUITests: XCTestCase {
   /// A deep link with a smuggled fragment (`%23` → `#`) is likewise rejected.
   func testSmuggledFragmentDeepLinkIsRejected() throws {
     let app = launchApp(
-      openURL: "omnigent://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9%23evil")
+      openURL: "coral://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9%23evil")
     assertAppReachedSetup(app)
 
-    let alert = app.alerts["Open this Omnigent link?"]
+    let alert = app.alerts["Open this Coral link?"]
     XCTAssertFalse(
       alert.waitForExistence(timeout: 6),
       "A deep link with a smuggled fragment (encoded `#`) must be rejected — no consent alert."
@@ -120,9 +122,9 @@ final class OmnigentUITests: XCTestCase {
     // `conv_abc` isn't a real server id, but it smuggles no structure, so the
     // parser forwards it — the SPA decides validity. Expect the consent alert
     // (unknown server), proving the link was ACCEPTED.
-    let app = launchApp(openURL: "omnigent://localhost:8000/c/conv_abc")
+    let app = launchApp(openURL: "coral://localhost:8000/c/conv_abc")
 
-    let alert = app.alerts["Open this Omnigent link?"]
+    let alert = app.alerts["Open this Coral link?"]
     XCTAssertTrue(
       alert.waitForExistence(timeout: 10),
       "A deep link with a benign (non-smuggling) id should be accepted and show the consent alert."
@@ -133,10 +135,10 @@ final class OmnigentUITests: XCTestCase {
   /// A deep link with an encoded `..` (`%2e%2e`) — a path-traversal-shaped id —
   /// is rejected by the grammar (no `.` in a conversation id).
   func testEncodedDotDotDeepLinkIsRejected() throws {
-    let app = launchApp(openURL: "omnigent://localhost:8000/c/%2e%2e")
+    let app = launchApp(openURL: "coral://localhost:8000/c/%2e%2e")
     assertAppReachedSetup(app)
 
-    let alert = app.alerts["Open this Omnigent link?"]
+    let alert = app.alerts["Open this Coral link?"]
     XCTAssertFalse(
       alert.waitForExistence(timeout: 6),
       "A deep link with an encoded `..` must be rejected — no consent alert."
@@ -146,10 +148,10 @@ final class OmnigentUITests: XCTestCase {
   /// A deep link with a control character (`%00` NUL) in the id is rejected.
   func testControlCharDeepLinkIsRejected() throws {
     let app = launchApp(
-      openURL: "omnigent://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9%00x")
+      openURL: "coral://localhost:8000/c/e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9%00x")
     assertAppReachedSetup(app)
 
-    let alert = app.alerts["Open this Omnigent link?"]
+    let alert = app.alerts["Open this Coral link?"]
     XCTAssertFalse(
       alert.waitForExistence(timeout: 6),
       "A deep link with a control character in the id must be rejected — no consent alert."
