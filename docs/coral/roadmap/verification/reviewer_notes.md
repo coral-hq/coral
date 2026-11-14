@@ -1,0 +1,221 @@
+# Reviewer notes left inline in specs
+
+- BRD-01 (brd.md): - Reviewer note: S89 (BRD-01) lists the Electron setup and connect pages, which BRD-03 includes. Split the ledger row.
+- BRD-02 (brd.md): - Reviewer note: the three upstream seams need K16, which the contracts omit.
+- BRD-02 (brd.md): - Reviewer note: `withPageView` is module-private, so the call is `coralRoutes(prefix, withPageView)`.
+- BRD-02 (brd.md): - Reviewer note: the proof's "unknown routes" means Coral desk paths, the only ones excluded.
+- BRD-03 (brd.md): - Reviewer note: "about 37 literals" is `main.js` only; `desktop_updater.js`, `quitConfirmation.js:28, 31` and `ssh_connect.js` also show "Omnigent".
+- BRD-03 (brd.md): - Reviewer note: the master's proof link has no host, so `workflows` parses as the host; use `coral://<host>/workflows/runs/<id>`.
+- BRD-03 (brd.md): - Reviewer note: the proof needs BRD-02's routes. Add BRD-02 as a soft dependency.
+- BRD-03 (brd.md): - Reviewer note: Android has no custom-scheme handler (`web/android/app/src/main/AndroidManifest.xml:39-77`), so S38 covers Electron and iOS only.
+- DUR-01 (dur.md): - Reviewer note: SES-08's "persisted edge facts" have no table in §9. They are resolved here as unapplied `coral_signals` rows plus slot fields in coral_0001, matching the SES-08 spec; otherwise SES-08 needs coral_00NN_turn_facts.
+- DUR-01 (dur.md): - Reviewer note: §9's coral_0002_queue row ("queue, timers") omits effects, signals and the worker lease.
+- DUR-02 (dur.md): - Reviewer note: wf1 cites `get_artifact_store` at `runtime/__init__.py:96-106`. At HEAD it is at `:120-130`.
+- DUR-03 (dur.md): - Reviewer note: step 3 needs DUR-04's first PR (coral_0002_queue) inside DUR-03's window, but the master records only DUR-04's soft dependency on DUR-03, nothing in this direction. A slice dependency "DUR-04#queue-schema" would make that visible to the schedule.
+- DUR-04 (dur.md): - Reviewer note: the §9 row "coral_0002_queue (queue, timers)" should also name effects, signals and the worker-lease row.
+- DUR-05 (dur.md): - Reviewer note: cancelling an unreadable run cannot use the reducer. ENG-06's cancel is a transition that emits SES-04's `cancel_sessions` effect; the narrow store path should enqueue that same effect kind, which ENG-06 and SES-04 must confirm.
+- DUR-06 (dur.md): - Reviewer note: §9 has no DUR-06 migration, but the policy and jobs need `coral_00NN_retention`.
+- DUR-06 (dur.md): - Reviewer note: no feature or seam owns a Coral entry in the closed settings union (`web/src/shell/settingsNav.tsx:37-74` `SettingsSectionId`, used by `web/src/pages/SettingsPage.tsx:326-401`); HRN-04 lists `web/src/workflows/settings/` but no shell.
+- DUR-06 (dur.md): - Reviewer note: the remap runs in the CLI outside the lifespan, so S56 also touches `omnigent/cli.py`; key paths omit it and `identity_migration.py`.
+- ENG-01 (eng-a.md): - Reviewer note: K3 embeds K8's patch, but ENG-01 has no edge to API-01 (only API-01's soft edge back), and tier (a) cannot import `coral/api`. API-01 should co-sign a pure RunView module.
+- ENG-01 (eng-a.md): - Reviewer note: reserve a K1 `parameters` block now for ENG-07.
+- ENG-01 (eng-a.md): - Reviewer note: DD§5.3.3(a) counts traversals, but D§5.6 ("three passes"), M2 journey step 4 ("pass 2 of 3") and the ENG-05 and ENG-07 proofs imply passes. K1 uses passes, pending OQ-19.
+- ENG-02 (eng-a.md): - Reviewer note: the D§5.6 fixture needs group entry and exit resolved, but ENG-09's master scope owns "Group IR with entry and exit". This spec only resolves them; group rules stay with ENG-09.
+- ENG-03 (eng-a.md): - Reviewer note: OQ-9 is on neither SPK-01's nor SPK-05's list; ENG-03 and DUR-02 assume the default.
+- ENG-03 (eng-a.md): - Reviewer note: HRN-02's master scope also lists V10 in its preflight engine (weeks 3-5), with no edge to ENG-03 (weeks 5-7). Here: the pure rule; HRN-02: live inputs. Add a soft edge HRN-02 -> ENG-03, or land V10 first.
+- ENG-04 (eng-a.md): - Reviewer note: `projection.py` emits K8 patches; add K8 to ENG-04's consumed contracts.
+- ENG-04 (eng-a.md): - Reviewer note: I7 needs ENG-11's reconcile, so the proof checks I7 only in reducer form.
+- ENG-05 (eng-a.md): - Reviewer note: passes versus traversals is the same open point as in ENG-01; this spec uses passes.
+- ENG-06 (eng-a.md): - Reviewer note: TLS-02's master scope also lists a per-slot rejected counter, and SES-04's the cancel chain. Here: counter state, and one `cancel_sessions` effect from the cancel transition (I8); TLS-02 feeds rejections; SES-04 executes.
+- ENG-06 (eng-a.md): - Reviewer note: K19 has no overdue kind (ENG-09) and no tier-(a) home.
+- ENG-06 (eng-a.md): - Reviewer note: M2 exit 4 and the proof say "pause the slot"; D§7.3 pauses the run, which this spec follows.
+- ENG-07 (eng-b.md): - Reviewer note: the parameter declaration has no contract home (no K1 `parameters` key or K7 field), yet WEB-03 consumes it; propose an additive K1 block.
+- ENG-07 (eng-b.md): - Reviewer note: per-reviewer models need a K1 roster model override.
+- ENG-08 (eng-b.md): - Reviewer note: the proof and Simulate support extend ENG-07; propose a soft edge ENG-08 -> ENG-07.
+- ENG-08 (eng-b.md): - Reviewer note: SES-10 (week 14) repeats over a multi-step group, but master ENG-08 excludes "Groups (ENG-09)" and ENG-09 (weeks 18-22.5) owns the Group IR; this spec reads K1 group keys as an ENG-02 region. The master should confirm or move a group-body IR here.
+- ENG-08 (eng-b.md): - Reviewer note: additive K1 Analysis flag `requires_structure_runtime` (read by HRN-02's preflight) needs ENG-01 and HRN-02 sign-off.
+- ENG-09 (eng-b.md): - Reviewer note: K19 has no overdue or reaction kind; needs an additive change signed by SES-01 and GTE-06.
+- ENG-09 (eng-b.md): - Reviewer note: the proof runs ENG-07's Simulate, not a listed dependency; propose a soft edge.
+- ENG-09 (eng-b.md): - Reviewer note: V8 needs a strictness order per K15 template, absent from RUL-03's first PR; propose an additive field.
+- EVD-01 (evd-api.md): - Reviewer note: the master's watermark is the "last ingested tool-result item seq", but claude-sdk has no item seq at ingestion; K11 uses a transport sequence plus EVD-02's in-flight cover rule, and HRN-03 maps item seqs onto it.
+- EVD-01 (evd-api.md): - Reviewer note: `stat` flags differ between BSD and GNU; `git hash-object --stdin-paths` over dirty paths is portable (SPK-04 to confirm).
+- EVD-01 (evd-api.md): - Reviewer note: step 5 lands in ENG-02's compiler (same weeks 3-5) with no edge; agree the hook with ENG-02.
+- EVD-02 (evd-api.md): - Reviewer note: the proof needs TLS-02 and WSP-06's session-shell fingerprint (weeks 7-9, no edge), so it closes at IM-3 (week 11.5).
+- EVD-02 (evd-api.md): - Reviewer note: the `evidence` opt-in must be a K6 params.coral key (consumed); the S68 observer registers via K17's process map, which is not consumed.
+- EVD-03 (evd-api.md): - Reviewer note: EVD-03 serves `/v1/coral/repos/*` without consuming K7; API-01's spec reserves the paths, but the master K7 text omits them.
+- EVD-03 (evd-api.md): - Reviewer note: the snapshot writes through DUR-02's store, but there is no edge to DUR-02.
+- EVD-03 (evd-api.md): - Reviewer note: the migration train requires WSP-01's `repo_bindings` first, yet WSP-01 is only soft; it finishes week 7, when EVD-03 starts.
+- EVD-04 (evd-api.md): - Reviewer note: check-to-attempt needs K2 observations, K3 kinds, K21 registration and K1 check keys; none is a consumed contract.
+- API-01 (evd-api.md): - Reviewer note: the `web/package.json` edits touch an upstream file that has no seam id, so OPS-01 needs a ledger entry for them.
+- API-01 (evd-api.md): - Reviewer note: the master K7 text omits EVD-03's repo command-pattern routes; this spec reserves them, and the master should name them.
+- API-02 (evd-api.md): - Reviewer note: API-02 uses FND-02's K17 registration and K4 access adapter with no edge to FND-02.
+- API-02 (evd-api.md): - Reviewer note: the outcome commit list needs WSP-06 to persist commit records; its scope names only `diff_stat`.
+- EXT-01 (ext.md): - Reviewer note: accept uses DUR-02 and adds K7 endpoints; DUR-02 is not a dependency and K7 is not consumed.
+- EXT-01 (ext.md): - Reviewer note: cost_growth needs API-02's spend (not in K3; DUR-06 purges it); test_edit_in_non_test_step needs changed paths in handoff refs (WSP-06, UNVERIFIED). §11 lists no Suggestions surface.
+- EXT-02 (ext.md): - Reviewer note: master RUL-01 includes "input-scope deny (internal_only)" and its spec owns `coral/omni/policies/input_scope.py` (`deny_session_reads`), which is also this feature's key path. Default here: RUL-01 owns the DENY; EXT-02 adds the per-member scope binding. Reconcile in the master.
+- EXT-02 (ext.md): - Reviewer note: typed handoffs need K6, TLS-02's rejection path and ENG-03 changes; none is a dependency or consumed contract.
+- EXT-03 (ext.md): - Excluded: repo-canonical editing, sync daemon, marketplace (deferred); repo import into drafts (WSP-01); profile revisions (PRF-02); gallery cards (WEB-03; listing imported templates there is unowned, Reviewer note); grants (EXT-04); commit and push (the user).
+- EXT-03 (ext.md): - Proving test (`test_sharing.py`, host tests): exporting a version writes `.coral/<id>.yaml` (here `.coral/workflows/<key>.yaml`; Reviewer note) only when the expected hash matches, importing it elsewhere yields the same content hash, and a run log exports as JSON.
+- EXT-03 (ext.md): - Reviewer note: the master proving test says `.coral/<id>.yaml`; D§12 and WSP-01's import use `.coral/workflows/`, followed here.
+- EXT-03 (ext.md): - Reviewer note: the endpoints extend K7, which is not consumed; web git import and imported-template display have no owner.
+- EXT-04 (ext.md): - Reviewer note: approver alerts need GTE-06's per-recipient producer (K19), and authority changes API-02 (K7); neither is a dependency.
+- EXT-04 (ext.md): - Reviewer note: `coral__` rows lack `session_id` (`omnigent/server/bundles.py:324-377`), so PUT agent (`routes_agent.py:337-341`) and MCP bundle edits (`session_mcp_servers.py:348-352`) already refuse them; S53's gaps are PATCH (`builtin_agents.py:332-340` admits the owner), reinstall, delete and registry selections (`_bound_agent`, `:290`).
+- EXT-04 (ext.md): - Reviewer note: S46 strips the labels HRN-07's loss fallback queries, so HRN-07 must switch to a bridge-id lookup first. The Share UI has no WEB load.
+- EXT-05 (ext.md): - Modify or extend upstream: none in the master; this design needs one fire hook (S, upstream-first; Reviewer note):
+- EXT-05 (ext.md): - Reviewer note: the master lists no seam, but this design needs the `fire.py` hook and TasksPage edits; add them to the seam ledger and §6.5. §11 lists no surface for the dialog.
+- FND-01 (fnd.md): - Reviewer note: the master path `dev/lint/coral_boundary.py` breaks the `lint_<name>.py` convention (`custom_lint.py:18-19`), so this spec renames it.
+- FND-01 (fnd.md): - Reviewer note: "every private through `_upstream.py`" conflicts with FND-03's private `omnigent.db` helpers. This spec allows named tier-c entries pinned by signature tests.
+- FND-01 (fnd.md): - Reviewer note: `server_plugins: [coral.server_plugin]` needs the root exemption.
+- FND-01 (fnd.md): - Reviewer note: the master assigns `custom_lint.RULES` registration to no feature; this spec gives it to FND-05 (S39), which edits `custom_lint.py`.
+- FND-02 (fnd.md): - Reviewer note: `CORAL_DISABLE_HOST_ENTRY_POINTS` is a K17 addition for FND-04, implemented by TLS-01.
+- FND-02 (fnd.md): - Reviewer note (unowned): S32 wires only `cli.py`; the `create_app` calls at `deploy/databricks/src/app.py:305` and `deploy/docker/entrypoint.py:490` cannot enable Coral.
+- FND-03 (fnd.md): - Reviewer note: S57 covers only Databricks; `deploy/docker/entrypoint.py:97` migrates Omnigent alone (see the FND-02 deploy note).
+- FND-03 (fnd.md): - Reviewer note: an empty chain has no head (`utils.py:719-742`), so this spec adds `coral_0000_base`; the master leaves it implicit.
+- FND-03 (fnd.md): - Reviewer note: the master gives the manual migrate command no owner; confirm here or move to OPS-03.
+- FND-04 (fnd.md): - Reviewer note: the sample needs TLS-01's S7, S8 and S10 transport and S50 token, yet TLS-01 is undeclared; recommend a soft edge FND-04 -> TLS-01.
+- FND-04 (fnd.md): - Reviewer note: `server_runner` passes no `--config` (`server_runner.py:144-167`), and `server_plugins` is read only from `--config` (`omnigent/cli.py:4857`), so the bootstrap appends `--config`.
+- FND-05 (fnd.md): - Reviewer note: S39c needs `.github/workflows/ci.yml:198`, because `--cov=omnigent` overrides the config source. The gap_analysis S39 row lists this line, but the master FND-05 key_paths omit `ci.yml`.
+- GTE-01 (gte.md): - Reviewer note: `/approve` cannot answer multi-label gates: `get_elicitation` omits `requestedSchema` (`routes_elicitations.py:196-208`), so ApprovePage's non-card branch (`ApprovePage.tsx:174-178, 250-286`) offers only Approve and Reject. Binary gates work. The upstream fix is unowned; until then, links open the run view.
+- GTE-02 (gte.md): - Reviewer note: this ends at week 7, before GTE-01 (9) and GTE-06 (11.5); cross-client ack is MSW-only until IM-4.
+- GTE-02 (gte.md): - Reviewer note: a one-line spread is not achievable; about 7 anchors are the minimum.
+- GTE-02 (gte.md): - Reviewer note: Extend has no backend owner; API-02 lists pause, resume, cancel, retry.
+- GTE-04 (gte.md): - Reviewer note: Electron's Chromium has no push service, so `PushManager.subscribe` should fail (UNVERIFIED). The desktop watcher must load from `web/electron/src/main.js`, an upstream file with no ledgered seam; add an S-row owned by GTE-04, after BRD-03.
+- GTE-04 (gte.md): - Reviewer note: a real push proof needs a live push service, so CI covers only the push-service HTTP boundary.
+- GTE-05 (gte.md): - Reviewer note: `omnigent/server/elicitation_hooks.py` does not exist at HEAD. It is new upstream-path code, and the ledger must count it under S6.
+- GTE-06 (gte.md): - Reviewer note: K19 lacks the overdue and reaction kinds that ENG-09 needs. Adding them is an additive K19 change that SES-01 must sign off.
+- GTE-06 (gte.md): - Reviewer note: the Extend action has no backend owner. `actions` lists it only once an endpoint exists.
+- GTE-06 (gte.md): - Reviewer note: no master feature emits gate-open or run-end `notify` effects; this spec takes them per "Producers: gates", touching ENG-04's reducer.
+- HRN-05 (hrn.md): - Reviewer note: the S62 ledger row leaves the approval handler UNVERIFIED; it is `codex_elicitation_request_hook` (`routes_hooks.py:1262-1340`; approval methods at `omnigent/server/routes/_codex_elicitation.py:16-18`).
+- HRN-05 (hrn.md): - Reviewer note: §6.5 assigns the headless `codex_executor.py` S24 branch here despite the headless-codex exclusion; followed here.
+- HRN-06 (hrn.md): - Reviewer note: `gate_failure_mode=deny` needs RUL-04's S14 output, yet the master lists no RUL-04 dependency (only via soft HRN-05). Schedule-safe (RUL-04 ends wk 7); make it hard.
+- HRN-07 (hrn.md): - Reviewer note: rotated sessions break K10's uuid5 session ids, so TLS-02 must accept submits from the rebound id (confirm with SES-03, TLS-02). K10 policy ids are used but not listed as consumed.
+- HRN-07 (hrn.md): - Reviewer note: a rotation audit entry needs a K3 kind (ENG-01); the supersession observer, K4 `on_supersession` and the label query are absent from K18 and K4 (SES-01).
+- HRN-07 (hrn.md): - Reviewer note: EXT-04's S46 scope also claims "an explicit /clear policy"; OQ-46's follow-or-block decision stays here.
+- HRN-09 (hrn.md): - Reviewer note: the master gives HRN-09 no OQ-29 conditional, but M4 exit 4 treats it as "green or dark behind codex_steps". Add the same conditional as HRN-06.
+- HRN-09 (hrn.md): - Reviewer note: §6.5 lists HRN-09 on `codex_executor.py` as S18 and S60, but S19's `thread/compact/start` request also lands there, while S60 as scoped here changes `workflow.py` and the parser, not the executor.
+- OPS-01 (ops-a.md): - Reviewer note: the fork point `2a9cbe2c2` is 4 commits past nightly^1 (`ee7a319f7`); a nightly^1 pin would flag them as fork edits. This spec pins the fork point; later merges pin a nightly^1.
+- OPS-01 (ops-a.md): - Reviewer note: §6.1 item 2 says upstream PRs go in `upstream.yaml`; OPS-01's master scope says `seams.yaml`, used here. FND-01's spec follows §6.1.
+- OPS-01 (ops-a.md): - Reviewer note: `python-matrix.json` (S39d), `web/package.json` and lockfiles cannot carry anchors, and dependency edits have no seam id. This spec adds `anchor_exempt` and non-seam `MF-n` entries to K16 v1.
+- OPS-02 (ops-a.md): - Reviewer note: two merges two weeks apart close the proof near week 6, after the week-4 finish.
+- OPS-02 (ops-a.md): - Reviewer note: `coral-compat.yml` replaces editing `server-compat.yml`'s path filter, which no seam covers.
+- OPS-03 (ops-a.md): - Reviewer note: fixing a reachable writer edits an upstream file that S75 does not cover; it needs a new seam id or an upstream-only PR.
+- OPS-03 (ops-a.md): - Reviewer note: no feature owns a default `server_plugins` for `coral server`; FND-02 owns only the key.
+- OPS-03 (ops-a.md): - Reviewer note: if S75 enables a channel, `_CACHE_DIR` also needs the data-dir override (a generic, upstreamable fix).
+- OPS-03 (ops-a.md): - Reviewer note: FND-01's tier rule limits the app tier to `coral.omni.protocols`. DUR-02 and this feature need `coral/cli.py` as a composition root.
+- OPS-04 (ops-a.md): - Modify or extend upstream: None planned; a plugin-config hook is open (reviewer note).
+- OPS-04 (ops-a.md): - Reviewer note: `BenchEnvironment` hard-codes its server config (`dev/benchmarks/omnigent/environment.py:681-696`), so it cannot load the Coral plugin. Recommend an upstream-first `extra_server_config` parameter under a new seam id. The fallback is a subclass overriding `_spawn_server` (654).
+- OPS-04 (ops-a.md): - Reviewer note: add `dev/loadtest/coral/` to OPS-01's allowed roots as a new-files-only root.
+- OPS-05 (ops-a.md): - Reviewer note: OPS-05 finishes in week 23 but co-owns IM-8 in week 25.5. Re-run the drill (one day) in week 25 so the evidence is current.
+- OPS-06 (ops-b.md): - Reviewer note: weeks 4-6 precede GTE-01 (7-9) and PRF-01 (to 9.5); tracking runs to 13.5 and sign-offs fall near 13.5 and 18. Budget about 0.5 week of WS-OPS tail.
+- OPS-07 (ops-b.md): - Reviewer note: a soak week has seven nightlies against a "9 of 10" threshold; run twice nightly or widen the window.
+- OPS-07 (ops-b.md): - Reviewer note: IM-3 and IM-4 are dated week 11.5, this feature's start, so step 1 starts about week 9.5.
+- OPS-07 (ops-b.md): - Reviewer note: IM-4 needs the real-server `tests/e2e_ui/` lane; DoD rule 7 names only `tests/browser_ui/`.
+- OPS-07 (ops-b.md): - Reviewer note: latency asserts on shared runners contradict `tests/budgets.py:21-36`, hence `nightly`. The e2e action builds old servers only from release tags (`action.yml:140-163`); the old-build variant needs a new input, outside credentialed-only `coral-e2e.yml`.
+- OPS-08 (ops-b.md): - Reviewer note: HRN-07 finishes at week 20, the day this lane starts, so there is no slack before M3.
+- OPS-09 (ops-b.md): - Reviewer note: OQ-29 governs this lane but is missing from its `open_questions`.
+- OPS-09 (ops-b.md): - Reviewer note: WEB-09 finishes at week 24.5, the day this lane starts. The `coral://` step has no CI Electron lane; it is proven in dogfood on a packaged build.
+- PRF-01 (prf-hrn.md): - Reviewer note: seeds use K17 (FND-02), missing from contracts_consumed; add it (FND-02 ends week 3, no schedule change).
+- PRF-01 (prf-hrn.md): - Reviewer note: the allowlist needs RUL-01's handlers; goldens use a test registry until it lands.
+- PRF-02 (prf-hrn.md): - Reviewer note: eng_harness §8.4 step 4 puts revision digests in the version content hash; decision 9 keeps it authoring-only. This spec follows decision 9.
+- HRN-02 (prf-hrn.md): - Reviewer note: the validity and sandbox checks read ENG-03 and WSP-01 (week 7); HRN-02 ends week 5 with no ENG-03 edge. Add a soft edge.
+- HRN-02 (prf-hrn.md): - Reviewer note: the token check reads K17 (FND-02), absent from contracts_consumed.
+- HRN-03 (prf-hrn.md): - Reviewer note: SES-08 keys facts on `observed_at_ms`; the fallback needs a response-id key, an additive K18 change to coordinate with SES-08.
+- HRN-04 (prf-hrn.md): - Reviewer note: HRN-04 adds a K18 field and a K2 resume time but lists only K9; add K18 and K2 to contracts_consumed.
+- HRN-04 (prf-hrn.md): - Reviewer note: master gives HRN-04 the mock-provider probe and HRN-08 all bench probes (S23); this spec keeps only the `usage_limit_signal` probe here.
+- RUL-01 (rul.md): - Reviewer note: S52 is four `builder.py` sites (three assembly sites plus the fast path), not one line.
+- RUL-01 (rul.md): - Reviewer note: upstream tests cannot import `coral`, so the proving test's Coral half lives in `tests/coral/omni/policies/test_run_guard.py`.
+- RUL-01 (rul.md): - Reviewer note: `SessionCapReached` and `ResumeRun.raise_session_cap_usd` amend ENG-01's K2; API-02's resume action lacks the field.
+- RUL-01 (rul.md): - Reviewer note: PRF-01's hygiene also lists the grants; PRF-01 writes them, RUL-01 checks them.
+- RUL-02 (rul.md): - Reviewer note: no feature owns HTTP exposure of labels for WEB-13 and WEB-03. This spec adds thin routes.
+- RUL-02 (rul.md): - Reviewer note: the sandbox backend comes from WSP-01's report, and WSP-01 is not a dependency.
+- RUL-03 (rul.md): - Reviewer note: shell writes bypass a write-tool DENY, and `write_paths` (`datamodel.py:621`) is an allowlist whose only nested denies are built-in dotfile and `~/Library` masks (`:593-618`). An Enforced `protect_paths` on claude-sdk needs compiled sibling grants (UNVERIFIED on seatbelt) or an unplanned sandbox seam.
+- RUL-03 (rul.md): - Reviewer note: the authoring keys belong to K1 (ENG-01), but K1 is not listed among this feature's consumed contracts.
+- RUL-03 (rul.md): - Reviewer note: `strictness_key` is added for ENG-09's V8 (the eng-b note).
+- RUL-04 (rul.md): - Reviewer note: S14 also touches `runner/native/orchestration.py` and `codex_native/app_server.py`, which §6.5 does not list for RUL-04. Land these before HRN-03 and HRN-05.
+- RUL-04 (rul.md): - Reviewer note: S16 touches `helpers.py` (a hot file) and `policies/types.py`, which neither the gap row nor §6.5 lists.
+- RUL-05 (rul.md): - Reviewer note: eng_persistence T3/T4 put run budget and spend columns in coral_0001. Choose one home before DUR-01 lands.
+- RUL-05 (rul.md): - Reviewer note: step budget keys need K1, which this feature does not consume.
+- RUL-05 (rul.md): - Reviewer note: utilization needs HRN-04's S24 data, which is not a dependency, so show tokens only.
+- RUL-06 (rul.md): - Reviewer note: the proving test depends on the claude-native K9 value. Pin `ask` in its fixture and add a `deny` case.
+- SES-01 (ses-a.md): - Concurrent, coordinate with: none in feature_context.json; SES-02 implements K18 concurrently (Reviewer note).
+- SES-01 (ses-a.md): - Reviewer note: SES-02 consumes K18 in the same weeks with no edge and no listed coordination; recommend a soft edge SES-02 -> SES-01.
+- SES-02 (ses-a.md): - Reviewer note: §6.5 puts the archive-idle origin in `routes_events.py`; at HEAD it is `orchestration.py:944` (via `_archive_stop`, 1027), and `stop_session` (`routes_events.py:2124`) keeps the default.
+- SES-02 (ses-a.md): - Reviewer note: "relay turn end" is read as B1, per the master's "B1 (relay turn-end)"; the main relay edge (9583) stays `unknown` and relies on `turn_outcome`. Confirm with SES-08.
+- SES-02 (ses-a.md): - Reviewer note: K18 is consumed with no edge to SES-01.
+- SES-03 (ses-a.md): - Reviewer note: TLS-01 adds the token to `HostHelloFrame.capabilities` but is not a dependency; until it lands (planned weeks 1-3), every host is refused.
+- SES-03 (ses-a.md): - Reviewer note: DUR-01 is soft, and §9 lists only ADR-05 as the bindings prerequisite, yet the single-head train (DoD 3) needs `coral_0001` (week 5).
+- SES-04 (ses-a.md): - Reviewer note: the Tier B proof needs TLS-02 and WSP-06 (weeks 7-9) plus FND-04, which is not a dependency, yet SES-04 ends at week 5. Recommend closing on Tier A with the K13 fake and an injected SubmitHandoff, and making the Tier B proof an IM-2 exit item.
+- SES-04 (ses-a.md): - Reviewer note: SES-04 consumes K5 and K21 and its migration needs `coral_0001` (§9), all from DUR-01 (weeks 3-5), with no edge; recommend soft SES-04 -> DUR-01.
+- SES-05 (ses-a.md): - Reviewer note: there is no edge to API-02 (run start) or PRF-01 (the inert agent and step bundle), so a test-only start hook and test agents are needed until those land.
+- SES-06 (ses-b.md): - Reviewer note: DUR-05 and SES-08 finish after week 9.5, so the proving test closes at IM-3.
+- SES-06 (ses-b.md): - Reviewer note: §7's conditional-owner line moves all of S27 to SES-06 if spike 16 fails (as §6.5 does), so SES-06 would also own the `coral.keep_alive` exemption; conditional_deps names only the retest. Confirm.
+- SES-06 (ses-b.md): - Reviewer note: `hold_seen_at` and `restart_attempt_id` need ENG-01 (K2) and DUR-01 approval.
+- SES-07 (ses-b.md): - Reviewer notes: the endpoints change K7, which this feature does not consume; `supersede` changes K4 additively (SES-01 approval); add a `refresh` key to `/v1/coral/info`.
+- SES-08 (ses-b.md): - Reviewer note: §9 lists no table for edge facts. This spec assumes `coral_signals` plus K2 slot fields (as the DUR spec does); confirm, or add a migration.
+- SES-08 (ses-b.md): - Reviewer note: the probe timer uses ENG-06's timer kinds; ENG-06 (finishes week 9.5) is not in SES-08's master deps.
+- SES-08 (ses-b.md): - Reviewer note: OPS-07's fault journey also lists 529/429/401, and DUR-04 and OPS-07 also list a perf smoke; OPS-07 should reuse this case.
+- SES-09 (ses-b.md): - Reviewer note: forks copy `coral.*` labels, so RUL-01's provider must check the binding.
+- SES-09 (ses-b.md): - Reviewer note: K2 already has the `user` and `drift` reasons (ENG-01). The cause slugs (`session_archived`, `session_deleted`, `anchor_archived`, `anchor_deleted`, `session_stopped`, `policy_missing`, `bundle_changed`) must join K2's cause set with ENG-01 approval.
+- SES-09 (ses-b.md): - Reviewer note: the master gives slot-start drift checks to both SES-09 and PRF-01 (spike 18). This spec splits them: PRF-01 compares the bundle, and SES-09 pauses.
+- SES-09 (ses-b.md): - Reviewer note: DUR-05 finishes at week 11.5, so the proving test closes at IM-3.
+- SES-10 (ses-b.md): - Reviewer note: week 16 comes before WSP-03 (week 22.5), WSP-07 (week 20), RUL-03 (week 18) and IM-7 (week 22.5). Split this feature or extend it.
+- SES-10 (ses-b.md): - Reviewer note: no feature owns a dedicated batch-gate card.
+- SPK-01 (spk.md): - Reviewer note: OQ-37 and OQ-47 shape K4 and K12 at IM-0 but only SES-01 lists them; SPK-01 should record defaults (params.coral, X-12; in-process facade, X-8).
+- SPK-02 (spk.md): - Reviewer note: the JSON window is weeks 0-1, but (e), (f), 14 and 15 run to week 2 (DEL-24); the schedule should show that tail. No downstream start moves.
+- SPK-03 (spk.md): - Reviewer note: `tests/harness_bench/probes/` is upstream code (`ALL_PROBES`, `__init__.py:20`); landing files there needs a ledger entry. Keep prototypes on the spike branch for HRN-08 to port.
+- SPK-04 (spk.md): - Reviewer note: `coral/workspace/ops.py` needs FND-01's skeleton, also weeks 0-1 with no edge; keep the draft in the report until FND-01 lands.
+- SPK-05 (spk.md): - Reviewer note: DUR-04, SES-08 and OPS-07 use these budgets with no edge to SPK-05; add soft edges.
+- SPK-05 (spk.md): - Reviewer note: proving test week 4 vs planned finish week 2; RUL-01 and HRN-02 start in week 3, so their records are due by week 2.
+- SPK-05 (spk.md): - Reviewer note: OQ-9 (invalid drafts) shapes DUR-02 and WEB-02 from week 5 with no record; add it here, default "draft save allowed, run blocked".
+- SPK-05 (spk.md): - Reviewer note: no feature's included list owns deciding OQ-29 or OQ-25 (due week 13.5); HRN-05's and DUR-06's first PRs should add them.
+- TLS-01 (tls.md): - Reviewer note: S49 is "Up: Yes", but the master lists upstream PRs only for S10, S12, S50; folded into the S10 PR.
+- TLS-01 (tls.md): - Reviewer note: K17 is consumed without an FND-02 edge; step 5 merges after FND-02's PluginRegistration PR (suggest soft dependency).
+- TLS-02 (tls.md): - Reviewer note: ENG-04's spec has slot `evaluating`, but neither K2's text nor DUR-01's coral_0001_core gives it a lease expiry (X-15); eng_persistence T16's `lease_expires_at`/`lease_holder` could carry it. Confirm, or add it via the train.
+- TLS-03 (tls.md): - Reviewer note: SES-06's ladder triggers the re-brief but is not a dependency. K10 (`coral.role`) and K4 (create and send) are used but not listed as consumed.
+- TLS-04 (tls.md): - Reviewer note: the conflict sub-state comes from WSP-03 (weeks 18-22.5), which starts after TLS-04, so the worktree proof uses a fake until IM-7.
+- TLS-05 (tls.md): - Reviewer note: the proof depends on ENG-06's watchdog and on K2, neither of which is a dependency; a soft dependency on ENG-06 is suggested.
+- TLS-05 (tls.md): - Reviewer note: the migration train sets "alerts" as this table's prerequisite, but GTE-06 (starting week 9.5) is only a soft dependency, and this table's first PR is week 9.
+- WEB-01 (web-a.md): - Reviewer note: WEB-01 finishes in week 5, before DUR-02 and ENG-07, so the proof uses fixture traces. Add a real-trace row to IM-4 (OPS-07).
+- WEB-01 (web-a.md): - Reviewer note: "too large" has no threshold. This spec proposes 200 nodes.
+- WEB-01 (web-a.md): - Reviewer note: master gives the failing-case expected-vs-actual view to WEB-01 and WEB-12. WEB-01 lists both paths; WEB-12 owns the diff.
+- WEB-02 (web-a.md): - Reviewer note: WEB-13 finishes in week 11, so the Runs tab shows a placeholder until then.
+- WEB-03 (web-a.md): - Reviewer note: for claude-sdk, `reconfigure` opens on `choose` (`pages/settings/HarnessFixDialog.tsx:135-140, 151`), so the API-key form is one click away. An `initialPhase` prop is an upstream edit no seam covers.
+- WEB-03 (web-a.md): - Reviewer note: no master feature includes `GET /v1/coral/templates` or `POST .../templates/{id}:use`. Assign them (DUR-02 is the closest fit).
+- WEB-03 (web-a.md): - Reviewer note: msw is only a transitive lock entry (`pnpm-lock.yaml:7390`). API-01 must add it as a direct devDependency.
+- WEB-04 (web-a.md): - Reviewer note: no axe tooling is locked at HEAD (`pnpm-lock.yaml`, `uv.lock`); no master feature names that dependency PR, so step 6 owns it.
+- WEB-04 (web-a.md): - Reviewer note: S35 stays unneeded only if steps are children of the anchor (ADR-05); otherwise it moves to SES-03 (master §6.4).
+- WEB-05 (web-a.md): - Reviewer note: master key_paths list `web/src/shell/SubagentTab.tsx`, but no seam covers it. This spec leaves it unchanged and composes `SideChatPane`.
+- WEB-05 (web-a.md): - Reviewer note: under `omnigent.closed=true`, the anchor composer reads "This sub-agent session is closed" (`lib/sessionCapabilities.ts:143`). Fixing that copy needs an edit no seam covers, so the S86 banner explains instead.
+- WEB-05 (web-a.md): - Reviewer note: if SPK-02 probe (e) fails, SES-03 uses RUL-01's DENY instead of `omnigent.closed`; the upstream anchor composer then stays enabled and only the banner explains.
+- WEB-06 (web-a.md): - Reviewer note: K7 does not yet define labels on `:validate`. API-01 must add them additively, with producer approval.
+- WEB-06 (web-a.md): - Reviewer note: until WEB-08, "on-box" means WEB-01's read-only preview.
+- WEB-07 (web-a.md): - Reviewer note: `AgentBundleInput` (`lib/agentBundle.ts:26-36`), the input of `buildAgentBundle` (`:45`), has no params field, so a client-side reinstall would drop `params.coral`. This spec relies on PRF-02's server-side reinstall.
+- WEB-07 (web-a.md): - Reviewer note: the master key path `web/src/pages/settings/` is read-only here, and no seam covers an edit.
+- WEB-08 (web-b.md): - Reviewer note: DUR-02's draft has no layout field. K7 must add `layout` additively.
+- WEB-08 (web-b.md): - Reviewer note: if ENG-09's group keys (weeks 18-22.5) are not stable by week 19, step 5 moves to WEB-09.
+- WEB-09 (web-b.md): - Reviewer note: this feature calls K7 endpoints (`:validate`, blocks), but the master lists only K1, K9 and K15. Add K7.
+- WEB-10 (web-b.md): - Reviewer note: API-02's log endpoint needs `arrow_id` and `scope_key` filters (additive K7), or why-not fails past WEB-04's 2,000-entry ring.
+- WEB-10 (web-b.md): - Reviewer note: WEB-01 ships `canvas/overlay.ts`; step 1 should move it to `canvas/overlay/types.ts` so file and folder do not share an import path.
+- WEB-11 (web-b.md): - Reviewer note: key_paths list `web/src/shell/monacoSetup.ts`, an upstream file with no seam. It is imported unchanged; any edit needs an OPS-01 ledger entry.
+- WEB-11 (web-b.md): - Reviewer note: wf1 (G-70, current_state, eng_web) cites `monacoSetup.ts:12-17` for the worker. At HEAD the worker is `:52-57`; the "language services unused" comment is `:9-12`.
+- WEB-11 (web-b.md): - Reviewer note: DUR-02 does not say `:validate` returns the compiled graph, which the preview needs; add it additively.
+- WEB-12 (web-b.md): - Reviewer note: no `/v1/coral/info` key covers this editor (DoD 6). It merges dark by staying unmounted.
+- WEB-12 (web-b.md): - Reviewer note: DUR-02 stores `CaseResult` but exposes no read path. K7 needs one additively, for example `case_results` on the version.
+- WEB-13 (web-b.md): - Reviewer note: API-02's outcome lacks the repo path and worktree state; git refuses to switch to a branch another worktree has checked out. Add both additively.
+- WEB-13 (web-b.md): - Reviewer note: PC-15 asks for a path summary, which K7 list rows lack.
+- WEB-13 (web-b.md): - Reviewer note: WEB-06 plans its own `LabelChip.tsx` in `guarantees/`, its key path. It should reuse `PromiseLabelChip` instead.
+- WEB-13 (web-b.md): - Reviewer note: client-side events can double count across devices; server-side emission is safer (OQ-26).
+- WSP-01 (wsp.md): - Reviewer note: the rev-parse fallback needs WSP-06's later runner shell, so `start_commit` waits for the first activation.
+- WSP-01 (wsp.md): - Reviewer note: M1 exit item 7 has K13 v1 at IM-0 (week 3), but WSP-01 starts in week 5 and EVD-01 (weeks 3-5) consumes K13. Recommend a WSP-01#K13 slice.
+- WSP-01 (wsp.md): - Reviewer note: the bindings API needs K7 and the `create_run_worktree` executor needs K21; neither is consumed. The S72 ledger row omits `host_tunnel.py:999-1011`.
+- WSP-02 (wsp.md): - Reviewer note: `key_paths` omits `host_registry.py` and `host_tunnel.py`, which S40 edits.
+- WSP-02 (wsp.md): - Reviewer note: the proving test names only `test_frames.py`; the L2 and fallback asserts belong in `tests/coral/omni/host/ops/` and K13 conformance.
+- WSP-03 (wsp.md): - Reviewer note: this feature opens a K2 sub-state, uses K6's `coral_assign_task` and registers K21 executors. Recommend adding K2, K6 and K21 to the contracts it consumes.
+- WSP-03 (wsp.md): - Reviewer note: SES-10 (weeks 14-16) soft-depends on WSP-03 and WSP-07, which start in week 18.
+- WSP-04 (wsp.md): - Reviewer note: `sandbox_runs` is not in FND-02's sub-feature map.
+- WSP-04 (wsp.md): - Reviewer note: checkpoints rely on WSP-07's push and consent. Recommend a soft edge WSP-04 -> WSP-07.
+- WSP-05 (wsp.md): - Proposed, pending a master amendment (Reviewer note): `WorkspaceReader.__init__` (`omnigent/workspace_fs.py:172-178`) calls `GitFilesystemRegistry.start`, whose daemon thread runs git probes after the handler returns (`omnigent/runtime/filesystem_registry.py:1082-1092`; the probe trusts `returncode` at 1175). Add `start(background=False)` for the host's reader.
+- WSP-05 (wsp.md): - Excluded: runner-path exit codes (EVD-02); the host channel (WSP-02); the host channel's exit-status test (WSP-07); other plain `to_thread` frame handlers (`connect.py:5950-6052`; no owner in the master, see Reviewer note).
+- WSP-05 (wsp.md): - Reviewer note: the master scopes S71 to `connect.py:6027-6034`, but the untracked-cache thread (`filesystem_registry.py:1082-1092`) runs git outside that window. A stolen status there could turn on `core.untrackedCache`. Recommend including it in S71.
+- WSP-05 (wsp.md): - Reviewer note: the other plain `to_thread` handlers (stat, list_dir, skills, plugins, harness startup, MCP servers) have no S71 owner; whether any spawns a subprocess is UNVERIFIED. Recommend an OPS-01 ledger follow-up.
+- WSP-07 (wsp.md): - Reviewer note: push and fetch add K21 kinds with side effects, but this feature does not consume K21. Recommend adding K21.

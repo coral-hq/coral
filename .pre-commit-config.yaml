@@ -217,6 +217,8 @@ repos:
       - id: check-added-large-files
         name: prevent large files
         args: ['--maxkb=1000']
+        # CORAL(S93): the committed Coral roadmap is over 1000 KB
+        exclude: ^docs/coral/roadmap/CORAL_ENGINEERING_ROADMAP\.md$
       - id: check-case-conflict
         name: check for case conflicts
       - id: mixed-line-ending

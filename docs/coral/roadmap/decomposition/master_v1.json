@@ -1,0 +1,4923 @@
+{
+ "version": "master_v1",
+ "repo": "omnigent-ai/omnigent",
+ "head": "2a9cbe2c2",
+ "date": "2026-11-11",
+ "features": [
+  {
+   "id": "SPK-01",
+   "name": "Decision records and sign-off pack",
+   "area": "SPK",
+   "workstream": "WS-OPS",
+   "phase": "PH0",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "S",
+   "enabler": true,
+   "objective": "Record signed decisions, or recorded defaults, for every TLD and every open question that gates M1 and M2, plus a minimum NFR list.",
+   "gaps": [],
+   "seams": [],
+   "hard_deps": [],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [],
+   "open_questions": [
+    "OQ-1",
+    "OQ-3",
+    "OQ-4",
+    "OQ-12",
+    "OQ-13",
+    "OQ-14",
+    "OQ-18",
+    "OQ-19",
+    "OQ-27",
+    "OQ-28",
+    "OQ-30",
+    "OQ-33",
+    "OQ-35",
+    "OQ-36",
+    "OQ-38",
+    "OQ-45",
+    "OQ-49",
+    "OQ-50",
+    "OQ-53",
+    "OQ-54"
+   ],
+   "included": [
+    "Requirements baseline from product.md §1, §7 and §9 with a minimum NFR list (OS support, max concurrent runs and agents, latency) (OQ-1, D2)",
+    "Sign-off on TLD-01..21 and on the TLD flags and milestone moves recorded in this roadmap",
+    "Gate outcomes and reject routing, owner-only gate authority, blocked-exit routing, step agents asking the user, watchdog default, end-of-run output, D6 back-arrow join rule (OQ-3, 4, 12, 13, 14, 18, 19)",
+    "claude-sdk auth default with a written vendor answer (OQ-28) and v1 harness modes (OQ-35)",
+    "Naming, Powered-by credit, namespace and Coral gate sign-off (OQ-27, OQ-30, R-2, OQ-45, OQ-36)",
+    "Merge cadence and rehearsal owner, dev-DB exception, CODEOWNERS (OQ-50, OQ-53, OQ-54)"
+   ],
+   "excluded": [
+    "Codex terms OQ-29 and retention OQ-25 (decide before PH5)",
+    "Promise-label visuals OQ-24 (decide before PH3)"
+   ],
+   "key_paths": [
+    "docs/coral/decisions/",
+    "coral/CLAUDE.md (new, after OQ-53)"
+   ],
+   "proving_test": "docs/coral/decisions/ holds a signed or defaulted record for each listed OQ and TLD, and the M2 feature specs cite them."
+  },
+  {
+   "id": "SPK-02",
+   "name": "Session topology spike and ADR",
+   "area": "SPK",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH0",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "S",
+   "enabler": true,
+   "objective": "In four days, prove or reject TLD-02 option B (step children of a stable run session with own_runner, plus S51) and record the topology ADR with the fallback costed.",
+   "gaps": [
+    "G-22"
+   ],
+   "seams": [],
+   "hard_deps": [],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [],
+   "open_questions": [
+    "OQ-32",
+    "OQ-17"
+   ],
+   "included": [
+    "(a) A child with its own worktree on a shared runner runs tools in its own cwd on claude-sdk (spike 3)",
+    "(b) a run session that never takes a turn hosts children; (c) an S51 prototype stops parent wakes",
+    "(d) stopping the orchestrator spares own_runner steps; (e) a gate elicitation on the run session renders in Inbox and /approve",
+    "(f) the engine can relaunch own-runner children after restart (upstream relaunches roots only, app.py:4273; recovery skips host_id children, child_session_recovery.py:164)",
+    "Spikes 14 (posts to archived sessions) and 15 (runner-local impersonation)",
+    "ADR-05 with the fallback (top-level family + S35 watch-set + engine-managed grants) costed at +3-4 eng-weeks"
+   ],
+   "excluded": [
+    "Facade code (SES-03)",
+    "Building the fallback (contingency only)"
+   ],
+   "key_paths": [
+    "docs/coral/decisions/ADR-05-topology.md",
+    "spike branch only"
+   ],
+   "proving_test": "A scripted spike run demonstrates probes (a)-(f) and ADR-05 records the verdict with evidence."
+  },
+  {
+   "id": "SPK-03",
+   "name": "Harness behaviour probes",
+   "area": "SPK",
+   "workstream": "WS-HARNESS",
+   "phase": "PH0",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "S",
+   "enabler": true,
+   "objective": "Answer the claude-sdk unknowns that shape M2 in week 1 and the native and Codex unknowns in week 2, each with a recorded verdict.",
+   "gaps": [
+    "G-44"
+   ],
+   "seams": [],
+   "hard_deps": [],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [],
+   "open_questions": [
+    "OQ-51"
+   ],
+   "included": [
+    "Week 1 claude-sdk: spike 1 can_use_tool under auto/bypass (decides S21), 2 Agent/Task unreachable, 4 mock ANTHROPIC_BASE_URL (Tier C lane), 7 MCP tool-call timeout (handoff scan bound), 16 idle watchdog vs long turns, 19 local CredentialStore, 20 Smart Routing pin",
+    "Week 2 native and Codex: spike 5 UserPromptSubmit on /clear, 6 native ASK re-publish after restart, 12 codex-native app-server sandbox, 13 Codex context window",
+    "Verdict memo with a reproducible probe script per spike"
+   ],
+   "excluded": [
+    "Bench code (HRN-01)",
+    "Fixes (owning features)"
+   ],
+   "key_paths": [
+    "docs/coral/decisions/probes/",
+    "tests/harness_bench/probes/ (prototype only)"
+   ],
+   "proving_test": "Verdict memo lists each spike with a rerunnable probe and marks S21 as needed or not needed."
+  },
+  {
+   "id": "SPK-04",
+   "name": "Workspace and evidence spike with WorkspaceOps contract",
+   "area": "SPK",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH0",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "S",
+   "enabler": true,
+   "objective": "Decide how M2 gets trustworthy fingerprints, commits and resets for a claude-sdk single writer without S40, and publish the WorkspaceOps interface (K13).",
+   "gaps": [
+    "G-38",
+    "G-59"
+   ],
+   "seams": [],
+   "hard_deps": [],
+   "soft_deps": [],
+   "contracts_produced": [
+    "K13"
+   ],
+   "contracts_consumed": [],
+   "open_questions": [
+    "OQ-39",
+    "OQ-44",
+    "OQ-10"
+   ],
+   "included": [
+    "Spike 8: sandboxed git add, commit and write-tree in a linked worktree",
+    "Runner /changes porcelain vs re-edits of already-dirty files; one L1 algorithm for per-command and submit-time digests",
+    "Session-shell timeout and true exit codes (routes_resources.py:3257-3297); S71 reaper hazard repro (connect.py:1417-1423, 6027-6034)",
+    "K13 WorkspaceOps interface (fingerprint, commit, salvage, reset, head, check, merge, read) with session-shell and host-channel backends and a fake",
+    "Contingency: if the session sandbox cannot commit or reset, pull minimal host ops into PH2 (+3 eng-weeks on the WSP-01 chain)"
+   ],
+   "excluded": [
+    "Building the host channel (WSP-02)",
+    "Spike 9 beyond a note"
+   ],
+   "key_paths": [
+    "coral/workspace/ops.py",
+    "coral/workspace/fake.py",
+    "docs/coral/contracts/workspace-ops.md"
+   ],
+   "proving_test": "Spike report plus the K13 protocol module whose fake backend passes the K13 conformance tests."
+  },
+  {
+   "id": "FND-01",
+   "name": "Coral package and tooling roots",
+   "area": "FND",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH0",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "S",
+   "enabler": true,
+   "objective": "Ship the coral package in the same wheel with lint, type, coverage, CI and CODEOWNERS roots and an enforced import boundary.",
+   "gaps": [
+    "G-12"
+   ],
+   "seams": [
+    "S29",
+    "S39",
+    "S39b",
+    "S39c",
+    "S39d",
+    "S39e",
+    "S76"
+   ],
+   "hard_deps": [],
+   "soft_deps": [
+    "OPS-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K16"
+   ],
+   "open_questions": [
+    "OQ-54"
+   ],
+   "included": [
+    "coral* in the wheel with package data for Coral Alembic files and templates (S29)",
+    "pyrefly, isort, coverage, lint and pre-commit roots; CODEOWNERS; coral CI group in python-matrix.json (S39, S39b-e)",
+    "just mod coral (S76)",
+    "Import-boundary lint and test: only coral.omni, coral.policies and coral.db import Omnigent internals",
+    "Spike 10: no dependency ships a top-level coral import name"
+   ],
+   "excluded": [
+    "Alembic env (FND-03)",
+    "Fork guard (OPS-01)",
+    "Console script (OPS-03)"
+   ],
+   "key_paths": [
+    "pyproject.toml",
+    "pyrefly.toml",
+    ".pre-commit-config.yaml",
+    ".github/CODEOWNERS",
+    ".github/scripts/ci/python-matrix.json",
+    "justfile",
+    "coral/__init__.py",
+    "coral/coral.just",
+    "tests/coral/test_import_boundary.py"
+   ],
+   "proving_test": "tests/coral/test_import_boundary.py passes and a built wheel imports coral with its package data."
+  },
+  {
+   "id": "OPS-01",
+   "name": "Seam ledger and coral-fork-guard",
+   "area": "OPS",
+   "workstream": "WS-OPS",
+   "phase": "PH0",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Make every upstream-file edit ledgered, anchored and budgeted from the first Coral PR through a required fork-guard check.",
+   "gaps": [
+    "G-83"
+   ],
+   "seams": [],
+   "hard_deps": [],
+   "soft_deps": [],
+   "contracts_produced": [
+    "K16"
+   ],
+   "contracts_consumed": [],
+   "open_questions": [
+    "OQ-50",
+    "OQ-54"
+   ],
+   "included": [
+    ".coral/upstream.yaml pinned at nightly^1; .coral/seams.yaml seeded with S1-S89 and sub-ids, owners from this roadmap",
+    "coral/fork/check_seams.py: allowed roots, CORAL(Sx) anchors, line budgets, commit prefix, stale entries",
+    "MODIFICATIONS.md generation; one-line hot-file rule; required CI check; temp-git tests"
+   ],
+   "excluded": [
+    "Merge rehearsal (OPS-02)",
+    "Licence texts (OPS-02)"
+   ],
+   "key_paths": [
+    ".coral/seams.yaml",
+    ".coral/upstream.yaml",
+    "coral/fork/",
+    ".github/workflows/coral-fork-guard.yml",
+    "MODIFICATIONS.md"
+   ],
+   "proving_test": "coral-fork-guard fails a PR that edits an upstream file without a ledger entry and anchor, and passes once both exist."
+  },
+  {
+   "id": "ENG-01",
+   "name": "Engine contracts pack",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH0",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Publish the workflow schema and IR (K1), reducer contract (K2) and run-log schema (K3) as typed, versioned modules with golden fixtures.",
+   "gaps": [
+    "G-01",
+    "G-03",
+    "G-05"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "SPK-01"
+   ],
+   "contracts_produced": [
+    "K1",
+    "K2",
+    "K3"
+   ],
+   "contracts_consumed": [],
+   "open_questions": [
+    "OQ-3",
+    "OQ-12",
+    "OQ-19"
+   ],
+   "included": [
+    "Authoring models and node taxonomy (Start, End, Work step, Orchestrator node, Human gate, Group; hidden Wait and Sub-workflow); Note is layout-only in a separate layout doc (R-16)",
+    "Reserved ids (runs, templates, new) and EGM keys (session: persistent_across_loop, input_scope) (D4)",
+    "Frozen CompiledGraph, content-hash rule and JSON Schema export",
+    "ScopeKey (run, node, item_path, iteration_path) on every input, effect, timer and log entry (TLD-21)",
+    "effect_key and idempotency-key library; session_generation; reserved StartRun(from_node, carried)",
+    "Pause reasons, error taxonomy, rejection codes; closed additive log kinds with 16 KiB body cap",
+    "Golden fixtures: MVP template, D§5.6 example, a deadlock"
+   ],
+   "excluded": [
+    "Loader and compiler (ENG-02)",
+    "Reducer logic (ENG-04)",
+    "Table layout (DUR-01)"
+   ],
+   "key_paths": [
+    "coral/model/",
+    "coral/engine/types.py",
+    "coral/engine/log.py",
+    "docs/coral/contracts/"
+   ],
+   "proving_test": "JSON Schema goldens match the fixtures and every fixture round-trips through the type modules."
+  },
+  {
+   "id": "SES-01",
+   "name": "Integration contracts pack",
+   "area": "SES",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH0",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Freeze the Omnigent-facing contracts (facade, tools, identity, bundle format, gate payloads) with a FakeOmni so engine, tool, gate and profile work runs in parallel.",
+   "gaps": [
+    "G-18",
+    "G-25",
+    "G-51"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "ENG-01",
+    "SPK-02"
+   ],
+   "contracts_produced": [
+    "K4",
+    "K6",
+    "K10",
+    "K12",
+    "K14"
+   ],
+   "contracts_consumed": [
+    "K2"
+   ],
+   "open_questions": [
+    "OQ-3",
+    "OQ-37",
+    "OQ-43",
+    "OQ-47"
+   ],
+   "included": [
+    "K4 coral.omni protocols (create, send with stable_id, interrupt, stop, wake, status, items, turn evidence, policies, gate publish, profiles, worktrees, host read) and an in-memory FakeOmni",
+    "K6 six TLD-20 tool schemas, result envelope {accepted, reason, allowed_values, next}, rejection codes, (run, operation_id) dedup, params.coral opt-in keys (TLD-04)",
+    "K10 coral.* labels, uuid5(effect_key) session ids, stable_id per message, deterministic policy ids and worktree paths, coral_gate_<visit> ids, coral__ and coral. prefixes",
+    "K12 per-step bundle tar layout, content address, params.coral keys, hygiene defaults, approval stance, guardrails slot, provider-reference auth (WS-HARNESS co-authors)",
+    "K14 gate, ask_user and budget form payloads, authored-outcome mapping, hidden decline and cancel, resolver identity, re-publish rule"
+   ],
+   "excluded": [
+    "Implementations (SES-03, TLS-*, GTE-01, PRF-01)"
+   ],
+   "key_paths": [
+    "coral/omni/protocols.py",
+    "coral/omni/fake.py",
+    "coral/tools/schemas.py",
+    "coral/identity.py",
+    "coral/omni/bundle_format.py",
+    "docs/coral/contracts/"
+   ],
+   "proving_test": "FakeOmni passes the K4 conformance suite and the tool and bundle schemas match their JSON Schema goldens."
+  },
+  {
+   "id": "API-01",
+   "name": "Coral API and run-stream contracts",
+   "area": "API",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH0",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "S",
+   "enabler": true,
+   "objective": "Publish the /v1/coral/* OpenAPI (K7) and run-stream protocol (K8) with a drift check, generated TS types and stub routers so web work starts in PH1.",
+   "gaps": [
+    "G-74",
+    "G-75"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "ENG-01",
+    "SES-01"
+   ],
+   "contracts_produced": [
+    "K7",
+    "K8"
+   ],
+   "contracts_consumed": [
+    "K1",
+    "K14"
+   ],
+   "open_questions": [
+    "OQ-45"
+   ],
+   "included": [
+    "Endpoint list, error envelope, ETag/412, start_key, access mapping through the run session",
+    "coral/api/dump_openapi.py --check and a drift test (upstream dump omits extra_routers)",
+    "Generated TS types; MSW fixtures and stub routers",
+    "K8: SSE snapshot then seq-numbered entry events, Last-Event-ID resume, heartbeat, [DONE], polling fallback"
+   ],
+   "excluded": [
+    "Real handlers (DUR-02, API-02)",
+    "Web stream client (WEB-04)"
+   ],
+   "key_paths": [
+    "coral/api/openapi.json",
+    "coral/api/dump_openapi.py",
+    "web/src/workflows/api/generated/",
+    "docs/coral/contracts/run-stream.md"
+   ],
+   "proving_test": "The OpenAPI drift test fails on an unregenerated change and the web build type-checks against the generated client."
+  },
+  {
+   "id": "FND-02",
+   "name": "Server plugin seam and Coral enablement gate",
+   "area": "FND",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "S",
+   "enabler": true,
+   "objective": "Load Coral routers and lifespan hooks through an upstreamable server_plugins seam, and gate the product with GET /v1/coral/info.",
+   "gaps": [
+    "G-17",
+    "G-81"
+   ],
+   "seams": [
+    "S32"
+   ],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "OPS-01"
+   ],
+   "contracts_produced": [
+    "K17"
+   ],
+   "contracts_consumed": [
+    "K16",
+    "K7"
+   ],
+   "open_questions": [
+    "OQ-36"
+   ],
+   "included": [
+    "server_plugins: config key loading modules that export ROUTERS and LIFESPAN_HOOKS with a ServerServices bundle",
+    "Routers mount before the SPA; hooks start after the scheduler and stop before the runner router closes; import failure is fatal; one-line CLI wiring",
+    "Refuse Coral workers under multi-replica or host sharding (TLD-08); spike 11 lifespan merge",
+    "coral/server_plugin.py mounting /v1/coral with GET /v1/coral/info (TLD-03, no Feature enum edit)"
+   ],
+   "excluded": [
+    "Workflow and run endpoints (DUR-02, API-02)",
+    "Workers (DUR-04)",
+    "S33 upstream flag"
+   ],
+   "key_paths": [
+    "omnigent/server/app.py",
+    "omnigent/cli.py",
+    "coral/server_plugin.py",
+    "coral/api/info.py",
+    "tests/server/test_app.py"
+   ],
+   "proving_test": "tests/server/test_app.py plugin cases: routers mount before the SPA, hook ordering holds, an import failure aborts startup, and /v1/coral/info reports enabled."
+  },
+  {
+   "id": "FND-03",
+   "name": "Coral DB environment and migration ordering",
+   "area": "FND",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Give Coral its own Alembic chain and CoralBase that always migrates after Omnigent reaches head, on all four DB backends.",
+   "gaps": [
+    "G-13"
+   ],
+   "seams": [
+    "S30",
+    "S31",
+    "S57",
+    "S58"
+   ],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "OPS-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K16"
+   ],
+   "open_questions": [
+    "OQ-42",
+    "OQ-54"
+   ],
+   "included": [
+    "coral/db base, types, ids, enum codecs and migrate; coral_alembic_version; CoralBase on its own DeclarativeBase",
+    "ensure_coral_schema strictly after Omnigent head with newer-build, D1-refusal and CockroachDB SERIALIZABLE guards; never create_all",
+    "env.py include_name filter (S30); truncation keeps every *alembic_version and skips coral_* in root truncation (S31)",
+    "Deploy entrypoint runs Coral migrations (S57); shared cursor and enum helpers (S58)",
+    "Single-head, round-trip, SQLite-safe and ordering tests on SQLite, Postgres, CockroachDB and MySQL"
+   ],
+   "excluded": [
+    "Tables (DUR-01)",
+    "create_all (never used)"
+   ],
+   "key_paths": [
+    "coral/db/",
+    "coral/db/migrations/",
+    "omnigent/db/migrations/env.py",
+    "tests/conftest.py",
+    "deploy/databricks/src/app.py",
+    "omnigent/db/enum_codecs.py"
+   ],
+   "proving_test": "Migration-ordering test: a fresh DB and an upgrade both reach Omnigent head, then Coral head, on all four lanes."
+  },
+  {
+   "id": "FND-04",
+   "name": "Coral test infrastructure",
+   "area": "FND",
+   "workstream": "WS-OPS",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Give every Coral feature its test lanes on day one: pure invariants, DB-lane faults and Tier B E2E scaffolding.",
+   "gaps": [
+    "G-87"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "FND-03",
+    "ENG-01",
+    "SPK-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K2",
+    "K3",
+    "K4"
+   ],
+   "open_questions": [
+    "OQ-52"
+   ],
+   "included": [
+    "tests/coral lane map and conftests; Coral-aware SQLite template",
+    "I1-I8 invariant harness and seeded stdlib fuzzing",
+    "Commit-boundary fault-injection and contention helpers for the DB lanes (tests/stores/coral)",
+    "Tier B scaffolding: mock LLM and an openai-agents step bundle scripted to call engine tools; just coral::test"
+   ],
+   "excluded": [
+    "Specific E2E journeys (SES-05)",
+    "Live bench (HRN-01)",
+    "claude-sdk fake (deferred)"
+   ],
+   "key_paths": [
+    "tests/coral/",
+    "tests/stores/coral/",
+    "tests/e2e/coral/",
+    "coral/coral.just"
+   ],
+   "proving_test": "A sample reducer property test and a sample commit-boundary fault test run green in the coral CI group on all four lanes."
+  },
+  {
+   "id": "OPS-02",
+   "name": "Upstream merge rehearsal, fork CI hygiene and licence basics",
+   "area": "OPS",
+   "workstream": "WS-OPS",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Rehearse upstream merges daily from nightly^1, keep inherited CI safe, and ship the NOTICE addendum and licence inventory.",
+   "gaps": [
+    "G-84",
+    "G-86"
+   ],
+   "seams": [
+    "S77"
+   ],
+   "hard_deps": [
+    "OPS-01"
+   ],
+   "soft_deps": [
+    "FND-03",
+    "FND-04"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K16"
+   ],
+   "open_questions": [
+    "OQ-50",
+    "OQ-30"
+   ],
+   "included": [
+    "Daily trial merge from nightly^1 with rerere and a conflict report by seam (TLD-17, R-14)",
+    "Scripted regeneration of uv.lock, pnpm-lock, openapi.json and palette CSS",
+    "Coral suites L0-L2 on SQLite, Postgres and CockroachDB, MySQL tested, including migration ordering; L3 joins when SES-03 lands",
+    "Disable secret-using inherited workflows (R-19) and desktop builds until BRD-03; branch protection",
+    "NOTICE append-only addendum (S77); licence inventory CI (yaml ISC, dagre MIT, Newsreader OFL; elkjs blocked)"
+   ],
+   "excluded": [
+    "Executed release merge drill, security cherry-pick lane and upstream PRs (OPS-05)",
+    "Counsel sign-off (OPS-05)"
+   ],
+   "key_paths": [
+    ".github/workflows/coral-upstream-rehearsal.yml",
+    "NOTICE",
+    "docs/coral/UPSTREAM_MERGES.md",
+    "coral/fork/licences.py"
+   ],
+   "proving_test": "The rehearsal job merges nightly^1 into a scratch branch each day and posts a green or per-seam conflict report."
+  },
+  {
+   "id": "OPS-03",
+   "name": "Distribution identity and coexistence",
+   "area": "OPS",
+   "workstream": "WS-OPS",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "Medium",
+   "complexity": "S",
+   "enabler": false,
+   "objective": "Ship a coral console script with its own data and config dirs and update identity so Coral and Omnigent coexist on one machine.",
+   "gaps": [
+    "G-85"
+   ],
+   "seams": [
+    "S75"
+   ],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "SPK-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [],
+   "open_questions": [
+    "OQ-49",
+    "OQ-53"
+   ],
+   "included": [
+    "coral script sets OMNIGENT_DATA_DIR and OMNIGENT_CONFIG_HOME to ~/.coral",
+    "Update check disabled or pointed at Coral (S75); coral/version.py",
+    "Isolation test: no writes to ~/.omnigent and no newer-DB lockout",
+    "coral/CLAUDE.md dev-DB exception once OQ-53 is approved; cut line: may slip to PH5 if M2 stays internal"
+   ],
+   "excluded": [
+    "Desktop identity (BRD-03)",
+    "Renaming omnigent internals"
+   ],
+   "key_paths": [
+    "pyproject.toml",
+    "coral/cli.py",
+    "coral/version.py",
+    "omnigent/update_check.py",
+    "coral/CLAUDE.md"
+   ],
+   "proving_test": "Isolation test runs coral and omnigent side by side with separate dirs, no shared files and no lockout."
+  },
+  {
+   "id": "DUR-01",
+   "name": "Core schema, persistence contract and migration train",
+   "area": "DUR",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Publish the persistence contract (K5) and land coral_0001 and coral_0002 as standalone migrations with scope keys, derived ids and generation fencing.",
+   "gaps": [
+    "G-14"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "FND-03",
+    "ENG-01"
+   ],
+   "soft_deps": [
+    "SES-01",
+    "EVD-01"
+   ],
+   "contracts_produced": [
+    "K5"
+   ],
+   "contracts_consumed": [
+    "K2",
+    "K3"
+   ],
+   "open_questions": [
+    "OQ-34"
+   ],
+   "included": [
+    "K5 first PR: table conventions (workspace_id leading PK, derived-id PKs, Uuid16, CHECKed enums, CompressedText cap, no FKs, scope-key columns), store protocols (apply_transition CAS, workflow store, queue claim/lease/finish), at-least-once semantics",
+    "coral_0001_core: workflows, versions, drafts, runs, run specs, activations, join arrivals, slots with session_generation, handoffs and items, gate visits, timers, queue, run log, simulation cases, blob refs",
+    "coral_0002_integration: session bindings, stable_id map, step agents, alerts, questions, repo bindings, command patterns, command observations",
+    "Migration-train ownership with a single-head CI check; models-match test"
+   ],
+   "excluded": [
+    "Store code (DUR-02, DUR-03, DUR-04)",
+    "Profile revisions and later tables, which queue through the train"
+   ],
+   "key_paths": [
+    "coral/db/models/",
+    "coral/db/migrations/versions/",
+    "coral/stores/protocols.py",
+    "docs/coral/contracts/persistence.md"
+   ],
+   "proving_test": "Models-match-migrations and single-head tests pass on four lanes, and every run table carries the scope-key columns."
+  },
+  {
+   "id": "DUR-02",
+   "name": "Workflow library: store, versions and API",
+   "area": "DUR",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Store workflows DB-canonically as drafts plus immutable content-addressed versions and serve them, with validate and simulate, through /v1/coral and the CLI (TLD-06).",
+   "gaps": [
+    "G-14",
+    "G-15",
+    "G-66",
+    "G-68",
+    "G-74"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "DUR-01",
+    "FND-02",
+    "ENG-02",
+    "API-01"
+   ],
+   "soft_deps": [
+    "ENG-03",
+    "ENG-07"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K5",
+    "K1",
+    "K7",
+    "K17"
+   ],
+   "open_questions": [
+    "OQ-8",
+    "OQ-9",
+    "OQ-33"
+   ],
+   "included": [
+    "Drafts with ETag/412; immutable versions; library index with stable workflow ids",
+    "Blob key scheme coral/v1/{ws}/..., put-then-commit, coral_blob_refs ledger, size caps at the API boundary",
+    "/v1/coral/workflows CRUD, version freeze, :validate and :simulate endpoints; saved simulation cases",
+    "coral workflow upload CLI"
+   ],
+   "excluded": [
+    "Repo import (WSP-01)",
+    "Repo export (EXT-03)",
+    "UI (WEB-02)"
+   ],
+   "key_paths": [
+    "coral/stores/workflows.py",
+    "coral/stores/blobs.py",
+    "coral/api/workflows.py",
+    "coral/cli.py"
+   ],
+   "proving_test": "API test: upload the template and get a version hash; a broken copy returns yaml_path-anchored problems; simulate returns a deterministic trace."
+  },
+  {
+   "id": "DUR-03",
+   "name": "Run store with CAS transitions",
+   "area": "DUR",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Commit each reducer transition's state, log, effects and receipts atomically under an optimistic run version on every lane.",
+   "gaps": [
+    "G-14",
+    "G-07"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "DUR-01"
+   ],
+   "soft_deps": [
+    "ENG-04"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K5",
+    "K2",
+    "K3"
+   ],
+   "open_questions": [],
+   "included": [
+    "Idempotent start_run via start_key",
+    "apply_transition writes state delta, log, effects and receipts in one short transaction",
+    "Reduce-and-retry on version conflict (run_write_transaction retries only 40001/1213)",
+    "Contention and commit-boundary tests on four lanes"
+   ],
+   "excluded": [
+    "Queue and workers (DUR-04)",
+    "Purge (DUR-06)"
+   ],
+   "key_paths": [
+    "coral/stores/runs.py",
+    "tests/stores/coral/test_run_store.py"
+   ],
+   "proving_test": "Two concurrent transitions on one run yield one winner and a reducer re-run, with fold(log) == state on all four lanes."
+  },
+  {
+   "id": "DUR-04",
+   "name": "Durable work queue and workers",
+   "area": "DUR",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": true,
+   "objective": "Own an at-least-once queue for signals, timers and effects with leases and idempotency keys, run by plugin-lifespan workers (TLD-08).",
+   "gaps": [
+    "G-11",
+    "G-25"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "DUR-01",
+    "FND-02"
+   ],
+   "soft_deps": [
+    "DUR-03",
+    "ENG-06"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K5",
+    "K17",
+    "K2"
+   ],
+   "open_questions": [
+    "OQ-34",
+    "OQ-42"
+   ],
+   "included": [
+    "Physical layout chosen here (unified or typed tables)",
+    "Lock-and-recheck claims, StartupLease, renew, finish, backoff; delete on apply",
+    "Enqueue off the event-loop thread; effect drainer and timer scan started by the plugin lifespan",
+    "Workers enter workspace, account-authority and host-owner scopes; dispatch-time re-validation",
+    "Single-replica refusal; never PersistentTaskScheduler (R-4)"
+   ],
+   "excluded": [
+    "Reconcile and resync (DUR-05)",
+    "Multi-replica sharding (deferred)"
+   ],
+   "key_paths": [
+    "coral/queue/",
+    "coral/workers/",
+    "tests/stores/coral/test_queue.py"
+   ],
+   "proving_test": "A worker killed after claim releases its lease and the effect runs exactly once more with the same idempotency key."
+  },
+  {
+   "id": "ENG-02",
+   "name": "Loader, compiler and content hash",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Turn workflow YAML into the frozen, hashed IR with source marks so every error points at a box or arrow.",
+   "gaps": [
+    "G-01"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-01"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1"
+   ],
+   "open_questions": [
+    "OQ-8"
+   ],
+   "included": [
+    "Safe-load with source marks and a yaml_path-to-range map",
+    "Stable and reserved ids; compile to frozen IR; content hash",
+    "JSON Schema export wired into the web build; golden tests"
+   ],
+   "excluded": [
+    "Validation (ENG-03)",
+    "Comment-preserving edits (WEB-02)"
+   ],
+   "key_paths": [
+    "coral/model/loader.py",
+    "coral/model/compile.py",
+    "tests/coral/model/"
+   ],
+   "proving_test": "The MVP template compiles to the expected IR and hash, and moving a key moves the reported error range."
+  },
+  {
+   "id": "ENG-03",
+   "name": "Static validator and derived joins",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Report V1-V7 and V10-V13 problems with box-anchored explanations, and derive join types, regions and checked parts.",
+   "gaps": [
+    "G-02",
+    "G-03"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-02"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1"
+   ],
+   "open_questions": [
+    "OQ-9",
+    "OQ-19"
+   ],
+   "included": [
+    "V1-V7 and V10-V13 with plain explanations; V10 against configured harnesses",
+    "Block-structure soundness instead of exhaustive V11 (X-25, R-24); regions; loop table",
+    "AND-join after a split vs merge of alternatives; back-arrow exemption (D6)",
+    "V12 activation upper bound as a cost backstop; invalid drafts savable but not runnable (OQ-9)"
+   ],
+   "excluded": [
+    "V8 (ENG-09)",
+    "V9 (RUL-02)",
+    "Exhaustive enumeration (deferred)"
+   ],
+   "key_paths": [
+    "coral/validate/",
+    "tests/coral/validate/"
+   ],
+   "proving_test": "Each rule has a failing fixture with the expected yaml_path and message, and the MVP template validates clean with derived join types."
+  },
+  {
+   "id": "ENG-04",
+   "name": "Reducer core and run log",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Implement the pure transition() for runs, activations, slots, attempts, decisions and gate visits, emitting log entries, keyed effects and rejections, with fold(log) == state.",
+   "gaps": [
+    "G-04",
+    "G-05",
+    "G-03",
+    "G-34"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-01",
+    "ENG-02"
+   ],
+   "soft_deps": [
+    "ENG-03",
+    "FND-04"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K2",
+    "K3"
+   ],
+   "open_questions": [
+    "OQ-3",
+    "OQ-12"
+   ],
+   "included": [
+    "State machines for Run, Activation, Slot, Attempt, Decision request and Gate visit; illegal-transition tables; rejections never throw",
+    "Handoffs and decision requests carrying legal labels and the per-agent handoff collection (D9)",
+    "Gate visits with visit tokens, stale-visit rejection and authored outcome labels (R-7)",
+    "Log emission, fold and receipts",
+    "Skeleton slice first (start -> step -> gate -> end); staff two engineers (top of L)"
+   ],
+   "excluded": [
+    "Loops, joins and failure paths (ENG-05)",
+    "Lifecycle and timers (ENG-06)",
+    "Repeat and parallel (ENG-08)"
+   ],
+   "key_paths": [
+    "coral/engine/reducer.py",
+    "coral/engine/machines/",
+    "tests/coral/engine/"
+   ],
+   "proving_test": "Seeded fuzz over the fixtures holds fold(log) == state and I1-I8, and the skeleton fixture walks start -> step -> gate -> end."
+  },
+  {
+   "id": "ENG-05",
+   "name": "Loops, joins and failure paths",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Make back-arrows, at-limit routes, joins, failure paths and blocked exits behave exactly as the validator explains.",
+   "gaps": [
+    "G-04",
+    "G-03"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-03",
+    "ENG-04"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K2",
+    "K3"
+   ],
+   "open_questions": [
+    "OQ-12",
+    "OQ-19"
+   ],
+   "included": [
+    "Back-arrow counters keyed by iteration_path; at_limit routing with open findings",
+    "Join arrivals unique per (activation, arrow, scope); merge of alternatives; arrow.skipped",
+    "Attempts and failure path; blocked-exit routing; liveness pause; runtime activation cap"
+   ],
+   "excluded": [
+    "Dead-path elimination beyond OQ-19",
+    "Region cancel (ENG-08)"
+   ],
+   "key_paths": [
+    "coral/engine/control.py",
+    "tests/coral/engine/test_loops_joins.py"
+   ],
+   "proving_test": "Scripted reducer test: changes requested x3 routes to the at-limit gate, and a blocked exit follows the failure path."
+  },
+  {
+   "id": "ENG-06",
+   "name": "Run lifecycle, timers and liveness policies",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Add start, pause, resume, cancel and retry commands, pause reasons and timer policies to the reducer so runs advance without babysitting.",
+   "gaps": [
+    "G-06",
+    "G-07",
+    "G-34"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-04"
+   ],
+   "soft_deps": [
+    "ENG-05"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K2",
+    "K3"
+   ],
+   "open_questions": [
+    "OQ-14",
+    "OQ-13",
+    "OQ-5"
+   ],
+   "included": [
+    "start_key to derived run id; pause-reason enum (infra, plan_limit, auth, budget, rejected_calls, liveness, drift); resume on the pinned version",
+    "Cancel effect chain interrupt -> stop -> omnigent.closed (R-13) and late-submit rejection; retry step",
+    "Auto-advance; decision watchdog (remind once, then alert) with a configurable default (OQ-14); rejected-call pause (3 in a row per slot)",
+    "Gate reminders and escalation that never auto-resolve; overdue timer kind; coalescing after laptop sleep"
+   ],
+   "excluded": [
+    "Effect execution (DUR-04, SES-*)",
+    "Budget pause (RUL-05)",
+    "Reactions and overdue alerts (ENG-09)"
+   ],
+   "key_paths": [
+    "coral/engine/lifecycle.py",
+    "coral/engine/timers.py"
+   ],
+   "proving_test": "Reducer tests: pause, resume, cancel and retry transitions; the watchdog fires once then alerts; three rejected calls pause the slot; a gate reminder never resolves the gate."
+  },
+  {
+   "id": "ENG-07",
+   "name": "Simulate engine, saved cases and MVP template",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Run the reducer with stub effects over scripted scenarios, save cases that re-run per version, and ship the TLD-01 template with saved simulations.",
+   "gaps": [
+    "G-66",
+    "G-69",
+    "G-62"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-04",
+    "ENG-05"
+   ],
+   "soft_deps": [
+    "ENG-06"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K2",
+    "K3"
+   ],
+   "open_questions": [
+    "OQ-2",
+    "OQ-9"
+   ],
+   "included": [
+    "Scripted labels, list lengths, pass/fail and gate answers; K3-shaped traces",
+    "Saved cases re-run on each new version; session-count estimate",
+    "\"Implement with review loop\" template (TLD-01) as package data and golden fixture"
+   ],
+   "excluded": [
+    "Exhaustive mode (deferred)",
+    "Simulate UI (WEB-01)",
+    "PR-review template (ENG-08)"
+   ],
+   "key_paths": [
+    "coral/engine/simulate.py",
+    "coral/templates/implement_review_loop.yaml",
+    "tests/coral/simulate/"
+   ],
+   "proving_test": "Saved cases approved, changes requested x3 -> at-limit gate, and gate reject re-run deterministically on a new template version."
+  },
+  {
+   "id": "EVD-01",
+   "name": "Evidence-requirement IR and evaluator",
+   "area": "EVD",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Define the evidence IR (K11) and a pure evaluator with final-pass-after-last-change semantics so formatter-then-test cannot livelock.",
+   "gaps": [
+    "G-40"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-01"
+   ],
+   "soft_deps": [
+    "SPK-04"
+   ],
+   "contracts_produced": [
+    "K11"
+   ],
+   "contracts_consumed": [
+    "K1",
+    "K13"
+   ],
+   "open_questions": [
+    "OQ-10"
+   ],
+   "included": [
+    "Required commands, may-modify flags for formatters, exit-code source rules, per-agent vs per-step scope",
+    "Observation and fingerprint record shapes",
+    "Pure evaluator; missing-item messages; tests over temp git repos"
+   ],
+   "excluded": [
+    "Capture (EVD-02)",
+    "Detection (EVD-03)",
+    "Coral-run checks (EVD-04)"
+   ],
+   "key_paths": [
+    "coral/evidence/ir.py",
+    "coral/evidence/evaluate.py",
+    "tests/coral/evidence/"
+   ],
+   "proving_test": "Formatter-then-test passes, test-then-edit fails with 'tests predate the last change', and messages list the missing items."
+  },
+  {
+   "id": "HRN-01",
+   "name": "Capability registry and bench",
+   "area": "HRN",
+   "workstream": "WS-HARNESS",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Fill and extend harness capability fields, expose them per spelling, publish the capability registry (K9), and back values with probes and a nightly bench.",
+   "gaps": [
+    "G-44"
+   ],
+   "seams": [
+    "S22",
+    "S23",
+    "S59",
+    "S78"
+   ],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "SPK-03",
+    "OPS-01"
+   ],
+   "contracts_produced": [
+    "K9"
+   ],
+   "contracts_consumed": [
+    "K16"
+   ],
+   "open_questions": [
+    "OQ-51"
+   ],
+   "included": [
+    "K9 first: fields, enums, CapabilityMatrix and effective-enforceability inputs",
+    "Fill steering, live_queue and compaction; add the ten G-44 fields; guard tests (S22)",
+    "capabilities_by_spelling on GET /v1/harnesses including native modes (S59)",
+    "Bench probes with offline verdict tests and feature-map rows (S23, S78); coral-bench.yml nightly, claude-sdk first"
+   ],
+   "excluded": [
+    "Label computation (RUL-02)",
+    "Codex live lanes until HRN-05"
+   ],
+   "key_paths": [
+    "omnigent/harness_capabilities.py",
+    "omnigent/harness_plugins.py",
+    "omnigent/server/routes/harnesses.py",
+    "tests/harness_bench/probes/",
+    "feature-map/harness-acceptance.md",
+    ".github/workflows/coral-bench.yml"
+   ],
+   "proving_test": "tests/test_harness_capabilities.py guard tests pass with the new fields, and GET /v1/harnesses returns capabilities_by_spelling for claude-sdk and claude-native."
+  },
+  {
+   "id": "RUL-01",
+   "name": "coral.policies, run guard and cost backstop",
+   "area": "RUL",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Hold rosters, orchestrator limits and paused or cancelled runs by policy, not by prompt, and cap per-session cost before run budgets exist.",
+   "gaps": [
+    "G-45",
+    "G-46",
+    "G-62"
+   ],
+   "seams": [
+    "S52"
+   ],
+   "hard_deps": [
+    "FND-02"
+   ],
+   "soft_deps": [
+    "SES-01",
+    "DUR-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K10",
+    "K12",
+    "K17"
+   ],
+   "open_questions": [
+    "OQ-15"
+   ],
+   "included": [
+    "coral.policies via policy_modules: step_roster, orchestrator_guard, engine_tool_guard, input-scope deny (internal_only) (R-3)",
+    "Spec grants spawn: false and tools.agents: []",
+    "S52 required-policy provider in builder.py (one-line) keyed on coral.run_id: DENY non-coral_* tools while paused or cancelled; any_policies_apply fast path",
+    "Deterministic per-session cost_budget backstop with no soft ASK, skipped for unpriced models (D34)"
+   ],
+   "excluded": [
+    "Rule catalog (RUL-03)",
+    "Run budgets (RUL-05)",
+    "S26 reserved names (EXT-04)"
+   ],
+   "key_paths": [
+    "coral/policies/",
+    "omnigent/runtime/policies/builder.py"
+   ],
+   "proving_test": "A paused run's step session is denied a non-coral tool, and an orchestrator session is denied a write tool by its bundle guardrail."
+  },
+  {
+   "id": "SES-02",
+   "name": "Seam pack A: status-edge observers and engine dispatch",
+   "area": "SES",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Land the upstreamable session seams as one-line registry calls: status-edge observers with origin and outcome, and in-process engine dispatch.",
+   "gaps": [
+    "G-19",
+    "G-20"
+   ],
+   "seams": [
+    "S1",
+    "S1b",
+    "S43",
+    "S4",
+    "S41",
+    "S42"
+   ],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "OPS-01",
+    "FND-02"
+   ],
+   "contracts_produced": [
+    "K18"
+   ],
+   "contracts_consumed": [
+    "K16"
+   ],
+   "open_questions": [
+    "OQ-41"
+   ],
+   "included": [
+    "Status-edge observer registry in session_live_state.py; the scheduled hook becomes one observer; notify after the sticky-failed return; bypasses B1 (relay turn-end) and B2 notify (S1)",
+    "origin slugs at the 18 _publish_status sites (S1b)",
+    "turn_outcome on headless runner edges and relay pass-through (S43)",
+    "S41 keeps the _post_event_impl handle; S42 EngineEventContext (S4 realized)",
+    "Upstream PR opened for the S1 registry"
+   ],
+   "excluded": [
+    "Coral observer and turn-end rule (SES-04)",
+    "S2 (HRN-05)",
+    "S44 (not planned)"
+   ],
+   "key_paths": [
+    "omnigent/server/session_live_state.py",
+    "omnigent/server/routes/_sessions/helpers.py",
+    "omnigent/server/routes/_sessions/orchestration.py",
+    "omnigent/server/routes/sessions/routes_events.py",
+    "omnigent/server/startup_inputs.py",
+    "omnigent/server/app.py",
+    "omnigent/runner/app.py"
+   ],
+   "proving_test": "tests/server/integration/test_engine_event_dispatch.py: an observer sees every edge with origin and turn_outcome, and an EngineEventContext message, interrupt and stop pass input policy."
+  },
+  {
+   "id": "TLS-01",
+   "name": "Seam pack B: engine tool transport",
+   "area": "TLS",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": true,
+   "objective": "Land the extension tool provider and server tool registry so one declaration registers, forwards, relays, pre-approves and instructs coral_* tools.",
+   "gaps": [
+    "G-26",
+    "G-27"
+   ],
+   "seams": [
+    "S50",
+    "S7",
+    "S8",
+    "S9",
+    "S10",
+    "S11",
+    "S12",
+    "S49"
+   ],
+   "hard_deps": [
+    "FND-01"
+   ],
+   "soft_deps": [
+    "SES-01",
+    "SES-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K6",
+    "K12",
+    "K16"
+   ],
+   "open_questions": [
+    "OQ-43"
+   ],
+   "included": [
+    "omnigent/tools/extensions.py provider (entry-point loaded) feeding ToolManager registration (S7), runner forwarding (S8), native relay advertisement (S9), native pre-approval sites (S11) and framework instructions (S12: headless prompt.py and native launch channels carrying extension text only), each a one-line call",
+    "coral_ prefix with collision error; params.coral opt-in read by the provider (TLD-04)",
+    "server_tools.py registry with ServerToolCall (operation id, actor, provenance) migrating sys_advise_models (S10); S49 runner-provenance predicate",
+    "(run, operation_id) transport dedup; upstream PRs for S10 and S50"
+   ],
+   "excluded": [
+    "Handlers (TLS-02, TLS-03)",
+    "Enabling native channels (HRN-03, HRN-05)"
+   ],
+   "key_paths": [
+    "omnigent/tools/extensions.py",
+    "omnigent/tools/manager.py",
+    "omnigent/runner/tool_dispatch.py",
+    "omnigent/runner/native/orchestration.py",
+    "omnigent/harnesses/codex_native/app_server.py",
+    "omnigent/server/server_tools.py",
+    "omnigent/runtime/prompt.py",
+    "coral/tools/provider.py"
+   ],
+   "proving_test": "A schema-only coral_ test tool declared once is registered, forwarded by the runner, deduplicated on a repeated operation_id, and its text appears in the headless prompt."
+  },
+  {
+   "id": "BRD-01",
+   "name": "Coral brand skin",
+   "area": "BRD",
+   "workstream": "WS-BRAND",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Make Coral look like Coral by default in light and dark, without disturbing existing heading users, while operator branding still overrides it.",
+   "gaps": [
+    "G-78",
+    "G-79"
+   ],
+   "seams": [
+    "S79",
+    "S81",
+    "S82",
+    "S83",
+    "S89"
+   ],
+   "hard_deps": [],
+   "soft_deps": [
+    "OPS-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K16"
+   ],
+   "open_questions": [
+    "OQ-7",
+    "OQ-30"
+   ],
+   "included": [
+    "omni palette slot data -> Clay Score light and dark, label Coral (TLD-16, X-21); status, chart, CTA and tag remap scoped to the default palette in web/src/brand/coral.css",
+    "Regenerated palette CSS and updated CSS contract tests",
+    "--font-display (Newsreader, bundled offline); --font-heading untouched (R-15)",
+    "CoralMark, CoralWordmark, CoralHero; BrandLogo fallback; defaults Coral and the hero line (OQ-7); favicon, index.html, apple-touch icon",
+    "Onboarding art replacing starfish and Otto; Powered-by per OQ-30 (R-1, R-2)"
+   ],
+   "excluded": [
+    "Sidebar brand row S80 (BRD-02)",
+    "Native shells (BRD-03)"
+   ],
+   "key_paths": [
+    "web/src/lib/themePalette.ts",
+    "web/src/themePalettes.generated.css",
+    "web/src/index.css",
+    "web/src/lib/branding.ts",
+    "web/src/components/BrandLogo.tsx",
+    "web/src/shell/NewChatDialog.tsx",
+    "web/src/brand/",
+    "web/index.html"
+   ],
+   "proving_test": "index.css and palette contract tests pass with Coral tokens, and a stored omni preference renders Clay Score."
+  },
+  {
+   "id": "BRD-02",
+   "name": "Navigation shell, Coral gate and desk headers",
+   "area": "BRD",
+   "workstream": "WS-BRAND",
+   "phase": "PH1",
+   "milestone": "M1",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Let users reach Workflows and Agent Profiles from the sidebar, palette and URLs, gated by /v1/coral/info, under one desk header.",
+   "gaps": [
+    "G-80",
+    "G-81"
+   ],
+   "seams": [
+    "S34",
+    "S80",
+    "S84"
+   ],
+   "hard_deps": [
+    "FND-02"
+   ],
+   "soft_deps": [
+    "BRD-01",
+    "API-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K7"
+   ],
+   "open_questions": [
+    "OQ-27"
+   ],
+   "included": [
+    "coralRoutes(prefix) fragment with withPageView for /workflows, /workflows/runs/:runId, /workflows/:workflowKey and /profiles (spike 17)",
+    "CoralGate reading /v1/coral/info (loading, disabled -> not found, error) instead of FeatureGatedPage",
+    "CoralPrimaryNavigation insert and sidebar brand row -> CoralWordmark (S80); useActiveNavItem exclusion; command palette actions",
+    "CoralPageHeader (list and full-bleed) with AccentRail on Inbox, Automations and the Coral desks (S84)",
+    "?agent= focus convention (R-17); placeholder desks with empty states"
+   ],
+   "excluded": [
+    "Desk content (WEB-*)",
+    "S33 upstream flag"
+   ],
+   "key_paths": [
+    "web/src/App.tsx",
+    "web/src/shell/Sidebar.tsx",
+    "web/src/shell/CommandPalette.tsx",
+    "web/src/pages/InboxPage.tsx",
+    "web/src/pages/TasksPage.tsx",
+    "web/src/workflows/routes.tsx",
+    "web/src/brand/CoralPageHeader.tsx"
+   ],
+   "proving_test": "Route tests: /workflows and /profiles render behind CoralGate, disabling Coral hides nav and returns not found, and unknown routes no longer light New session."
+  },
+  {
+   "id": "WEB-01",
+   "name": "Read-only diagram and Simulate UI",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "High",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Render any compiled workflow read-only through one xyflow adapter whose overlay Simulate and the run view share, and let authors simulate and save cases from the UI (TLD-14).",
+   "gaps": [
+    "G-71",
+    "G-67"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-01"
+   ],
+   "soft_deps": [
+    "ENG-02",
+    "API-01",
+    "BRD-02",
+    "ENG-07",
+    "DUR-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K7"
+   ],
+   "open_questions": [
+    "OQ-30"
+   ],
+   "included": [
+    "Graph model from the compiled IR; one xyflow adapter folder; design taxonomy with Note layout-only",
+    "dagre layout in a worker (ELK behind legal); pure layout tests (xyflow OOMs in jsdom)",
+    "Overlay API shared with the run view; states: loading, layout pending, parse error with last valid, too large",
+    "Simulate scenario editor from derived info; overlay of visit counts, taken edges and limits; estimate; saved-test badges"
+   ],
+   "excluded": [
+    "Editing (WEB-08)",
+    "ELK",
+    "Run data (WEB-04)"
+   ],
+   "key_paths": [
+    "web/src/workflows/model/",
+    "web/src/workflows/layout/",
+    "web/src/workflows/canvas/",
+    "web/src/workflows/simulate/",
+    "web/package.json"
+   ],
+   "proving_test": "Layout tests render the MVP template graph model, and a scripted simulation overlays visit counts that match the API trace."
+  },
+  {
+   "id": "WEB-02",
+   "name": "Workflows desk, library and YAML editor",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH1",
+   "milestone": "M2",
+   "priority": "High",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Let users find, open and edit workflows in YAML with live server markers, a problem list and comment-preserving saves (TLD-15).",
+   "gaps": [
+    "G-70",
+    "G-68",
+    "G-81",
+    "G-73"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "BRD-02",
+    "API-01"
+   ],
+   "soft_deps": [
+    "DUR-02",
+    "WEB-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K7",
+    "K1"
+   ],
+   "open_questions": [
+    "OQ-9",
+    "OQ-27",
+    "OQ-33"
+   ],
+   "included": [
+    "/workflows tabs (Your workflows, Runs, Templates) with loading, empty and error states; intro walkthrough",
+    "Library list with versions and last run; upload and import actions",
+    "Monaco YAML pane via monacoSetup helpers plus the yaml npm CST; markers and problem list from the server validator only",
+    "Save with 412 conflict dialog; dirty guard; golden round-trip fixtures",
+    "YAML editing is the last PR series and the M2 cut line: ship read-only plus upload if it slips"
+   ],
+   "excluded": [
+    "Guarantees panel (WEB-06)",
+    "Canvas (WEB-08)",
+    "MonacoCodeEditor reuse"
+   ],
+   "key_paths": [
+    "web/src/workflows/desk/",
+    "web/src/workflows/editor/",
+    "web/src/shell/monacoSetup.ts",
+    "web/package.json"
+   ],
+   "proving_test": "Editing YAML shows server markers on the right range, saving round-trips comments unchanged, and a concurrent edit opens the 412 dialog."
+  },
+  {
+   "id": "DUR-05",
+   "name": "Reconciler and restart recovery",
+   "area": "DUR",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Make runs survive server restarts and lost edges by reconciling durable state with live session facts at startup and on a periodic resync.",
+   "gaps": [
+    "G-11",
+    "G-16",
+    "G-87"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "DUR-03",
+    "DUR-04"
+   ],
+   "soft_deps": [
+    "ENG-06",
+    "SES-04",
+    "GTE-01",
+    "SES-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K2",
+    "K4",
+    "K5",
+    "K19"
+   ],
+   "open_questions": [
+    "OQ-14"
+   ],
+   "included": [
+    "Startup reconcile, periodic resync and liveness checks; re-lease expired effects; read before resend",
+    "Trigger gate re-publish; stale runner_last_seen marks slots suspect; resync re-derives turn ends from persisted edge facts",
+    "Alert on waiting-with-no-elicitation",
+    "Lazy authority checks with paused(authority_revoked) written as system",
+    "Commit-boundary fault suite on every lane"
+   ],
+   "excluded": [
+    "Runner-loss restart ladder (SES-06)",
+    "Retention (DUR-06)"
+   ],
+   "key_paths": [
+    "coral/reconcile/",
+    "tests/stores/coral/test_commit_boundaries.py"
+   ],
+   "proving_test": "A crash at each commit boundary recovers with no duplicate sessions, briefs, policies, worktrees or gate prompts on all four lanes."
+  },
+  {
+   "id": "SES-03",
+   "name": "Session facade: request-free create and topology",
+   "area": "SES",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Create run-owned sessions idempotently without an HTTP request in the ADR-05 topology, guarded by a facade contract suite.",
+   "gaps": [
+    "G-18",
+    "G-22",
+    "G-25"
+   ],
+   "seams": [
+    "S51"
+   ],
+   "hard_deps": [
+    "SPK-02",
+    "SES-01",
+    "FND-02"
+   ],
+   "soft_deps": [
+    "DUR-01",
+    "PRF-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K4",
+    "K10",
+    "K12",
+    "K17"
+   ],
+   "open_questions": [
+    "OQ-32",
+    "OQ-17",
+    "OQ-47"
+   ],
+   "included": [
+    "fire.py-subset create: validators, uuid5(effect_key) conversation id through the store (R-9), unique child titles, presentation labels, policies before input, launch and init",
+    "Stable run session with own_runner step children (TLD-02 option B); S51 parent-wake exemption (omnigent.parent_wake: off)",
+    "workspace= with no git options (keeps S73 unneeded); unattended-permission preflight",
+    "Privates imported only through the omnigent.server.routes.sessions facade; L3 contract suite (signature snapshots, facade-vs-HTTP row diff) added to the rehearsal",
+    "Fallback (top-level family, S35, engine-managed grants) costed as a +3-4 week contingency, not planned"
+   ],
+   "excluded": [
+    "Dispatch and turn end (SES-04)",
+    "Fallback build (contingency)",
+    "S55 (not planned)"
+   ],
+   "key_paths": [
+    "coral/omni/sessions.py",
+    "omnigent/runtime/subagent_block_notifier.py",
+    "tests/coral/omni/contract/"
+   ],
+   "proving_test": "L3 contract suite: creating the same effect twice yields one session, and the facade row matches an HTTP-created row except for allowed fields."
+  },
+  {
+   "id": "SES-04",
+   "name": "Step turn loop: dispatch and per-mode turn-end detection",
+   "area": "SES",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Brief, nudge, interrupt and stop run sessions through _post_event_impl, and decide durably, per mode, when an engine-started turn ended.",
+   "gaps": [
+    "G-19",
+    "G-20",
+    "G-21",
+    "G-07"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "SES-02",
+    "SES-03"
+   ],
+   "soft_deps": [
+    "DUR-04",
+    "HRN-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K4",
+    "K18",
+    "K2",
+    "K9",
+    "K5"
+   ],
+   "open_questions": [
+    "OQ-41",
+    "OQ-13"
+   ],
+   "included": [
+    "Brief, nudge, feedback, notice, interrupt and stop via _post_event_impl with stable_id on every message; read before resend; ManagedStartupInputs fallback for provisioning sandboxes",
+    "Coral status observer with an O(1) binding filter that enqueues TurnFacts off the hot path (built against the K5 queue protocol)",
+    "Per-mode turn-end rule (idle, engine input consumed, assistant reply, mode confirmation, no pending elicitation), claude-sdk first",
+    "Nudge only engine-started turns, never cancelled ones; ignore archive idle edges",
+    "Cancel chain interrupt -> stop -> omnigent.closed"
+   ],
+   "excluded": [
+    "Native turn ends (HRN-03, HRN-05)",
+    "Runner loss (SES-06)"
+   ],
+   "key_paths": [
+    "coral/omni/dispatch.py",
+    "coral/signals/",
+    "coral/engine/turn_end.py"
+   ],
+   "proving_test": "Typing into a step session never triggers a nudge, while an engine brief's turn end advances the slot exactly once."
+  },
+  {
+   "id": "SES-06",
+   "name": "Recovery: runner loss, host offline and drift",
+   "area": "SES",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "High",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Handle runner loss, host-offline holds and user actions on run sessions by pausing with an explanation and recovering safely (TLD-12).",
+   "gaps": [
+    "G-23",
+    "G-24"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "SES-04",
+    "DUR-05"
+   ],
+   "soft_deps": [
+    "WSP-01",
+    "RUL-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K4",
+    "K2",
+    "K13"
+   ],
+   "open_questions": [
+    "OQ-17",
+    "OQ-46"
+   ],
+   "included": [
+    "Liveness from runner_last_seen; wake via ensure_runner_connected or retry_session",
+    "paused(infra) during the 72 h hold; never restart inside it",
+    "Restart = stop, bump session_generation, salvage, reset, new session; the engine relaunches own-runner children itself",
+    "Drift checks (policy, label, bundle digest) then re-attach or pause; defined outcomes for archive, delete, stop, fork and rename",
+    "Spike 14 verdict applied"
+   ],
+   "excluded": [
+    "Reserved prefixes and guards (EXT-04)",
+    "Native /clear following (HRN-03)",
+    "S48 (not planned)"
+   ],
+   "key_paths": [
+    "coral/recovery/",
+    "tests/coral/omni/test_recovery.py"
+   ],
+   "proving_test": "Killing the implementer's runner pauses the run as paused(infra); Resume creates a new generation after a salvage ref; a deleted run policy pauses the run within one resync."
+  },
+  {
+   "id": "SES-05",
+   "name": "Walking skeleton and M2 acceptance lane",
+   "area": "SES",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Make a thin end-to-end path the first PH2 integration target, then grow it into the M2 journey with injected faults in CI and on a credentialed claude-sdk lane.",
+   "gaps": [
+    "G-87"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "FND-04",
+    "SES-04",
+    "SES-06",
+    "TLS-02",
+    "TLS-03",
+    "GTE-01",
+    "DUR-05",
+    "EVD-02",
+    "WSP-01",
+    "PRF-01",
+    "HRN-02",
+    "API-02"
+   ],
+   "soft_deps": [
+    "WEB-04",
+    "GTE-02",
+    "SPK-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K2",
+    "K4",
+    "K6",
+    "K14"
+   ],
+   "open_questions": [
+    "OQ-51"
+   ],
+   "included": [
+    "Skeleton target first: one-step workflow -> real session -> coral_submit_handoff -> gate -> API answer -> end, surviving a server kill; built against skeleton slices and stubs, with a burn-down list",
+    "E2E-1 (Tier B mock LLM calls submit; gate answered via API) and E2E-2 (SIGTERM between brief and handoff; no second session)",
+    "M2 journey with injected faults: runner kill, loop forced to limit 3, pause, resume, cancel and retry",
+    "Nightly credentialed claude-sdk run of the MVP template; mock base-URL lane if spike 4 passes"
+   ],
+   "excluded": [
+    "Native E2E-3 and E2E-4 (HRN-03, RUL-04)",
+    "Browser E2E"
+   ],
+   "key_paths": [
+    "tests/e2e/coral/",
+    ".github/workflows/coral-e2e.yml",
+    ".github/workflows/coral-bench.yml"
+   ],
+   "proving_test": "E2E-1 and E2E-2 are green in CI, and the credentialed nightly passes the M2 journey five runs in a row."
+  },
+  {
+   "id": "TLS-02",
+   "name": "coral_submit_handoff",
+   "area": "TLS",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Accept or reject step handoffs with a bounded synchronous evidence scan, slot-state dedup and generation fencing, with actionable rejections.",
+   "gaps": [
+    "G-28"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "TLS-01",
+    "ENG-04",
+    "DUR-03"
+   ],
+   "soft_deps": [
+    "EVD-02",
+    "SES-04",
+    "SPK-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K6",
+    "K2",
+    "K5",
+    "K11"
+   ],
+   "open_questions": [
+    "OQ-12",
+    "OQ-10"
+   ],
+   "included": [
+    "Fields: activation_id, status done|blocked, report, artifacts, derived label or items, kind handoff|refresh_note",
+    "Schema check -> reducer command -> one short transaction; bounded synchronous evidence-ledger scan (bound from spike 7) under a per-slot evaluating lease (X-15)",
+    "Rejection codes with reasons; per-slot rejected counter; session_generation check; receipts and slot-state dedup (X-5, R-10)",
+    "Post-cancel submits rejected; skeleton slice first"
+   ],
+   "excluded": [
+    "Coral-run checks (EVD-04)",
+    "refresh_note handling (SES-07)"
+   ],
+   "key_paths": [
+    "coral/tools/handlers/submit_handoff.py",
+    "tests/coral/tools/"
+   ],
+   "proving_test": "A duplicate submit returns the original receipt, a stale-generation submit is rejected, and a submit before passing commands lists the missing items."
+  },
+  {
+   "id": "TLS-03",
+   "name": "Orchestrator: decisions, choose_arrow and ask_user",
+   "area": "TLS",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Let the orchestrator decide only through coral_choose_arrow and ask through coral_ask_user, under a seeded claude-sdk profile that cannot do the work.",
+   "gaps": [
+    "G-29",
+    "G-30",
+    "G-32",
+    "G-33"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "TLS-02",
+    "PRF-01",
+    "ENG-05"
+   ],
+   "soft_deps": [
+    "GTE-01",
+    "RUL-01",
+    "SES-04"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K6",
+    "K12",
+    "K14",
+    "K2"
+   ],
+   "open_questions": [
+    "OQ-13",
+    "OQ-14",
+    "OQ-7"
+   ],
+   "included": [
+    "Seeded orchestrator on claude-sdk with no os_env (no sys_os_* tools); orchestrator_guard in bundle guardrails plus a label check in the handler (TLD-05, X-11)",
+    "Decision requests listing legal labels and the handoff collection (D9); coral_choose_arrow with a generic label validated server-side, reason and optional items (R-11)",
+    "Chat interleaving with claude-sdk mid-turn buffering; user-induced illegal calls not counted; lazy creation; reminders re-check state",
+    "coral_ask_user non-blocking: durable question row, form elicitation, [Coral answer] delivery that suspends the watchdog; vendor AskUserQuestion denied in run sessions",
+    "Cut line if M2 slips: ask_user first"
+   ],
+   "excluded": [
+    "Message and assign tools (TLS-04)",
+    "Orchestrator refresh (SES-07)"
+   ],
+   "key_paths": [
+    "coral/tools/handlers/choose_arrow.py",
+    "coral/tools/handlers/ask_user.py",
+    "coral/orchestrator/",
+    "coral/profiles/seeds/orchestrator/"
+   ],
+   "proving_test": "With a mock orchestrator, an illegal label is rejected with allowed_values, a legal one routes the loop, and an ask_user answer arrives as a message without blocking the turn."
+  },
+  {
+   "id": "GTE-01",
+   "name": "Gate elicitation surface (seam pack C)",
+   "area": "GTE",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Surface durable gate visits, questions and budget prompts as stable-id elicitations on the run session and route answers back once, with resolver identity (TLD-09).",
+   "gaps": [
+    "G-35",
+    "G-34"
+   ],
+   "seams": [
+    "S5",
+    "S6",
+    "S6a",
+    "S6b"
+   ],
+   "hard_deps": [
+    "ENG-04",
+    "SES-03",
+    "DUR-03"
+   ],
+   "soft_deps": [
+    "SPK-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K14",
+    "K4",
+    "K10",
+    "K2"
+   ],
+   "open_questions": [
+    "OQ-3",
+    "OQ-4",
+    "OQ-5"
+   ],
+   "included": [
+    "Gate row written before publish; S5 elicitation observers as a list with per-observer isolation",
+    "S6a request-free publish with stable ids coral_gate_<visit>; S6b verdict-handler registry and resolver identity",
+    "CAS resolution with visit token; stale answers refused as no longer current; re-publish on startup and on run-session replacement",
+    "Owner-only authority (LEVEL_EDIT, OQ-4); ApprovalCard and /approve reused with authored outcome labels only; native-bridge bearer risk labelled (D25)",
+    "ask_user and budget forms on the same path; never policy ASK (R-7)"
+   ],
+   "excluded": [
+    "Inbox kind (GTE-02)",
+    "External delivery (GTE-03)",
+    "Team approvers (EXT-04)"
+   ],
+   "key_paths": [
+    "omnigent/runtime/pending_elicitations.py",
+    "omnigent/server/routes/sessions/routes_events.py",
+    "omnigent/server/routes/_sessions/orchestration.py",
+    "omnigent/server/routes/sessions/routes_elicitations.py",
+    "coral/gates/"
+   ],
+   "proving_test": "A duplicate answer advances once, a stale answer is refused, and after a server restart the gate is re-published with the same id."
+  },
+  {
+   "id": "GTE-02",
+   "name": "Workflow Inbox kind and run notifications",
+   "area": "GTE",
+   "workstream": "WS-WEB",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Show gates, questions and pauses as an Inbox workflow kind with server-side ack, and notify at run level while the app is open.",
+   "gaps": [
+    "G-36"
+   ],
+   "seams": [
+    "S36",
+    "S37",
+    "S85"
+   ],
+   "hard_deps": [
+    "GTE-01",
+    "BRD-02",
+    "DUR-01"
+   ],
+   "soft_deps": [
+    "API-02",
+    "ENG-06"
+   ],
+   "contracts_produced": [
+    "K19"
+   ],
+   "contracts_consumed": [
+    "K7",
+    "K14",
+    "K10"
+   ],
+   "open_questions": [
+    "OQ-24",
+    "OQ-6"
+   ],
+   "included": [
+    "K19 alert model first: coral_alerts, ack, actions, deep-link payload without secrets",
+    "GET /v1/coral/inbox and POST .../ack with server-side ack (X-30); alert producers for gates, questions, pauses and the watchdog",
+    "WorkflowInboxCard with run actions (open, resume, cancel, extend); sidebar count; CoralRuntimeProvider mount (S85)",
+    "Suppress per-step turn-end OS notifications for coral.run_id sessions while keeping elicitation ones (S36); deep-linked run notifications",
+    "'App must be open' notice (TLD-09, R-6)"
+   ],
+   "excluded": [
+    "Webhook and email (GTE-03)",
+    "Push (GTE-04)",
+    "localStorage read state"
+   ],
+   "key_paths": [
+    "web/src/pages/InboxPage.tsx",
+    "web/src/hooks/useIdleNotifications.ts",
+    "web/src/main.tsx",
+    "web/src/workflows/inbox/",
+    "coral/api/inbox.py"
+   ],
+   "proving_test": "A gate alert appears in the Inbox, acking it on one client clears it on another, and no per-step turn-end notification fires for run sessions."
+  },
+  {
+   "id": "EVD-02",
+   "name": "claude-sdk evidence capture and done-when at handoff",
+   "area": "EVD",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Record each claude-sdk command's exit code and the workspace state after it durably, and evaluate done-when at handoff (TLD-10).",
+   "gaps": [
+    "G-38",
+    "G-39",
+    "G-40"
+   ],
+   "seams": [
+    "S68",
+    "S69"
+   ],
+   "hard_deps": [
+    "EVD-01",
+    "SPK-04",
+    "DUR-01",
+    "WSP-01"
+   ],
+   "soft_deps": [
+    "SPK-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K11",
+    "K13",
+    "K6"
+   ],
+   "open_questions": [
+    "OQ-10"
+   ],
+   "included": [
+    "S68 tool-completion observer registry with one-line calls at the four pr_observer sites; claude-sdk site enabled",
+    "S69 transport: runner /mcp/execute response field plus server TOOL_RESULT hook, and an external_workspace_observations event with an outbox reporter",
+    "coral_command_observations with command, exit code and L1 fingerprint; one L1 algorithm per command and at submit (never bare /changes porcelain)",
+    "Runner-path exit-status preservation test; evidence result rows; missing-item feedback through TLS-02"
+   ],
+   "excluded": [
+    "L2 and the host backend (WSP-02)",
+    "Native and Codex observation sites (HRN-03, HRN-05)",
+    "Coral-run checks (EVD-04)"
+   ],
+   "key_paths": [
+    "omnigent/runner/tool_dispatch.py",
+    "omnigent/runtime/harnesses/_executor_adapter.py",
+    "omnigent/runner/mcp_routes.py",
+    "coral/evidence/capture.py"
+   ],
+   "proving_test": "A claude-sdk step that edits after running tests is rejected at handoff, then accepted after re-running, with exit codes recorded per command."
+  },
+  {
+   "id": "EVD-03",
+   "name": "Repository command detection and confirmation",
+   "area": "EVD",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Detect test, lint, format and typecheck commands in a bound repo, let the author confirm them, and snapshot them into the workflow version.",
+   "gaps": [
+    "G-41",
+    "G-42"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "DUR-01",
+    "SES-01"
+   ],
+   "soft_deps": [
+    "EVD-01",
+    "WSP-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K4",
+    "K11"
+   ],
+   "open_questions": [
+    "OQ-38"
+   ],
+   "included": [
+    "Parsers for package.json, pyproject.toml, justfile, Makefile, CI files and pre-commit, read request-free via host fs_request",
+    "Per-repo command patterns; confirm API",
+    "Confirmed commands snapshotted into the workflow version (X-32); picker backend (TLD-19)"
+   ],
+   "excluded": [
+    "LLM translation (deferred)",
+    "Picker UI (WEB-03)",
+    "Coral-run checks (EVD-04)"
+   ],
+   "key_paths": [
+    "coral/evidence/detect.py",
+    "coral/api/repos.py",
+    "tests/coral/evidence/fixtures/"
+   ],
+   "proving_test": "Detection over fixture repos returns the expected commands, and confirming them snapshots into a new version."
+  },
+  {
+   "id": "PRF-01",
+   "name": "Step bundles, seeded profiles and hidden engine agents",
+   "area": "PRF",
+   "workstream": "WS-HARNESS",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Run every step from a generated, content-addressed agent pinned by digest, keep those rows out of pickers, and make claude-sdk reviewers read-only by sandbox (TLD-05).",
+   "gaps": [
+    "G-47",
+    "G-50",
+    "G-51",
+    "G-52"
+   ],
+   "seams": [
+    "S54"
+   ],
+   "hard_deps": [
+    "SES-01",
+    "DUR-01"
+   ],
+   "soft_deps": [
+    "RUL-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K12",
+    "K10"
+   ],
+   "open_questions": [
+    "OQ-37",
+    "OQ-48"
+   ],
+   "included": [
+    "coral/omni/bundles.py deterministic tar; uploaded_agent_for content-addressed rows recorded in coral_step_agents",
+    "Seeded Coral built-ins (orchestrator, implementer, reviewer) pinned by digest; slot-start drift check (spike 18)",
+    "Hygiene: tool groups off, spawn: false, skills none for hermetic steps, agent_session_sharing none, vendor ask tools denied; provider-reference auth",
+    "Required policies in bundle guardrails; reviewer os_env.sandbox.write_paths: [] plus read_only_os (moved to M2 for TLD-01, R-23)",
+    "S54 picker and scope=user exclusion for coral__ rows in the store and web hooks; golden bundle tests"
+   ],
+   "excluded": [
+    "User profile revisions (PRF-02)",
+    "Desk (WEB-07)",
+    "S53 mutation guards (EXT-04)"
+   ],
+   "key_paths": [
+    "coral/omni/bundles.py",
+    "coral/profiles/seeds/",
+    "omnigent/stores/agent_store/sqlalchemy_store.py",
+    "omnigent/server/routes/builtin_agents.py",
+    "omnigent/server/bundles.py",
+    "web/src/hooks/useAvailableAgents.ts"
+   ],
+   "proving_test": "The same step yields the same bundle digest across runs, a reviewer write is denied by the sandbox, and coral__ rows are absent from GET /v1/agents?scope=user."
+  },
+  {
+   "id": "HRN-02",
+   "name": "claude-sdk credential guard",
+   "area": "HRN",
+   "workstream": "WS-HARNESS",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "S",
+   "enabler": false,
+   "objective": "Start run-owned claude-sdk sessions only on API-key or provider auth pinned per run, with no vendor workspace tools (TLD-07).",
+   "gaps": [
+    "G-54"
+   ],
+   "seams": [
+    "S13",
+    "S63",
+    "S21"
+   ],
+   "hard_deps": [
+    "SPK-03",
+    "SES-01"
+   ],
+   "soft_deps": [
+    "PRF-01",
+    "HRN-01",
+    "SPK-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K12",
+    "K9"
+   ],
+   "open_questions": [
+    "OQ-28"
+   ],
+   "included": [
+    "Spawn-env flag and executor refusal of subscription OAuth for run-owned sessions (S13)",
+    "Provider references only, never literal keys; operator bindings respected; preflight from harness_accounts; account pinned per run",
+    "S63 contract test that no vendor workspace tools are exposed; S21 PreToolUse hook only if spike 1 fails",
+    "Spikes 19 and 20 applied; honest preflight copy for subscription-only users (they wait for claude-native at M3)"
+   ],
+   "excluded": [
+    "claude-native subscription path (HRN-03)",
+    "Model-access settings and plan-limit pauses (HRN-04)"
+   ],
+   "key_paths": [
+    "omnigent/runtime/workflow.py",
+    "omnigent/inner/claude_sdk_harness.py",
+    "omnigent/inner/claude_sdk_executor.py",
+    "coral/harness/preflight.py"
+   ],
+   "proving_test": "A run-owned claude-sdk session with only subscription credentials is refused at preflight and at spawn."
+  },
+  {
+   "id": "WSP-01",
+   "name": "Repo bindings, run worktree and restart safety",
+   "area": "WSP",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Own each run's worktree request-free, commit accepted handoffs, and salvage and reset before retries, behind the WorkspaceOps session-shell backend; import workflows from the repo.",
+   "gaps": [
+    "G-58",
+    "G-59",
+    "G-68"
+   ],
+   "seams": [
+    "S71",
+    "S72"
+   ],
+   "hard_deps": [
+    "SPK-04",
+    "SES-01",
+    "DUR-01"
+   ],
+   "soft_deps": [
+    "SES-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K13",
+    "K4",
+    "K10"
+   ],
+   "open_questions": [
+    "OQ-18",
+    "OQ-39",
+    "OQ-44"
+   ],
+   "included": [
+    "S71 reaper guard on fs_request and fs_write as the first PR (may land in PH1; upstreamable bug fix)",
+    "Repo bindings (host, repo root, traits) and binding API; deterministic coral/r-<run>/base created request-free and adopted on retry",
+    "S72: create_worktree returns head_commit, adds detached+commit mode and optional worktree_parent; start commit recorded",
+    "Sessions bound with workspace= and no git options, with an invariant test (S73 stays unneeded)",
+    "Engine commits with trailers at accepted handoffs (hook policy OQ-39); salvage refs refs/coral/salvage/*; reset --hard and clean -fd before retry",
+    "K13 session-shell backend; removal, retention and disk cap; workflow import via host fs_request read (TLD-06)"
+   ],
+   "excluded": [
+    "Per-agent worktrees and merges (WSP-03)",
+    "Host op channel (WSP-02)",
+    "Per-worktree setup (EVD-04)"
+   ],
+   "key_paths": [
+    "omnigent/host/connect.py",
+    "omnigent/host/git_worktree.py",
+    "omnigent/host/frames.py",
+    "omnigent/server/routes/_host_worktree.py",
+    "coral/omni/worktrees.py",
+    "coral/workspace/"
+   ],
+   "proving_test": "Retrying a step salvages its edits to refs/coral/salvage/*, resets to the step start commit, and deleting a run session leaves the branch intact."
+  },
+  {
+   "id": "API-02",
+   "name": "Runs API, gate answers, preflight and run stream",
+   "area": "API",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Serve runs, lifecycle actions, gate answers and preflight, and tail the run log as a resumable SSE stream.",
+   "gaps": [
+    "G-74",
+    "G-75",
+    "G-76",
+    "G-07",
+    "G-34"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "DUR-02",
+    "DUR-03",
+    "API-01"
+   ],
+   "soft_deps": [
+    "ENG-06",
+    "SES-03",
+    "HRN-02",
+    "GTE-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K7",
+    "K8",
+    "K3",
+    "K4"
+   ],
+   "open_questions": [
+    "OQ-4",
+    "OQ-16"
+   ],
+   "included": [
+    "Runs list, get and idempotent start with start_key; pause, resume, cancel and retry actions",
+    "Gate answers with visit_token",
+    "Preflight: V10 configured_harnesses, harness_accounts auth, host online, validity, estimate",
+    "SSE tail of the run log with seq, Last-Event-ID, heartbeat and [DONE]; access through the run session"
+   ],
+   "excluded": [
+    "Take-over endpoints (SES-07)",
+    "Amendments (ENG-10)",
+    "Budgets (RUL-05)"
+   ],
+   "key_paths": [
+    "coral/api/runs.py",
+    "coral/api/stream.py",
+    "tests/coral/api/"
+   ],
+   "proving_test": "Reconnecting the run stream with Last-Event-ID loses no entries, and a repeated start with the same start_key returns the same run."
+  },
+  {
+   "id": "WEB-03",
+   "name": "Templates, Use-template and start-run dialogs",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Take a new user from the gallery to a saved, simulated workflow on their repo with confirmed done-when commands, then start a run behind a preflight that names every fix.",
+   "gaps": [
+    "G-69",
+    "G-42",
+    "G-76"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "WEB-02",
+    "DUR-02"
+   ],
+   "soft_deps": [
+    "EVD-03",
+    "API-02",
+    "WSP-01",
+    "PRF-01",
+    "ENG-07",
+    "HRN-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K7",
+    "K11"
+   ],
+   "open_questions": [
+    "OQ-2",
+    "OQ-16",
+    "OQ-18"
+   ],
+   "included": [
+    "Gallery tab and Use-template dialog (name, repo, parameters, model per role)",
+    "Detected-command picker and confirmation sheet stored as K11 (TLD-19)",
+    "Start-run dialog: request, host/repo/base via WorkspacePickerDialog and useHostWorktrees, version pin, estimate, activation cap",
+    "Preflight errors that name each fix; idempotent start; states: gallery failed, host offline, nothing detected"
+   ],
+   "excluded": [
+    "Money budgets (RUL-05)",
+    "Profile picker (WEB-07)",
+    "LLM translation (deferred)"
+   ],
+   "key_paths": [
+    "web/src/workflows/templates/",
+    "web/src/workflows/start/"
+   ],
+   "proving_test": "Use template on a fixture repo shows the detected commands, confirming saves a version, and a failing preflight lists the fix."
+  },
+  {
+   "id": "WEB-04",
+   "name": "Runs list and live run view",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Let users see where a run is, why it went that way, what passed and what it waits on, live, without reading a transcript.",
+   "gaps": [
+    "G-77",
+    "G-75"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "WEB-01",
+    "API-01"
+   ],
+   "soft_deps": [
+    "API-02",
+    "GTE-01",
+    "EVD-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K7",
+    "K8",
+    "K3"
+   ],
+   "open_questions": [
+    "OQ-17",
+    "OQ-23"
+   ],
+   "included": [
+    "Stream client with id: parsing, stream-slot acquisition and polling fallback",
+    "Runs list with all states; header with lifecycle actions",
+    "State overlay with loop counters and open gates; inspector tabs (step, decision reason, gate via ApprovalCard, log)",
+    "Evidence list with missing items; timeline; pause banners with reason, resume condition and actions",
+    "First slice: a log list for the walking skeleton"
+   ],
+   "excluded": [
+    "Agent panes and steering (WEB-05)",
+    "Promise labels (WEB-06)",
+    "Structure layers and why-not arrows (WEB-10)"
+   ],
+   "key_paths": [
+    "web/src/workflows/runs/",
+    "web/src/workflows/stream/"
+   ],
+   "proving_test": "Against a recorded run log, the view shows the loop counter, the open gate and evidence, and resumes after a dropped stream with no gaps."
+  },
+  {
+   "id": "WEB-05",
+   "name": "Run agent panes and steering",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH2",
+   "milestone": "M2",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "From the run view, let users open any agent or the orchestrator, type in with honest hints, and get back to the run.",
+   "gaps": [
+    "G-77"
+   ],
+   "seams": [
+    "S86"
+   ],
+   "hard_deps": [
+    "WEB-04"
+   ],
+   "soft_deps": [
+    "SES-03",
+    "SES-04"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K7",
+    "K10"
+   ],
+   "open_questions": [
+    "OQ-13",
+    "OQ-17"
+   ],
+   "included": [
+    "SubagentTabPane via ?agent=&node= query params, never :conversationId (R-17)",
+    "Current orchestrator pane; 'read after current turn' hint for claude-sdk mid-turn buffering",
+    "Run-owned banner; 'Part of run' chip in ChatHeader (S86); 'Step waiting on you'"
+   ],
+   "excluded": [
+    "Stitched orchestrator and take-over controls (WEB-10)"
+   ],
+   "key_paths": [
+    "web/src/workflows/runs/agents/",
+    "web/src/shell/ChatHeader.tsx",
+    "web/src/shell/SubagentTab.tsx"
+   ],
+   "proving_test": "Opening a step from the run view focuses its session via ?agent= without switching AppShell into chat mode, and the chip links back to the run."
+  },
+  {
+   "id": "PRF-02",
+   "name": "Profile revisions and pinning",
+   "area": "PRF",
+   "workstream": "WS-HARNESS",
+   "phase": "PH3",
+   "milestone": "M3",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Make profiles pinned, immutable revisions over custom agents so edits never leak into versioned or running workflows.",
+   "gaps": [
+    "G-50",
+    "G-14"
+   ],
+   "seams": [
+    "S66"
+   ],
+   "hard_deps": [
+    "PRF-01",
+    "DUR-01"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K12",
+    "K5"
+   ],
+   "open_questions": [
+    "OQ-37"
+   ],
+   "included": [
+    "Profile = agent row plus params.coral metadata (X-12 recommendation)",
+    "coral_profile_revisions with byte copy and digest through the migration train; version-to-revision pins; drift check at slot start",
+    "Edits by reinstall create new revisions; /v1/coral/profiles API with used-by; spike 18 result",
+    "Optional S66: redacted params.coral in agent summaries"
+   ],
+   "excluded": [
+    "Desk UI (WEB-07)",
+    "Git import (EXT-03)"
+   ],
+   "key_paths": [
+    "coral/profiles/",
+    "coral/db/migrations/versions/",
+    "coral/api/profiles.py"
+   ],
+   "proving_test": "Editing a profile mid-run leaves the run on rev N and the next run uses rev N+1."
+  },
+  {
+   "id": "RUL-02",
+   "name": "Capability-aware validation and promise labels",
+   "area": "RUL",
+   "workstream": "WS-ENGINE",
+   "phase": "PH3",
+   "milestone": "M3",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Compute the four promise labels per checked part and mode from the IR and the capability registry, and validate enforceability (V9), so nothing over-claims (TLD-11).",
+   "gaps": [
+    "G-73",
+    "G-47"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "HRN-01",
+    "ENG-03",
+    "EVD-02"
+   ],
+   "soft_deps": [
+    "RUL-03",
+    "PRF-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K9",
+    "K1",
+    "K11",
+    "K15"
+   ],
+   "open_questions": [
+    "OQ-24"
+   ],
+   "included": [
+    "Enforced, Verified, Requested and Judgment per checked part and mode (D14)",
+    "V9 per-mode enforceability: native unenforceable until S14, headless codex until S20, codex-native until S15",
+    "Read-only Enforced only on claude-sdk with write_paths: []; otherwise Verified by before/after fingerprints (X-28)",
+    "Property test that an unknown capability never yields Enforced; pure label API with a frozen matrix fixture"
+   ],
+   "excluded": [
+    "Panel UI (WEB-06)",
+    "Rule compilation (RUL-03)"
+   ],
+   "key_paths": [
+    "coral/validate/labels.py",
+    "coral/validate/v9.py",
+    "tests/coral/validate/test_labels.py"
+   ],
+   "proving_test": "Over registry x fixtures no unknown capability yields Enforced, and switching a reviewer to claude-native turns read-only from Enforced to Verified."
+  },
+  {
+   "id": "RUL-03",
+   "name": "Rules catalog v1: Required and Guidance",
+   "area": "RUL",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH3",
+   "milestone": "M3",
+   "priority": "High",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Let authors add Required and Guidance rules from a typed template catalog over existing builtins, compiled into bundle guardrails (TLD-19).",
+   "gaps": [
+    "G-48"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "RUL-01",
+    "PRF-01",
+    "ENG-03"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [
+    "K15"
+   ],
+   "contracts_consumed": [
+    "K9",
+    "K12"
+   ],
+   "open_questions": [
+    "OQ-38"
+   ],
+   "included": [
+    "K15 first PR: template id, params, target builtin or policy, Required vs Guidance, enforceability inputs",
+    "About 8 templates: worktree_guard, blast_radius, mode-aware egress allowlist (R-12), CEL ask-before-path, never force-push",
+    "Workflow, step and profile scopes; an unenforceable Required rule fails validation with remedies",
+    "Compile into bundle guardrails; confirmation API"
+   ],
+   "excluded": [
+    "Free-text LLM translation (deferred)",
+    "Reactions and V8 (ENG-09)"
+   ],
+   "key_paths": [
+    "coral/rules/catalog/",
+    "coral/rules/compile.py",
+    "coral/api/rules.py"
+   ],
+   "proving_test": "A Required 'protect infra/**' rule compiles into the step bundle's guardrails and blocks a write in a claude-sdk run."
+  },
+  {
+   "id": "RUL-04",
+   "name": "Native fail-closed hooks",
+   "area": "RUL",
+   "workstream": "WS-HARNESS",
+   "phase": "PH3",
+   "milestone": "M3",
+   "priority": "Critical",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Make native policy hooks fail closed for run-owned sessions and carry sub-agent identity, the prerequisite for any native Enforced label.",
+   "gaps": [
+    "G-49"
+   ],
+   "seams": [
+    "S14",
+    "S16"
+   ],
+   "hard_deps": [
+    "HRN-01",
+    "RUL-01",
+    "SPK-03"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K9"
+   ],
+   "open_questions": [
+    "OQ-46"
+   ],
+   "included": [
+    "fail_closed_hook_output for run-owned sessions; early returns deny; bridge-config policy_failure_mode; onFailure: block; explicit PreToolUse timeout",
+    "Hooks-installed check (ap_server_url); CLI-version gating",
+    "S16 sub-agent identity in the policy context",
+    "Spike 6 verdict applied; E2E-4"
+   ],
+   "excluded": [
+    "S15 codex-native refusal (HRN-05)",
+    "S21 (HRN-02, conditional)"
+   ],
+   "key_paths": [
+    "omnigent/native/native_policy_hook.py",
+    "omnigent/harnesses/claude_native/hook.py",
+    "omnigent/harnesses/codex_native/hook.py",
+    "omnigent/harnesses/claude_native/bridge.py"
+   ],
+   "proving_test": "E2E-4: blackholing the policy endpoint mid-step blocks the next native tool call."
+  },
+  {
+   "id": "HRN-03",
+   "name": "claude-native step mode",
+   "area": "HRN",
+   "workstream": "WS-HARNESS",
+   "phase": "PH3",
+   "milestone": "M3",
+   "priority": "High",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Offer claude-native steps for subscription users behind fail-closed hooks, with launch-time framework text, Stop-hook turn end, /clear handling and honest labels (TLD-07).",
+   "gaps": [
+    "G-55",
+    "G-39",
+    "G-24"
+   ],
+   "seams": [
+    "S3",
+    "S45",
+    "S64"
+   ],
+   "hard_deps": [
+    "RUL-04",
+    "PRF-01",
+    "SES-04",
+    "TLS-01"
+   ],
+   "soft_deps": [
+    "RUL-02",
+    "HRN-01",
+    "EVD-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K9",
+    "K12",
+    "K11",
+    "K18"
+   ],
+   "open_questions": [
+    "OQ-28",
+    "OQ-35",
+    "OQ-46"
+   ],
+   "included": [
+    "Enable the S12 native launch channel and the S9/S11 relay and pre-approval for coral_* tools landed by TLS-01",
+    "S3 terminal_launch_args derivation; Stop-hook turn end",
+    "S45 supersession observer: follow native /clear rotation and re-attach policies and labels (OQ-46)",
+    "S64 egress auto-add of provider hosts; PostToolUse observation hints into the S68/S69 path",
+    "Separate sessions, steps only (never the orchestrator); E2E-3"
+   ],
+   "excluded": [
+    "codex-native (HRN-05)",
+    "claude-native orchestrator",
+    "Plan-limit pause (HRN-04)"
+   ],
+   "key_paths": [
+    "omnigent/runner/native/orchestration.py",
+    "omnigent/native/_native_supersession.py",
+    "omnigent/server/routes/_sessions/helpers.py",
+    "omnigent/inner/egress/rules.py",
+    "coral/harness/claude_native.py"
+   ],
+   "proving_test": "E2E-3: a claude-native step under a mock model runs Bash, calls coral_submit_handoff, and turn_completed advances the run."
+  },
+  {
+   "id": "HRN-04",
+   "name": "Model access, plan limits and usage signal",
+   "area": "HRN",
+   "workstream": "WS-HARNESS",
+   "phase": "PH3",
+   "milestone": "M3",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Let users choose how Claude is reached, and pause runs at plan limits with a visible reset time and automatic resume.",
+   "gaps": [
+    "G-57",
+    "G-54"
+   ],
+   "seams": [
+    "S24"
+   ],
+   "hard_deps": [
+    "HRN-02",
+    "ENG-06"
+   ],
+   "soft_deps": [
+    "HRN-03",
+    "PRF-02",
+    "WEB-07"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K9"
+   ],
+   "open_questions": [
+    "OQ-28"
+   ],
+   "included": [
+    "Onboarding and settings route API key vs subscription -> claude-native; per-profile auth badge",
+    "S24 usage-limit signal with reset time: claude-sdk RateLimitEvent, ExecutorError reset time, native forwarders (the Codex branch lands with HRN-05)",
+    "paused(plan_limit) showing paused-until with auto-resume; mock-provider probe"
+   ],
+   "excluded": [
+    "Account switching",
+    "Codex limits beyond the shared signal (HRN-05)"
+   ],
+   "key_paths": [
+    "omnigent/inner/executor.py",
+    "omnigent/inner/claude_sdk_executor.py",
+    "omnigent/harnesses/claude_native/forwarder.py",
+    "web/src/workflows/settings/"
+   ],
+   "proving_test": "With a mock provider, a rate-limit event pauses the run as plan_limit with the reset time, and it resumes after it."
+  },
+  {
+   "id": "WEB-06",
+   "name": "Guarantees panel and rule authoring UI",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH3",
+   "milestone": "M3",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Show 'What Coral guarantees' with four per-mode labels, and let authors pick catalog rules with confirmation.",
+   "gaps": [
+    "G-73",
+    "G-48"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "RUL-02",
+    "WEB-02"
+   ],
+   "soft_deps": [
+    "RUL-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K9",
+    "K15",
+    "K7"
+   ],
+   "open_questions": [
+    "OQ-24"
+   ],
+   "included": [
+    "Guarantees panel and on-box label chips; labels follow mode changes",
+    "Rule picker with Required vs Guidance and per-mode labels; translation status chips; confirmation sheet"
+   ],
+   "excluded": [
+    "Free-text rules (deferred)",
+    "Label computation (RUL-02)"
+   ],
+   "key_paths": [
+    "web/src/workflows/guarantees/",
+    "web/src/workflows/rules/"
+   ],
+   "proving_test": "Switching a step's mode in the editor updates its chips, and a Required rule the mode cannot enforce shows a problem with remedies."
+  },
+  {
+   "id": "WEB-07",
+   "name": "Agent Profiles desk and picker",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH3",
+   "milestone": "M3",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Ship /profiles as a lens over custom agents and a cmdk picker with capability chips, used-by and source badges.",
+   "gaps": [
+    "G-53"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "PRF-02",
+    "BRD-02"
+   ],
+   "soft_deps": [
+    "HRN-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K7",
+    "K9",
+    "K12"
+   ],
+   "open_questions": [
+    "OQ-27",
+    "OQ-37"
+   ],
+   "included": [
+    "/profiles list over custom agents plus Coral metadata, with all states",
+    "Edits by reinstall ('running runs keep rev N'); capability chips reading Claude, not Claude Code",
+    "cmdk picker in the editor and the template and start dialogs"
+   ],
+   "excluded": [
+    "localStorage profiles (R-16)",
+    "Editing params via PATCH"
+   ],
+   "key_paths": [
+    "web/src/workflows/profiles/",
+    "web/src/pages/settings/"
+   ],
+   "proving_test": "Picking a profile for Review in the editor shows its capability chips and used-by count, and editing it creates rev N+1."
+  },
+  {
+   "id": "WSP-02",
+   "name": "Host workspace-op channel and L2 fingerprints",
+   "area": "WSP",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": true,
+   "objective": "Run sessionless workspace ops on hosts with true exit codes, move commit, reset and salvage there, and make L2 the authoritative fingerprint.",
+   "gaps": [
+    "G-38",
+    "G-59"
+   ],
+   "seams": [
+    "S40",
+    "S40b"
+   ],
+   "hard_deps": [
+    "WSP-01",
+    "SPK-04"
+   ],
+   "soft_deps": [
+    "EVD-02"
+   ],
+   "contracts_produced": [
+    "K20"
+   ],
+   "contracts_consumed": [
+    "K13",
+    "K11"
+   ],
+   "open_questions": [
+    "OQ-44"
+   ],
+   "included": [
+    "K20 frames first; capability token workspace_ops:1; reaper-guarded host dispatcher",
+    "Server proxy, pending map, job events and job journal; S40b entry-point op registry",
+    "Ops: probe, head, fingerprint L1/L2, diff_paths, commit_all, salvage, reset_to, branch",
+    "L2 write-tree on a temporary index (tracked plus untracked-not-ignored); version-skew fallback to the session-shell backend",
+    "Adapter swap with the evaluator unchanged; exit-status contract test"
+   ],
+   "excluded": [
+    "Exec jobs (EVD-04)",
+    "Merges (WSP-03)",
+    "Fetch and push"
+   ],
+   "key_paths": [
+    "omnigent/host/frames.py",
+    "omnigent/host/connect.py",
+    "omnigent/server/routes/_host_workspace_ops.py",
+    "omnigent/server/host_registry.py",
+    "coral/host_ops/"
+   ],
+   "proving_test": "The evaluator gives identical verdicts on both K13 backends, and L2 detects a re-edit that L1 porcelain missed."
+  },
+  {
+   "id": "EVD-04",
+   "name": "Coral-run checks, verifier and worktree setup",
+   "area": "EVD",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "High",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Run the pinned checks in a Coral-controlled checkout, flag tampering, feed results back into attempts, and offer a verifier step.",
+   "gaps": [
+    "G-43",
+    "G-58"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "WSP-02",
+    "EVD-03",
+    "EVD-02"
+   ],
+   "soft_deps": [
+    "ENG-06"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K13",
+    "K20",
+    "K11"
+   ],
+   "open_questions": [
+    "OQ-44",
+    "OQ-10"
+   ],
+   "included": [
+    "Sandboxed exec jobs with caps on the host channel",
+    "Detached checkout via the S72 detached mode running the snapshotted commands (X-32)",
+    "JUnit capture; integrity diff on test and config edits; check-to-attempt loop",
+    "Read-only verifier step pattern labelled Judgment; per-worktree setup (.coral/repo.yaml, .worktreeinclude fallback)"
+   ],
+   "excluded": [
+    "Hidden held-out tests",
+    "LLM rubric judges",
+    "Multi-writer merges (WSP-03)"
+   ],
+   "key_paths": [
+    "coral/checks/",
+    "coral/host_ops/exec.py",
+    "coral/templates/patterns/verifier.yaml"
+   ],
+   "proving_test": "An agent that edits package.json scripts is flagged by the integrity diff, and checks re-run in the detached checkout feed the attempt."
+  },
+  {
+   "id": "WSP-03",
+   "name": "Per-agent worktrees and serial merges",
+   "area": "WSP",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "High",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Give each code-writing agent its own worktree, merge serially into the run worktree, and resolve conflicts in the agent's worktree with post-merge checks.",
+   "gaps": [
+    "G-60"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "WSP-02",
+    "EVD-04",
+    "TLS-04",
+    "ENG-08"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K13",
+    "K20",
+    "K11"
+   ],
+   "open_questions": [
+    "OQ-40"
+   ],
+   "included": [
+    "agent-<n> worktrees per writer (D11)",
+    "Serial merges at close or join; conflict sub-state resolved in the agent's own worktree via coral_assign_task (D10)",
+    "Mandatory post-merge Coral-run checks (D8); submodule and LFS probe"
+   ],
+   "excluded": [
+    "Unchecked parallel merges",
+    "Managed sandboxes (WSP-04)"
+   ],
+   "key_paths": [
+    "coral/workspace/merge.py",
+    "coral/host_ops/merge.py"
+   ],
+   "proving_test": "Two writers' branches merge serially, a conflict is resolved in the agent's worktree, and post-merge checks run before the step closes."
+  },
+  {
+   "id": "ENG-08",
+   "name": "Repeat-for-each, parallel regions and PR-review showcase",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "High",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Execute repeat-for-each and parallel split and join with region cancel, and ship the PR-review loop showcase (TLD-01).",
+   "gaps": [
+    "G-08",
+    "G-09"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-05",
+    "ENG-06"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K2",
+    "K3"
+   ],
+   "open_questions": [
+    "OQ-2",
+    "OQ-19",
+    "OQ-40"
+   ],
+   "included": [
+    "Repeat contract: order, empty list, per-item failure, concurrency, per-item gates and batching, '3 of N' progress",
+    "Parallel split and join with region cancel and failure paths inside regions",
+    "Validator and Simulate support; PR-review loop template; E2E-5"
+   ],
+   "excluded": [
+    "Groups (ENG-09)",
+    "Merges (WSP-03)"
+   ],
+   "key_paths": [
+    "coral/engine/repeat.py",
+    "coral/engine/regions.py",
+    "coral/templates/pr_review_loop.yaml",
+    "tests/e2e/coral/test_parallel.py"
+   ],
+   "proving_test": "E2E-5: a parallel split with two agents joins once and a duplicate signal is a no-op; repeat over three items reports 3 of 3."
+  },
+  {
+   "id": "ENG-09",
+   "name": "Groups, saved blocks, Wait and reactions",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "Medium",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Let authors group steps with inherited rules, save blocks, use Wait timers, and attach 'when X, do Y' reactions such as overdue alerts.",
+   "gaps": [
+    "G-10",
+    "G-48",
+    "G-06"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-03",
+    "ENG-06",
+    "RUL-03"
+   ],
+   "soft_deps": [
+    "ENG-08",
+    "GTE-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K2",
+    "K15",
+    "K19"
+   ],
+   "open_questions": [
+    "OQ-19",
+    "OQ-38"
+   ],
+   "included": [
+    "Group IR with entry and exit; saved blocks library; V8 inner-stricter rule inheritance",
+    "Hidden Wait kind with timers",
+    "Reaction templates on timers and run events; expected_duration x factor overdue alerts into the Inbox"
+   ],
+   "excluded": [
+    "Sub-workflow invocation (deferred)",
+    "Group canvas UI (WEB-08, WEB-09)",
+    "Reactions that change the graph"
+   ],
+   "key_paths": [
+    "coral/model/groups.py",
+    "coral/engine/reactions.py",
+    "coral/validate/v8.py"
+   ],
+   "proving_test": "The validator rejects a group whose inner rule is looser (V8), and a simulated overdue step raises an Inbox alert from a reaction."
+  },
+  {
+   "id": "TLS-04",
+   "name": "Messaging and assignment tools",
+   "area": "TLS",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "Medium",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Let parallel agents and the orchestrator message through the engine, use 'up to' rosters, and re-task a member to resolve conflicts.",
+   "gaps": [
+    "G-31"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "TLS-03",
+    "SES-04"
+   ],
+   "soft_deps": [
+    "ENG-08"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K6",
+    "K4"
+   ],
+   "open_questions": [],
+   "included": [
+    "coral_message_agent: engine-routed via dispatch with a [Coral message from ...] prefix, isolation flags, rate limit, steer-vs-closing race",
+    "coral_assign_agents for 'up to' rosters",
+    "coral_assign_task to re-task a member for conflict resolution (D10)"
+   ],
+   "excluded": [
+    "sys_session_message reuse",
+    "EGM resolutions (EXT-02)"
+   ],
+   "key_paths": [
+    "coral/tools/handlers/message_agent.py",
+    "coral/tools/handlers/assign.py"
+   ],
+   "proving_test": "A message to a closing step is refused cleanly, and assign_task re-tasks a member inside its own worktree."
+  },
+  {
+   "id": "SES-07",
+   "name": "Slot control: refresh and take-over",
+   "area": "SES",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "Medium",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Refresh long sessions by slot restart with a refresh note, and let a user take over a step and hand it back (TLD-13).",
+   "gaps": [
+    "G-63",
+    "G-64"
+   ],
+   "seams": [
+    "S25",
+    "S27"
+   ],
+   "hard_deps": [
+    "SES-06",
+    "HRN-01",
+    "EVD-02",
+    "ENG-06"
+   ],
+   "soft_deps": [
+    "WSP-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K4",
+    "K9",
+    "K6",
+    "K11"
+   ],
+   "open_questions": [
+    "OQ-11",
+    "OQ-46"
+   ],
+   "included": [
+    "Per-mode threshold refresh_threshold_bp=7000 below native auto-compaction (D1.7); wait for turn end; request refresh_note",
+    "Slot restart: create, brief, close the old session, publish a notice; S25 'refresh' reason literal and web handler",
+    "S27 reaper retests (label exemption only if the retest fails)",
+    "taken_over(by) state with reminders, refresh and auto-advance off; user input detected by stable_id",
+    "Hand-back re-fingerprints and re-evaluates done-when; salvage guard; endpoints"
+   ],
+   "excluded": [
+    "Fork-based refresh (S47, not planned)",
+    "Stitched transcript and controls UI (WEB-10)",
+    "Multi-user take-over"
+   ],
+   "key_paths": [
+    "coral/slots/refresh.py",
+    "coral/slots/takeover.py",
+    "omnigent/server/schemas.py",
+    "omnigent/server/pane_reaper.py"
+   ],
+   "proving_test": "A step crossing the threshold restarts with its refresh note, and a taken-over step hands back with a fresh fingerprint and done-when result."
+  },
+  {
+   "id": "GTE-03",
+   "name": "External notification connector (webhook first)",
+   "area": "GTE",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Deliver unattended gates and pauses outside the app through an outbox-driven connector, webhook first, then email or Slack DM.",
+   "gaps": [
+    "G-37"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "GTE-02",
+    "DUR-04"
+   ],
+   "soft_deps": [
+    "GTE-01"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K19",
+    "K5",
+    "K7"
+   ],
+   "open_questions": [
+    "OQ-6"
+   ],
+   "included": [
+    "Per-user channel config and settings UI",
+    "Outbox-driven delivery, idempotent per channel; secret-free deep links",
+    "Webhook first, then email or Slack DM"
+   ],
+   "excluded": [
+    "Push (GTE-04)",
+    "Slack-originated sessions"
+   ],
+   "key_paths": [
+    "coral/notify/",
+    "web/src/workflows/settings/notifications/"
+   ],
+   "proving_test": "An unattended gate posts one webhook (retries stay idempotent) whose deep link opens the gate."
+  },
+  {
+   "id": "WEB-08",
+   "name": "Canvas editing core",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "Medium",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Let users draw and rewire workflows on the canvas while the YAML keeps its comments and confirmed translations.",
+   "gaps": [
+    "G-72"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "WEB-01",
+    "WEB-02"
+   ],
+   "soft_deps": [
+    "WEB-07",
+    "RUL-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K7"
+   ],
+   "open_questions": [
+    "OQ-22"
+   ],
+   "included": [
+    "Palette; connect, move and delete as canvas intents",
+    "Intents -> comment-preserving CST patches; layout file keyed by stable ids",
+    "One undo stack shared with the YAML pane; server validation; golden round-trips"
+   ],
+   "excluded": [
+    "Inspectors (WEB-09)",
+    "Mobile editing"
+   ],
+   "key_paths": [
+    "web/src/workflows/canvas/edit/",
+    "web/src/workflows/editor/patches/"
+   ],
+   "proving_test": "Adding and rewiring a step on the canvas produces a YAML diff that touches only those lines and keeps every comment."
+  },
+  {
+   "id": "WEB-09",
+   "name": "Canvas inspectors and accessible outline",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "Medium",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Make every property editable in an inspector, and give keyboard and screen-reader users an outline view with full parity.",
+   "gaps": [
+    "G-72"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "WEB-08"
+   ],
+   "soft_deps": [
+    "WEB-07",
+    "WEB-06",
+    "ENG-09",
+    "WEB-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K9",
+    "K15"
+   ],
+   "open_questions": [
+    "OQ-22"
+   ],
+   "included": [
+    "Step, arrow, gate, decision and group inspectors",
+    "Embedded profile picker, rules panel and done-when picker",
+    "Outline tree with keyboard and screen-reader parity; a11y tests"
+   ],
+   "excluded": [
+    "Freeform layout tools",
+    "Real-time co-editing"
+   ],
+   "key_paths": [
+    "web/src/workflows/canvas/inspectors/",
+    "web/src/workflows/outline/"
+   ],
+   "proving_test": "Every inspector edit is reachable from the outline by keyboard alone, and an axe check of the outline passes."
+  },
+  {
+   "id": "WEB-10",
+   "name": "Run view depth and structure visuals",
+   "area": "WEB",
+   "workstream": "WS-WEB",
+   "phase": "PH4",
+   "milestone": "M4",
+   "priority": "Medium",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Show repeats, regions, groups, join waits and why-not-taken arrows on diagrams, Simulate and runs, plus take-over and refresh in the run view.",
+   "gaps": [
+    "G-77",
+    "G-08",
+    "G-67"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "WEB-04"
+   ],
+   "soft_deps": [
+    "ENG-08",
+    "SES-07",
+    "ENG-10",
+    "WEB-05"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K8",
+    "K3",
+    "K7"
+   ],
+   "open_questions": [
+    "OQ-23"
+   ],
+   "included": [
+    "Overlay layers: '3 of N' repeat badges, region frames, groups, join waits",
+    "Why-taken and why-not-taken arrows",
+    "Take-over controls; stitched orchestrator segments with refresh dividers; versions tab"
+   ],
+   "excluded": [
+    "Run sharing (EXT-04)",
+    "Mobile layouts"
+   ],
+   "key_paths": [
+    "web/src/workflows/canvas/overlay/",
+    "web/src/workflows/runs/"
+   ],
+   "proving_test": "A recorded PR-review run renders '3 of N' badges and a why-not-taken explanation on a skipped arrow."
+  },
+  {
+   "id": "HRN-05",
+   "name": "codex-native step mode",
+   "area": "HRN",
+   "workstream": "WS-HARNESS",
+   "phase": "PH5",
+   "milestone": "M4",
+   "priority": "Medium",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Enable codex-native steps with terminal turn outcomes, refusal without hooks and an explicit unattended stance.",
+   "gaps": [
+    "G-56",
+    "G-20"
+   ],
+   "seams": [
+    "S2",
+    "S15",
+    "S62"
+   ],
+   "hard_deps": [
+    "RUL-04",
+    "HRN-01",
+    "SES-04",
+    "TLS-01"
+   ],
+   "soft_deps": [
+    "RUL-02",
+    "HRN-04"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K9",
+    "K12",
+    "K18"
+   ],
+   "open_questions": [
+    "OQ-29"
+   ],
+   "included": [
+    "S2 turn_outcome and turn_completed on terminal edges",
+    "S15 refuse run-owned codex-native when policy hooks are disabled",
+    "S62 explicit yolo stance for run sessions with policy-resolved approvals",
+    "Native S12 text and S11 pre-approval enabled; adapter exit_code observations; Codex branch of S24; spikes 12 and 13; honest labels"
+   ],
+   "excluded": [
+    "Headless codex (HRN-06)",
+    "Hosted use before OQ-29",
+    "Codex orchestrator"
+   ],
+   "key_paths": [
+    "omnigent/harnesses/codex_native/forwarder.py",
+    "omnigent/harnesses/codex_native/app_server.py",
+    "omnigent/server/routes/_sessions/helpers.py",
+    "coral/harness/codex_native.py"
+   ],
+   "proving_test": "A codex-native reviewer step submits a handoff and its terminal edge carries turn_outcome; disabling hooks refuses the run."
+  },
+  {
+   "id": "HRN-06",
+   "name": "Headless codex mode",
+   "area": "HRN",
+   "workstream": "WS-HARNESS",
+   "phase": "PH5",
+   "milestone": "M4",
+   "priority": "Low",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Enable headless Codex steps with thread routing, compaction, hook-based gating and an honest read-only stance; first cut if M4 slips.",
+   "gaps": [
+    "G-56"
+   ],
+   "seams": [
+    "S18",
+    "S19",
+    "S20",
+    "S60",
+    "S61",
+    "S67"
+   ],
+   "hard_deps": [
+    "HRN-01",
+    "RUL-01"
+   ],
+   "soft_deps": [
+    "HRN-05"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K9",
+    "K12"
+   ],
+   "open_questions": [
+    "OQ-29"
+   ],
+   "included": [
+    "threadId routing and collab items (S18); compaction (S19)",
+    "hooks.json PreToolUse gating (S20); hook-trust failure fails closed for run sessions (S67)",
+    "Per-session native-tool switches from the spec (S60); read-only stance without silent upgrade (S61); gating probe"
+   ],
+   "excluded": [
+    "codex-native (HRN-05)",
+    "Hosted use before OQ-29"
+   ],
+   "key_paths": [
+    "omnigent/inner/codex_executor.py",
+    "omnigent/inner/codex_harness.py",
+    "omnigent/runtime/workflow.py"
+   ],
+   "proving_test": "A headless codex read-only step cannot write, and a tool denied by policy is blocked through hooks.json."
+  },
+  {
+   "id": "RUL-05",
+   "name": "Run and step budgets",
+   "area": "RUL",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH5",
+   "milestone": "M4",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Pause a run at its budget and ask to raise or stop, using a spend aggregator over all run sessions, with step budgets and estimates from history.",
+   "gaps": [
+    "G-62"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "RUL-01",
+    "GTE-01",
+    "SES-04"
+   ],
+   "soft_deps": [
+    "ENG-07"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K14",
+    "K4",
+    "K9"
+   ],
+   "open_questions": [
+    "OQ-15",
+    "OQ-16"
+   ],
+   "included": [
+    "Spend aggregator over all run sessions (policy_cost_usd ?? total_cost_usd)",
+    "paused(budget) with a raise-or-stop elicitation; run-guard DENY reason; overshoot disclosure",
+    "Tokens and utilization for plan users (D21); estimate from Simulate sessions x past medians; budget in the start dialog",
+    "Step budgets"
+   ],
+   "excluded": [
+    "cost_budget as the primary mechanism (R-5)",
+    "Provider-side hard caps"
+   ],
+   "key_paths": [
+    "coral/budgets/",
+    "omnigent/runtime/policies/builder.py"
+   ],
+   "proving_test": "A run crossing its budget pauses with a budget elicitation; raising it resumes and stopping cancels."
+  },
+  {
+   "id": "ENG-10",
+   "name": "Versions, diff and restart-from-node",
+   "area": "ENG",
+   "workstream": "WS-ENGINE",
+   "phase": "PH5",
+   "milestone": "M4",
+   "priority": "Medium",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Show version history and diffs, and amend a run by cancelling and restarting it from a chosen node with carried handoffs (TLD-18).",
+   "gaps": [
+    "G-65",
+    "G-14"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-06",
+    "DUR-03",
+    "DUR-02"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K2",
+    "K5"
+   ],
+   "open_questions": [
+    "OQ-20",
+    "OQ-4"
+   ],
+   "included": [
+    "Versions list and structural diff API; runs per version",
+    "Restart-from-node creating a linked run on a chosen version with carried handoffs and a reason; mapping validation",
+    "Lineage migration through the train; restart dialog in the run view"
+   ],
+   "excluded": [
+    "'Apply to this run' (deferred)",
+    "Counter carry-over"
+   ],
+   "key_paths": [
+    "coral/engine/restart.py",
+    "coral/api/versions.py",
+    "web/src/workflows/runs/restart/"
+   ],
+   "proving_test": "Restarting a cancelled run from Review on v2 carries the implementer's handoff and links the old and new runs."
+  },
+  {
+   "id": "DUR-06",
+   "name": "Retention, purge and account lifecycle",
+   "area": "DUR",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH5",
+   "milestone": "M4",
+   "priority": "Medium",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Purge run data by policy and carry or purge Coral rows when accounts are revoked or migrated.",
+   "gaps": [
+    "G-16"
+   ],
+   "seams": [
+    "S56"
+   ],
+   "hard_deps": [
+    "DUR-05"
+   ],
+   "soft_deps": [
+    "DUR-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K5"
+   ],
+   "open_questions": [
+    "OQ-25"
+   ],
+   "included": [
+    "Retention policy; batched purge_run with blob GC from the ledger; engine agent-row GC",
+    "Deleting workflows that have runs",
+    "S56 account-lifecycle callbacks for revocation and identity migration"
+   ],
+   "excluded": [
+    "Legal hold",
+    "Run-log export (post-M4)"
+   ],
+   "key_paths": [
+    "coral/retention/",
+    "omnigent/server/accounts_store.py"
+   ],
+   "proving_test": "A purged run leaves no Coral rows or blobs, and identity migration carries Coral rows to the new account."
+  },
+  {
+   "id": "OPS-04",
+   "name": "Production hardening: DB lanes, load and security",
+   "area": "OPS",
+   "workstream": "WS-OPS",
+   "phase": "PH5",
+   "milestone": "M4",
+   "priority": "Critical",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Certify Coral for production with all DB lanes, a load scenario and a closed security review (TLD-08).",
+   "gaps": [
+    "G-87",
+    "G-11"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "OPS-02",
+    "DUR-05",
+    "SES-06",
+    "GTE-01"
+   ],
+   "soft_deps": [
+    "WSP-02",
+    "HRN-05",
+    "GTE-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [],
+   "open_questions": [
+    "OQ-1",
+    "OQ-42",
+    "OQ-43"
+   ],
+   "included": [
+    "Four DB lanes green with fault suites; release statement: SQLite and Postgres committed, CockroachDB and MySQL tested",
+    "Coral load scenario in dev/loadtest (concurrent runs, SQLite contention)",
+    "Threat review with fixes: tool provenance (S49), native bridge bearer (D25), runner-local impersonation (spike 15), host-op token, bundle secrets, gate authority, webhooks"
+   ],
+   "excluded": [
+    "Multi-replica (deferred)",
+    "Multi-region"
+   ],
+   "key_paths": [
+    "dev/loadtest/",
+    "tests/stores/coral/",
+    "docs/coral/SECURITY_REVIEW.md"
+   ],
+   "proving_test": "The load report meets the OQ-1 NFRs and the security review closes with no open high findings."
+  },
+  {
+   "id": "OPS-05",
+   "name": "Release readiness: merge drill, upstreaming and licensing sign-off",
+   "area": "OPS",
+   "workstream": "WS-OPS",
+   "phase": "PH5",
+   "milestone": "M4",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Complete a real upstream merge by the playbook, upstream the generic registries, and close licensing for release.",
+   "gaps": [
+    "G-84",
+    "G-86"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "OPS-02"
+   ],
+   "soft_deps": [
+    "OPS-04"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [],
+   "open_questions": [
+    "OQ-30",
+    "OQ-31",
+    "OQ-50"
+   ],
+   "included": [
+    "A real upstream merge executed by the playbook with re-anchoring; security cherry-pick lane with an SLA",
+    "Upstream PRs for the generic registries S1, S5, S6, S10, S32, S50 and S52",
+    "Counsel answers: attribution, Apache §4(b), React Flow attribution, OFL, dagre; DCO decision; release pipeline"
+   ],
+   "excluded": [
+    "Store listings",
+    "Relicensing"
+   ],
+   "key_paths": [
+    "docs/coral/UPSTREAM_MERGES.md",
+    ".github/workflows/coral-release.yml",
+    "NOTICE",
+    "MODIFICATIONS.md"
+   ],
+   "proving_test": "One upstream merge lands through the playbook with all Coral lanes green, and the licence inventory is signed off."
+  },
+  {
+   "id": "BRD-03",
+   "name": "Native shell identity",
+   "area": "BRD",
+   "workstream": "WS-BRAND",
+   "phase": "PH5",
+   "milestone": "M4",
+   "priority": "High",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Give the Coral desktop and mobile shells their own names, ids, icons, scheme and update feed, with deep links to runs.",
+   "gaps": [
+    "G-82"
+   ],
+   "seams": [
+    "S38",
+    "S87",
+    "S88"
+   ],
+   "hard_deps": [
+    "BRD-01"
+   ],
+   "soft_deps": [
+    "OPS-02",
+    "OPS-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K16"
+   ],
+   "open_questions": [
+    "OQ-31",
+    "OQ-23"
+   ],
+   "included": [
+    "Electron brand.js constants for about 37 literals; productName, appId, coral:// scheme, Coral publish.url updater feed (R-18; required before any desktop build)",
+    "Setup and connect pages; icons including Assets.car; CLI detection accepting coral",
+    "iOS and Android display names and icons; run deep links (S38)"
+   ],
+   "excluded": [
+    "Store listings (OQ-31)",
+    "Mobile push (deferred)",
+    "Mobile editing"
+   ],
+   "key_paths": [
+    "web/electron/package.json",
+    "web/electron/src/main.js",
+    "web/electron/src/brand.js",
+    "web/electron/src/deepLink.js",
+    "web/ios/",
+    "web/android/"
+   ],
+   "proving_test": "A packaged desktop build reports the Coral appId, checks the Coral update feed, and coral://workflows/runs/<id> opens the run."
+  },
+  {
+   "id": "WSP-04",
+   "name": "Managed-sandbox runs",
+   "area": "WSP",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH6",
+   "milestone": "post-M4",
+   "priority": "Low",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Run workflows in managed sandboxes that survive sleep and relaunch from checkpoints.",
+   "gaps": [
+    "G-61"
+   ],
+   "seams": [
+    "S28",
+    "S70"
+   ],
+   "hard_deps": [
+    "WSP-02",
+    "SES-06"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K13",
+    "K20"
+   ],
+   "open_questions": [
+    "OQ-5"
+   ],
+   "included": [
+    "Bind-mode worktrees in managed sandboxes (S28)",
+    "Host-keyed keep-warm lease (S70)",
+    "Checkpoint pushes and relaunch from a checkpoint branch; spike 9"
+   ],
+   "excluded": [
+    "Plain-folder shadow repos (deferred)",
+    "Multi-host runs"
+   ],
+   "key_paths": [
+    "omnigent/server/managed_hosts.py",
+    "omnigent/server/managed_host_keepalive.py",
+    "coral/workspace/sandbox.py"
+   ],
+   "proving_test": "A sandboxed run survives sandbox sleep at a gate and relaunches from its checkpoint branch."
+  },
+  {
+   "id": "EXT-01",
+   "name": "Improvement suggestions",
+   "area": "EXT",
+   "workstream": "WS-ENGINE",
+   "phase": "PH6",
+   "milestone": "post-M4",
+   "priority": "Low",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Propose evidence-backed workflow edits from finished runs, never weakening evidence or gates.",
+   "gaps": [
+    "G-88"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-04",
+    "DUR-03"
+   ],
+   "soft_deps": [
+    "ENG-10",
+    "WEB-08"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K3",
+    "K1"
+   ],
+   "open_questions": [
+    "OQ-26"
+   ],
+   "included": [
+    "Run-log detectors: first-try evidence failures, loops at limit, cost growth, always-approved gates, reversed decisions, always-pass evidence, test edits in non-test steps",
+    "Suggestion list with run links and YAML diffs; accepting creates a version"
+   ],
+   "excluded": [
+    "Auto-apply",
+    "Weakening evidence or gates"
+   ],
+   "key_paths": [
+    "coral/suggestions/",
+    "web/src/workflows/suggestions/"
+   ],
+   "proving_test": "A run history with three loops at limit yields a suggestion with a YAML diff, and no suggestion removes a gate or evidence item."
+  },
+  {
+   "id": "EXT-02",
+   "name": "Elephant-Goldfish showcase",
+   "area": "EXT",
+   "workstream": "WS-ENGINE",
+   "phase": "PH6",
+   "milestone": "post-M4",
+   "priority": "Low",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Ship the Elephant-Goldfish template with a persistent elephant step across passes and scoped goldfish inputs.",
+   "gaps": [
+    "G-89"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "ENG-08",
+    "WSP-02",
+    "SES-07"
+   ],
+   "soft_deps": [
+    "TLS-04"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K1",
+    "K13",
+    "K20"
+   ],
+   "open_questions": [
+    "OQ-30"
+   ],
+   "included": [
+    "Slot rebinding for session: persistent_across_loop (keys reserved in K1)",
+    "Per-member input scoping with a coral.policies DENY on session-read tools plus a files.materialize host op (S65 not used; TLD-04)",
+    "Typed resolutions; ESCALATE -> gate; persona attribution"
+   ],
+   "excluded": [
+    "Elephant as the orchestrator (D4.2)",
+    "AgentSpec changes (TLD-04)"
+   ],
+   "key_paths": [
+    "coral/templates/elephant_goldfish.yaml",
+    "coral/policies/input_scope.py",
+    "coral/host_ops/materialize.py"
+   ],
+   "proving_test": "A goldfish step cannot read sibling sessions, and the elephant keeps one session across three loop passes."
+  },
+  {
+   "id": "EXT-03",
+   "name": "Repo export and git import",
+   "area": "EXT",
+   "workstream": "WS-WORKSPACE",
+   "phase": "PH6",
+   "milestone": "post-M4",
+   "priority": "Low",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Export workflows to .coral/ in a repo, and import workflows, templates and profiles from git.",
+   "gaps": [
+    "G-68",
+    "G-90"
+   ],
+   "seams": [
+    "S74"
+   ],
+   "hard_deps": [
+    "WSP-01",
+    "DUR-02"
+   ],
+   "soft_deps": [
+    "PRF-02",
+    "WSP-02"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K13",
+    "K12"
+   ],
+   "open_questions": [
+    "OQ-33"
+   ],
+   "included": [
+    "S74 .coral/**-confined write op with an expected-hash precondition",
+    "Git-URL import of workflows, templates and profiles with a V10 profile check"
+   ],
+   "excluded": [
+    "Repo-canonical editing",
+    "Sync daemon",
+    "Marketplace"
+   ],
+   "key_paths": [
+    "omnigent/host/connect.py",
+    "omnigent/server/routes/_host_filesystem.py",
+    "coral/sharing/"
+   ],
+   "proving_test": "Exporting a version writes .coral/<id>.yaml only when the expected hash matches, and importing it on another machine yields the same content hash."
+  },
+  {
+   "id": "EXT-04",
+   "name": "Run sharing, teams and protection guards",
+   "area": "EXT",
+   "workstream": "WS-INTEGRATION",
+   "phase": "PH6",
+   "milestone": "post-M4",
+   "priority": "Low",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Let teams share runs and answer gates, and protect run sessions and engine agents from mutation (TLD-12).",
+   "gaps": [
+    "G-90",
+    "G-24",
+    "G-52"
+   ],
+   "seams": [
+    "S26",
+    "S46",
+    "S53"
+   ],
+   "hard_deps": [
+    "SES-06",
+    "GTE-01"
+   ],
+   "soft_deps": [
+    "GTE-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K10",
+    "K14"
+   ],
+   "open_questions": [
+    "OQ-4",
+    "OQ-17",
+    "OQ-46"
+   ],
+   "included": [
+    "Engine-managed grants for run sharing (D18); team approvers",
+    "S26 protected coral. policy names and label prefix; S46 reserved labels on non-route write paths with an explicit /clear policy",
+    "S53 mutation guards on PUT agent, MCP edits, PATCH, reinstall and non-forced delete"
+   ],
+   "excluded": [
+    "Per-session sharing reuse",
+    "Cross-org sharing"
+   ],
+   "key_paths": [
+    "omnigent/server/routes/session_policies.py",
+    "omnigent/runtime/policies/engine.py",
+    "omnigent/server/routes/sessions/routes_agent.py",
+    "omnigent/server/routes/builtin_agents.py",
+    "coral/sharing/"
+   ],
+   "proving_test": "A teammate with the run grant answers a gate, and a non-engine PATCH to a coral__ agent is refused."
+  },
+  {
+   "id": "EXT-05",
+   "name": "Automations 'Run workflow' trigger",
+   "area": "EXT",
+   "workstream": "WS-PLATFORM",
+   "phase": "PH6",
+   "milestone": "post-M4",
+   "priority": "Low",
+   "complexity": "M",
+   "enabler": false,
+   "objective": "Start workflow runs from an Automations action, with no second scheduler.",
+   "gaps": [
+    "G-90"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "API-02"
+   ],
+   "soft_deps": [],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K7"
+   ],
+   "open_questions": [
+    "OQ-21"
+   ],
+   "included": [
+    "'Run workflow' Automations action",
+    "start_key per fire for idempotent starts"
+   ],
+   "excluded": [
+    "Coral-owned schedules",
+    "Workflows as tools or APIs (deferred)"
+   ],
+   "key_paths": [
+    "omnigent/scheduled/",
+    "web/src/pages/TasksPage.tsx",
+    "coral/api/runs.py"
+   ],
+   "proving_test": "An automation firing twice with the same fire id starts one run."
+  },
+  {
+   "id": "GTE-04",
+   "name": "Web and desktop push notifications",
+   "area": "GTE",
+   "workstream": "WS-WEB",
+   "phase": "PH6",
+   "milestone": "post-M4",
+   "priority": "Low",
+   "complexity": "L",
+   "enabler": false,
+   "objective": "Deliver gate and pause notifications through Web Push when the app is closed.",
+   "gaps": [
+    "G-37"
+   ],
+   "seams": [],
+   "hard_deps": [
+    "GTE-03"
+   ],
+   "soft_deps": [
+    "BRD-03"
+   ],
+   "contracts_produced": [],
+   "contracts_consumed": [
+    "K19"
+   ],
+   "open_questions": [
+    "OQ-6",
+    "OQ-23"
+   ],
+   "included": [
+    "VAPID keys, subscriptions and a service worker",
+    "Payloads without secrets; desktop shell delivery"
+   ],
+   "excluded": [
+    "APNs and FCM mobile push (deferred)",
+    "Email digests"
+   ],
+   "key_paths": [
+    "web/src/workflows/push/",
+    "web/public/",
+    "coral/notify/push.py"
+   ],
+   "proving_test": "A gate opened while the browser tab is closed shows a push notification that deep-links to the gate."
+  }
+ ],
+ "contracts": [
+  {
+   "id": "K1",
+   "name": "Workflow authoring schema and compiled IR",
+   "producer": "ENG-01",
+   "ships_in": "PH0",
+   "description": "YAML keys and node kinds (Note layout-only, hidden Wait and Sub-workflow), reserved keys and ids, frozen CompiledGraph, content hash, JSON Schema for TS, stable-id rule, separate layout doc.",
+   "consumers": [
+    "API-01",
+    "DUR-02",
+    "ENG-02",
+    "ENG-03",
+    "ENG-04",
+    "ENG-05",
+    "ENG-07",
+    "ENG-08",
+    "ENG-09",
+    "ENG-10",
+    "EVD-01",
+    "EXT-01",
+    "EXT-02",
+    "RUL-02",
+    "WEB-01",
+    "WEB-02",
+    "WEB-08",
+    "WEB-09"
+   ]
+  },
+  {
+   "id": "K2",
+   "name": "Reducer contract",
+   "producer": "ENG-01",
+   "ships_in": "PH0",
+   "description": "transition(graph, state, input, now) -> {state delta, log, effects, rejections}; commands and observations with idempotency keys; effects with effect_key; ScopeKey; session_generation; StartRun(from_node); pause reasons; error taxonomy.",
+   "consumers": [
+    "DUR-01",
+    "DUR-03",
+    "DUR-04",
+    "DUR-05",
+    "ENG-04",
+    "ENG-05",
+    "ENG-06",
+    "ENG-07",
+    "ENG-08",
+    "ENG-09",
+    "ENG-10",
+    "FND-04",
+    "GTE-01",
+    "SES-01",
+    "SES-04",
+    "SES-05",
+    "SES-06",
+    "TLS-02",
+    "TLS-03"
+   ]
+  },
+  {
+   "id": "K3",
+   "name": "Run-log entry schema and fold",
+   "producer": "ENG-01",
+   "ships_in": "PH0",
+   "description": "Closed additive kind enum, seq, actor, scope key, 16 KiB body cap, refs, idempotency key; fold(log) == state.",
+   "consumers": [
+    "API-02",
+    "DUR-01",
+    "DUR-03",
+    "ENG-04",
+    "ENG-05",
+    "ENG-06",
+    "ENG-07",
+    "ENG-08",
+    "EXT-01",
+    "FND-04",
+    "WEB-04",
+    "WEB-10"
+   ]
+  },
+  {
+   "id": "K4",
+   "name": "coral.omni facade protocol and FakeOmni",
+   "producer": "SES-01",
+   "ships_in": "PH0",
+   "description": "Sessions (create, send with stable_id, interrupt, stop, wake, status, items, turn facts), policies, gate publish, profiles, worktrees, host read and capabilities, with idempotency semantics and an in-memory fake.",
+   "consumers": [
+    "API-02",
+    "DUR-05",
+    "EVD-03",
+    "FND-04",
+    "GTE-01",
+    "RUL-05",
+    "SES-03",
+    "SES-04",
+    "SES-05",
+    "SES-06",
+    "SES-07",
+    "TLS-04",
+    "WSP-01"
+   ]
+  },
+  {
+   "id": "K5",
+   "name": "Coral persistence contract",
+   "producer": "DUR-01",
+   "ships_in": "PH1",
+   "description": "Table conventions incl. scope keys and derived-id PKs; store protocols (apply_transition CAS, workflow store, queue claim/lease/finish); at-least-once work semantics; migration-train rule.",
+   "consumers": [
+    "DUR-02",
+    "DUR-03",
+    "DUR-04",
+    "DUR-05",
+    "DUR-06",
+    "ENG-10",
+    "GTE-03",
+    "PRF-02",
+    "SES-04",
+    "TLS-02"
+   ]
+  },
+  {
+   "id": "K6",
+   "name": "Engine tool contracts",
+   "producer": "SES-01",
+   "ships_in": "PH0",
+   "description": "The six TLD-20 tools: argument schemas, result envelope, rejection codes, (run, operation_id) dedup, handler signature, params.coral opt-in keys.",
+   "consumers": [
+    "EVD-02",
+    "SES-05",
+    "SES-07",
+    "TLS-01",
+    "TLS-02",
+    "TLS-03",
+    "TLS-04"
+   ]
+  },
+  {
+   "id": "K7",
+   "name": "Coral REST API and OpenAPI",
+   "producer": "API-01",
+   "ships_in": "PH0",
+   "description": "/v1/coral/* endpoints incl. info gate, error envelope, ETag/412, start_key, access mapping, OpenAPI artifact with drift check, generated TS types.",
+   "consumers": [
+    "API-02",
+    "BRD-02",
+    "DUR-02",
+    "EXT-05",
+    "FND-02",
+    "GTE-02",
+    "GTE-03",
+    "WEB-01",
+    "WEB-02",
+    "WEB-03",
+    "WEB-04",
+    "WEB-05",
+    "WEB-06",
+    "WEB-07",
+    "WEB-08",
+    "WEB-10"
+   ]
+  },
+  {
+   "id": "K8",
+   "name": "Run stream protocol",
+   "producer": "API-01",
+   "ships_in": "PH0",
+   "description": "SSE snapshot then seq-numbered entry events; Last-Event-ID resume; heartbeat; [DONE]; polling fallback.",
+   "consumers": [
+    "API-02",
+    "WEB-04",
+    "WEB-10"
+   ]
+  },
+  {
+   "id": "K9",
+   "name": "Capability registry",
+   "producer": "HRN-01",
+   "ships_in": "PH1",
+   "description": "Capability fields and enums per harness spelling (S22, S59); CapabilityMatrix; effective-enforceability inputs to promise labels and V9.",
+   "consumers": [
+    "HRN-02",
+    "HRN-03",
+    "HRN-04",
+    "HRN-05",
+    "HRN-06",
+    "RUL-02",
+    "RUL-03",
+    "RUL-04",
+    "RUL-05",
+    "SES-04",
+    "SES-07",
+    "WEB-06",
+    "WEB-07",
+    "WEB-09"
+   ]
+  },
+  {
+   "id": "K10",
+   "name": "Identity, labels and derived keys",
+   "producer": "SES-01",
+   "ships_in": "PH0",
+   "description": "coral.* label keys, uuid5(effect_key) session ids, stable_id per message, deterministic policy ids and worktree paths, coral_gate_<visit> ids, coral__ and coral. prefixes.",
+   "consumers": [
+    "EXT-04",
+    "GTE-01",
+    "GTE-02",
+    "PRF-01",
+    "RUL-01",
+    "SES-03",
+    "WEB-05",
+    "WSP-01"
+   ]
+  },
+  {
+   "id": "K11",
+   "name": "Evidence-requirement IR and observation records",
+   "producer": "EVD-01",
+   "ships_in": "PH1",
+   "description": "Required commands, may-modify flags, exit-code sources, scope, final-pass semantics, observation and fingerprint records, missing-item messages.",
+   "consumers": [
+    "EVD-02",
+    "EVD-03",
+    "EVD-04",
+    "HRN-03",
+    "RUL-02",
+    "SES-07",
+    "TLS-02",
+    "WEB-03",
+    "WSP-02",
+    "WSP-03"
+   ]
+  },
+  {
+   "id": "K12",
+   "name": "Step bundle format and params.coral schema",
+   "producer": "SES-01",
+   "ships_in": "PH0",
+   "description": "Tar layout, content addressing, params.coral keys, hygiene defaults, approval stance, guardrails slot, provider-reference auth, revision reference.",
+   "consumers": [
+    "EXT-03",
+    "HRN-02",
+    "HRN-03",
+    "HRN-05",
+    "HRN-06",
+    "PRF-01",
+    "PRF-02",
+    "RUL-01",
+    "RUL-03",
+    "SES-03",
+    "TLS-01",
+    "TLS-03",
+    "WEB-07"
+   ]
+  },
+  {
+   "id": "K13",
+   "name": "WorkspaceOps interface",
+   "producer": "SPK-04",
+   "ships_in": "PH0",
+   "description": "Ops (fingerprint L1/L2, commit, salvage, reset, head, check, merge, read) with op keys; session-shell and host-channel backends; fake backend and conformance tests.",
+   "consumers": [
+    "EVD-01",
+    "EVD-02",
+    "EVD-04",
+    "EXT-02",
+    "EXT-03",
+    "SES-06",
+    "WSP-01",
+    "WSP-02",
+    "WSP-03",
+    "WSP-04"
+   ]
+  },
+  {
+   "id": "K14",
+   "name": "Gate, question and budget elicitation payloads",
+   "producer": "SES-01",
+   "ships_in": "PH0",
+   "description": "Form payloads, stable ids, visit token, authored-outcome mapping, hidden decline and cancel, resolver identity, re-publish rule.",
+   "consumers": [
+    "API-01",
+    "EXT-04",
+    "GTE-01",
+    "GTE-02",
+    "RUL-05",
+    "SES-05",
+    "TLS-03"
+   ]
+  },
+  {
+   "id": "K15",
+   "name": "Rule-template catalog IR",
+   "producer": "RUL-03",
+   "ships_in": "PH3",
+   "description": "Template id, params, target builtin or policy, Required vs Guidance, per-mode enforceability inputs. First PR of RUL-03; bundles reserve the guardrails slot in K12 from PH0.",
+   "consumers": [
+    "ENG-09",
+    "RUL-02",
+    "WEB-06",
+    "WEB-09"
+   ]
+  },
+  {
+   "id": "K16",
+   "name": "Seam ledger format",
+   "producer": "OPS-01",
+   "ships_in": "PH0",
+   "description": "seams.yaml and upstream.yaml: seam id, files, CORAL(Sx) anchors, tests, budget lines, upstream PR, owner feature.",
+   "consumers": [
+    "BRD-01",
+    "BRD-03",
+    "FND-01",
+    "FND-02",
+    "FND-03",
+    "HRN-01",
+    "OPS-02",
+    "SES-02",
+    "TLS-01"
+   ]
+  },
+  {
+   "id": "K17",
+   "name": "Server plugin registration",
+   "producer": "FND-02",
+   "ships_in": "PH1",
+   "description": "server_plugins key, ROUTERS, LIFESPAN_HOOKS, ServerServices, hook ordering, fatal import failure, single-replica refusal.",
+   "consumers": [
+    "DUR-02",
+    "DUR-04",
+    "RUL-01",
+    "SES-03"
+   ]
+  },
+  {
+   "id": "K18",
+   "name": "Status-edge observer API and turn facts",
+   "producer": "SES-02",
+   "ships_in": "PH1",
+   "description": "Observer signature, origin slugs (S1b), turn_outcome (S43), persisted TurnFact fields.",
+   "consumers": [
+    "HRN-03",
+    "HRN-05",
+    "SES-04"
+   ]
+  },
+  {
+   "id": "K19",
+   "name": "Alert and inbox feed model",
+   "producer": "GTE-02",
+   "ships_in": "PH2",
+   "description": "coral_alerts kinds, ack, run actions, deep-link payload without secrets. First PR of GTE-02, consumed by reconcile, reactions and external delivery.",
+   "consumers": [
+    "DUR-05",
+    "ENG-09",
+    "GTE-03",
+    "GTE-04"
+   ]
+  },
+  {
+   "id": "K20",
+   "name": "Host workspace-op wire frames",
+   "producer": "WSP-02",
+   "ships_in": "PH4",
+   "description": "Frames, workspace_ops:1 capability token, op catalog, job events and journal, reaper-guard rule. First PR of WSP-02; K13 carries a draft appendix from PH0.",
+   "consumers": [
+    "EVD-04",
+    "EXT-02",
+    "WSP-03",
+    "WSP-04"
+   ]
+  }
+ ],
+ "deferred_gaps": [
+  {
+   "gap": "G-10 (Sub-workflow invocation)",
+   "reason": "No M1-M4 journey or template needs it; the kind stays reserved and hidden in K1."
+  },
+  {
+   "gap": "G-11 (multi-replica)",
+   "reason": "v1 is single replica (TLD-08); FND-02 and DUR-04 refuse to start workers under multi-replica or host sharding."
+  },
+  {
+   "gap": "G-37 (APNs and FCM mobile push)",
+   "reason": "Needs app ids and store decisions (OQ-31) and mobile scope (OQ-23); Web Push (GTE-04) comes first post-M4."
+  },
+  {
+   "gap": "G-38 and G-61 (plain-folder workspaces and fingerprints)",
+   "reason": "Git worktrees only until a non-code persona is confirmed (OQ-1); needs content-hash manifests first."
+  },
+  {
+   "gap": "G-42 and G-48 (free-text LLM translation of done-when and rules)",
+   "reason": "TLD-19: v1 is the detected-command picker (EVD-03, WEB-03) and the typed catalog (RUL-03); an engine-owned translator session is unscheduled post-M4."
+  },
+  {
+   "gap": "G-65 (full 'Apply to this run' amendments)",
+   "reason": "TLD-18: ENG-10 ships cancel-and-restart-from-node; full amendments are unscheduled post-M4 (OQ-20)."
+  },
+  {
+   "gap": "G-66 (exhaustive Simulate, V11)",
+   "reason": "Replaced by block-structure validation plus scripted Simulate (X-25, R-24); revisit as a sampling check."
+  },
+  {
+   "gap": "G-87 (claude-sdk fake)",
+   "reason": "None exists; the credentialed nightly (SES-05, HRN-01) and a mock base-URL lane if spike 4 passes stand in."
+  },
+  {
+   "gap": "G-90 (workflows as tools or APIs, marketplace)",
+   "reason": "Mentioned only in D§15 with no product spec; EXT-05 covers the Automations trigger."
+  }
+ ],
+ "unplanned_seams": [
+  {
+   "seam": "S17",
+   "reason": "claude-sdk sub-agent attribution is moot: run sessions expose no vendor sub-agents (S63 contract test in HRN-02). Revisit only if that changes."
+  },
+  {
+   "seam": "S33",
+   "reason": "Upstream Feature enum flag replaced by the Coral-owned GET /v1/coral/info gate (TLD-03, R-21)."
+  },
+  {
+   "seam": "S35",
+   "reason": "Watch-set union is needed only under the top-level topology fallback; costed as the SES-03 contingency (TLD-02)."
+  },
+  {
+   "seam": "S44",
+   "reason": "Optional shared turn-outcome classifier; the per-mode rule in SES-04 does not need it. Reconsider if codex-native rules diverge."
+  },
+  {
+   "seam": "S47",
+   "reason": "Child-capable continue-in-fork: refresh is a slot restart (TLD-13, R-8)."
+  },
+  {
+   "seam": "S48",
+   "reason": "hold_started callback: polling runner_last_seen in SES-06 suffices."
+  },
+  {
+   "seam": "S55",
+   "reason": "Caller-supplied id through HTTP create: the facade creates sessions through the store with derived ids (X-6)."
+  },
+  {
+   "seam": "S65",
+   "reason": "tool_groups.session_reads is an AgentSpec and parser change, which TLD-04 rules out; EXT-02 scopes inputs with a coral.policies DENY instead."
+  },
+  {
+   "seam": "S73",
+   "reason": "Run sessions carry workspace= and no git options, so session-delete worktree cleanup never fires; WSP-01 keeps this as a tested invariant (TLD-12)."
+  }
+ ],
+ "notes": [
+  "Contract catalog: followed the architect (K1-K18 boundaries and producers), added K19 alert/inbox model from product and split host frames out as K20 from the adversarial lens.",
+  "Spikes: followed the adversarial lens (four time-boxed PH0 spikes: decisions, topology, harness probes, workspace and evidence) and added product's probe (e), a gate on a turnless run session rendering in Inbox, to SPK-02.",
+  "One-hour unknowns (spikes 10, 11, 17, 18, 19) run as first checks inside FND-01, FND-02, BRD-02, PRF-01 and HRN-02 (adversarial).",
+  "K13 WorkspaceOps is SPK-04's decision output with session-shell and host backends, so M4 swaps the backend without rewriting evidence or restart code (adversarial and product).",
+  "Foundations split into package (PH0), plugin seam, DB env and test infra (architect and adversarial) rather than one L package-plus-DB feature (product).",
+  "GET /v1/coral/info lives in FND-02 (product) so the web Coral gate unblocks in early PH1.",
+  "Seam packs A (SES-02) and B (TLS-01) start in PH1 and land as a serial seam train per hot file (architect), so PH2 never waits on upstream review.",
+  "TLS-01 lands every S50 call site, including the native S9, S11 and S12 sites, as one-line calls (architect); enabling native channels stays in HRN-03 and HRN-05.",
+  "G-04 (XL) split three ways: ENG-04 core with gate visits and log (L, two engineers), ENG-05 loops and joins (M), ENG-06 lifecycle and timers (M); adversarial split, architect's gate-in-engine boundary.",
+  "ENG-06 lifecycle starts in PH1 as pure reducer work targeting M2 (adversarial), not in PH2 (architect).",
+  "The MVP template ships as package data with the Simulate engine in ENG-07 (product and adversarial).",
+  "Workflow store and workflow endpoints merged into DUR-02 so the M1 API journey is one vertical slice (product); repo import stays with repo bindings in WSP-01 (architect).",
+  "DUR-01 owns K5, both MVP migrations and the migration train with a single-head check (architect for K5, adversarial for the train).",
+  "Queue (DUR-04) starts in PH1 as the main schedule lever (architect); the reconciler is a separate M feature because fault helpers live in FND-04 (adversarial sizing).",
+  "Walking skeleton (product) and M2 acceptance lane (adversarial) merged into SES-05: one owner from the first integration target to the M2 exit.",
+  "Session integration split into facade (SES-03), turn loop (SES-04) and recovery (SES-06) per the architect; SES-04 builds against the K5 queue protocol so it is not hard-blocked on DUR-04.",
+  "coral_choose_arrow lives with the orchestrator in TLS-03 (product and adversarial), not with submit_handoff (architect); ask_user stays in TLS-03 as the first M2 cut line (adversarial).",
+  "Gates: visit semantics in the reducer (ENG-04, architect) and the Omnigent elicitation seam pack C in GTE-01 (all three lenses).",
+  "Evidence: IR in PH1 (all), claude-sdk capture plus handoff evaluation as one L feature (architect and adversarial), detection separate (EVD-03), L2 inside the host channel WSP-02 (architect and adversarial).",
+  "S71 is WSP-01's first PR with a may-land-in-PH1 note (adversarial); product's flag holds that it guards fs_request git status used by import and detection.",
+  "S68 and S69 owned whole by EVD-02 (architect); native and Codex observation sites are enabled later by HRN-03 and HRN-05.",
+  "Credential guard split: core S13/S63 guard at M2 (HRN-02) and model access plus plan limits at M3 (HRN-04) (product).",
+  "S45 owned by claude-native HRN-03 as the first needer for /clear rotation (adversarial), not by refresh.",
+  "S21 assigned conditionally to HRN-02 (product and adversarial) rather than unplanned (architect), because a failed spike 1 would block M2 policy enforcement on claude-sdk.",
+  "S3 assigned to HRN-03 for terminal_launch_args only (architect and product); the rest of S3 is not needed.",
+  "S65 not planned and EGM uses a coral.policies DENY (architect's TLD-04 flag followed fully).",
+  "Read-only diagram merged with Simulate UI in WEB-01 so one owner holds the shared overlay API (adversarial).",
+  "Run view (WEB-04) and agent panes plus steering (WEB-05) kept separate to hold WEB-04 within L (product); runs list sits in WEB-04 (adversarial).",
+  "Templates, Use-template and start-run dialogs merged into WEB-03 as one dialog family (architect).",
+  "Refresh and take-over merged into SES-07 slot control (product and adversarial).",
+  "Reactions and overdue alerts move to PH4 with groups in ENG-09 (adversarial; the mandate puts 'rules depth' in PH4), not M3 (product).",
+  "Production readiness split into hardening (OPS-04) and release readiness (OPS-05) (adversarial) instead of one L (architect).",
+  "Native shell identity keeps desktop and mobile names and icons together at M4 (architect) so S88 has one owner; mobile push is a deferred gap part.",
+  "LLM translation and full amendments are deferred gap parts, not PH6 features (count discipline; TLD-18, TLD-19); workflows-as-tools deferred (product).",
+  "Every mutual soft-dependency pair was cut to the consumer-to-producer direction so the combined hard+soft graph has no cycles.",
+  "WS-INTEGRATION owns 18 features: staff it as a seam and facade sub-team (SES-01..06, TLS-01, GTE-01) and a tools and policies sub-team (TLS-02..04, RUL-01, RUL-03, RUL-05, GTE-03, EXT-04) (architect R2).",
+  "Move: S13/S63 credential guard M3 -> M2 (HRN-02), all three lenses; TLD-07 makes API-key auth the MVP and without S13 run sessions fall through to subscription OAuth (runtime/workflow.py:1123-1400).",
+  "Move: claude-sdk reviewer write_paths: [] M3 -> M2 (PRF-01), all three lenses; TLD-01 has read-only reviewers at M2 and read_only_os leaves the shell writable (R-23).",
+  "Move: per-session cost_budget backstop M4 -> M2 (RUL-01), adversarial and product, backed at M1 by the V12 bound (ENG-03) and the runtime activation cap (ENG-05); run and step budgets stay at M4 (RUL-05).",
+  "Kept: promise-label UI at M3 (architect and adversarial); product's static-row M2 labels rejected so nothing is labelled before the registry is bench-tested (TLD-11).",
+  "Kept: YAML editor at M2 as WEB-02's last PR series with an explicit cut line (architect and product, with the adversarial cut line).",
+  "Kept: plan-limit pause at M3 (product); API-key MVP users rarely hit plan windows and G-57 is 'later'.",
+  "Kept: headless codex at M4 per the mandate (architect and product) at Low priority as the first M4 cut; the adversarial post-M4 move was rejected because HRN-06 carries the S20 gating fix.",
+  "Kept: step budgets in RUL-05 at M4 (architect and product); adversarial deferral rejected because G-62 and the mandated M4 budgets line include them.",
+  "Kept: repo export post-M4 in EXT-03 (architect and adversarial; TLD-06), not M4 (product).",
+  "Kept: versions list and diff with restart-from-node in ENG-10 at M4 (all three).",
+  "TLD-10 flag: S71 guards only host-owned subprocesses (connect.py:1417-1423, fs handlers at :6027-6034); MVP exit codes come from the runner path, so EVD-02 adds a runner exit-status test, uses one L1 algorithm at command and submit time (bare /changes porcelain misses re-edits of dirty files), and M2 evidence tops out at Verified (L1).",
+  "TLD-02 flag: option B needs engine-driven relaunch of own-runner children, since upstream relaunches roots only (app.py:4273) and recovery skips host_id children (child_session_recovery.py:164); SPK-02 probe (f) and an SES-06 deliverable.",
+  "TLD-09 flag: a gate published on a turnless run session and its Inbox rendering are unverified; SPK-02 probe (e) covers it before GTE-01 starts.",
+  "TLD-17 flag: the L3 coral.omni contract suite exists only once SES-03 lands; the rehearsal runs L0-L2 from day one and adds L3 then.",
+  "TLD-12 flag: S73 stays unneeded only while run sessions carry workspace= and no git options (session delete otherwise removes the branch, routes_events.py:4166-4189); WSP-01 tests that invariant.",
+  "TLD-07 flag: subscription-only users cannot run workflows until M3; needs product sign-off in SPK-01, and HRN-02 ships honest preflight copy.",
+  "TLD-04 flag: seam S65 would be an AgentSpec and parser change, so it is not planned.",
+  "No TLD was found unsound; the flags above are conditions the plan now carries."
+ ]
+}
