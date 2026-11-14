@@ -419,6 +419,7 @@ seams:
       - web/electron/package.json
       - web/electron/src/main.js
       - web/electron/about/index.html
+      - web/ios/Omnigent/ConnectView.swift
     tests: []
     budget_lines: 40
     budget_exception:
@@ -465,6 +466,7 @@ seams:
       - web/src/pages/onboarding/ServerSelectStep.render.test.tsx
       - web/src/server-selector-v2.test.tsx
       - web/electron/e2e/desktop_arca_onboarding.e2e.js
+      - web/ios/Omnigent/ConnectView.swift
     tests:
       - web/src/pages/onboarding/ServerSelectorV2.test.tsx
       - web/src/pages/onboarding/ServerSelectStep.render.test.tsx

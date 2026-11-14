@@ -26,13 +26,14 @@ struct ConnectView: View {
       Spacer(minLength: 24)
 
       VStack(spacing: 0) {
-        Image(colorScheme == .dark ? "OmnigentLogoReverse" : "OmnigentLogo")
+        // CORAL(S88): the connect screen shows the Coral mark and names a Coral server.
+        Image(colorScheme == .dark ? "CoralLogoReverse" : "CoralLogo")
           .resizable()
           .scaledToFit()
           .frame(height: 80)
           .padding(.bottom, 12)
 
-        Text("Enter the URL of the Omnigent server.")
+        Text("Enter the URL of the Coral server.")
           .font(.system(size: 14))
           .lineSpacing(2)
           .multilineTextAlignment(.center)
@@ -151,7 +152,7 @@ struct ConnectView: View {
         .frame(width: 44, height: 44)
         .contentShape(Rectangle())
     }
-    .accessibilityLabel("About Omnigent")
+    .accessibilityLabel("About Coral")
   }
 
   private var visibleRecentServers: [String] {
@@ -236,9 +237,10 @@ private enum InfoLink: Identifiable {
 
   var url: URL {
     switch self {
-    case .website: URL(string: "https://omnigent.ai")!
+    // CORAL(S89b): Website and Privacy Policy open Coral's pages; Docs stays upstream until OPS-09.
+    case .website: URL(string: "https://github.com/coral-hq/coral")!
     case .docs: URL(string: "https://omnigent.ai/docs")!
-    case .privacy: URL(string: "https://omnigent.ai/privacy")!
+    case .privacy: URL(string: "https://github.com/coral-hq/coral/blob/main/PRIVACY.md")!
     }
   }
 }

@@ -102,6 +102,7 @@ OPS-01's generator will maintain this file later.
 | `web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-mark.svg` | S88 | coral-specific | Added. Symlink to `platform-assets/logos/coral-mark.svg` (S88). |
 | `web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/Contents.json` | S88 | coral-specific | Added. Coral connect-screen logo imageset for dark mode (S88). |
 | `web/ios/Omnigent/Assets.xcassets/CoralLogoReverse.imageset/coral-mark.svg` | S88 | coral-specific | Added. Symlink to `platform-assets/logos/coral-mark.svg` (S88). |
+| `web/ios/Omnigent/ConnectView.swift` | S88, S89b | coral-specific | The connect screen shows the Coral mark, names a Coral server and labels About as Coral (S88); Website and Privacy Policy open Coral's repository and PRIVACY.md, Docs stays upstream (S89b). |
 | `web/ios/Omnigent/DeepLink.swift` | S38 | coral-specific | Accepts only `coral://` session links (S38). |
 | `web/ios/Omnigent/Info-Debug.plist` | S38, S88 | coral-specific | Camera, microphone and speech permission prompts name Coral (S88); the session-link URL scheme is `coral` (S38). |
 | `web/ios/Omnigent/Info-Release.plist` | S38, S88 | coral-specific | Camera, microphone and speech permission prompts name Coral (S88); the session-link URL scheme is `coral` (S38). |
