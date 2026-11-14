@@ -71,10 +71,6 @@ app, run `just electron-dev`.
 runs as `coral`: `coral server`, `coral host`, `coral claude` and the rest work
 exactly as Omnigent documents them. `uv run coral --help` lists them all.
 
-## Telemetry
-
-Coral doesn't collect or send usage telemetry.
-
 ## Documentation
 
 - [docs/coral/](docs/coral/README.md): Coral's design, roadmap, and how Coral
