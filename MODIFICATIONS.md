@@ -17,7 +17,7 @@ OPS-01's generator will maintain this file later.
 | `MODIFICATIONS.md` | S77 | coral-specific | Added. This file. |
 | `NOTICE` | S77 | coral-specific | Appends the Coral addendum after Omnigent's unchanged NOTICE: Coral's copyright, the attribution to Omnigent, the CORAL anchor rule, and notices for fonts Coral adds or newly documents. |
 | `README.md` | S91 | coral-specific | Adds a four-line Coral banner (attribution and a pointer to `docs/coral/README.md`) above the unchanged Omnigent README. |
-| `justfile` | S87 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build (S87). |
+| `justfile` | S87 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build, and `electron-mdm` writes and imports Coral's app-id preference domains (S87). |
 | `omnigent/conversation_browser.py` | S38 | coral-specific | `deep_link_url` generates `coral://` links for `--open-in-desktop` (S38). |
 | `omnigent/server/routes/auth.py` | S92 | coral-specific | The CLI login consent page now says "A Coral client", "this Coral server" and "from Coral", and its title suffix is "— Coral"; the upgrade notice, the omnigent login text and the server messages stay as they were (S92) |
 | `omnigent/server/routes/device_auth.py` | S92 | coral-specific | The device-grant consent page now says "this Coral server" and its title is "Authorize access — Coral"; env var names, protocol headers and client ids stay as they were (S92) |
@@ -128,6 +128,7 @@ OPS-01's generator will maintain this file later.
 | `web/src/components/PermissionsModal.designs.stories.tsx` | S89, S38 | coral-specific | The sample QR link uses `coral://` (S38) and the sample sharing copy names Coral (S89). |
 | `web/src/components/PermissionsModal.test.tsx` | S89, S38 | coral-specific | Expects `coral://` QR links (S38). Test assertions on the sharing-off and server-mode notices now expect 'Coral server' (S89). |
 | `web/src/components/PermissionsModal.tsx` | S89, S38 | coral-specific | The share QR encodes a `coral://` link from `web/src/brand/urlScheme.ts` (S38). The share modal's sharing-off notice, server-mode notices, blocked-workspace notice, and the QR dialog's description and aria-label now name the app through useAppName() (default Coral) instead of Omnigent (S89). |
+| `web/src/components/SlashCommandMenu.tsx` | S89 | coral-specific | The skill wand carries a `slash-skill-icon` hook that `coral.css` tints clay in the default palette; other palettes keep pink (S89). |
 | `web/src/components/UpdateBanner.test.tsx` | S89 | coral-specific | The update banner tests now expect "Coral Desktop" copy for the available, downloading and ready-to-install states (S89). |
 | `web/src/components/UpdateBanner.tsx` | S89 | coral-specific | The update banner's available, downloading and ready-to-install lines now say "{appName} Desktop" via useAppName() (Coral by default) instead of "Omnigent Desktop" (S89). |
 | `web/src/components/blocks/ApprovalCard.test.tsx` | S89 | coral-specific | The Antigravity always-allow title assertion now expects "for this Coral session" (S89). |

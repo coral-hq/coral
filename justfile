@@ -206,15 +206,16 @@ electron-run *flags:
 #   import                              copy this Mac's MDM values for the release app
 #   show | clear
 # Relaunch to apply. Real MDM profiles and release builds are untouched.
-# Test managed preferences for local builds (ai.omnigent.desktop-dev).
+# Test managed preferences for local builds (io.github.coral-hq.coral-dev).
 [group('electron')]
 [positional-arguments]
 electron-mdm cmd="show" *args:
     #!/usr/bin/env bash
     set -euo pipefail
     [ "$(uname)" = "Darwin" ] || { echo "electron-mdm is macOS-only."; exit 1; }
-    domain=ai.omnigent.desktop-dev
-    managed="/Library/Managed Preferences/ai.omnigent.desktop.plist"
+    # CORAL(S87): the Coral dev and release app ids (web/electron/src/brand.js).
+    domain=io.github.coral-hq.coral-dev
+    managed="/Library/Managed Preferences/io.github.coral-hq.coral.plist"
     usage="usage: just electron-mdm [set <url>[,<url>...] [--internal] | import | show | clear]"
     unset_all() {
         defaults delete "$domain" serverUrls 2>/dev/null || true
@@ -239,7 +240,7 @@ electron-mdm cmd="show" *args:
             [ "$internal" = 0 ] || defaults write "$domain" databricksInternalFeaturesEnabled -bool true
             ;;
         import)
-            [ -r "$managed" ] || { echo "No managed preferences for ai.omnigent.desktop on this Mac."; exit 1; }
+            [ -r "$managed" ] || { echo "No managed preferences for io.github.coral-hq.coral on this Mac."; exit 1; }
             # import merges, so drop the old values first for an exact copy.
             unset_all
             defaults import "$domain" "$managed"

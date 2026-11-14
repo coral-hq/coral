@@ -152,8 +152,9 @@ seams:
     budget_exception:
       lines: 20
       reason: >-
-        BrandLogo's fallback drops both Otto imports and branches, and its test
-        swaps the two Otto mocks for the Coral mark.
+        BrandLogo's fallback drops both Otto imports and branches, its test
+        swaps the two Otto mocks for the Coral mark, and the browser lane's
+        working-indicator test trades the Otto blink check for the Coral pulse.
       approver: pending
     anchor_exempt: []
     upstream_first: false
@@ -246,6 +247,7 @@ seams:
       - web/src/shell/QuitDialog.test.tsx
       - web/src/shell/Sidebar.tsx
       - web/update-overlay.html
+      - web/src/components/SlashCommandMenu.tsx
       - tests/e2e_ui/collaboration/test_permissions_modal.py
       - tests/e2e_ui/collaboration/test_sharing_mode_off.py
       - tests/e2e_ui/sessions/test_settings_export_import.py
@@ -372,7 +374,8 @@ seams:
       lines: 70
       reason: >-
         Every deep-link fixture in the Electron, web, Python and iOS tests moves
-        from omnigent:// to coral://; the production edits stay within XS.
+        from omnigent:// to coral://, and conversation_browser.py's docstrings
+        follow its coral:// link (11 lines).
       approver: pending
     anchor_exempt:
       - web/electron/package.json

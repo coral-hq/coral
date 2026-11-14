@@ -543,7 +543,8 @@ function MenuRowButton({
                 "size-3.5",
                 isBuiltin
                   ? "text-slate-500 dark:text-slate-400"
-                  : "text-pink-500 dark:text-pink-400",
+                  : // CORAL(S89): slash-skill-icon lets coral.css tint the wand clay in the default palette.
+                    "slash-skill-icon text-pink-500 dark:text-pink-400",
               )}
             />
           </span>

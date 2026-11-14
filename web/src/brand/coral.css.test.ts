@@ -103,6 +103,9 @@ describe("coral.css", () => {
     expect(declaration(light, "--tag-pink")).toBe("rgba(134, 74, 49, 0.08)");
     expect(declaration(light, "--primary-cta")).toBe("var(--coral-clay)");
     expect(declaration(dark, "--primary-cta")).toBe("var(--coral-mustard)");
+    expect(declaration(rules.get(`${LIGHT_DEFAULT} .slash-skill-icon`), "color")).toBe(
+      "var(--brand-accent)",
+    );
   });
 
   it("keeps true destructive red", () => {

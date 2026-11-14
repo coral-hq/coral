@@ -83,6 +83,16 @@
   background: linear-gradient(150deg, #a3623f 0%, #7a432c 40%, #5f251d 100%);
 }
 
+/* The composer's skill wand is clay, like the transcript's skill card, instead of
+ * Tailwind pink; other palettes keep their pink. */
+:root:not(.dark):not([data-theme]) .slash-skill-icon {
+  color: var(--brand-accent);
+}
+
+.dark:not([data-theme]) .slash-skill-icon {
+  color: var(--coral-clay);
+}
+
 /* Working indicator: the Coral mark pulses in place (opacity only, so it never
  * shifts the row) instead of Otto's blink. */
 @keyframes coral-mark-pulse {
