@@ -13,8 +13,7 @@ configured wrapper.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, MutableMapping  # CORAL(S96): name_invoked_command
-from pathlib import PureWindowsPath  # CORAL(S96): name_invoked_command
+from collections.abc import Mapping
 
 DEFAULT_CLI_NAME = "omnigent"
 WRAPPER_COMMAND_ENV = "OMNIGENT_WRAPPER_COMMAND"
@@ -31,18 +30,3 @@ def cli_invocation(*, name: str = DEFAULT_CLI_NAME, env: Mapping[str, str] | Non
     if env is None:
         env = os.environ
     return (env.get(WRAPPER_COMMAND_ENV) or "").strip() or name
-
-
-# CORAL(S96): a CLI run as `coral` names itself `coral` in hints
-CORAL_CLI_NAME = "coral"
-
-
-def name_invoked_command(argv0: str, env: MutableMapping[str, str]) -> None:
-    """Make hints spell ``coral`` when the user ran the CLI as ``coral``.
-
-    A configured wrapper command wins. The value goes into ``env`` so that
-    daemons and runners started from this process name the same command.
-    """
-    invoked = PureWindowsPath(argv0).stem  # accepts either path separator on every OS
-    if invoked == CORAL_CLI_NAME and not (env.get(WRAPPER_COMMAND_ENV) or "").strip():
-        env[WRAPPER_COMMAND_ENV] = CORAL_CLI_NAME

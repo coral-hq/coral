@@ -2279,11 +2279,6 @@ def main() -> None:
     # to pass through. Refuse naked calls before any work happens.
     _enforce_wrapper_guard()
 
-    # CORAL(S96): after the guard, so its redirect still names the operator's wrapper
-    from omnigent.cli_invocation import name_invoked_command
-
-    name_invoked_command(sys.argv[0], os.environ)
-
     # Legacy-codepage stdio (Windows ANSI, C locale, PYTHONIOENCODING)
     # can't encode the CLI's glyphs; harden the streams before any command
     # renders so the write degrades instead of aborting.

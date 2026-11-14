@@ -599,24 +599,19 @@ seams:
     upstream_candidate: false
 
   - id: S96
-    title: CLI hints, crash reports and /bug name Coral
+    title: Crash reports and /bug name Coral and file issues on Coral
     owner: WS-BRAND
     status: landed
     category: coral-specific
     note: >-
-      Run as `coral`, the CLI sets OMNIGENT_WRAPPER_COMMAND=coral unless an
-      operator already set it, so every cli_invocation() hint, in this process
-      and the daemons it starts, names coral; run as omnigent, hints are
-      unchanged. The crash handler and the REPL's /bug file issues on
-      coral-hq/coral.
+      The crash handler and the REPL's /bug file issues on coral-hq/coral.
+      CLI hints keep the original `omnigent` commands; `coral` runs the same CLI.
     files:
-      - omnigent/cli_invocation.py
       - omnigent/cli.py
       - omnigent/repl/_repl.py
       - tests/cli/test_crash_handler.py
       - tests/repl/test_report_command.py
     tests:
-      - tests/coral/test_coral_cli_name.py
       - tests/cli/test_crash_handler.py
       - tests/repl/test_report_command.py
     budget_lines: 40

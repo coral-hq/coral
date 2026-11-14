@@ -30,12 +30,16 @@ plan. This pass supersedes these rows of section 3:
 | `f3fabb9b0` | CORAL: S91, S94: Coral's README and GitHub community files | Coral's own README; `SECURITY.md`, `CONTRIBUTING.md` and the issue templates point to Coral. |
 | `b5f877cfb` | CORAL: S93: rebrand report update and inventory | This section and the regenerated inventory: 4 server-page rows now count as changed. |
 | `0b8eee004` | CORAL: S93, S94: link Coral's private advisories and Discussions | After the owner turned both on: `SECURITY.md` links Coral's private advisories, and the issue chooser links Discussions. |
-| (this commit) | CORAL: S91, S93: README focuses on Coral and credits Omnigent | The README drops its inventory of what still says Omnigent and its sync procedure; this report keeps both. |
+| `dd08858f4` | CORAL: S91, S93: README focuses on Coral and credits Omnigent | The README drops its inventory of what still says Omnigent and its sync procedure; this report keeps both. |
+| `65c928246` | CORAL: S79, S88, S89, S89b, S91: the Coral logo replaces the placeholder mark | `docs/coral/design/coral.png` and `.coral/tools/brand_assets.py`, which generates every icon and in-app copy from it. |
+| `5e58872a6` | CORAL: S95: brand transform of Omnigent 2a9cbe2c2, commands kept | The base snapshot rebuilt with the revised rule; its parent is `93d9e2c88`. |
+| `2b0442bf1` | CORAL: S95: keep the original omnigent commands; coral wraps the same CLI | The owner's decision: every `omnigent` command stays as written and `coral` runs the same CLI. Merging the rebuilt snapshot returned the CLI help examples to `omnigent ...`. |
+| (this commit) | CORAL: S29, S91, S93, S96: hints keep the omnigent commands | Removes the hint renaming from `84b6b9d11` (crash reports and `/bug` still go to Coral); the README leads with `coral start` and explains that `coral` wraps the CLI. |
 
 **What the transform changes.** In `omnigent/` and `tests/` Python files:
 
 - "Omnigent" in prose string literals becomes "Coral", and "an Omnigent" becomes "a Coral";
-- in click command help and `help=` text, `omnigent <command>` and `omni <command>` also become `coral <command>`.
+- in click command help and `help=` text, the product name changes the same way; the `omnigent <command>` examples stay, because `coral` runs the same CLI.
 
 Each rewritten file gets one `CORAL(S95)` line at the top. The script checks
 that only string literals changed before it writes.
@@ -53,7 +57,7 @@ that only string literals changed before it writes.
 - `coral --version` prints `omnigent 0.22.0.dev0`. OPS-03 owns the Coral version line.
 - `coral upgrade` upgrades a wheel install to Omnigent's release on PyPI. Its help says so. OPS-03 blocks it for `coral`.
 - The `sandbox` and `upgrade` command summaries. Their help mixes Coral steps with upstream install commands, so the script keeps them whole.
-- About 200 runtime messages that hard-code `omnigent <command>` instead of calling `cli_invocation()`. Routing them through `cli_invocation()` is an upstream candidate.
+- Every `omnigent` command, by the owner's decision: in help, hints and docs. `coral` wraps the same CLI, so each one also runs as `coral <command>`.
 - Internal names, kept so Omnigent's changes keep merging cleanly:
   - the `omnigent` package, its imports and its distribution name;
   - the `omnigent` and `omni` commands, which are the same CLI as `coral`;
@@ -70,7 +74,7 @@ that only string literals changed before it writes.
 | Full default pytest lanes (`-n 8 -m "not databricks"`) on the rebranded tree, before the final rule and hint changes | 49,838 passed, 194 failed, 5 errors. Rerun alone, 53 of those failed identically on the base tree: no ripgrep, no PyYAML in the system `python3`, Linux-only `os.waitid`, macOS socket-path limits, tmux sockets. The rest passed alone, except 32 caused by a first hint design (changing the default name), which was replaced. |
 | The same 197 tests on the final tree | Identical to the base tree's failures, except one load-flaky zygote test that passes alone (its files are unchanged). |
 | The 72 changed test files, `tests/server/test_openapi_drift.py` and `tests/cli/test_cli_invocation.py` on the committed tree | 6,858 passed; 3 failed, all of which fail on the base tree too (`test_claude_native_bridge.py` relay timing). |
-| `tests/coral/` (transform and `coral` hint tests) | 36 passed |
+| `tests/coral/` (transform tests) | 36 passed at the time; 27 transform tests and 4 asset tests after the commands decision |
 | `rebrand.py check` on `main` | clean |
 | Ledger check (roots, anchors, budgets, no deletions or renames) | 0 problems, 387 ledgered files |
 | Audits: LICENSE files, NOTICE prefix, `PoweredByOmnigent.tsx`, every modified file in `MODIFICATIONS.md` with an anchor | passed |

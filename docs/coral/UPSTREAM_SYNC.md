@@ -107,11 +107,17 @@ remote is fetch-only: its push URL is `DISABLED`.
 
 ## When the rules change
 
-Change the script and its tests on `main` first. Run
-`.venv/bin/python -I .coral/tools/rebrand.py apply` on `main`, and commit the
-result with the rule change. The next sync's transformed commit uses the new
-rules. Its diff from the previous transformed commit also carries the rule
-change, which `main` already has, so those lines merge cleanly.
+Change the script and its tests on `main` first.
+
+- A rule that rewrites more: run `.venv/bin/python -I .coral/tools/rebrand.py apply`
+  on `main` and commit the result with the rule change.
+- A rule that rewrites less: `apply` cannot undo earlier rewrites. Rebuild the
+  transformed snapshot of the current `merged_sha` with the new script (steps
+  2-4, with `PREVIOUS` as the only parent), merge it, and update
+  `transformed_sha`. The merge returns those lines to their upstream text.
+
+Either way, the next sync's transformed commit uses the new rules, and its
+diff from the previous transformed commit merges cleanly.
 
 ## What the transform leaves alone
 

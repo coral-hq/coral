@@ -21,14 +21,13 @@ OPS-01's generator will maintain this file later.
 | `CONTRIBUTING.md` | S94 | coral-specific | Retitled for Coral, with a note on seams in Omnigent files; the clone URL and the bug-report field point to Coral. |
 | `MODIFICATIONS.md` | S77 | coral-specific | Added. This file. |
 | `NOTICE` | S77 | coral-specific | Appends the Coral addendum after Omnigent's unchanged NOTICE: Coral's copyright, the attribution to Omnigent, the CORAL anchor rule, and notices for fonts Coral adds or newly documents. |
-| `README.md` | S91 | coral-specific | Replaced by Coral's README: what Coral is, its status, running it from source, telemetry, documentation, contributing, and the credit and attribution to Omnigent. |
+| `README.md` | S91 | coral-specific | Replaced by Coral's README: what Coral is, its status, running it from source with `coral start` (the `coral` command wraps the same CLI as `omnigent`), telemetry, documentation, contributing, and the credit and attribution to Omnigent. |
 | `SECURITY.md` | S94 | coral-specific | Vulnerability reports go to Coral's private security advisories or coralai.team@gmail.com; the code-scanning link points to Coral's repository. |
 | `justfile` | S87 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build, and `electron-mdm` writes and imports Coral's app-id preference domains (S87). |
 | `omnigent/chat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/cli.py` | S96, S95 | coral-specific | Calls `name_invoked_command` after the wrapper guard; the crash handler shows Coral and files issues on coral-hq/coral. Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/cli.py` | S96, S95 | coral-specific | The crash handler shows Coral and files issues on coral-hq/coral. Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/cli_config.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/cli_diagnostics.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/cli_invocation.py` | S96 | coral-specific | Adds `name_invoked_command`: run as `coral`, hints name `coral` unless a wrapper command is configured. |
 | `omnigent/cli_native.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/cli_sandbox.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/conversation_browser.py` | S38, S95 | coral-specific | `deep_link_url` generates `coral://` links for `--open-in-desktop` (S38). Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |

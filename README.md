@@ -54,17 +54,22 @@ uv venv --python "$(cat .python-version)"
 uv sync --extra all --group dev
 ```
 
-Start a local server, then register this machine as a host so the web UI can
-start sessions on it:
+Then start Coral with one command:
 
 ```bash
-uv run coral server                                # terminal 1: http://localhost:6767
-uv run coral host --server http://localhost:6767   # terminal 2
+uv run coral start
 ```
 
-Open http://localhost:6767. From a terminal, `uv run coral claude` or
-`uv run coral codex` starts that agent with Coral, and `uv run coral --help`
-lists every command. For the desktop app, run `just electron-dev`.
+`coral start` runs a local server in the background, registers this machine so
+sessions can run on it, and opens the web UI at http://localhost:6767.
+`uv run coral stop` turns it off. To chat in the terminal instead, run
+`uv run coral run --harness claude` (or `codex`, `cursor`, and so on).
+`uv run coral setup` configures your agents and credentials. For the desktop
+app, run `just electron-dev`.
+
+`coral` wraps Omnigent's command-line tool, so every `omnigent` command also
+runs as `coral`: `coral server`, `coral host`, `coral claude` and the rest work
+exactly as Omnigent documents them. `uv run coral --help` lists them all.
 
 ## Telemetry
 
@@ -80,8 +85,8 @@ export OMNIGENT_DISABLE_TELEMETRY=1   # or DO_NOT_TRACK=1
 - [docs/coral/](docs/coral/README.md): Coral's design, roadmap, and how Coral
   builds on Omnigent and stays current with it.
 - [Omnigent's documentation](https://omnigent.ai) covers the agents, harnesses,
-  policies and deployment options Coral builds on. Its `omnigent` commands work
-  as `coral` commands.
+  policies and deployment options Coral builds on. Its `omnigent` commands also
+  run as `coral`.
 
 ## Contributing
 
