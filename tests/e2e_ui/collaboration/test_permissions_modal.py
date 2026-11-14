@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """UI: the Share / permissions modal interactions themselves.
 
 The sharing-journey test (``test_sharing_journey.py``) issues every grant
@@ -321,7 +322,7 @@ def test_share_modal_qr_code_opens_mobile_deep_link(
     qr_dialog = page.get_by_role("dialog").filter(has_text="Scan with your phone").last
     expect(qr_dialog).to_be_visible(timeout=10_000)
     # The QR code is an SVG element inside the dialog.
-    qr_svg = qr_dialog.locator("[aria-label='QR code to open this session in the Omnigent app']")
+    qr_svg = qr_dialog.locator("[aria-label='QR code to open this session in the Coral app']")
     expect(qr_svg).to_be_visible(timeout=10_000)
 
     # Closing the QR dialog returns to the share modal (not dismissed

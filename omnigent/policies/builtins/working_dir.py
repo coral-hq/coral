@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Built-in working-directory / worktree policy (shell-surface).
 
 A single factory, :func:`block_working_dir_changes`, that gates shell commands
@@ -463,7 +464,7 @@ POLICY_REGISTRY: list[dict[str, Any]] = [  # type: ignore[explicit-any]
             "Gates shell commands that switch the working directory "
             "(cd / chdir / pushd / popd, "
             "git -C) or git worktrees (git worktree add / move / remove). "
-            "Supports Omnigent, Claude/Codex, Cursor, Pi, Hermes, and Goose "
+            "Supports Coral, Claude/Codex, Cursor, Pi, Hermes, and Goose "
             "shell tools. Optionally allow cd into specific directories via allowed_dirs. "
             "Chained, wrapped (bash -c), and env-prefixed commands are parsed "
             "so the gate cannot be trivially bypassed."

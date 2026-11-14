@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Browser contract: the Appearance color-palette picker skins the app and persists.
 
 Alongside the light/dark **mode** tiles, ``AppearanceSection``
@@ -274,7 +275,7 @@ def test_color_palette_applies_persists_and_resets(
     # key cleared, since the default reverts to the base brand tokens.
     _pick_palette(page, "Omnigent")
     expect(_color_theme_select(page)).to_contain_text("Omnigent")
-    assert _data_theme(page) is None, "<html> kept data-theme after returning to Omnigent"
+    assert _data_theme(page) is None, "<html> kept data-theme after returning to Coral"
     assert _stored_palette(page) is None, "the palette key was not cleared for the default"
 
 

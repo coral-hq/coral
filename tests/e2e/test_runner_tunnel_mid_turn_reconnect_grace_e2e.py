@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """E2E: tunnel reconnections preserve in-flight work on the same or a new replica.
 
 Real server and runner processes communicate through the production WebSocket
@@ -408,7 +409,7 @@ class _ReconnectStack:
         _poll_until(
             self._server_healthy,
             timeout=_HEALTH_TIMEOUT_S,
-            what="the real Omnigent server to become healthy",
+            what="the real Coral server to become healthy",
         )
         self.proxy = _TunnelIngressProxy("127.0.0.1", self._port)
         proxy_url = f"http://127.0.0.1:{self.proxy.port}"
@@ -526,7 +527,7 @@ class _Replica:
         _poll_until(
             self._healthy,
             timeout=_HEALTH_TIMEOUT_S,
-            what="the second Omnigent replica to become healthy",
+            what="the second Coral replica to become healthy",
         )
 
     def _healthy(self) -> bool:

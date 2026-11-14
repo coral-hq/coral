@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Reject known-unavailable harnesses before creating a session."""
 
 from __future__ import annotations
@@ -73,8 +74,8 @@ async def validate_create_harness_readiness(
         raise OmnigentError(
             f"Harness {harness!r} needs tmux {MIN_TMUX_VERSION_HINT} or newer on the target "
             "host. Install or upgrade tmux there (macOS: `brew install tmux`), then check "
-            "the harness again. If Omnigent still can't find it, quit and reopen the "
-            "Omnigent app, or choose another harness.",
+            "the harness again. If Coral still can't find it, quit and reopen the "
+            "Coral app, or choose another harness.",
             code=ErrorCode.HARNESS_NOT_CONFIGURED,
         )
     raise OmnigentError(

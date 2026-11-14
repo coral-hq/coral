@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the top-level ``omnigent import`` command."""
 
 from __future__ import annotations
@@ -567,7 +568,7 @@ def test_import_command_continues_batch_after_network_failure(tmp_path: Path) ->
     assert result.exit_code == 1, result.output
     assert "Imported: 1" in result.output
     assert "Failed: 1" in result.output
-    assert "Could not reach the Omnigent server" in result.output
+    assert "Could not reach the Coral server" in result.output
 
 
 def test_import_command_requires_exactly_one_session_selector() -> None:

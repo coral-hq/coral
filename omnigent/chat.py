@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Implementation of the ``omnigent chat`` command.
 
 The CLI always ends by connecting an Omnigent client to a server URL. For
@@ -1796,13 +1797,13 @@ def _unreachable_server_message(base_url: str) -> str:
     """
     if is_loopback_url(base_url):
         return (
-            f"Could not connect to the local Omnigent server at {base_url}. "
+            f"Could not connect to the local Coral server at {base_url}. "
             f"It may have stopped — run `{cli_invocation()} stop`, then try again. "
             f"Server logs are under {process_log_dir_reference('server')}."
         )
 
     return (
-        f"Could not connect to the Omnigent server at {display_server_url(base_url)}. "
+        f"Could not connect to the Coral server at {display_server_url(base_url)}. "
         "Check the URL, your network connection, and any HTTP proxy settings."
     )
 

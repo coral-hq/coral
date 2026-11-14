@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """SDK in-process transport driver and shared turn results."""
 
 from __future__ import annotations
@@ -314,7 +315,7 @@ class SdkInprocDriver:
         )
 
     async def run_mcp_tool_turn(self) -> TurnResult:
-        return TurnResult(error="Omnigent MCP relay is not observable on sdk-inproc")
+        return TurnResult(error="Coral MCP relay is not observable on sdk-inproc")
 
     async def run_fork_turn(self, marker: str) -> ForkResult:
         return ForkResult(error="session fork is not observable on sdk-inproc")

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 Interactive cost-budget approval prompt for a native terminal.
 
@@ -405,11 +406,11 @@ def _read_omnigent_routing(config_file: Path) -> dict[str, object]:
         raw = json.loads(config_file.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
         raise SystemExit(
-            f"cost-approval popup: cannot read Omnigent config {config_file}: {exc}"
+            f"cost-approval popup: cannot read Coral config {config_file}: {exc}"
         ) from exc
     if not isinstance(raw, dict) or not isinstance(raw.get("ap_server_url"), str):
         raise SystemExit(
-            f"cost-approval popup: Omnigent config {config_file} has no 'ap_server_url' string"
+            f"cost-approval popup: Coral config {config_file} has no 'ap_server_url' string"
         )
     return raw
 

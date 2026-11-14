@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the embedded-browser (``browser_*``) tool surface.
 
 Covers the runner-side half of the feature:
@@ -141,7 +142,7 @@ async def test_browser_tool_read_timeout_returns_clean_json() -> None:
     )
     parsed = json.loads(out)
     assert "timed out" in parsed["error"]
-    assert "Omnigent desktop app" in parsed["error"]
+    assert "Coral desktop app" in parsed["error"]
 
 
 @pytest.mark.asyncio

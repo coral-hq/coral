@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the native Claude Code terminal wrapper helpers."""
 
 from __future__ import annotations
@@ -6030,7 +6031,7 @@ async def test_resolve_cold_resume_args_replaces_existing_local_claude_transcrip
         "type": "message",
         "status": "completed",
         "role": "user",
-        "content": [{"type": "input_text", "text": "fresh Omnigent text"}],
+        "content": [{"type": "input_text", "text": "fresh Coral text"}],
     }
     item_requests = 0
 
@@ -6062,13 +6063,13 @@ async def test_resolve_cold_resume_args_replaces_existing_local_claude_transcrip
         args = await claude_native._resolve_cold_resume_args(client, "conv_abc")
 
     assert args == ("--resume", "claude-uuid-abc")
-    assert item_requests == 1, "cold resume must fetch Omnigent items even when local JSONL exists"
+    assert item_requests == 1, "cold resume must fetch Coral items even when local JSONL exists"
     records = [
         json.loads(line)
         for line in transcript_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert [record["message"]["content"] for record in records] == ["fresh Omnigent text"]
+    assert [record["message"]["content"] for record in records] == ["fresh Coral text"]
 
 
 @pytest.mark.asyncio
@@ -6105,7 +6106,7 @@ async def test_resolve_cold_resume_args_resumes_a_copy_while_a_background_job_ru
         "type": "message",
         "status": "completed",
         "role": "user",
-        "content": [{"type": "input_text", "text": "fresh Omnigent text"}],
+        "content": [{"type": "input_text", "text": "fresh Coral text"}],
     }
     items_from_ap = [item_from_ap]
 
@@ -6141,7 +6142,7 @@ async def test_resolve_cold_resume_args_resumes_a_copy_while_a_background_job_ru
                 **item_from_ap,
                 "id": "msg_user_2",
                 "response_id": "resp_2",
-                "content": [{"type": "input_text", "text": "later Omnigent text"}],
+                "content": [{"type": "input_text", "text": "later Coral text"}],
             }
         )
         later_args = await claude_native._resolve_cold_resume_args(client, "conv_abc")
@@ -6161,8 +6162,8 @@ async def test_resolve_cold_resume_args_resumes_a_copy_while_a_background_job_ru
         if line.strip()
     ]
     assert [record["message"]["content"] for record in records] == [
-        "fresh Omnigent text",
-        "later Omnigent text",
+        "fresh Coral text",
+        "later Coral text",
     ]
     assert {record["sessionId"] for record in records} == {copy_session_id}
     assert sorted(path.name for path in project_dir.iterdir()) == sorted(
@@ -6220,7 +6221,7 @@ async def test_resolve_cold_resume_args_resumes_in_place_when_the_registry_check
         "type": "message",
         "status": "completed",
         "role": "user",
-        "content": [{"type": "input_text", "text": "fresh Omnigent text"}],
+        "content": [{"type": "input_text", "text": "fresh Coral text"}],
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -6871,7 +6872,7 @@ async def test_attach_passes_start_at_end_true_on_cold_resume(
         f"cold_resumed=True must force start_at_end=True; got "
         f"start_at_end={captured.get('start_at_end')!r}. Without this, "
         f"every prior turn in the reopened claude transcript is "
-        f"re-POSTed to Omnigent on resume and broadcast to live clients."
+        f"re-POSTed to Coral on resume and broadcast to live clients."
     )
 
 

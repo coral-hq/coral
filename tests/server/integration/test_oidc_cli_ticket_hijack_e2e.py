@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """A passive victim sign-in must never release credentials to the ticket creator."""
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ async def test_attacker_ticket_not_redeemable_after_passive_victim_signin(
 
         if login_url == "/auth/cli-upgrade":
             page = await victim_browser.get(login_url)
-            assert "Update Omnigent to sign in" in page.text
+            assert "Update Coral to sign in" in page.text
             # Even placing the notice marker into a real login cannot redeem it.
             login_url = f"/auth/login?ticket={ticket}"
 

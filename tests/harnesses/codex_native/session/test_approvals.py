@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Approvals tests for Codex session."""
 
 from __future__ import annotations
@@ -471,7 +472,7 @@ def test_forwarder_logs_unsupported_codex_server_request(
         :param request: HTTP request sent by the forwarder.
         :returns: Never returns.
         """
-        raise AssertionError(f"unexpected Omnigent request: {request.method} {request.url}")
+        raise AssertionError(f"unexpected Coral request: {request.method} {request.url}")
 
     async def run() -> None:
         """

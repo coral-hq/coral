@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Route managed terminals' native text copies through clipboard consent.
 
 The private ``pbcopy`` command talks to a write-only, size-limited socket.
@@ -185,15 +186,13 @@ def _main() -> int:
         if option == "-Prefer" and args and args.pop(0) == "txt":
             continue
         print(
-            "Omnigent terminal copying supports plain text on the general clipboard.",
+            "Coral terminal copying supports plain text on the general clipboard.",
             file=sys.stderr,
         )
         return 2
     payload = sys.stdin.buffer.read(MAX_CLIPBOARD_BYTES + 1)
     if not payload:
-        print(
-            "Omnigent terminal copying does not support clearing the clipboard.", file=sys.stderr
-        )
+        print("Coral terminal copying does not support clearing the clipboard.", file=sys.stderr)
         return 1
     if _copy_to_terminal(sys.argv[1], payload):
         return 0

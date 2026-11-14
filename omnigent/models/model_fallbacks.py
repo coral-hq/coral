@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Owned static model tables for routing, background titles and Pi compatibility.
 
 Pre-launch picker listings carry no static stand-ins anymore — the live
@@ -70,7 +71,7 @@ PI_ANTHROPIC_BUDGET_THINKING = StaticModelFallback(
 _CODEX_ARM_PREFERENCE = StaticModelFallback(
     model_ids=("gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5"),
     owner="Databricks model discovery (omnigent.models.databricks_model_discovery)",
-    provenance="Omnigent's release-curated Codex arm ordering",
+    provenance="Coral's release-curated Codex arm ordering",
     discovery_gap="a workspace listing ranks models by neither recency nor capability",
 )
 
@@ -92,7 +93,7 @@ def static_model_fallback(provider_kind: str, cli: str) -> StaticModelFallback |
 _CODEX_LAUNCH_DEFAULT = StaticModelFallback(
     model_ids=("gpt-5.6-sol",),
     owner="Codex native launch",
-    provenance="codex's catalog slug for Omnigent's preferred launch arm",
+    provenance="codex's catalog slug for Coral's preferred launch arm",
     discovery_gap=(
         "the launch default is resolved before any app-server probe can "
         "answer, and codex rejects the bundled catalog's newest row (a bare "

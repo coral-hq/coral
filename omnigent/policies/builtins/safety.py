@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Built-in safety policies for common guardrails.
 
 Provides ready-to-use policy callables that admins and users
@@ -986,7 +987,7 @@ POLICY_REGISTRY: list[dict[str, object]] = [
         "kind": "callable",
         "name": "Require Approval for File & Shell Operations",
         "description": "Asks for user approval before any file or shell tool call — "
-        "covers Omnigent sys_os_* tools, the Omnigent sys_terminal_* tools that "
+        "covers Coral sys_os_* tools, the Coral sys_terminal_* tools that "
         "launch, type into, read, or close a terminal, Claude Code and Codex native tools "
         "(Bash, Read, Write, Edit, MultiEdit, NotebookEdit, Glob, Grep), "
         "Cursor native tools (Shell), Pi native tools (read, bash, write, edit), "

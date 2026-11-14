@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """CopilotExecutor: run agents through the GitHub Copilot SDK (``github-copilot-sdk``).
 
 Drives GitHub Copilot via :mod:`copilot` (the ``github-copilot-sdk`` package) —
@@ -496,14 +497,14 @@ class CopilotExecutor(Executor):
             verdict = await evaluator("PHASE_TOOL_CALL", {"name": name, "arguments": args})
             if getattr(verdict, "action", "") == "POLICY_ACTION_DENY":
                 reason = getattr(verdict, "reason", "") or "blocked by policy"
-                return PermissionDecisionReject(feedback=f"Denied by Omnigent policy: {reason}")
+                return PermissionDecisionReject(feedback=f"Denied by Coral policy: {reason}")
 
         # Stage 2 — user elicitation: surface an approval card.
         handler = self._elicitation_handler
         if handler is not None:
             approved = await handler(name, args)
             if not approved:
-                return PermissionDecisionReject(feedback="Denied via Omnigent approval UI")
+                return PermissionDecisionReject(feedback="Denied via Coral approval UI")
 
         return PermissionDecisionApproveOnce()
 

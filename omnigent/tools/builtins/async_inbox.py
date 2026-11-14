@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 LLM-callable async-dispatch builtins.
 
@@ -62,7 +63,7 @@ class SysCancelTaskTool(Tool):
             "will transition to cancelled status; you'll see a "
             "[System: task ... cancelled] message before your next "
             "iteration. Already-terminal tasks are unchanged (no error). "
-            "NOTE: this tool only cancels tasks that Omnigent created via "
+            "NOTE: this tool only cancels tasks that Coral created via "
             "sys_session_send / sys_call_async. Background shell commands "
             "launched by Bash (`&`) are tracked by the Claude SDK — kill "
             "those with the KillBash tool instead. Calling sys_cancel_task "
@@ -298,7 +299,7 @@ class SysReadInboxTool(Tool):
             "a textual summary; an empty inbox returns a sentinel "
             "string. It is also the expected response to the runtime's "
             f"sub-agent wake notice `{SUBAGENT_WAKE_NOTICE_SHAPE}`, which "
-            "Omnigent posts into your session when a dispatched child "
+            "Coral posts into your session when a dispatched child "
             "finishes; that notice comes from the runtime, not from a person."
         )
 

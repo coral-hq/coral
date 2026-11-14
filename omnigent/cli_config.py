@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Interactive harness & credential configuration for the CLI.
 
 Everything behind ``omnigent config`` / ``omnigent setup`` and the first-run
@@ -323,7 +324,7 @@ def _run_configure_databricks() -> None:
             "see the command output above for details."
         )
 
-    click.echo("ucode configuration complete. Omnigent will use state.json for harness setup.")
+    click.echo("ucode configuration complete. Coral will use state.json for harness setup.")
 
 
 def _warn_missing_harness_dependencies() -> None:
@@ -2255,7 +2256,7 @@ def _print_goose_auth_help() -> None:
     from omnigent.onboarding.interactive import console
 
     console.print(
-        "\n  [bold]Configure Goose[/bold] (Omnigent stores no Goose credential):\n"
+        "\n  [bold]Configure Goose[/bold] (Coral stores no Goose credential):\n"
         "    • Interactive: run [bold]goose configure[/bold] to pick a provider "
         "and store its key (keyring or ~/.config/goose/config.yaml)\n"
         "    • Env override: set [bold]GOOSE_PROVIDER[/bold] + [bold]GOOSE_MODEL[/bold] "
@@ -2398,7 +2399,7 @@ def _print_acp_examples() -> None:
     console.print(
         "\n  [bold]Custom ACP agents[/bold] — connect any agent that speaks the "
         "Agent Client Protocol ([underline]agentclientprotocol.com[/underline]).\n"
-        "  Omnigent stores no credential — log into each agent via its own CLI first.\n\n"
+        "  Coral stores no credential — log into each agent via its own CLI first.\n\n"
         "  Example commands to paste:\n"
         "    • Gemini CLI     [bold]gemini --experimental-acp[/bold]\n"
         "    • Qwen Code      [bold]qwen --acp[/bold]\n"
@@ -2532,7 +2533,7 @@ def _import_openclaw_agents() -> None:
                 f"    • [bold]{escape(entry.name)}[/bold] → "
                 f"[dim]{escape(entry.command)}[/dim]{suffix}"
             )
-        console.print("  [dim]Omnigent stores only these launch commands, not credentials.[/dim]")
+        console.print("  [dim]Coral stores only these launch commands, not credentials.[/dim]")
 
         if not click.confirm("Import coding agents from OpenClaw?", default=True):
             console.print("  [yellow]Skipped OpenClaw import.[/yellow]")
@@ -2835,7 +2836,7 @@ def _print_kimi_auth_help() -> None:
         '            type = "kimi"\n'
         '            base_url = "https://api.kimi.com/coding/v1"\n'
         '            api_key = "sk-…"[/dim]\n'
-        "    • Omnigent stores no kimi credential and cannot thread one per "
+        "    • Coral stores no kimi credential and cannot thread one per "
         "spawn — configure it once in the kimi CLI\n"
     )
 
@@ -3557,8 +3558,8 @@ def _print_opencode_auth_help() -> None:
         "      stored in ~/.local/share/opencode/auth.json.\n"
         "    • Provider env vars (OPENAI_API_KEY / ANTHROPIC_API_KEY / …) are auto-detected.\n"
         "    • Databricks gateway: set an agent ``profile`` (configured under Claude / Codex);\n"
-        "      Omnigent synthesizes opencode's per-session provider config from it.\n"
-        "  Omnigent stores no OpenCode credential of its own.\n"
+        "      Coral synthesizes opencode's per-session provider config from it.\n"
+        "  Coral stores no OpenCode credential of its own.\n"
         f"  [dim]Tip:[/dim] 'Set default model' picks which model "
         f"`{cli_invocation(name='omni')} opencode` launches on\n"
         "  (otherwise OpenCode uses its built-in default, opencode/big-pickle)."

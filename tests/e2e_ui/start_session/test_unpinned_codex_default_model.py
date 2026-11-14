@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """E2E: an unpinned native Codex session launches on Omnigent's Codex default.
 
 With a provider that pins no model and a Codex catalog whose own default
@@ -314,5 +315,5 @@ def test_unpinned_native_codex_session_launches_on_omnigent_default(
     )
     assert launched == CODEX_DEFAULT_MODEL, (
         f"unpinned native Codex session launched on {launched!r} instead of "
-        f"Omnigent's default {CODEX_DEFAULT_MODEL!r}; pane text:\n{pane_text}"
+        f"Coral's default {CODEX_DEFAULT_MODEL!r}; pane text:\n{pane_text}"
     )

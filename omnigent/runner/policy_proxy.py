@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Runner proxy for harness policy evaluations against the Omnigent server.
 
 The harness emits ``policy_evaluation.requested``; the runner forwards it to
@@ -105,7 +106,7 @@ async def _evaluate_policy_via_omnigent(
     _default_action = "POLICY_ACTION_DENY" if _fail_closed else "POLICY_ACTION_ALLOW"
     verdict_action = _default_action
     verdict_reason: str | None = (
-        f"Omnigent policy evaluation unavailable; failing closed for {phase}."
+        f"Coral policy evaluation unavailable; failing closed for {phase}."
         if _fail_closed
         else None
     )

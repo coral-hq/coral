@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Subagents tests for Codex session."""
 
 from __future__ import annotations
@@ -428,7 +429,7 @@ def test_forwarder_registers_subagent_activity_before_child_events(
     asyncio.run(run())
 
     registrations = _registration_posts(posted, "conv_parent")
-    assert registrations, "subAgentActivity(kind=started) must create an Omnigent child session"
+    assert registrations, "subAgentActivity(kind=started) must create a Coral child session"
     assert registrations[0]["data"]["thread_id"] == "thread_child"
     child_posts = _transcript_posts(posted, "conv_child")
     assert [post["data"]["item_data"]["content"][0]["text"] for post in child_posts] == [

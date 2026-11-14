@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Runner FastAPI app — spawns harness subprocesses and dispatches to them.
 
 Per ``designs/RUNNER.md`` §1, the runner owns harness subprocesses.
@@ -1982,7 +1983,7 @@ def create_runner_app(
         terminal = _TERMINAL_DISPLAY_NAMES.get(event.terminal_name, event.terminal_name)
         message = (
             f"{terminal} terminal did not become ready before the message delivery timed "
-            "out, so Omnigent closed it and the message was not delivered. Relaunch the "
+            "out, so Coral closed it and the message was not delivered. Relaunch the "
             "terminal to continue this conversation."
         )
         if event.last_output:

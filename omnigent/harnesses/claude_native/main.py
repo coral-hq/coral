@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Native Claude Code terminal wrapper for the Omnigent CLI.
 
 The wrapper deliberately treats Claude Code as a terminal-first
@@ -6716,7 +6717,7 @@ def _preflight_local_tools(command: str) -> None:
     if resolved_command is None:
         raise click.ClickException(
             f"Claude Code CLI command {command!r} was not found on local PATH. "
-            "--server selects the Omnigent server only; Claude still runs locally."
+            "--server selects the Coral server only; Claude still runs locally."
         )
     try:
         validate_claude_hook_interpreter_compatibility(resolved_command)

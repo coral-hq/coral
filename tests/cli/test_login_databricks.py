@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for ``omnigent login`` against Databricks-fronted servers.
 
 Covers the two Databricks deployment shapes the login probe detects:
@@ -451,7 +452,7 @@ def test_login_rejects_workspace_mismatch_without_changing_login(
     assert "Requested workspace 123," in result.output
     assert "reports workspace 123456." in result.output
     assert "truncated" in result.output
-    assert "Saved Omnigent login details were not changed" in result.output
+    assert "Saved Coral login details were not changed" in result.output
     assert "omnigent stop" not in result.output
     assert fake.requests[-1]["params"] == {"o": "123"}
     assert auth_file.read_bytes() == original_auth

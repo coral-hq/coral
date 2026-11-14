@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Throwaway certificate authority for intercepting a harness's HTTPS model traffic.
 
 Machines with Claude Code managed settings pin ``ANTHROPIC_BASE_URL`` to a
@@ -52,7 +53,7 @@ class TlsInterceptor:
         now = datetime.datetime.now(datetime.UTC)
         self._key = ec.generate_private_key(ec.SECP256R1())
         self._name = x509.Name(
-            [x509.NameAttribute(NameOID.COMMON_NAME, "Omnigent resilience lab CA")]
+            [x509.NameAttribute(NameOID.COMMON_NAME, "Coral resilience lab CA")]
         )
         self._ca = (
             x509.CertificateBuilder()

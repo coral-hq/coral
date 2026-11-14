@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for omnigent.cli — bundle env var resolution."""
 
 from __future__ import annotations
@@ -147,9 +148,9 @@ def test_global_profiling_writes_summary_and_timestamped_stats(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     assert "CLI profile:" in result.stderr
-    assert "Top Omnigent call paths" in result.stderr
-    assert "Top Omnigent functions by self time" in result.stderr
-    self_time_table = result.stderr.split("Top Omnigent functions by self time", 1)[1]
+    assert "Top Coral call paths" in result.stderr
+    assert "Top Coral functions by self time" in result.stderr
+    self_time_table = result.stderr.split("Top Coral functions by self time", 1)[1]
     assert "<built-in method" not in self_time_table
     assert "Full profile data:" in result.stderr
     [profile_path] = list((tmp_path / "data" / "profiles").glob("omnigent-cli-*.prof"))
@@ -181,7 +182,7 @@ def test_python_module_entrypoint_uses_unified_click_cli() -> None:
     assert "Usage: python -m omnigent [OPTIONS] COMMAND [ARGS]..." in result.stdout
     assert "Commands:" in result.stdout
     assert "run" in result.stdout and "Attach the REPL to a live session" in result.stdout
-    assert "Omnigent quick chat" not in result.stdout
+    assert "Coral quick chat" not in result.stdout
 
 
 def _run_entrypoint(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -1092,7 +1093,7 @@ def test_codex_cli_rejects_runner_owned_transport_args(
     result = CliRunner().invoke(cli, ["codex", *codex_args])
 
     assert result.exit_code == 2, result.output
-    assert f"'{reserved}' is reserved for Omnigent" in result.output
+    assert f"'{reserved}' is reserved for Coral" in result.output
 
 
 def test_pi_config_args_form_base_cli_args_append(
@@ -1166,7 +1167,7 @@ def test_help_hides_extras_gated_harness_when_sdk_missing(
 
     assert result.exit_code == 0, result.output
     # Not listed as launchable harnesses...
-    assert "Launch Cursor with Omnigent" not in result.output
+    assert "Launch Cursor with Coral" not in result.output
     assert "Launch Antigravity" not in result.output
     # ...but a generic notice points at setup instead.
     assert "Some harnesses need an optional extra" in result.output
@@ -4603,7 +4604,7 @@ def test_global_profiling_coexists_with_run_databricks_profile(
 
     assert result.exit_code == 0, result.output
     assert seen["value"] == "my-sp"
-    assert "Top Omnigent call paths" in result.stderr
+    assert "Top Coral call paths" in result.stderr
     profiles = tmp_path / "data" / "profiles"
     assert len(list(profiles.glob("omnigent-cli-*.prof"))) == 1
 

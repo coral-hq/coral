@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Expose Omnigent's builtin tools to an ACP agent via ``session/new.mcpServers``.
 
 Shared by the ACP executors (``acp`` generic, ``goose``, ``qwen``). Reuses the
@@ -134,14 +135,14 @@ class OmnigentAcpMcp:
             )
             self._acp_servers = _to_acp_mcp_servers(build_mcp_config(self._bridge_dir))
             logger.info(
-                "acp[%s] Omnigent MCP relay ready (%d builtin tools bridged)",
+                "acp[%s] Coral MCP relay ready (%d builtin tools bridged)",
                 self._label,
                 len(tools),
             )
             return self._acp_servers
         except Exception as exc:  # noqa: BLE001 — MCP is additive; never break a turn
             logger.warning(
-                "acp[%s] Omnigent MCP bridge setup failed; agent runs without Omnigent tools: %s",
+                "acp[%s] Coral MCP bridge setup failed; agent runs without Coral tools: %s",
                 self._label,
                 exc,
             )

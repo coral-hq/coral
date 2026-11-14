@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Schema-only ``browser_*`` builtin tool classes.
 
 These classes are the **tool surface only** — ``name()``,
@@ -51,9 +52,9 @@ class BrowserNavigateTool(Tool):
     def description(cls) -> str:
         """:returns: Human-readable description of the tool."""
         return (
-            "Open or navigate the Omnigent desktop app's embedded "
+            "Open or navigate the Coral desktop app's embedded "
             "browser pane to a URL. Auto-opens the pane if it isn't "
-            "open yet. Requires the Omnigent desktop window to be "
+            "open yet. Requires the Coral desktop window to be "
             "running — fails cleanly otherwise. After a load settles, "
             "call browser_snapshot to inspect what's on the page."
         )

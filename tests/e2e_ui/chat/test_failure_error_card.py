@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Failure error pills render as clear English, not a raw code + log blob.
 
 A harness launch/turn failure persists an ``error`` transcript item. Before,
@@ -160,7 +161,7 @@ def test_provider_auth_recovery_command_copies_to_clipboard(
                 "code": "PROVIDER_AUTH_REQUIRED",
                 "message": "Your Databricks model credential is unavailable or expired.",
                 "title": "Sign in to continue",
-                "cause": "Omnigent could not obtain a model credential for this session.",
+                "cause": "Coral could not obtain a model credential for this session.",
                 "remediation": "ucode configure",
             },
         },

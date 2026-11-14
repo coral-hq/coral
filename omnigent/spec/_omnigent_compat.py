@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Omnigent compatibility surface — bundled for surgical removal.
 
 🚨 **TECH DEBT — REMOVE WHEN OMNIGENT COMPAT WORKSTREAM ENDS.**
@@ -443,7 +444,7 @@ def load_omnigent_yaml(
             for e in result.errors
         ):
             message += (
-                "\n\nNote: if this harness is valid on a newer Omnigent server, "
+                "\n\nNote: if this harness is valid on a newer Coral server, "
                 "this client (runner) may be older than the server that produced "
                 "the spec — upgrade the runner to pick up newer harnesses."
             )

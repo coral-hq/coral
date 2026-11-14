@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Manual regression through Chrome, the real host/runner, and native Codex.
 
 Requires the checked-out UI's locked dependencies, Chrome, agent-browser, tmux,
@@ -285,7 +286,7 @@ class CodexNativeChildVisibilityE2ETest(unittest.TestCase):
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=5)
         _, survivors = reap_leaked_omnigent_processes(self.data)
-        self.assertFalse(survivors, "Test-owned Omnigent processes survived cleanup")
+        self.assertFalse(survivors, "Test-owned Coral processes survived cleanup")
         for log in self.logs:
             log.close()
         # Raw native logs and credentials remain private; only deliberate test

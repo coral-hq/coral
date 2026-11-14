@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Bridge state for native Antigravity TUI sessions."""
 
 from __future__ import annotations
@@ -597,7 +598,7 @@ def _load_user_mcp_servers(real_home: Path) -> dict[str, object]:
         return {}
     except (OSError, ValueError):
         _logger.warning(
-            "Could not read the user's agy MCP config at %s; seeding only the Omnigent relay",
+            "Could not read the user's agy MCP config at %s; seeding only the Coral relay",
             path,
             exc_info=True,
         )
@@ -606,7 +607,7 @@ def _load_user_mcp_servers(real_home: Path) -> dict[str, object]:
     if not isinstance(servers, dict):
         _logger.warning(
             "agy MCP config at %s is not a JSON object with an mcpServers object; "
-            "seeding only the Omnigent relay",
+            "seeding only the Coral relay",
             path,
         )
         return {}

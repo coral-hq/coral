@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Build harness bench profiles from the canonical capability registry."""
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ _INTEGRATION_MODE_PROSE: dict[IntegrationMode, str] = {
 }
 
 _AUTH_PROSE: dict[AuthModel, str] = {
-    AuthModel.OMNIGENT_CREDENTIAL: "Omnigent credential (gateway / provider config)",
+    AuthModel.OMNIGENT_CREDENTIAL: "Coral credential (gateway / provider config)",
     AuthModel.OWN_AUTH: "Own auth (vendor login / API key)",
     AuthModel.SESSION_SCOPED_CONFIG: "Session-scoped vendor config",
 }

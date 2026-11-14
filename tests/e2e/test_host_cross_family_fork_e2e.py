@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """End-to-end tests for CROSS-FAMILY fork history carry into claude-native.
 
 Covers forking an openai-family source into the anthropic NATIVE harness:
@@ -233,7 +234,7 @@ def _recall_marker_in_clone(
     text = poll_marker(client, session_id=fork_id, marker=marker, timeout=180.0)
     assert marker in text, (
         f"{target_harness} clone did not recall {marker!r} (got {text!r}) — the "
-        f"{source_harness} source's Omnigent items were not rebuilt into the "
+        f"{source_harness} source's Coral items were not rebuilt into the "
         f"clone's native transcript, so it launched fresh without history"
     )
 

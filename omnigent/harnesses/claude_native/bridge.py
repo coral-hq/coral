@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Claude terminal utilities and the shared native-harness MCP relay.
 
 The ``serve-mcp`` entrypoint and tool relay also serve Codex, Antigravity,
@@ -594,8 +595,8 @@ def _windows_native_claude_error(claude_path: str) -> ClaudeNativeHookInterprete
     """
     return ClaudeNativeHookInterpreterMismatchError(
         "Claude Code executable "
-        f"{claude_path!r} is Windows-native, but Omnigent is running under WSL. "
-        "Claude Code cannot run Omnigent's WSL Python hook command from its Windows shell. "
+        f"{claude_path!r} is Windows-native, but Coral is running under WSL. "
+        "Claude Code cannot run Coral's WSL Python hook command from its Windows shell. "
         "Install @anthropic-ai/claude-code from WSL (for example, `npm install -g "
         "@anthropic-ai/claude-code`) so a WSL-native `claude` binary wins PATH resolution, "
         "then retry."
@@ -3013,8 +3014,7 @@ def augment_claude_args(
     if claude_code_managed_mcp_present():
         # Claude Code exits at startup on --mcp-config while an enterprise MCP config exists.
         _logger.warning(
-            "Claude Code has an enterprise managed-mcp.json; launching without "
-            "Omnigent's MCP tools."
+            "Claude Code has an enterprise managed-mcp.json; launching without Coral's MCP tools."
         )
     else:
         mcp_config = build_mcp_config(bridge_dir, python_executable=python_executable)
@@ -8286,9 +8286,9 @@ def _tool_relay_handler_factory(
                 """Detect a departed caller and keep the response's idle timer alive."""
                 nonlocal last_heartbeat
                 if closed is not None and closed.is_set():
-                    raise ConnectionAbortedError("Omnigent tool relay closed")
+                    raise ConnectionAbortedError("Coral tool relay closed")
                 if connection_monitor.select(0):
-                    raise ConnectionAbortedError("Omnigent tool caller disconnected")
+                    raise ConnectionAbortedError("Coral tool caller disconnected")
                 now = time.monotonic()
                 if now - last_heartbeat >= _TOOL_RELAY_HEARTBEAT_S:
                     self.wfile.write(b"\n")
@@ -8534,7 +8534,7 @@ def _tool_relay_handler_factory(
             # the fixed prefix is prepended.
             if len(detail) > _POLICY_PROXY_ERROR_DETAIL_MAX:
                 detail = detail[: _POLICY_PROXY_ERROR_DETAIL_MAX - 3] + "..."
-            message = f"omnigent policy-eval proxy could not reach the Omnigent server: {detail}"
+            message = f"omnigent policy-eval proxy could not reach the Coral server: {detail}"
             body = message.encode("utf-8", "replace")
             try:
                 self.send_response(HTTPStatus.BAD_GATEWAY)
@@ -8614,7 +8614,7 @@ def _run_relay_tool(
             remaining = deadline.remaining()
             if remaining <= 0:
                 return _mcp_error(
-                    f"Omnigent tool dispatch timed out after {_TOOL_CALL_TIMEOUT_S:g}s "
+                    f"Coral tool dispatch timed out after {_TOOL_CALL_TIMEOUT_S:g}s "
                     "of active work (approval waiting excluded). Cancellation requested; "
                     "completion is unknown. Check the affected state before retrying."
                 )
@@ -8631,7 +8631,7 @@ def _run_relay_tool(
             result = future.result()
     except Exception as exc:  # noqa: BLE001 - relay converts callback failures to MCP errors.
         detail = str(exc).strip() or type(exc).__name__
-        return _mcp_error(f"Omnigent tool dispatch failed: {detail}. Completion is unknown.")
+        return _mcp_error(f"Coral tool dispatch failed: {detail}. Completion is unknown.")
     finally:
         if not future.done():
             future.cancel()
@@ -8976,8 +8976,8 @@ def _handle_mcp_request(
                 "version": "0.1.0",
             },
             "instructions": (
-                "Omnigent tools are available as MCP tools when the "
-                "active Omnigent turn advertises them; local sys_os_* "
+                "Coral tools are available as MCP tools when the "
+                "active Coral turn advertises them; local sys_os_* "
                 "tools are available outside an active turn for "
                 "workspace file and shell access."
             ),
@@ -9161,7 +9161,7 @@ def _call_relay_tool(
     token = relay.get("token")
     url = relay.get("url")
     if not isinstance(token, str) or not isinstance(url, str):
-        return _mcp_error("active Omnigent tool relay is missing url/token")
+        return _mcp_error("active Coral tool relay is missing url/token")
     payload = json.dumps({"name": name, "arguments": arguments}).encode("utf-8")
     req = request.Request(
         f"{url}/tool",
@@ -9175,7 +9175,7 @@ def _call_relay_tool(
     try:
         cancelled = _MCP_CALL_CANCEL_EVENT.get()
         if cancelled is not None and cancelled.is_set():
-            return _mcp_error("Omnigent tool call cancelled before dispatch")
+            return _mcp_error("Coral tool call cancelled before dispatch")
         with request.urlopen(req, timeout=_TOOL_RELAY_POST_TIMEOUT_S) as resp:
             if resp.status >= 400:
                 return _mcp_error(f"tool relay POST failed with HTTP {resp.status}")
@@ -9188,9 +9188,7 @@ def _call_relay_tool(
                         raw = line.decode("utf-8")
                         break
                 else:
-                    raise ConnectionError(
-                        "Omnigent tool relay closed before delivering its result"
-                    )
+                    raise ConnectionError("Coral tool relay closed before delivering its result")
             else:
                 raw = resp.read().decode("utf-8")
     # ``OSError`` (the base of ``error.URLError``) also covers the bare
@@ -9203,19 +9201,19 @@ def _call_relay_tool(
     except OSError as exc:
         detail = str(exc).strip() or type(exc).__name__
         return _mcp_error(
-            f"failed to call Omnigent tool relay: {detail}. Completion is unknown; "
+            f"failed to call Coral tool relay: {detail}. Completion is unknown; "
             "check the affected state before retrying."
         )
     try:
         decoded = json.loads(raw)
     except json.JSONDecodeError:
         return _mcp_error(
-            "Omnigent tool relay returned malformed JSON. Completion is unknown; "
+            "Coral tool relay returned malformed JSON. Completion is unknown; "
             "check the affected state before retrying."
         )
     if not isinstance(decoded, dict):
         return _mcp_error(
-            "Omnigent tool relay returned non-object JSON. Completion is unknown; "
+            "Coral tool relay returned non-object JSON. Completion is unknown; "
             "check the affected state before retrying."
         )
     return decoded
@@ -11052,7 +11050,7 @@ _CONTEXT_OVERFLOW_REPLACEMENT = (
 _LOGIN_COMMAND_RE = re.compile(r"(?<![\w/])/login\b")
 
 _LOGIN_GUIDANCE = (
-    "`/login` is not available from the Omnigent web chat — run "
+    "`/login` is not available from the Coral web chat — run "
     "`omni setup` on the host to sign in again."
 )
 # Shared with the executor's /login short-circuit so the two surfaces cannot
@@ -11063,7 +11061,7 @@ MANAGED_SANDBOX_SIGN_IN_REMEDY = (
     "its credentials."
 )
 _LOGIN_GUIDANCE_MANAGED_SANDBOX = (
-    "`/login` is not available from the Omnigent web chat. " + MANAGED_SANDBOX_SIGN_IN_REMEDY
+    "`/login` is not available from the Coral web chat. " + MANAGED_SANDBOX_SIGN_IN_REMEDY
 )
 
 

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for server-owned runner session initialization coordination."""
 
 from __future__ import annotations
@@ -386,7 +387,7 @@ async def test_initializer_checks_retained_files_before_posting_to_runner(
         assert response.status_code == 201
         assert len(client.calls) == 1
     else:
-        with pytest.raises(OmnigentError, match="Update Omnigent") as error:
+        with pytest.raises(OmnigentError, match="Update Coral") as error:
             await initializer.initialize(conversation, client, timeout=10)  # type: ignore[arg-type]
         assert error.value.code == ErrorCode.CONFLICT
         assert not client.calls
@@ -402,7 +403,7 @@ async def test_attachment_init_error_propagates_and_can_retry_after_upgrade(
 
     initializer, conversation, registry, client = _attachment_initializer(db_uri, "sample.zip", [])
     client.release.set()
-    with pytest.raises(OmnigentError, match="Update Omnigent") as error:
+    with pytest.raises(OmnigentError, match="Update Coral") as error:
         await sessions_routes._ensure_runner_session_initialized(
             conversation.id,
             conversation,

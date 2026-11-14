@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for native turn sequencing, message flow, and recovery."""
 
 from __future__ import annotations
@@ -1853,7 +1854,7 @@ async def test_catch_up_scan_skips_codex_native_history_entries(
         runner_app_mod._session_histories_ref.update(saved_histories)
 
     assert server_client.get_calls == [], (
-        "Catch-up scan must skip Codex-native sessions before fetching Omnigent "
+        "Catch-up scan must skip Codex-native sessions before fetching Coral "
         "items. A GET here means reconnect recovery can observe mirrored "
         "native transcript items and replay them."
     )

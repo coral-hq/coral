@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Rendering + flow helpers for ``omnigent setup --no-internal-beta``.
 
 The user-facing model-selection surface (chunk 2b of
@@ -490,7 +491,7 @@ def add_menu_options() -> list[AddOption]:
         ),
         _opt(
             "Pi — original auth",
-            "Use Pi's own auth (~/.pi/agent) as-is, without Omnigent managing the provider.",
+            "Use Pi's own auth (~/.pi/agent) as-is, without Coral managing the provider.",
             SUBSCRIPTION_KIND,
             cli="pi",
         ),

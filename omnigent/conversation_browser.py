@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Helpers for opening Omnigent conversation URLs from CLI frontends."""
 
 from __future__ import annotations
@@ -227,7 +228,7 @@ def _open_with_platform_opener(url: str) -> bool:
 # workflows that tee the run log) can grep the conversation URL the moment
 # the session exists — before the turn finishes — without polling the
 # sessions API. Keep this literal in sync with any log-scraping consumer.
-SESSION_URL_ANNOUNCE_PREFIX = "Omnigent session: "
+SESSION_URL_ANNOUNCE_PREFIX = "Coral session: "
 
 
 def announce_conversation_url(

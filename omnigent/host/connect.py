@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Host process main loop for ``omnigent host``.
 
 Connects to the server via WebSocket, registers as a host, and
@@ -1699,7 +1700,7 @@ class HostProcess:
             `omnigent login http://localhost:6767` to authenticate."``.
         """
         return (
-            "If this server uses Omnigent accounts or OIDC login, run "
+            "If this server uses Coral accounts or OIDC login, run "
             f"`{cli_invocation()} login {self._login_hint_url()}` to authenticate."
         )
 

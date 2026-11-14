@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the runner subprocess entry-point wiring."""
 
 from __future__ import annotations
@@ -3126,7 +3127,7 @@ async def test_runner_shutdown_closes_terminal_registry(
     # instead of a shared RunnerMcpManager. No RunnerMcpManager is created on
     # startup, so mcp_managers is empty — that is the correct post-P1 behavior.
     assert not mcp_managers, (
-        "RunnerMcpManager should not be created by create_app() in Omnigent mode; "
+        "RunnerMcpManager should not be created by create_app() in Coral mode; "
         "MCP calls are proxied per-session through ProxyMcpManager"
     )
     assert async_clients and async_clients[0].closed

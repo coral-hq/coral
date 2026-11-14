@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Canonical Codex launch options and private config-file profile materialization."""
 
 from __future__ import annotations
@@ -164,7 +165,7 @@ class CodexTransportArgsError(OmnigentError, ValueError):
         super().__init__(
             f"terminal_launch_args may not contain the runner-owned Codex transport "
             f"token {token!r}. Start a new Codex session without that argument; "
-            "Omnigent starts the app-server and attaches the terminal automatically.",
+            "Coral starts the app-server and attaches the terminal automatically.",
             code=ErrorCode.HARNESS_NOT_CONFIGURED,
         )
 

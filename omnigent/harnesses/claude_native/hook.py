@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Claude Code hook recorder for the native Omnigent wrapper."""
 
 from __future__ import annotations
@@ -190,7 +191,7 @@ _EVALUATE_POLICY_TIMEOUT_S = 86400.0
 # terminal picker, where a web-only user never sees it. Asking in chat text
 # reaches both the web transcript and the terminal.
 _ASK_USER_QUESTION_UNAVAILABLE_MESSAGE = (
-    "Omnigent could not show this question in its web UI. Ask the same question, "
+    "Coral could not show this question in its web UI. Ask the same question, "
     "with its options, in a normal chat message instead, then wait for the user's reply."
 )
 _FORK_COMMAND_NAMES = frozenset({"/branch", "/fork"})
@@ -298,7 +299,7 @@ def record_hook_payload(
         )
     url = _conversation_url_for_active_session(bridge_dir, conversation_url)
     if url and payload.get("hook_event_name") == "SessionStart":
-        return {"systemMessage": f"Open this session in Omnigent: {url}"}
+        return {"systemMessage": f"Open this session in Coral: {url}"}
     return None
 
 
@@ -469,7 +470,7 @@ def _rotate_session_on_clear(bridge_dir: Path) -> str | None:
                 bridge_dir,
             )
     except httpx.HTTPError as exc:
-        print(f"omnigent claude clear hook: Omnigent rotation failed: {exc}", file=sys.stderr)
+        print(f"omnigent claude clear hook: Coral rotation failed: {exc}", file=sys.stderr)
         return None
     except RuntimeError as exc:
         print(f"omnigent claude clear hook: rotation failed: {exc}", file=sys.stderr)
@@ -531,7 +532,7 @@ def _rotate_session_on_fork(bridge_dir: Path) -> str | None:
                 bridge_dir,
             )
     except httpx.HTTPError as exc:
-        print(f"omnigent claude fork hook: Omnigent fork failed: {exc}", file=sys.stderr)
+        print(f"omnigent claude fork hook: Coral fork failed: {exc}", file=sys.stderr)
         return None
     except RuntimeError as exc:
         print(f"omnigent claude fork hook: fork failed: {exc}", file=sys.stderr)
@@ -924,7 +925,7 @@ def _post_hook_with_reattach(
                             headers = refreshed
                             reauthed = True
                             print(
-                                f"omnigent {hook_label} hook: Omnigent auth expired "
+                                f"omnigent {hook_label} hook: Coral auth expired "
                                 "(login redirect/401); re-minted token and retrying",
                                 file=sys.stderr,
                             )
@@ -942,14 +943,14 @@ def _post_hook_with_reattach(
                     if answer_window_ends_at is not None:
                         if time.monotonic() >= answer_window_ends_at:
                             print(
-                                f"omnigent {hook_label} hook: Omnigent auth could not "
+                                f"omnigent {hook_label} hook: Coral auth could not "
                                 f"be renewed within the answer window — failing ask: {exc}",
                                 file=sys.stderr,
                             )
                             return None
                         retry_by = min(deadline, answer_window_ends_at)
                     print(
-                        f"omnigent {hook_label} hook: Omnigent auth lapsed and "
+                        f"omnigent {hook_label} hook: Coral auth lapsed and "
                         f"could not be renewed; retrying: {exc}",
                         file=sys.stderr,
                     )
@@ -959,7 +960,7 @@ def _post_hook_with_reattach(
                     continue
                 if exc.response.status_code < 500:
                     print(
-                        f"omnigent {hook_label} hook: Omnigent request rejected: {exc}",
+                        f"omnigent {hook_label} hook: Coral request rejected: {exc}",
                         file=sys.stderr,
                     )
                     return None
@@ -970,8 +971,7 @@ def _post_hook_with_reattach(
                 is_hard_failure = held_s < _PERMISSION_HELD_POLL_FLOOR_S
                 kind = "sick" if is_hard_failure else "held-poll severed by gateway"
                 print(
-                    f"omnigent {hook_label} hook: Omnigent request failed "
-                    f"({kind}); retrying: {exc}",
+                    f"omnigent {hook_label} hook: Coral request failed ({kind}); retrying: {exc}",
                     file=sys.stderr,
                 )
             except httpx.HTTPError as exc:
@@ -989,8 +989,7 @@ def _post_hook_with_reattach(
                     else ("flapping" if is_hard_failure else "held-poll severed")
                 )
                 print(
-                    f"omnigent {hook_label} hook: Omnigent request failed "
-                    f"({kind}); retrying: {exc}",
+                    f"omnigent {hook_label} hook: Coral request failed ({kind}); retrying: {exc}",
                     file=sys.stderr,
                 )
             if is_hard_failure:
@@ -1020,7 +1019,7 @@ def _post_hook_with_reattach(
             elif answer_window_ends_at is not None and not never_connected:
                 # That answer has expired, so a raised cap can't recover it.
                 print(
-                    f"omnigent {hook_label} hook: Omnigent still failing after the "
+                    f"omnigent {hook_label} hook: Coral still failing after the "
                     "answer window — failing ask",
                     file=sys.stderr,
                 )
@@ -1075,7 +1074,7 @@ def _main_permission_request(argv: list[str]) -> int:
     config = read_permission_hook_config(bridge_dir)
     ap_server_url = args.omnigent_server_url or config.get("ap_server_url")
     if not isinstance(ap_server_url, str) or not ap_server_url:
-        print("omnigent claude permission hook: Omnigent server URL missing", file=sys.stderr)
+        print("omnigent claude permission hook: Coral server URL missing", file=sys.stderr)
         return 0
     headers = _parse_headers(args.omnigent_auth_headers_json)
     if not headers:
@@ -1282,13 +1281,13 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     if resp is None:
         return _fail_closed(api_error or (reauth.failure_reason if reauth else None))
     if not resp.content:
-        print("omnigent evaluate-policy hook: empty Omnigent response", file=sys.stderr)
+        print("omnigent evaluate-policy hook: empty Coral response", file=sys.stderr)
         return _fail_closed()
 
     try:
         eval_response = resp.json()
     except json.JSONDecodeError:
-        print("omnigent evaluate-policy hook: malformed Omnigent response", file=sys.stderr)
+        print("omnigent evaluate-policy hook: malformed Coral response", file=sys.stderr)
         return _fail_closed()
 
     # Through the relay the server evaluated the relay's session, which can

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Install the Omnigent host as a per-user operating-system service."""
 
 from __future__ import annotations
@@ -123,7 +124,7 @@ def _systemd_unit(
     ]
     lines = [
         "[Unit]",
-        "Description=Omnigent host",
+        "Description=Coral host",
         "Wants=network-online.target",
         "After=network-online.target",
         "",

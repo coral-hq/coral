@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """E2E: Settings → Appearance export/import buttons.
 
 The Appearance section footer has Export and Import buttons next to "Reset to
@@ -176,6 +177,6 @@ def test_import_rejects_invalid_json(page: Page, live_server: str) -> None:
         # Dialog stays open and shows error.
         expect(page.get_by_role("dialog", name="Import settings")).to_be_visible()
         expect(page.get_by_role("alert")).to_be_visible()
-        expect(page.get_by_role("alert")).to_contain_text("valid Omnigent settings")
+        expect(page.get_by_role("alert")).to_contain_text("valid Coral settings")
     finally:
         Path(temp_path).unlink()

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 Shared :class:`HarnessApp` adapter that drives any inner :class:`Executor`.
 
@@ -1003,7 +1004,7 @@ class ExecutorAdapter(HarnessApp):
         ctx = self._current_ctx
         if ctx is None:
             _logger.error("ask-question callback fired with no active turn context; denying")
-            return "AskUserQuestion is unavailable outside an active Omnigent turn."
+            return "AskUserQuestion is unavailable outside an active Coral turn."
         ask_payload = structured_ask_user_question(tool_input)
         if ask_payload is None:
             return (

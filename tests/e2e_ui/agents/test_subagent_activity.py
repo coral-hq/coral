@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Sub-agent lifecycle notices reveal the child chat and Agents panel."""
 
 from __future__ import annotations
@@ -10,8 +11,8 @@ from playwright.sync_api import Page, expect
 
 from tests.e2e_ui.conftest import seed_committed_turn
 
-_CHILD_TITLE = "Research Omnigent public positioning"
-_CHILD_REPLY = "Omnigent supports CLI, desktop, mobile, and web workflows."
+_CHILD_TITLE = "Research Coral public positioning"
+_CHILD_REPLY = "Coral supports CLI, desktop, mobile, and web workflows."
 
 
 @pytest.mark.min_server_version("0.17.0")
@@ -29,7 +30,7 @@ def test_subagent_notices_link_to_child_and_reveal_agents(
     )
     seed_committed_turn(
         parent_id,
-        prompt="Research Omnigent's public positioning.",
+        prompt="Research Coral's public positioning.",
         reply="I'll delegate the public research to a sub-agent.",
     )
     page.goto(f"{base_url}/c/{parent_id}")

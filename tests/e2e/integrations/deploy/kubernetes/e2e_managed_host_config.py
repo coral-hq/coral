@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 End-to-end test: `sandbox.host_config` injection on the Kubernetes provider.
 
@@ -172,7 +173,7 @@ def assert_injected_config(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--server", required=True, help="Omnigent server base URL")
+    parser.add_argument("--server", required=True, help="Coral server base URL")
     parser.add_argument("--agent-id", default=None, help="Agent to bind (default: first)")
     parser.add_argument("--namespace", default="omnigent-sandboxes", help="Runner-Pod namespace")
     parser.add_argument(

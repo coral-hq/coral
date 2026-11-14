@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Tests for the native OpenCode bridge state helpers."""
 
 from __future__ import annotations
@@ -271,8 +272,8 @@ def test_policy_plugin_denies_prompt_and_withholds_tool_result(
     )
     assert out["id"] == "omnigent-policy"
     assert out["hooks"] == ["session.prompt", "tool.execute.after"]
-    assert out["prompt"] == "blocked: Omnigent policy blocked this prompt: nope"
-    assert out["result"] == {"content": "[Omnigent policy withheld this tool result: nope]"}
+    assert out["prompt"] == "blocked: Coral policy blocked this prompt: nope"
+    assert out["result"] == {"content": "[Coral policy withheld this tool result: nope]"}
     assert out["calls"][0] == {
         "url": "http://srv/v1/sessions/conv_1/policies/evaluate",
         "body": {"event": {"type": "PHASE_REQUEST", "target": "", "data": {"text": "hi"}}},

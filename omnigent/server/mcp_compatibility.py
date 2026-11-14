@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Keep registry references away from hosts and runners that cannot load them."""
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ def require_registry_mcp_support(
     if services and CAP_MCP_REGISTRY not in capabilities:
         raise OmnigentError(
             f"The {component} does not advertise MCP registry support required by "
-            f"{', '.join(sorted(services))}. Install an Omnigent build with MCP registry "
+            f"{', '.join(sorted(services))}. Install a Coral build with MCP registry "
             "support on the execution host (or update its sandbox image), then restart "
             "the host and session runner. Updating only the server is not sufficient.",
             code=ErrorCode.RUNNER_CAPABILITY_MISMATCH,

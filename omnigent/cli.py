@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """CLI entry point for omnigent."""
 
 from __future__ import annotations
@@ -1418,7 +1419,7 @@ def _require_existing_sqlite_db(db_uri: str) -> None:
     if not db_path.exists():
         raise click.ClickException(
             f"Database file {str(db_path)!r} does not exist. Check the path in "
-            f"the database URL — db-upgrade upgrades an existing Omnigent "
+            f"the database URL — db-upgrade upgrades an existing Coral "
             f"database and will not create one."
         )
 
@@ -1697,7 +1698,7 @@ def _validate_agent_policy_functions(  # type: ignore[explicit-any]  # spec type
                     f"{policy.name!r} references function {path!r}, which "
                     f"cannot be resolved from sys.path "
                     f"({type(exc).__name__}: {exc}). Install the trusted callable "
-                    f"package in both the Omnigent CLI and server/runtime environments, "
+                    f"package in both the Coral CLI and server/runtime environments, "
                     f"or correct the policy path. CLI preflight does not import "
                     f"modules from the workspace directory.",
                 ) from exc
@@ -2016,8 +2017,8 @@ def _finish_cli_profile(profiler: Any, output_path: Path) -> None:  # type: igno
         f"{total_calls:,} calls ({primitive_calls:,} primitive)",
         err=True,
     )
-    _print_rows("Top Omnigent call paths", omnigent_rows)
-    _print_rows("Top Omnigent functions by self time", self_time_rows)
+    _print_rows("Top Coral call paths", omnigent_rows)
+    _print_rows("Top Coral functions by self time", self_time_rows)
     click.echo(f"\nFull profile data: {output_path}", err=True)
 
 
@@ -2084,7 +2085,7 @@ def _extract_global_logging_flags(argv: list[str]) -> tuple[list[str], bool, boo
     is_eager=True,
     expose_value=False,
     callback=_set_debug_logging,
-    help="Enable verbose DEBUG logging for Omnigent processes.",
+    help="Enable verbose DEBUG logging for Coral processes.",
 )
 @click.option(
     "--log-to-stderr",
@@ -2103,7 +2104,7 @@ def _extract_global_logging_flags(argv: list[str]) -> tuple[list[str], bool, boo
     help="Show the version and exit.",
 )
 def cli() -> None:
-    """Omnigent CLI."""
+    """Coral CLI."""
 
 
 # Names of every subcommand the click group owns. Used by
@@ -4043,8 +4044,8 @@ def _verified_databricks_org_id(
         exc = click.ClickException(
             f"Requested workspace {requested_org_id}, but the server reports "
             f"workspace {reported_org_id}. The server URL may be truncated or "
-            "point to a different workspace. Copy the full Omnigent URL from "
-            "the intended workspace and retry. Saved Omnigent login details were not changed."
+            "point to a different workspace. Copy the full Coral URL from "
+            "the intended workspace and retry. Saved Coral login details were not changed."
         )
         setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
         raise exc
@@ -4061,7 +4062,7 @@ def _persist_databricks_org_id(server: str, org_id: str) -> None:
     except OSError as error:
         exc = click.ClickException(
             "Could not persist the workspace routing selector. "
-            "Check that the Omnigent data directory is writable, then retry."
+            "Check that the Coral data directory is writable, then retry."
         )
         setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
         raise exc from error
@@ -4338,13 +4339,13 @@ def _discover_local_server_url(
                 tail_path, tail = tail_info
                 detail = f"\n  Server log: {tail_path}\n\n  Last 50 lines:\n{tail}"
             raise LocalServerStartupError(
-                "The local daemon exited before its Omnigent server became ready. "
+                "The local daemon exited before its Coral server became ready. "
                 f"See logs under {process_log_dir_reference('host')} and "
                 f"{process_log_dir_reference('server')}." + detail
             )
         time.sleep(0.2)
     raise LocalServerStartupError(
-        f"Timed out after {timeout:.0f}s waiting for the local Omnigent server to "
+        f"Timed out after {timeout:.0f}s waiting for the local Coral server to "
         f"start. See {process_log_dir_reference('server')} for details."
     )
 
@@ -4699,9 +4700,9 @@ def server(
     background: bool,
     base_path: str | None,
 ) -> None:
-    """Start the Omnigent server, or manage the background server.
+    """Start the Coral server, or manage the background server.
 
-    Bare ``omnigent server`` runs the server in the FOREGROUND (Ctrl-C to
+    Bare ``coral server`` runs the server in the FOREGROUND (Ctrl-C to
     stop) — for deploys / Docker. Pass ``--background`` to spawn it as a
     detached background process instead (the managed local server that
     ``run`` / ``claude`` / ``codex`` reuse). Subcommands manage that
@@ -5286,11 +5287,11 @@ def _run_background_server() -> None:
 
 @server.command("start", hidden=True)
 def server_start() -> None:
-    """Deprecated alias for ``omnigent server --background``.
+    """Deprecated alias for ``coral server --background``.
 
     Removed in v0.7.0 by #3105 and restored here for compatibility: the
     desktop app ships on its own update channel, so a client built before
-    v0.7.0 still shells out to ``omni server start`` and hard-failed with
+    v0.7.0 still shells out to ``coral server start`` and hard-failed with
     ``No such command 'start'`` against a newer CLI (#3578). Hidden from
     ``--help`` (the flag is the documented spelling) and warns on stderr so
     interactive users migrate, while the desktop's stdout parsing — which
@@ -5312,12 +5313,12 @@ def server_start() -> None:
     help="SIGKILL the local host daemon if it does not exit on SIGTERM.",
 )
 def server_stop(force: bool) -> None:
-    """Stop the background Omnigent server and the local host daemon.
+    """Stop the background Coral server and the local host daemon.
 
     Stops the local host daemon first, then the detached server recorded
     in ``~/.omnigent/local_server.pid`` — its web UI and sessions become
     unreachable. To stop hosting but KEEP the server up, use
-    ``omnigent host stop``; to stop everything, use ``omnigent stop``.
+    ``coral host stop``; to stop everything, use ``coral stop``.
 
     :param force: SIGKILL the local host daemon after the grace period if it
         does not exit on SIGTERM.
@@ -5332,7 +5333,7 @@ def server_stop(force: bool) -> None:
 @server.command("status")
 @click.option("--json", "json_output", is_flag=True, help="Emit JSON.")
 def server_status(json_output: bool) -> None:
-    """Show whether the background Omnigent server is running.
+    """Show whether the background Coral server is running.
 
     Reports the recorded pid/port, URL, live-session count, and whether a
     local host daemon is attached. Reads ``~/.omnigent/local_server.pid``
@@ -5378,7 +5379,7 @@ def server_status(json_output: bool) -> None:
 
 
 @cli.command("start")
-@click.option("--server", default=None, help="Omnigent server URL to host on.")
+@click.option("--server", default=None, help="Coral server URL to host on.")
 @click.option(
     "--no-open",
     is_flag=True,
@@ -5391,7 +5392,7 @@ def server_status(json_output: bool) -> None:
     is_flag=True,
     envvar="OMNIGENT_HOST_OPEN_IN_DESKTOP",
     show_envvar=True,
-    help="Open the host web UI in the Omnigent desktop app instead of a browser.",
+    help="Open the host web UI in the Coral desktop app instead of a browser.",
 )
 @click.option(
     "--non-interactive",
@@ -5405,26 +5406,26 @@ def server_status(json_output: bool) -> None:
     ),
 )
 def start(server: str | None, no_open: bool, open_in_desktop: bool, non_interactive: bool) -> None:
-    """Start Omnigent on this machine, in the background.
+    """Start Coral on this machine, in the background.
 
-    The on switch, and the counterpart of ``omnigent stop``: brings up the
+    The on switch, and the counterpart of ``coral stop``: brings up the
     local server (web UI / history) and registers this machine as a host, then
     returns. With a configured or explicit ``--server`` it hosts on that server
     instead, and no local server is started.
 
-    An alias of ``omnigent host --background`` — reach for that spelling when
-    a script wants the host lifecycle by name (``omnigent host status`` /
-    ``omnigent host stop``). Sign-in happens here, in your terminal, before the
+    An alias of ``coral host --background`` — reach for that spelling when
+    a script wants the host lifecycle by name (``coral host status`` /
+    ``coral host stop``). Sign-in happens here, in your terminal, before the
     daemon detaches.
 
-    :param server: Omnigent server URL to host on, e.g.
+    :param server: Coral server URL to host on, e.g.
         ``"https://example.databricksapps.com"``. ``None`` falls back to
         config; empty string forces local mode.
     :param no_open: When ``True``, skip automatically opening the host web UI.
     :param open_in_desktop: When ``True``, open the host web UI in the desktop
         app instead of a browser.
     :param non_interactive: When ``True``, never launch the browser login for
-        an un-authed remote server — fail with the ``omnigent login`` hint
+        an un-authed remote server — fail with the ``coral login`` hint
         instead.
     :returns: None.
     """
@@ -5444,12 +5445,12 @@ def start(server: str | None, no_open: bool, open_in_desktop: bool, non_interact
     help="Continue past failures and SIGKILL daemons that do not exit on SIGTERM.",
 )
 def stop(force: bool) -> None:
-    """Stop everything Omnigent is running on this machine.
+    """Stop everything Coral is running on this machine.
 
-    The off switch, and the counterpart of ``omnigent start``: stops every host
+    The off switch, and the counterpart of ``coral start``: stops every host
     daemon (local and remote-targeted) and the detached background server.
     Runners are reaped when their daemon exits. To stop only hosting while
-    keeping the local server (web UI / history) up, use ``omnigent host stop``
+    keeping the local server (web UI / history) up, use ``coral host stop``
     instead.
 
     :param force: Continue past individual failures and SIGKILL daemons that
@@ -5727,7 +5728,7 @@ def doctor(
     if json_output:
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
     elif ledger is None:
-        click.echo("No Omnigent install detected; no ledger written.")
+        click.echo("No Coral install detected; no ledger written.")
     elif apply_changes:
         click.echo(f"Wrote backfill ledger to {backfill_ledger_path()}.")
     else:
@@ -5761,7 +5762,7 @@ def uninstall(
     no_backup: bool,
     assume_inferred: bool,
 ) -> None:
-    """Uninstall Omnigent from this machine."""
+    """Uninstall Coral from this machine."""
     from omnigent.install_ledger import resolve_uninstall_ledger
 
     ledger = resolve_uninstall_ledger()
@@ -5789,13 +5790,13 @@ def uninstall(
                         "backups": [],
                         "summary": {"done": 0, "skipped": 0, "failed": 0, "reported": 0},
                         "exit_code": 3,
-                        "error": "no Omnigent install detected",
+                        "error": "no Coral install detected",
                     },
                     indent=2,
                 )
             )
             raise SystemExit(3)
-        click.echo("No Omnigent install detected; nothing to uninstall.", err=True)
+        click.echo("No Coral install detected; nothing to uninstall.", err=True)
         raise SystemExit(3)
 
     script_path = _uninstall_script_path()
@@ -6953,15 +6954,15 @@ def polly(run_args: tuple[str, ...]) -> None:
     # :param run_args: Pass-through args for ``run``.
     """Launch polly, the bundled multi-agent coding orchestrator.
 
-    Shorthand for ``omnigent run`` on the packaged polly agent — the default
-    agent ``omnigent run`` launches when a Claude credential is configured.
+    Shorthand for ``coral run`` on the packaged polly agent — the default
+    agent ``coral run`` launches when a Claude credential is configured.
     All ``run`` options are accepted and forwarded.
 
     \b
     Examples:
-      omnigent polly
-      omnigent polly -p "review the last commit"
-      omnigent polly --server https://<app>.databricksapps.com
+      coral polly
+      coral polly -p "review the last commit"
+      coral polly --server https://<app>.databricksapps.com
     """
     _run_bundled_agent("polly", run_args)
 
@@ -6978,15 +6979,15 @@ def debby(run_args: tuple[str, ...]) -> None:
     # :param run_args: Pass-through args for ``run``.
     """Launch debby, the bundled two-headed brainstorming agent.
 
-    Shorthand for ``omnigent run`` on the packaged debby agent. Debby fans
+    Shorthand for ``coral run`` on the packaged debby agent. Debby fans
     every question out to both a Claude and a GPT sub-agent, so a Claude
     and an OpenAI provider must both be configured. All ``run`` options are
     accepted and forwarded.
 
     \b
     Examples:
-      omnigent debby
-      omnigent debby -p "name ideas for a CLI that runs agents"
+      coral debby
+      coral debby -p "name ideas for a CLI that runs agents"
     """
     _run_bundled_agent("debby", run_args)
 
@@ -6999,9 +7000,9 @@ def debby(run_args: tuple[str, ...]) -> None:
 )
 @click.argument("run_args", nargs=-1, type=click.UNPROCESSED)
 def copilot(run_args: tuple[str, ...]) -> None:
-    """Launch GitHub Copilot with Omnigent.
+    """Launch GitHub Copilot with Coral.
 
-    Shorthand for ``omnigent run --harness copilot``; every ``run`` option is forwarded."""
+    Shorthand for ``coral run --harness copilot``; every ``run`` option is forwarded."""
     _run_harness_shorthand("copilot", run_args)
 
 
@@ -7013,7 +7014,7 @@ def copilot(run_args: tuple[str, ...]) -> None:
     help=(
         "Remote omnigent URL. When set, the picker / lookup queries "
         "this server instead of starting a local one. Required when "
-        "running ``omnigent resume`` without a conversation id."
+        "running ``coral resume`` without a conversation id."
     ),
 )
 def resume(
@@ -7027,13 +7028,13 @@ def resume(
     #     ``"conv_abc123"``. None falls through to the picker.
     # :param server: Remote Omnigent server URL (optional in id mode;
     #     required in picker mode).
-    """Resume an Omnigent conversation, auto-dispatching by runtime.
+    """Resume a Coral conversation, auto-dispatching by runtime.
 
     \b
     With CONV_ID: looks up the conversation and dispatches to the
     matching wrapper. claude-native sessions land in
-    ``omnigent claude``; everything else surfaces a clear hint to
-    use ``omnigent run --resume <id> <agent.yaml>``.
+    ``coral claude``; everything else surfaces a clear hint to
+    use ``coral run --resume <id> <agent.yaml>``.
 
     \b
     Without CONV_ID: opens a cross-agent picker over your prior
@@ -7042,9 +7043,9 @@ def resume(
 
     \b
     Examples:
-      omnigent resume conv_abc123
-      omnigent resume conv_abc123 --server https://<app>.databricksapps.com
-      omnigent resume --server https://<app>.databricksapps.com
+      coral resume conv_abc123
+      coral resume conv_abc123 --server https://<app>.databricksapps.com
+      coral resume --server https://<app>.databricksapps.com
     """
     from omnigent.resume_dispatch import run_resume
 
@@ -7119,7 +7120,7 @@ def _import_rejected_as_too_large(response: httpx.Response) -> bool:
     "--server",
     default=None,
     help=(
-        "Omnigent server URL. Defaults to the configured server, an existing "
+        "Coral server URL. Defaults to the configured server, an existing "
         "local server, or a newly started local server."
     ),
 )
@@ -7137,7 +7138,7 @@ def import_session_command(
 ) -> None:
     """Import chats from supported local coding harnesses.
 
-    The source transcript is converted to ordinary Omnigent items and stored
+    The source transcript is converted to ordinary Coral items and stored
     as a normal session. Qwen, Kiro, and Kimi currently preserve visible
     messages but not native tool activity; OpenCode and Pi preserve exported
     tool activity. Use --session for one chat or --last for a bounded batch. A
@@ -7146,12 +7147,12 @@ def import_session_command(
 
     \b
     Examples:
-      omnigent import --harness claude --session <session-id>
-      omnigent import --harness codex --session <session-id>
-      omnigent import --harness opencode --session <session-id>
-      omnigent import --harness qwen --session <session-id>
-      omnigent import --harness claude --last 10
-      omnigent import --harness claude --session <session-id> --force
+      coral import --harness claude --session <session-id>
+      coral import --harness codex --session <session-id>
+      coral import --harness opencode --session <session-id>
+      coral import --harness qwen --session <session-id>
+      coral import --harness claude --last 10
+      coral import --harness claude --session <session-id> --force
     """
     import httpx
 
@@ -7265,7 +7266,7 @@ def import_session_command(
             return _SessionImportResult(
                 sid,
                 "unreachable",
-                message=f"Could not reach the Omnigent server: {exc}",
+                message=f"Could not reach the Coral server: {exc}",
                 raw_exc=exc,
             )
 
@@ -7459,8 +7460,7 @@ def _render_usage(report: dict[str, Any], limit: int) -> None:  # type: ignore[e
     "--server",
     default=None,
     help=(
-        "Omnigent server URL. "
-        "Defaults to the configured server, or a local server already running."
+        "Coral server URL. Defaults to the configured server, or a local server already running."
     ),
 )
 @click.option(
@@ -7471,7 +7471,7 @@ def _render_usage(report: dict[str, Any], limit: int) -> None:  # type: ignore[e
     help="Emit the raw usage report as JSON instead of the table.",
 )
 def usage(limit: int, server: str | None, as_json: bool) -> None:
-    """Show your Omnigent usage and costs.
+    """Show your Coral usage and costs.
 
     The summary is sourced from the per-user daily cost rollup, which
     attributes spend to the UTC calendar day it occurred on — so the
@@ -7488,9 +7488,9 @@ def usage(limit: int, server: str | None, as_json: bool) -> None:
 
     \b
     Examples:
-      omnigent usage
-      omnigent usage --limit 25
-      omnigent usage --json
+      coral usage
+      coral usage --limit 25
+      coral usage --json
     """
     import httpx
 
@@ -7523,13 +7523,13 @@ def usage(limit: int, server: str | None, as_json: bool) -> None:
 @cli.group("session", invoke_without_command=True)
 @click.pass_context
 def session(ctx: click.Context) -> None:
-    """Manage Omnigent sessions.
+    """Manage Coral sessions.
 
     \b
     Examples:
-      omnigent session export --id conv_abc123
-      omnigent session export --id conv_abc123 --output transcript.jsonl
-      omnigent session export --id conv_abc123 --server https://myserver.com
+      coral session export --id conv_abc123
+      coral session export --id conv_abc123 --output transcript.jsonl
+      coral session export --id conv_abc123 --server https://myserver.com
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -7555,8 +7555,7 @@ def session(ctx: click.Context) -> None:
     "--server",
     default=None,
     help=(
-        "Omnigent server URL. "
-        "Defaults to the configured server, or a local server already running."
+        "Coral server URL. Defaults to the configured server, or a local server already running."
     ),
 )
 def session_export(session_id: str, output: str | None, server: str | None) -> None:
@@ -7566,13 +7565,13 @@ def session_export(session_id: str, output: str | None, server: str | None) -> N
     the session metadata (``"record_type": "session_meta"``); every
     subsequent line is one conversation item
     (``"record_type": "item"``).  The file preserves full turn order
-    and is independent of ``omnigent import``, which reads native harness history.
+    and is independent of ``coral import``, which reads native harness history.
 
     \b
     Examples:
-      omnigent session export --id conv_abc123
-      omnigent session export --id conv_abc123 --output my_session.jsonl
-      omnigent session export --id conv_abc123 --server https://myserver.com
+      coral session export --id conv_abc123
+      coral session export --id conv_abc123 --output my_session.jsonl
+      coral session export --id conv_abc123 --server https://myserver.com
     """
     import httpx
 
@@ -7706,7 +7705,7 @@ def _import_item_payload(item: Mapping[str, object]) -> dict[str, object]:
     "input_path",
     required=True,
     metavar="FILE",
-    help="Path to a JSONL file produced by 'omnigent session export'.",
+    help="Path to a JSONL file produced by 'coral session export'.",
 )
 @click.option(
     "--title",
@@ -7717,14 +7716,13 @@ def _import_item_payload(item: Mapping[str, object]) -> dict[str, object]:
     "--server",
     default=None,
     help=(
-        "Omnigent server URL. "
-        "Defaults to the configured server, or a local server already running."
+        "Coral server URL. Defaults to the configured server, or a local server already running."
     ),
 )
 def session_import(input_path: str, title: str | None, server: str | None) -> None:
     """Import a session transcript from a portable JSONL file.
 
-    The inverse of ``omnigent session export``: reads the ``session_meta`` +
+    The inverse of ``coral session export``: reads the ``session_meta`` +
     ``item`` lines and recreates the conversation on the target server as a new
     session (a fresh conversation id each time). Distinct from ``omnigent
     import``, which reads native harness history rather than an export file.
@@ -7743,9 +7741,9 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
 
     \b
     Examples:
-      omnigent session import -i my_session.jsonl
-      omnigent session import -i my_session.jsonl --title "Repro of ES-2065116"
-      omnigent session import -i my_session.jsonl --server https://myserver.com
+      coral session import -i my_session.jsonl
+      coral session import -i my_session.jsonl --title "Repro of ES-2065116"
+      coral session import -i my_session.jsonl --server https://myserver.com
     """
     import httpx
 
@@ -7912,7 +7910,7 @@ _RUN_HARNESS_HELP = (
     f"Harness to use: {_HARNESS_CHOICES_HELP}. Without AGENT, launches that harness directly."
 )
 _FROM_OPENCLAW_HELP = (
-    "Launch one agent from the OpenClaw/acpx registry without saving it to Omnigent config."
+    "Launch one agent from the OpenClaw/acpx registry without saving it to Coral config."
 )
 _MODEL_HELP = "Model to use for the agent."
 _PROMPT_HELP = "Send this as the first message when the REPL starts."
@@ -7947,28 +7945,26 @@ _LOG_HELP = "Write a JSON dump of the conversation to ~/.omnigent/logs/ on exit.
 
 _DEFAULT_HARNESS_PROMPTS = {
     "claude-sdk": (
-        "You are Claude Code, running through Omnigent. "
+        "You are Claude Code, running through Coral. "
         "Help the user with software engineering tasks."
     ),
     "codex": (
-        "You are Codex, running through Omnigent. Help the user with software engineering tasks."
+        "You are Codex, running through Coral. Help the user with software engineering tasks."
     ),
     "cursor": (
-        "You are Cursor, running through Omnigent. Help the user with software engineering tasks."
+        "You are Cursor, running through Coral. Help the user with software engineering tasks."
     ),
     "kimi": (
-        "You are Kimi Code, running through Omnigent. "
-        "Help the user with software engineering tasks."
+        "You are Kimi Code, running through Coral. Help the user with software engineering tasks."
     ),
     "qwen": (
-        "You are Qwen Code, running through Omnigent. "
-        "Help the user with software engineering tasks."
+        "You are Qwen Code, running through Coral. Help the user with software engineering tasks."
     ),
     "goose": (
-        "You are Goose, running through Omnigent. Help the user with software engineering tasks."
+        "You are Goose, running through Coral. Help the user with software engineering tasks."
     ),
 }
-_DEFAULT_HARNESS_PROMPT = "You are a helpful coding agent running through Omnigent."
+_DEFAULT_HARNESS_PROMPT = "You are a helpful coding agent running through Coral."
 
 # Harnesses whose auto-generated launcher YAML should include an
 # ``os_env`` block.  This triggers the workflow's ``ToolManager``
@@ -8996,13 +8992,13 @@ def attach(
     on a server and streams its I/O. It never spawns a server, runner, or
     harness, applies no model/harness defaults, and errors loudly when
     there is nothing live to attach to. To START a session use
-    ``omnigent run``; to reopen/restart a stored one use
-    ``omnigent resume``.
+    ``coral run``; to reopen/restart a stored one use
+    ``coral resume``.
 
     \b
     Examples:
-      omnigent attach conv_abc123
-      omnigent attach conv_abc123 --server https://<app>.databricksapps.com
+      coral attach conv_abc123
+      coral attach conv_abc123 --server https://<app>.databricksapps.com
     """
     cfg = _load_effective_config()
     base_url = _resolve_attach_server(server, cfg.get("server"))
@@ -9151,13 +9147,13 @@ def run(
     debug_events: bool,
     register_host: bool,
 ) -> None:
-    """Start a session with an Omnigent agent.
+    """Start a session with a Coral agent.
 
     AGENT may be an agent YAML file or an agent directory. Without AGENT,
     pass ``--server`` to connect directly to a server, or pass
     ``--harness`` to launch a built-in harness directly.
 
-    Default: omnigent server+REPL architecture (spawns a local
+    Default: coral server+REPL architecture (spawns a local
     server, REPL connects as an HTTP client). With ``--server <url>`` and
     no AGENT, connect directly to that server; with AGENT, use local
     runner + remote server topology (RUNNER.md §6 Flow 1) - laptop hosts
@@ -9165,16 +9161,16 @@ def run(
 
     \b
     Examples:
-      omnigent run --harness claude-sdk
-      omnigent run --harness codex -p "review the last commit"
-      omnigent run --from-openclaw "Gemini CLI" -p "review the last commit"
-      omnigent run examples/hello_world.yaml
-      omnigent run examples/hello_world.yaml --harness codex --model gpt-5.4-mini
-      omnigent run --server http://localhost:6767
-      omnigent run --server http://localhost:6767 --agent scribe -p "hi"
-      omnigent run --server local  # local server, ignoring any configured default
-      omnigent run examples/databricks_coding_agent.yaml --server https://<app>.databricksapps.com
-      omnigent run --server https://<app>.databricksapps.com --profile my-sp -p "hi"
+      coral run --harness claude-sdk
+      coral run --harness codex -p "review the last commit"
+      coral run --from-openclaw "Gemini CLI" -p "review the last commit"
+      coral run examples/hello_world.yaml
+      coral run examples/hello_world.yaml --harness codex --model gpt-5.4-mini
+      coral run --server http://localhost:6767
+      coral run --server http://localhost:6767 --agent scribe -p "hi"
+      coral run --server local  # local server, ignoring any configured default
+      coral run examples/databricks_coding_agent.yaml --server https://<app>.databricksapps.com
+      coral run --server https://<app>.databricksapps.com --profile my-sp -p "hi"
     """
     # A remote --server authenticated via a named Databricks profile: point the
     # SDK credential chain (used by every remote-auth path in this process) at
@@ -9568,7 +9564,7 @@ def _background_registration_timeout(
     log_detail = _background_host_log_detail(record.log_path)
     if not server_responded and transport_error is not None:
         exc = click.ClickException(
-            f"Could not reach the Omnigent server at {target} within "
+            f"Could not reach the Coral server at {target} within "
             f"{_BACKGROUND_HOST_REGISTRATION_GRACE_S:.0f}s ({transport_error}). "
             "Check that the server is running and that your `server` config "
             f"points at the right URL.{log_detail}"
@@ -9670,7 +9666,7 @@ def _maybe_open_host_web_ui(
     except OSError:
         opened = False
     if not opened:
-        click.echo(f"Open the Omnigent web UI: {web_url}", err=True)
+        click.echo(f"Open the Coral web UI: {web_url}", err=True)
 
 
 def _run_background_host(
@@ -9811,7 +9807,7 @@ def _host_stop_command(explicit_server: str | None) -> str:
 
 
 @cli.group("host", cls=_HostGroup, invoke_without_command=True)
-@click.option("--server", default=None, help="Remote omnigent server URL.")
+@click.option("--server", default=None, help="Remote coral server URL.")
 @click.option(
     "--no-open",
     is_flag=True,
@@ -9824,7 +9820,7 @@ def _host_stop_command(explicit_server: str | None) -> str:
     is_flag=True,
     envvar="OMNIGENT_HOST_OPEN_IN_DESKTOP",
     show_envvar=True,
-    help="Open the host web UI in the Omnigent desktop app instead of a browser.",
+    help="Open the host web UI in the Coral desktop app instead of a browser.",
 )
 @click.option(
     "--background",
@@ -9863,22 +9859,22 @@ def host(
 
     \b
     Examples:
-      omnigent host https://omnigent-app.databricksapps.com
-      omnigent host --server https://omnigent-app.databricksapps.com
-      omnigent host ""   # spawn + connect to a local server
-      omnigent host --background   # spawn detached, return immediately
-      omnigent host --no-open   # connect without opening the web UI
-      omnigent host --open-in-desktop   # open the web UI in the desktop app
-      omnigent host enable   # install and start a per-user system service
-      omnigent host disable  # stop and remove the per-user system service
+      coral host https://omnigent-app.databricksapps.com
+      coral host --server https://omnigent-app.databricksapps.com
+      coral host ""   # spawn + connect to a local server
+      coral host --background   # spawn detached, return immediately
+      coral host --no-open   # connect without opening the web UI
+      coral host --open-in-desktop   # open the web UI in the desktop app
+      coral host enable   # install and start a per-user system service
+      coral host disable  # stop and remove the per-user system service
 
-    The server URL may be given positionally (``omnigent host
+    The server URL may be given positionally (``coral host
     <url>``) or via ``--server <url>``. A leading ``status``, ``stop``,
     ``enable``, ``disable``, ``stop-session``, or ``reset-id`` token still
     runs that management subcommand.
 
     When the target server is Databricks-fronted and you are not signed
-    in, ``host`` runs the same flow ``omnigent login`` would before
+    in, ``host`` runs the same flow ``coral login`` would before
     connecting (an interactive browser flow). Pass ``--non-interactive``
     to keep the old scripted behavior: fail with the login command to run
     instead of prompting. This holds for ``--background`` too: the login
@@ -9886,7 +9882,7 @@ def host(
 
     :param ctx: Click invocation context. ``ctx.invoked_subcommand`` is
         set when a management subcommand such as ``"status"`` is running.
-    :param server: Remote Omnigent server URL, e.g.
+    :param server: Remote Coral server URL, e.g.
         ``"https://example.databricksapps.com"``. ``None`` falls back
         to config; empty string selects local mode.
     :param background: When ``True``, spawn the daemon detached and return
@@ -9895,7 +9891,7 @@ def host(
     :param open_in_desktop: When ``True``, open the host web UI in the desktop
         app instead of a browser.
     :param non_interactive: When ``True``, never launch the browser login
-        for an un-authed remote server — fail with the ``omnigent login``
+        for an un-authed remote server — fail with the ``coral login``
         hint instead.
     """
     ctx.ensure_object(dict)
@@ -10473,7 +10469,7 @@ def _sessions_for_daemon(
         return _DaemonSessionsResult(
             base_url=None,
             sessions=[],
-            error="local Omnigent server is not reachable",
+            error="local Coral server is not reachable",
             unreachable=_local_server_confirmed_dead(),
         )
     host_id = record.host_id or _load_existing_host_id()
@@ -10622,7 +10618,7 @@ def _add_daemon_host_status(
     base_url = payload.get("server_url")
     host_id = payload.get("host_id")
     if not isinstance(base_url, str):
-        payload["error"] = "local Omnigent server is not reachable"
+        payload["error"] = "local Coral server is not reachable"
         return
     if not isinstance(host_id, str) or not host_id:
         payload["error"] = "host id is not available in local config"
@@ -11133,7 +11129,7 @@ def host_enable(
     except HostServiceError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    click.echo(f"Enabled the Omnigent host user service for {_host_display_url(target)}.")
+    click.echo(f"Enabled the Coral host user service for {_host_display_url(target)}.")
     click.echo(f"Service definition: {_display_path(service.path)}")
     if service.log_path is not None:
         click.echo(f"Service output: {_display_path(service.log_path)}")
@@ -11153,7 +11149,7 @@ def host_disable() -> None:
     for record in _list_daemon_records():
         if not _pid_alive(record.pid):
             _delete_daemon_record(record)
-    click.echo("Disabled the Omnigent host user service.")
+    click.echo("Disabled the Coral host user service.")
     click.echo(f"Removed service definition: {_display_path(service.path)}")
 
 
@@ -11546,7 +11542,7 @@ def host_stop(
         # web UI / history survive). Point users at the full stop so a wedged
         # server doesn't look like it survived a restart.
         click.echo(
-            "This stops hosting only — the local Omnigent server (web UI / history) "
+            "This stops hosting only — the local Coral server (web UI / history) "
             f"stays up. Run `{cli_invocation()} stop` to stop it too."
         )
 
@@ -11568,7 +11564,7 @@ def host_stop_session(
     :param ctx: Click context carrying group-level options.
     :param session_ids: Session ids to stop, e.g.
         ``["conv_abc123", "conv_def456"]``.
-    :param server: Omnigent server URL that owns the sessions, e.g.
+    :param server: Coral server URL that owns the sessions, e.g.
         ``"https://example.databricksapps.com"``. ``None`` falls back
         to config/local discovery.
     :param force: Continue after individual stop failures.
@@ -11580,7 +11576,7 @@ def host_stop_session(
         resolved_server = local_server_url_if_healthy()
         if resolved_server is None:
             raise click.ClickException(
-                "No server was supplied and no local Omnigent server is reachable."
+                "No server was supplied and no local Coral server is reachable."
             )
     for session_id in session_ids:
         try:
@@ -11606,7 +11602,7 @@ def host_reset_id(yes: bool) -> None:
     to a different account``: the server keys host registrations by the
     persisted host id, so once another identity owns it, this machine
     cannot re-register under yours. Resetting the id lets the next
-    ``omnigent host`` register as a brand-new host under the identity you
+    ``coral host`` register as a brand-new host under the identity you
     are signed in as. The host name and other config are preserved.
 
     :param yes: When ``True``, skip the confirmation prompt.
@@ -11656,7 +11652,7 @@ def host_reset_id(yes: bool) -> None:
 
 @cli.command(hidden=True)
 def version() -> None:
-    """Print the installed Omnigent version."""
+    """Print the installed Coral version."""
     print(_format_version())
 
 
@@ -11983,14 +11979,14 @@ def _slack_daemon() -> IntegrationDaemon:
 @cli.group("integration", invoke_without_command=True)
 @click.pass_context
 def integration(ctx: click.Context) -> None:
-    """Run and manage Omnigent chat integrations.
+    """Run and manage Coral chat integrations.
 
     \b
     Available integrations:
       slack   The @omnigent Slack socket-mode bot.
 
-    Run ``omni integration slack`` to start the Slack bot in the foreground,
-    or ``omni integration slack --background`` to run it in the background.
+    Run ``coral integration slack`` to start the Slack bot in the foreground,
+    or ``coral integration slack --background`` to run it in the background.
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -12014,17 +12010,17 @@ def slack(ctx: click.Context, background: bool) -> None:
 
     \b
     Bare invocation runs in the FOREGROUND (Ctrl-C to stop):
-      omni integration slack
+      coral integration slack
     Pass --background to spawn it as a detached daemon instead:
-      omni integration slack --background   # spawn detached, return immediately
+      coral integration slack --background   # spawn detached, return immediately
     Manage that background daemon with the subcommands:
-      omni integration slack status   # is it running?
-      omni integration slack stop     # terminate the daemon
-      omni integration slack logs     # where the daemon logs (-f to tail)
+      coral integration slack status   # is it running?
+      coral integration slack stop     # terminate the daemon
+      coral integration slack logs     # where the daemon logs (-f to tail)
 
     Config (Slack tokens, OMNIGENT_SERVER_URL, …) comes from environment
     variables — the bot does not read a .env file itself (matching
-    ``omni server``). Export them, or launch under a tool that injects a .env
+    ``coral server``). Export them, or launch under a tool that injects a .env
     (e.g. ``uv run --env-file .env``). See integrations/slack/.env.example for
     the full set; a missing required var prints a friendly error and exits.
 
@@ -12055,7 +12051,7 @@ def slack(ctx: click.Context, background: bool) -> None:
     # Foreground: inherit stdio, block until the bot exits (Ctrl-C). Config
     # comes from the inherited environment only (no .env loading — matches
     # `omni server`), so the child inherits our cwd; nothing to special-case.
-    click.echo("Starting the Omnigent Slack bot (foreground). Press Ctrl-C to stop.")
+    click.echo("Starting the Coral Slack bot (foreground). Press Ctrl-C to stop.")
     result = subprocess.run(_slack_argv(), env=os.environ.copy(), check=False)
     raise SystemExit(result.returncode)
 
@@ -12084,7 +12080,7 @@ def _start_slack_background() -> None:
             message += f"\nLast log lines:\n{tail}"
         message += f"\nFull log: {_display_path(Path(record.log_path))}"
         raise click.ClickException(message)
-    click.echo(f"Started the Omnigent Slack bot in the background (pid {record.pid}).")
+    click.echo(f"Started the Coral Slack bot in the background (pid {record.pid}).")
     click.echo(f"Logs: {_display_path(Path(record.log_path))}")
     click.echo("Stop it with: omni integration slack stop")
 
@@ -12108,7 +12104,7 @@ def slack_stop() -> None:
     if record is None:
         click.echo("Slack bot: not running.")
         return
-    click.echo(f"Stopped the Omnigent Slack bot (pid {record.pid}).")
+    click.echo(f"Stopped the Coral Slack bot (pid {record.pid}).")
 
 
 @slack.command("logs")
@@ -12136,10 +12132,10 @@ def slack_logs(follow: bool) -> None:
 
 @cli.group("config", cls=_ConfigGroup)
 def config_grp() -> None:
-    """Get, set, and view Omnigent defaults and credentials.
+    """Get, set, and view Coral defaults and credentials.
 
     Defaults (auto_open_conversation, default_agent, harness, model,
-    server) are used by ``omnigent run``. Project-level config
+    server) are used by ``coral run``. Project-level config
     (``.omnigent/config.yaml`` in the cwd, like ``.git/config``) overrides
     user-level config (``~/.omnigent/config.yaml``, like ``~/.gitconfig``).
 
@@ -12160,7 +12156,7 @@ def config_list() -> None:
 
     Prints the defaults (user + project), then the configured model
     credentials grouped by harness with each harness's default marked — the
-    merged view of everything ``omnigent run`` will use (including
+    merged view of everything ``coral run`` will use (including
     ambient-detected credentials).
 
     :returns: None.
@@ -12181,7 +12177,7 @@ def config_list() -> None:
 )
 @click.argument("settings", nargs=-1, required=True, metavar="KEY=VALUE...")
 def config_set(is_global: bool, settings: tuple[str, ...]) -> None:
-    """Set one or more Omnigent defaults.
+    """Set one or more Coral defaults.
 
     Without ``--global``, pairs are written to ``.omnigent/config.yaml``
     in the current directory (project-level, like ``.git/config``); with
@@ -12201,8 +12197,8 @@ def config_set(is_global: bool, settings: tuple[str, ...]) -> None:
 
     \b
     Examples:
-      omnigent config set default_agent=examples/hello_world.yaml
-      omnigent config set --global server=https://<app>.databricksapps.com
+      coral config set default_agent=examples/hello_world.yaml
+      coral config set --global server=https://<app>.databricksapps.com
     """
     parsed = _parse_config_settings(settings, resolve_paths=is_global)
     _validate_config_set_scope(parsed, is_global=is_global)
@@ -12226,7 +12222,7 @@ def config_set(is_global: bool, settings: tuple[str, ...]) -> None:
 )
 @click.argument("keys", nargs=-1, required=True, metavar="KEY...")
 def config_unset(is_global: bool, keys: tuple[str, ...]) -> None:
-    """Remove one or more Omnigent defaults.
+    """Remove one or more Coral defaults.
 
     :param is_global: When ``True``, remove from ``~/.omnigent/config.yaml``;
         when ``False``, from ``.omnigent/config.yaml`` in cwd.
@@ -12252,12 +12248,12 @@ def config_unset(is_global: bool, keys: tuple[str, ...]) -> None:
 )
 def setup(internal_beta: bool) -> None:
     """
-    Launch the Omnigent first-time setup flow.
+    Launch the Coral first-time setup flow.
 
     By default this runs the standard model/credential picker — choose a
     provider for each harness and set your defaults, then start a session
-    with ``omnigent run``. (List configured credentials with
-    ``omnigent config list``.) Pass ``--internal-beta`` to configure
+    with ``coral run``. (List configured credentials with
+    ``coral config list``.) Pass ``--internal-beta`` to configure
     Databricks internal-beta defaults and authentication instead.
     """
     from omnigent.inner import ui
@@ -12385,8 +12381,7 @@ _AGENT_SERVER_OPTION = click.option(
     "--server",
     default=None,
     help=(
-        "Omnigent server URL. "
-        "Defaults to the configured server, or a local server already running."
+        "Coral server URL. Defaults to the configured server, or a local server already running."
     ),
 )
 
@@ -12595,7 +12590,7 @@ def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> No
     Re-adding an agent with the same name replaces your copy in place.
     Workers, skills, guardrails, and supporting files in the directory are
     all kept. For a directory, ``${VAR}`` references are resolved from this
-    shell, as ``omnigent run`` does; a YAML file or tarball is uploaded as is.
+    shell, as ``coral run`` does; a YAML file or tarball is uploaded as is.
 
     A GitHub repo (``owner/repo[/path][@agent]`` or a github.com URL) is
     shallow-cloned and every agent directory in it (or just ``@agent``) is
@@ -12604,11 +12599,11 @@ def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> No
 
     \b
     Examples:
-      omnigent agent add ./orion
-      omnigent agent add ./orion.tar.gz --server https://myserver.com
-      omnigent agent add acme/agents --list
-      omnigent agent add acme/agents@orion
-      omnigent agent add https://github.com/acme/agents/tree/main/orion
+      coral agent add ./orion
+      coral agent add ./orion.tar.gz --server https://myserver.com
+      coral agent add acme/agents --list
+      coral agent add acme/agents@orion
+      coral agent add https://github.com/acme/agents/tree/main/orion
     """
     path = Path(source)
     github = None if path.exists() else _parse_github_source(source)
@@ -12703,7 +12698,7 @@ def _list_agents(client: Any) -> list[dict[str, Any]]:  # type: ignore[explicit-
 @agent_grp.command("list")
 @_AGENT_SERVER_OPTION
 def agent_list(server: str | None) -> None:
-    """List your agents (installed with ``omnigent agent add`` or uploaded)."""
+    """List your agents (installed with ``coral agent add`` or uploaded)."""
     with _agent_api_client(server) as client:
         rows = _list_agents(client)
     if not rows:
@@ -12727,7 +12722,7 @@ def agent_list(server: str | None) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Remove without asking, even if sessions use it.")
 @_AGENT_SERVER_OPTION
 def agent_remove(agent: str, yes: bool, server: str | None) -> None:
-    """Remove your AGENT, given by name or by the id ``omnigent agent list`` shows.
+    """Remove your AGENT, given by name or by the id ``coral agent list`` shows.
 
     Sessions using it keep running while they can, then must be forked into
     another agent to continue, so you are asked to confirm first.
@@ -12771,7 +12766,7 @@ def debug() -> None:
 @click.argument("url")
 def debug_db_upgrade(url: str) -> None:
     """
-    Upgrade the schema of an Omnigent tracking database to the
+    Upgrade the schema of a Coral tracking database to the
     latest supported version.
 
     URL is a SQLAlchemy database URL, e.g.
@@ -12852,11 +12847,11 @@ def debug_migrate_accounts_to_oidc(
     \b
     Examples:
       # Dry run: append the org domain to every username
-      omnigent debug migrate-accounts-to-oidc sqlite:///chat.db --domain example.com
+      coral debug migrate-accounts-to-oidc sqlite:///chat.db --domain example.com
       # Apply it
-      omnigent debug migrate-accounts-to-oidc sqlite:///chat.db --domain example.com --commit
+      coral debug migrate-accounts-to-oidc sqlite:///chat.db --domain example.com --commit
       # Explicit per-user mapping (add --commit to apply)
-      omnigent debug migrate-accounts-to-oidc sqlite:///chat.db --map alice=alice@corp.com
+      coral debug migrate-accounts-to-oidc sqlite:///chat.db --map alice=alice@corp.com
 
     \b
     IMPORTANT: always back up your database before running with
@@ -13001,17 +12996,17 @@ def debug_logs(
     \b
     Examples:
       # Tail the most recent local runner log (default)
-      omnigent debug logs
+      coral debug logs
       # List all local runner log files with sizes
-      omnigent debug logs --list
+      coral debug logs --list
       # Show runner logs for a specific session (across relaunches)
-      omnigent debug logs --type runner --session conv_abc123
+      coral debug logs --type runner --session conv_abc123
       # List runner log files for a session
-      omnigent debug logs --type runner --session conv_abc123 --list
+      coral debug logs --type runner --session conv_abc123 --list
       # Follow the latest server log in real-time
-      omnigent debug logs --type server --follow
+      coral debug logs --type server --follow
       # Show the full latest CLI diagnostics log
-      omnigent debug logs --type cli -n 0
+      coral debug logs --type cli -n 0
     """
     import re
     import subprocess
@@ -13983,7 +13978,7 @@ def _remember_default_server(server: str) -> None:
 @cli.command("login")
 @click.argument("server_url")
 def login(server_url: str) -> None:
-    """Authenticate with a remote Omnigent server.
+    """Authenticate with a remote Coral server.
 
     Probes the server's auth mode and runs the matching flow:
 
@@ -13995,14 +13990,14 @@ def login(server_url: str) -> None:
       stores the session JWT when the browser flow completes.
     - header mode: no login needed (proxy injects identity); we
       print a hint and exit successfully.
-    - Databricks-fronted (a Databricks App, or omnigent hosted on
+    - Databricks-fronted (a Databricks App, or coral hosted on
       a workspace API path): detected from the probe response — we
       log in to the workspace via ``databricks auth login --host
       <workspace>`` (browser) and store a pointer record so later
       commands mint fresh workspace tokens automatically. Requires
       the ``databricks`` extra.
 
-    Subsequent ``omnigent run --server <url>`` commands then
+    Subsequent ``coral run --server <url>`` commands then
     use the stored token via the runner / host-tunnel auth chain. A
     successful login also records the server as the user-level default
     (the ``server`` key in ``~/.omnigent/config.yaml``), so a bare
@@ -14011,8 +14006,8 @@ def login(server_url: str) -> None:
 
     \b
     Example:
-      omnigent login http://localhost:6767
-      omnigent login example.cloud.databricks.com/omnigent  # https:// assumed
+      coral login http://localhost:6767
+      coral login example.cloud.databricks.com/omnigent  # https:// assumed
       omnigent          # connects to the server just logged in to
 
     :param server_url: The remote server URL, e.g.
@@ -14088,7 +14083,7 @@ def login(server_url: str) -> None:
         # endpoint, so fail on the probe itself.
         raise click.ClickException(
             f"Unexpected response from {server}/v1/me: HTTP {probe.status_code}. "
-            "This is not an Omnigent auth answer; the server may be erroring, "
+            "This is not a Coral auth answer; the server may be erroring, "
             "or something other than the server may have replied."
             f"{_proxy_interference_hint(server)}"
         )
@@ -14346,23 +14341,23 @@ _PANE_SPLIT_DIRECTIONS = ("v", "h", "w")
     "--parent-pane",
     "parent_pane",
     required=True,
-    help="Tmux pane id of the parent omnigent pane (e.g. '%0'). "
+    help="Tmux pane id of the parent coral pane (e.g. '%0'). "
     "Forwarded by the wrapped key-binding via #{pane_id}.",
 )
 def pane_split(direction: str | None, parent_pane: str) -> None:
     """
-    Split the parent omnigent pane and run the chooser in the new pane.
+    Split the parent coral pane and run the chooser in the new pane.
 
     Internal subcommand invoked by the tmux key-binding wrappers
     installed by ``omnigent.repl._tmux_pane``. The wrapper fires
-    ``run-shell 'omnigent pane-split -<v|h|w> -p #{pane_id}'`` when
+    ``run-shell 'coral pane-split -<v|h|w> -p #{pane_id}'`` when
     the user presses their split key while focused on an omnigent
     pane; tmux substitutes ``#{pane_id}`` to the focused pane's id
     and we exec the right ``tmux split-window`` / ``new-window``
-    invocation pointing at ``omnigent pane-picker``.
+    invocation pointing at ``coral pane-picker``.
 
     :param direction: One of ``v`` / ``h`` / ``w``. Required.
-    :param parent_pane: The omnigent pane id, e.g. ``%0``. Required.
+    :param parent_pane: The coral pane id, e.g. ``%0``. Required.
     """
     import shlex
 
@@ -14418,7 +14413,7 @@ def pane_split(direction: str | None, parent_pane: str) -> None:
     "--parent-pane",
     "parent_pane",
     required=True,
-    help="Tmux pane id of the parent omnigent pane (e.g. '%0'). "
+    help="Tmux pane id of the parent coral pane (e.g. '%0'). "
     "Used to read launch context (agent name, launch argv, server URL) "
     "from custom pane options the parent set via "
     "``omnigent.repl._tmux_pane.register_pane``.",
@@ -14428,9 +14423,9 @@ def pane_picker(parent_pane: str) -> None:
     Launch a fresh REPL conversation in the current new pane.
 
     Internal subcommand. The new tmux pane (created by
-    ``omnigent pane-split``) execs this command, which:
+    ``coral pane-split``) execs this command, which:
 
-    1. Reads the parent omnigent pane's ``@omnigent-launch-argv``
+    1. Reads the parent coral pane's ``@omnigent-launch-argv``
        and friends.
     2. ``os.execvp``\\s the parent's launch argv to spawn a new
        REPL against the same agent in this pane.
@@ -14441,7 +14436,7 @@ def pane_picker(parent_pane: str) -> None:
     ``designs/REPL_TMUX_PANE_SPLIT.md``. With only one option,
     a chooser is friction; we just exec.
 
-    :param parent_pane: The parent omnigent pane id, e.g. ``%0``.
+    :param parent_pane: The parent coral pane id, e.g. ``%0``.
     """
     import json
 
@@ -14835,7 +14830,7 @@ def _reject_reserved_devin_resume_args(devin_args: tuple[str, ...]) -> None:
     reserved = {"--resume", "-r", "--continue", "-c", "--config", "--export"}
     if any(arg == flag or arg.startswith(f"{flag}=") for arg in devin_args for flag in reserved):
         raise click.UsageError(
-            "Devin resume/config flags are reserved for Omnigent handling; use "
+            "Devin resume/config flags are reserved for Coral handling; use "
             "`omnigent devin --resume [CONVERSATION]` instead."
         )
 
@@ -14845,7 +14840,7 @@ def _reject_reserved_kiro_resume_args(kiro_args: tuple[str, ...]) -> None:
     reserved = {"--resume", "--resume-id", "--resume-picker"}
     if any(arg == flag or arg.startswith(f"{flag}=") for arg in kiro_args for flag in reserved):
         raise click.UsageError(
-            "Kiro resume flags are reserved for Omnigent resume handling; use "
+            "Kiro resume flags are reserved for Coral resume handling; use "
             f"`{cli_invocation()} kiro --resume [CONVERSATION]` instead."
         )
 
@@ -14862,7 +14857,7 @@ def _reject_reserved_codex_transport_args(codex_args: tuple[str, ...]) -> None:
     reserved = reserved_codex_transport_arg(codex_args)
     if reserved is not None:
         raise click.UsageError(
-            f"{reserved!r} is reserved for Omnigent, which starts Codex's app-server "
+            f"{reserved!r} is reserved for Coral, which starts Codex's app-server "
             f"and attaches the TUI itself. Drop it from `{cli_invocation()} codex`, "
             "or run `codex app-server` directly for a standalone app-server."
         )

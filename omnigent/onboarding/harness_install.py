@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Harness CLI install + auth operations — shared by ``run`` and ``configure``.
 
 A coding harness is "ready" along two independent axes:
@@ -148,7 +149,7 @@ _INSTALLER_REASON_PREFIX = "omnigent-setup: "
 _OPENCODE_INSTALL_SCRIPT = (
     "if npm ls -g opencode-ai --depth=0 >/dev/null 2>&1; then "
     f'echo "{_INSTALLER_REASON_PREFIX}OpenCode 1.x (opencode-ai) is installed and owns the global '
-    "'opencode' binary. Omnigent does not remove packages; run "
+    "'opencode' binary. Coral does not remove packages; run "
     "'npm rm -g opencode-ai' yourself, then rerun setup.\" >&2; "
     "exit 1; "
     f"fi; npm install -g {_OPENCODE_PACKAGE}"
@@ -347,7 +348,7 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
         status_args=("auth", "status"),
         install_hint=_DEVIN_INSTALL_HINT,
         install_command=("bash", "-c", _DEVIN_INSTALL_HINT),
-        auth_hint="run `devin auth login` (Omnigent stores no Devin credential)",
+        auth_hint="run `devin auth login` (Coral stores no Devin credential)",
     ),
 }
 

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Codex Code hook entrypoint for native Omnigent policy enforcement.
 
 Registered as the ``PreToolUse`` / ``PostToolUse`` command hook in the
@@ -190,14 +191,14 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     if resp is None:
         return _fail_closed(api_error or (reauth.failure_reason if reauth else None))
     if not resp.content:
-        print("omnigent codex evaluate-policy hook: empty Omnigent response", file=sys.stderr)
+        print("omnigent codex evaluate-policy hook: empty Coral response", file=sys.stderr)
         return _fail_closed()
 
     try:
         eval_response = resp.json()
     except json.JSONDecodeError:
         print(
-            "omnigent codex evaluate-policy hook: malformed Omnigent response",
+            "omnigent codex evaluate-policy hook: malformed Coral response",
             file=sys.stderr,
         )
         return _fail_closed()

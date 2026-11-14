@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Native OpenCode wrapper agent spec for ``opencode-native-ui``.
 
 Materializes the terminal-first built-in agent the server seeds (parallel
@@ -189,7 +190,7 @@ def run_opencode_native(  # pragma: no cover
     _preflight_local_tools()
     if server is None:
         raise click.ClickException(
-            "OpenCode requires a resolved Omnigent server URL. The CLI should resolve "
+            "OpenCode requires a resolved Coral server URL. The CLI should resolve "
             "a backend before run_opencode_native."
         )
     with TemporaryDirectory(prefix="omnigent-opencode-native-") as tmpdir:

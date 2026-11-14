@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """``omni polly`` must not fail "Not logged in" for Codex-only users.
 
 Reproduces the reported user journey end-to-end through the real CLI:
@@ -205,7 +206,7 @@ def test_polly_with_codex_subscription_does_not_fail_not_logged_in(
         # server + runner are up and the session is attached. The bug's error
         # can only surface after this point (it is a turn failure).
         launch_patterns = [
-            r"Omnigent session:",
+            r"Coral session:",
             "Not logged in",
             pexpect.EOF,
             pexpect.TIMEOUT,
@@ -220,7 +221,7 @@ def test_polly_with_codex_subscription_does_not_fail_not_logged_in(
             )
         if index in (2, 3):
             pytest.fail(
-                "`omni polly` did not reach a live session (no 'Omnigent "
+                "`omni polly` did not reach a live session (no 'Coral "
                 f"session:' URL within {_LAUNCH_TIMEOUT_S}s).\n"
                 f"Transcript:\n{''.join(transcript)[-4000:]}"
             )

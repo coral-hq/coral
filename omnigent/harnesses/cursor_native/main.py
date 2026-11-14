@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Native Cursor TUI wrapper for the Omnigent CLI.
 
 ``omnigent cursor`` launches the Cursor CLI's interactive TUI (``cursor-agent``
@@ -347,7 +348,7 @@ def run_cursor_native(
     _preflight_local_tools()
     if server is None:
         raise click.ClickException(
-            "Cursor requires a resolved Omnigent server URL. The CLI should call "
+            "Cursor requires a resolved Coral server URL. The CLI should call "
             "_ensure_backend before run_cursor_native."
         )
     effective_cursor_args = _inject_mode_arg(cursor_args, mode)

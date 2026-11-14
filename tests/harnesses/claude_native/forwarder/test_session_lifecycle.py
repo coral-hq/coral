@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Session lifecycle tests for Claude-native forwarding."""
 
 from __future__ import annotations
@@ -492,7 +493,7 @@ async def test_clear_hook_consumes_hook_rotated_session_without_duplicate_fork(
         :param request: Incoming request.
         :returns: Never returns.
         """
-        raise AssertionError(f"unexpected Omnigent request: {request.method} {request.url}")
+        raise AssertionError(f"unexpected Coral request: {request.method} {request.url}")
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
@@ -712,7 +713,7 @@ async def test_fork_hook_consumes_hook_rotated_session_without_duplicate_fork(
         :param request: Incoming request.
         :returns: Never returns.
         """
-        raise AssertionError(f"unexpected Omnigent request: {request.method} {request.url}")
+        raise AssertionError(f"unexpected Coral request: {request.method} {request.url}")
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
@@ -801,7 +802,7 @@ async def test_resume_seen_claude_fork_does_not_create_second_omnigent_fork(
         :param request: Incoming request.
         :returns: Never returns.
         """
-        raise AssertionError(f"unexpected Omnigent request: {request.method} {request.url}")
+        raise AssertionError(f"unexpected Coral request: {request.method} {request.url}")
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:

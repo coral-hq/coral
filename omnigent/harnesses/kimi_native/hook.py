@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Kimi Code hook commands for the native Omnigent wrapper.
 
 Registered into a per-session ``config.toml`` ``[[hooks]]`` array (see
@@ -191,7 +192,7 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     try:
         eval_response = resp.json()
     except json.JSONDecodeError:
-        print("omnigent kimi evaluate-policy hook: malformed Omnigent response", file=sys.stderr)
+        print("omnigent kimi evaluate-policy hook: malformed Coral response", file=sys.stderr)
         return _fail_closed()
 
     hook_output = evaluation_response_to_hook_output(hook_event, eval_response)

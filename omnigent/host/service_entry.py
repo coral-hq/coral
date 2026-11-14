@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Process entry point used by launchd and systemd host services."""
 
 from __future__ import annotations
@@ -40,10 +41,10 @@ def _wait_while_workspace_is_served(server: str) -> None:
 
 def main() -> int:
     """Run the foreground host command and normalize permanent failures."""
-    parser = argparse.ArgumentParser(description="Omnigent host service")
+    parser = argparse.ArgumentParser(description="Coral host service")
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--server", help="Remote Omnigent server URL.")
-    mode.add_argument("--local", action="store_true", help="Run a local Omnigent server.")
+    mode.add_argument("--server", help="Remote Coral server URL.")
+    mode.add_argument("--local", action="store_true", help="Run a local Coral server.")
     args = parser.parse_args()
 
     from omnigent.cli import cli

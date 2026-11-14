@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """
 Provider-agnostic interface for running Omnigent hosts in remote sandboxes.
 
@@ -50,7 +51,7 @@ if TYPE_CHECKING:
 
 DEFAULT_HOST_IMAGE: str = "ghcr.io/omnigent-ai/omnigent-host:latest"
 """Default sandbox image across providers: the official prebaked
-Omnigent host image, published by CI from the ``host`` target of
+Coral host image, published by CI from the ``host`` target of
 ``deploy/docker/Dockerfile`` (``:latest`` tracks main; ``:sha-<short>``
 pins a commit). It bakes the full omnigent install plus git / tmux /
 curl and the coding-harness CLIs, so sandbox creation skips the

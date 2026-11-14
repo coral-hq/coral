@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """UI: the Share control is grayed out with an explanatory tooltip when the
 server's ``OMNIGENT_SHARING_MODE`` is ``off``.
 
@@ -32,7 +33,7 @@ from tests.e2e_ui.collaboration._multi_user_server import (
 _ADMIN_EMAIL = "sharing-off@ui.test"
 
 # Mirrors AppShell.tsx's shareDisabledReason for the sharing-off case.
-_OFF_REASON = "Sharing has been disabled for this Omnigent server."
+_OFF_REASON = "Sharing has been disabled for this Coral server."
 
 
 @pytest.fixture(scope="module")

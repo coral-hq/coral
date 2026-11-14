@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Higher-layer orchestration helpers for the sessions routes (call-depth 2+).
 
 Flows that compose the lower-layer ``.helpers`` primitives: runner relay,
@@ -2351,7 +2352,7 @@ async def _resolve_native_delivery(
         meta = data.get("_meta")
         if not isinstance(meta, dict) or not meta.get("native_delivery_attempt"):
             raise OmnigentError(
-                "This client cannot retry delivery. Update Omnigent or answer in the terminal.",
+                "This client cannot retry delivery. Update Coral or answer in the terminal.",
                 code=ErrorCode.INVALID_INPUT,
             )
         if meta.get("native_delivery_attempt") != delivery.get("attempt") or data.get(

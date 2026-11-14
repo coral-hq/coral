@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Per-session ``KIMI_CODE_HOME`` builder that injects Omnigent hooks.
 
 Kimi Code reads a single ``config.toml`` at ``$KIMI_CODE_HOME/config.toml``
@@ -154,7 +155,7 @@ def render_kimi_hooks_toml(*, bridge_dir: Path, python_executable: str | None = 
     # to answer the card — after which kimi's own TUI prompt stands.
     return (
         "\n"
-        "# --- Omnigent native hooks (auto-generated; do not edit) ---\n"
+        "# --- Coral native hooks (auto-generated; do not edit) ---\n"
         "[[hooks]]\n"
         'event = "PreToolUse"\n'
         f'command = "{pre}"\n'

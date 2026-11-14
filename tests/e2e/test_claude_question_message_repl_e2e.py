@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """A real REPL and Claude session preserve questions while web messages wait.
 
 Opt in with OMNIGENT_E2E_CLAUDE_NATIVE=1 and pass --profile plus a real
@@ -374,7 +375,7 @@ def test_web_followup_preserves_real_repl_question(
 
             _wait_for(
                 approval_displayed,
-                description="the generic Omnigent REPL's approval display",
+                description="the generic Coral REPL's approval display",
                 timeout=10,
             )
             evidence["repl_displayed_approval"] = True
@@ -562,7 +563,7 @@ def test_web_followup_preserves_real_repl_question(
 
             evidence["mirrored_followup_after_answer"] = _wait_for(
                 mirrored_followup,
-                description="the delivered follow-up in Omnigent's persisted conversation",
+                description="the delivered follow-up in Coral's persisted conversation",
                 timeout=30,
             )
             evidence["followup_delivered_at"] = _now()

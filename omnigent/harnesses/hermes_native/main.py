@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Native Hermes TUI wrapper for the Omnigent CLI.
 
 ``omnigent hermes`` launches Nous Research's Hermes Agent interactive TUI (the bare
@@ -182,7 +183,7 @@ def run_hermes_native(
     _preflight_local_tools()
     if server is None:
         raise click.ClickException(
-            "Hermes requires a resolved Omnigent server URL. The CLI should call "
+            "Hermes requires a resolved Coral server URL. The CLI should call "
             "_ensure_backend before run_hermes_native."
         )
     with TemporaryDirectory(prefix="omnigent-hermes-native-") as tmpdir:

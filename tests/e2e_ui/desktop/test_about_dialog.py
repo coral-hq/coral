@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """E2E coverage for the shell-owned Electron About page.
 
 The e2e_ui harness runs Chromium rather than Electron, so this injects the same
@@ -58,7 +59,7 @@ def test_about_dialog_update_flow(page: Page) -> None:
     page.add_init_script(_ABOUT_BRIDGE)
     page.goto(_ABOUT_PAGE.as_uri())
 
-    expect(page.get_by_role("heading", name="Omnigent macOS app")).to_be_visible()
+    expect(page.get_by_role("heading", name="Coral macOS app")).to_be_visible()
     expect(page.get_by_text("0.13.0", exact=True)).to_be_visible()
     expect(page.get_by_text("0.13.0.dev0", exact=True)).to_be_visible()
     expect(page.get_by_text("/Users/alice/.local/bin/omnigent", exact=True)).to_be_visible()

@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """End-to-end regression: cursor-native transcript polling under fd exhaustion.
 
 The bug
@@ -266,7 +267,7 @@ def emfile_server() -> Iterator[str]:
             log_handle.close()
             log_text = log_path.read_text(errors="replace")
             raise RuntimeError(
-                f"Omnigent server failed to start within 30 s. Log tail:\n{log_text[-2000:]}"
+                f"Coral server failed to start within 30 s. Log tail:\n{log_text[-2000:]}"
             )
         yield base_url
     finally:

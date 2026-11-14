@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """Per-harness live characterization test — antigravity (Gemini) SDK harness.
 
 Runs ``omnigent run <spec> --harness antigravity ...`` as a real subprocess and
@@ -167,7 +168,7 @@ def _antigravity_skip_reason(omnigent_python: Path) -> str | None:
         # The probe itself failed to import the onboarding module — treat as a
         # missing/installation-broken prerequisite and skip with the detail.
         return (
-            "antigravity prerequisite probe failed in the Omnigent venv "
+            "antigravity prerequisite probe failed in the Coral venv "
             f"(exit {probe.returncode}): {probe.stderr.strip()[:400]!r}"
         )
     flags = probe.stdout.strip()

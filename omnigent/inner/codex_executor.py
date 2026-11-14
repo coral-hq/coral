@@ -1,3 +1,4 @@
+# CORAL(S95): user-visible "Omnigent" text changed to "Coral" by .coral/tools/rebrand.py
 """CodexExecutor: run agents through the Codex App Server.
 
 This executor keeps one long-lived ``codex app-server`` subprocess per
@@ -2383,7 +2384,7 @@ def _databricks_codex_config_overrides(
         "model_supports_reasoning_summaries=true",
         (
             "model_providers.omnigent_databricks="
-            '{name="Omnigent Databricks",'
+            '{name="Coral Databricks",'
             f"base_url={json.dumps(base_url)},"
             f"auth={{command={json.dumps(command)},"
             f"args={json.dumps(args)},"
@@ -2444,7 +2445,7 @@ def _provider_codex_config_overrides(
     overrides.append(f'model_provider="{provider_name}"')
     overrides.append(
         f"model_providers.{provider_name}="
-        '{name="Omnigent Provider",'
+        '{name="Coral Provider",'
         f"base_url={json.dumps(base_url)},"
         'auth={command="sh",'
         f'args=["-c",{auth_command_json}],'
@@ -2469,7 +2470,7 @@ def _brokered_codex_config_overrides(
         "model_supports_reasoning_summaries=true",
         (
             f"model_providers.{provider_name}="
-            '{name="Omnigent Brokered",'
+            '{name="Coral Brokered",'
             f"base_url={json.dumps(base_url)},"
             'env_key="OPENAI_API_KEY",'
             'wire_api="responses"}'
@@ -4996,7 +4997,7 @@ class CodexExecutor(Executor):
                     # silently selecting a ``databricks-*`` default.
                     raise OSError(
                         "CodexExecutor(gateway=True) with a gateway base URL requires a "
-                        "model: the Omnigent producer must resolve one before spawning."
+                        "model: the Coral producer must resolve one before spawning."
                     )
                 effective_model = model
             # ``DATABRICKS_HOST`` is read by the Databricks ``databricks auth
