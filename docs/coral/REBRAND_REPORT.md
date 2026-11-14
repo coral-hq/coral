@@ -28,7 +28,9 @@ plan. This pass supersedes these rows of section 3:
 | `39203877c` | CORAL: S95: merge the brand transform of Omnigent 2a9cbe2c2 | Merges that line into `main`. Where a hand seam had changed a file, the merge keeps the seam's text with the transform applied on top. Adds the S95 ledger entry (212 files). |
 | `84b6b9d11` | CORAL: S29, S96: coral command, and hints, crash reports and /bug name Coral | The `coral` console script (same CLI). Run as `coral`, the CLI names `coral` in every `cli_invocation()` hint, in its own process and in the daemons it starts. The crash handler and `/bug` file issues on `coral-hq/coral`. |
 | `f3fabb9b0` | CORAL: S91, S94: Coral's README and GitHub community files | Coral's own README; `SECURITY.md`, `CONTRIBUTING.md` and the issue templates point to Coral. |
-| (this commit) | CORAL: S93: rebrand report update and inventory | This section and the regenerated inventory: 4 server-page rows now count as changed. |
+| `b5f877cfb` | CORAL: S93: rebrand report update and inventory | This section and the regenerated inventory: 4 server-page rows now count as changed. |
+| `0b8eee004` | CORAL: S93, S94: link Coral's private advisories and Discussions | After the owner turned both on: `SECURITY.md` links Coral's private advisories, and the issue chooser links Discussions. |
+| (this commit) | CORAL: S91, S93: README focuses on Coral and credits Omnigent | The README drops its inventory of what still says Omnigent and its sync procedure; this report keeps both. |
 
 **What the transform changes.** In `omnigent/` and `tests/` Python files:
 
@@ -52,7 +54,14 @@ that only string literals changed before it writes.
 - `coral upgrade` upgrades a wheel install to Omnigent's release on PyPI. Its help says so. OPS-03 blocks it for `coral`.
 - The `sandbox` and `upgrade` command summaries. Their help mixes Coral steps with upstream install commands, so the script keeps them whole.
 - About 200 runtime messages that hard-code `omnigent <command>` instead of calling `cli_invocation()`. Routing them through `cli_invocation()` is an upstream candidate.
-- Everything in the README's "What still says Omnigent" list. The other areas in section 3 are unchanged: `editors/`, `sdks/`, `integrations/`, `examples/`, `docs/`, `feature-map/`, mobile ids, and the deferred web rows.
+- Internal names, kept so Omnigent's changes keep merging cleanly:
+  - the `omnigent` package, its imports and its distribution name;
+  - the `omnigent` and `omni` commands, which are the same CLI as `coral`;
+  - `OMNIGENT_*` variables and `~/.omnigent`;
+  - API paths and header names.
+- The "Powered by Omnigent" credit, omnigent.ai documentation links, and the
+  installer scripts in `scripts/`, which install upstream Omnigent.
+- The other areas in section 3 are unchanged: `editors/`, `sdks/`, `integrations/`, `examples/`, `docs/`, `feature-map/`, mobile ids, and the deferred web rows.
 
 **Checks for this pass:**
 
@@ -101,7 +110,7 @@ integration tests, which cannot import their optional dependencies here.
 | `cfc0aa218` | CORAL: S38: coral:// session links on iOS | iOS `CFBundleURLSchemes`, `DeepLink.parse` and the consent alert; iOS deep-link tests. |
 | `17f58af9f` | CORAL: S88, S89b: Coral iOS connect screen | ConnectView shows the Coral mark and copy; Website and Privacy Policy open Coral's pages. |
 | `4d0061e9e` | CORAL: S87, S89: Coral app ids in electron-mdm and a clay skill wand | Review fixes: `just electron-mdm` uses the Coral app-id preference domains; the composer skill wand is clay in the default palette; two budget-exception reasons corrected. |
-| (this commit) | CORAL: S93: rebrand report and final inventory | This report and the inventory regenerated against the final tree. |
+| `2e55d913e` | CORAL: S93: rebrand report and final inventory | This report and the inventory regenerated against the final tree. |
 
 The two iOS commits ran every hook except `web-ios-swift-format` and
 `web-ios-swift-lint`, which the maintainer approved skipping: this Mac's

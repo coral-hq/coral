@@ -21,7 +21,7 @@ OPS-01's generator will maintain this file later.
 | `CONTRIBUTING.md` | S94 | coral-specific | Retitled for Coral, with a note on seams in Omnigent files; the clone URL and the bug-report field point to Coral. |
 | `MODIFICATIONS.md` | S77 | coral-specific | Added. This file. |
 | `NOTICE` | S77 | coral-specific | Appends the Coral addendum after Omnigent's unchanged NOTICE: Coral's copyright, the attribution to Omnigent, the CORAL anchor rule, and notices for fonts Coral adds or newly documents. |
-| `README.md` | S91 | coral-specific | Replaced by Coral's README: what Coral is, its status, running it from source, telemetry and update checks, what still says Omnigent and why, syncing with Omnigent, and the attribution to Omnigent. |
+| `README.md` | S91 | coral-specific | Replaced by Coral's README: what Coral is, its status, running it from source, telemetry, documentation, contributing, and the credit and attribution to Omnigent. |
 | `SECURITY.md` | S94 | coral-specific | Vulnerability reports go to Coral's private security advisories or coralai.team@gmail.com; the code-scanning link points to Coral's repository. |
 | `justfile` | S87 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build, and `electron-mdm` writes and imports Coral's app-id preference domains (S87). |
 | `omnigent/chat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |

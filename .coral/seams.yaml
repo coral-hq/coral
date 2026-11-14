@@ -63,8 +63,8 @@ seams:
       lines: 900
       reason: >-
         The whole README is rewritten as Coral's: what Coral is, its status,
-        running it from source, telemetry, what still says Omnigent and why,
-        and the attribution.
+        running it from source, telemetry, and the credit and attribution to
+        Omnigent.
       approver: pending
     anchor_exempt: []
     upstream_first: false
