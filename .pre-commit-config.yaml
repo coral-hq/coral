@@ -27,7 +27,8 @@ repos:
       - id: pyrefly
         name: pyrefly
         language: system
-        entry: .venv/bin/pyrefly check
+        # CORAL(S101): check against this checkout's .venv, not an inherited VIRTUAL_ENV
+        entry: .venv/bin/pyrefly check --python-interpreter-path .venv/bin/python
         pass_filenames: false
         files: ^(omnigent/.*\.pyi?|sdks/python-client/.*\.py|pyproject\.toml|pyrefly\.toml|uv\.lock)$
 
