@@ -4,3 +4,9 @@
 
 # Keep changes to the approval policy subject to the same review.
 /.github/CODEOWNERS @Edwinhe03 @aravind-segu @dbczumar @bbqiu
+
+# CORAL(S39): Coral package, migrations, docs, and seam ledger
+/coral/ @coral-hq/coral-eng @lindsay-cheng
+/coral/db/migrations/ @coral-hq/coral-eng @lindsay-cheng
+/docs/coral/ @coral-hq/coral-eng @lindsay-cheng
+/.coral/ @coral-hq/coral-eng @lindsay-cheng

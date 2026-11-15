@@ -1,6 +1,9 @@
 default:
     @just --list
 
+# CORAL(S76): Coral test and verification module
+mod coral 'coral/coral.just'
+
 export FASTLANE_SKIP_UPDATE_CHECK := "1"
 
 # iOS simulator name override (default: an available iPhone, preferring a booted one)
