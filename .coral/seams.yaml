@@ -401,8 +401,9 @@ seams:
     note: >-
       Icons and artwork are generated from the Coral logo,
       docs/coral/design/coral.png, by .coral/tools/brand_assets.py.
-      Electron's Assets.car (macOS 26 dynamic icon) needs Xcode 26 and is not
-      replaced; the hand-authored iOS AppIcon.icon is unverified without it.
+      Electron's Assets.car (the macOS 26 dynamic icon) is compiled from the
+      Coral AppIcon.icon with Xcode 27.2's actool, which also compiles that
+      bundle for iOS.
       Mobile bundle ids, store listings, signing and push stay with OQ-31.
     files:
       - web/ios/Omnigent.xcodeproj/project.pbxproj
@@ -450,6 +451,7 @@ seams:
       - web/electron/icons/coral-icon.png
       - web/electron/icons/coral-icon.icns
       - web/electron/icons/coral-icon.ico
+      - web/electron/icons/Assets.car
       - web/electron/icons/coral-linux/16x16.png
       - web/electron/icons/coral-linux/24x24.png
       - web/electron/icons/coral-linux/32x32.png
@@ -484,6 +486,7 @@ seams:
       - web/electron/icons/coral-icon.png
       - web/electron/icons/coral-icon.icns
       - web/electron/icons/coral-icon.ico
+      - web/electron/icons/Assets.car
       - web/platform-assets/coral/AppIcon.icon/Assets/Coral Logo.png
       - web/electron/icons/coral-linux/16x16.png
       - web/electron/icons/coral-linux/24x24.png

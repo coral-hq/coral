@@ -154,11 +154,10 @@ building or distributing app builds or packages.
    Electron `coral-icon.*` and Linux icon sizes, the Android launcher,
    monochrome, notification and connect bitmaps, the iOS imagesets and the iOS
    Icon Composer layer. The logo is a raster; a vector (SVG) export would keep
-   the smallest sizes sharper. Not replaced at all: `web/electron/icons/Assets.car`,
-   the macOS 26 dynamic icon, still holds the Omnigent starfish (rebuilding it
-   needs Xcode 26; `afterPack` copies it into every packaged mac build). The
-   hand-authored `web/platform-assets/coral/AppIcon.icon` mirrors the upstream
-   bundle's schema but has not been compiled (Xcode 26).
+   the smallest sizes sharper. `web/electron/icons/Assets.car`, the macOS 26
+   dynamic icon, is compiled from `web/platform-assets/coral/AppIcon.icon` with
+   Xcode 27.2's `actool` (light, dark and tinted renditions), and the same
+   bundle compiles for iOS with the logo at 72% of the icon.
 4. **Code signing.** Electron `build.mac.identity` is `null` (unsigned builds);
    Coral needs its own Developer ID. iOS `DEVELOPMENT_TEAM` is still
    `8RMX4WU6F8`, Databricks' Apple team; mobile bundle ids stay `ai.omnigent.*`
@@ -185,7 +184,7 @@ Inventory classes (`rebrand-inventory.md`, 8,997 rows, 1 pending):
 |---|---|---|
 | change | 395 | Product-name text shown to users (now Coral), plus the tests and copies that pinned it. |
 | change-identity | 19 | App ids and the URL scheme, now `io.github.coral-hq.coral` and `coral`. |
-| change-asset | 33 | Omnigent artwork with a Coral replacement beside it; one still pending (`Assets.car`). |
+| change-asset | 33 | Omnigent artwork with a Coral replacement beside it. |
 | keep-origin | 405 | Origin facts (upstream project, docs, attribution) and the Databricks platform as an integration target. |
 | keep-internal | 8027 | Internal identifiers, comments, and tests that do not assert visible text. |
 | keep-deferred | 111 | Install commands, omnigent.ai docs links, the `omnigent` CLI, server messages, store metadata and mobile ids, each with the feature that changes it. |

@@ -16,13 +16,7 @@ Areas: `web/src`, `web/electron`, `web/ios`, `web/android`, `web/*.html`, and th
 | keep-deferred | Install commands, omnigent.ai docs links, the `omnigent` CLI, server messages, App Store metadata and mobile ids, each with the feature that will change it. | 107 |
 | keep-L7 | The Powered-by-Omnigent credit (L7), unchanged until counsel answers OQ-30. | 7 |
 
-Total rows: 8997. Pending planned changes: 1.
-
-### Pending
-
-| File:line | Class | Seam | Reason |
-|---|---|---|---|
-| `web/electron/icons/Assets.car:0` | change-asset | S88 | PENDING: compiled macOS 26 dynamic icon (starfish); regenerating it needs Xcode 26. Release blocker. |
+Total rows: 8997. Pending planned changes: 0.
 
 ## Rows by file
 
@@ -2383,7 +2377,7 @@ Text is an excerpt around the first hit. Seams: S79-S89b, S92 (see `.coral/seams
 
 | Line | Text | Class | Seam | Reason |
 |---|---|---|---|---|
-| - | (asset) | change-asset | S88 | PENDING: compiled macOS 26 dynamic icon (starfish); regenerating it needs Xcode 26. Release blocker. |
+| - | (asset) | change-asset | S88 | Compiled macOS 26 dynamic icon; now built from the Coral AppIcon.icon with Xcode 27.2's actool. |
 
 ### `web/electron/icons/README.md`
 

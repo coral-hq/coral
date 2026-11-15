@@ -296,6 +296,7 @@ OPS-01's generator will maintain this file later.
 | `web/electron/e2e/desktop_saved_server_unresponsive.e2e.js` | S87 | coral-specific | Assertions follow the shell copy, which names Coral (S87). |
 | `web/electron/e2e/desktop_session_expiry_browser_view.e2e.js` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
 | `web/electron/e2e/desktop_update_window.e2e.js` | S79 | coral-specific | The default hero heading is "Direct the run…" (S79). |
+| `web/electron/icons/Assets.car` | S88 | coral-specific | The macOS 26 dynamic icon, compiled with Xcode's actool from the Coral `AppIcon.icon` bundle (the Coral logo on cream). |
 | `web/electron/icons/coral-icon.icns` | S88 | coral-specific | Added. Desktop app icon: the Coral logo on the cream plate. Generated from the Coral logo by `.coral/tools/brand_assets.py`. |
 | `web/electron/icons/coral-icon.ico` | S88 | coral-specific | Added. Desktop app icon: the Coral logo on the cream plate. Generated from the Coral logo by `.coral/tools/brand_assets.py`. |
 | `web/electron/icons/coral-icon.png` | S88 | coral-specific | Added. Desktop app icon: the Coral logo on the cream plate. Generated from the Coral logo by `.coral/tools/brand_assets.py`. |
