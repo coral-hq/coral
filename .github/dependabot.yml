@@ -11,6 +11,8 @@
 #     so github-actions lists that directory as well as the root.
 #   - Review routing comes from .github/CODEOWNERS (the `reviewers` key is
 #     deprecated); labels named here must already exist in the repo.
+# CORAL(S100): every entry is off for now (limit 0, ignore all); Coral takes
+# dependency updates from Omnigent through upstream syncs.
 version: 2
 
 updates:
@@ -20,7 +22,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0  # CORAL(S100): off for now
+    ignore:
+      - dependency-name: "*"
     cooldown:
       default-days: 7
     labels:
@@ -43,7 +47,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0  # CORAL(S100): off for now
     cooldown:
       default-days: 7
     labels:
@@ -52,6 +56,7 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     ignore:
+      - dependency-name: "*"  # CORAL(S100): off for now
       # Framework majors (react, react-router, vite, electron, ...) are
       # migrations the team schedules; a bot PR for them is only churn.
       - dependency-name: "*"
@@ -82,7 +87,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0  # CORAL(S100): off for now
+    ignore:
+      - dependency-name: "*"
     cooldown:
       default-days: 7
     labels:
@@ -99,7 +106,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0  # CORAL(S100): off for now
+    ignore:
+      - dependency-name: "*"
     cooldown:
       default-days: 7
     labels:
@@ -114,7 +123,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0  # CORAL(S100): off for now
+    ignore:
+      - dependency-name: "*"
     cooldown:
       default-days: 7
     labels:
@@ -128,7 +139,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0  # CORAL(S100): off for now
+    ignore:
+      - dependency-name: "*"
     cooldown:
       default-days: 7
     labels:
@@ -145,7 +158,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0  # CORAL(S100): off for now
+    ignore:
+      - dependency-name: "*"
     cooldown:
       default-days: 7
     labels:
@@ -159,7 +174,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0  # CORAL(S100): off for now
+    ignore:
+      - dependency-name: "*"
     cooldown:
       default-days: 7
     labels:
