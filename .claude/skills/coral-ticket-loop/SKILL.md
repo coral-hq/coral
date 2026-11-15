@@ -94,7 +94,12 @@ branches:
 git fetch origin development
 git worktree add -b feat/CRL-124-session-topology ../coral-worktrees/CRL-124 origin/development
 cd ../coral-worktrees/CRL-124
+just _ensure-uv    # the git hooks run this worktree's .venv
+just _ensure-web   # only if the ticket touches web/; web hooks skip without node_modules
 ```
+
+A new worktree has no `.venv` or `web/node_modules`, so install them before the
+first commit, or the Python hooks fail and the web hooks silently skip.
 
 Name the branch `<type>/<KEY>-<short-slug>` (`feat`, `fix`, `chore`, …). The key
 in the name lets Jira link the branch and PR to the ticket.
