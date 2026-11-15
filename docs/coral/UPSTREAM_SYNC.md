@@ -1,8 +1,8 @@
 # Syncing with Omnigent
 
 Coral keeps Omnigent's full history and merges new Omnigent commits into
-`main`. Coral changes Omnigent's files in two ways, and each one merges
-differently:
+`development`, which reaches `main` with the next release. Coral changes
+Omnigent's files in two ways, and each one merges differently:
 
 1. **Hand seams.** Small edits marked `CORAL(<seam id>)`, listed in
    `.coral/seams.yaml` and `MODIFICATIONS.md`. They merge like any other edit.
@@ -23,14 +23,17 @@ differently:
   brand transform. Its parents are the previous `transformed_sha` and the
   Omnigent commit, so it records both lines of history.
 
-Each sync adds one transformed commit and merges it into `main`. The merge base
+Each sync adds one transformed commit and merges it into `development`. The merge base
 is then the previous transformed commit, so git sees only Omnigent's new
 changes, already rewritten.
 
 ## Procedure
 
-Run these from Coral's repository root, on an up-to-date `main`. The upstream
-remote is fetch-only: its push URL is `DISABLED`.
+Run these from Coral's repository root, on a branch off an up-to-date
+`development`, and open a pull request into `development`. Merge it with a merge
+commit, never squash or rebase: the transformed commit must stay in the history
+for the next sync's merge base. The upstream remote is fetch-only: its push URL
+is `DISABLED`.
 
 1. Fetch Omnigent and pick the commit to merge:
 
@@ -41,7 +44,7 @@ remote is fetch-only: its push URL is `DISABLED`.
    ```
 
 2. Build the transformed snapshot in a scratch worktree. Use the script from
-   Coral's `main`, so the rules match what `main` already carries:
+   Coral's `development`, so the rules match what it already carries:
 
    ```bash
    git worktree add --detach ../coral-sync "$UPSTREAM"
@@ -89,7 +92,7 @@ remote is fetch-only: its push URL is `DISABLED`.
    `README.md` is Coral's own file: keep Coral's version
    (`git checkout --ours README.md`).
 
-5. Confirm `main` is fully rebranded, then update the ledger:
+5. Confirm the branch is fully rebranded, then update the ledger:
 
    ```bash
    .venv/bin/python -I .coral/tools/rebrand.py check
@@ -107,10 +110,10 @@ remote is fetch-only: its push URL is `DISABLED`.
 
 ## When the rules change
 
-Change the script and its tests on `main` first.
+Change the script and its tests on `development` first.
 
 - A rule that rewrites more: run `.venv/bin/python -I .coral/tools/rebrand.py apply`
-  on `main` and commit the result with the rule change.
+  on `development` and commit the result with the rule change.
 - A rule that rewrites less: `apply` cannot undo earlier rewrites. Rebuild the
   transformed snapshot of the current `merged_sha` with the new script (steps
   2-4, with `PREVIOUS` as the only parent), merge it, and update

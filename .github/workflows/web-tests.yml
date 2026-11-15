@@ -23,6 +23,8 @@ on:
   push:
     branches:
       - main
+      # CORAL(S99): Coral's integration branch; feature PRs merge here before a release to main
+      - development
     paths:
       - "web/**"
       - "editors/vscode/**"
