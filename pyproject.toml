@@ -415,8 +415,8 @@ dev = [
 # `omni` ship, internal and OSS alike.)
 omnigent = "omnigent.cli:main"
 omni = "omnigent.cli:main"
-# CORAL(S29): Coral's command, the same CLI until FND-01 adds coral.cli
-coral = "omnigent.cli:main"
+# CORAL(S29): Coral's command (coral.cli stub until the workflow subcommands grow)
+coral = "coral.cli:main"
 
 [tool.uv]
 # Keep plain `uv sync` aligned with the published base package. Repository
@@ -459,7 +459,7 @@ include-package-data = true
 where = ["."]
 # Discovers the `omnigent` package (including `omnigent.inner.*` and
 # all omnigent subpackages absorbed during unification).
-include = ["omnigent*"]
+include = ["omnigent*", "coral*"]
 
 [tool.setuptools.package-data]
 "omnigent.db" = ["alembic.ini"]
@@ -538,7 +538,7 @@ playwright_visual_snapshot_failures_path = "tests/e2e_ui/visual/snapshot_failure
 
 [tool.coverage.run]
 # Measure the shipped package only; tests live under tests/.
-source = ["omnigent"]
+source = ["omnigent", "coral"]
 # Each CI shard sets COVERAGE_FILE=artifacts/.coverage.<group> and writes
 # one data file (pytest-cov already combines the xdist workers within a
 # shard). `relative_files` stores paths relative to the repo root so the
@@ -624,7 +624,7 @@ ignore = [
 # omnigent.onboarding.internal_beta) would be reclassified as third-party
 # there, demanding a different import order per checkout. Pinning the
 # package name keeps one canonical order everywhere.
-known-first-party = ["omnigent"]
+known-first-party = ["omnigent", "coral"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests legitimately accept parameters they don't use (pytest fixtures,
