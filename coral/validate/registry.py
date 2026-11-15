@@ -67,6 +67,7 @@ class RuleSpec:
     fact_codes: frozenset[str]
 
 
+# custom-lint: disable-next=workspace-scoped-cache -- static rule registry
 _RULES: dict[str, RuleSpec] = {}
 
 

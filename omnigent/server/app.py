@@ -11,7 +11,7 @@ import re
 import tarfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
 from importlib import import_module
 from itertools import batched, groupby
@@ -1579,6 +1579,8 @@ def create_app(
     extra_routers: list[tuple[Any, str, list[str]]] | None = None,
     policy_modules: list[str] | None = None,
     debug_router_modules: list[str] | None = None,
+    # CORAL(S32): dotted server-plugin entrypoints (e.g. coral.server_plugin)
+    server_plugins: Sequence[str] | None = None,
     admins: list[str] | None = None,
     allowed_domains: list[str] | None = None,
     sandbox_config: ManagedSandboxDeployment | None = None,
@@ -1790,6 +1792,7 @@ def create_app(
 
     from omnigent.server.server_config import (
         automation_trigger_poll_minutes,
+        config_str_list,
         load_branding_snapshot,
         load_picker_curation,
         load_server_config,
@@ -1901,6 +1904,46 @@ def create_app(
         agent_store=agent_store,
         agent_cache=agent_cache,
     )
+    # CORAL(S32): load configured server plugins after core registries are ready
+    from omnigent.server.server_plugins import (
+        ServerServices,
+        enter_lifespan_hooks,
+        load_server_plugins,
+    )
+
+    if server_plugins is not None:
+        resolved_server_plugins = list(server_plugins)
+    elif "server_plugins" in resolved_server_config:
+        resolved_server_plugins = config_str_list(resolved_server_config.get("server_plugins"))
+    else:
+        resolved_server_plugins = []
+    plugin_services = ServerServices(
+        agent_store=agent_store,
+        file_store=file_store,
+        conversation_store=conversation_store,
+        artifact_store=artifact_store,
+        agent_cache=agent_cache,
+        comment_store=comment_store,
+        policy_store=policy_store,
+        permission_store=permission_store,
+        scheduled_task_store=scheduled_task_store,
+        project_store=project_store,
+        preference_store=preference_store,
+        host_store=host_store,
+        account_store=account_store,
+        auth_provider=auth_provider,
+        runner_router=runner_router,
+        host_registry=host_registry,
+        tunnel_registry=tunnel_registry,
+        server_config=resolved_server_config,
+        host_sharded=host_sharded,
+    )
+    plugin_registrations = load_server_plugins(resolved_server_plugins, plugin_services)
+    plugin_routers = [router_entry for reg in plugin_registrations for router_entry in reg.routers]
+    plugin_lifespan_hooks = [hook for reg in plugin_registrations for hook in reg.lifespan_hooks]
+    plugin_policy_modules = [
+        mod_path for reg in plugin_registrations for mod_path in reg.policy_modules
+    ]
     runner_session_initializer = RunnerSessionInitializer(
         tunnel_registry,
         server_version=_server_version(),
@@ -2044,7 +2087,9 @@ def create_app(
         # modules) so GET /v1/policy-registry serves the catalog.
         from omnigent.policies.registry import load_registry
 
-        load_registry(extra_modules=policy_modules)
+        # CORAL(S32): merge plugin policy modules into the startup policy registry
+        combined_policy_modules = [*(policy_modules or []), *plugin_policy_modules]
+        load_registry(extra_modules=combined_policy_modules or None)
 
         # Accounts first-run: open the browser after uvicorn has bound
         # the port. bootstrap_admin sets open_url to the loopback base
@@ -2214,8 +2259,10 @@ def create_app(
 
         session_pull_requests.install_refresher(pull_request_refresher)
         try:
-            with monitor_event_loop():
-                yield
+            # CORAL(S32): enter plugin lifespan hooks after core startup and exit first
+            async with enter_lifespan_hooks(app_inst, plugin_services, plugin_lifespan_hooks):
+                with monitor_event_loop():
+                    yield
         finally:
             session_pull_requests.install_refresher(None)
             await pull_request_refresher.aclose()
@@ -5308,6 +5355,8 @@ def create_app(
     # mount so FastAPI resolves them before the catch-all fallback.
     all_extra_routers = list(extra_routers or [])
     all_extra_routers.extend(_load_debug_routers(debug_router_modules))
+    # CORAL(S32): mount server-plugin routers before the SPA catch-all
+    all_extra_routers.extend(plugin_routers)
     for router, prefix, tags in all_extra_routers:
         app.include_router(router, prefix=prefix, tags=[*tags])
 

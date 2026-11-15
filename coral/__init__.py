@@ -1,5 +1,7 @@
-"""Coral workflow engine."""
+"""Coral workflow orchestration package."""
 
-from coral.version import __version__
+from __future__ import annotations
 
-__all__ = ["__version__"]
+from coral.version import CORAL_VERSION, __version__
+
+__all__ = ["CORAL_VERSION", "__version__"]

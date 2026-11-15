@@ -10,10 +10,9 @@ from typing import Protocol
 
 from sqlalchemy import Engine, select
 
+from coral.db import encode, make_named_managed_session_maker
 from coral.db.models_workflows import MAX_STORED_BYTES, WorkflowRow
 from coral.model import CompiledGraph
-from omnigent.db.compression import encode
-from omnigent.db.utils import make_named_managed_session_maker
 
 _RUNNABLE = "runnable"
 _NOT_RUNNABLE = "not_runnable"

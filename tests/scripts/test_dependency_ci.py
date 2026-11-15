@@ -252,6 +252,15 @@ def test_ci_tooling_tests_leave_the_catch_all_shard():
     assert "--ignore=tests/scripts" in groups["misc"]
 
 
+def test_coral_tests_leave_the_catch_all_shard():
+    groups = {
+        row["group"]: row["paths"].split()
+        for row in json.loads((CI / "python-matrix.json").read_text())
+    }
+    assert groups["coral"] == ["tests/coral"]
+    assert "--ignore=tests/coral" in groups["misc"]
+
+
 def test_gradle_wrapper_bundle_keeps_the_android_profile(scope_module):
     paths = [
         "web/android/gradlew",

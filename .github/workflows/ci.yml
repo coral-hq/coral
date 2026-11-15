@@ -189,6 +189,7 @@ jobs:
         run: |
           mkdir -p artifacts artifacts/progress "$(dirname "$COVERAGE_FILE")"
           # matrix.paths is unquoted on purpose: it word-splits into pytest args.
+          # CORAL(S39c): measure coverage across coral alongside omnigent.
           # shellcheck disable=SC2086
           env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u DATABRICKS_TOKEN \
             uv run pytest ${{ matrix.paths }} \
@@ -197,7 +198,7 @@ jobs:
               --dist=${{ matrix.dist || 'loadfile' }} \
               --timeout=300 \
               --junitxml=artifacts/pytest-${{ matrix.group }}.xml \
-              --cov=omnigent --cov-report= \
+              --cov=omnigent --cov=coral --cov-report= \
               -v --tb=long --showlocals --log-level=INFO -r a \
               || { rc=$?; [ "$rc" -eq 5 ] && [ "$DEPENDENCY" != "true" ] && echo "::notice::No tests collected in this shard; treating as a pass." || exit "$rc"; }
 

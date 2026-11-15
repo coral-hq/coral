@@ -5137,6 +5137,16 @@ def server(
         account_store=account_store,
         policy_modules=cfg.get("policy_modules"),
         debug_router_modules=config_str_list(cfg.get("debug_router_modules")),
+        # CORAL(S32): pass configured server_plugins or CLI default from environment
+        server_plugins=(
+            config_str_list(cfg.get("server_plugins"))
+            if "server_plugins" in cfg
+            else [
+                entry.strip()
+                for entry in os.environ.get("OMNIGENT_SERVER_PLUGINS", "").split(",")
+                if entry.strip()
+            ]
+        ),
         admins=config_str_list(cfg.get("admins")),
         allowed_domains=config_str_list(cfg.get("allowed_domains")),
         sandbox_config=sandbox_config,

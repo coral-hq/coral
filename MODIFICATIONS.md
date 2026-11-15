@@ -14,24 +14,29 @@ OPS-01's generator will maintain this file later.
 
 | File | Seams | Category | Change |
 |---|---|---|---|
+| `.github/CODEOWNERS` | S39 | coral-specific | Appends Coral's ownership block for `/coral/`, `/coral/db/migrations/`, `/docs/coral/`, and `/.coral/` below Omnigent's unchanged lines (S39). |
 | `.github/ISSUE_TEMPLATE/bug_report.yml` | S94 | coral-specific | The version field asks for the Coral commit. |
 | `.github/ISSUE_TEMPLATE/config.yml` | S94 | coral-specific | The contact links point to Coral's Discussions and documentation. |
 | `.github/dependabot.yml` | S100 | coral-specific | Every update entry is off for now (limit 0, ignores every dependency); Coral takes dependency updates from Omnigent's upstream syncs. |
-| `.github/workflows/ci.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
+| `.github/scripts/ci/python-matrix.json` | S39d | coral-specific | Adds the `coral` shard (`tests/coral`) and ignores `tests/coral` in `misc` (S39d). |
+| `.github/workflows/ci.yml` | S99, S39c | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main` (S99). Collects coverage for `coral` alongside `omnigent` (S39c). |
 | `.github/workflows/lint.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
 | `.github/workflows/security-gate.yml` | S99 | coral-specific | Reads its trust rules from the default branch (`development`) instead of `main`. |
 | `.github/workflows/security-scan.yml` | S99 | coral-specific | Reads its trust rules from the default branch (`development`) instead of `main`. |
 | `.github/workflows/web-tests.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
 | `.gitignore` | S77 | coral-specific | Tracks `.coral/` despite the `.*/` rule. |
-| `.pre-commit-config.yaml` | S93, S101 | coral-specific | Exempts the committed 1.2 MB Coral roadmap from `check-added-large-files` (S93); the pyrefly hook checks against the checkout's own `.venv` interpreter, so worktrees that inherit another `VIRTUAL_ENV` pass (S101). |
+| `.pre-commit-config.yaml` | S93, S101, S39e | coral-specific | Exempts the committed 1.2 MB Coral roadmap from `check-added-large-files` (S93); the pyrefly hook checks against the checkout's own `.venv` interpreter, so worktrees that inherit another `VIRTUAL_ENV` pass (S101); triggers pyrefly on `coral/` changes (S39e). |
 | `CONTRIBUTING.md` | S94 | coral-specific | Retitled for Coral, with a note on seams in Omnigent files and Coral's branch flow (`development` is the default branch; releases merge into `main` and back); the clone URL and bug-report field point to Coral. |
 | `MODIFICATIONS.md` | S77 | coral-specific | Added. This file. |
 | `NOTICE` | S77 | coral-specific | Appends the Coral addendum after Omnigent's unchanged NOTICE: Coral's copyright, the attribution to Omnigent, the CORAL anchor rule, and notices for fonts Coral adds or newly documents. |
 | `README.md` | S91 | coral-specific | Replaced by Coral's README: what Coral is, its status, running it from source with `coral start` (the `coral` command wraps the same CLI as `omnigent`), documentation, contributing, and the credit and attribution to Omnigent. |
 | `SECURITY.md` | S94 | coral-specific | Vulnerability reports go to Coral's private security advisories or coralai.team@gmail.com; the code-scanning link points to Coral's repository. |
-| `justfile` | S87 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build, and `electron-mdm` writes and imports Coral's app-id preference domains (S87). |
+| `dev/lint/custom_lint.py` | S39 | coral-specific | Registers the `coral-import-boundary` rule last in `RULES` (S39). |
+| `dev/lint/lint_coral_import_boundary.py` | S39 | coral-specific | Added. Enforces Coral's pure/omni/db/app/root three-tier import boundaries (S39). |
+| `dev/lint/lint_workspace_scoped_cache.py` | S39 | coral-specific | Adds `coral/` to `SCANNED_ROOTS` (S39). |
+| `justfile` | S87, S76 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build, and `electron-mdm` writes and imports Coral's app-id preference domains (S87). Mounts `mod coral 'coral/coral.just'` (S76). |
 | `omnigent/chat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/cli.py` | S96, S95 | coral-specific | The crash handler shows Coral and files issues on coral-hq/coral. Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/cli.py` | S96, S95, S32 | upstream-extension | The crash handler shows Coral and files issues on coral-hq/coral (S96). Passes configured `server_plugins` into `create_app` (S32). Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/cli_config.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/cli_diagnostics.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/cli_native.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -119,7 +124,8 @@ OPS-01's generator will maintain this file later.
 | `omnigent/runtime/harnesses/process_manager.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/runtime/prompt.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/runtime/workflow.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/server/app.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/server/app.py` | S95, S32 | upstream-extension | Wires `server_plugins` loading, router mounting ahead of `_SPAStaticFiles`, policy-module merging, and lifespan hook execution (S32). Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/server/server_plugins.py` | S32 | upstream-extension | Added. Defines `ServerServices`, `ServerPluginRegistration`, `load_server_plugins`, and `enter_lifespan_hooks` (S32). |
 | `omnigent/server/mcp_compatibility.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/server/performance_metrics.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/server/routes/_session_harness_readiness.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -143,7 +149,8 @@ OPS-01's generator will maintain this file later.
 | `omnigent/util/tmux_compat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `openapi.json` | S95 | coral-specific | Regenerated: the title and API descriptions follow the S95 brand transform. |
 | `pnpm-lock.yaml` | S83 | coral-specific | Locks `@fontsource-variable/newsreader` 5.3.0 (S83). |
-| `pyproject.toml` | S29 | coral-specific | Adds the `coral` console script, the same CLI as `omnigent` and `omni` (interim until FND-01). |
+| `pyproject.toml` | S29, S39b, S39c | coral-specific | Points `coral` at `coral.cli:main`, includes `coral*` and Coral package data (S29); adds `"coral"` to isort `known-first-party` (S39b) and `[tool.coverage.run].source` (S39c). |
+| `pyrefly.toml` | S39e | coral-specific | Includes `coral/**/*.py` and `coral/**/*.pyi` in typechecking (S39e). |
 | `tests/browser_ui/chat/test_color_theme.py` | S82 | coral-specific | The default palette is labelled "Coral" with Coral's selection washes (S82). |
 | `tests/browser_ui/chat/test_status_indicators.py` | S79 | coral-specific | The working indicator's Coral mark holds still while its opacity pulses, replacing the Otto blink check (S79). |
 | `tests/cli/test_backend.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -154,6 +161,7 @@ OPS-01's generator will maintain this file later.
 | `tests/cli/test_import.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/cli/test_login_databricks.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/db/test_crdb_core.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/dev/lint/test_custom_lint.py` | S39 | coral-specific | Asserts `coral-import-boundary` is registered last in `custom_lint.RULES` (S39). |
 | `tests/e2e/integrations/deploy/gensee/test_managed_lifecycle.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e/integrations/deploy/kubernetes/e2e_managed_host_config.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e/omnigent/_snapshot.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -236,6 +244,7 @@ OPS-01's generator will maintain this file later.
 | `tests/runner/test_runner_entry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/runtime/harnesses/test_executor_adapter.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/runtime/test_filesystem_registry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/scripts/test_dependency_ci.py` | S39d | coral-specific | Asserts the `coral` matrix group collects `tests/coral` and `misc` ignores it (S39d). |
 | `tests/scripts/test_security_gate.py` | S99 | coral-specific | Expects the gate and scan to fetch their trust rules from the default branch. |
 | `tests/server/integration/test_kiro_permission_delivery.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/integration/test_lifespan.py` | S98 | coral-specific | Expects the server never to start the telemetry client, in CI or not. |
@@ -245,6 +254,7 @@ OPS-01's generator will maintain this file later.
 | `tests/server/routes/test_session_resources.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/routes/test_sessions_upload_limits.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/test_admin_list.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/server/test_app.py` | S32 | upstream-extension | Adds server-plugin loading, failure abort, lifespan ordering, bundle policy registration, and `/v1/coral/info` gate tests (S32). |
 | `tests/server/test_oidc_cli_ticket.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/test_runner_session_init.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/test_codex_effort_terminal_composer_mirror.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
