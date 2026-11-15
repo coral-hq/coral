@@ -16,6 +16,9 @@ OPS-01's generator will maintain this file later.
 |---|---|---|---|
 | `.github/ISSUE_TEMPLATE/bug_report.yml` | S94 | coral-specific | The version field asks for the Coral commit. |
 | `.github/ISSUE_TEMPLATE/config.yml` | S94 | coral-specific | The contact links point to Coral's Discussions and documentation. |
+| `.github/workflows/ci.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
+| `.github/workflows/lint.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
+| `.github/workflows/web-tests.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
 | `.gitignore` | S77 | coral-specific | Tracks `.coral/` despite the `.*/` rule. |
 | `.pre-commit-config.yaml` | S93 | coral-specific | Exempts the committed 1.2 MB Coral roadmap from `check-added-large-files`. |
 | `CONTRIBUTING.md` | S94 | coral-specific | Retitled for Coral, with a note on seams in Omnigent files; the clone URL and the bug-report field point to Coral. |
