@@ -19,10 +19,12 @@ OPS-01's generator will maintain this file later.
 | `.github/dependabot.yml` | S100 | coral-specific | Every update entry is off for now (limit 0, ignores every dependency); Coral takes dependency updates from Omnigent's upstream syncs. |
 | `.github/workflows/ci.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
 | `.github/workflows/lint.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
+| `.github/workflows/security-gate.yml` | S99 | coral-specific | Reads its trust rules from the default branch (`development`) instead of `main`. |
+| `.github/workflows/security-scan.yml` | S99 | coral-specific | Reads its trust rules from the default branch (`development`) instead of `main`. |
 | `.github/workflows/web-tests.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
 | `.gitignore` | S77 | coral-specific | Tracks `.coral/` despite the `.*/` rule. |
 | `.pre-commit-config.yaml` | S93 | coral-specific | Exempts the committed 1.2 MB Coral roadmap from `check-added-large-files`. |
-| `CONTRIBUTING.md` | S94 | coral-specific | Retitled for Coral, with a note on seams in Omnigent files; the clone URL and the bug-report field point to Coral. |
+| `CONTRIBUTING.md` | S94 | coral-specific | Retitled for Coral, with a note on seams in Omnigent files and Coral's branch flow (`development` is the default branch; releases merge into `main` and back); the clone URL and bug-report field point to Coral. |
 | `MODIFICATIONS.md` | S77 | coral-specific | Added. This file. |
 | `NOTICE` | S77 | coral-specific | Appends the Coral addendum after Omnigent's unchanged NOTICE: Coral's copyright, the attribution to Omnigent, the CORAL anchor rule, and notices for fonts Coral adds or newly documents. |
 | `README.md` | S91 | coral-specific | Replaced by Coral's README: what Coral is, its status, running it from source with `coral start` (the `coral` command wraps the same CLI as `omnigent`), documentation, contributing, and the credit and attribution to Omnigent. |

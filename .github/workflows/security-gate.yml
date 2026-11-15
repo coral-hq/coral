@@ -36,10 +36,12 @@ jobs:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 12
     steps:
-      - name: Check out trust check from main
+      # CORAL(S99): read from the default branch (development); PRs cannot change it
+      - name: Check out trust check from the default branch
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          TRUSTED_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           # Bootstrap without executing an Action pin supplied by the PR.
           git init .
@@ -47,7 +49,7 @@ jobs:
           git sparse-checkout set --no-cone .github/scripts .github/security .github/dependabot-automerge.json
           authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           echo "::add-mask::$authorization"
-          git -c "http.extraHeader=AUTHORIZATION: basic $authorization" fetch --depth=1 origin main
+          git -c "http.extraHeader=AUTHORIZATION: basic $authorization" fetch --depth=1 origin "$TRUSTED_BRANCH"
           git checkout --detach FETCH_HEAD
 
       - name: Trust gate

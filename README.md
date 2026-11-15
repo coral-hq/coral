@@ -82,6 +82,7 @@ exactly as Omnigent documents them. `uv run coral --help` lists them all.
 ## Contributing
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): development setup, tests and pull requests.
+  Work lands on the `development` branch; `main` holds releases.
 - [Discussions](https://github.com/coral-hq/coral/discussions): questions and ideas.
 - [SECURITY.md](SECURITY.md): report a vulnerability privately.
 

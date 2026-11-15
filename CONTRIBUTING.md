@@ -10,9 +10,13 @@ in Omnigent itself should also go to Omnigent. The rest of this guide is
 inherited from Omnigent; its development setup and checks apply to Coral as
 written.
 
-Coral's branches: create your branch from `development` and open your pull
-request into `development`. Releases merge `development` into `main` with a merge
-commit. Where the inherited guide below says `main`, read `development`.
+Coral's branches: `development` is the default branch, where all work lands,
+and `main` holds releases. Create your branch from `development` and open your
+pull request into `development`. To release, open a pull request from
+`development` into `main` and merge it with a merge commit. Then open a pull
+request from `main` into `development` and merge it the same way, so
+`development` contains the release merge and the two histories stay joined.
+Where the inherited guide below says `main`, read `development`.
 
 Please don't include secrets, internal URLs, customer data, or private
 configuration in issues, tests, examples, or logs.
