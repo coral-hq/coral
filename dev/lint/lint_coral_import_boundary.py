@@ -69,8 +69,14 @@ _COMPOSITION_ROOTS: frozenset[str] = frozenset({"coral.cli", "coral.server_plugi
 _PURE_THIRD_PARTY: frozenset[str] = frozenset({"pydantic", "yaml"})
 _DB_THIRD_PARTY: frozenset[str] = _PURE_THIRD_PARTY | frozenset({"sqlalchemy", "alembic"})
 
-# Allowlisted `omnigent.db` symbols permitted inside `coral.db.**` (populated by DB slices).
-DB_OMNIGENT_ALLOWLIST: frozenset[str] = frozenset()
+# Allowlisted `omnigent.db` symbols permitted inside `coral.db.**`.
+DB_OMNIGENT_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "omnigent.db.compression.CompressedText",
+        "omnigent.db.compression.encode",
+        "omnigent.db.utils.make_named_managed_session_maker",
+    }
+)
 
 _STDLIB_NAMES: frozenset[str] = sys.stdlib_module_names | frozenset({"__future__"})
 
@@ -213,7 +219,9 @@ def _check_pure(target: _ImportedTarget, display_path: str) -> str | None:
     if top == "coral":
         resolved = target.full_name if target.symbol else target.module
         if target.module == "coral":
-            if target.symbol in {None, "CORAL_VERSION"} or _is_pure_module(resolved):
+            if target.symbol in {None, "CORAL_VERSION", "__version__"} or _is_pure_module(
+                resolved
+            ):
                 return None
             return (
                 f"{display_path}:{target.line}: pure module cannot import non-pure "

@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from coral.version import CORAL_VERSION
+from coral.version import CORAL_VERSION, __version__
 
-__all__ = ["CORAL_VERSION"]
+__all__ = ["CORAL_VERSION", "__version__"]

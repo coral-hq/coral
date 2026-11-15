@@ -12,6 +12,7 @@ from collections.abc import MutableMapping
 from pathlib import Path
 
 CORAL_VERSION = "0.1.0.dev0"
+__version__ = CORAL_VERSION
 DEFAULT_CORAL_SERVER_PLUGINS = "coral.server_plugin"
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 import click
 
@@ -88,6 +89,35 @@ def _version_callback(ctx: click.Context, _param: click.Parameter, value: bool) 
 def cli() -> None:
     """Coral workflow orchestration CLI."""
     apply_coral_environment()
+
+
+@cli.group("workflow", help="Work with workflow definitions.")
+def workflow_group() -> None:
+    """Workflow definition subcommands."""
+
+
+def _validate_workflow_file(path: Path) -> int:
+    from coral.validate.pipeline import check_text
+
+    result = check_text(path.read_text())
+    if result.load_error is not None:
+        error = result.load_error
+        line = f":{error.range.start_line}" if error.range else ""
+        click.echo(f"{path}{line}: {error.code}: {error.message}", err=True)
+        return 1
+    assert result.report is not None
+    for problem in result.report.problems:
+        line = f":{problem.range.start_line}" if problem.range else ""
+        click.echo(f"{path}{line}: {problem.severity} {problem.rule}: {problem.message}")
+    click.echo("runnable" if result.report.runnable else "not runnable")
+    return 0 if result.report.runnable else 1
+
+
+@workflow_group.command("validate", help="Check a workflow YAML file.")
+@click.argument("path", type=click.Path(path_type=Path))
+def validate_workflow(path: Path) -> None:
+    """Validate and summarize runnability for a workflow YAML file."""
+    raise SystemExit(_validate_workflow_file(path))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

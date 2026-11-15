@@ -1,0 +1,60 @@
+# The decision can skip the AND-join at "publish", so the join would wait forever.
+id: deadlock-join
+name: Deadlock join
+nodes:
+  - id: start
+    kind: start
+  - id: fork
+    kind: step
+    goal: Kick off both tracks
+    roster: [planner]
+  - id: build
+    kind: step
+    goal: Build it
+    roster: [implementer]
+  - id: triage
+    kind: decision
+  - id: docs
+    kind: step
+    goal: Write docs
+    roster: [writer]
+  - id: publish
+    kind: step
+    goal: Publish
+    roster: [implementer]
+  - id: abandon
+    kind: step
+    goal: Clean up
+    roster: [implementer]
+  - id: end
+    kind: end
+arrows:
+  - id: a1
+    from: start
+    to: fork
+  - id: a2
+    from: fork
+    to: build
+  - id: a3
+    from: fork
+    to: docs
+  - id: a4
+    from: build
+    to: triage
+  - id: a5
+    from: triage
+    to: publish
+    label: ship
+  - id: a6
+    from: triage
+    to: abandon
+    label: stop
+  - id: a7
+    from: docs
+    to: publish
+  - id: a8
+    from: publish
+    to: end
+  - id: a9
+    from: abandon
+    to: end
