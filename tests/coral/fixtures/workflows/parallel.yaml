@@ -1,0 +1,42 @@
+id: fan-out
+name: Fan out
+nodes:
+  - id: start
+    kind: start
+  - id: plan
+    kind: step
+    goal: Plan the work
+    roster: [planner]
+  - id: build
+    kind: step
+    goal: Build it
+    roster: [implementer]
+  - id: docs
+    kind: step
+    goal: Document it
+    roster: [writer]
+  - id: merge
+    kind: step
+    goal: Combine the results
+    roster: [implementer]
+  - id: end
+    kind: end
+arrows:
+  - id: a1
+    from: start
+    to: plan
+  - id: a2
+    from: plan
+    to: build
+  - id: a3
+    from: plan
+    to: docs
+  - id: a4
+    from: build
+    to: merge
+  - id: a5
+    from: docs
+    to: merge
+  - id: a6
+    from: merge
+    to: end

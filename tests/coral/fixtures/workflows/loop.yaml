@@ -1,0 +1,35 @@
+id: review-loop
+name: Review loop
+nodes:
+  - id: start
+    kind: start
+  - id: work
+    kind: step
+    goal: Implement the change
+    roster: [implementer]
+  - id: review
+    kind: decision
+    question: Is the change acceptable?
+  - id: end
+    kind: end
+arrows:
+  - id: a1
+    from: start
+    to: work
+  - id: a2
+    from: work
+    to: review
+  - id: a3
+    from: review
+    to: end
+    label: approved
+  - id: a4
+    from: review
+    to: work
+    label: revise
+    back: true
+    limit: 3
+    at_limit: a5
+  - id: a5
+    from: review
+    to: end
