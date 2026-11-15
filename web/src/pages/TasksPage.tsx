@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ClockIcon, InfoIcon, Loader2Icon, SearchIcon, TriangleAlertIcon } from "lucide-react";
 import { PageScroll } from "@/components/PageScroll";
+import { CoralPageHeader } from "@/brand/CoralPageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -234,37 +235,37 @@ export function TasksPage({ templatesOnly = false }: { templatesOnly?: boolean }
           onClose={() => (introOpens > 0 ? introButtonRef : newTaskButtonRef).current?.focus()}
         />
       )}
-      <div className="mb-6 flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-1">
-            <h1 className="text-2xl font-semibold">Automations</h1>
-            <Button
-              ref={introButtonRef}
-              variant="ghost"
-              size="icon-xs"
-              aria-label="About automations"
-              data-testid="tasks-intro-button"
-              componentId="tasks.intro.open"
-              className="text-muted-foreground"
-              onClick={() => setIntroOpens((n) => n + 1)}
-            >
-              <InfoIcon className="size-4" />
-            </Button>
-          </div>
-          <p className="text-ui text-muted-foreground">
-            Run agent sessions on a recurring schedule.
-          </p>
-        </div>
-        <Button
-          ref={newTaskButtonRef}
-          data-testid="new-task-button"
-          className="shrink-0"
-          componentId="tasks.new"
-          onClick={openManual}
-        >
-          New automation
-        </Button>
-      </div>
+      {/* CORAL(S84): shared desk header. */}
+      <CoralPageHeader
+        variant="list"
+        title="Automations"
+        description="Run agent sessions on a recurring schedule."
+        titleAccessory={
+          <Button
+            ref={introButtonRef}
+            variant="ghost"
+            size="icon-xs"
+            aria-label="About automations"
+            data-testid="tasks-intro-button"
+            componentId="tasks.intro.open"
+            className="text-muted-foreground"
+            onClick={() => setIntroOpens((n) => n + 1)}
+          >
+            <InfoIcon className="size-4" />
+          </Button>
+        }
+        actions={
+          <Button
+            ref={newTaskButtonRef}
+            data-testid="new-task-button"
+            className="shrink-0"
+            componentId="tasks.new"
+            onClick={openManual}
+          >
+            New automation
+          </Button>
+        }
+      />
 
       <Tabs
         value={view}

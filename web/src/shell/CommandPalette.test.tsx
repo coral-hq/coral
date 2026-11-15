@@ -4,11 +4,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps, ReactNode } from "react";
 
 import { ALT_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
+import type { CoralInfo } from "@/workflows/api/types";
+import type * as CoralInfoModule from "@/workflows/gate/useCoralInfo";
 import { CommandPalette } from "./CommandPalette";
 
 const navigate = vi.fn();
 vi.mock("@/lib/routing", () => ({
   useNavigate: () => navigate,
+}));
+
+const coralInfo = vi.hoisted(() => ({ data: undefined as CoralInfo | undefined }));
+vi.mock("@/workflows/gate/useCoralInfo", async (importOriginal) => ({
+  ...(await importOriginal<typeof CoralInfoModule>()),
+  useCoralInfo: () => ({ data: coralInfo.data }),
 }));
 
 const useConversations = vi.fn();
@@ -89,6 +97,7 @@ function withQueryClient(queryClient = new QueryClient()) {
 
 beforeEach(() => {
   navigate.mockClear();
+  coralInfo.data = undefined;
   useConversations.mockReset();
   useSessionSearch.mockReset();
   serverInfo.mockReturnValue({ session_search_scope: true });
@@ -911,6 +920,29 @@ describe("CommandPalette — actions", () => {
     expect(screen.getByText("Go to Settings")).toBeTruthy();
     expect(screen.getByText("Toggle conversations sidebar")).toBeTruthy();
     expect(screen.getByText("Toggle workspace sidebar")).toBeTruthy();
+  });
+
+  it("omits Coral actions until Coral is enabled", () => {
+    renderPalette();
+    expect(screen.queryByText("Go to Workflows")).toBeNull();
+    expect(screen.queryByText("Go to Agent Profiles")).toBeNull();
+  });
+
+  it("offers Go to Workflows, and Agent Profiles only with profiles_desk", () => {
+    coralInfo.data = { enabled: true, version: "1", sub_features: {} };
+    const onOpenChange = vi.fn();
+    renderPalette({ onOpenChange });
+
+    expect(screen.queryByText("Go to Agent Profiles")).toBeNull();
+    fireEvent.click(screen.getByText("Go to Workflows"));
+    expect(navigate).toHaveBeenCalledWith("/workflows");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    cleanup();
+
+    coralInfo.data = { enabled: true, version: "1", sub_features: { profiles_desk: true } };
+    renderPalette();
+    fireEvent.click(screen.getByText("Go to Agent Profiles"));
+    expect(navigate).toHaveBeenLastCalledWith("/profiles");
   });
 
   it("runs a navigation action and closes the palette", () => {
