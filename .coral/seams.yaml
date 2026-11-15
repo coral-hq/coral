@@ -897,3 +897,24 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S99
+    title: CI runs on Coral's development branch
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      Coral works on feature branches off `development`, merges them into
+      `development`, and releases by merging `development` into `main`. Pull
+      request checks already run for any base branch; this adds `development`
+      to the after-merge runs of CI, Lint and web Tests. The security gate and
+      scan keep reading their trust rules from `main`, the release branch.
+    files:
+      - .github/workflows/ci.yml
+      - .github/workflows/lint.yml
+      - .github/workflows/web-tests.yml
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
