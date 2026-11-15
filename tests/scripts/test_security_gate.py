@@ -392,7 +392,9 @@ def test_dependabot_scan_still_runs_other_detectors():
     for workflow, job in [("security-gate.yml", "gate"), ("security-scan.yml", "scan")]:
         checkout = _steps(workflow, job)[0]
         assert "uses" not in checkout
-        assert "fetch --depth=1 origin main" in checkout["run"]
+        # CORAL(S99): the trusted rules come from the default branch (development)
+        assert checkout["env"]["TRUSTED_BRANCH"] == "${{ github.event.repository.default_branch }}"
+        assert 'fetch --depth=1 origin "$TRUSTED_BRANCH"' in checkout["run"]
         assert "git checkout --detach FETCH_HEAD" in checkout["run"]
 
 
