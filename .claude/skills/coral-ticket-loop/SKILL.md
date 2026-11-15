@@ -94,7 +94,16 @@ branches:
 git fetch origin development
 git worktree add -b feat/CRL-124-session-topology ../coral-worktrees/CRL-124 origin/development
 cd ../coral-worktrees/CRL-124
+uv sync --extra all --group dev
+pnpm install --frozen-lockfile --filter web --filter omnigent-vscode
 ```
+
+The git hooks run tools from the worktree's own `.venv` and `node_modules`, and
+a new worktree has neither, so its Python and TypeScript hooks fail until these
+run. `uv sync` also builds the web UI; the `pnpm` line adds the VS Code
+extension's packages, matching what CI installs. Run Python tools with
+`uv run --no-sync`, so they use this worktree's code rather than the main
+checkout's.
 
 Name the branch `<type>/<KEY>-<short-slug>` (`feat`, `fix`, `chore`, …). The key
 in the name lets Jira link the branch and PR to the ticket.
