@@ -121,8 +121,9 @@ The two iOS commits ran every hook except `web-ios-swift-format` and
 swift-format (Swift 6.1, Command Line Tools and Xcode 16.4) cannot read
 `web/ios/.swift-format` and fails on every Swift file, changed or not. The six
 Swift files were checked with swift-format 604.0.0 against that config instead
-(`lint --strict` clean; `format` leaves them unchanged). Re-run both hooks once
-Xcode 26 or later is installed (section 8).
+(`lint --strict` clean; `format` leaves them unchanged). On 2026-11-14, with
+Xcode 27.2 selected, both hooks ran on all six files and passed with no changes,
+which closes the exception.
 
 BRD-01 step 4 took two commits: `8177ae7a8` amends the working-mark pulse that
 the palette flip (`f0a2ed5a1`) added to `coral.css`, and `10b7b3e6a` adds a test
@@ -245,6 +246,9 @@ Run (all on this branch unless noted):
 | `uv run --no-sync pytest tests/test_conversation_browser.py` | 44 passed |
 | `tests/server/test_device_auth.py`, `tests/server/test_oidc_cli_ticket.py`, and the web-UI/landing cases of `tests/server/test_app.py` (no `tests/server` file changed: none pinned the S92 strings) | 117 passed; 3 passed |
 | swift-format 604.0.0 `lint --strict` and `format` with `web/ios/.swift-format` on the six changed Swift files | clean, no reformatting |
+| 2026-11-14, Xcode 27.2 (swift-format 6.4.4): `web-ios-swift-format` and `web-ios-swift-lint` on the six changed Swift files | passed, no changes |
+| 2026-11-14, Xcode 27.2: `xcodebuild test ... -only-testing:OmnigentTests/DeepLinkTests` on an iPhone 17 simulator (iOS 27.2) | 23 passed; the app, including the Coral `AppIcon.icon`, builds |
+| 2026-11-14, Xcode 27.2: `actool` on `web/platform-assets/coral/AppIcon.icon` for iOS and macOS | compiles; the logo fills 72% of the iOS icon; `Assets.car` rebuilt from it |
 | Pre-commit hooks on every commit (ruff, pyrefly, prettier, oxlint, `tsc -b`, palette check, custom lint, file hygiene, large files) | passed; the two Swift hooks were skipped on the two iOS commits with approval (section 1) |
 | Audit: `git diff --quiet 2a9cbe2c2 -- LICENSE editors/vscode/LICENSE` | passed |
 | Audit: NOTICE starts with the base NOTICE's bytes (`cmp`) | passed |
@@ -263,10 +267,8 @@ Not run:
   runs. Their sources were updated wherever they pinned changed text; CI
   regenerates the landing and story snapshots through
   `.github/workflows/ui-snapshot-update.yml` (Actions are off for now).
-- iOS `DeepLinkTests`: `xcodebuild -version` fails with the Command Line Tools
-  selected; with Xcode 16.4 (`DEVELOPER_DIR`) the build finds no destination
-  because the project targets iOS 26.0 and Xcode 16.4 has only the iOS 18.5
-  runtime. Needs Xcode 26. Fastlane was not used.
+- iOS UI tests (`OmnigentUITests`) and Fastlane. The deep-link unit tests ran on
+  2026-11-14 with Xcode 27.2 (see the table above).
 - Android: no Gradle build or unit tests (no Android toolchain here); ktlint is
   not installed, so its hooks skipped as designed (CI enforces them).
 - The packaged desktop check in `web/electron/RELEASING.md` (needs a signed,
@@ -343,10 +345,7 @@ placeholder with the first real skill (rule recorded in
    on macOS) and that an `omnigent://` link does not.
 6. On the Electron setup page (Connect), confirm the cream ground, the mark
    beside "Coral", the five-dot rail and "Run a Coral server on this machine…".
-7. After installing Xcode 26 or later, run the two skipped Swift hooks and the
-   iOS deep-link tests:
-   `uv run --no-sync pre-commit run web-ios-swift-format --files $(git diff --name-only 2a9cbe2c2 -- 'web/ios/*.swift')`,
-   the same with `web-ios-swift-lint`, then
-   `xcodebuild test -project web/ios/Omnigent.xcodeproj -scheme Omnigent -configuration Debug -destination 'platform=iOS Simulator,name=<an available iPhone>' -only-testing:OmnigentTests/DeepLinkTests`.
-   Also build the app once to confirm the Coral `AppIcon.icon` compiles, and
-   regenerate `web/electron/icons/Assets.car` from it (`web/electron/icons/README.md`).
+7. Done on 2026-11-14 with Xcode 27.2: the two skipped Swift hooks and the iOS
+   deep-link tests pass, the Coral `AppIcon.icon` compiles, and
+   `web/electron/icons/Assets.car` is rebuilt from it. To see the icon, run the
+   iOS app in a simulator from Xcode, or `just electron-dev` on macOS 26 or later.
