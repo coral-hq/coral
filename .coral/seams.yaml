@@ -941,3 +941,21 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S101
+    title: Pyrefly hook checks against the checkout's own .venv
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      Pyrefly picks its interpreter from VIRTUAL_ENV when set. In a git
+      worktree that inherits the main checkout's VIRTUAL_ENV, it resolved the
+      main checkout's editable installs and failed the worktree's imports, so
+      the hook passes the worktree's .venv interpreter explicitly.
+    files:
+      - .pre-commit-config.yaml
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true

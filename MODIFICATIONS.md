@@ -23,7 +23,7 @@ OPS-01's generator will maintain this file later.
 | `.github/workflows/security-scan.yml` | S99 | coral-specific | Reads its trust rules from the default branch (`development`) instead of `main`. |
 | `.github/workflows/web-tests.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
 | `.gitignore` | S77 | coral-specific | Tracks `.coral/` despite the `.*/` rule. |
-| `.pre-commit-config.yaml` | S93 | coral-specific | Exempts the committed 1.2 MB Coral roadmap from `check-added-large-files`. |
+| `.pre-commit-config.yaml` | S93, S101 | coral-specific | Exempts the committed 1.2 MB Coral roadmap from `check-added-large-files` (S93); the pyrefly hook checks against the checkout's own `.venv` interpreter, so worktrees that inherit another `VIRTUAL_ENV` pass (S101). |
 | `CONTRIBUTING.md` | S94 | coral-specific | Retitled for Coral, with a note on seams in Omnigent files and Coral's branch flow (`development` is the default branch; releases merge into `main` and back); the clone URL and bug-report field point to Coral. |
 | `MODIFICATIONS.md` | S77 | coral-specific | Added. This file. |
 | `NOTICE` | S77 | coral-specific | Appends the Coral addendum after Omnigent's unchanged NOTICE: Coral's copyright, the attribution to Omnigent, the CORAL anchor rule, and notices for fonts Coral adds or newly documents. |
