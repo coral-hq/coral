@@ -33,6 +33,8 @@ import { ARIA_MOD_KEY, MOD_KEY, SHIFT_KEY } from "@/components/KeyboardShortcut"
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
 import type * as PullRequestsModule from "@/hooks/usePullRequests";
+import type { CoralInfo } from "@/workflows/api/types";
+import type * as CoralInfoModule from "@/workflows/gate/useCoralInfo";
 import {
   markConversationRead,
   markConversationSeen,
@@ -111,6 +113,13 @@ const {
 vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
   ...(await importOriginal<typeof PullRequestsModule>()),
   usePullRequestInfo: usePullRequestInfoMock,
+}));
+
+const coralInfoState = vi.hoisted(() => ({ data: undefined as CoralInfo | undefined }));
+// Drive the Coral nav rows without a server; the pure helpers stay real.
+vi.mock("@/workflows/gate/useCoralInfo", async (importOriginal) => ({
+  ...(await importOriginal<typeof CoralInfoModule>()),
+  useCoralInfo: () => ({ data: coralInfoState.data }),
 }));
 
 vi.mock("@/hooks/useSessionWorktrees", () => ({
@@ -1272,6 +1281,59 @@ describe("Sidebar session list", () => {
     expect(canvas).toHaveAttribute("aria-current", "page");
     expect(canvas).toHaveClass("bg-[var(--sidebar-active)]");
     expect(screen.getByTestId("new-chat-button")).not.toHaveClass("bg-[var(--sidebar-active)]");
+  });
+
+  describe("Coral desk navigation", () => {
+    function setCoralInfo(info: CoralInfo | undefined) {
+      coralInfoState.data = info;
+      onTestFinished(() => {
+        coralInfoState.data = undefined;
+      });
+    }
+
+    it("hides Workflows until Coral is confirmed enabled", () => {
+      mockConversations(THREE_TYPE_CONVERSATIONS);
+      setCoralInfo({ enabled: false, version: "1", sub_features: {} });
+      renderSidebar(true, "/");
+
+      expect(screen.queryByTestId("workflows-nav")).toBeNull();
+    });
+
+    it("renders Workflows after Inbox and highlights it without lighting New session", () => {
+      mockConversations(THREE_TYPE_CONVERSATIONS);
+      setCoralInfo({ enabled: true, version: "1", sub_features: {} });
+      renderSidebar(true, "/workflows/runs/r1?agent=s1");
+
+      const workflows = screen.getByTestId("workflows-nav");
+      expect(workflows).toHaveAttribute("href", "/workflows");
+      expect(workflows).toHaveAttribute("aria-current", "page");
+      expect(workflows).toHaveClass("bg-[var(--sidebar-active)]");
+      expect(
+        screen.getByTestId("inbox-button").compareDocumentPosition(workflows) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      expect(screen.getByTestId("new-chat-button")).not.toHaveClass("bg-[var(--sidebar-active)]");
+      expect(screen.getByTestId("inbox-button")).not.toHaveClass("bg-[var(--sidebar-active)]");
+    });
+
+    it("does not alias a workflow key onto another nav row", () => {
+      mockConversations(THREE_TYPE_CONVERSATIONS);
+      setCoralInfo({ enabled: true, version: "1", sub_features: {} });
+      renderSidebar(true, "/workflows/inbox");
+
+      expect(screen.getByTestId("workflows-nav")).toHaveAttribute("aria-current", "page");
+      expect(screen.getByTestId("inbox-button")).not.toHaveClass("bg-[var(--sidebar-active)]");
+    });
+
+    it("shows Agent Profiles only with profiles_desk and keeps New session off /profiles", () => {
+      mockConversations(THREE_TYPE_CONVERSATIONS);
+      setCoralInfo({ enabled: true, version: "1", sub_features: { profiles_desk: true } });
+      renderSidebar(true, "/profiles");
+
+      const profiles = screen.getByTestId("profiles-nav");
+      expect(profiles).toHaveAttribute("aria-current", "page");
+      expect(screen.getByTestId("new-chat-button")).not.toHaveClass("bg-[var(--sidebar-active)]");
+    });
   });
 
   it.each(["/canvas", "/canvas/c/conv_one"])(
