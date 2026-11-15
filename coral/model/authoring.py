@@ -7,12 +7,10 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from coral.model.ids import RESERVED_WORKFLOW_IDS as RESERVED_WORKFLOW_IDS
+from coral.model.ids import validate_workflow_id
 from coral.model.ir import PartKind
 
-# Workflow ids that collide with URL segments of the workflow API.
-RESERVED_WORKFLOW_IDS: frozenset[str] = frozenset({"runs", "templates", "new"})
-
-WORKFLOW_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 # Node, arrow and part ids exclude "." so ``node.part`` references split cleanly.
 ELEMENT_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -129,14 +127,4 @@ class Workflow(_Authoring):
     @field_validator("id")
     @classmethod
     def _workflow_slug(cls, value: str) -> str:
-        if not WORKFLOW_SLUG_PATTERN.match(value):
-            raise ValueError(
-                f"{value!r} is not a valid workflow id; use 1-64 characters from a-z, 0-9, "
-                "'_', '.' and '-', starting with a letter or digit"
-            )
-        if value in RESERVED_WORKFLOW_IDS:
-            raise ValueError(
-                f"{value!r} is reserved; choose a different workflow id "
-                f"(reserved: {', '.join(sorted(RESERVED_WORKFLOW_IDS))})"
-            )
-        return value
+        return validate_workflow_id(value)
