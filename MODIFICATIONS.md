@@ -16,6 +16,7 @@ OPS-01's generator will maintain this file later.
 |---|---|---|---|
 | `.github/ISSUE_TEMPLATE/bug_report.yml` | S94 | coral-specific | The version field asks for the Coral commit. |
 | `.github/ISSUE_TEMPLATE/config.yml` | S94 | coral-specific | The contact links point to Coral's Discussions and documentation. |
+| `.github/dependabot.yml` | S100 | coral-specific | Every update entry is off for now (limit 0, ignores every dependency); Coral takes dependency updates from Omnigent's upstream syncs. |
 | `.github/workflows/ci.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
 | `.github/workflows/lint.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
 | `.github/workflows/web-tests.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
