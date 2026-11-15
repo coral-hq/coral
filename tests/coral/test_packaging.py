@@ -32,7 +32,6 @@ def test_built_wheel_runs_coral_help_in_no_deps_venv(tmp_path: Path) -> None:
             uv_bin,
             "build",
             "--wheel",
-            "--no-build-isolation",
             "--out-dir",
             str(wheel_dir),
         ],
