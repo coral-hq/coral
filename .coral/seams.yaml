@@ -907,14 +907,37 @@ seams:
       Coral works on feature branches off `development`, merges them into
       `development`, and releases by merging `development` into `main`. Pull
       request checks already run for any base branch; this adds `development`
-      to the after-merge runs of CI, Lint and web Tests. The security gate and
-      scan keep reading their trust rules from `main`, the release branch.
+      to the after-merge runs of CI, Lint and web Tests, and the security gate
+      and scan read their trust rules from the default branch (`development`).
     files:
       - .github/workflows/ci.yml
       - .github/workflows/lint.yml
       - .github/workflows/web-tests.yml
-    tests: []
+      - .github/workflows/security-gate.yml
+      - .github/workflows/security-scan.yml
+      - tests/scripts/test_security_gate.py
+    tests:
+      - tests/scripts/test_security_gate.py
     budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S100
+    title: Dependabot opens no pull requests for now
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      Every update entry has open-pull-requests-limit 0 and ignores every
+      dependency, so Dependabot opens neither version nor security PRs. Coral
+      takes dependency updates from Omnigent through upstream syncs. To turn an
+      ecosystem back on, restore its limit and drop the catch-all ignore.
+    files:
+      - .github/dependabot.yml
+    tests:
+      - tests/scripts/test_dependabot_config.py
+    budget_lines: 40
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
