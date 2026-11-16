@@ -70,11 +70,26 @@ _PURE_THIRD_PARTY: frozenset[str] = frozenset({"pydantic", "yaml"})
 _DB_THIRD_PARTY: frozenset[str] = _PURE_THIRD_PARTY | frozenset({"sqlalchemy", "alembic"})
 
 # Allowlisted `omnigent.db` symbols permitted inside `coral.db.**`.
+# CORAL(S58): allow Coral DB layer to reuse shared Omnigent DB utilities
 DB_OMNIGENT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "omnigent.db.compression.CompressedText",
         "omnigent.db.compression.encode",
+        "omnigent.db.db_models.DEFAULT_WORKSPACE_ID",
+        "omnigent.db.db_models.current_workspace_id",
+        "omnigent.db.enum_codecs.decode_enum",
+        "omnigent.db.enum_codecs.encode_enum",
+        "omnigent.db.pagination.keyset_after",
+        "omnigent.db.query_context.query_name_scope",
+        "omnigent.db.utils.create_db_engine",
+        "omnigent.db.utils.get_db_revision_state",
+        "omnigent.db.utils.get_or_create_engine",
+        "omnigent.db.utils.is_cockroachdb",
+        "omnigent.db.utils.is_postgresql_family",
         "omnigent.db.utils.make_named_managed_session_maker",
+        "omnigent.db.utils.normalize_database_url",
+        "omnigent.db.utils.run_write_transaction",
+        "omnigent.db.utils.shared_read_scope",
     }
 )
 
