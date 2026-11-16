@@ -71,6 +71,8 @@ from omnigent.host.frames import (
     HostLaunchRunnerResultFrame,
     HostListDirFrame,
     HostListDirResultFrame,
+    HostListWorktreesFrame,
+    HostListWorktreesResultFrame,
     HostMcpServersFrame,
     HostMcpServersResultFrame,
     HostMcpToolsFrame,
@@ -83,6 +85,7 @@ from omnigent.host.frames import (
     HostProbeAccountsResultFrame,
     HostRefreshHarnessesFrame,
     HostRefreshHarnessesResultFrame,
+    HostRemoveWorktreeFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
@@ -99,7 +102,7 @@ from omnigent.host.frames import (
     decode_host_frame,
     encode_host_frame,
 )
-from omnigent.host.git_worktree import CreatedWorktree
+from omnigent.host.git_worktree import CreatedWorktree, WorktreeInfo
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
@@ -3075,6 +3078,67 @@ async def test_cancelled_readiness_probe_keeps_orphan_reaper_paused(
     assert host._host_subprocess_tasks == set()
 
 
+# CORAL(S71): a cancelled frame keeps the reaper paused until its worker exits.
+@pytest.mark.parametrize(
+    ("blocked_target", "frame"),
+    [
+        (
+            "omnigent.host.connect.create_worktree",
+            HostCreateWorktreeFrame(request_id="wt", repo_path="/repo", branch_name="feature/a"),
+        ),
+        (
+            "omnigent.host.connect.remove_worktree",
+            HostRemoveWorktreeFrame(request_id="wt", worktree_path="/repo-wt"),
+        ),
+        (
+            "omnigent.host.connect.list_worktrees",
+            HostListWorktreesFrame(request_id="wt", repo_path="/repo"),
+        ),
+        (
+            "omnigent.host.connect.HostProcess._handle_fs_request",
+            HostFsRequestFrame(request_id="fs", op="changes", workspace="/repo", session_id="s"),
+        ),
+    ],
+    ids=["create_worktree", "remove_worktree", "list_worktrees", "fs_request"],
+)
+async def test_cancelled_subprocess_frame_keeps_orphan_reaper_paused(
+    monkeypatch: pytest.MonkeyPatch, blocked_target: str, frame: object
+) -> None:
+    """A reconnect that cancels a frame cannot un-pause cleanup while its worker runs."""
+    host = _make_host_process()
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+
+    def _blocked_worker(*_args: object, **_kwargs: object) -> None:
+        worker_started.set()
+        if not worker_release.wait(timeout=5.0):
+            raise AssertionError("test did not release the frame worker")
+
+    monkeypatch.setattr(blocked_target, _blocked_worker)
+    frame_task = asyncio.create_task(
+        host._dispatch_host_frame(_FakeTunnel(), frame)  # type: ignore[arg-type]
+    )
+    try:
+        assert await asyncio.to_thread(worker_started.wait, 5.0)
+        assert host._owned_subprocess_ops == 1
+
+        frame_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await frame_task
+        assert host._owned_subprocess_ops == 1
+        workers = list(host._host_subprocess_tasks)
+        assert len(workers) == 1
+
+        worker_release.set()
+        await asyncio.wait_for(asyncio.gather(*workers), timeout=5.0)
+        assert host._owned_subprocess_ops == 0
+        assert host._host_subprocess_tasks == set()
+    finally:
+        worker_release.set()
+        frame_task.cancel()
+        await asyncio.gather(frame_task, *host._host_subprocess_tasks, return_exceptions=True)
+
+
 async def test_cancelled_account_probe_request_does_not_block_disconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4403,10 +4467,13 @@ async def test_handle_create_worktree_uses_server_budget_or_legacy_bound(
     """The host spends the budget the server sent, or stays within an older server's deadline."""
     host = _make_host_process()
     captured: dict[str, object] = {}
+    head_commit = "3f2a9c1e" * 5
 
     def _fake_create_worktree(**kwargs: object) -> CreatedWorktree:
         captured.update(kwargs)
-        return CreatedWorktree(worktree_path="/wt", branch="feature/login", workspace="/wt")
+        return CreatedWorktree(
+            worktree_path="/wt", branch="feature/login", workspace="/wt", head_commit=head_commit
+        )
 
     monkeypatch.setattr("omnigent.host.connect.create_worktree", _fake_create_worktree)
 
@@ -4421,6 +4488,8 @@ async def test_handle_create_worktree_uses_server_budget_or_legacy_bound(
 
     assert isinstance(result, HostCreateWorktreeResultFrame)
     assert result.status == "ok"
+    # CORAL(S72): the reply carries the created worktree's start commit.
+    assert result.head_commit == head_commit
     assert captured["timeout_s"] == expected_timeout_s
     # The server outwaits the budget only for hosts that advertise honouring it.
     assert CAP_WORKTREE_CREATE_BUDGET in HOST_CAPABILITIES
@@ -4454,6 +4523,33 @@ async def test_handle_create_worktree_replies_when_create_raises(
     assert result.status == "failed"
     assert result.error is not None
     assert expected_detail in result.error
+    # CORAL(S71): a raising git worker still releases the orphan reaper's pause.
+    assert host._owned_subprocess_ops == 0
+    assert host._host_subprocess_tasks == set()
+
+
+# CORAL(S72): each listed worktree reports whether git holds it locked.
+async def test_handle_list_worktrees_reports_each_worktree_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _make_host_process()
+    listed = [
+        WorktreeInfo(path="/repo", branch="main", is_main=True, detached=False),
+        WorktreeInfo(path="/wt", branch="feature/a", is_main=False, detached=False, locked=True),
+    ]
+    monkeypatch.setattr("omnigent.host.connect.list_worktrees", lambda **_kwargs: listed)
+
+    result = await host._handle_list_worktrees(
+        HostListWorktreesFrame(request_id="r1", repo_path="/repo")
+    )
+
+    assert isinstance(result, HostListWorktreesResultFrame)
+    assert result.status == "ok"
+    assert result.worktrees is not None
+    assert [(entry["path"], entry["locked"]) for entry in result.worktrees] == [
+        ("/repo", False),
+        ("/wt", True),
+    ]
 
 
 def test_reap_orphans_is_noop_without_wnohang(
@@ -11060,6 +11156,37 @@ def test_host_reads_a_file_named_as_the_workspace_root(tmp_path: Path) -> None:
     assert result.payload is not None
     assert result.payload["content"] == "# hello\n"
     assert result.payload["content_type"] == "text/markdown"
+
+
+# CORAL(S71): no reader git probe outlives the host's guarded fs handler.
+async def test_host_fs_reader_does_not_start_change_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registries: list[Path] = []
+    starts: list[Path] = []
+
+    def spy_registry(root: Path) -> SimpleNamespace:
+        registries.append(root)
+        return SimpleNamespace(start=lambda: starts.append(root))
+
+    monkeypatch.setattr("omnigent.workspace_fs.create_filesystem_registry", spy_registry)
+    (tmp_path / "notes.md").write_text("# hello\n")
+    host = _make_host_process()
+    try:
+        result = host._handle_fs_request(
+            HostFsRequestFrame(
+                request_id="list-root",
+                op="list_or_read",
+                workspace=str(tmp_path),
+                session_id="session",
+                params={"path": ""},
+            )
+        )
+    finally:
+        _cleanup_host(host)
+    assert result.status == "ok", result
+    assert registries == [tmp_path.resolve()]
+    assert starts == []
 
 
 async def test_dispatch_fs_write_op_unknown_op_raises() -> None:

@@ -13,11 +13,17 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
+from typing import TypeVar
 
 import pytest
 
 from omnigent.workspace_fs import WorkspaceReader, WorkspaceReaderError, read_repository_branches
+
+_T = TypeVar("_T")
 
 
 def _git_env() -> dict[str, str]:
@@ -433,6 +439,71 @@ def test_changes_non_git_workspace_is_empty(tmp_path: Path) -> None:
     result = reader.changes("conv_x")
 
     assert result["data"] == []
+
+
+# CORAL(S71): the host builds readers without the registry's background git probe.
+@pytest.mark.parametrize(
+    ("kwargs", "expected_starts"),
+    [({}, 1), ({"start_registry": True}, 1), ({"start_registry": False}, 0)],
+    ids=["default", "start", "no-start"],
+)
+def test_reader_starts_change_registry_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, bool], expected_starts: int
+) -> None:
+    """Only a reader built with ``start_registry=False`` skips ``registry.start()``."""
+    starts: list[Path] = []
+
+    def spy_registry(root: Path) -> SimpleNamespace:
+        return SimpleNamespace(start=lambda: starts.append(root))
+
+    monkeypatch.setattr("omnigent.workspace_fs.create_filesystem_registry", spy_registry)
+
+    WorkspaceReader(tmp_path, **kwargs)
+
+    assert starts == [tmp_path.resolve()] * expected_starts
+
+
+def _without_blocking_on(fifo: Path, call: Callable[[], _T]) -> _T:
+    """Run ``call``; if it is still blocked on ``fifo`` after 5 s, release it and fail."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(call)
+        try:
+            return future.result(timeout=5.0)
+        except TimeoutError:
+            # A writer opening the FIFO releases a reader stuck in open().
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            pytest.fail(f"reading {fifo.name} blocked waiting for a writer")
+
+
+# CORAL(S71): a FIFO in the workspace must not hang the host's guarded fs handler.
+@pytest.mark.posix_only
+def test_file_reads_refuse_a_fifo_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    (tmp_path / "notes.txt").write_text("regular\n")
+    changed = SimpleNamespace(
+        start=lambda: None,
+        get_changed_file=lambda session_id, path: {"path": path, "status": "modified"},
+        get_baseline=lambda path: "before\n",
+    )
+    monkeypatch.setattr("omnigent.workspace_fs.create_filesystem_registry", lambda root: changed)
+    reader = WorkspaceReader(tmp_path)
+
+    with pytest.raises(WorkspaceReaderError) as refused:
+        _without_blocking_on(fifo, lambda: reader.list_or_read("pipe"))
+    assert (refused.value.status, refused.value.code) == (404, "not_found")
+    assert refused.value.message == "Path 'pipe' is not a regular file"
+    assert _without_blocking_on(fifo, lambda: reader.diff("conv_x", "pipe"))["after"] is None
+
+    assert reader.list_or_read("notes.txt")["content"] == "regular\n"
+    assert reader.diff("conv_x", "notes.txt") == {
+        "object": "session.environment.filesystem.file_diff",
+        "path": "notes.txt",
+        "before": "before\n",
+        "after": "regular\n",
+    }
 
 
 # ── GitHub ops (host fallback) ────────────────────────────────────────

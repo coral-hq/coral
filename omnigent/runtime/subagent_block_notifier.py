@@ -27,6 +27,8 @@ import threading
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from omnigent.util.session_lifecycle import PARENT_WAKE_LABEL_KEY, PARENT_WAKE_OFF_VALUE
+
 if TYPE_CHECKING:
     from omnigent.entities.conversation import Conversation
     from omnigent.stores import ConversationStore
@@ -262,7 +264,8 @@ class SubagentBlockNotifier:
         out ``_BLOCK_WAKE_ESCALATION_DELAY_S`` and only wakes the parent
         *agent* if the block is still unanswered (the debounce arm doubles
         as the cancellation token — :meth:`observe` clears it on resolve).
-        For a top-level session (no parent) this is a no-op.
+        For a top-level session (no parent), or a child labelled
+        ``omnigent.parent_wake: off`` once the grace ends, this is a no-op.
 
         Delivery is attempted up to ``1 + _WAKE_RETRIES`` times (the parent's
         runner may be briefly unroutable during a reconnect/relaunch). An
@@ -296,6 +299,9 @@ class SubagentBlockNotifier:
         )
         if child is None or child.parent_conversation_id is None:
             # Top-level session: no parent; the resolve event clears the arm.
+            return
+        if child.labels.get(PARENT_WAKE_LABEL_KEY) == PARENT_WAKE_OFF_VALUE:
+            # CORAL(S51): this child is labelled to skip block wakes to its parent.
             return
         parent_id = child.parent_conversation_id
         notice = _format_block_notice(child, event)

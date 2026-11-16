@@ -2116,10 +2116,37 @@ def test_create_worktree_result_frame_round_trip() -> None:
         worktree_path="/Users/alice/myrepo-worktrees/feature-login",
         branch="feature/login",
         workspace="/Users/alice/myrepo-worktrees/feature-login/web",
+        # CORAL(S72): the new worktree's start commit travels with the result.
+        head_commit="3f2a9c1e" * 5,
     )
     decoded = decode_host_frame(encode_host_frame(original))
     assert isinstance(decoded, HostCreateWorktreeResultFrame)
     assert decoded == original
+
+
+def test_create_worktree_result_frame_head_commit_absent_defaults_none() -> None:
+    """CORAL(S72): a result from an older host, without ``head_commit``, decodes as ``None``."""
+    encoded = encode_host_frame(
+        HostCreateWorktreeResultFrame(
+            request_id="req_wt_1", status="ok", worktree_path="/wt", head_commit="3f2a9c1e" * 5
+        )
+    )
+    msg = json.loads(encoded)
+    msg.pop("head_commit")
+    decoded = decode_host_frame(json.dumps(msg))
+    assert isinstance(decoded, HostCreateWorktreeResultFrame)
+    assert decoded.head_commit is None
+
+
+def test_create_worktree_result_frame_head_commit_rejects_non_string() -> None:
+    """CORAL(S72): a non-string ``head_commit`` is a malformed frame."""
+    encoded = encode_host_frame(
+        HostCreateWorktreeResultFrame(
+            request_id="req_wt_1", status="ok", head_commit="3f2a9c1e" * 5
+        )
+    )
+    with pytest.raises(ValueError, match="head_commit"):
+        decode_host_frame(encoded.replace(f'"{"3f2a9c1e" * 5}"', "42"))
 
 
 def test_create_worktree_result_frame_failure_round_trip() -> None:

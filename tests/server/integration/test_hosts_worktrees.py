@@ -20,6 +20,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from omnigent.host.frames import (
+    HostCreateWorktreeFrame,
+    HostCreateWorktreeResultFrame,
     HostHelloFrame,
     HostListWorktreesFrame,
     HostListWorktreesResultFrame,
@@ -27,6 +29,7 @@ from omnigent.host.frames import (
     encode_host_frame,
 )
 from omnigent.server.host_registry import HostRegistry
+from omnigent.server.routes._host_worktree import create_worktree_on_host
 from omnigent.server.routes.host_tunnel import create_host_tunnel_router
 from omnigent.server.routes.hosts import create_hosts_router
 from omnigent.stores.conversation_store.sqlalchemy_store import (
@@ -87,10 +90,11 @@ async def wt_setup(
     tuple[FastAPI, HostRegistry, ApplicationCommunicator, dict[str, dict[str, Any]]]
 ]:
     """
-    Connect a mock host and auto-reply to list_worktrees frames.
+    Connect a mock host and auto-reply to list_worktrees and create_worktree frames.
 
     Tests register fake replies in ``replies`` (repo_path → reply
-    dict) before calling the REST endpoint. The auto-replier decodes
+    dict) before calling the REST endpoint; a create reply holds the
+    result frame's fields. The auto-replier decodes
     outbound frames and resolves the matching pending future — the
     same wiring host_tunnel.py does in production.
 
@@ -119,6 +123,22 @@ async def wt_setup(
             if not isinstance(text, str):
                 continue
             frame = decode_host_frame(text)
+            if isinstance(frame, HostCreateWorktreeFrame):
+                # CORAL(S72): answer a create from its repo's reply; none registered fails it.
+                reply = replies.get(frame.repo_path, {})
+                created = HostCreateWorktreeResultFrame(
+                    request_id=frame.request_id,
+                    status=reply.get("status", "failed"),
+                    worktree_path=reply.get("worktree_path"),
+                    branch=reply.get("branch"),
+                    error=reply.get("error"),
+                    workspace=reply.get("workspace"),
+                    head_commit=reply.get("head_commit"),
+                )
+                await comm.send_input(
+                    {"type": "websocket.receive", "text": encode_host_frame(created)}
+                )
+                continue
             if not isinstance(frame, HostListWorktreesFrame):
                 continue
             reply = replies.get(frame.repo_path)
@@ -236,6 +256,35 @@ async def test_list_worktrees_passes_through_legacy_entries_without_metadata(
         )
     assert resp.status_code == 200, resp.text
     assert resp.json()["data"] == replies["/Users/corey/legacy"]["worktrees"]
+
+
+async def test_create_worktree_relay_delivers_head_commit(
+    wt_setup: tuple[FastAPI, HostRegistry, ApplicationCommunicator, dict[str, dict[str, Any]]],
+) -> None:
+    """CORAL(S72): the tunnel relay hands the host's start commit to the create proxy."""
+    _app, registry, _comm, replies = wt_setup
+    replies["/Users/corey/repo"] = {
+        "status": "ok",
+        "worktree_path": "/Users/corey/repo-worktrees/feature-x",
+        "branch": "feature/x",
+        "workspace": "/Users/corey/repo-worktrees/feature-x",
+        "head_commit": "3f2a9c1e" * 5,
+    }
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    # Bounded so a drain that stops answering fails fast instead of waiting out the proxy.
+    created = await asyncio.wait_for(
+        create_worktree_on_host(
+            host_registry=registry,
+            host_conn=conn,
+            repo_path="/Users/corey/repo",
+            branch_name="feature/x",
+            base_branch=None,
+        ),
+        timeout=10.0,
+    )
+    assert created.worktree_path == "/Users/corey/repo-worktrees/feature-x"
+    assert created.head_commit == "3f2a9c1e" * 5
 
 
 async def test_list_worktrees_non_git_path_400(
