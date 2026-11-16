@@ -4,6 +4,8 @@ import { useSidebarData } from "./useSidebarData";
 import { authenticatedFetch } from "@/lib/identity";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { agentRootName } from "@/lib/forkHarness";
+// CORAL(S54): drop engine step agents from every picker source
+import { isEngineAgentName } from "@/lib/engineAgents";
 import { capitalizeAgentName, useAcpHarnessIds, useHarnessLabels } from "@/lib/agentLabels";
 import {
   nativeCodingAgentForAvailableAgent,
@@ -146,11 +148,6 @@ interface BuiltinAgentsListWire {
   // Packaged built-ins the deployment trimmed via OMNIGENT_SEEDED_AGENTS.
   // Absent on older servers.
   suppressed_agent_names?: string[];
-}
-
-// CORAL(S54): engine step agents stay bound to their sessions but never appear in pickers.
-export function isEngineAgentName(name: string): boolean {
-  return name.startsWith("coral__");
 }
 
 /** The built-in catalog plus the packaged names the deployment hides. */

@@ -1278,14 +1278,16 @@ seams:
       (`autoescape=True`, so `_` is not a LIKE wildcard), and `GET /v1/agents`
       drops server-kind rows with the prefix. The web catalog, the caller's
       agents, session discovery and the Custom agents list filter them through
-      `isEngineAgentName`. Reads by id are unchanged, so sessions bound to an
-      engine row keep working. A user agent named with the prefix is hidden
+      `isEngineAgentName` from `web/src/lib/engineAgents.ts`, a module with no
+      imports, so the Custom agents page does not load the picker hooks. Reads
+      by id are unchanged, so sessions bound to an engine row keep working. A user agent named with the prefix is hidden
       too; rename protection belongs to S53.
     files:
       - omnigent/stores/agent_store/sqlalchemy_store.py
       - omnigent/server/routes/builtin_agents.py
       - web/src/hooks/useAvailableAgents.ts
       - web/src/hooks/useCustomAgents.ts
+      - web/src/lib/engineAgents.ts
       - tests/stores/test_agent_store.py
       - tests/server/routes/test_builtin_agents.py
       - web/src/hooks/useAvailableAgents.test.tsx

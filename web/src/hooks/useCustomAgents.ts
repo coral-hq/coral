@@ -1,8 +1,8 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Agent } from "./useAgents";
-import { isEngineAgentName } from "./useAvailableAgents";
 import { authenticatedFetch } from "@/lib/identity";
 import { apiErrorFromResponse } from "@/lib/sessionsApi";
+import { isEngineAgentName } from "@/lib/engineAgents";
 import { buildAgentBundle, type AgentBundleInput } from "@/lib/agentBundle";
 import {
   getAgentConfig,

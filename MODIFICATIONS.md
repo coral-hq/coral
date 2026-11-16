@@ -419,12 +419,13 @@ OPS-01's generator will maintain this file later.
 | `web/src/components/scheduled/triggerTemplates.test.ts` | S89 | coral-specific | Updated the expected attribution and link-back text to say Coral, and added a test for each source showing that a rendered prompt with its attribution swapped back to "Sent with Omnigent" still splits into the same userPrompt and round-trips through combineTriggerPrompt (S89). |
 | `web/src/components/scheduled/triggerTemplates.ts` | S89 | coral-specific | Trigger templates now use the Jira label placeholder "coral", the link-back text "Coral session:" and OMNIGENT_ATTRIBUTION "Sent with Coral"; splitTriggerPrompt and combineTriggerPrompt also accept the legacy posting instructions built from "Sent with Omnigent", so saved prompts still split and round-trip byte for byte (S89). |
 | `web/src/hooks/useAvailableAgents.test.tsx` | S54 | coral-specific | Adds the `coral__` hiding tests for the four agent hooks (S54). |
-| `web/src/hooks/useAvailableAgents.ts` | S54 | coral-specific | Adds `isEngineAgentName` and drops `coral__` agents from the catalog, the caller's agents and session discovery (S54). |
+| `web/src/hooks/useAvailableAgents.ts` | S54 | coral-specific | Drops `coral__` agents from the catalog, the caller's agents and session discovery (S54). |
 | `web/src/hooks/useCustomAgents.ts` | S54 | coral-specific | The Custom agents list drops `coral__` agents (S54). |
 | `web/src/index.css` | S83 | coral-specific | Imports Newsreader and `./brand/coral.css`, and adds `--font-display` (S83). |
 | `web/src/index.css.test.ts` | S83 | coral-specific | Asserts the Newsreader import and `--font-display`, and that `--font-heading` stays sans (S83). |
 | `web/src/lib/branding.ts` | S79 | coral-specific | Built-in defaults become "Coral" and "Direct the run…"; operator branding still overrides them (S79). |
 | `web/src/lib/customTheme.test.ts` | S82 | coral-specific | Rebaselines the default palette's selection tint to Coral's washes (S82). |
+| `web/src/lib/engineAgents.ts` | S54 | coral-specific | Added. `isEngineAgentName`, the `coral__` prefix check the agent hooks share (S54). |
 | `web/src/lib/harnessSetup.ts` | S89 | coral-specific | resolveSetupSteps takes an optional appName (default DEFAULT_APP_NAME), and the synthesized tmux step's detail uses it instead of hard-coded Omnigent (S89). |
 | `web/src/lib/settingsPortability.ts` | S89 | coral-specific | Settings export now downloads as coral-settings.json and the invalid-file import error names DEFAULT_APP_NAME; import checks only the .json extension and content shape, so omnigent-settings.json exports still load (S89). |
 | `web/src/lib/terminalClipboardPreferences.test.ts` | S89 | coral-specific | Clipboard-preference import test expects the 'valid Coral settings' error (S89). |
