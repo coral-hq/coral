@@ -959,3 +959,64 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
+
+  - id: S71
+    title: Host frame handlers keep their subprocess exit statuses
+    owner: WS-WORKSPACE
+    status: landed
+    category: upstreamable
+    note: >-
+      The host's orphan reaper could collect a git/gh/CLI child's exit status
+      before subprocess did, so a failed command reported 0. The fs request,
+      fs write, skills, skill-content and credential-detection frames and the
+      worktree create/remove/list handlers now run through
+      _run_host_subprocess_in_thread, which keeps the reaper paused until the
+      worker thread exits, even when a reconnect cancels the frame. The host
+      builds its WorkspaceReaders with start_registry=False, so the change
+      registry's one-time untracked-cache git probe (a persisted speed-up
+      only) never runs after the guarded handler returns. A guarded worker
+      that never returns would now pause the host-wide reaper until restart,
+      so both WorkspaceReader file-content reads open non-blocking and refuse
+      non-regular files: a FIFO in the workspace is refused instead of
+      blocking the read. Other blocking reads can still hold a guarded worker:
+      a hung network mount (NFS, FUSE, SMB), a stalled skills-bundle download,
+      or a FIFO named SKILL.md in a skills directory (skill discovery checks
+      exists() and then reads it). Known costs:
+      the reaper stays paused for as long as
+      any guarded op runs (a worktree create up to its budget, 3600 s from
+      current servers and 140 s for older ones; fs handlers chain several
+      gh/git timeouts), and work queued but not yet started still runs after
+      its frame is cancelled. Still unguarded: the launch preflight --version
+      probes, model_options, MCP stdio and opencode-serve spawns, the
+      pr_resource discovery pool and the azure-devops-fetch thread.
+      Follow-ups: a rate-limited warning when the reaper has been paused for
+      more than 60 s, and a two-sweep zombie rule (reap a pid only when it was
+      already a zombie on the previous sweep), which would cover every
+      unguarded spawner and end the pauses.
+    files:
+      - omnigent/host/connect.py
+      - omnigent/workspace_fs.py
+      - tests/host/test_connect.py
+      - tests/host/test_orphan_reaper.py
+      - tests/test_workspace_fs.py
+    tests:
+      - tests/host/test_orphan_reaper.py
+      - tests/host/test_connect.py
+      - tests/test_workspace_fs.py
+    budget_lines: 10
+    budget_exception:
+      lines: 116
+      reason: >-
+        Every changed file is over the XS budget. omnigent/host/connect.py
+        (52 lines): eight helper call sites (five dispatch frames, three
+        worktree handlers) and the reader construction, each with one anchor.
+        omnigent/workspace_fs.py (47): the start_registry keyword and the
+        non-blocking regular-file read helper used by both file-content reads.
+        tests/host/test_orphan_reaper.py (116): the dispatch repro over the
+        five guarded frame types. tests/host/test_connect.py (97): the
+        cancellation matrix and the host reader check. tests/test_workspace_fs.py
+        (71): the start_registry matrix and the FIFO refusal test.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true

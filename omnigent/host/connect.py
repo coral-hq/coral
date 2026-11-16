@@ -3852,7 +3852,8 @@ class HostProcess:
                 with self._fs_readers_lock:
                     cached = self._fs_readers.get(expanded)
                     if cached is None or cached[0] != repo_root:
-                        cached = (repo_root, WorkspaceReader(Path(expanded)))
+                        # CORAL(S71): no registry git probe may outlive this guarded handler.
+                        cached = (repo_root, WorkspaceReader(Path(expanded), start_registry=False))
                         self._fs_readers[expanded] = cached
                         while len(self._fs_readers) > _FS_READER_CACHE_SIZE:
                             self._fs_readers.popitem(last=False)
@@ -4574,12 +4575,12 @@ class HostProcess:
             frame.timeout_s if frame.timeout_s is not None else _LEGACY_SERVER_CREATE_BUDGET_S
         )
         try:
-            # Pause the orphan reaper: create_worktree runs git via
+            # CORAL(S71): pause the orphan reaper until git exits: create_worktree runs git via
             # subprocess.run, whose children are direct children of this host
             # but not tracked runners — the reaper must not wait() them out
             # from under subprocess (#1782).
-            with self._host_subprocess_op():
-                created = await asyncio.to_thread(
+            created = await self._run_host_subprocess_in_thread(
+                functools.partial(
                     create_worktree,
                     repo_path=frame.repo_path,
                     branch_name=frame.branch_name,
@@ -4587,6 +4588,7 @@ class HostProcess:
                     existing_branch=frame.existing_branch,
                     timeout_s=timeout_s,
                 )
+            )
         except WorktreeError as exc:
             return HostCreateWorktreeResultFrame(
                 request_id=frame.request_id,
@@ -4636,15 +4638,16 @@ class HostProcess:
             ``status: "failed"`` with an error message.
         """
         try:
-            # Pause the orphan reaper while remove_worktree runs git — see
+            # CORAL(S71): pause the orphan reaper until remove_worktree's git exits — see
             # _handle_create_worktree above and _reap_orphans_once (#1782).
-            with self._host_subprocess_op():
-                await asyncio.to_thread(
+            await self._run_host_subprocess_in_thread(
+                functools.partial(
                     remove_worktree,
                     worktree_path=frame.worktree_path,
                     branch=frame.branch,
                     delete_branch=frame.delete_branch,
                 )
+            )
         except WorktreeError as exc:
             return HostRemoveWorktreeResultFrame(
                 request_id=frame.request_id,
@@ -4676,14 +4679,15 @@ class HostProcess:
             ``status: "failed"`` with an error message.
         """
         try:
-            # Pause the orphan reaper while git runs — see
+            # CORAL(S71): pause the orphan reaper until git exits — see
             # _handle_create_worktree above and _reap_orphans_once.
-            with self._host_subprocess_op():
-                worktrees = await asyncio.to_thread(
+            worktrees = await self._run_host_subprocess_in_thread(
+                functools.partial(
                     list_worktrees,
                     repo_path=frame.repo_path,
                     for_cleanup=frame.for_cleanup,
                 )
+            )
         except WorktreeError as exc:
             return HostListWorktreesResultFrame(
                 request_id=frame.request_id,
@@ -6012,8 +6016,10 @@ class HostProcess:
             await self._send_text(ws, self._encode_frame(secret_result))
         elif isinstance(frame, HostDetectCredentialsFrame):
             # Ambient detection may probe files / a localhost socket, so run it
-            # off the event loop.
-            credentials_result = await asyncio.to_thread(self._handle_detect_credentials, frame)
+            # off the event loop. CORAL(S71): it may run a CLI, so keep its exit status.
+            credentials_result = await self._run_host_subprocess_in_thread(
+                functools.partial(self._handle_detect_credentials, frame)
+            )
             await self._send_text(ws, self._encode_frame(credentials_result))
         elif isinstance(frame, HostCreateWorktreeFrame):
             await self._send_text(
@@ -6027,21 +6033,31 @@ class HostProcess:
             await self._send_text(ws, self._encode_frame(await self._handle_list_worktrees(frame)))
         elif isinstance(frame, HostFsRequestFrame):
             # Git status and directory walks can block, so run the read
-            # off the event loop and reply when it completes.
-            fs_result = await asyncio.to_thread(self._handle_fs_request, frame)
+            # off the event loop and reply when it completes. CORAL(S71): keep exit codes.
+            fs_result = await self._run_host_subprocess_in_thread(
+                functools.partial(self._handle_fs_request, frame)
+            )
             await self._send_text(ws, self._encode_frame(fs_result))
         elif isinstance(frame, HostFsWriteFrame):
-            # gh/git writes can block; run off the event loop and reply back.
-            fs_write_result = await asyncio.to_thread(self._handle_fs_write, frame)
+            # CORAL(S71): gh/git writes can block; run them off-loop, keeping exit codes.
+            fs_write_result = await self._run_host_subprocess_in_thread(
+                functools.partial(self._handle_fs_write, frame)
+            )
             await self._send_text(ws, self._encode_frame(fs_write_result))
         elif isinstance(frame, HostSkillsFrame):
-            skills_result = await asyncio.to_thread(self._handle_skills, frame)
+            # CORAL(S71): skill discovery runs harness CLIs; keep their exit statuses.
+            skills_result = await self._run_host_subprocess_in_thread(
+                functools.partial(self._handle_skills, frame)
+            )
             await self._send_text(ws, self._encode_frame(skills_result))
         elif isinstance(frame, HostPluginsFrame):
             plugins_result = await asyncio.to_thread(self._handle_plugins, frame)
             await self._send_text(ws, self._encode_frame(plugins_result))
         elif isinstance(frame, HostSkillContentFrame):
-            content_result = await asyncio.to_thread(self._handle_skill_content, frame)
+            # CORAL(S71): skill lookup can run harness CLIs; keep their exit statuses.
+            content_result = await self._run_host_subprocess_in_thread(
+                functools.partial(self._handle_skill_content, frame)
+            )
             await self._send_text(ws, self._encode_frame(content_result))
         elif isinstance(frame, HostMcpToolsFrame):
             tools_result = await self._handle_mcp_tools(frame)

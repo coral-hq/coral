@@ -69,7 +69,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/harnesses/pi_native/main.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/harnesses/qwen_native/main.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/host/_daemon_entry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/host/connect.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/host/connect.py` | S71, S95 | upstreamable, coral-specific | The fs request, fs write, skills, skill-content and credential-detection frames and the worktree create/remove/list handlers run through `_run_host_subprocess_in_thread`, so the orphan reaper cannot steal their children's exit statuses and stays paused until a cancelled frame's worker exits; the host builds its workspace readers with `start_registry=False` (S71). Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/host/service.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/host/service_entry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/inner/_acp_omnigent_mcp.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -141,6 +141,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/tools/builtins/ui.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/tools/manager.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/util/tmux_compat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/workspace_fs.py` | S71 | upstreamable | `WorkspaceReader` takes a keyword-only `start_registry` (default `True`); with `False` it does not start the change registry's background git probe. File reads and diffs open files non-blocking and refuse FIFOs, devices and other non-regular files (S71). |
 | `openapi.json` | S95 | coral-specific | Regenerated: the title and API descriptions follow the S95 brand transform. |
 | `pnpm-lock.yaml` | S83 | coral-specific | Locks `@fontsource-variable/newsreader` 5.3.0 (S83). |
 | `pyproject.toml` | S29 | coral-specific | Adds the `coral` console script, the same CLI as `omnigent` and `omni` (interim until FND-01). |
@@ -218,7 +219,9 @@ OPS-01's generator will maintain this file later.
 | `tests/harnesses/codex_native/test_codex_native_hook.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/helpers/ui_url_safety.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/host/test_cli_host.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/host/test_connect.py` | S71 | upstreamable | A cancelled worktree create/remove/list or fs request frame keeps the orphan reaper paused until its worker exits, and the host's fs reader never starts the change registry (S71). |
 | `tests/host/test_local_server.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/host/test_orphan_reaper.py` | S71 | upstreamable | Fs request, fs write, skills, skill-content and credential-detection frames dispatched while a sweep runs keep the reaper paused, lose no child, and report the child's exit code 42 (S71). |
 | `tests/inner/test_claude_sdk_executor.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/inner/test_terminal.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/inner/test_ui.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -259,6 +262,7 @@ OPS-01's generator will maintain this file later.
 | `tests/test_telemetry.py` | S98 | coral-specific | Expects telemetry to stay disabled with no opt-out set and with `telemetry: true` in config. |
 | `tests/test_ui_url_safety.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/test_uninstall_cli.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/test_workspace_fs.py` | S71 | upstreamable | `WorkspaceReader` starts the change registry by default and with `start_registry=True`, and not with `False`; a FIFO is refused at once by file reads and diffs while regular files read as before (S71). |
 | `tests/tools/test_mcp.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `web/android/app/src/androidTest/java/ai/omnigent/android/ScreenshotTest.kt` | S88 | coral-specific | The connect field hint names a Coral server (S88). |
 | `web/android/app/src/main/java/ai/omnigent/android/BlobSaver.kt` | S88 | coral-specific | Saved files default to a `coral-` name (S88). |
