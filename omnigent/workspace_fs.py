@@ -36,6 +36,7 @@ import base64
 import mimetypes
 import os
 import re
+import stat
 import subprocess
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -142,6 +143,27 @@ def _resolve_workspace_path(root: Path, path: str) -> Path:
     return full
 
 
+# CORAL(S71): a blocked FIFO read would keep the host's orphan reaper paused.
+def _open_nonblocking(path: str | os.PathLike[str], flags: int) -> int:
+    """``open()`` opener adding ``O_NONBLOCK``, so a FIFO opens without waiting for a writer."""
+    return os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
+
+
+def _read_regular_file(path: Path, max_bytes: int) -> bytes | None:
+    """Read at most ``max_bytes`` of a regular file without blocking on special files.
+
+    :param path: Resolved file path, e.g. ``Path("/repo/README.md")``.
+    :param max_bytes: Most bytes to read.
+    :returns: The bytes read, or ``None`` for a FIFO, device or other non-regular file.
+    :raises OSError: When the file cannot be opened or read.
+    """
+    with open(path, "rb", opener=_open_nonblocking) as fh:
+        # Checked on the open descriptor, so nothing can be swapped in behind it.
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            return None
+        return fh.read(max_bytes)
+
+
 def read_repository_branches(root: Path, repositories: list[dict[str, str]]) -> _WorkspacePayload:
     """Read current branches and their availability at the original clone URLs.
 
@@ -167,15 +189,20 @@ class WorkspaceReader:
 
     :param root: Absolute path to the workspace directory on disk, e.g.
         ``Path("/Users/alice/project")``.
+    :param start_registry: Start the change registry's background git
+        probe; the host passes ``False`` so no git runs after its guarded
+        fs handler returns.
     """
 
-    def __init__(self, root: Path) -> None:
+    # CORAL(S71): callers may skip the registry's background git probe.
+    def __init__(self, root: Path, *, start_registry: bool = True) -> None:
         self._root = Path(root).resolve()
         # The change registry (git or edit-tracking) is chosen the same
         # way the runner chooses it, so git workspaces get git-status
         # semantics and everything else degrades to an empty list.
         self._registry = create_filesystem_registry(self._root)
-        self._registry.start()
+        if start_registry:
+            self._registry.start()
 
     # ── Path confinement ──────────────────────────────────────────
 
@@ -301,12 +328,14 @@ class WorkspaceReader:
         use before decoding oversized files.
         """
         try:
-            with resolved.open("rb") as fh:
-                # One extra byte lets us detect (and flag) truncation
-                # without loading the rest of a large file into memory.
-                capped = fh.read(_MAX_READ_BYTES + 1)
+            # One extra byte lets us detect (and flag) truncation
+            # without loading the rest of a large file into memory.
+            capped = _read_regular_file(resolved, _MAX_READ_BYTES + 1)
         except OSError as exc:
             raise WorkspaceReaderError(404, "not_found", f"Path {rel!r} not found") from exc
+        if capped is None:
+            # CORAL(S71): FIFOs and devices are refused instead of read.
+            raise WorkspaceReaderError(404, "not_found", f"Path {rel!r} is not a regular file")
 
         return self._file_content_payload(rel, capped)
 
@@ -610,9 +639,9 @@ class WorkspaceReader:
             try:
                 # Bounded read (like _read_file) so a huge changed file can't
                 # OOM the host; the diff view caps at _MAX_READ_BYTES anyway.
-                with resolved.open("rb") as fh:
-                    raw = fh.read(_MAX_READ_BYTES)
-                after = raw.decode("utf-8", errors="replace")
+                raw = _read_regular_file(resolved, _MAX_READ_BYTES)
+                if raw is not None:  # CORAL(S71): no "after" for a FIFO or device.
+                    after = raw.decode("utf-8", errors="replace")
             except OSError:
                 after = None
         return {

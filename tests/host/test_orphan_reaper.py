@@ -16,7 +16,19 @@ from types import SimpleNamespace
 import pytest
 
 from omnigent.host.connect import HostProcess, _RunnerHandle
-from omnigent.host.frames import HostLaunchRunnerFrame
+from omnigent.host.frames import (
+    HostDetectCredentialsFrame,
+    HostDetectCredentialsResultFrame,
+    HostFsRequestFrame,
+    HostFsResultFrame,
+    HostFsWriteFrame,
+    HostLaunchRunnerFrame,
+    HostSkillContentFrame,
+    HostSkillContentResultFrame,
+    HostSkillsFrame,
+    HostSkillsResultFrame,
+    decode_host_frame,
+)
 from omnigent.host.identity import HostIdentity
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc
 from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
@@ -442,6 +454,108 @@ async def test_launch_protects_child_until_spawn_worker_returns(
         finally:
             resume.set()
             await asyncio.wait_for(asyncio.gather(launch, return_exceptions=True), timeout=5.0)
+
+
+class _CollectingTunnel:
+    """Tunnel stand-in that records every frame the host sends."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send(self, data: str) -> None:
+        self.sent.append(data)
+
+
+# CORAL(S71): frame handlers whose git/gh/CLI children must keep their exit statuses.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("frame", "handler_name", "reply"),
+    [
+        pytest.param(
+            HostFsRequestFrame("fs-read", "changes", "/workspace", "session"),
+            "_handle_fs_request",
+            lambda code: HostFsResultFrame("fs-read", "ok", payload={"returncode": code}),
+            id="fs_request",
+        ),
+        pytest.param(
+            HostFsWriteFrame("fs-write", "github_merge", "/workspace", "session"),
+            "_handle_fs_write",
+            lambda code: HostFsResultFrame("fs-write", "ok", payload={"returncode": code}),
+            id="fs_write",
+        ),
+        pytest.param(
+            HostSkillsFrame("skills", "codex", "/workspace"),
+            "_handle_skills",
+            lambda code: HostSkillsResultFrame(
+                "skills", "ok", skills=[{"name": "exit-status", "description": str(code)}]
+            ),
+            id="skills",
+        ),
+        pytest.param(
+            HostSkillContentFrame("skill-content", "codex", "exit-status"),
+            "_handle_skill_content",
+            lambda code: HostSkillContentResultFrame(
+                "skill-content",
+                "ok",
+                skill={
+                    "name": "exit-status",
+                    "description": str(code),
+                    "content": "",
+                    "truncated": False,
+                },
+            ),
+            id="skill_content",
+        ),
+        pytest.param(
+            HostDetectCredentialsFrame("credentials"),
+            "_handle_detect_credentials",
+            lambda code: HostDetectCredentialsResultFrame(
+                "credentials",
+                credentials=[{"family": "exit-status", "source": str(code), "env_var": None}],
+            ),
+            id="detect_credentials",
+        ),
+    ],
+)
+async def test_frame_handler_keeps_child_exit_status_while_reaper_sweeps(
+    host: HostProcess,
+    monkeypatch: pytest.MonkeyPatch,
+    frame: object,
+    handler_name: str,
+    reply: Callable[[int], object],
+) -> None:
+    started = threading.Event()
+    resume = threading.Event()
+    tunnel = _CollectingTunnel()
+
+    with _exited_process(42) as proc:
+
+        def paused_handler(request: object) -> object:
+            assert request is frame
+            started.set()
+            assert resume.wait(timeout=5.0), "frame worker was not released"
+            return reply(proc.wait(timeout=5.0))
+
+        monkeypatch.setattr(host, handler_name, paused_handler)
+        dispatch = asyncio.create_task(
+            host._dispatch_host_frame(tunnel, frame)  # type: ignore[arg-type]
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 5.0), timeout=6.0)
+            assert host._owned_subprocess_ops == 1
+
+            # A sweep landing while the handler still owns the exited child.
+            assert host._reap_orphans_once([proc.pid]) == 0
+            assert proc.returncode is None
+
+            resume.set()
+            await asyncio.wait_for(dispatch, timeout=5.0)
+
+            assert [decode_host_frame(sent) for sent in tunnel.sent] == [reply(42)]
+            assert host._owned_subprocess_ops == 0
+        finally:
+            resume.set()
+            await asyncio.wait_for(asyncio.gather(dispatch, return_exceptions=True), timeout=5.0)
 
 
 def test_hangup_signals_live_runners_but_not_the_zygote(

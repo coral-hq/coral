@@ -751,6 +751,8 @@ class HostCreateWorktreeResultFrame:
     :param error: Error message when ``status`` is ``"failed"``,
         e.g. ``"not a git repository"``. ``None`` on success.
     :param workspace: Selected directory in the new worktree. Absent on older hosts.
+    :param head_commit: ``git rev-parse HEAD`` of the new worktree, e.g.
+        ``"3f2a9c1e…"``. ``None`` when the host could not read it; absent on older hosts.
     """
 
     request_id: str
@@ -759,6 +761,7 @@ class HostCreateWorktreeResultFrame:
     branch: str | None = None
     error: str | None = None
     workspace: str | None = None
+    head_commit: str | None = None  # CORAL(S72)
 
 
 @dataclass
@@ -1812,6 +1815,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "branch": frame.branch,
                 "error": frame.error,
                 "workspace": frame.workspace,
+                "head_commit": frame.head_commit,  # CORAL(S72)
             }
         )
     if isinstance(frame, HostRemoveWorktreeFrame):
@@ -2985,6 +2989,7 @@ def _decode_create_worktree_result(
         branch=_optional_nullable_str(msg, "branch"),
         error=_optional_nullable_str(msg, "error"),
         workspace=_optional_nullable_str(msg, "workspace"),
+        head_commit=_optional_nullable_str(msg, "head_commit"),  # CORAL(S72)
     )
 
 

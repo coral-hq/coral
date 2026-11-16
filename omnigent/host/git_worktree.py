@@ -296,6 +296,8 @@ class WorktreeInfo:
         (no branch checked out).
     :param updated_at: Unix epoch seconds of the checked-out HEAD commit, or
         ``None`` when the commit timestamp cannot be resolved.
+    :param locked: Git lists it as locked: by ``git worktree lock``, or by a
+        ``git worktree add`` still checking it out or interrupted.
     """
 
     path: str
@@ -303,6 +305,7 @@ class WorktreeInfo:
     is_main: bool
     detached: bool
     updated_at: int | None = None
+    locked: bool = False  # CORAL(S72)
 
 
 def _commit_updated_ats(repo_root: str, heads: list[str | None]) -> dict[str, int]:
@@ -364,6 +367,7 @@ def list_worktrees(*, repo_path: str, for_cleanup: bool = False) -> list[Worktre
     branch: str | None = None
     head: str | None = None
     detached = False
+    locked_paths: set[str] = set()
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
             path = line[len("worktree ") :].strip()
@@ -377,6 +381,9 @@ def list_worktrees(*, repo_path: str, for_cleanup: bool = False) -> list[Worktre
             branch = ref[len("refs/heads/") :] if ref.startswith("refs/heads/") else ref
         elif line == "detached":
             detached = True
+        elif (line == "locked" or line.startswith("locked ")) and path is not None:
+            # CORAL(S72): ``locked`` or ``locked <reason>``.
+            locked_paths.add(path)
         elif line == "" and path is not None:
             # Blank line terminates a record.
             records.append((path, branch, detached, head))
@@ -392,6 +399,7 @@ def list_worktrees(*, repo_path: str, for_cleanup: bool = False) -> list[Worktre
             is_main=index == 0,
             detached=worktree_detached,
             updated_at=updated_ats.get(worktree_head) if worktree_head is not None else None,
+            locked=worktree_path in locked_paths,
         )
         for index, (worktree_path, worktree_branch, worktree_detached, worktree_head) in enumerate(
             records
@@ -500,11 +508,14 @@ class CreatedWorktree:
     :param branch: The branch checked out in the worktree, e.g.
         ``"feature/login"``.
     :param workspace: Selected directory relocated into the new worktree.
+    :param head_commit: ``git rev-parse HEAD`` of the new worktree, e.g.
+        ``"3f2a9c1e…"``; ``None`` when it could not be read.
     """
 
     worktree_path: str
     branch: str
     workspace: str
+    head_commit: str | None = None  # CORAL(S72)
 
 
 def create_worktree(
@@ -701,11 +712,39 @@ def _create_worktree(
             except WorktreeError:
                 _logger.warning("Could not roll back worktree %s", worktree_path, exc_info=True)
             raise
+    # CORAL(S72): a pinned checkout's HEAD is the commit validated above.
+    head_commit = validated_commit or _read_head_commit(worktree_path)
     return CreatedWorktree(
         worktree_path=str(worktree_path),
         branch=branch_name,
         workspace=str(worktree_path / relative_directory),
+        head_commit=head_commit,
     )
+
+
+def _read_head_commit(worktree_path: Path) -> str | None:
+    """Read a created worktree's HEAD commit without failing the create.
+
+    :param worktree_path: The new worktree, e.g.
+        ``Path("/Users/alice/myrepo-worktrees/feature-login")``.
+    :returns: The commit hash, e.g. ``"3f2a9c1e…"``, or ``None`` when git
+        fails, times out, the create's budget is already spent or anything
+        else goes wrong.
+    """
+    try:
+        result = _run_git(["rev-parse", "--verify", "HEAD"], cwd=str(worktree_path))
+    except Exception:
+        # CORAL(S72): the worktree already exists, so no error here may fail the create.
+        _logger.warning("Could not read HEAD of worktree %s", worktree_path, exc_info=True)
+        return None
+    if result.returncode != 0:
+        _logger.warning(
+            "Could not read HEAD of worktree %s: %s",
+            worktree_path,
+            _git_error("git rev-parse HEAD failed", result).message,
+        )
+        return None
+    return result.stdout.strip() or None
 
 
 def _main_repo_for_worktree(worktree_path: str, *, timeout: float | None = None) -> str:

@@ -127,10 +127,43 @@ async def host_setup() -> AsyncIterator[HostRegistry]:
             drain_task.cancel()
 
 
-@pytest.mark.parametrize("workspace", [None, "/Users/alice/myrepo-worktrees/feature-login/web"])
+_WORKSPACE = "/Users/alice/myrepo-worktrees/feature-login/web"
+_SHA1 = "3f2a9c1e" * 5
+
+
+# CORAL(S72): only a full lowercase git object id is kept; anything else reads like an older host.
+@pytest.mark.parametrize(
+    ("workspace", "head_commit", "expected_head_commit"),
+    [
+        (None, None, None),
+        (_WORKSPACE, None, None),
+        (_WORKSPACE, _SHA1, _SHA1),
+        (_WORKSPACE, "3f2a9c1e" * 8, "3f2a9c1e" * 8),
+        (_WORKSPACE, "g" * 40, None),
+        (_WORKSPACE, _SHA1[:7], None),
+        (_WORKSPACE, _SHA1.upper(), None),
+        (_WORKSPACE, _SHA1 + "0", None),
+        (_WORKSPACE, _SHA1 + "\n", None),
+        (_WORKSPACE, 40, None),
+    ],
+    ids=[
+        "pre-workspace-host",
+        "older-host",
+        "sha1",
+        "sha256",
+        "non-hex",
+        "abbreviated",
+        "uppercase",
+        "too-long",
+        "trailing-newline",
+        "non-string",
+    ],
+)
 async def test_create_worktree_success_returns_path_and_branch(
     host_setup: HostRegistry,
     workspace: str | None,
+    head_commit: object,
+    expected_head_commit: str | None,
 ) -> None:
     """A successful host reply is unpacked into the worktree path + branch."""
     registry = host_setup
@@ -144,6 +177,8 @@ async def test_create_worktree_success_returns_path_and_branch(
     )
     if workspace is not None:
         registry._create_reply_for_test["workspace"] = workspace  # type: ignore[attr-defined]
+    if head_commit is not None:
+        registry._create_reply_for_test["head_commit"] = head_commit  # type: ignore[attr-defined]
     conn = registry.get(_HOST_ID)
     assert conn is not None
     result = await create_worktree_on_host(
@@ -158,6 +193,7 @@ async def test_create_worktree_success_returns_path_and_branch(
     assert result.worktree_path == "/Users/alice/myrepo-worktrees/feature-login"
     assert result.branch == "feature/login"
     assert result.workspace == workspace
+    assert result.head_commit == expected_head_commit
     # The frame the proxy actually sent carries the request params.
     sent = registry._sent_frames_for_test[-1]  # type: ignore[attr-defined]
     assert isinstance(sent, HostCreateWorktreeFrame)
