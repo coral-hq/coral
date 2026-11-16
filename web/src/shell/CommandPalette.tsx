@@ -45,6 +45,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { useCoralPaletteActions } from "@/workflows/nav/useCoralPaletteActions";
 import { conversationDisplayLabel, getConversationAgentType } from "./sidebarNav";
 
 export interface CommandPaletteProps {
@@ -182,6 +183,9 @@ export function CommandPalette({
 
   const close = (): void => onOpenChange(false);
 
+  // CORAL(S34): Workflows / Agent Profiles entries, empty while Coral is off.
+  const coralActions = useCoralPaletteActions(navigate);
+
   const actions = useMemo<ActionCommand[]>(
     () => [
       {
@@ -206,6 +210,7 @@ export function CommandPalette({
         keywords: ["scheduled", "recurring", "cron", "automation", "schedule"],
         run: () => navigate("/tasks"),
       },
+      ...coralActions,
       {
         id: "go-settings",
         label: "Go to Settings",
@@ -231,7 +236,13 @@ export function CommandPalette({
         shortcut: rightSidebarShortcutEnabled ? rightSidebarToggleShortcutKeys() : undefined,
       },
     ],
-    [navigate, onToggleLeftSidebar, onToggleRightSidebar, rightSidebarShortcutEnabled],
+    [
+      navigate,
+      coralActions,
+      onToggleLeftSidebar,
+      onToggleRightSidebar,
+      rightSidebarShortcutEnabled,
+    ],
   );
 
   const filteredActions = useMemo(() => {

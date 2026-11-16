@@ -1,0 +1,94 @@
+"""Packaging smoke test and distribution-collision check (Spike 10)."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from importlib.metadata import packages_distributions
+from pathlib import Path
+
+import click
+
+
+def test_coral_package_has_no_conflicting_distribution() -> None:
+    """No non-omnigent distribution claims the ``coral`` top-level package."""
+    owners = packages_distributions().get("coral", [])
+    assert set(owners) <= {"omnigent"}
+
+
+def test_built_wheel_runs_coral_help_in_no_deps_venv(tmp_path: Path) -> None:
+    """Build a wheel without web UI and run ``coral --help`` with only click installed."""
+    uv_bin = shutil.which("uv")
+    assert uv_bin is not None, "uv executable must be on PATH"
+
+    repo_root = Path(__file__).resolve().parents[2]
+    wheel_dir = tmp_path / "dist"
+    build_env = os.environ.copy()
+    build_env["OMNIGENT_SKIP_WEB_UI"] = "true"
+
+    subprocess.run(
+        [
+            uv_bin,
+            "build",
+            "--wheel",
+            "--out-dir",
+            str(wheel_dir),
+        ],
+        cwd=repo_root,
+        env=build_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheels = list(wheel_dir.glob("omnigent-*.whl"))
+    assert len(wheels) == 1
+
+    venv_dir = tmp_path / "venv"
+    subprocess.run(
+        [uv_bin, "venv", "--no-project", str(venv_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    venv_python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    subprocess.run(
+        [uv_bin, "pip", "install", "--python", str(venv_python), "--no-deps", str(wheels[0])],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    only_click_dir = tmp_path / "only_click"
+    only_click_dir.mkdir()
+    shutil.copytree(Path(click.__file__).resolve().parent, only_click_dir / "click")
+    run_env = {
+        "HOME": str(tmp_path / "home"),
+        "PYTHONPATH": str(only_click_dir),
+        "PATH": str(venv_python.parent),
+    }
+    coral_bin = venv_python.parent / ("coral.exe" if os.name == "nt" else "coral")
+    result = subprocess.run(
+        [str(coral_bin), "--help"],
+        env=run_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Coral workflow orchestration CLI." in result.stdout
+
+    dist_check = subprocess.run(
+        [
+            str(venv_python),
+            "-c",
+            "from importlib.metadata import packages_distributions; "
+            "dists = packages_distributions(); "
+            "assert set(dists.get('coral', [])) == {'omnigent'}, f'got {dists.get(\"coral\")!r}'",
+        ],
+        env=run_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert dist_check.returncode == 0, dist_check.stderr

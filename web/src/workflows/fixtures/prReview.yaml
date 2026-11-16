@@ -1,0 +1,76 @@
+id: review-prs
+name: Review labelled pull requests
+description: Find open PRs, review them, fix findings (up to 3 rounds), then approve and merge.
+nodes:
+  - id: start
+    kind: start
+  - id: find_prs
+    kind: step
+    name: Find PRs
+    goal: Handle the pull requests labelled needs-review
+    roster: [claude]
+    parts:
+      - name: pull_requests
+        kind: list
+  - id: review
+    kind: step
+    name: Review
+    goal: Review the pull request
+    roster: [claude, codex]
+    attempts: 2
+    concurrency: 2
+  - id: triage
+    kind: decision
+    name: Triage
+    question: Approved or changes requested?
+  - id: fix
+    kind: step
+    name: Fix
+    goal: Address review findings
+    roster: [claude]
+  - id: approve_merge
+    kind: gate
+    name: Approve merge
+    outcomes: [approve]
+  - id: summarize
+    kind: step
+    name: Summarize
+    goal: Summarize results per pull request
+    roster: [claude]
+  - id: end
+    kind: end
+arrows:
+  - id: a1
+    from: start
+    to: find_prs
+  - id: a2
+    from: find_prs
+    to: review
+  - id: a3
+    from: review
+    to: triage
+  - id: a4
+    from: triage
+    to: fix
+    label: changes_requested
+  - id: a5
+    from: triage
+    to: approve_merge
+    label: approved
+  - id: a6
+    from: fix
+    to: review
+    label: revise
+    back: true
+    limit: 3
+    at_limit: a7
+  - id: a7
+    from: fix
+    to: approve_merge
+  - id: a8
+    from: approve_merge
+    to: summarize
+    label: approve
+  - id: a9
+    from: summarize
+    to: end

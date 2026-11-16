@@ -26,6 +26,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from dev.lint import (
+    # CORAL(S39): register Coral import-boundary lint rule
+    lint_coral_import_boundary,
     lint_floating_runner_image,
     lint_session_list_visibility,
     lint_sleep_then_assert,
@@ -69,6 +71,12 @@ RULES: list[Rule] = [
         name=lint_sleep_then_assert.RULE_NAME,
         check=lint_sleep_then_assert.check,
         hint=lint_sleep_then_assert.HINT,
+    ),
+    # CORAL(S39): keep coral-import-boundary registered after workspace-scoped-cache
+    Rule(
+        name=lint_coral_import_boundary.RULE_NAME,
+        check=lint_coral_import_boundary.check,
+        hint=lint_coral_import_boundary.HINT,
     ),
 ]
 

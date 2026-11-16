@@ -14,6 +14,10 @@ allowed_roots:
     new_files_only: false
   - path: tests/coral/
     new_files_only: false
+  - path: tests/stores/coral/
+    new_files_only: false
+  - path: tests/e2e/coral/
+    new_files_only: false
   - path: web/src/brand/
     new_files_only: false
   - path: .claude/skills/
@@ -585,18 +589,20 @@ seams:
 
 
   - id: S29
-    title: coral console script
+    title: coral console script and package roots
     owner: WS-PLATFORM
     status: landed
     category: coral-specific
     note: >-
-      Interim: `coral` points at omnigent.cli:main, the same CLI as omnigent
-      and omni. FND-01 repoints it to coral.cli:main and adds the package
-      include and package data.
+      Points the `coral` console script at `coral.cli:main`, includes `coral*`
+      in package discovery, and registers package data for Coral's migrations,
+      templates, and built-in profile seeds.
     files:
       - pyproject.toml
-    tests: []
-    budget_lines: 10
+    tests:
+      - tests/coral/test_cli_isolation.py
+      - tests/coral/test_packaging.py
+    budget_lines: 20
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -1133,3 +1139,134 @@ seams:
     anchor_exempt: []
     upstream_first: true
     upstream_candidate: true
+  - id: S32
+    title: Server plugin seam and lifespan hooks
+    owner: WS-PLATFORM
+    status: landed
+    category: upstream-extension
+    note: >-
+      Adds `omnigent/server/server_plugins.py` (`ServerServices`,
+      `ServerPluginRegistration`, `load_server_plugins`,
+      `enter_lifespan_hooks`) and wires `server_plugins` into
+      `omnigent/server/app.py` and `omnigent/cli.py`. Plugin routers mount
+      before `_SPAStaticFiles`, plugin policy modules merge into
+      `load_registry` after fatal pre-import checks, and plugin lifespan hooks
+      enter after scheduler/reaper startup and exit first in reverse order.
+    files:
+      - omnigent/server/server_plugins.py
+      - omnigent/server/app.py
+      - omnigent/cli.py
+      - tests/server/test_app.py
+    tests:
+      - tests/server/test_app.py
+    budget_lines: 120
+    anchor_exempt: []
+    upstream_first: true
+    upstream_candidate: true
+
+  - id: S39
+    title: Custom lint roots, import-boundary rule, and CODEOWNERS block
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      Adds `coral/` to `lint_workspace_scoped_cache.SCANNED_ROOTS`, adds and
+      registers `dev/lint/lint_coral_import_boundary.py` last in
+      `dev/lint/custom_lint.RULES`, and appends Coral's ownership block below
+      Omnigent's unchanged lines in `.github/CODEOWNERS`.
+    files:
+      - dev/lint/lint_workspace_scoped_cache.py
+      - dev/lint/lint_coral_import_boundary.py
+      - dev/lint/custom_lint.py
+      - .github/CODEOWNERS
+      - tests/dev/lint/test_custom_lint.py
+    tests:
+      - tests/dev/lint/test_custom_lint.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S39b
+    title: Ruff isort first-party package entry for coral
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      Adds `"coral"` to `[tool.ruff.lint.isort].known-first-party` in
+      `pyproject.toml`.
+    files:
+      - pyproject.toml
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S39c
+    title: Coverage source root for coral
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      Adds `"coral"` to `[tool.coverage.run].source` in `pyproject.toml` and
+      `--cov=coral` in `.github/workflows/ci.yml`.
+    files:
+      - pyproject.toml
+      - .github/workflows/ci.yml
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S39d
+    title: Dedicated coral CI matrix group and misc ignore
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      Adds a `coral` shard running `tests/coral` and excludes `tests/coral` from
+      `misc` in `.github/scripts/ci/python-matrix.json`.
+    files:
+      - .github/scripts/ci/python-matrix.json
+      - tests/scripts/test_dependency_ci.py
+    tests:
+      - tests/scripts/test_dependency_ci.py
+    budget_lines: 10
+    anchor_exempt:
+      - .github/scripts/ci/python-matrix.json
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S39e
+    title: Pyrefly include roots and pre-commit trigger for coral
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      Adds `coral/**/*.py` and `coral/**/*.pyi` to `pyrefly.toml` and includes
+      `coral/` in `.pre-commit-config.yaml`'s pyrefly trigger regex.
+    files:
+      - pyrefly.toml
+      - .pre-commit-config.yaml
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S76
+    title: Justfile module mount for coral recipes
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      Mounts `mod coral 'coral/coral.just'` from the root `justfile`.
+    files:
+      - justfile
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

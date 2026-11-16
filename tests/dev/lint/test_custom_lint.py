@@ -28,6 +28,11 @@ def test_session_visibility_is_registered() -> None:
     assert any(rule.name == "session-list-visibility" for rule in custom_lint.RULES)
 
 
+def test_coral_import_boundary_is_registered_last() -> None:
+    assert any(rule.name == "coral-import-boundary" for rule in custom_lint.RULES)
+    assert custom_lint.RULES[-1].name == "coral-import-boundary"
+
+
 def test_any_rule_violation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """A single rule reporting a violation makes the runner return 1."""
     monkeypatch.setattr(
