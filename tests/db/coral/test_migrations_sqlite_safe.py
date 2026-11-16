@@ -118,7 +118,7 @@ def test_coral_migration_chain_round_trips_and_has_zero_drift_on_sqlite() -> Non
                         f"Alembic schema drift detected after re-upgrade: {diff_after}"
                     )
 
-                    # Ensure all 16 tables exist
+                    # Ensure every model table exists
                     inspector = sa.inspect(conn)
                     tables = set(inspector.get_table_names())
                     for expected_table in CoralBase.metadata.tables:
@@ -134,7 +134,12 @@ def test_coral_migration_chain_revisions_and_lineage() -> None:
     script = ScriptDirectory.from_config(config)
 
     heads = script.get_heads()
-    assert heads == ["coral_0001_core"]
+    assert heads == ["coral_0002_session_facade"]
+
+    rev_sessions = script.get_revision("coral_0002_session_facade")
+    assert rev_sessions is not None
+    assert rev_sessions.down_revision == "coral_0001_core"
+    assert len(rev_sessions.revision) <= 32
 
     rev_core = script.get_revision("coral_0001_core")
     assert rev_core is not None
@@ -147,3 +152,32 @@ def test_coral_migration_chain_revisions_and_lineage() -> None:
     assert rev_base.down_revision is None
     assert len(rev_base.revision) <= 32
     assert rev_base.revision.startswith("coral_")
+
+
+def test_migrated_check_constraints_match_the_models_on_sqlite() -> None:
+    """compare_metadata skips CHECK constraints, so compare their names and SQL directly."""
+    with tempfile.TemporaryDirectory() as tmp:
+        uri = f"sqlite:///{Path(tmp) / 'coral_checks.db'}"
+        config = Config(str(_ALEMBIC_INI))
+        config.set_main_option("sqlalchemy.url", uri)
+        config.set_main_option("script_location", str(_MIGRATIONS_DIR))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            command.upgrade(config, "head")
+
+        engine = sa.create_engine(uri)
+        try:
+            inspector = sa.inspect(engine)
+            for table in CoralBase.metadata.sorted_tables:
+                expected = {
+                    constraint.name: str(constraint.sqltext)
+                    for constraint in table.constraints
+                    if isinstance(constraint, sa.CheckConstraint)
+                }
+                migrated = {
+                    check["name"]: check["sqltext"]
+                    for check in inspector.get_check_constraints(table.name)
+                }
+                assert migrated == expected, table.name
+        finally:
+            engine.dispose()

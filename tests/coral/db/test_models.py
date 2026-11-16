@@ -25,8 +25,11 @@ from sqlalchemy.orm import Session
 from coral.db import (
     CoralBase,
     RunRow,
+    SessionBindingRow,
+    StableIdRow,
     WorkflowRow,
     WorkRow,
+    WorkspaceOpIntentRow,
 )
 from coral.db import enum_codecs as ec
 from coral.db.types import CAPPED_TEXT, CHECKSUM32, MAX_STORED_BYTES, CaseSensitiveString
@@ -50,6 +53,9 @@ EXPECTED_TABLE_NAMES = frozenset(
         "coral_blob_refs",
         "coral_work",
         "coral_worker_leases",
+        "coral_session_bindings",
+        "coral_stable_ids",
+        "coral_workspace_op_intents",
     }
 )
 
@@ -77,10 +83,10 @@ def _column_index_byte_length(col: Column) -> int:
     return 8
 
 
-def test_exactly_16_tables_registered_and_no_metadata_overlap() -> None:
+def test_exactly_19_tables_registered_and_no_metadata_overlap() -> None:
     tables = CoralBase.metadata.tables
     assert set(tables.keys()) == EXPECTED_TABLE_NAMES
-    assert len(tables) == 16
+    assert len(tables) == 19
 
     omnigent_tables = set(OmnigentBase.metadata.tables.keys())
     conversation_tables = set(ConversationBase.metadata.tables.keys())
@@ -166,6 +172,9 @@ def test_exact_internal_and_external_id_lengths() -> None:
         "coral_simulation_cases": {"id", "workflow_id", "last_version_id"},
         "coral_blob_refs": {"scope_id"},
         "coral_work": {"id", "run_id"},
+        "coral_session_bindings": {"run_id"},
+        "coral_stable_ids": {"stable_id", "run_id"},
+        "coral_workspace_op_intents": {"run_id"},
     }
 
     external_ref_columns: dict[str, set[str]] = {
@@ -182,6 +191,9 @@ def test_exact_internal_and_external_id_lengths() -> None:
         "coral_gate_visits": {"token", "elicitation_id", "elicitation_session_id"},
         "coral_work": {"lease_holder"},
         "coral_worker_leases": {"name", "holder_id"},
+        "coral_session_bindings": {"session_id", "host_id"},
+        "coral_stable_ids": {"session_id"},
+        "coral_workspace_op_intents": {"host_id"},
     }
 
     for table_name, cols in internal_id_columns.items():
@@ -473,6 +485,30 @@ def test_enum_codecs_roundtrip_and_errors() -> None:
             ec.decode_work_status,
             ec.WorkStatus,
         ),
+        (
+            ec.SESSION_BINDING_ROLE,
+            ec.encode_session_binding_role,
+            ec.decode_session_binding_role,
+            ec.SessionBindingRole,
+        ),
+        (
+            ec.SESSION_BINDING_PROGRESS,
+            ec.encode_session_binding_progress,
+            ec.decode_session_binding_progress,
+            ec.SessionBindingProgress,
+        ),
+        (
+            ec.STABLE_ID_KIND,
+            ec.encode_stable_id_kind,
+            ec.decode_stable_id_kind,
+            ec.StableIdKind,
+        ),
+        (
+            ec.WORKSPACE_OP_INTENT_OP,
+            ec.encode_workspace_op_intent_op,
+            ec.decode_workspace_op_intent_op,
+            ec.WorkspaceOpIntentOp,
+        ),
     ]
 
     for table, encode_fn, decode_fn, enum_cls in codecs_to_test:
@@ -500,6 +536,110 @@ def test_enum_codecs_roundtrip_and_errors() -> None:
     with pytest.raises(ValueError, match=r"unknown coral_runs\.status code"):
         ec.encode_run_status(ec.WorkKind.SIGNAL)  # type: ignore[arg-type]
     assert ec.encode_run_status(ec.RunStatusStr.RUNNING) == ec.RunStatus.RUNNING
+
+
+def test_stored_codes_for_drift_and_session_facade_enums() -> None:
+    """Stored integers are a persistence contract; renumbering breaks existing rows."""
+    assert ec.encode_run_pause_reason("drift") == 12
+    assert ec.SESSION_BINDING_ROLE == {"anchor": 1, "step": 2}
+    assert ec.SESSION_BINDING_PROGRESS == {"reserved": 1, "row_created": 2, "initialized": 3}
+    assert ec.STABLE_ID_KIND == {"brief": 1, "steer": 2, "nudge": 3}
+    assert ec.WORKSPACE_OP_INTENT_OP == {"commit": 1, "salvage": 2, "reset": 3}
+    # Binding progress is compared for monotonic updates and "at least row_created" checks.
+    assert (
+        ec.SessionBindingProgress.RESERVED
+        < ec.SessionBindingProgress.ROW_CREATED
+        < ec.SessionBindingProgress.INITIALIZED
+    )
+
+
+def test_session_facade_tables_enforce_their_enum_checks_on_sqlite() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    CoralBase.metadata.create_all(engine)
+    binding = {
+        "workspace_id": 1,
+        "session_id": "s" * 32,
+        "run_id": "r" * 32,
+        "role": int(ec.SessionBindingRole.ANCHOR),
+        "slot_id": None,
+        "slot_role": None,
+        "effect_cksum": b"\x01" * 32,
+        "session_generation": 1,
+        "host_id": None,
+        "progress": int(ec.SessionBindingProgress.RESERVED),
+        "created_at": 100,
+        "updated_at": 100,
+    }
+    stable_id = {
+        "workspace_id": 1,
+        "stable_id": "i" * 32,
+        "run_id": "r" * 32,
+        "session_id": "s" * 32,
+        "effect_cksum": b"\x02" * 32,
+        "content_cksum": b"\x04" * 32,
+        "kind": int(ec.StableIdKind.BRIEF),
+        "session_generation": 1,
+        "created_at": 100,
+    }
+    intent = {
+        "workspace_id": 1,
+        "op_key": "k" * 32,
+        "run_id": "r" * 32,
+        "op": int(ec.WorkspaceOpIntentOp.COMMIT),
+        "host_id": "h" * 32,
+        "root": "/repo-worktrees/run",
+        "expected_head": None,
+        "created_at": 100,
+    }
+    valid_rows = [
+        SessionBindingRow(**binding),
+        StableIdRow(**stable_id),
+        WorkspaceOpIntentRow(**intent),
+    ]
+    # Each invalid binding has its own effect checksum so only the enum check can fail.
+    invalid_rows = [
+        SessionBindingRow(**{**binding, "session_id": "a", "effect_cksum": b"a" * 32, "role": 9}),
+        SessionBindingRow(
+            **{**binding, "session_id": "b", "effect_cksum": b"b" * 32, "slot_role": 9}
+        ),
+        SessionBindingRow(
+            **{**binding, "session_id": "c", "effect_cksum": b"c" * 32, "progress": 9}
+        ),
+        StableIdRow(**{**stable_id, "stable_id": "j" * 32, "kind": 9}),
+        WorkspaceOpIntentRow(**{**intent, "op_key": "l" * 32, "op": 9}),
+    ]
+    with Session(engine) as session:
+        session.add_all(valid_rows)
+        session.commit()
+        for row in invalid_rows:
+            session.add(row)
+            with pytest.raises(IntegrityError):
+                session.commit()
+            session.rollback()
+
+
+def test_session_binding_effect_checksum_is_unique_within_a_run() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    CoralBase.metadata.create_all(engine)
+    row = {
+        "workspace_id": 1,
+        "run_id": "r" * 32,
+        "role": int(ec.SessionBindingRole.STEP),
+        "slot_id": "slot-a",
+        "slot_role": int(ec.SlotRole.STEP_AGENT),
+        "effect_cksum": b"\x03" * 32,
+        "session_generation": 1,
+        "host_id": "h" * 32,
+        "progress": int(ec.SessionBindingProgress.RESERVED),
+        "created_at": 100,
+        "updated_at": 100,
+    }
+    with Session(engine) as session:
+        session.add(SessionBindingRow(session_id="s" * 32, **row))
+        session.commit()
+        session.add(SessionBindingRow(session_id="t" * 32, **row))
+        with pytest.raises(IntegrityError):
+            session.commit()
 
 
 def test_types_and_constants() -> None:

@@ -50,3 +50,8 @@ def derived_id(kind: str, *parts: str) -> str:
     """
     payload = f"{kind}:".encode() + b"\0".join(part.encode() for part in parts)
     return hashlib.sha256(payload).hexdigest()[:32]
+
+
+def anchor_session_id(workspace_id: int, run_id: str) -> str:
+    """Return the run's anchor session id; one per run, so a re-keyed anchor effect reuses it."""
+    return derived_id("coral-anchor", str(workspace_id), run_id)

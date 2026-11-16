@@ -12,7 +12,7 @@ from omnigent.db.utils import get_or_create_engine
 
 
 def test_ensure_coral_schema_creates_all_tables_and_allows_row_insertion(db_uri: str) -> None:
-    """ensure_coral_schema creates all 16 Coral tables and allows inserting/querying models."""
+    """ensure_coral_schema creates every Coral table and allows inserting/querying models."""
     ensure_coral_schema(db_uri)
 
     engine = get_or_create_engine(db_uri)
@@ -36,6 +36,9 @@ def test_ensure_coral_schema_creates_all_tables_and_allows_row_insertion(db_uri:
         "coral_blob_refs",
         "coral_work",
         "coral_worker_leases",
+        "coral_session_bindings",
+        "coral_stable_ids",
+        "coral_workspace_op_intents",
     }
 
     assert expected_tables.issubset(existing_tables), (
@@ -44,7 +47,7 @@ def test_ensure_coral_schema_creates_all_tables_and_allows_row_insertion(db_uri:
     assert "coral_alembic_version" in existing_tables
 
     current, head = current_coral_revision(db_uri)
-    assert current == head == "coral_0001_core"
+    assert current == head == "coral_0002_session_facade"
 
     # Insert a WorkflowRow
     with Session(engine) as session:
@@ -129,4 +132,4 @@ def test_s31_truncation_preserves_coral_version_and_clears_data(db_uri: str) -> 
     assert "alembic_version" in all_tables
 
     current, head = current_coral_revision(db_uri)
-    assert current == head == "coral_0001_core"
+    assert current == head == "coral_0002_session_facade"

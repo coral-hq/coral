@@ -174,10 +174,11 @@ class RunRow(CoralBase):
         Index("ix_coral_runs_active", "status", "workspace_id", "id"),
         Index("ix_coral_runs_version", "workspace_id", "version_id", "id"),
         make_enum_check_constraint("status", RUN_STATUS, name="ck_coral_runs_status"),
+        # Renamed when widened: a distinct name lets CockroachDB replace it in one transaction.
         make_enum_check_constraint(
             "pause_reason",
             RUN_PAUSE_REASON,
-            name="ck_coral_runs_pause_reason",
+            name="ck_coral_runs_pause_reason_v2",
             nullable=True,
         ),
     )
