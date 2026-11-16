@@ -14,6 +14,10 @@ allowed_roots:
     new_files_only: false
   - path: tests/coral/
     new_files_only: false
+  - path: tests/stores/coral/
+    new_files_only: false
+  - path: tests/db/coral/
+    new_files_only: false
   - path: web/src/brand/
     new_files_only: false
   - path: .claude/skills/
@@ -1093,3 +1097,82 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S30
+    title: Exclude Coral-owned tables and coral_alembic_version from Omnigent migrations
+    owner: WS-PLATFORM
+    status: landed
+    category: upstream-extension
+    note: >-
+      Adds `_include_name` filter to `omnigent/db/migrations/env.py` so that
+      Coral-owned tables (`coral_*`) and `coral_alembic_version` are ignored
+      by Omnigent Alembic autogenerate and migrations in online and offline modes.
+    files:
+      - omnigent/db/migrations/env.py
+    tests:
+      - tests/db/coral/test_migration_coral_chain.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: true
+    upstream_candidate: true
+
+  - id: S31
+    title: Preserve alembic version tables during multi-database test truncation
+    owner: WS-PLATFORM
+    status: landed
+    category: upstream-extension
+    note: >-
+      Adjusts table truncation in `tests/conftest.py` to preserve both
+      `alembic_version` and `coral_alembic_version` between test runs on
+      Postgres, MySQL, and CockroachDB while still truncating all data tables.
+    files:
+      - tests/conftest.py
+    tests:
+      - tests/stores/coral/test_coral_migrations_multi.py
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: true
+    upstream_candidate: true
+
+  - id: S57
+    title: Databricks deployment app schema migration entry point
+    owner: WS-PLATFORM
+    status: planned
+    category: upstream-extension
+    note: >-
+      Planned seam for running Coral schema migrations alongside Omnigent
+      migrations in Databricks app startup (`deploy/databricks/src/app.py`).
+      Runtime call lands in Unit 3 when `coral/db/migrate.py` exists.
+    files:
+      - deploy/databricks/src/app.py
+    tests: []
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S58
+    title: Shared DB utilities for keyset pagination, enum codecs, and engine inspection
+    owner: WS-PLATFORM
+    status: landed
+    category: upstream-extension
+    note: >-
+      Extracts `keyset_after` into `omnigent/db/pagination.py`, refactors
+      `SqlAlchemyScheduledTaskStore._cursor_after` to delegate to it, adds
+      public `encode_enum` / `decode_enum` in `omnigent/db/enum_codecs.py`,
+      exposes `create_db_engine` and `get_db_revision_state` in `omnigent/db/utils.py`,
+      and allowlists them in `dev/lint/lint_coral_import_boundary.py`.
+    files:
+      - omnigent/db/pagination.py
+      - omnigent/db/enum_codecs.py
+      - omnigent/db/utils.py
+      - omnigent/stores/scheduled_task_store/sqlalchemy_store.py
+      - dev/lint/lint_coral_import_boundary.py
+    tests:
+      - tests/db/test_pagination.py
+      - tests/db/test_enum_codecs.py
+      - tests/coral/test_import_boundary.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: true
+    upstream_candidate: true

@@ -32,7 +32,7 @@ OPS-01's generator will maintain this file later.
 | `README.md` | S91 | coral-specific | Replaced by Coral's README: what Coral is, its status, running it from source with `coral start` (the `coral` command wraps the same CLI as `omnigent`), documentation, contributing, and the credit and attribution to Omnigent. |
 | `SECURITY.md` | S94 | coral-specific | Vulnerability reports go to Coral's private security advisories or coralai.team@gmail.com; the code-scanning link points to Coral's repository. |
 | `dev/lint/custom_lint.py` | S39 | coral-specific | Registers the `coral-import-boundary` rule last in `RULES` (S39). |
-| `dev/lint/lint_coral_import_boundary.py` | S39 | coral-specific | Added. Enforces Coral's pure/omni/db/app/root three-tier import boundaries (S39). |
+| `dev/lint/lint_coral_import_boundary.py` | S39, S58 | coral-specific | Added. Enforces Coral's pure/omni/db/app/root three-tier import boundaries (S39). Allowlist permits shared Omnigent DB utilities in coral.db (S58). |
 | `dev/lint/lint_workspace_scoped_cache.py` | S39 | coral-specific | Adds `coral/` to `SCANNED_ROOTS` (S39). |
 | `justfile` | S87, S76 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build, and `electron-mdm` writes and imports Coral's app-id preference domains (S87). Mounts `mod coral 'coral/coral.just'` (S76). |
 | `omnigent/chat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -44,7 +44,10 @@ OPS-01's generator will maintain this file later.
 | `omnigent/conversation_browser.py` | S38, S95 | coral-specific | `deep_link_url` generates `coral://` links for `--open-in-desktop` (S38). Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/crash_handler.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/db/cockroachdb.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/db/utils.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/db/enum_codecs.py` | S58 | upstream-extension | Public encode_enum and decode_enum helpers for Coral schema codecs (S58). |
+| `omnigent/db/migrations/env.py` | S30 | upstream-extension | Filters out Coral tables (coral_*) and coral_alembic_version from Omnigent Alembic autogenerate (S30). |
+| `omnigent/db/pagination.py` | S58 | upstream-extension | Added. Shared keyset_after pagination helper with MySQL scalar expansion (S58). |
+| `omnigent/db/utils.py` | S95, S58 | upstream-extension | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Exposes create_db_engine and get_db_revision_state for isolated Coral schema checks (S58). |
 | `omnigent/extensions/registry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/harnesses/antigravity_native/bridge.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/harnesses/antigravity_native/reader.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -140,6 +143,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/spec/__init__.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/spec/_omnigent_compat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/spec/omnigent.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/stores/scheduled_task_store/sqlalchemy_store.py` | S58 | upstream-extension | Delegates _cursor_after to shared keyset_after helper (S58). |
 | `omnigent/telemetry/client.py` | S98 | coral-specific | Telemetry is always disabled: Coral sends no usage telemetry to Omnigent's service. |
 | `omnigent/tools/builtins/async_inbox.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/tools/builtins/browser.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -160,6 +164,7 @@ OPS-01's generator will maintain this file later.
 | `tests/cli/test_crash_handler.py` | S96, S95 | coral-specific | Renders the crash screen with the `coral` app name the CLI now passes. Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/cli/test_import.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/cli/test_login_databricks.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/conftest.py` | S31 | upstream-extension | Preserves alembic_version and coral_alembic_version during test table truncation across Postgres, MySQL, and CockroachDB (S31). |
 | `tests/db/test_crdb_core.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/dev/lint/test_custom_lint.py` | S39 | coral-specific | Asserts `coral-import-boundary` is registered last in `custom_lint.RULES` (S39). |
 | `tests/e2e/integrations/deploy/gensee/test_managed_lifecycle.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |

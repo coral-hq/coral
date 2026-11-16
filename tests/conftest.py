@@ -733,7 +733,11 @@ def db_uri(
 
     engine = get_or_create_engine(_worker_db_uri)
     dialect = engine.dialect.name
-    tables = [t for t in _sa.inspect(engine).get_table_names() if t != "alembic_version"]
+    # CORAL(S31): preserve alembic_version and coral_alembic_version while still
+    # truncating all data tables
+    tables = [
+        t for t in _sa.inspect(engine).get_table_names() if not t.endswith("alembic_version")
+    ]
     # No FK constraints exist (dropped in p1a2b3c4d5e6) so no need to toggle
     # FOREIGN_KEY_CHECKS — one less round-trip per test on MySQL.
     operation = "DELETE FROM" if dialect == "cockroachdb" else "TRUNCATE TABLE"

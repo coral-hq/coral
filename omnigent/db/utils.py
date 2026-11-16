@@ -766,6 +766,17 @@ def _verify_db_revision_is_supported(
         ) from exc
 
 
+# CORAL(S58): public migration inspection helpers for isolated Coral schema checks
+def create_db_engine(db_uri: str) -> Engine:
+    """Create a SQLAlchemy engine with standard pooling without running migrations."""
+    return _create_engine(db_uri)
+
+
+def get_db_revision_state(engine: Engine, db_uri: str) -> tuple[str | None, str]:
+    """Return the database's current Alembic revision and head revision."""
+    return (_get_current_db_revision(engine), _get_head_db_revision(db_uri))
+
+
 def _initialize_or_verify_schema(engine: Engine, db_uri: str) -> None:
     """
     Bring a fresh or stale database to head before the server starts.
