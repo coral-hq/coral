@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pytest
+from sqlalchemy import make_url
 
 from omnigent.db.utils import get_or_create_engine
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from tests.stores.coral._faults import evict_cached_engine
 from tests.stores.coral._schema import (
     build_coral_sqlite_template,
     crdb_ddl_lock,
@@ -44,3 +49,54 @@ def _coral_schema_on_worker_db(_worker_db_uri: str) -> Iterator[None]:
 def coral_db_uri(db_uri: str, _coral_schema_on_worker_db: None) -> str:
     """:returns: An operational DB URI with Coral tables and no rows, on the active lane."""
     return db_uri
+
+
+@dataclass(frozen=True)
+class CoralSplitDb:
+    operational_uri: str
+    conversation_uri: str
+    operational_path: Path
+    conversation_path: Path
+    conversation_store: SqlAlchemyConversationStore
+
+
+@pytest.fixture
+def coral_split_db(
+    coral_db_uri: str, tmp_path: Path, _worker_db_uri: str
+) -> Iterator[CoralSplitDb]:
+    """:returns: The Coral operational DB plus a conversation DB in a separate SQLite file."""
+    if _worker_db_uri:
+        pytest.skip("split-DB lane is SQLite + SQLite")
+    conversation_path = tmp_path / "conversations.db"
+    conversation_uri = f"sqlite:///{conversation_path}"
+    yield CoralSplitDb(
+        operational_uri=coral_db_uri,
+        conversation_uri=conversation_uri,
+        operational_path=Path(str(make_url(coral_db_uri).database)),
+        conversation_path=conversation_path,
+        conversation_store=SqlAlchemyConversationStore(coral_db_uri, conversation_uri),
+    )
+    # db_uri evicts only the operational engine.
+    evict_cached_engine(conversation_uri)
+
+
+@dataclass(frozen=True)
+class CoralDbLayout:
+    kind: Literal["single", "split"]
+    operational_uri: str
+    conversation_uri: str
+
+
+@pytest.fixture(params=["single", "split"])
+def coral_db_layout(request: pytest.FixtureRequest, coral_db_uri: str) -> CoralDbLayout:
+    """Run a test on one shared DB and on the split layout; split skips on external lanes."""
+    if request.param == "single":
+        return CoralDbLayout(
+            kind="single", operational_uri=coral_db_uri, conversation_uri=coral_db_uri
+        )
+    split: CoralSplitDb = request.getfixturevalue("coral_split_db")
+    return CoralDbLayout(
+        kind="split",
+        operational_uri=split.operational_uri,
+        conversation_uri=split.conversation_uri,
+    )

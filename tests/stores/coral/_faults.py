@@ -48,16 +48,23 @@ def crash_around(
     monkeypatch.setattr(owner, attr, crashing)
 
 
-def fresh_process(uri: str) -> Engine:
-    """Drop and dispose the cached engine for ``uri`` and return a new one.
-
-    Only committed state is visible through the new engine.
-    """
+def evict_cached_engine(uri: str) -> None:
+    """Drop and dispose the process-wide cached engine for ``uri``, if any."""
     with _engine_lock:
         engine = _engine_cache.pop(normalize_database_url(uri), None)
     if engine is not None:
         engine.dispose()
-    return get_or_create_engine(uri)
+
+
+def fresh_process(uri: str, *, connect: Callable[[str], Engine] = get_or_create_engine) -> Engine:
+    """Evict the cached engine for ``uri`` and return a new one from ``connect``.
+
+    Only committed state is visible through the new engine. Pass
+    ``get_or_create_conversation_engine`` for a split conversation DB, which
+    must not receive Omnigent migrations.
+    """
+    evict_cached_engine(uri)
+    return connect(uri)
 
 
 @dataclass(frozen=True)
