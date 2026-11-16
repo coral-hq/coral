@@ -6,9 +6,8 @@ from pathlib import Path
 
 import pytest
 
-# The first version line that carries Coral; compat runs pin older runner tags.
+# First runner version line that includes Coral.
 CORAL_MIN_RUNNER_VERSION = "0.22.0"
-# Spike 4 passed: docs/coral/decisions/probes/SPK-03-claude-sdk.md.
 CORAL_TIER_B_HARNESS = "claude-sdk"
 
 _HERE = Path(__file__).resolve().parent

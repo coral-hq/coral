@@ -23,10 +23,7 @@ from omnigent.db.utils import (
 
 
 class SimulatedCrash(BaseException):
-    """Stands in for process death.
-
-    A BaseException, so ``except Exception`` cleanup in the code under test cannot absorb it.
-    """
+    """Process death; a BaseException so ``except Exception`` in the code under test misses it."""
 
 
 def crash_around(
@@ -57,11 +54,9 @@ def evict_cached_engine(uri: str) -> None:
 
 
 def fresh_process(uri: str, *, connect: Callable[[str], Engine] = get_or_create_engine) -> Engine:
-    """Evict the cached engine for ``uri`` and return a new one from ``connect``.
+    """Evict the cached engine for ``uri`` and return a new one that sees only committed state.
 
-    Only committed state is visible through the new engine. Pass
-    ``get_or_create_conversation_engine`` for a split conversation DB, which
-    must not receive Omnigent migrations.
+    Pass ``get_or_create_conversation_engine`` for a split conversation DB (no migrations).
     """
     evict_cached_engine(uri)
     return connect(uri)

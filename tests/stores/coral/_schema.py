@@ -49,10 +49,7 @@ def _run_schema_ddl(engine: Engine, apply: Callable[[MetaData, Connection], None
 
 
 def create_coral_schema(engine: Engine) -> None:
-    """Create the Coral and test-only tables that are missing.
-
-    This is the one place that decides what Coral schema a test database has.
-    """
+    """Create the Coral and test-only tables that are missing."""
     _run_schema_ddl(
         engine, lambda metadata, connection: metadata.create_all(connection, checkfirst=True)
     )
