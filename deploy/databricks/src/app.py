@@ -230,6 +230,14 @@ try:
         max_attempts=int(os.environ.get("AP_MIGRATE_MAX_ATTEMPTS", "8")),
         backoff_seconds=float(os.environ.get("AP_MIGRATE_BACKOFF_SECONDS", "3")),
     )
+    # CORAL(S57): run Coral schema migrations strictly after Omnigent reaches head
+    from coral.db.migrate import run_coral_migrations_with_retry
+
+    run_coral_migrations_with_retry(
+        DB_URI,
+        max_attempts=int(os.environ.get("AP_MIGRATE_MAX_ATTEMPTS", "8")),
+        backoff_seconds=float(os.environ.get("AP_MIGRATE_BACKOFF_SECONDS", "3")),
+    )
 
     agent_store = SqlAlchemyAgentStore(DB_URI)
     file_store = SqlAlchemyFileStore(DB_URI)

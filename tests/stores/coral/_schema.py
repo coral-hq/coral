@@ -9,9 +9,10 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from filelock import FileLock
-from sqlalchemy import Connection, Engine, MetaData, String
+from sqlalchemy import Connection, Engine, MetaData, String, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from coral.db.migrate import clear_coral_schema_cache, ensure_coral_schema
 from coral.db.models_workflows import CoralBase
 from omnigent.db.cockroachdb import _crdb_server_version, _prepare_crdb_schema_transaction
 from omnigent.db.utils import _engine_cache, _engine_lock, get_or_create_engine, is_cockroachdb
@@ -34,31 +35,44 @@ class ProbeRow(CoralTestBase):
 _CORAL_METADATA = (CoralBase.metadata, CoralTestBase.metadata)
 
 
-def _run_schema_ddl(engine: Engine, apply: Callable[[MetaData, Connection], None]) -> None:
+def _run_schema_ddl(
+    engine: Engine,
+    metadatas: tuple[MetaData, ...],
+    apply: Callable[[MetaData, Connection], None],
+) -> None:
     if is_cockroachdb(engine.dialect.name):
         version = _crdb_server_version(engine)
         with engine.connect() as connection:
             _prepare_crdb_schema_transaction(connection, version)
-            for metadata in _CORAL_METADATA:
+            for metadata in metadatas:
                 apply(metadata, connection)
             connection.commit()
         return
     with engine.begin() as connection:
-        for metadata in _CORAL_METADATA:
+        for metadata in metadatas:
             apply(metadata, connection)
 
 
 def create_coral_schema(engine: Engine) -> None:
-    """Create the Coral and test-only tables that are missing."""
+    """Migrate the Coral schema to head via Alembic and create the test-only probe table."""
+    ensure_coral_schema(engine.url.render_as_string(hide_password=False))
     _run_schema_ddl(
-        engine, lambda metadata, connection: metadata.create_all(connection, checkfirst=True)
+        engine,
+        (CoralTestBase.metadata,),
+        lambda metadata, connection: metadata.create_all(connection, checkfirst=True),
     )
 
 
 def drop_coral_schema(engine: Engine) -> None:
+    """Drop Coral tables, the test-only probe table, and coral_alembic_version."""
     _run_schema_ddl(
-        engine, lambda metadata, connection: metadata.drop_all(connection, checkfirst=True)
+        engine,
+        _CORAL_METADATA,
+        lambda metadata, connection: metadata.drop_all(connection, checkfirst=True),
     )
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS coral_alembic_version"))
+    clear_coral_schema_cache()
 
 
 @contextlib.contextmanager
