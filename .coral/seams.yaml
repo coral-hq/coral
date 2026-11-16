@@ -1744,12 +1744,18 @@ seams:
       handler failed to load or conflicts, not that none exists. The result
       stays cached until the host restarts. Installed metadata updates only
       after uv sync, so tests pass handlers to dispatch_workspace_op or patch
-      default_workspace_op_handlers.
+      default_workspace_op_handlers. pyproject.toml declares Coral's own
+      contribution, coral = coral.omni.host.ops:workspace_op_handlers, which
+      serves head, diff_stat, read and fingerprint (L1) and returns no ops
+      while CORAL_DISABLE_HOST_ENTRY_POINTS is set.
     files:
       - omnigent/host/workspace_ops.py
+      - pyproject.toml
       - tests/host/test_workspace_ops.py
     tests:
       - tests/host/test_workspace_ops.py
+      - tests/coral/test_packaging.py
+      - tests/coral/omni/host/ops/test_host_imports.py
     budget_lines: 40
     budget_exception:
       lines: 192
@@ -1764,7 +1770,8 @@ seams:
         without ops (the QA's test), the two-package conflict with its log
         and unknown_op text, the failed-to-load text, the once-per-process
         load and the fresh-interpreter check that importing the host loads
-        nothing.
+        nothing. pyproject.toml (4) declares Coral's contribution and is
+        within budget.
       approver: pending
     anchor_exempt: []
     upstream_first: false

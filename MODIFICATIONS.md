@@ -167,7 +167,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/workspace_fs.py` | S71 | upstreamable | `WorkspaceReader` takes a keyword-only `start_registry` (default `True`); with `False` it does not start the change registry's background git probe. File reads and diffs open files non-blocking and refuse FIFOs, devices and other non-regular files (S71). |
 | `openapi.json` | S95 | coral-specific | Regenerated: the title and API descriptions follow the S95 brand transform. |
 | `pnpm-lock.yaml` | S83 | coral-specific | Locks `@fontsource-variable/newsreader` 5.3.0 (S83). |
-| `pyproject.toml` | S29, S39b, S39c | coral-specific | Points `coral` at `coral.cli:main`, includes `coral*` and Coral package data (S29); adds `"coral"` to isort `known-first-party` (S39b) and `[tool.coverage.run].source` (S39c). |
+| `pyproject.toml` | S29, S39b, S39c, S40b | coral-specific | Points `coral` at `coral.cli:main`, includes `coral*` and Coral package data (S29); adds `"coral"` to isort `known-first-party` (S39b) and `[tool.coverage.run].source` (S39c). Declares Coral's `omnigent.host_workspace_ops` entry point, `coral = "coral.omni.host.ops:workspace_op_handlers"` (S40b). |
 | `pyrefly.toml` | S39e | coral-specific | Includes `coral/**/*.py` and `coral/**/*.pyi` in typechecking (S39e). |
 | `tests/browser_ui/chat/test_color_theme.py` | S82 | coral-specific | The default palette is labelled "Coral" with Coral's selection washes (S82). |
 | `tests/browser_ui/chat/test_status_indicators.py` | S79 | coral-specific | The working indicator's Coral mark holds still while its opacity pulses, replacing the Otto blink check (S79). |
