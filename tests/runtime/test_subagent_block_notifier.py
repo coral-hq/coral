@@ -32,6 +32,7 @@ from omnigent.runtime.subagent_block_notifier import (
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
+from tests._helpers.polling import poll_until_async
 
 # Wall-clock ceiling for polling the recording dispatch. The notifier
 # hops through ``run_coroutine_threadsafe`` and an escalation sleep, so
@@ -583,6 +584,69 @@ async def test_wake_fires_only_after_escalation_grace(
     # (mirrored card) so it doesn't direct the user somewhere else.
     assert "mirrored into this conversation" in call.notice
     assert "Run rm -rf?" in call.notice
+
+
+# CORAL(S51): only an exact "off" label keeps a child's block from waking its parent.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("child_labels", "expect_wake"),
+    [
+        ({}, True),
+        ({"omnigent.parent_wake": "on"}, True),
+        ({"omnigent.parent_wake": "OFF"}, True),
+        ({"omnigent.parent_wake": " off"}, True),
+        ({"omnigent.parent_wake": "off"}, False),
+    ],
+    ids=["unlabelled", "on", "upper_off", "padded_off", "off"],
+)
+async def test_parent_wake_label_gates_escalated_wake(
+    conv_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    child_labels: dict[str, str],
+    expect_wake: bool,
+) -> None:
+    """A child labelled ``omnigent.parent_wake: off`` never wakes its parent on a block."""
+    parent = conv_store.create_conversation(kind="default", title="anchor")
+    child = conv_store.create_conversation(
+        kind="sub_agent", title="step:build", parent_conversation_id=parent.id
+    )
+    gate = _GatedEscalation()
+    monkeypatch.setattr(subagent_block_notifier, "_escalation_sleep", gate)
+    dispatch = _RecordingDispatch()
+    notifier = SubagentBlockNotifier(conv_store, dispatch, asyncio.get_running_loop())
+    try:
+        notifier.observe(child.id, _request_event("elicit_step"))
+        (handler,) = notifier._inflight
+        await poll_until_async(lambda: gate.entered == 1, timeout_s=_WAIT_TIMEOUT_S)
+        # Written during the grace, so the label must be read after it.
+        conv_store.set_labels(child.id, child_labels)
+        gate.release()
+        if expect_wake:
+            await _wait_for_calls(dispatch, expected=1)
+        else:
+            # Stop at the handler's return or at a wrong wake, whichever comes first.
+            await poll_until_async(
+                lambda: handler.done() or dispatch.calls, timeout_s=_WAIT_TIMEOUT_S
+            )
+        expected = [(parent.id, child.id)] if expect_wake else []
+        assert [(call.parent_id, call.child_id) for call in dispatch.calls] == expected
+
+        # Woken or not, the block stays armed and a re-publish schedules no second handler.
+        notifier.observe(child.id, _request_event("elicit_step"))
+        assert elicitation_armed(notifier, "elicit_step")
+        assert notifier._inflight <= {handler}
+
+        notifier.observe(child.id, _resolved_event("elicit_step", "accept"))
+        await asyncio.wait_for(asyncio.wrap_future(handler), _WAIT_TIMEOUT_S)
+        notices = [call.notice for call in dispatch.calls]
+        assert len(notices) == (2 if expect_wake else 0)
+        assert not expect_wake or "has been resolved" in notices[1]
+        assert not elicitation_armed(notifier, "elicit_step")
+        # An opted-out block returns before registering a resolve signal, so none is left.
+        assert not notifier._resolution_signals and not notifier._verdicts
+        assert gate.entered == 1
+    finally:
+        notifier.close()
 
 
 @pytest.mark.asyncio

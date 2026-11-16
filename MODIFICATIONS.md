@@ -118,6 +118,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/runtime/harnesses/_executor_adapter.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/runtime/harnesses/process_manager.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/runtime/prompt.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/runtime/subagent_block_notifier.py` | S51 | upstreamable | A blocked child labelled `omnigent.parent_wake: off` (exact match, read after the grace) does not wake its parent; the block stays debounced until it resolves and no resolution notice is sent (S51). |
 | `omnigent/runtime/workflow.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/server/app.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/server/mcp_compatibility.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -140,6 +141,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/tools/builtins/spawn.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/tools/builtins/ui.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/tools/manager.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/util/session_lifecycle.py` | S51 | upstreamable | Adds `PARENT_WAKE_LABEL_KEY` (`omnigent.parent_wake`) and `PARENT_WAKE_OFF_VALUE` (`off`) beside the closed-label constants (S51). |
 | `omnigent/util/tmux_compat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/workspace_fs.py` | S71 | upstreamable | `WorkspaceReader` takes a keyword-only `start_registry` (default `True`); with `False` it does not start the change registry's background git probe. File reads and diffs open files non-blocking and refuse FIFOs, devices and other non-regular files (S71). |
 | `openapi.json` | S95 | coral-specific | Regenerated: the title and API descriptions follow the S95 brand transform. |
@@ -239,6 +241,7 @@ OPS-01's generator will maintain this file later.
 | `tests/runner/test_runner_entry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/runtime/harnesses/test_executor_adapter.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/runtime/test_filesystem_registry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/runtime/test_subagent_block_notifier.py` | S51 | upstreamable | No label, `on`, `OFF` and ` off` wake the parent and only an exact `off` does not; an `off` block stays debounced, its resolve sends no notice, clears it and leaves no resolve signal behind, and "no wake" is asserted only after the handler has returned (S51). |
 | `tests/scripts/test_security_gate.py` | S99 | coral-specific | Expects the gate and scan to fetch their trust rules from the default branch. |
 | `tests/server/integration/test_kiro_permission_delivery.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/integration/test_lifespan.py` | S98 | coral-specific | Expects the server never to start the telemetry client, in CI or not. |

@@ -1020,3 +1020,45 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
+
+  - id: S51
+    title: A child labelled omnigent.parent_wake off never wakes its parent on a block
+    owner: WS-INTEGRATION
+    status: landed
+    category: upstreamable
+    note: >-
+      SubagentBlockNotifier wakes a child's parent when an approval stays
+      unanswered for the 120 s grace. It now returns without waking when the
+      child's omnigent.parent_wake label is exactly "off"; any other value or
+      no label keeps the wake. Only these block wakes change: completion wakes
+      (the runner's step-completion delivery to the parent) are not affected.
+      The label is read after the grace from the child row the notifier
+      already loads, so a label set during the grace is honoured and no I/O is
+      added. As for a top-level session, no resolution notice is sent and the
+      block stays debounced until its resolve clears it, so a label change
+      takes effect from the next block. The label applies per parent-child
+      link: an unlabelled middle session that receives a child's mirrored
+      prompt still wakes its own parent. The key is not reserved, so callers
+      set it when they create the child; the Coral session facade (SES-03)
+      sets it on every child of a run anchor (the orchestrator and each step).
+      The approval card is still mirrored into ancestor chats.
+    files:
+      - omnigent/runtime/subagent_block_notifier.py
+      - omnigent/util/session_lifecycle.py
+      - tests/runtime/test_subagent_block_notifier.py
+    tests:
+      - tests/runtime/test_subagent_block_notifier.py
+    budget_lines: 10
+    budget_exception:
+      lines: 64
+      reason: >-
+        tests/runtime/test_subagent_block_notifier.py (64 lines): the label
+        matrix test, which pins the exact "off" match against near misses and
+        awaits the notifier's own handler future so a "no wake" is asserted
+        only after the handler has returned. The production
+        files are within budget: subagent_block_notifier.py 8,
+        session_lifecycle.py 3.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true

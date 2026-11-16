@@ -7,6 +7,9 @@ from collections.abc import Mapping
 CLOSED_LABEL_KEY = "omnigent.closed"
 CLOSED_LABEL_VALUE = "true"
 CLOSED_TITLE_INFIX = ":closed:"
+# CORAL(S51): a child with this label set to "off" never wakes its parent on a block.
+PARENT_WAKE_LABEL_KEY = "omnigent.parent_wake"
+PARENT_WAKE_OFF_VALUE = "off"
 
 
 def title_without_closed_marker(title: str | None) -> str | None:
