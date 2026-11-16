@@ -54,7 +54,9 @@ def test_handlers_load_through_the_entry_point_and_run_without_database_modules(
         handlers = load_workspace_op_handlers([entry])
         subprocess.Popen.__init__ = real_popen
 
-        assert sorted(handlers) == ["diff_stat", "fingerprint", "head", "read"], dict(handlers)
+        assert sorted(handlers) == [
+            "commit", "diff_stat", "fingerprint", "head", "read", "reset", "salvage"
+        ], dict(handlers)
         request = WorkspaceOpRequest(
             op="head",
             root=root,
@@ -88,10 +90,14 @@ def test_disabled_host_entry_points_serve_no_ops_and_import_no_handler_module(
 
         assert dict(workspace_op_handlers()) == {}
         assert_not_loaded(
+            "coral.omni.host.ops._aside",
             "coral.omni.host.ops._git",
             "coral.omni.host.ops._files",
+            "coral.omni.host.ops._jail",
+            "coral.omni.host.ops._locks",
             "coral.omni.host.ops._read_ops",
             "coral.omni.host.ops._target",
+            "coral.omni.host.ops._write_ops",
         )
         """)
 

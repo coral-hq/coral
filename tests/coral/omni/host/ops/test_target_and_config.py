@@ -21,6 +21,7 @@ from tests.coral.omni.host.ops._worktrees import (
     make_partial_clone_worktree,
     make_repository,
     op_request,
+    requests_for_every_op,
     run_git,
     write_stub_git,
 )
@@ -489,12 +490,7 @@ def test_a_host_without_git_is_refused(
 def test_non_posix_hosts_refuse_every_op(
     worktree: LinkedWorktree, handlers: Handlers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    requests = {
-        "head": op_request("head", worktree),
-        "diff_stat": op_request("diff_stat", worktree, from_commit=worktree.base, to_commit=None),
-        "read": op_request("read", worktree, path="README.md", at_commit=None),
-        "fingerprint": op_request("fingerprint", worktree, level="L1"),
-    }
+    requests = requests_for_every_op(worktree)
     assert set(requests) == set(handlers)
     monkeypatch.setattr(os, "name", "nt")
 

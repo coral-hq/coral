@@ -1746,8 +1746,8 @@ seams:
       after uv sync, so tests pass handlers to dispatch_workspace_op or patch
       default_workspace_op_handlers. pyproject.toml declares Coral's own
       contribution, coral = coral.omni.host.ops:workspace_op_handlers, which
-      serves head, diff_stat, read and fingerprint (L1) and returns no ops
-      while CORAL_DISABLE_HOST_ENTRY_POINTS is set.
+      serves head, diff_stat, read, fingerprint (L1), commit, salvage and
+      reset and returns no ops while CORAL_DISABLE_HOST_ENTRY_POINTS is set.
     files:
       - omnigent/host/workspace_ops.py
       - pyproject.toml

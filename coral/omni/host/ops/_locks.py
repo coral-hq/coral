@@ -17,6 +17,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
+from coral.omni.host.ops._aside import aside_path
 from coral.omni.host.ops._git import TIMEOUT, printable
 from omnigent.host.workspace_ops import (
     WorkspaceOpHandler,
@@ -66,9 +67,17 @@ def one_op_per_worktree(handler: WorkspaceOpHandler) -> WorkspaceOpHandler:
 
 
 def _root_key(root: str) -> tuple[int, int] | str:
-    """The directory's ``(st_dev, st_ino)``; the path itself when it cannot be stat'ed."""
-    try:
-        info = os.stat(root)
-    except OSError:
-        return root
-    return info.st_dev, info.st_ino
+    """
+    The directory's ``(st_dev, st_ino)``; the path itself when it cannot be stat'ed.
+
+    A worktree a WRITE op moved aside keeps its inode, so an op on it then still
+    finds the same lock. The aside copy comes first: a surviving process can
+    make an empty directory at the old path, which must not get a lock of its own.
+    """
+    for path in (aside_path(root), root):
+        try:
+            info = os.stat(path)
+        except OSError:
+            continue
+        return info.st_dev, info.st_ino
+    return root

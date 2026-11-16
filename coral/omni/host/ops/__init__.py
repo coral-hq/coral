@@ -25,11 +25,12 @@ def workspace_op_handlers() -> Mapping[str, WorkspaceOpHandler]:
     """Return Coral's handlers by op name; none when host entry points are disabled."""
     if host_entry_points_disabled():
         return {}
-    from coral.omni.host.ops import _read_ops
+    from coral.omni.host.ops import _read_ops, _write_ops
 
     return {
         "head": _read_ops.head,
         "diff_stat": _read_ops.diff_stat,
         "read": _read_ops.read,
         "fingerprint": _read_ops.fingerprint,
+        **_write_ops.write_handlers(),
     }

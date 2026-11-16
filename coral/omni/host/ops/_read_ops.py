@@ -31,16 +31,16 @@ from coral.omni.host.ops._git import (
     WORKSPACE_STATUS_ARGV,
     Git,
     check_deadline,
+    head_commit,
     printable,
+    resolve_commit,
+    status_paths,
     tree_diff_argv,
+    unfinished_operations,
 )
 from coral.omni.host.ops._locks import one_op_per_worktree
-from coral.omni.host.ops._target import invalid_params, op_params, pin
-from coral.workspace.ops import (
-    MAX_READ_BYTES,
-    validate_commit_id,
-    validate_workspace_path,
-)
+from coral.omni.host.ops._target import commit_param, invalid_params, op_params, pinned
+from coral.workspace.ops import MAX_READ_BYTES, validate_workspace_path
 from omnigent.host.workspace_ops import WorkspaceOpHandlerError, WorkspaceOpRequest
 
 # Base64 of this many bytes, plus the payload's other fields, stays under the
@@ -61,56 +61,56 @@ _L1_LAYOUT = b"coral-host-l1-interim-1\0"
 @one_op_per_worktree
 def head(request: WorkspaceOpRequest) -> Mapping[str, object]:
     """``{head, branch, merge_in_progress}``; ``branch`` is ``None`` when HEAD is detached."""
-    target = pin(request, op_params(request), write=False)
-    git = target.git
-    commit = _head_commit(git)
-    symbolic = git.run("symbolic-ref", "-q", "HEAD", ok_exit_codes=(0, 1))
-    branch = None
-    if symbolic.exit_code == 0:
-        branch = symbolic.stdout.rstrip(b"\n").decode("utf-8", "replace")
-        branch = branch.removeprefix("refs/heads/")
-    merge_head = os.fsdecode(git.run("rev-parse", "--git-path", "MERGE_HEAD").stdout.rstrip(b"\n"))
-    return {
-        "head": commit,
-        "branch": branch,
-        "merge_in_progress": os.path.lexists(os.path.join(target.root, merge_head)),
-    }
+    with pinned(request, op_params(request), write=False) as target:
+        git = target.git
+        commit = head_commit(git)
+        symbolic = git.run("symbolic-ref", "-q", "HEAD", ok_exit_codes=(0, 1))
+        branch = None
+        if symbolic.exit_code == 0:
+            branch = symbolic.stdout.rstrip(b"\n").decode("utf-8", "replace")
+            branch = branch.removeprefix("refs/heads/")
+        return {
+            "head": commit,
+            "branch": branch,
+            "merge_in_progress": "MERGE_HEAD" in unfinished_operations(git, target.root),
+        }
 
 
 @one_op_per_worktree
 def diff_stat(request: WorkspaceOpRequest) -> Mapping[str, object]:
     """``{files_changed, insertions, deletions, paths}`` between two commits (default HEAD)."""
     params = op_params(request, required=("from_commit",), optional=("to_commit",))
-    from_commit = _commit_param(params, "from_commit", required=True)
-    to_commit = _commit_param(params, "to_commit")
-    git = pin(request, params, write=False).git
-    start = _resolve_commit(git, str(from_commit))
-    end = _head_commit(git) if to_commit is None else _resolve_commit(git, to_commit)
-    output = git.run(*tree_diff_argv(start, end)).stdout
-    insertions = deletions = 0
-    paths = []
-    for record in output.split(b"\0"):
-        if not record:
-            continue
-        fields = record.split(b"\t", 2)
-        if len(fields) != 3:
-            raise WorkspaceOpHandlerError(GIT_FAILED, "git diff --numstat output is malformed")
-        added, removed, path = fields
-        # A binary file reports "-" and counts 0 lines.
-        insertions += 0 if added == b"-" else int(added)
-        deletions += 0 if removed == b"-" else int(removed)
-        paths.append(path.decode("utf-8", "replace"))
-    payload = {
-        "files_changed": len(paths),
-        "insertions": insertions,
-        "deletions": deletions,
-        "paths": sorted(paths),
-    }
-    if len(json.dumps(payload)) > MAX_DIFF_STAT_PAYLOAD_BYTES:
-        raise WorkspaceOpHandlerError(
-            GIT_FAILED, f"the diff names too many paths to report ({len(paths)})"
-        )
-    return payload
+    from_commit = commit_param(params, "from_commit", required=True)
+    to_commit = commit_param(params, "to_commit")
+    with pinned(request, params, write=False) as target:
+        git = target.git
+        start = resolve_commit(git, str(from_commit))
+        end = head_commit(git) if to_commit is None else resolve_commit(git, to_commit)
+        output = git.run(*tree_diff_argv(start, end)).stdout
+        insertions = deletions = 0
+        paths = []
+        for record in output.split(b"\0"):
+            if not record:
+                continue
+            fields = record.split(b"\t", 2)
+            if len(fields) != 3:
+                raise WorkspaceOpHandlerError(GIT_FAILED, "git diff --numstat output is malformed")
+            added, removed, path = fields
+            # A binary file reports "-" and counts 0 lines.
+            insertions += 0 if added == b"-" else int(added)
+            deletions += 0 if removed == b"-" else int(removed)
+            paths.append(path.decode("utf-8", "replace"))
+        payload = {
+            "files_changed": len(paths),
+            "insertions": insertions,
+            "deletions": deletions,
+            "paths": sorted(paths),
+        }
+        if len(json.dumps(payload)) > MAX_DIFF_STAT_PAYLOAD_BYTES:
+            raise WorkspaceOpHandlerError(
+                GIT_FAILED, f"the diff names too many paths to report ({len(paths)})"
+            )
+        return payload
 
 
 @one_op_per_worktree
@@ -126,17 +126,17 @@ def read(request: WorkspaceOpRequest) -> Mapping[str, object]:
         raise invalid_params(f"path {printable(path)} must be relative to the worktree") from None
     if any(_is_dot_git(segment) for segment in path.split("/")):
         raise invalid_params(f"path {printable(path)} is inside a .git directory")
-    at_commit = _commit_param(params, "at_commit")
-    target = pin(request, params, write=False)
-    if at_commit is None:
-        content = _read_working_tree(target.root, path, request.deadline)
-    else:
-        content = _read_blob(target.git, path, at_commit)
-    return {
-        "path": path,
-        "content_b64": base64.b64encode(content).decode("ascii"),
-        "sha256": hashlib.sha256(content).hexdigest(),
-    }
+    at_commit = commit_param(params, "at_commit")
+    with pinned(request, params, write=False) as target:
+        if at_commit is None:
+            content = _read_working_tree(target.root, path, request.deadline)
+        else:
+            content = _read_blob(target.git, path, at_commit)
+        return {
+            "path": path,
+            "content_b64": base64.b64encode(content).decode("ascii"),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
 
 
 @one_op_per_worktree
@@ -159,58 +159,27 @@ def fingerprint(request: WorkspaceOpRequest) -> Mapping[str, object]:
             f"this host serves fingerprint level L1 only, not {level[:16]!r}",
             permanent=True,
         )
-    target = pin(request, params, write=False)
-    git = target.git
-    object_format = git.run("rev-parse", "--show-object-format").stdout.decode().strip()
-    if object_format not in ("sha1", "sha256"):
-        raise WorkspaceOpHandlerError(GIT_FAILED, f"unknown object format {object_format!r}")
-    commit = _head_commit(git)
-    status = git.run(*WORKSPACE_STATUS_ARGV).stdout
-    dirty_count, paths = _dirty_paths(status)
-    digest = hashlib.sha256(_L1_LAYOUT)
-    digest.update(commit.encode() + b"\0")
-    digest.update(_framed(status))
-    for path in paths:
-        check_deadline(request.deadline, "fingerprint")
-        digest.update(_framed(path))
-        digest.update(_framed(_l1_entry(target.root, path, object_format, request.deadline)))
-    return {
-        "level": "L1",
-        "digest": digest.hexdigest(),
-        "head": commit,
-        "dirty_count": dirty_count,
-    }
-
-
-def _commit_param(
-    params: Mapping[str, object], name: str, *, required: bool = False
-) -> str | None:
-    value = params.get(name)
-    if value is None and not required:
-        return None
-    if not isinstance(value, str):
-        raise invalid_params(f"{name} must be a full hex commit id")
-    try:
-        validate_commit_id(value)
-    except ValueError as exc:
-        raise invalid_params(f"{name}: {exc}") from None
-    return value
-
-
-def _head_commit(git: Git) -> str:
-    result = git.run("rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False)
-    if result.exit_code != 0:
-        raise WorkspaceOpHandlerError(GIT_FAILED, "HEAD does not name a commit")
-    return result.stdout.decode().strip()
-
-
-def _resolve_commit(git: Git, commit: str) -> str:
-    result = git.run(
-        "rev-parse", "--verify", "--quiet", "--end-of-options", f"{commit}^{{commit}}", check=False
-    )
-    if result.exit_code != 0:
-        raise WorkspaceOpHandlerError(GIT_FAILED, f"unknown commit {commit}")
-    return result.stdout.decode().strip()
+    with pinned(request, params, write=False) as target:
+        git = target.git
+        object_format = git.run("rev-parse", "--show-object-format").stdout.decode().strip()
+        if object_format not in ("sha1", "sha256"):
+            raise WorkspaceOpHandlerError(GIT_FAILED, f"unknown object format {object_format!r}")
+        commit = head_commit(git)
+        status = git.run(*WORKSPACE_STATUS_ARGV).stdout
+        dirty_count, paths = status_paths(status)
+        digest = hashlib.sha256(_L1_LAYOUT)
+        digest.update(commit.encode() + b"\0")
+        digest.update(_framed(status))
+        for path in paths:
+            check_deadline(request.deadline, "fingerprint")
+            digest.update(_framed(path))
+            digest.update(_framed(_l1_entry(target.root, path, object_format, request.deadline)))
+        return {
+            "level": "L1",
+            "digest": digest.hexdigest(),
+            "head": commit,
+            "dirty_count": dirty_count,
+        }
 
 
 def _is_dot_git(segment: str) -> bool:
@@ -233,7 +202,7 @@ def _read_working_tree(root: str, path: str, deadline: float) -> bytes:
 
 def _read_blob(git: Git, path: str, at_commit: str) -> bytes:
     """The blob at ``<at_commit>:<path>``, when the tree records a regular file there."""
-    commit = _resolve_commit(git, at_commit)
+    commit = resolve_commit(git, at_commit)
     where = f"commit {at_commit}"
     # ls-tree -l names the entry's mode, type, id and size; the path is matched literally.
     listed = git.run(
@@ -272,33 +241,6 @@ def _unreadable(path: str, where: str, reason: str) -> WorkspaceOpHandlerError:
         "object_missing": "is not in this clone (a partial clone never fetches)",
     }.get(reason, "passes through a symlink or a non-directory")
     return WorkspaceOpHandlerError(GIT_FAILED, f"{shown} in {where} {detail}")
-
-
-def _dirty_paths(status: bytes) -> tuple[int, list[bytes]]:
-    """The number of ``git status`` records and the sorted paths they name (renames: both)."""
-    fields = status.split(b"\0")
-    if fields[-1] == b"":
-        fields.pop()
-    # Space-separated fields before the path in each porcelain v2 record kind.
-    leading = {b"1": 8, b"2": 9, b"u": 10, b"?": 1}
-    count = 0
-    paths: set[bytes] = set()
-    index = 0
-    while index < len(fields):
-        record = fields[index]
-        index += 1
-        kind = record[:1]
-        parts = record.split(b" ", leading.get(kind, 0))
-        if kind not in leading or len(parts) != leading[kind] + 1:
-            raise WorkspaceOpHandlerError(GIT_FAILED, "git status output is malformed")
-        paths.add(parts[-1])
-        if kind == b"2":
-            if index >= len(fields):
-                raise WorkspaceOpHandlerError(GIT_FAILED, "git status output is malformed")
-            paths.add(fields[index])  # the rename's original path
-            index += 1
-        count += 1
-    return count, sorted(paths)
 
 
 def _l1_entry(root: str, path: bytes, object_format: str, deadline: float) -> bytes:

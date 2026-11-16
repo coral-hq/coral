@@ -28,10 +28,11 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import IO, cast
 
+from coral.omni.host.ops._jail import Jail
 from coral.workspace.ops import GIT_DIFF_FLAGS, GIT_ENV, GIT_HARDENING_CONFIG, WORKSPACE_PATHSPEC
 from omnigent.host.workspace_ops import WorkspaceOpHandlerError
 
@@ -116,6 +117,10 @@ class _OutputTooLarge(Exception):
         self.cap = cap
 
 
+class OutputTooLarge(WorkspaceOpHandlerError):
+    """``workspace.git_failed`` for output over its cap; a caller may read it as "too much"."""
+
+
 @dataclass(frozen=True)
 class Git:
     """
@@ -132,6 +137,7 @@ class Git:
         are off. ``False`` only to read settings from the user's full config.
     :param extra_env: More variables, e.g. ``GIT_INDEX_FILE`` or the identity.
     :param sleep: Waits between lock retries; injectable for tests.
+    :param jail: Runs each call inside this write jail (``_jail``); ``None`` runs it bare.
     """
 
     executable: str
@@ -144,6 +150,7 @@ class Git:
     isolated: bool = True
     extra_env: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     sleep: Callable[[float], None] = time.sleep
+    jail: Jail | None = None
 
     def environment(self) -> dict[str, str]:
         """The child's whole environment; nothing else is inherited."""
@@ -191,9 +198,19 @@ class Git:
         name = _subcommand(argv)
         if self.deadline - time.monotonic() <= 0:
             raise _timed_out(name)
+        command: list[str | bytes] = [
+            self.executable,
+            *HOST_HARDENING_CONFIG,
+            *self.config_args,
+            *argv,
+        ]
+        if self.jail is not None:
+            # The jail execs git (sandbox-exec) or stays its parent in the same
+            # process group (bwrap), so exit codes and the group kill still reach git.
+            command = self.jail.command(command, cwd=self.cwd)
         try:
             process = subprocess.Popen(
-                [self.executable, *HOST_HARDENING_CONFIG, *self.config_args, *argv],
+                command,
                 cwd=self.cwd,
                 env=self.environment(),
                 stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
@@ -214,7 +231,7 @@ class Git:
             raise _timed_out(name) from None
         except _OutputTooLarge as exc:
             _stop_group(process)
-            raise WorkspaceOpHandlerError(
+            raise OutputTooLarge(
                 GIT_FAILED, f"git {name} wrote more than {exc.cap} bytes to {exc.stream}"
             ) from None
         except BaseException:
@@ -260,6 +277,62 @@ class Git:
             delay = min(delay * 2, _MAX_LOCK_BACKOFF_S)
 
 
+@dataclass(frozen=True)
+class StatusRecord:
+    """
+    One ``WORKSPACE_STATUS_ARGV`` record.
+
+    :param kind: ``1`` (changed), ``2`` (renamed or copied), ``u`` (unmerged) or ``?``.
+    :param index_status: The ``X`` of ``XY``: how the index differs from HEAD; empty for ``?``.
+    :param path: The path; a nested repository's ``?`` path ends in ``/``.
+    :param original: A rename's original path.
+    """
+
+    kind: bytes
+    index_status: bytes
+    path: bytes
+    original: bytes | None = None
+
+
+def status_records(status: bytes) -> list[StatusRecord]:
+    """Parse ``WORKSPACE_STATUS_ARGV`` output; ``workspace.git_failed`` when malformed."""
+    fields = status.split(b"\0")
+    if fields[-1] == b"":
+        fields.pop()
+    # Space-separated fields before the path in each porcelain v2 record kind.
+    leading = {b"1": 8, b"2": 9, b"u": 10, b"?": 1}
+    records = []
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        kind = record[:1]
+        parts = record.split(b" ", leading.get(kind, 0))
+        if kind not in leading or len(parts) != leading[kind] + 1:
+            raise WorkspaceOpHandlerError(GIT_FAILED, "git status output is malformed")
+        original = None
+        if kind == b"2":
+            if index >= len(fields):
+                raise WorkspaceOpHandlerError(GIT_FAILED, "git status output is malformed")
+            original = fields[index]
+            index += 1
+        index_status = b"" if kind == b"?" else parts[1][:1]
+        records.append(StatusRecord(kind, index_status, parts[-1], original))
+    return records
+
+
+def status_paths(status: bytes) -> tuple[int, list[bytes]]:
+    """
+    The number of ``WORKSPACE_STATUS_ARGV`` records and the sorted paths they name.
+
+    A rename names both paths. A nested repository is one ``?`` record ending in ``/``.
+    """
+    records = status_records(status)
+    paths = {record.path for record in records}
+    paths.update(record.original for record in records if record.original is not None)
+    return len(records), sorted(paths)
+
+
 def tree_diff_argv(start: str, end: str) -> tuple[str, ...]:
     """``diff --numstat`` between two commits, never looking inside a submodule."""
     return (
@@ -275,6 +348,41 @@ def tree_diff_argv(start: str, end: str) -> tuple[str, ...]:
         "--",
         *WORKSPACE_PATHSPEC,
     )
+
+
+def capped(git: Git, limit_s: float) -> Git:
+    """``git`` with its deadline cut to ``limit_s`` from now, when that is sooner."""
+    return replace(git, deadline=min(git.deadline, time.monotonic() + limit_s))
+
+
+def unfinished_operations(git: Git, root: str) -> list[str]:
+    """Which of ``MERGE_HEAD``, ``CHERRY_PICK_HEAD`` and ``REVERT_HEAD`` the worktree has."""
+    names = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+    argv = [arg for name in names for arg in ("--git-path", name)]
+    paths = git.run("rev-parse", *argv).stdout.split(b"\n")
+    return [
+        name
+        for name, path in zip(names, paths, strict=False)
+        if os.path.lexists(os.path.join(root, os.fsdecode(path)))
+    ]
+
+
+def head_commit(git: Git) -> str:
+    """The commit HEAD names; ``workspace.git_failed`` when it names none."""
+    result = git.run("rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False)
+    if result.exit_code != 0:
+        raise WorkspaceOpHandlerError(GIT_FAILED, "HEAD does not name a commit")
+    return result.stdout.decode().strip()
+
+
+def resolve_commit(git: Git, commit: str) -> str:
+    """The commit a validated id names; ``workspace.git_failed`` for an unknown one."""
+    result = git.run(
+        "rev-parse", "--verify", "--quiet", "--end-of-options", f"{commit}^{{commit}}", check=False
+    )
+    if result.exit_code != 0:
+        raise WorkspaceOpHandlerError(GIT_FAILED, f"unknown commit {commit}")
+    return result.stdout.decode().strip()
 
 
 def git_failure(name: str, result: GitResult) -> WorkspaceOpHandlerError:
@@ -315,9 +423,9 @@ def require_posix() -> None:
         )
 
 
-def require_git_outside(executable: str, roots: Sequence[str]) -> None:
+def require_git_outside(executable: str, roots: Sequence[str], *, what: str = "git") -> None:
     """
-    Refuse a git whose path, or real path, passes through a directory in ``roots``.
+    Refuse a ``what`` (git, or its jail tool) whose path, or real path, passes through ``roots``.
 
     Directories compare by device and inode, not by spelling: a case variant on
     a case-folding disk, or a symlink, names the same directory.
@@ -335,8 +443,8 @@ def require_git_outside(executable: str, roots: Sequence[str]) -> None:
             if root is not None:
                 raise WorkspaceOpHandlerError(
                     BACKEND_UNAVAILABLE,
-                    f"git at {printable(executable)} is inside {printable(root)}; "
-                    "Coral runs git only from outside the worktree",
+                    f"{what} at {printable(executable)} is inside {printable(root)}; "
+                    f"Coral runs {what} only from outside the worktree",
                     permanent=True,
                 )
             parent = os.path.dirname(directory)

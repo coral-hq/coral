@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from coral.omni.host.ops import _git, _locks, _read_ops, _target
+from coral.omni.host.ops import _locks, _read_ops, _target
 from coral.omni.host.ops._files import read_in_root
 from coral.omni.host.ops._locks import root_lock
 from coral.workspace.ops import MAX_READ_BYTES
@@ -28,11 +28,14 @@ from omnigent.host.workspace_ops import (
 from tests._helpers.polling import poll_until_async
 from tests.coral.omni.host.ops._worktrees import (
     LinkedWorktree,
+    add_submodule,
     expect_op_error,
     make_linked_worktree,
     make_partial_clone_worktree,
     op_request,
+    requests_for_every_op,
     run_git,
+    trace_git,
 )
 
 Handlers = Mapping[str, WorkspaceOpHandler]
@@ -435,19 +438,6 @@ def test_a_partial_clone_never_fetches_missing_objects(tmp_path: Path, handlers:
 # ── One op per worktree ─────────────────────────────────────────────────────
 
 
-def _requests(worktree: LinkedWorktree, *, timeout_s: float = 60.0) -> dict[str, object]:
-    return {
-        "head": op_request("head", worktree, timeout_s=timeout_s),
-        "diff_stat": op_request(
-            "diff_stat", worktree, from_commit=worktree.base, to_commit=None, timeout_s=timeout_s
-        ),
-        "read": op_request(
-            "read", worktree, path="README.md", at_commit=None, timeout_s=timeout_s
-        ),
-        "fingerprint": op_request("fingerprint", worktree, level="L1", timeout_s=timeout_s),
-    }
-
-
 def _plant_blocking_fifo(worktree: LinkedWorktree) -> None:
     """A nested repository whose HEAD is a FIFO: git's own walk blocks opening it."""
     git_dir = worktree.root / "x" / ".git"
@@ -469,7 +459,7 @@ def _frame(worktree: LinkedWorktree, request_id: str, *, timeout_s: float) -> Ho
 def test_every_op_on_a_busy_worktree_fails_at_once(
     worktree: LinkedWorktree, handlers: Handlers
 ) -> None:
-    requests = _requests(worktree)
+    requests = requests_for_every_op(worktree)
     assert set(requests) == set(handlers)
 
     # As if another op on this worktree were still running.
@@ -482,7 +472,7 @@ def test_every_op_on_a_busy_worktree_fails_at_once(
             )
             assert "another workspace op is still running on this worktree" in error.message
 
-    for op, request in _requests(worktree).items():
+    for op, request in requests_for_every_op(worktree).items():
         handlers[op](request)
 
 
@@ -548,30 +538,6 @@ def test_listing_attributes_files_gives_up_long_before_the_op_deadline(
 # ── Submodules and nested repositories ──────────────────────────────────────
 
 
-def _trace_git(monkeypatch: pytest.MonkeyPatch, trace: Path) -> None:
-    """Record every git command the ops run, including any child git, in ``trace``."""
-    environment = _git.Git.environment
-    monkeypatch.setattr(
-        _git.Git, "environment", lambda self: {**environment(self), "GIT_TRACE": str(trace)}
-    )
-
-
-def _add_submodule(worktree: LinkedWorktree) -> Path:
-    """Record ``sub``, a repository inside the worktree, as a gitlink in the superproject."""
-    sub = worktree.root / "sub"
-    sub.mkdir()
-    run_git(sub, "init", "-q", "-b", "main")
-    (sub / "file.txt").write_bytes(b"one\n")
-    run_git(sub, "add", "-A")
-    run_git(sub, "commit", "-qm", "sub")
-    # An agent's .gitmodules cannot turn the submodule check back on.
-    worktree.write(
-        ".gitmodules", b'[submodule "sub"]\n\tpath = sub\n\turl = ./sub\n\tignore = none\n'
-    )
-    worktree.commit("gitlink")
-    return sub
-
-
 @pytest.mark.parametrize("layout", ["embedded-repository", "rewritten-submodule-gitfile"])
 def test_read_ops_never_start_git_in_a_submodule_or_run_its_filter(
     worktree: LinkedWorktree,
@@ -580,7 +546,7 @@ def test_read_ops_never_start_git_in_a_submodule_or_run_its_filter(
     monkeypatch: pytest.MonkeyPatch,
     layout: str,
 ) -> None:
-    sub = _add_submodule(worktree)
+    sub = add_submodule(worktree)
     git_dir = sub / ".git"
     if layout == "rewritten-submodule-gitfile":
         # The agent keeps the submodule's repository elsewhere in its worktree.
@@ -594,7 +560,7 @@ def test_read_ops_never_start_git_in_a_submodule_or_run_its_filter(
     # A stat-dirty file makes a submodule status re-hash it through the filter.
     os.utime(sub / "file.txt", ns=(1_000_000_000, 1_000_000_000))
     trace = tmp_path / "trace"
-    _trace_git(monkeypatch, trace)
+    trace_git(monkeypatch, trace)
     requests = {
         "head": op_request("head", worktree),
         "diff_stat": op_request("diff_stat", worktree, from_commit=worktree.base, to_commit=None),
@@ -617,7 +583,7 @@ def test_read_ops_never_start_git_in_a_submodule_or_run_its_filter(
 def test_l1_still_reports_a_moved_submodule_commit(
     worktree: LinkedWorktree, handlers: Handlers
 ) -> None:
-    sub = _add_submodule(worktree)
+    sub = add_submodule(worktree)
     recorded = _l1(handlers, worktree)
     assert recorded["dirty_count"] == 0
 

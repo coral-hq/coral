@@ -14,14 +14,20 @@ allowed: the op's isolated config never loads it (K13 security requirement 1).
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import os
 import posixpath
 import re
+import shutil
 import stat
+import tempfile
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
+from coral.omni.host.ops._aside import aside_path, move_aside_enabled, moved_aside, recover
 from coral.omni.host.ops._files import (
     UnreadableFile,
     lstat_in_root,
@@ -30,6 +36,7 @@ from coral.omni.host.ops._files import (
 )
 from coral.omni.host.ops._git import (
     BACKEND_UNAVAILABLE,
+    CAPABILITY_UNAVAILABLE,
     INVALID_PARAMS,
     NO_LAZY_FETCH_VERSION,
     TARGET_MISMATCH,
@@ -41,9 +48,17 @@ from coral.omni.host.ops._git import (
     require_git_outside,
     require_posix,
 )
+from coral.omni.host.ops._jail import (
+    Jail,
+    JailUnavailable,
+    checked_jail_tool,
+    home_directory,
+    log_unjailed_reads,
+)
 from coral.workspace.ops import (
     FALLBACK_IDENTITY_EMAIL,
     FALLBACK_IDENTITY_NAME,
+    validate_commit_id,
     validate_coral_ref,
     validate_op_key,
 )
@@ -51,6 +66,16 @@ from omnigent.host.workspace_ops import WorkspaceOpHandlerError, WorkspaceOpRequ
 
 # Params every op carries: the bound repository's main worktree and the run branch.
 COMMON_PARAMS = frozenset({"repo_root", "branch"})
+# What a WRITE op's git writes in the common dir, besides its own admin dir:
+# objects, the coral/ refs and their reflogs. Never hooks/, config, info/ or other refs.
+_WRITABLE_GIT_DIRS = (
+    "objects",
+    "refs/heads/coral",
+    "refs/coral",
+    "logs/refs/heads/coral",
+    "logs/refs/coral",
+)
+_WRITABLE_GIT_FILES = ("packed-refs", "packed-refs.lock")
 # Repository-level keys read under the isolated config (global and system off).
 _REFUSED_REPO_CONFIG = (
     r"^(hook\..*\.command|filter\..*|merge\..*\.driver|core\.sparsecheckout|attr\.tree"
@@ -90,6 +115,7 @@ class PinnedTarget:
         or the common dir for the main worktree.
     :param common_dir: ``<repo_root>/.git``.
     :param identity: ``(name, email)`` from the full config, else Coral's fallback.
+    :param temp_dir: The op's private temp dir, canonical, removed when the op ends.
     """
 
     git: Git
@@ -98,6 +124,7 @@ class PinnedTarget:
     git_dir: str
     common_dir: str
     identity: tuple[str, str]
+    temp_dir: str | None = None
 
 
 def op_params(
@@ -137,25 +164,259 @@ def op_params(
     return params
 
 
-def pin(request: WorkspaceOpRequest, params: Mapping[str, object], *, write: bool) -> PinnedTarget:
-    """Resolve the request's target with the host's git, after :func:`op_params`."""
+@contextmanager
+def pinned(
+    request: WorkspaceOpRequest, params: Mapping[str, object], *, write: bool
+) -> Iterator[PinnedTarget]:
+    """
+    The request's target, resolved after :func:`op_params`, with its git jailed.
+
+    The op's private temp dir lives until the block ends. A WRITE op without a
+    working jail is refused (``_jail``). On macOS a WRITE op's worktree is moved
+    aside for the block (``_aside``), and any op first brings back a worktree an
+    interrupted op left aside.
+    """
     repo_root = str(params["repo_root"])
-    return resolve_pinned(
-        # Git inside this op's worktree or repository must not run, even to print its version.
-        host_git(request.deadline, outside=(repo_root, request.root)),
-        repo_root=repo_root,
-        root=request.root,
-        branch=str(params["branch"]),
-        write=write,
+    root = request.root
+    branch = str(params["branch"])
+    if move_aside_enabled():
+        recover(root)
+    # Git inside this op's worktree or repository must not run, even to print its version.
+    git = host_git(request.deadline, outside=(repo_root, root))
+    with op_temp_dir() as temp_dir:
+        if not write:
+            jail = op_jail(git, root=root, repo_root=repo_root, temp_dir=temp_dir)
+            yield resolve_pinned(
+                git,
+                repo_root=repo_root,
+                root=root,
+                branch=branch,
+                write=False,
+                jail=jail,
+                temp_dir=temp_dir,
+            )
+            return
+        admin_dir = linked_worktree_admin_dir(repo_root, root, request.deadline)
+        # The jail, and its tool's check, come before the worktree moves.
+        jail = op_jail(
+            git,
+            root=root,
+            repo_root=repo_root,
+            temp_dir=temp_dir,
+            admin_dir=admin_dir,
+            work_root=aside_path(root) if move_aside_enabled() else root,
+        )
+        with _work_root(root) as work_root:
+            yield resolve_pinned(
+                git,
+                repo_root=repo_root,
+                root=root,
+                branch=branch,
+                write=True,
+                jail=jail,
+                temp_dir=temp_dir,
+                work_root=work_root,
+            )
+
+
+@contextmanager
+def _work_root(root: str) -> Iterator[str]:
+    """Where a WRITE op's git works: ``root`` moved aside on macOS, else ``root`` itself."""
+    if not move_aside_enabled():
+        yield root
+        return
+    with moved_aside(root) as aside:
+        yield aside
+
+
+def linked_worktree_admin_dir(repo_root: str, root: str, deadline: float) -> str:
+    """
+    The admin dir of the linked worktree ``root``, verified without running git.
+
+    A WRITE op calls this before it moves the worktree or runs git: both paths
+    canonical, the common dir and ``root`` real directories owned by the host
+    user, ``root`` not the main worktree, and one admin dir whose ``gitdir``
+    names ``<root>/.git`` and whose ``commondir`` leads back.
+
+    :raises WorkspaceOpHandlerError: ``workspace.target_mismatch`` or, for
+        another user's files, ``workspace.backend_unavailable`` (permanent).
+    """
+    for name, path in (("repo_root", repo_root), ("root", root)):
+        if "\n" in path or os.path.realpath(path) != path:
+            raise _mismatch(f"{name} {printable(path)} is not a canonical path")
+    if root == repo_root:
+        raise _mismatch(
+            f"{printable(root)} is the main worktree; WRITE ops run in linked worktrees only"
+        )
+    common_dir = os.path.join(repo_root, ".git")
+    for path in (common_dir, root):
+        try:
+            is_directory = stat.S_ISDIR(os.lstat(path).st_mode)
+        except FileNotFoundError:
+            is_directory = False
+        if not is_directory:
+            raise _mismatch(f"{printable(path)} is not a directory")
+        _require_owned(path)
+    return _admin_dir(common_dir, root, deadline)
+
+
+@contextmanager
+def op_temp_dir() -> Iterator[str]:
+    """
+    A fresh private (0700) temp dir, canonical, removed afterwards.
+
+    :raises WorkspaceOpHandlerError: ``workspace.backend_unavailable``, retryable,
+        when the host's temp dir is full or unwritable.
+    """
+    try:
+        directory = os.path.realpath(tempfile.mkdtemp(prefix="coral-op-"))
+    except OSError as exc:
+        raise temp_dir_unavailable(exc) from None
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def temp_dir_unavailable(exc: OSError) -> WorkspaceOpHandlerError:
+    """A retryable failure of the host's temp dir, e.g. a full disk."""
+    return WorkspaceOpHandlerError(
+        BACKEND_UNAVAILABLE,
+        f"the host's temp dir {printable(tempfile.gettempdir())} failed: "
+        f"{exc.strerror or type(exc).__name__}",
     )
+
+
+def op_jail(
+    git: Git,
+    *,
+    root: str,
+    repo_root: str,
+    temp_dir: str,
+    admin_dir: str | None = None,
+    work_root: str | None = None,
+) -> Jail | None:
+    """
+    The jail this op's git runs in; ``None`` for a READ op on a host without one.
+
+    A WRITE op (``admin_dir`` given) may write the worktree where it will be
+    (``work_root``, else ``root``), the objects, the ``coral/`` refs and their
+    logs, ``packed-refs``, its own admin dir and ``temp_dir``; a READ op
+    ``temp_dir`` only. Under the home directory both may read only those
+    paths, the repository and git's install (the config includes and global
+    ignore and attribute files join once known). The tool must sit outside
+    ``root`` and ``repo_root`` before it first runs.
+
+    :raises WorkspaceOpHandlerError: for a WRITE op, ``workspace.capability_unavailable``
+        (permanent) when no jail works on this host, and
+        ``workspace.backend_unavailable`` (permanent) without a home directory.
+    """
+    write = admin_dir is not None
+    try:
+        tool = checked_jail_tool(
+            functools.partial(_jailed_version_failure, git),
+            refuse_inside=lambda found: require_git_outside(
+                found.executable, (repo_root, root), what=found.name
+            ),
+        )
+    except JailUnavailable as exc:
+        if write:
+            raise WorkspaceOpHandlerError(
+                CAPABILITY_UNAVAILABLE,
+                f"Coral workspace WRITE ops run git in a write jail, and {exc}",
+                permanent=True,
+            ) from None
+        log_unjailed_reads(str(exc))
+        return None
+    home = home_directory()
+    if write and home is None:
+        raise WorkspaceOpHandlerError(
+            BACKEND_UNAVAILABLE,
+            "Coral workspace WRITE ops need $HOME set to the host user's home directory: "
+            "the write jail keeps git from reading the rest of it",
+            permanent=True,
+        )
+    common_dir = os.path.join(repo_root, ".git")
+    work_root = root if work_root is None else work_root
+    readable = (work_root, common_dir, temp_dir, *_install_paths(git, home))
+    jail = Jail(tool=tool, writable=(temp_dir,), home=home).allowing_reads(*readable)
+    if admin_dir is None:
+        return jail
+    return replace(
+        jail,
+        writable=(work_root, *_writable_git_dirs(common_dir), admin_dir, temp_dir),
+        writable_files=tuple(os.path.join(common_dir, name) for name in _WRITABLE_GIT_FILES),
+    )
+
+
+def _writable_git_dirs(common_dir: str) -> tuple[str, ...]:
+    """The common-dir directories a WRITE op's git writes, created when missing."""
+    directories = tuple(os.path.join(common_dir, name) for name in _WRITABLE_GIT_DIRS)
+    for directory in directories:
+        # bwrap binds only what exists; git would otherwise create these itself. A
+        # reftable store has a file at refs/heads: the write-target check refuses it.
+        with contextlib.suppress(OSError):
+            os.makedirs(directory, exist_ok=True)
+    return directories
+
+
+def _jailed_version_failure(git: Git, jail: Jail) -> str | None:
+    try:
+        replace(git, cwd="/", jail=jail).run("--version")
+    except WorkspaceOpHandlerError as exc:
+        return exc.message
+    return None
+
+
+# The exec path of each git installed under a home directory, read once.
+# custom-lint: disable-next=workspace-scoped-cache -- keyed by an executable on this host
+_exec_paths: dict[str, str] = {}
+
+
+def _install_paths(git: Git, home: str | None) -> tuple[str, ...]:
+    """
+    What jailed git needs readable of its install: nothing outside the home dir.
+
+    A git installed under the home dir needs its own directory and its exec path,
+    and nothing else there.
+    """
+    directory = os.path.dirname(os.path.realpath(git.executable))
+    if home is None or not directory.startswith(home + "/"):
+        return ()
+    if git.executable not in _exec_paths:
+        output = replace(git, cwd="/", jail=None).run("--exec-path").stdout
+        _exec_paths[git.executable] = os.fsdecode(output.strip())
+    return (directory, _exec_paths[git.executable])
 
 
 def invalid_params(message: str) -> WorkspaceOpHandlerError:
     return WorkspaceOpHandlerError(INVALID_PARAMS, message, permanent=True)
 
 
+def commit_param(params: Mapping[str, object], name: str, *, required: bool = False) -> str | None:
+    """A full hex commit id param; ``None`` when an optional one is absent or null."""
+    value = params.get(name)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str):
+        raise invalid_params(f"{name} must be a full hex commit id")
+    try:
+        validate_commit_id(value)
+    except ValueError as exc:
+        raise invalid_params(f"{name}: {exc}") from None
+    return value
+
+
 def resolve_pinned(
-    git: Git, *, repo_root: str, root: str, branch: str, write: bool
+    git: Git,
+    *,
+    repo_root: str,
+    root: str,
+    branch: str,
+    write: bool,
+    jail: Jail | None = None,
+    temp_dir: str | None = None,
+    work_root: str | None = None,
 ) -> PinnedTarget:
     """
     Verify ``root`` against the repository at ``repo_root``, pin git to it and check its config.
@@ -166,6 +427,10 @@ def resolve_pinned(
     :param branch: The run branch; checked only when ``write``.
     :param write: Also require a linked worktree that is its own toplevel with
         ``refs/heads/<branch>`` checked out, ``branch`` under ``coral/``.
+    :param jail: Every git call runs in it; the user's git files join its reads.
+    :param temp_dir: The op's private temp dir, kept on the result.
+    :param work_root: Where the worktree is now, when a WRITE op moved it aside;
+        git works there, while ``root`` is still how the repository lists it.
     :raises WorkspaceOpHandlerError: ``workspace.target_mismatch`` for an
         unverified target; ``workspace.backend_unavailable`` (permanent) for a
         refused repository, another user's files or a git inside the worktree.
@@ -173,7 +438,8 @@ def resolve_pinned(
     for name, path in (("repo_root", repo_root), ("root", root)):
         if "\n" in path or os.path.realpath(path) != path:
             raise _mismatch(f"{name} {printable(path)} is not a canonical path")
-    require_git_outside(git.executable, (repo_root, root))
+    work_root = root if work_root is None else work_root
+    require_git_outside(git.executable, (repo_root, root, work_root))
     common_dir = os.path.join(repo_root, ".git")
     try:
         is_repository = stat.S_ISDIR(os.lstat(common_dir).st_mode)
@@ -182,6 +448,13 @@ def resolve_pinned(
     if not is_repository:
         raise _mismatch(f"{printable(repo_root)} is not a repository's main worktree")
     _require_owned(common_dir)
+    if jail is not None:
+        # The repository's config files, includes too, stay readable in the jail.
+        reader = replace(
+            git, cwd=repo_root, git_dir=common_dir, isolated=False, jail=jail.without_read_limits()
+        )
+        jail = jail.allowing_reads(*_repository_config_files(reader))
+    git = replace(git, jail=jail)
     if root not in _listed_worktrees(replace(git, cwd=repo_root, git_dir=common_dir)):
         raise _mismatch(f"{printable(root)} is not a worktree of {printable(repo_root)}")
     if root == repo_root:
@@ -193,21 +466,28 @@ def resolve_pinned(
     else:
         git_dir = _admin_dir(common_dir, root, git.deadline)
         _require_owned(git_dir)
-    _require_owned(root)
-    pinned = replace(git, cwd=root, git_dir=git_dir, work_tree=root)
+    _require_owned(work_root)
+    pinned = replace(git, cwd=work_root, git_dir=git_dir, work_tree=work_root)
     if write:
-        _require_write_target(pinned, root, branch)
+        _require_write_target(pinned, work_root, branch)
     _refuse_repository_config(pinned)
-    identity, config_args, attributes_file = _full_config_settings(replace(pinned, isolated=False))
-    pinned = replace(pinned, config_args=config_args)
-    _refuse_declared_filters(pinned, root, common_dir, attributes_file)
+    # The user's own config, and whatever it includes, is read outside the read limits.
+    config_reader = replace(
+        pinned, isolated=False, jail=None if jail is None else jail.without_read_limits()
+    )
+    identity, config_args, attributes_file, user_files = _full_config_settings(config_reader)
+    if jail is not None:
+        jail = jail.allowing_reads(*user_files)
+    pinned = replace(pinned, config_args=config_args, jail=jail)
+    _refuse_declared_filters(pinned, work_root, common_dir, attributes_file)
     return PinnedTarget(
         git=pinned,
         repo_root=repo_root,
-        root=root,
+        root=work_root,
         git_dir=git_dir,
         common_dir=common_dir,
         identity=identity,
+        temp_dir=temp_dir,
     )
 
 
@@ -304,6 +584,29 @@ def _require_write_target(git: Git, root: str, branch: str) -> None:
     head = git.run("symbolic-ref", "-q", "HEAD", ok_exit_codes=(0, 1))
     if head.exit_code != 0 or head.stdout.rstrip(b"\n") != os.fsencode(f"refs/heads/{branch}"):
         raise _mismatch(f"{printable(root)} does not have {printable(branch)} checked out")
+    storage = git.run("config", "--get", "extensions.refstorage", ok_exit_codes=(0, 1)).stdout
+    if storage.strip() not in (b"", b"files"):
+        # The write jail opens the coral/ refs as files; a reftable store is one table.
+        raise _refused(
+            "the repository keeps its refs in a reftable; Coral's write jail needs the "
+            "files ref store"
+        )
+
+
+def _repository_config_files(git: Git) -> list[str]:
+    """
+    The repository's own config files and their includes; never global or system config.
+
+    Isolated ops read only these (``GIT_CONFIG_GLOBAL=/dev/null``, ``GIT_CONFIG_NOSYSTEM``).
+    """
+    listed = git.run("config", "--list", "--show-scope", "--show-origin", "-z").stdout
+    fields = listed.split(b"\0")
+    files = []
+    # Records are "<scope>", "<origin>", "<key>\n<value>"; an include keeps its file's scope.
+    for scope, origin in zip(fields[0::3], fields[1::3], strict=False):
+        if scope in (b"local", b"worktree") and origin.startswith(b"file:"):
+            files.append(os.path.join(git.cwd or "", os.fsdecode(origin[len(b"file:") :])))
+    return files
 
 
 def _config_entries(git: Git, pattern: str) -> list[tuple[str, bytes | None]]:
@@ -358,11 +661,14 @@ def _config_true(value: bytes | None) -> bool:
         return True
 
 
-def _full_config_settings(git: Git) -> tuple[tuple[str, str], tuple[str, ...], str | None]:
+def _full_config_settings(
+    git: Git,
+) -> tuple[tuple[str, str], tuple[str, ...], str | None, tuple[str, ...]]:
     """
     Read the identity and the passed settings from the user's full config.
 
-    :returns: ``(identity, -c args, the attributes file git reads, if any)``.
+    :returns: ``(identity, -c args, the attributes file git reads, if any, and
+        the user's files ops read: the global attributes and excludes files)``.
     """
     values: dict[str, str] = {}
     for key, value in _config_entries(git, _FULL_CONFIG_SETTINGS):
@@ -375,24 +681,45 @@ def _full_config_settings(git: Git) -> tuple[tuple[str, str], tuple[str, ...], s
     for key, spelled in _PASSED_SETTINGS:
         if key in values:
             config_args += ["-c", f"{spelled}={values[key]}"]
+    attributes_file = _attributes_file(git, configured="core.attributesfile" in values)
+    # Exactly the global ignore and attribute files git consults; not the XDG dir,
+    # which can hold the credential store.
+    if "core.excludesfile" in values:
+        excludes_file = _configured_path(git, "core.excludesfile")
+    else:
+        xdg_git_dir = _xdg_git_dir()
+        excludes_file = os.path.join(xdg_git_dir, "ignore") if xdg_git_dir else None
+    user_files = [attributes_file, excludes_file]
     return (
         identity,
         tuple(config_args),
-        _attributes_file(git, configured="core.attributesfile" in values),
+        attributes_file,
+        tuple(path for path in user_files if path),
     )
 
 
 def _attributes_file(git: Git, *, configured: bool) -> str | None:
     """The global attributes file git reads: the configured one, else the XDG default."""
     if configured:
-        expanded = git.run("config", "--type=path", "--get", "core.attributesfile").stdout
-        path = os.fsdecode(expanded.rstrip(b"\n"))
-        return os.path.join(git.cwd or "", path) if path else None
+        return _configured_path(git, "core.attributesfile")
+    xdg_git_dir = _xdg_git_dir()
+    return os.path.join(xdg_git_dir, "attributes") if xdg_git_dir else None
+
+
+def _configured_path(git: Git, key: str) -> str | None:
+    """A path setting as git expands it (``~``), relative ones against the worktree."""
+    expanded = git.run("config", "--type=path", "--get", key).stdout
+    path = os.fsdecode(expanded.rstrip(b"\n"))
+    return os.path.join(git.cwd or "", path) if path else None
+
+
+def _xdg_git_dir() -> str | None:
+    """Where git looks for the user's default ignore and attributes files."""
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
     if xdg_config_home:
-        return os.path.join(xdg_config_home, "git", "attributes")
+        return os.path.join(xdg_config_home, "git")
     home = os.environ.get("HOME")
-    return os.path.join(home, ".config", "git", "attributes") if home else None
+    return os.path.join(home, ".config", "git") if home else None
 
 
 def _refuse_declared_filters(
