@@ -46,6 +46,9 @@ def test_validate_reports_runnable_workflow(client: TestClient) -> None:
     body = client.post("/v1/coral/workflows:validate", json={"yaml": fixture_text("loop")}).json()
     assert body["valid"] and body["runnable"] and body["problems"] == []
     assert len(body["content_hash"]) == 64
+    assert body["compiled"]["content_hash"] == body["content_hash"]
+    assert {node["kind"] for node in body["compiled"]["nodes"]} >= {"start", "end"}
+    assert body["compiled"]["arrows"]
 
 
 def test_validate_reports_problems_with_paths_and_ranges(client: TestClient) -> None:
@@ -53,6 +56,7 @@ def test_validate_reports_problems_with_paths_and_ranges(client: TestClient) -> 
         "/v1/coral/workflows:validate", json={"yaml": fixture_text("deadlock_join")}
     ).json()
     assert body["valid"] and not body["runnable"]
+    assert body["compiled"]["nodes"]
     problem = body["problems"][0]
     assert problem["rule"] == "V2" and problem["yaml_path"] and problem["range"]["start_line"] >= 1
 
@@ -61,6 +65,7 @@ def test_validate_reports_load_errors_without_failing_the_request(client: TestCl
     response = client.post("/v1/coral/workflows:validate", json={"yaml": "a: 1\na: 2\n"})
     assert response.status_code == 200
     assert response.json()["load_error"]["code"] == "duplicate_key"
+    assert "compiled" not in response.json()
 
 
 def test_save_then_get_and_list(client: TestClient) -> None:

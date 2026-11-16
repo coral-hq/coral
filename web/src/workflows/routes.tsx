@@ -6,7 +6,7 @@ import { CoralGate } from "./gate/CoralGate";
 type WithPageView = <P extends object>(id: string, Component: ComponentType<P>) => ComponentType<P>;
 
 const WorkflowsPage = lazy(() =>
-  import("./desk/WorkflowsPlaceholderPage").then((m) => ({ default: m.WorkflowsPlaceholderPage })),
+  import("./desk/WorkflowsDeskPage").then((m) => ({ default: m.WorkflowsDeskPage })),
 );
 const RunPage = lazy(() =>
   import("./desk/WorkflowRunPlaceholderPage").then((m) => ({
@@ -14,9 +14,7 @@ const RunPage = lazy(() =>
   })),
 );
 const EditorPage = lazy(() =>
-  import("./desk/WorkflowRunPlaceholderPage").then((m) => ({
-    default: m.WorkflowEditorPlaceholderPage,
-  })),
+  import("./editor/WorkflowEditorPage").then((m) => ({ default: m.WorkflowEditorPage })),
 );
 const SettingsPage = lazy(() =>
   import("./desk/WorkflowRunPlaceholderPage").then((m) => ({

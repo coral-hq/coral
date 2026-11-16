@@ -31,6 +31,7 @@ def _check_json(result: CheckResult) -> dict[str, Any]:
         "runnable": result.report.runnable,
         "content_hash": result.graph.content_hash,
         "problems": [asdict(problem) for problem in result.report.problems],
+        "compiled": result.graph.model_dump(mode="json"),
     }
 
 
