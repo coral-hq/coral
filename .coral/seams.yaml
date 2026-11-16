@@ -598,7 +598,7 @@ seams:
     note: >-
       Points the `coral` console script at `coral.cli:main`, includes `coral*`
       in package discovery, and registers package data for Coral's migrations,
-      templates, and built-in profile seeds.
+      templates, and built-in profile seeds with their seeds.lock.
     files:
       - pyproject.toml
     tests:
@@ -1281,6 +1281,44 @@ seams:
     upstream_first: false
     upstream_candidate: false
 
+  - id: S13
+    title: claude-sdk refuses Coral specs without an API credential or OS sandbox
+    owner: WS-HARNESS
+    status: landed
+    category: coral-specific
+    note: >-
+      `_build_claude_sdk_spawn_env` sets HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL=1
+      when `"coral" in spec.params`; the harness passes it to the executor as
+      `require_api_credential`. Under the flag, `run_turn` yields
+      `coral_subscription_auth_refused` before any CLI process starts unless an
+      apiKeyHelper or gateway is set, yields `coral_sandbox_unavailable` when a
+      configured os_env has no available bwrap or seatbelt sandbox (Windows
+      job objects isolate no files), and strips CLAUDE_CODE_OAUTH_TOKEN and
+      ANTHROPIC_AUTH_TOKEN from the CLI env. Non-Coral specs are unchanged.
+    files:
+      - omnigent/runtime/workflow.py
+      - omnigent/inner/claude_sdk_harness.py
+      - omnigent/inner/claude_sdk_executor.py
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/inner/test_claude_sdk_executor.py
+    tests:
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/inner/test_claude_sdk_executor.py
+    budget_lines: 40
+    budget_exception:
+      lines: 160
+      reason: >-
+        The executor carries both refusals and the token strip (about 55
+        lines, including the host-side sandbox refusal), and its test file
+        carries the refusal matrix with the non-Coral regression (about 160
+        lines).
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
   - id: S30
     title: Exclude Coral-owned tables and coral_alembic_version from Omnigent migrations
     owner: WS-PLATFORM
@@ -1334,6 +1372,129 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S21
+    title: claude-sdk PreToolUse hook enforces TOOL_CALL policy for Coral specs
+    owner: WS-HARNESS
+    status: landed
+    category: coral-specific
+    note: >-
+      The CLI never calls `can_use_tool` under bypassPermissions or for tools
+      that allowed_tools pre-approves, so a TOOL_CALL DENY on a connector MCP
+      tool did not hold there (SPK-03 spike 1). For specs with `params.coral`,
+      `_build_claude_sdk_spawn_env` sets HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK=1,
+      and the executor installs a catch-all PreToolUse hook that runs
+      `_evaluate_tool_call_policy`. The hook denies on a DENY verdict, on an
+      evaluator error and when the evaluator takes longer than 60 s. An ASK
+      approval waits under the 24 h AskUserQuestion ceiling, not the
+      evaluator deadline. The hook leaves AskUserQuestion to its own hook.
+      `can_use_tool` then skips its policy half, so each call is evaluated
+      once. A Coral spec whose hook cannot install (no evaluator or no
+      HookMatcher) is refused before the CLI starts. Sessions from other
+      specs keep upstream behavior. The two executor comments that said
+      `can_use_tool` gates every permission mode are corrected.
+    files:
+      - omnigent/runtime/workflow.py
+      - omnigent/inner/claude_sdk_harness.py
+      - omnigent/inner/claude_sdk_executor.py
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/inner/test_claude_sdk_executor.py
+    tests:
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/e2e/coral/test_tier_b_tool_gate.py
+      - docs/coral/decisions/probes/spike_01.py
+    budget_lines: 40
+    budget_exception:
+      lines: 180
+      reason: >-
+        The executor carries the hook installer, the single-evaluation change
+        to `can_use_tool` and the two corrected comments (about 110 changed
+        lines), and its test file carries the hook decision matrix (about 160
+        lines).
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true
+
+  - id: S102
+    title: Host hello advertises its OS sandbox backend
+    owner: WS-HARNESS
+    status: landed
+    category: upstream-extension
+    note: >-
+      `omnigent/host/frames.py` adds `host_capabilities()`, which returns
+      HOST_CAPABILITIES plus `os_sandbox:<linux_bwrap|darwin_seatbelt>` when the
+      platform default sandbox's binary (bwrap or sandbox-exec) is on PATH, and
+      `os_sandbox:none` otherwise, so preflight can tell a host without a
+      sandbox (install bwrap) from one that predates the token (update the
+      host). `omnigent/host/connect.py` sends it in host.hello. Servers that
+      do not know the token ignore it. HOST_CAPABILITIES is
+      unchanged. Coral's preflight reads the token through
+      `coral.validate.preflight.sandbox_from_capabilities`, which also accepts
+      WSP-01's richer `coral_host_sandbox:1:...` report, so the producer can
+      change without touching the engine. Offering it upstream waits on the
+      WSP-01 token decision.
+    files:
+      - omnigent/host/frames.py
+      - omnigent/host/connect.py
+      - tests/host/test_connect.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/coral/omni/test_preflight_facts.py
+    budget_lines: 40
+    budget_exception:
+      lines: 80
+      reason: >-
+        tests/host/test_connect.py carries the platform and binary matrix for
+        `host_capabilities()`, a hello-frame test and an unknown-token decode
+        test (about 70 lines).
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true
+
+  - id: S54
+    title: Hide coral__ engine agents from agent lists and pickers
+    owner: WS-PROFILES
+    status: landed
+    category: coral-specific
+    note: >-
+      Coral step bundles are ordinary agent rows named `coral__...`. The
+      `list_user_agents` query drops them in SQL before its 50-row read cap
+      (`autoescape=True`, so `_` is not a LIKE wildcard), and `GET /v1/agents`
+      drops server-kind rows with the prefix. The web catalog, the caller's
+      agents, session discovery and the Custom agents list filter them through
+      `isEngineAgentName` from `web/src/lib/engineAgents.ts`, a module with no
+      imports, so the Custom agents page does not load the picker hooks. Reads
+      by id are unchanged, so sessions bound to an engine row keep working.
+      Every filter ignores case, matching SQLite LIKE, so `Coral__x` is hidden
+      everywhere. A user agent named with the prefix is hidden too; rename
+      protection belongs to S53.
+    files:
+      - omnigent/stores/agent_store/sqlalchemy_store.py
+      - omnigent/server/routes/builtin_agents.py
+      - web/src/hooks/useAvailableAgents.ts
+      - web/src/hooks/useCustomAgents.ts
+      - web/src/lib/engineAgents.ts
+      - tests/stores/test_agent_store.py
+      - tests/server/routes/test_builtin_agents.py
+      - web/src/hooks/useAvailableAgents.test.tsx
+    tests:
+      - tests/stores/test_agent_store.py
+      - tests/server/routes/test_builtin_agents.py
+      - web/src/hooks/useAvailableAgents.test.tsx
+    budget_lines: 40
+    budget_exception:
+      lines: 100
+      reason: >-
+        web/src/hooks/useAvailableAgents.test.tsx carries the two hook
+        scenarios for the catalog, the caller's agents, session discovery and
+        Custom agents (about 85 lines).
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true
 
   - id: S58
     title: Shared DB utilities for keyset pagination, enum codecs, and engine inspection

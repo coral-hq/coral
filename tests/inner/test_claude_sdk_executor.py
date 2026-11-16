@@ -6558,3 +6558,358 @@ async def test_turn_options_expose_ask_user_question_only_with_its_hook(
     matchers = [m.matcher for m in (options.hooks or {}).get("PreToolUse", [])]
     assert ("AskUserQuestion" in options.tools) is bridge_wired
     assert ("AskUserQuestion" in matchers) is bridge_wired
+
+
+# CORAL(S13): Coral specs refuse subscription auth and missing OS sandboxes before the CLI starts.
+
+
+def _coral_executor(monkeypatch, **kwargs):
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor._find_system_claude", lambda: None)
+    return ClaudeSDKExecutor(**kwargs)
+
+
+async def _turn_with_recording_sdk(executor):
+    """Run one turn on a fake SDK; return its events, the SDK and each client's spawn env."""
+    fake_sdk = _make_recovery_fake_sdk()
+    spawn_envs = []
+
+    class _RecordingClient(fake_sdk.ClaudeSDKClient):
+        async def connect(self):
+            spawn_envs.append({**os.environ, **(getattr(self.options, "env", None) or {})})
+
+    fake_sdk.ClaudeSDKClient = _RecordingClient
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        events = [e async for e in executor.run_turn([{"role": "user", "content": "hi"}], [], "")]
+    return events, fake_sdk, spawn_envs
+
+
+async def test_coral_spec_without_api_credential_is_refused_before_the_cli(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import (
+        CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE,
+        CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE,
+    )
+
+    executor = _coral_executor(monkeypatch, require_api_credential=True)
+
+    events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert len(errors) == 1 and len(events) == 1
+    assert errors[0].code == CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE
+    assert errors[0].retryable is False
+    assert errors[0].message == CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE
+    assert "Claude Code" not in errors[0].message
+    assert fake_sdk.created_clients == []
+    assert spawn_envs == []
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        {"api_key_helper": "printf %s sk-ant-test"},
+        {
+            "gateway": True,
+            "gateway_host": "https://gateway.example",
+            "base_url_override": "https://gateway.example/anthropic",
+            "gateway_auth_command": "printf %s gateway-token",
+        },
+    ],
+    ids=["api-key-helper", "gateway"],
+)
+async def test_coral_spec_with_api_credential_reaches_the_cli(monkeypatch, credential):
+    executor = _coral_executor(monkeypatch, require_api_credential=True, **credential)
+    if credential.get("gateway"):
+        monkeypatch.setattr(
+            executor, "_apply_gateway_model_vocabulary", AsyncMock(return_value={})
+        )
+        monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
+
+    events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+
+    assert not [e for e in events if isinstance(e, ExecutorError)], events
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert len(fake_sdk.created_clients) == 1
+
+
+async def test_non_coral_spec_without_api_credential_keeps_subscription_auth(monkeypatch):
+    executor = _coral_executor(monkeypatch)
+
+    events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+
+    assert not [e for e in events if isinstance(e, ExecutorError)], events
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert len(fake_sdk.created_clients) == 1
+
+
+@pytest.mark.parametrize(("coral", "token_seen"), [(True, False), (False, True)])
+async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral, token_seen):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "inherited-oauth")
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env",
+        lambda cwd=None: {"ANTHROPIC_AUTH_TOKEN": "settings-token"},
+    )
+    executor = _coral_executor(
+        monkeypatch,
+        require_api_credential=coral,
+        api_key_helper="printf %s sk-ant-test",
+        skills_filter="none",
+    )
+
+    events, _, spawn_envs = await _turn_with_recording_sdk(executor)
+
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert len(spawn_envs) == 1
+    assert ("CLAUDE_CODE_OAUTH_TOKEN" in spawn_envs[0]) is token_seen
+    assert ("ANTHROPIC_AUTH_TOKEN" in spawn_envs[0]) is token_seen
+    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "inherited-oauth"
+
+
+@pytest.mark.parametrize(
+    ("sandbox_type", "binary_present"),
+    [(None, True), ("none", True), ("windows_jobobject", True), ("linux_bwrap", False)],
+    ids=["no-sandbox", "none", "windows-jobobject", "bwrap-missing"],
+)
+async def test_coral_spec_without_os_sandbox_is_refused(monkeypatch, sandbox_type, binary_present):
+    from omnigent.inner.claude_sdk_executor import CORAL_SANDBOX_UNAVAILABLE_CODE
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    sandbox = OSEnvSandboxSpec(type=sandbox_type) if sandbox_type is not None else None
+    executor = _coral_executor(
+        monkeypatch,
+        require_api_credential=True,
+        api_key_helper="printf %s sk-ant-test",
+        os_env=OSEnvSpec(cwd=str(Path.cwd()), sandbox=sandbox),
+    )
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.shutil.which",
+        lambda name: f"/usr/bin/{name}" if binary_present else None,
+    )
+
+    events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+
+    assert [e.code for e in events if isinstance(e, ExecutorError)] == [
+        CORAL_SANDBOX_UNAVAILABLE_CODE
+    ]
+    assert fake_sdk.created_clients == []
+
+
+@pytest.mark.parametrize("sandbox_type", ["linux_bwrap", "darwin_seatbelt"])
+async def test_coral_spec_with_os_sandbox_reaches_the_cli(monkeypatch, sandbox_type):
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    executor = _coral_executor(
+        monkeypatch,
+        require_api_credential=True,
+        api_key_helper="printf %s sk-ant-test",
+        os_env=OSEnvSpec(cwd=str(Path.cwd()), sandbox=OSEnvSandboxSpec(type=sandbox_type)),
+    )
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+
+    events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+
+    assert not [e for e in events if isinstance(e, ExecutorError)], events
+    assert len(fake_sdk.created_clients) == 1
+
+
+# CORAL(S21): Coral specs check every tool call against TOOL_CALL policy from PreToolUse.
+
+
+def _policy_verdict(action, reason=None):
+    from omnigent.runtime.harnesses._scaffold import PolicyVerdictPayload
+
+    return PolicyVerdictPayload(action=action, reason=reason)
+
+
+def _policy_hook_executor(*, evaluator, permission_mode="bypassPermissions", hooked=True):
+    executor = _default_executor(permission_mode=permission_mode, tool_call_policy_hook=hooked)
+    executor._policy_evaluator = evaluator
+    return executor
+
+
+def _catch_all_policy_hooks(options):
+    return [m for m in (options.hooks or {}).get("PreToolUse", []) if m.matcher is None]
+
+
+async def _policy_gate(executor):
+    (matcher,) = _catch_all_policy_hooks(await _turn_options(executor))
+    (gate,) = matcher.hooks
+    return gate
+
+
+def _deny_output(reason):
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("hooked", "installed"),
+    [(True, True), (False, False)],
+    ids=["coral", "non-coral"],
+)
+async def test_tool_call_policy_hook_installed_only_for_coral_sessions(hooked, installed):
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ALLOW"))
+    executor = _policy_hook_executor(evaluator=evaluator, hooked=hooked)
+
+    options = await _turn_options(executor)
+
+    assert len(_catch_all_policy_hooks(options)) == int(installed)
+    if not hooked:
+        assert options.can_use_tool == executor._can_use_tool_gate
+
+
+def test_tool_call_policy_hook_keeps_the_callers_hook_list():
+    import claude_agent_sdk
+
+    caller_hooks = [claude_agent_sdk.HookMatcher(matcher="Bash", hooks=[AsyncMock()])]
+    options = SimpleNamespace(hooks={"PreToolUse": caller_hooks})
+    executor = _policy_hook_executor(evaluator=AsyncMock())
+
+    assert executor._install_tool_call_policy_hook(claude_agent_sdk, options) is True
+
+    assert len(caller_hooks) == 1
+    assert len(options.hooks["PreToolUse"]) == 2
+
+
+@pytest.mark.parametrize("missing", ["evaluator", "hook-matcher"])
+async def test_coral_spec_is_refused_when_the_policy_hook_cannot_install(missing):
+    from omnigent.inner.claude_sdk_executor import CORAL_POLICY_HOOK_UNAVAILABLE_CODE
+
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ALLOW"))
+    executor = _policy_hook_executor(evaluator=None if missing == "evaluator" else evaluator)
+    fake_sdk = _make_recovery_fake_sdk()
+    if missing == "evaluator":
+        from claude_agent_sdk import HookMatcher
+
+        fake_sdk.HookMatcher = HookMatcher
+
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        events = [e async for e in executor.run_turn([{"role": "user", "content": "hi"}], [], "")]
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert [(e.code, e.retryable) for e in errors] == [(CORAL_POLICY_HOOK_UNAVAILABLE_CODE, False)]
+    assert fake_sdk.created_clients == []
+
+
+async def test_tool_call_policy_hook_denies_a_deny_verdict():
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_DENY", reason="no github"))
+    gate = await _policy_gate(_policy_hook_executor(evaluator=evaluator))
+
+    decision = await gate(
+        {"tool_name": "mcp__github__issue_write", "tool_input": {"title": "x"}}, "tu_1", None
+    )
+
+    assert decision == _deny_output("no github")
+    evaluator.assert_awaited_once_with(
+        "PHASE_TOOL_CALL", {"name": "mcp__github__issue_write", "arguments": {"title": "x"}}
+    )
+
+
+async def test_tool_call_policy_hook_has_no_opinion_on_allow_and_omnigent_tools():
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ALLOW"))
+    gate = await _policy_gate(_policy_hook_executor(evaluator=evaluator))
+
+    assert (
+        await gate({"tool_name": "mcp__omnigent__sys_os_read", "tool_input": {}}, "t", None) == {}
+    )
+    evaluator.assert_not_awaited()
+    assert await gate({"tool_name": "ToolSearch", "tool_input": {}}, "t", None) == {}
+    evaluator.assert_awaited_once()
+
+
+async def test_tool_call_policy_hook_allows_an_approved_ask():
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ASK", reason="check"))
+    executor = _policy_hook_executor(evaluator=evaluator)
+    executor._elicitation_handler = AsyncMock(return_value=True)
+    gate = await _policy_gate(executor)
+
+    decision = await gate({"tool_name": "mcp__github__issue_write", "tool_input": {}}, "t", None)
+
+    assert decision == {
+        "hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+    }
+
+
+async def test_tool_call_policy_hook_waits_for_a_slow_ask_approval(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    async def slow_approval(tool_name, tool_input):
+        await asyncio.sleep(0.05)
+        return True
+
+    monkeypatch.setattr(ClaudeSDKExecutor, "_TOOL_CALL_POLICY_DEADLINE_S", 0.01)
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ASK", reason="check"))
+    executor = _policy_hook_executor(evaluator=evaluator)
+    executor._elicitation_handler = slow_approval
+    gate = await _policy_gate(executor)
+
+    decision = await gate({"tool_name": "mcp__github__issue_write", "tool_input": {}}, "t", None)
+
+    assert decision == {
+        "hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+    }
+
+
+async def test_tool_call_policy_hook_fails_closed_on_error_and_deadline(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    async def slow_verdict(phase, payload):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(ClaudeSDKExecutor, "_TOOL_CALL_POLICY_DEADLINE_S", 0.01)
+    unchecked = _deny_output("Coral could not check this tool call against policy")
+    call = {"tool_name": "mcp__github__issue_write", "tool_input": {}}
+
+    raising = await _policy_gate(
+        _policy_hook_executor(evaluator=AsyncMock(side_effect=RuntimeError("server down")))
+    )
+    slow = await _policy_gate(_policy_hook_executor(evaluator=slow_verdict))
+
+    assert await raising(call, "t", None) == unchecked
+    assert await slow(call, "t", None) == unchecked
+
+
+async def test_tool_call_policy_hook_propagates_cancellation():
+    gate = await _policy_gate(
+        _policy_hook_executor(evaluator=AsyncMock(side_effect=asyncio.CancelledError))
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await gate({"tool_name": "mcp__github__issue_write", "tool_input": {}}, "t", None)
+
+
+async def test_tool_call_policy_hook_leaves_ask_user_question_to_its_own_hook():
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_DENY", reason="no"))
+    executor = _policy_hook_executor(evaluator=evaluator)
+    executor._ask_question_handler = AsyncMock(return_value="unused")
+    gate = await _policy_gate(executor)
+
+    assert await gate({"tool_name": "AskUserQuestion", "tool_input": {}}, "t", None) == {}
+    evaluator.assert_not_awaited()
+
+
+async def test_tool_call_policy_hook_can_use_tool_does_not_evaluate_again():
+    from claude_agent_sdk import PermissionResultAllow
+
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ALLOW"))
+    executor = _policy_hook_executor(evaluator=evaluator, permission_mode="default")
+    executor._elicitation_handler = AsyncMock(return_value=True)
+    options = await _turn_options(executor)
+    (matcher,) = _catch_all_policy_hooks(options)
+    call = ("mcp__github__issue_write", {"title": "x"})
+    perm_ctx = SimpleNamespace(tool_use_id="t", agent_id=None, suggestions=[])
+
+    assert await matcher.hooks[0]({"tool_name": call[0], "tool_input": call[1]}, "t", None) == {}
+    result = await options.can_use_tool(*call, perm_ctx)
+
+    assert isinstance(result, PermissionResultAllow)
+    evaluator.assert_awaited_once()
+    executor._elicitation_handler.assert_awaited_once_with(*call)

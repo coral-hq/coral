@@ -34,12 +34,14 @@ import json
 import logging
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
+from functools import partial
 from types import ModuleType
 from typing import Any, NamedTuple, Protocol, TypeAlias, cast
 
@@ -94,6 +96,7 @@ from .executor import (
 )
 from .native_attachments import framework_notices, unresolved_attachment_marker
 from .sandbox import (
+    _resolve_sandbox_type,
     create_exec_launcher,
     get_backend,
     resolve_sandbox,
@@ -119,6 +122,17 @@ _CLAUDE_CODE_MIN_THINKING_BUDGET_TOKENS = 1024
 # gateway env (not the generic-provider gateway env) must carry it.
 _ANTHROPIC_CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 _DATABRICKS_CODING_AGENT_HEADER = "x-databricks-use-coding-agent-mode: true"
+
+# CORAL(S13): refusals for Coral specs that lack an API credential or an OS sandbox
+CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE = "coral_subscription_auth_refused"
+CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE = (
+    "Workflows with an orchestrator need an Anthropic API key "
+    "(Console, plan-linked Console, or cloud provider)."
+)
+CORAL_SANDBOX_UNAVAILABLE_CODE = "coral_sandbox_unavailable"
+CORAL_POLICY_HOOK_UNAVAILABLE_CODE = "coral_policy_hook_unavailable"
+_CORAL_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec"}
+_SUBSCRIPTION_TOKEN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
 
 CLAUDE_AUTH_FAILED_CODE = "claude_sdk_auth_failed"
 CLAUDE_AUTH_FAILED_TITLE = "Claude Code could not authenticate"
@@ -1806,6 +1820,8 @@ class ClaudeSDKExecutor(Executor):
         skills_filter: str | list[str] = "all",
         api_key_helper: str | None = None,
         system_prompt_preset: str | None = None,
+        require_api_credential: bool = False,
+        tool_call_policy_hook: bool = False,
     ) -> None:
         """Create a ClaudeSDKExecutor.
 
@@ -1881,6 +1897,12 @@ class ClaudeSDKExecutor(Executor):
                 Injected into ``_extra_env`` as
                 :data:`_CLAUDE_API_KEY_HELPER_ENV_KEY` so it reaches
                 the SDK's ``settings.apiKeyHelper`` option at turn time.
+            require_api_credential: Refuse turns unless *api_key_helper* or
+                *gateway* is set and any *os_env* has a bwrap or seatbelt
+                sandbox; strip inherited subscription tokens from the CLI.
+            tool_call_policy_hook: Check every non-Omnigent tool call against
+                TOOL_CALL policy from a PreToolUse hook, which the CLI runs in
+                every permission mode, unlike ``can_use_tool``.
         """
         # Fail loud: a Databricks model requires the gateway transport.
         if not gateway and model is not None and is_databricks_model_id(model):
@@ -1894,6 +1916,9 @@ class ClaudeSDKExecutor(Executor):
         if system_prompt_preset not in (None, "claude_code"):
             raise ValueError("system_prompt_preset must be 'claude_code' or unset")
         self._system_prompt_preset = system_prompt_preset
+        # CORAL(S13, S21)
+        self._require_api_credential = require_api_credential
+        self._tool_call_policy_hook = tool_call_policy_hook
         self._cwd = cwd
         self._os_env_spec = os_env
         self._os_env = os_env is not None
@@ -2117,6 +2142,10 @@ class ClaudeSDKExecutor(Executor):
                 with ExitStack() as env_stack:
                     env_stack.enter_context(_unset_env_var("CLAUDECODE"))
                     env_stack.enter_context(_unset_env_var("ANTHROPIC_API_KEY"))
+                    # CORAL(S13): no subscription token reaches a Coral spec's CLI
+                    if self._require_api_credential:
+                        for name in _SUBSCRIPTION_TOKEN_ENV:
+                            env_stack.enter_context(_unset_env_var(name))
                     if isinstance(sdk_env, dict) and "CLAUDE_CODE_USE_GATEWAY" in sdk_env:
                         env_stack.enter_context(
                             _unset_env_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
@@ -2677,6 +2706,61 @@ class ClaudeSDKExecutor(Executor):
         hooks["PreToolUse"] = entries
         options.hooks = hooks
 
+    # CORAL(S21): a slow evaluator denies; a raw ASK waits as long as AskUserQuestion
+    _TOOL_CALL_POLICY_DEADLINE_S: float = 60.0
+
+    def _install_tool_call_policy_hook(self, sdk: _ClaudeSDK, options: SdkOptions) -> bool:
+        """CORAL(S21): gate every tool call on TOOL_CALL policy from a catch-all PreToolUse hook.
+
+        :param sdk: The ``claude_agent_sdk`` module (or a test double).
+        :param options: ``ClaudeAgentOptions`` to mutate.
+        :returns: Whether the hook was installed, so ``can_use_tool`` skips its policy half.
+        """
+        hook_matcher_cls = getattr(sdk, "HookMatcher", None)
+        policy_evaluator = getattr(self, "_policy_evaluator", None)
+        if not self._tool_call_policy_hook or policy_evaluator is None or hook_matcher_cls is None:
+            return False
+        ask_hook_installed = self._ask_user_question_enabled(sdk)
+
+        def _decide(decision: str, reason: str | None = None) -> _JsonObject:
+            output: _JsonObject = {"hookEventName": "PreToolUse", "permissionDecision": decision}
+            if reason is not None:
+                output["permissionDecisionReason"] = reason
+            return {"hookSpecificOutput": output}
+
+        async def gate(payload: object, _tool_use_id: str | None, _context: object) -> _JsonObject:
+            unchecked = "Coral could not check this tool call against policy"
+            if not isinstance(payload, dict):
+                return _decide("deny", unchecked)
+            tool_name = str(payload.get("tool_name") or "")
+            if ask_hook_installed and tool_name == "AskUserQuestion":
+                return {}
+            try:
+                result = await self._evaluate_tool_call_policy(
+                    tool_name,
+                    payload.get("tool_input") or {},
+                    evaluator_deadline_s=self._TOOL_CALL_POLICY_DEADLINE_S,
+                )
+            except Exception:
+                logger.exception("TOOL_CALL policy hook failed; denying tool=%s", tool_name)
+                return _decide("deny", unchecked)
+            behavior = getattr(result, "behavior", None)
+            if behavior == "deny":
+                return _decide("deny", getattr(result, "message", "") or "Denied by Coral policy")
+            if behavior == "allow":
+                return _decide("allow")
+            return {}
+
+        hooks = dict(getattr(options, "hooks", None) or {})
+        hooks["PreToolUse"] = [
+            *hooks.get("PreToolUse", []),
+            hook_matcher_cls(
+                matcher=None, timeout=self._ASK_QUESTION_HOOK_TIMEOUT_S, hooks=[gate]
+            ),
+        ]
+        options.hooks = hooks
+        return True
+
     async def _can_use_tool_for_permission(
         self,
         tool_name: str,
@@ -2728,6 +2812,8 @@ class ClaudeSDKExecutor(Executor):
         self,
         tool_name: str,
         tool_input: ToolArgs,
+        *,
+        evaluator_deadline_s: float | None = None,
     ) -> object | None:
         """
         Run a pre-execution TOOL_CALL policy evaluation for one tool call.
@@ -2762,6 +2848,8 @@ class ClaudeSDKExecutor(Executor):
         :param tool_name: Full SDK tool name, e.g.
             ``"mcp__github__issue_write"``.
         :param tool_input: Arguments dict for the tool call.
+        :param evaluator_deadline_s: CORAL(S21): seconds the evaluator may take,
+            raising ``TimeoutError`` past it; elicitation is not bounded by it.
         :returns: :class:`claude_agent_sdk.PermissionResultDeny` when a
             policy denies the call. ``POLICY_ACTION_ASK`` is normally
             collapsed to a hard ALLOW/DENY by the server-side
@@ -2783,9 +2871,9 @@ class ClaudeSDKExecutor(Executor):
         # the dispatch bridge / ProxyMcpManager — don't evaluate them twice.
         if tool_name.startswith(_OMNIGENT_MCP_PREFIX):
             return None
-        _verdict = await _policy_eval(
-            "PHASE_TOOL_CALL",
-            {"name": tool_name, "arguments": tool_input},
+        _verdict = await asyncio.wait_for(
+            _policy_eval("PHASE_TOOL_CALL", {"name": tool_name, "arguments": tool_input}),
+            evaluator_deadline_s,
         )
         _action = getattr(_verdict, "action", None)
         if _action in ("POLICY_ACTION_ALLOW", "POLICY_ACTION_UNSPECIFIED"):
@@ -2824,19 +2912,20 @@ class ClaudeSDKExecutor(Executor):
         tool_name: str,
         tool_input: ToolArgs,
         perm_ctx: object,
+        *,
+        policy_checked: bool = False,
     ) -> object:
         """
         Unified ``options.can_use_tool`` callback for the claude-sdk path.
 
         Composes two independent gates, in order:
 
-        1. **TOOL_CALL policy** (always, when a ``_policy_evaluator`` is
-           wired): a hard DENY short-circuits to
-           :class:`~claude_agent_sdk.PermissionResultDeny`. This runs in
-           EVERY permission mode — including ``bypassPermissions`` — so
-           connector-native MCP tools can't slip past policy. ALLOW /
-           no-match falls through with no human interaction, preserving
-           ``bypassPermissions`` ergonomics for un-gated tools.
+        1. **TOOL_CALL policy** (when a ``_policy_evaluator`` is wired and
+           *policy_checked* is false): a hard DENY short-circuits to
+           :class:`~claude_agent_sdk.PermissionResultDeny`. ALLOW /
+           no-match falls through with no human interaction. CORAL(S21):
+           the CLI skips ``can_use_tool`` under ``bypassPermissions`` and for
+           pre-approved tools, so Coral specs rely on the PreToolUse hook.
         2. **Human-consent elicitation** (only when the permission mode is
            NOT ``bypassPermissions`` and an elicitation handler is wired):
            the pre-existing per-tool approval prompt. Under
@@ -2847,11 +2936,16 @@ class ClaudeSDKExecutor(Executor):
             ``"mcp__github__issue_write"``.
         :param tool_input: Arguments dict for the tool call.
         :param perm_ctx: :class:`claude_agent_sdk.ToolPermissionContext`.
+        :param policy_checked: The PreToolUse policy hook already evaluated this call.
         :returns: A :class:`~claude_agent_sdk.PermissionResult`.
         """
         from claude_agent_sdk import PermissionResultAllow
 
-        policy_result = await self._evaluate_tool_call_policy(tool_name, tool_input)
+        policy_result = (
+            None
+            if policy_checked
+            else await self._evaluate_tool_call_policy(tool_name, tool_input)
+        )
         if policy_result is not None:
             # Hard DENY from policy — block before execution.
             return policy_result
@@ -2860,6 +2954,31 @@ class ClaudeSDKExecutor(Executor):
         if self._permission_mode == "bypassPermissions" or self._elicitation_handler is None:
             return PermissionResultAllow()
         return await self._can_use_tool_for_permission(tool_name, tool_input, perm_ctx)
+
+    def _coral_refusal(self, api_key_helper: str | None) -> ExecutorError | None:
+        """CORAL(S13): why a Coral spec must not start, or ``None`` to proceed."""
+        if not self._require_api_credential:
+            return None
+        if not (api_key_helper or self._gateway):
+            return ExecutorError(
+                message=CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE,
+                code=CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE,
+                title="Anthropic API key needed",
+                retryable=False,
+            )
+        if self._os_env_spec is None:
+            return None
+        sandbox = self._os_env_spec.sandbox
+        sandbox_type = _resolve_sandbox_type(sandbox.type if sandbox is not None else None)
+        binary = _CORAL_SANDBOX_BINARIES.get(sandbox_type)
+        if binary is not None and shutil.which(binary) is not None:
+            return None
+        missing = f"install {binary}" if binary else f"{sandbox_type!r} does not isolate files"
+        return ExecutorError(
+            message=f"Steps that read or change files need an OS sandbox: {missing}.",
+            code=CORAL_SANDBOX_UNAVAILABLE_CODE,
+            retryable=False,
+        )
 
     async def run_turn(
         self,
@@ -2995,6 +3114,11 @@ class ClaudeSDKExecutor(Executor):
         env = dict(self._extra_env)
         env["CLAUDE_AGENT_SDK_CLIENT_APP"] = "omnigent"
         api_key_helper = env.pop(_CLAUDE_API_KEY_HELPER_ENV_KEY, None)
+        # CORAL(S13): refuse a Coral spec before any CLI process starts
+        refusal = self._coral_refusal(api_key_helper)
+        if refusal is not None:
+            yield refusal
+            return
         # Teach Claude Code this gateway's spellings so no model surface routes
         # to an id the gateway rejects: pins for the family aliases, rewrites
         # for the canonical ids the CLI names itself (the refusal-fallback).
@@ -3061,6 +3185,10 @@ class ClaudeSDKExecutor(Executor):
         if resolved.setting_sources == [] and not self._gateway:
             # The CLI then skips the user settings env, which may hold the only provider endpoint.
             env = {**_claude_user_settings_env(self._cwd), **env}
+        # CORAL(S13): user settings can carry a subscription token
+        if self._require_api_credential:
+            for name in _SUBSCRIPTION_TOKEN_ENV:
+                env.pop(name, None)
         max_output_tokens = cfg.extra.get("max_tokens")
         if max_output_tokens is not None:
             max_output_tokens = int(max_output_tokens)
@@ -3129,28 +3257,26 @@ class ClaudeSDKExecutor(Executor):
             options.model = model
         if self._cwd:
             options.cwd = self._cwd
-        # Install the unified can_use_tool gate. It runs the TOOL_CALL
-        # policy evaluation in EVERY permission mode — including
-        # ``bypassPermissions`` — so connector-native MCP tools
-        # (``mcp__github__*``, ``mcp__atlassian__*``) that execute inside
-        # the CLI subprocess are evaluated against Omnigent TOOL_CALL
-        # policy before they run, instead of bypassing policy entirely.
-        #
-        # The gate is no-friction when nothing matches: a policy ALLOW /
-        # no-match returns allow with no human prompt, so
-        # ``bypassPermissions`` ergonomics are preserved for un-gated
-        # tools. The human-consent elicitation half of the gate still only
-        # fires for non-bypass modes (see ``_can_use_tool_gate``).
-        #
-        # Install whenever EITHER a policy evaluator OR an elicitation
-        # handler is wired. Previously this only installed for non-bypass
-        # modes, which is why default ``claude-sdk`` sessions (which
-        # default to ``bypassPermissions``) had no per-tool TOOL_CALL gate.
+        # Install the unified can_use_tool gate whenever a policy evaluator or
+        # an elicitation handler is wired. CORAL(S21): Coral specs gate policy
+        # in PreToolUse instead, and refuse the turn when that hook cannot run.
+        policy_hooked = self._install_tool_call_policy_hook(sdk, options)
+        if self._tool_call_policy_hook and not policy_hooked:
+            yield ExecutorError(
+                message="Coral steps need a TOOL_CALL policy check, which is unavailable.",
+                code=CORAL_POLICY_HOOK_UNAVAILABLE_CODE,
+                retryable=False,
+            )
+            return
         if (
             getattr(self, "_policy_evaluator", None) is not None
             or self._elicitation_handler is not None
         ):
-            options.can_use_tool = self._can_use_tool_gate
+            options.can_use_tool = (
+                partial(self._can_use_tool_gate, policy_checked=True)
+                if policy_hooked
+                else self._can_use_tool_gate
+            )
 
         self._install_subagent_router_hook(sdk, options, model)
         self._install_framework_context_hook(sdk, options, session_key)

@@ -1,0 +1,11 @@
+spec_version: 1
+description: Coral orchestrator. Plans the step it is given and reports the plan.
+executor:
+  type: omnigent
+  config:
+    harness: claude-sdk
+    permission_mode: bypassPermissions
+instructions: >-
+  You are a Coral orchestrator step. Read the brief you are given, decide what
+  the next steps need, and return that plan as your report. Coral starts every
+  other step itself, so you never start agents or sessions.

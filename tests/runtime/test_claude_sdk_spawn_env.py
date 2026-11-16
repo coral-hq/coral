@@ -281,3 +281,36 @@ def test_ucode_state_with_model_is_not_overridden_by_default(
     env = _build_claude_sdk_spawn_env(spec, workdir=None)
 
     assert env["HARNESS_CLAUDE_SDK_MODEL"] == "databricks-claude-sonnet-4-6"
+
+
+@pytest.mark.parametrize("params", [{"coral": {"run_id": "r1"}}, {"coral": None}])
+def test_coral_spec_requires_an_api_credential(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, params: dict[str, object]
+) -> None:
+    """CORAL(S13, S21): a Coral spec refuses subscription auth and hooks tool policy."""
+    from tests._helpers.providers import isolate_provider_resolution
+
+    isolate_provider_resolution(monkeypatch, tmp_path / "config")
+    spec = _make_spec(model="claude-sonnet-4-6")
+    spec.params.update(params)
+
+    env = _build_claude_sdk_spawn_env(spec, workdir=None)
+
+    assert env["HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL"] == "1"
+    assert env["HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK"] == "1"
+
+
+def test_non_coral_spec_leaves_the_api_credential_optional(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """CORAL(S13, S21): other specs keep the subscription fallback and upstream policy gating."""
+    from tests._helpers.providers import isolate_provider_resolution
+
+    isolate_provider_resolution(monkeypatch, tmp_path / "config")
+    spec = _make_spec(model="claude-sonnet-4-6")
+    spec.params["team"] = "coral"
+
+    env = _build_claude_sdk_spawn_env(spec, workdir=None)
+
+    assert "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL" not in env
+    assert "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK" not in env

@@ -1,0 +1,59 @@
+agent_session_sharing: none
+async: false
+description: Coral reviewer. Reads the workspace and reports findings without changing
+  files.
+executor:
+  auth:
+    name: p
+    type: provider
+  config:
+    harness: claude-sdk
+    permission_mode: bypassPermissions
+  model: m
+  type: omnigent
+guardrails:
+  policies:
+    deny_vendor_ask:
+      function:
+        path: coral.omni.policies.hygiene.deny_vendor_ask
+      'on':
+      - tool_call
+      type: function
+    read_only_os:
+      function:
+        path: omnigent.policies.builtins.orchestration.read_only_os
+      'on':
+      - tool_call
+      type: function
+instructions: 'You are a Coral reviewer step. Read the workspace with your sys_os_*
+  tools, check the work against your brief, and report findings with file and line
+  evidence. You cannot change files: describe each fix in your report instead.'
+name: coral__demo-flow__review__m0
+os_env:
+  cwd: .
+  sandbox:
+    write_paths: []
+  type: caller_process
+params:
+  coral:
+    generated:
+      generator_version: 1
+      node_id: review
+      roster_index: 0
+      seed:
+        name: reviewer
+        sha256: 5b9ebd23c7ec567be8b635b1c28e909364884fa6f3cd7e1be420fbb5a94164d9
+      stance: reviewer
+      workflow_id: demo.flow
+skills: none
+spawn: false
+spec_version: 1
+timers: false
+tool_groups:
+  agent_discovery: false
+  browser: false
+  comments: false
+  policies: false
+  scheduled_tasks: false
+tools:
+  agents: []

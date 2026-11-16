@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -42,6 +43,7 @@ from omnigent.inner.native_attachments import (
     CAP_FILESYSTEM_ATTACHMENT_DELIVERY,
     CAP_FILESYSTEM_ATTACHMENTS,
 )
+from omnigent.inner.sandbox import _default_sandbox_for_platform
 from omnigent.scheduled_context import parse_scheduled_run
 from omnigent.util.json_types import JsonObject as _JsonObject
 from omnigent.util.tunnel_limits import RUNNER_TUNNEL_MAX_MESSAGE_BYTES
@@ -107,6 +109,23 @@ HOST_CAPABILITIES: list[str] = [
     CAP_HARNESS_ACCOUNTS,
     CAP_HARNESS_LOGIN,
 ]
+
+# CORAL(S102): ``os_sandbox:<backend>`` names the OS sandbox this host can run.
+CAP_OS_SANDBOX_PREFIX = "os_sandbox:"
+_OS_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec"}
+
+
+def host_capabilities() -> list[str]:
+    """CORAL(S102): ``HOST_CAPABILITIES`` plus ``os_sandbox:<backend>``, or ``os_sandbox:none``."""
+    try:
+        backend = _default_sandbox_for_platform().type
+    except OSError:
+        backend = "none"
+    binary = _OS_SANDBOX_BINARIES.get(backend)
+    if binary is None or shutil.which(binary) is None:
+        backend = "none"
+    return [*HOST_CAPABILITIES, f"{CAP_OS_SANDBOX_PREFIX}{backend}"]
+
 
 # Server capabilities, advertised on the tunnel's WebSocket upgrade response (the
 # server sends no frame before the host's hello). Older servers send no header.

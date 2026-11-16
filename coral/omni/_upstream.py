@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+# omnigent/runtime/workflow.py: claude-sdk CLI env, used by coral/omni/server/preflight.py.
+from omnigent.runtime.workflow import _build_claude_sdk_spawn_env
+
 # Host worktree proxies, used by coral/omni/server/worktrees.py.
 from omnigent.server.routes._host_worktree import (
     # omnigent/server/routes/_host_worktree.py: the host could not be reached.
@@ -29,6 +34,15 @@ __all__ = [
     "WorktreeHostUnavailableError",
     "WorktreeProxyError",
     "_ask_host_stat",
+    "_build_claude_sdk_spawn_env",
+    "_tar_gz_dir",
     "create_worktree_on_host",
     "list_worktrees_on_host",
 ]
+
+
+def _tar_gz_dir(bundle_dir: Path) -> bytes:
+    """Pack *bundle_dir* with the server's tarball packer, imported on first use."""
+    from omnigent.server.app import _tar_gz_dir as server_tar_gz_dir
+
+    return server_tar_gz_dir(bundle_dir)
