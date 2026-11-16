@@ -129,12 +129,17 @@ def mock_only_env(
     return changes
 
 
-def make_executor(workspace: Path, *, model: str, permission_mode: str) -> ClaudeSDKExecutor:
+def make_executor(
+    workspace: Path, *, model: str, permission_mode: str, coral: bool = False
+) -> ClaudeSDKExecutor:
+    """The executor the harness builds; ``coral`` sets the flags a ``params.coral`` spec sets."""
     return ClaudeSDKExecutor(
         cwd=str(workspace),
         model=model,
         permission_mode=permission_mode,
         api_key_helper=MOCK_API_KEY_HELPER,
+        require_api_credential=coral,
+        tool_call_policy_hook=coral,
     )
 
 
@@ -202,6 +207,7 @@ async def run_probe_case(
     policy_evaluator: Callable[[str, dict], Awaitable[object]] | None = None,
     extra_queues: tuple[dict[str, Any], ...] = (),
     extra_env: dict[str, str | None] | None = None,
+    coral: bool = False,
 ) -> dict[str, Any]:
     """One turn in a fresh temp dir, mock and egress recorder; returns what was observed.
 
@@ -220,6 +226,7 @@ async def run_probe_case(
                 policy_evaluator=policy_evaluator,
                 extra_queues=extra_queues,
                 extra_env=extra_env or {},
+                coral=coral,
             )
     finally:
         os.environ.clear()
@@ -237,6 +244,7 @@ async def _run_probe_turn(
     policy_evaluator: Callable[[str, dict], Awaitable[object]] | None,
     extra_queues: tuple[dict[str, Any], ...],
     extra_env: dict[str, str | None],
+    coral: bool,
 ) -> dict[str, Any]:
     token = f"PROBE-{uuid.uuid4().hex[:8]}"
     call_id = f"toolu_{token.lower().replace('-', '_')}"
@@ -257,7 +265,9 @@ async def _run_probe_turn(
         )
         apply_env(changes, os.environ)
         apply_env(extra_env, os.environ)
-        executor = make_executor(workspace, model=model, permission_mode=permission_mode)
+        executor = make_executor(
+            workspace, model=model, permission_mode=permission_mode, coral=coral
+        )
         if policy_evaluator is not None:
             executor._policy_evaluator = policy_evaluator  # type: ignore[attr-defined]
         events: list = []

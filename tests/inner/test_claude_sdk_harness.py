@@ -495,3 +495,30 @@ def test_bundle_dir_unset_passes_none(
 
     assert captured["bundle_dir"] is None
     assert captured["agent_name"] is None
+
+
+@pytest.mark.parametrize(
+    ("env_name", "kwarg"),
+    [
+        ("HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL", "require_api_credential"),
+        ("HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK", "tool_call_policy_hook"),
+    ],
+)
+@pytest.mark.parametrize(("value", "expected"), [("1", True), ("", False), (None, False)])
+def test_coral_credential_and_policy_flags_thread_through(
+    monkeypatch: pytest.MonkeyPatch, env_name: str, kwarg: str, value: str | None, expected: bool
+) -> None:
+    """CORAL(S13, S21): the Coral flags reach the executor."""
+    if value is None:
+        monkeypatch.delenv(env_name, raising=False)
+    else:
+        monkeypatch.setenv(env_name, value)
+    captured: dict[str, Any] = {}
+
+    def _fake_init(self: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    with patch("omnigent.inner.claude_sdk_harness.ClaudeSDKExecutor.__init__", _fake_init):
+        claude_sdk_harness._build_claude_sdk_executor()
+
+    assert captured[kwarg] is expected

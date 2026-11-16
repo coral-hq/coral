@@ -1,4 +1,4 @@
-"""Spike 1: does ``_can_use_tool_gate`` enforce a TOOL_CALL DENY on a connector MCP tool?
+"""Spike 1: does a Coral claude-sdk session enforce a TOOL_CALL DENY on a connector MCP tool?
 
 Run from the repository root: ``uv run --no-sync python docs/coral/decisions/probes/spike_01.py``.
 """
@@ -13,7 +13,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from tests.e2e._harness_probes import cli_unavailable_reason
-from tests.e2e.coral._claude_sdk_kit import cli_versions, run_probe_case
+from tests.e2e.coral._claude_sdk_kit import cli_versions, probe_tool, run_probe_case
 
 RERUN = "uv run --no-sync python docs/coral/decisions/probes/spike_01.py --model {model}"
 # The two prompts Claude Code's auto-mode classifier sends through the same base URL.
@@ -33,10 +33,11 @@ CASES = (
 )
 
 
-def _deny_tool_calls(phases: list[tuple[str, str | None]]):
+# Deny only the probe tool: denying ToolSearch too would hide the tool before it is called.
+def _deny_probe_tool_calls(phases: list[tuple[str, str | None]]):
     async def evaluate(phase: str, payload: dict) -> SimpleNamespace:
         phases.append((phase, payload.get("name")))
-        denied = phase == "PHASE_TOOL_CALL"
+        denied = phase == "PHASE_TOOL_CALL" and payload.get("name") == probe_tool("touch")
         action = "POLICY_ACTION_DENY" if denied else "POLICY_ACTION_ALLOW"
         return SimpleNamespace(action=action, reason="probe deny")
 
@@ -53,13 +54,14 @@ async def _probe(model: str) -> dict:
             turn_timeout_s=180,
             tool="touch",
             arguments={"note": "spike-01"},
-            policy_evaluator=_deny_tool_calls(phases),
+            policy_evaluator=_deny_probe_tool_calls(phases),
             extra_queues=classifier_queues,
+            coral=True,
         )
         cases.append(
             {
                 "case": label,
-                "gate_consulted": any(phase == "PHASE_TOOL_CALL" for phase, _ in phases),
+                "gate_consulted": ("PHASE_TOOL_CALL", probe_tool("touch")) in phases,
                 "tool_ran": "touched spike-01" in observed["marker"],
                 "policy_phases": phases,
                 **observed,

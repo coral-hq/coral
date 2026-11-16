@@ -1,0 +1,24 @@
+spec_version: 1
+description: Coral reviewer. Reads the workspace and reports findings without changing files.
+executor:
+  type: omnigent
+  config:
+    harness: claude-sdk
+    permission_mode: bypassPermissions
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    write_paths: []
+guardrails:
+  policies:
+    read_only_os:
+      type: function
+      "on":
+        - tool_call
+      function:
+        path: omnigent.policies.builtins.orchestration.read_only_os
+instructions: >-
+  You are a Coral reviewer step. Read the workspace with your sys_os_* tools,
+  check the work against your brief, and report findings with file and line
+  evidence. You cannot change files: describe each fix in your report instead.

@@ -2,6 +2,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import type { Agent } from "./useAgents";
 import { authenticatedFetch } from "@/lib/identity";
 import { apiErrorFromResponse } from "@/lib/sessionsApi";
+import { isEngineAgentName } from "@/lib/engineAgents";
 import { buildAgentBundle, type AgentBundleInput } from "@/lib/agentBundle";
 import {
   getAgentConfig,
@@ -40,7 +41,9 @@ export function useCustomAgents(scope: "server" | "user", enabled: boolean) {
       if (pageParam) params.set("after", pageParam);
       const res = await authenticatedFetch(`/v1/agents?${params}`, { signal });
       if (!res.ok) throw await apiErrorFromResponse(res);
-      return res.json();
+      const page: AgentPage = await res.json();
+      // CORAL(S54): engine step agents are not user-managed
+      return { ...page, data: page.data.filter((agent) => !isEngineAgentName(agent.name)) };
     },
     getNextPageParam: (page) => (page.has_more ? page.last_id : undefined),
     enabled,

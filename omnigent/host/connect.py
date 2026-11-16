@@ -73,7 +73,6 @@ from omnigent.host import workspace_ops as _workspace_ops  # CORAL(S40)
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
-    HOST_CAPABILITIES,
     LAUNCH_HANDLER_FAILED_ERROR_CODE,
     RUNNER_LOG_TAIL_HEADING,
     SERVER_CAPABILITIES_HEADER,
@@ -145,6 +144,7 @@ from omnigent.host.frames import (
     encode_host_frame,
     encode_import_local_session_frames,
     frame_for_server,
+    host_capabilities,
     parse_server_capabilities,
     workspace_missing_message,
 )
@@ -5640,7 +5640,7 @@ class HostProcess:
             interactive_shells=self._interactive_shells,
             telemetry_opt_out=_tel_opt_out,
             installation_id=_tel_install_id,
-            capabilities=list(HOST_CAPABILITIES),
+            capabilities=host_capabilities(),  # CORAL(S102): adds the OS sandbox token
             connection_id=connection_id,
         )
         try:

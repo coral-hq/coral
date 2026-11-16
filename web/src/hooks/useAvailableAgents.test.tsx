@@ -16,6 +16,7 @@ import {
   useAvailableAgents,
   prefetchAvailableAgentDetails,
 } from "./useAvailableAgents";
+import { useCustomAgents } from "./useCustomAgents";
 
 // The template catalog and sidebar Mine cache load through authenticatedFetch.
 // URL-keyed stubs exercise the real fetch and mapping path.
@@ -1745,5 +1746,82 @@ describe("useAgentCatalog", () => {
     act(() => result.current.retry());
     await waitFor(() => expect(result.current.data?.map((a) => a.name)).toEqual(["polly"]));
     expect(result.current.isError).toBe(false);
+  });
+});
+
+// CORAL(S54): engine step agents never reach a picker or the Custom agents list.
+describe("coral__ engine agents", () => {
+  const USER_AGENTS_URL = "/v1/agents?scope=user&limit=50";
+
+  it("drops engine rows from the catalog, the caller's agents and session discovery", async () => {
+    routeFetch({
+      [BUILTINS_URL]: mockResponse({
+        data: [
+          { id: "ag_anchor", name: "coral__anchor", harness: "claude-sdk", builtin: true },
+          { id: "ag_upper", name: "Coral__x", harness: "claude-sdk", builtin: true },
+          { id: "ag_polly", name: "polly", harness: "claude-sdk", builtin: true },
+        ],
+        has_more: false,
+      }),
+      [USER_AGENTS_URL]: mockResponse({
+        data: [
+          { id: "ag_step", name: "coral__anchor", builtin: false, created_at: 9 },
+          { id: "ag_vega", name: "vega", builtin: false, created_at: 8 },
+        ],
+        has_more: false,
+      }),
+      [MINE_URL]: sessionResponse({
+        object: "list",
+        data: [
+          { id: "ag_run", name: "coral__demo-flow__review__m0" },
+          { id: "ag_doc", name: "doc-writer" },
+        ],
+        has_more: false,
+      }),
+    });
+
+    const { result } = renderHook(() => ({ ...useAvailableAgents() }), {
+      wrapper: ({ children }: { children: ReactNode }) =>
+        wrapper({
+          children: (
+            <CapabilitiesProvider info={{ ...FALLBACK_SERVER_INFO, agent_install: true }}>
+              {children}
+            </CapabilitiesProvider>
+          ),
+        }),
+    });
+
+    await waitFor(() => {
+      expect(result.current.isPlaceholderData).toBe(false);
+      expect(result.current.data?.map((a) => a.id).toSorted()).toEqual([
+        "ag_doc",
+        "ag_polly",
+        "ag_vega",
+      ]);
+    });
+  });
+
+  it("drops engine rows from the Custom agents list", async () => {
+    routeFetch({
+      "/v1/agents?limit=50&scope=user": mockResponse({
+        data: [
+          { id: "ag_step", name: "coral__anchor" },
+          { id: "ag_vega", name: "vega" },
+        ],
+        has_more: false,
+        last_id: "ag_vega",
+      }),
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const { result } = renderHook(() => useCustomAgents("user", true), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+
+    await waitFor(() => {
+      expect(result.current.data?.pages[0]?.data.map((a) => a.id)).toEqual(["ag_vega"]);
+    });
   });
 });

@@ -128,6 +128,10 @@ _ENV_GATEWAY_AUTH_REFRESH_INTERVAL_MS = "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_REFRESH
 # executor strips ANTHROPIC_API_KEY before connecting to avoid subscription
 # auth being bypassed).
 _ENV_API_KEY_HELPER = "HARNESS_CLAUDE_SDK_API_KEY_HELPER"
+# CORAL(S13): set for Coral specs; the executor refuses turns without an API credential
+_ENV_REQUIRE_API_CREDENTIAL = "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL"
+# CORAL(S21): set for Coral specs; gates every tool call on policy in every permission mode
+_ENV_TOOL_CALL_POLICY_HOOK = "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK"
 
 # Default permission mode for the Claude SDK. ``"auto"`` auto-approves
 # tool calls with background safety checks that verify actions align
@@ -301,6 +305,9 @@ def _build_claude_sdk_executor() -> Executor:
         agent_name=agent_name,
         skills_filter=_resolve_skills_filter(),
         api_key_helper=os.environ.get(_ENV_API_KEY_HELPER) or None,
+        # CORAL(S13, S21)
+        require_api_credential=os.environ.get(_ENV_REQUIRE_API_CREDENTIAL) == "1",
+        tool_call_policy_hook=os.environ.get(_ENV_TOOL_CALL_POLICY_HOOK) == "1",
     )
 
 

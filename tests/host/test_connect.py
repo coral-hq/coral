@@ -101,6 +101,7 @@ from omnigent.host.frames import (
     HostStoreSecretResultFrame,
     decode_host_frame,
     encode_host_frame,
+    host_capabilities,
 )
 from omnigent.host.git_worktree import CreatedWorktree, WorktreeInfo
 from omnigent.host.identity import HostIdentity
@@ -4493,6 +4494,74 @@ async def test_handle_create_worktree_uses_server_budget_or_legacy_bound(
     assert captured["timeout_s"] == expected_timeout_s
     # The server outwaits the budget only for hosts that advertise honouring it.
     assert CAP_WORKTREE_CREATE_BUDGET in HOST_CAPABILITIES
+
+
+@pytest.mark.parametrize(
+    ("platform", "binary_on_path", "expected_token"),
+    [
+        ("linux", "bwrap", "os_sandbox:linux_bwrap"),
+        ("linux", None, "os_sandbox:none"),
+        ("darwin", "sandbox-exec", "os_sandbox:darwin_seatbelt"),
+        ("darwin", None, "os_sandbox:none"),
+        ("darwin", "bwrap", "os_sandbox:none"),
+        ("sunos5", "bwrap", "os_sandbox:none"),
+    ],
+)
+def test_host_capabilities_always_advertise_the_os_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    binary_on_path: str | None,
+    expected_token: str,
+) -> None:
+    """CORAL(S102): the hello names the OS sandbox, or ``none`` when its binary is missing."""
+    base = list(HOST_CAPABILITIES)
+    monkeypatch.setattr("omnigent.inner.sandbox.sys.platform", platform)
+    monkeypatch.setattr(
+        "omnigent.host.frames.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name == binary_on_path else None,
+    )
+
+    capabilities = host_capabilities()
+
+    assert capabilities == [*base, expected_token]
+    assert base == HOST_CAPABILITIES
+
+
+def test_hello_with_sandbox_tokens_decodes_where_tokens_are_unknown() -> None:
+    """CORAL(S102): a server that knows no sandbox token still accepts the hello."""
+    hello = HostHelloFrame(
+        version="0.22.0",
+        frame_protocol_version=1,
+        name="laptop",
+        capabilities=[*HOST_CAPABILITIES, "os_sandbox:none", "os_sandbox:future_backend"],
+    )
+
+    decoded = decode_host_frame(encode_host_frame(hello))
+
+    assert isinstance(decoded, HostHelloFrame)
+    assert decoded.capabilities == hello.capabilities
+
+
+async def test_hello_carries_the_os_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CORAL(S102): the host sends ``host_capabilities()`` in its hello."""
+    monkeypatch.setattr("omnigent.inner.sandbox.sys.platform", "linux")
+    monkeypatch.setattr("omnigent.host.frames.shutil.which", lambda name: f"/usr/bin/{name}")
+    host = _make_host_process()
+
+    async def _discover() -> None:
+        host._capabilities_initialized = True
+
+    monkeypatch.setattr(host, "_initialize_capabilities", _discover)
+    tunnel = _BlockingTunnel()
+    serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
+    try:
+        await asyncio.wait_for(tunnel.first_send.wait(), timeout=1.0)
+    finally:
+        await _cancel(serve_task)
+
+    hello = decode_host_frame(tunnel.sent[0])
+    assert isinstance(hello, HostHelloFrame)
+    assert hello.capabilities == [*HOST_CAPABILITIES, "os_sandbox:linux_bwrap"]
 
 
 @pytest.mark.parametrize(

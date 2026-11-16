@@ -1,0 +1,17 @@
+spec_version: 1
+description: Coral implementer. Changes files in the run's workspace to meet its brief.
+executor:
+  type: omnigent
+  config:
+    harness: claude-sdk
+    permission_mode: bypassPermissions
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    write_paths:
+      - .
+instructions: >-
+  You are a Coral implementer step. Make the change your brief describes in the
+  workspace with your sys_os_* tools, run the checks it names, and report what
+  you changed and how you verified it.

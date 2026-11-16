@@ -4,6 +4,8 @@ import { useSidebarData } from "./useSidebarData";
 import { authenticatedFetch } from "@/lib/identity";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { agentRootName } from "@/lib/forkHarness";
+// CORAL(S54): drop engine step agents from every picker source
+import { isEngineAgentName } from "@/lib/engineAgents";
 import { capitalizeAgentName, useAcpHarnessIds, useHarnessLabels } from "@/lib/agentLabels";
 import {
   nativeCodingAgentForAvailableAgent,
@@ -173,7 +175,7 @@ export async function fetchAgentCatalog(): Promise<AgentCatalog> {
     const res = await authenticatedFetch(url);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const body = (await res.json()) as BuiltinAgentsListWire;
-    rows.push(...body.data);
+    rows.push(...body.data.filter((row) => !isEngineAgentName(row.name)));
     for (const name of body.suppressed_agent_names ?? []) suppressedNames.add(name);
     after = body.has_more === true && body.last_id ? body.last_id : null;
   } while (after != null);
@@ -218,6 +220,7 @@ export async function fetchUserAgents(): Promise<AvailableAgent[]> {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const body = (await res.json()) as BuiltinAgentsListWire;
     for (const row of body.data) {
+      if (isEngineAgentName(row.name)) continue;
       const name = agentRootName(row.name);
       if (names.size >= 50 && !names.has(name)) continue;
       names.add(name);
@@ -249,6 +252,7 @@ export function useSessionAgents(enabled = true) {
     const agents = new Map<string, AvailableAgent>();
     for (const row of mine.data.pages.flatMap((page) => page.data).slice(0, 30)) {
       if (!row.agent_id || !row.agent_name || agents.has(row.agent_id)) continue;
+      if (isEngineAgentName(row.agent_name)) continue;
       agents.set(row.agent_id, {
         id: row.agent_id,
         name: row.agent_name,
