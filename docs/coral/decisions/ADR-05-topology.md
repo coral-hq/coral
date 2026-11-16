@@ -228,17 +228,17 @@ Rerun from the repository root (about two and a half minutes):
 uv run --no-sync python docs/coral/decisions/probes/spk02_live_topology.py
 ```
 
-The run recorded here is from 2026-11-16 UTC, on macOS, on commit `5e9a25aab`
+The run recorded here is from 2026-11-16 UTC, on macOS, on commit `24e710dd9`
 with a clean working tree (`base_commit_dirty: false`). It exited with code 0
-after 137 s and left no stray processes. Earlier runs during development also
-passed. Verdict:
+after 136 s and left no stray processes. Earlier runs during development also
+passed. Verdict, as printed:
 
 ```json
 {
   "probe": "spk02_live_topology",
   "verdict": "pass",
   "date": "2026-11-16",
-  "base_commit": "5e9a25aab",
+  "base_commit": "24e710dd9",
   "base_commit_dirty": false,
   "platform": "Darwin",
   "python": "3.12.12",
@@ -268,7 +268,7 @@ passed. Verdict:
       "labelled": 0
     }
   },
-  "duration_s": 137.1,
+  "duration_s": 135.7,
   "error": null
 }
 ```
