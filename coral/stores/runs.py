@@ -840,7 +840,7 @@ class SqlAlchemyCoralRunStore:
                     stmt = (
                         mysql_insert(WorkRow)
                         .values(**values)
-                        .on_duplicate_key_update(id=values["id"])
+                        .on_duplicate_key_update(workspace_id=WorkRow.workspace_id)
                     )
                 elif dialect == "sqlite":
                     stmt = sqlite_insert(WorkRow).values(**values).on_conflict_do_nothing()
