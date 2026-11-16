@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 import time
@@ -94,6 +95,7 @@ from .executor import (
 )
 from .native_attachments import framework_notices, unresolved_attachment_marker
 from .sandbox import (
+    _resolve_sandbox_type,
     create_exec_launcher,
     get_backend,
     resolve_sandbox,
@@ -119,6 +121,16 @@ _CLAUDE_CODE_MIN_THINKING_BUDGET_TOKENS = 1024
 # gateway env (not the generic-provider gateway env) must carry it.
 _ANTHROPIC_CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 _DATABRICKS_CODING_AGENT_HEADER = "x-databricks-use-coding-agent-mode: true"
+
+# CORAL(S13): refusals for Coral specs that lack an API credential or an OS sandbox
+CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE = "coral_subscription_auth_refused"
+CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE = (
+    "Workflows with an orchestrator need an Anthropic API key "
+    "(Console, plan-linked Console, or cloud provider)."
+)
+CORAL_SANDBOX_UNAVAILABLE_CODE = "coral_sandbox_unavailable"
+_CORAL_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec"}
+_SUBSCRIPTION_TOKEN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
 
 CLAUDE_AUTH_FAILED_CODE = "claude_sdk_auth_failed"
 CLAUDE_AUTH_FAILED_TITLE = "Claude Code could not authenticate"
@@ -1806,6 +1818,7 @@ class ClaudeSDKExecutor(Executor):
         skills_filter: str | list[str] = "all",
         api_key_helper: str | None = None,
         system_prompt_preset: str | None = None,
+        require_api_credential: bool = False,
     ) -> None:
         """Create a ClaudeSDKExecutor.
 
@@ -1881,6 +1894,9 @@ class ClaudeSDKExecutor(Executor):
                 Injected into ``_extra_env`` as
                 :data:`_CLAUDE_API_KEY_HELPER_ENV_KEY` so it reaches
                 the SDK's ``settings.apiKeyHelper`` option at turn time.
+            require_api_credential: Refuse turns unless *api_key_helper* or
+                *gateway* is set and any *os_env* has a bwrap or seatbelt
+                sandbox; strip inherited subscription tokens from the CLI.
         """
         # Fail loud: a Databricks model requires the gateway transport.
         if not gateway and model is not None and is_databricks_model_id(model):
@@ -1894,6 +1910,8 @@ class ClaudeSDKExecutor(Executor):
         if system_prompt_preset not in (None, "claude_code"):
             raise ValueError("system_prompt_preset must be 'claude_code' or unset")
         self._system_prompt_preset = system_prompt_preset
+        # CORAL(S13): set for Coral specs
+        self._require_api_credential = require_api_credential
         self._cwd = cwd
         self._os_env_spec = os_env
         self._os_env = os_env is not None
@@ -2117,6 +2135,10 @@ class ClaudeSDKExecutor(Executor):
                 with ExitStack() as env_stack:
                     env_stack.enter_context(_unset_env_var("CLAUDECODE"))
                     env_stack.enter_context(_unset_env_var("ANTHROPIC_API_KEY"))
+                    # CORAL(S13): no subscription token reaches a Coral spec's CLI
+                    if self._require_api_credential:
+                        for name in _SUBSCRIPTION_TOKEN_ENV:
+                            env_stack.enter_context(_unset_env_var(name))
                     if isinstance(sdk_env, dict) and "CLAUDE_CODE_USE_GATEWAY" in sdk_env:
                         env_stack.enter_context(
                             _unset_env_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
@@ -2861,6 +2883,31 @@ class ClaudeSDKExecutor(Executor):
             return PermissionResultAllow()
         return await self._can_use_tool_for_permission(tool_name, tool_input, perm_ctx)
 
+    def _coral_refusal(self, api_key_helper: str | None) -> ExecutorError | None:
+        """CORAL(S13): why a Coral spec must not start, or ``None`` to proceed."""
+        if not self._require_api_credential:
+            return None
+        if not (api_key_helper or self._gateway):
+            return ExecutorError(
+                message=CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE,
+                code=CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE,
+                title="Anthropic API key needed",
+                retryable=False,
+            )
+        if self._os_env_spec is None:
+            return None
+        sandbox = self._os_env_spec.sandbox
+        sandbox_type = _resolve_sandbox_type(sandbox.type if sandbox is not None else None)
+        binary = _CORAL_SANDBOX_BINARIES.get(sandbox_type)
+        if binary is not None and shutil.which(binary) is not None:
+            return None
+        missing = f"install {binary}" if binary else f"{sandbox_type!r} does not isolate files"
+        return ExecutorError(
+            message=f"Steps that read or change files need an OS sandbox: {missing}.",
+            code=CORAL_SANDBOX_UNAVAILABLE_CODE,
+            retryable=False,
+        )
+
     async def run_turn(
         self,
         messages: list[Message],
@@ -2995,6 +3042,11 @@ class ClaudeSDKExecutor(Executor):
         env = dict(self._extra_env)
         env["CLAUDE_AGENT_SDK_CLIENT_APP"] = "omnigent"
         api_key_helper = env.pop(_CLAUDE_API_KEY_HELPER_ENV_KEY, None)
+        # CORAL(S13): refuse a Coral spec before any CLI process starts
+        refusal = self._coral_refusal(api_key_helper)
+        if refusal is not None:
+            yield refusal
+            return
         # Teach Claude Code this gateway's spellings so no model surface routes
         # to an id the gateway rejects: pins for the family aliases, rewrites
         # for the canonical ids the CLI names itself (the refusal-fallback).
@@ -3061,6 +3113,10 @@ class ClaudeSDKExecutor(Executor):
         if resolved.setting_sources == [] and not self._gateway:
             # The CLI then skips the user settings env, which may hold the only provider endpoint.
             env = {**_claude_user_settings_env(self._cwd), **env}
+        # CORAL(S13): user settings can carry a subscription token
+        if self._require_api_credential:
+            for name in _SUBSCRIPTION_TOKEN_ENV:
+                env.pop(name, None)
         max_output_tokens = cfg.extra.get("max_tokens")
         if max_output_tokens is not None:
             max_output_tokens = int(max_output_tokens)

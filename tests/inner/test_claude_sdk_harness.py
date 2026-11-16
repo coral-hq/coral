@@ -495,3 +495,23 @@ def test_bundle_dir_unset_passes_none(
 
     assert captured["bundle_dir"] is None
     assert captured["agent_name"] is None
+
+
+@pytest.mark.parametrize(("value", "expected"), [("1", True), ("", False), (None, False)])
+def test_require_api_credential_env_var_threads_through(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool
+) -> None:
+    """CORAL(S13): the Coral credential flag reaches the executor."""
+    if value is None:
+        monkeypatch.delenv("HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL", raising=False)
+    else:
+        monkeypatch.setenv("HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL", value)
+    captured: dict[str, Any] = {}
+
+    def _fake_init(self: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    with patch("omnigent.inner.claude_sdk_harness.ClaudeSDKExecutor.__init__", _fake_init):
+        claude_sdk_harness._build_claude_sdk_executor()
+
+    assert captured["require_api_credential"] is expected

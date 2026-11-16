@@ -1403,6 +1403,9 @@ def _build_claude_sdk_spawn_env(
             model is not None and is_databricks_model_id(model)
         ):
             env["HARNESS_CLAUDE_SDK_GATEWAY"] = "true"
+    # CORAL(S13): Coral specs must run on an API key or provider, never a subscription login
+    if "coral" in spec.params:
+        env["HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL"] = "1"
     _add_claude_sdk_skills_env(env, spec, workdir)
     # OS env: enabling this in the inner ClaudeSDKExecutor is
     # what gates the SDK-native ``Bash/Read/Edit/Write/Glob/Grep``

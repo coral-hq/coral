@@ -6558,3 +6558,158 @@ async def test_turn_options_expose_ask_user_question_only_with_its_hook(
     matchers = [m.matcher for m in (options.hooks or {}).get("PreToolUse", [])]
     assert ("AskUserQuestion" in options.tools) is bridge_wired
     assert ("AskUserQuestion" in matchers) is bridge_wired
+
+
+# CORAL(S13): Coral specs refuse subscription auth and missing OS sandboxes before the CLI starts.
+
+
+def _coral_executor(monkeypatch, **kwargs):
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor._find_system_claude", lambda: None)
+    return ClaudeSDKExecutor(**kwargs)
+
+
+async def _turn_with_recording_sdk(executor):
+    """Run one turn on a fake SDK; return its events, the SDK and each client's spawn env."""
+    fake_sdk = _make_recovery_fake_sdk()
+    spawn_envs = []
+
+    class _RecordingClient(fake_sdk.ClaudeSDKClient):
+        async def connect(self):
+            spawn_envs.append({**os.environ, **(getattr(self.options, "env", None) or {})})
+
+    fake_sdk.ClaudeSDKClient = _RecordingClient
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        events = [e async for e in executor.run_turn([{"role": "user", "content": "hi"}], [], "")]
+    return events, fake_sdk, spawn_envs
+
+
+async def test_coral_spec_without_api_credential_is_refused_before_the_cli(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import (
+        CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE,
+        CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE,
+    )
+
+    executor = _coral_executor(monkeypatch, require_api_credential=True)
+
+    events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert len(errors) == 1 and len(events) == 1
+    assert errors[0].code == CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE
+    assert errors[0].retryable is False
+    assert errors[0].message == CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE
+    assert "Claude Code" not in errors[0].message
+    assert fake_sdk.created_clients == []
+    assert spawn_envs == []
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        {"api_key_helper": "printf %s sk-ant-test"},
+        {
+            "gateway": True,
+            "gateway_host": "https://gateway.example",
+            "base_url_override": "https://gateway.example/anthropic",
+            "gateway_auth_command": "printf %s gateway-token",
+        },
+    ],
+    ids=["api-key-helper", "gateway"],
+)
+async def test_coral_spec_with_api_credential_reaches_the_cli(monkeypatch, credential):
+    executor = _coral_executor(monkeypatch, require_api_credential=True, **credential)
+    if credential.get("gateway"):
+        monkeypatch.setattr(
+            executor, "_apply_gateway_model_vocabulary", AsyncMock(return_value={})
+        )
+        monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
+
+    events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+
+    assert not [e for e in events if isinstance(e, ExecutorError)], events
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert len(fake_sdk.created_clients) == 1
+
+
+async def test_non_coral_spec_without_api_credential_keeps_subscription_auth(monkeypatch):
+    executor = _coral_executor(monkeypatch)
+
+    events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+
+    assert not [e for e in events if isinstance(e, ExecutorError)], events
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert len(fake_sdk.created_clients) == 1
+
+
+@pytest.mark.parametrize(("coral", "token_seen"), [(True, False), (False, True)])
+async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral, token_seen):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "inherited-oauth")
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env",
+        lambda cwd=None: {"ANTHROPIC_AUTH_TOKEN": "settings-token"},
+    )
+    executor = _coral_executor(
+        monkeypatch,
+        require_api_credential=coral,
+        api_key_helper="printf %s sk-ant-test",
+        skills_filter="none",
+    )
+
+    events, _, spawn_envs = await _turn_with_recording_sdk(executor)
+
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert len(spawn_envs) == 1
+    assert ("CLAUDE_CODE_OAUTH_TOKEN" in spawn_envs[0]) is token_seen
+    assert ("ANTHROPIC_AUTH_TOKEN" in spawn_envs[0]) is token_seen
+    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "inherited-oauth"
+
+
+@pytest.mark.parametrize(
+    ("sandbox_type", "binary_present"),
+    [(None, True), ("none", True), ("windows_jobobject", True), ("linux_bwrap", False)],
+    ids=["no-sandbox", "none", "windows-jobobject", "bwrap-missing"],
+)
+async def test_coral_spec_without_os_sandbox_is_refused(monkeypatch, sandbox_type, binary_present):
+    from omnigent.inner.claude_sdk_executor import CORAL_SANDBOX_UNAVAILABLE_CODE
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    sandbox = OSEnvSandboxSpec(type=sandbox_type) if sandbox_type is not None else None
+    executor = _coral_executor(
+        monkeypatch,
+        require_api_credential=True,
+        api_key_helper="printf %s sk-ant-test",
+        os_env=OSEnvSpec(cwd=str(Path.cwd()), sandbox=sandbox),
+    )
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.shutil.which",
+        lambda name: f"/usr/bin/{name}" if binary_present else None,
+    )
+
+    events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+
+    assert [e.code for e in events if isinstance(e, ExecutorError)] == [
+        CORAL_SANDBOX_UNAVAILABLE_CODE
+    ]
+    assert fake_sdk.created_clients == []
+
+
+@pytest.mark.parametrize("sandbox_type", ["linux_bwrap", "darwin_seatbelt"])
+async def test_coral_spec_with_os_sandbox_reaches_the_cli(monkeypatch, sandbox_type):
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    executor = _coral_executor(
+        monkeypatch,
+        require_api_credential=True,
+        api_key_helper="printf %s sk-ant-test",
+        os_env=OSEnvSpec(cwd=str(Path.cwd()), sandbox=OSEnvSandboxSpec(type=sandbox_type)),
+    )
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+
+    events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+
+    assert not [e for e in events if isinstance(e, ExecutorError)], events
+    assert len(fake_sdk.created_clients) == 1

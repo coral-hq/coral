@@ -1097,3 +1097,41 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S13
+    title: claude-sdk refuses Coral specs without an API credential or OS sandbox
+    owner: WS-HARNESS
+    status: landed
+    category: coral-specific
+    note: >-
+      `_build_claude_sdk_spawn_env` sets HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL=1
+      when `"coral" in spec.params`; the harness passes it to the executor as
+      `require_api_credential`. Under the flag, `run_turn` yields
+      `coral_subscription_auth_refused` before any CLI process starts unless an
+      apiKeyHelper or gateway is set, yields `coral_sandbox_unavailable` when a
+      configured os_env has no available bwrap or seatbelt sandbox (Windows
+      job objects isolate no files), and strips CLAUDE_CODE_OAUTH_TOKEN and
+      ANTHROPIC_AUTH_TOKEN from the CLI env. Non-Coral specs are unchanged.
+    files:
+      - omnigent/runtime/workflow.py
+      - omnigent/inner/claude_sdk_harness.py
+      - omnigent/inner/claude_sdk_executor.py
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/inner/test_claude_sdk_executor.py
+    tests:
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/inner/test_claude_sdk_executor.py
+    budget_lines: 40
+    budget_exception:
+      lines: 160
+      reason: >-
+        The executor carries both refusals and the token strip (about 55
+        lines, including the host-side sandbox refusal), and its test file
+        carries the refusal matrix with the non-Coral regression (about 160
+        lines).
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
