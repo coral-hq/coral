@@ -14,6 +14,10 @@ allowed_roots:
     new_files_only: false
   - path: tests/coral/
     new_files_only: false
+  - path: tests/stores/coral/
+    new_files_only: false
+  - path: tests/e2e/coral/
+    new_files_only: false
   - path: web/src/brand/
     new_files_only: false
   - path: .claude/skills/
