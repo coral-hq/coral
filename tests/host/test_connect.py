@@ -98,6 +98,7 @@ from omnigent.host.frames import (
     HostStoreSecretResultFrame,
     decode_host_frame,
     encode_host_frame,
+    host_capabilities,
 )
 from omnigent.host.git_worktree import CreatedWorktree
 from omnigent.host.identity import HostIdentity
@@ -4424,6 +4425,59 @@ async def test_handle_create_worktree_uses_server_budget_or_legacy_bound(
     assert captured["timeout_s"] == expected_timeout_s
     # The server outwaits the budget only for hosts that advertise honouring it.
     assert CAP_WORKTREE_CREATE_BUDGET in HOST_CAPABILITIES
+
+
+@pytest.mark.parametrize(
+    ("platform", "binary_on_path", "expected_token"),
+    [
+        ("linux", "bwrap", "os_sandbox:linux_bwrap"),
+        ("linux", None, None),
+        ("darwin", "sandbox-exec", "os_sandbox:darwin_seatbelt"),
+        ("darwin", None, None),
+        ("darwin", "bwrap", None),
+        ("sunos5", "bwrap", None),
+    ],
+)
+def test_host_capabilities_advertise_the_os_sandbox_only_with_its_binary(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    binary_on_path: str | None,
+    expected_token: str | None,
+) -> None:
+    """CORAL(S102): the hello names the OS sandbox only when its binary is installed."""
+    base = list(HOST_CAPABILITIES)
+    monkeypatch.setattr("omnigent.inner.sandbox.sys.platform", platform)
+    monkeypatch.setattr(
+        "omnigent.host.frames.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name == binary_on_path else None,
+    )
+
+    capabilities = host_capabilities()
+
+    assert capabilities == [*base, *([expected_token] if expected_token else [])]
+    assert base == HOST_CAPABILITIES
+
+
+async def test_hello_carries_the_os_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CORAL(S102): the host sends ``host_capabilities()`` in its hello."""
+    monkeypatch.setattr("omnigent.inner.sandbox.sys.platform", "linux")
+    monkeypatch.setattr("omnigent.host.frames.shutil.which", lambda name: f"/usr/bin/{name}")
+    host = _make_host_process()
+
+    async def _discover() -> None:
+        host._capabilities_initialized = True
+
+    monkeypatch.setattr(host, "_initialize_capabilities", _discover)
+    tunnel = _BlockingTunnel()
+    serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
+    try:
+        await asyncio.wait_for(tunnel.first_send.wait(), timeout=1.0)
+    finally:
+        await _cancel(serve_task)
+
+    hello = decode_host_frame(tunnel.sent[0])
+    assert isinstance(hello, HostHelloFrame)
+    assert hello.capabilities == [*HOST_CAPABILITIES, "os_sandbox:linux_bwrap"]
 
 
 @pytest.mark.parametrize(

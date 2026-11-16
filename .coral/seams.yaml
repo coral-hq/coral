@@ -1177,3 +1177,36 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
+
+  - id: S102
+    title: Host hello advertises its OS sandbox backend
+    owner: WS-HARNESS
+    status: landed
+    category: upstream-extension
+    note: >-
+      `omnigent/host/frames.py` adds `host_capabilities()`, which returns
+      HOST_CAPABILITIES plus `os_sandbox:<linux_bwrap|darwin_seatbelt>` when the
+      platform default sandbox's binary (bwrap or sandbox-exec) is on PATH.
+      `omnigent/host/connect.py` sends it in host.hello. HOST_CAPABILITIES is
+      unchanged. Coral's preflight reads the token through
+      `coral.validate.preflight.sandbox_from_capabilities`, which also accepts
+      WSP-01's richer `coral_host_sandbox:1:...` report, so the producer can
+      change without touching the engine. Offering it upstream waits on the
+      WSP-01 token decision.
+    files:
+      - omnigent/host/frames.py
+      - omnigent/host/connect.py
+      - tests/host/test_connect.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/coral/omni/test_preflight_facts.py
+    budget_lines: 40
+    budget_exception:
+      lines: 60
+      reason: >-
+        tests/host/test_connect.py carries the platform and binary matrix for
+        `host_capabilities()` plus a hello-frame test (about 55 lines).
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true
