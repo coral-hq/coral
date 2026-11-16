@@ -4,11 +4,11 @@ Tier rules (checked via AST inspection, including ``TYPE_CHECKING`` blocks,
 relative imports, and literal ``importlib.import_module(...)`` calls):
 
 * **pure**: ``coral.__init__``, ``coral.version``, ``coral.model``,
-  ``coral.validate``, ``coral.engine``, ``coral.evidence.{ir,evaluate,
-  fingerprint,match,messages}``, ``coral.rules.catalog``, ``coral.workspace.ops``,
-  ``coral.harness.registry``, ``coral.identity``, ``coral.runview.types``, and
-  ``coral.alerts.types`` may only import stdlib, ``pydantic``, ``yaml``, and
-  other pure modules.
+  ``coral.validate``, ``coral.engine``, ``coral.signals``,
+  ``coral.evidence.{ir,evaluate,fingerprint,match,messages}``,
+  ``coral.rules.catalog``, ``coral.workspace.ops``, ``coral.harness.registry``,
+  ``coral.identity``, ``coral.runview.types``, and ``coral.alerts.types`` may
+  only import stdlib, ``pydantic``, ``yaml``, and other pure modules.
 * **omni**: ``coral.omni.**`` may import anything, except underscore-prefixed
   ``omnigent`` names/modules are restricted to ``coral/omni/_upstream.py``, and
   ``coral.omni.runner`` / ``coral.omni.host`` must never import
@@ -53,6 +53,7 @@ _PURE_PREFIXES: tuple[str, ...] = (
     "coral.model",
     "coral.validate",
     "coral.engine",
+    "coral.signals",
     "coral.evidence.ir",
     "coral.evidence.evaluate",
     "coral.evidence.fingerprint",
