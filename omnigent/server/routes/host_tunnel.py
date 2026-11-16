@@ -78,6 +78,7 @@ from omnigent.host.frames import (
     encode_host_frame,
 )
 from omnigent.host.identity import MANAGED_HOST_TOKEN_HEADER
+from omnigent.host.workspace_ops import HostWorkspaceOpResultFrame  # CORAL(S40)
 from omnigent.runner.transports.ws_tunnel.diagnostics import silence_source
 from omnigent.runner.transports.ws_tunnel.frames import (
     PingFrame,
@@ -1031,6 +1032,31 @@ async def _receive_loop(
                         "status": frame.status,
                         "worktrees": frame.worktrees,
                         "error": frame.error,
+                    }
+                )
+            continue
+
+        if isinstance(frame, HostWorkspaceOpResultFrame):
+            # CORAL(S40): hand an engine workspace op's result to its waiting request.
+            op_future = conn.pending_workspace_ops.pop(frame.request_id, None)
+            if op_future is None or op_future.done():
+                # Its request gave up (timeout, cancel); the op may still have run on the host.
+                _logger.debug(
+                    "Host %s sent a late workspace op result: request_id=%s status=%s code=%s",
+                    host_id,
+                    frame.request_id,
+                    frame.status,
+                    frame.error_code,
+                )
+            else:
+                op_future.set_result(
+                    {
+                        "status": frame.status,
+                        "payload": frame.payload,
+                        "error_code": frame.error_code,
+                        "error": frame.error,
+                        "exit_code": frame.exit_code,
+                        "permanent": frame.permanent,
                     }
                 )
             continue

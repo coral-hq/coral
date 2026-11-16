@@ -1610,3 +1610,162 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S40
+    title: Host workspace-op frames, guarded dispatcher, token and server request helper
+    owner: WS-WORKSPACE
+    status: landed
+    category: coral-specific
+    note: >-
+      The server can ask a host to run a named workspace op in one of its git
+      worktrees. omnigent/host/workspace_ops.py (standard library only;
+      frames.py imports it, never the reverse) defines host.workspace_op and
+      host.workspace_op_result, their codec and the token workspace_ops:1,
+      which HOST_CAPABILITIES now advertises. The two kinds are not
+      HostFrameKind members: encode_host_frame and decode_host_frame route
+      them to the module first. Decoding checks every field's type, requires
+      a non-empty request id, rejects a timeout_s outside (0, 900] (an integer
+      too large for a float included), and requires a payload on an ok result
+      and an error code on a failed one; a result without permanent reads as
+      retryable. Both sides refuse a root that is not canonical and absolute
+      (no NUL, no // or UNC prefix, no empty, . or .. segment, no trailing
+      separator, judged in the root's own POSIX or Windows-drive flavour) and
+      an op_key outside K13's format. On the host, the host.workspace_op
+      branch of _dispatch_host_frame calls dispatch_workspace_op and reads the
+      handlers through the module, so a patched default_workspace_op_handlers
+      takes effect. The dispatcher always answers; only cancellation
+      propagates. An unknown op is unknown_op and a bad root or op key
+      invalid_request, both permanent and before any handler runs. Otherwise
+      the op waits for one of two per-host slots (an asyncio.Semaphore taken
+      before the guard, so a queued op holds no thread and leaves the reaper
+      running), then runs inside _run_host_subprocess_in_thread (the S71
+      guard) with a monotonic deadline that counts the time queued. The
+      handler's payload is serialised once, in that worker thread, and
+      encoding reuses the text; a non-mapping or non-JSON payload is
+      invalid_payload and one over 8 MiB serialised result_too_large, both
+      permanent. A WorkspaceOpHandlerError checks its own field types and
+      keeps its code, exit code and permanent flag, with its message trimmed
+      to the last 2,000 characters. Any other exception, including a badly
+      built handler error, is handler_failed (retryable) with only its type
+      name on the wire. A frame that does not decode is dropped like any
+      other host frame. On the server, HostConnection.pending_workspace_ops
+      is failed with the worktree maps on replace and deregister; the host
+      tunnel relays the result's six fields to the waiting future and logs a
+      late result at debug. Before a frame is sent,
+      request_workspace_op_on_host refuses a host without the token, then any
+      frame the host would drop or refuse (the same codec, root and op-key
+      checks), then any send outside a host_owner_scope that names the
+      connection's owner, workspace and registration. host_owner_scope now
+      records that it is active, so an ownerless scope (auth off) matches
+      only an ownerless connection. The helper sends a 32-hex request id and
+      waits timeout_s plus 15 s through _await_host_worktree_result (no
+      older-host hint); a lost connection or no reply raises
+      HostWorkspaceOpUnavailableError with timed_out set. Replies are
+      bounded: error text is cut to its last 2,000 characters and a malformed
+      error code reads as handler_failed; payload shapes are the caller's to
+      check. No handler is registered and nothing calls the helper yet, so
+      the channel is dark. Known cost: a handler's thread cannot be stopped,
+      so an op runs until its handler returns. Handlers enforce
+      request.deadline themselves, and the 900 s bound holds only if they do.
+      While an op runs it holds a default-executor thread and keeps the
+      host-wide orphan reaper paused. At most two ops run at once per host,
+      so they cannot exhaust the executor that other host frames share. A
+      server timeout, a dropped tunnel or a cancelled request leaves the
+      outcome unknown, because the host may still finish the op: callers
+      retry with the same op_key and never treat such a failure as not
+      executed.
+    files:
+      - omnigent/host/workspace_ops.py
+      - omnigent/host/frames.py
+      - omnigent/host/connect.py
+      - omnigent/server/host_registry.py
+      - omnigent/server/routes/host_tunnel.py
+      - omnigent/server/routes/_host_workspace_ops.py
+      - tests/host/test_frames.py
+      - tests/host/test_workspace_ops.py
+      - tests/server/routes/test_host_workspace_ops.py
+    tests:
+      - tests/host/test_frames.py
+      - tests/host/test_workspace_ops.py
+      - tests/server/routes/test_host_workspace_ops.py
+    budget_lines: 120
+    budget_exception:
+      lines: 503
+      reason: >-
+        omnigent/host/workspace_ops.py (590 lines, new, shared with S40b;
+        about 469 are S40): the frame dataclasses, the request and
+        handler-error types with field checks, the codec, the shared root and
+        op-key checks, the guarded, slot-bounded dispatcher with its
+        one-pass payload serialisation and size cap, with docstrings.
+        omnigent/server/routes/_host_workspace_ops.py (166, new): the reply
+        type, three errors, the request helper with its pre-send checks and
+        the bounded reply typing. frames.py (16), connect.py (12),
+        host_registry.py (29) and host_tunnel.py (26) are within budget.
+        tests/host/test_frames.py (161): the token, exact round trips, the
+        wire keys, the result without permanent and 27 malformed-frame cases.
+        tests/host/test_workspace_ops.py (695, new, shared with S40b; about
+        503 are S40): the reaper-sweep exit status and the patched registry
+        through the connect branch, the two-op cap, the dispatcher's request
+        and deadline, 12 permanent refusals, typed and ill-typed handler
+        errors, message trimming, type-only exceptions, the catch-all,
+        payload refusals, the size cap, the one-pass serialisation and the
+        root flavours. tests/server/routes/test_host_workspace_ops.py (412,
+        new, including the QA's 49-line stray-result test): the token, 16
+        pre-send frame refusals, the owner-scope matrix, cancellation,
+        immediate failure on deregister and replace, the timeout plus grace,
+        and through the real host tunnel the six relayed fields, bounded host
+        text and stray results.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S40b
+    title: Workspace-op handler registry from entry points
+    owner: WS-WORKSPACE
+    status: landed
+    category: coral-specific
+    note: >-
+      The host's workspace-op handlers come from installed
+      omnigent.host_workspace_ops entry points. Each names a zero-argument
+      callable returning {op name: handler}; op names match
+      [a-z][a-z0-9_.]{0,63}. Installed entry points load in (name, value)
+      order. A contribution that fails to import or call, returns a
+      non-mapping, or names an invalid op or a non-callable handler is
+      skipped whole with a warning; one that returns no ops adds nothing and
+      logs nothing. An op offered by more than one contribution is served by
+      none of them and logged as an error naming every package, so no
+      installed package can silently take over another's op. Each served op
+      is logged at info with the package that serves it.
+      default_workspace_op_handlers loads once per process, on the first
+      host.workspace_op frame and never at host import. It returns a
+      read-only WorkspaceOpHandlers mapping that also records the failed
+      contributions and the conflicting ops, so unknown_op says that a
+      handler failed to load or conflicts, not that none exists. The result
+      stays cached until the host restarts. Installed metadata updates only
+      after uv sync, so tests pass handlers to dispatch_workspace_op or patch
+      default_workspace_op_handlers.
+    files:
+      - omnigent/host/workspace_ops.py
+      - tests/host/test_workspace_ops.py
+    tests:
+      - tests/host/test_workspace_ops.py
+    budget_lines: 40
+    budget_exception:
+      lines: 192
+      reason: >-
+        omnigent/host/workspace_ops.py (new, shared with S40): about 121
+        lines are S40b. They are the entry-point group constant, the
+        WorkspaceOpHandlers mapping, the loader with its conflict rule and
+        source logging, the cached default and the unknown_op wording, with
+        docstrings. tests/host/test_workspace_ops.py (new, shared with S40):
+        about 192 lines are S40b. They cover contributions loaded through
+        real entry points, skipped broken contributions, a contribution
+        without ops (the QA's test), the two-package conflict with its log
+        and unknown_op text, the failed-to-load text, the once-per-process
+        load and the fresh-interpreter check that importing the host loads
+        nothing.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
