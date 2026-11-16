@@ -100,7 +100,9 @@ from omnigent.runtime.prompt import EMBEDDED_BROWSER_PRIORITY_INSTRUCTION
 from omnigent.server.schemas import CreateResponseRequest as _CreateResponseRequest
 from omnigent.spec.types import AgentSpec, ExecutorSpec, SharePolicy, ToolsConfig
 from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
+from tests._helpers.polling import poll_until_async  # CORAL(S43): turn-outcome tests
 from tests._helpers.providers import isolate_provider_resolution
+from tests.runner.conftest import _drain_session_event_queue  # CORAL(S43): turn-outcome tests
 from tests.runner.conftest import (
     _FakeProcessManager as _RecoveryFakeProcessManager,
 )
@@ -10612,8 +10614,9 @@ async def test_setup_cancel_does_not_leave_active_turn() -> None:
         assert conv not in active
 
 
+@pytest.mark.parametrize("live_response_id", [None, "resp_desync"])  # CORAL(S43)
 @pytest.mark.asyncio
-async def test_desync_emits_user_visible_error() -> None:
+async def test_desync_emits_user_visible_error(live_response_id: str | None) -> None:
     """Recovered desync surfaces a distinct, non-retryable error code.
 
     With no buffered continuation, ``_resync_turn_state`` publishes a
@@ -10629,6 +10632,9 @@ async def test_desync_emits_user_visible_error() -> None:
         ),
         server_client=NullServerClient(),  # type: ignore[arg-type]
     )
+    if live_response_id is not None:
+        # CORAL(S43): the failed edge names the response the desync ended.
+        app.state.live_response_id[conv] = live_response_id
 
     async with _runner_test_client(app):
         # Drive the recovery entry directly (no live turn, no buffer).
@@ -10643,6 +10649,8 @@ async def test_desync_emits_user_visible_error() -> None:
     assert isinstance(error, dict)
     assert error["code"] == "runner_turn_context_desync"
     assert error["message"]
+    assert failed_event["turn_outcome"] == "failed"  # CORAL(S43)
+    assert failed_event.get("turn_response_id") == live_response_id
 
 
 class _SetupBoom(BaseException):
@@ -11356,6 +11364,441 @@ async def test_interrupt_cleanup_is_scoped_to_turn_generation(replacement: str) 
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         app.state.active_turns.pop(conv, None)
+
+
+# ── CORAL(S43): each turn end names its response and outcome ─────────────────
+
+
+def _created_frame(response_id: str) -> str:
+    """Return the SSE frame a harness sends when it opens *response_id*."""
+    payload = json.dumps({"type": "response.created", "response": {"id": response_id}})
+    return f"event: response.created\ndata: {payload}\n\n"
+
+
+def _turn_status_edges(app: FastAPI, conv: str) -> list[tuple[str, str | None, str | None]]:
+    """Drain *conv*'s queued events into ``(status, turn_outcome, turn_response_id)``."""
+    return [
+        (event["status"], event.get("turn_outcome"), event.get("turn_response_id"))
+        for event in _drain_session_event_queue(app.state.session_event_queues.get(conv))
+        if event.get("type") == "session.status"
+    ]
+
+
+async def _scheduled_drains() -> None:
+    """Await the queue drains a turn end scheduled, so their edges are published."""
+    drains = [
+        task
+        for task in asyncio.all_tasks()
+        if "_check_and_start_next_turn" in task.get_coro().__qualname__  # type: ignore[union-attr]
+    ]
+    await asyncio.gather(*drains)
+
+
+class _HeldOpenHarnessClient(_RecoveryScriptedHarnessClient):
+    """Holds the first turn open after its frames until cancelled; later turns stream and end."""
+
+    def __init__(self, frames: list[str], later_frames: list[str] | None = None) -> None:
+        super().__init__(frames)
+        self._later_frames = later_frames
+
+    def stream(self, method: str, url: str, *, json: dict[str, Any], timeout: Any) -> Any:
+        del method, url, timeout
+        self.posted_bodies.append(json)
+        held = len(self.posted_bodies) == 1 or self._later_frames is None
+        frames = self._sse_frames if held else self._later_frames or []
+
+        async def aiter_text() -> AsyncIterator[str]:
+            for frame in frames:
+                yield frame
+            if held:
+                await asyncio.Event().wait()
+
+        @asynccontextmanager
+        async def _open() -> AsyncIterator[SimpleNamespace]:
+            yield SimpleNamespace(status_code=200, aiter_text=aiter_text)
+
+        return _open()
+
+
+@pytest.mark.parametrize(
+    ("ending", "expected"),
+    [
+        ("interrupted", ("idle", "cancelled")),
+        ("cancelled", ("idle", "cancelled")),
+        ("completed", ("idle", "completed")),
+        # The turn ended with a sub-agent still running.
+        ("waiting", ("waiting", "completed")),
+        ("failed", ("failed", "failed")),
+    ],
+)
+@pytest.mark.asyncio
+async def test_turn_end_status_names_the_ended_response_and_its_outcome(
+    monkeypatch: pytest.MonkeyPatch, ending: str, expected: tuple[str, str]
+) -> None:
+    """A headless turn end reports its outcome for the response it ended."""
+    conv = f"conv_turn_end_{ending}"
+    app = create_runner_app(
+        process_manager=_RecoveryFakeProcessManager(_RecoveryScriptedHarnessClient([])),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    app.state.begin_turn_slot(conv)
+    app.state.live_response_id[conv] = "resp_ended"
+    if ending == "interrupted":
+        app.state.interrupted_sessions.add(conv)
+    if ending == "waiting":
+        # A server that knows "waiting"; older ones get the same outcome on "running".
+        monkeypatch.setattr("omnigent.runner.app._server_version", "0.3.0")
+        subagent_work.register_subagent_work(
+            parent_session_id=conv, child_session_id=f"{conv}_child", agent="worker", title="w"
+        )
+    try:
+        app.state.on_proxy_stream_end(
+            conv,
+            owner_response_id="resp_ended",
+            cancelled=ending == "cancelled",
+            error={"code": "model_error", "message": "boom"} if ending == "failed" else None,
+        )
+        await _scheduled_drains()
+    finally:
+        subagent_work.unregister_subagent_work(f"{conv}_child")
+
+    assert _turn_status_edges(app, conv) == [(*expected, "resp_ended")]
+
+
+@pytest.mark.asyncio
+async def test_interrupted_turn_status_carries_cancelled_outcome() -> None:
+    """An interrupt that cancels a streaming turn reports it cancelled under its response id."""
+    conv = "conv_interrupted_outcome"
+    app = create_runner_app(
+        process_manager=_RecoveryFakeProcessManager(  # type: ignore[arg-type]
+            _HeldOpenHarnessClient([_created_frame("resp_held")])
+        ),
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _recovery_runner_client(app) as http:
+        message = {"type": "message", "role": "user", "agent_id": "ag", "model": "x"}
+        response = await http.post(
+            f"/v1/sessions/{conv}/events",
+            json={**message, "content": [{"type": "input_text", "text": "start"}]},
+        )
+        assert response.status_code == 202, response.text
+        await poll_until_async(lambda: app.state.live_response_id.get(conv) == "resp_held")
+
+        response = await http.post(f"/v1/sessions/{conv}/events", json={"type": "interrupt"})
+        assert response.status_code == 204, response.text
+
+    edges = _turn_status_edges(app, conv)
+    # The cancelled drain reports the held response; the turn's later teardown
+    # edge no longer knows it and names none.
+    assert edges[:2] == [("running", None, None), ("idle", "cancelled", "resp_held")]
+    assert {outcome for _status, outcome, turn_id in edges if turn_id == "resp_held"} == {
+        "cancelled"
+    }
+    assert "completed" not in {outcome for _status, outcome, _turn_id in edges}
+
+
+@pytest.mark.asyncio
+async def test_interrupt_with_buffered_input_reports_cancelled_for_the_interrupted_response() -> (
+    None
+):
+    """The continuation's running edge reports the interrupted turn; its own end names itself."""
+    conv = "conv_buffered_continuation_outcome"
+    completed = json.dumps({"type": "response.completed", "response": {"id": "resp_next"}})
+    harness = _RecoveryScriptedHarnessClient(
+        [_created_frame("resp_next"), f"event: response.completed\ndata: {completed}\n\n"]
+    )
+    app = create_runner_app(
+        process_manager=_RecoveryFakeProcessManager(harness),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _recovery_runner_client(app) as http:
+        app.state.begin_turn_slot(conv)
+        app.state.live_response_id[conv] = "resp_interrupted"
+        response = await http.post(
+            f"/v1/sessions/{conv}/events",
+            json={
+                "type": "message",
+                "role": "user",
+                "agent_id": "ag",
+                "model": "x",
+                "content": [{"type": "input_text", "text": "follow up"}],
+            },
+        )
+        assert response.json()["status"] == "buffered", response.text
+        app.state.interrupted_sessions.add(conv)
+
+        app.state.on_proxy_stream_end(conv, owner_response_id="resp_interrupted")
+        events = await _drain_turn_events(
+            app.state.session_event_queues, conv, until_status="idle", timeout=10.0
+        )
+
+    assert [
+        (event["status"], event.get("turn_outcome"), event.get("turn_response_id"))
+        for event in events
+        if event.get("type") == "session.status"
+    ] == [("running", "cancelled", "resp_interrupted"), ("idle", "completed", "resp_next")]
+
+
+@pytest.mark.parametrize(("interrupted", "outcome"), [(True, "cancelled"), (False, "completed")])
+@pytest.mark.asyncio
+async def test_carried_outcome_is_reported_when_its_continuation_never_starts(
+    interrupted: bool, outcome: str
+) -> None:
+    """A drain that finds the buffered input gone still reports the ended turn, on idle."""
+    conv = f"conv_carried_without_continuation_{outcome}"
+    app = create_runner_app(
+        process_manager=_RecoveryFakeProcessManager(_RecoveryScriptedHarnessClient([])),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    app.state.begin_turn_slot(conv)
+    app.state.live_response_id[conv] = "resp_ended"
+    app.state.session_message_buffers[conv] = [{"type": "message", "role": "user"}]
+    if interrupted:
+        app.state.interrupted_sessions.add(conv)
+
+    app.state.on_proxy_stream_end(conv, owner_response_id="resp_ended")
+    # Buffered input defers the outcome to the continuation's running edge.
+    assert _turn_status_edges(app, conv) == []
+    # Stop or delete can clear the queue before the scheduled drain runs.
+    app.state.session_message_buffers.pop(conv)
+    await _scheduled_drains()
+
+    assert _turn_status_edges(app, conv) == [("idle", outcome, "resp_ended")]
+
+
+def _completed_frame(response_id: str) -> str:
+    """Return the SSE frame a harness sends when *response_id* completes."""
+    payload = json.dumps({"type": "response.completed", "response": {"id": response_id}})
+    return f"event: response.completed\ndata: {payload}\n\n"
+
+
+_FOLLOW_UP = {
+    "type": "message",
+    "role": "user",
+    "agent_id": "ag",
+    "model": "x",
+    "content": [{"type": "input_text", "text": "follow up"}],
+}
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (None, [("running", "completed", "resp_first"), ("idle", "completed", "resp_next")]),
+        # A failure is published at once, so the continuation carries no second outcome.
+        (
+            {"code": "model_error", "message": "boom"},
+            [
+                ("failed", "failed", "resp_first"),
+                ("running", None, None),
+                ("idle", "completed", "resp_next"),
+            ],
+        ),
+    ],
+    ids=["completed", "failed"],
+)
+@pytest.mark.asyncio
+async def test_buffered_turn_end_reports_its_outcome_once(
+    error: dict[str, str] | None, expected: list[tuple[str, str | None, str | None]]
+) -> None:
+    """A completed or failed turn followed by buffered input reports its outcome exactly once."""
+    conv = f"conv_buffered_turn_end_{'failed' if error else 'completed'}"
+    harness = _RecoveryScriptedHarnessClient(
+        [_created_frame("resp_next"), _completed_frame("resp_next")]
+    )
+    app = create_runner_app(
+        process_manager=_RecoveryFakeProcessManager(harness),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _recovery_runner_client(app) as http:
+        app.state.begin_turn_slot(conv)
+        app.state.live_response_id[conv] = "resp_first"
+        response = await http.post(f"/v1/sessions/{conv}/events", json=_FOLLOW_UP)
+        assert response.json()["status"] == "buffered", response.text
+
+        app.state.on_proxy_stream_end(conv, owner_response_id="resp_first", error=error)
+        events = await _drain_turn_events(
+            app.state.session_event_queues, conv, until_status="idle", timeout=10.0
+        )
+
+    assert [
+        (event["status"], event.get("turn_outcome"), event.get("turn_response_id"))
+        for event in events
+        if event.get("type") == "session.status"
+    ] == expected
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_session_drops_its_carried_turn_outcome() -> None:
+    """A recreated same-id session's first turn never reports the deleted session's turn."""
+    conv = "conv_deleted_with_carried_outcome"
+    harness = _RecoveryScriptedHarnessClient(
+        [_created_frame("resp_new"), _completed_frame("resp_new")]
+    )
+    app = create_runner_app(
+        process_manager=_RecoveryFakeProcessManager(harness),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _recovery_runner_client(app) as http:
+        app.state.begin_turn_slot(conv)
+        app.state.live_response_id[conv] = "resp_ended"
+        app.state.session_message_buffers[conv] = [{"type": "message", "role": "user"}]
+        app.state.on_proxy_stream_end(conv, owner_response_id="resp_ended")
+        # A held slot keeps the drain from taking the outcome, as when the delete comes first.
+        app.state.begin_turn_slot(conv)
+        await _scheduled_drains()
+        response = await http.delete(f"/v1/sessions/{conv}")
+        assert response.status_code < 300, response.text
+
+        response = await http.post(f"/v1/sessions/{conv}/events", json=_FOLLOW_UP)
+        assert response.status_code == 202, response.text
+        events = await _drain_turn_events(
+            app.state.session_event_queues, conv, until_status="idle", timeout=10.0
+        )
+
+    assert [
+        (event["status"], event.get("turn_outcome"), event.get("turn_response_id"))
+        for event in events
+        if event.get("type") == "session.status"
+    ] == [("running", None, None), ("idle", "completed", "resp_new")]
+
+
+@pytest.mark.asyncio
+async def test_force_cancelled_interrupt_with_buffered_input_reports_the_turn_once() -> None:
+    """A real interrupt cancels the streaming turn while a message waits; one outcome results."""
+    conv = "conv_force_cancelled_with_buffer"
+    harness = _HeldOpenHarnessClient(
+        [_created_frame("resp_held")], [_created_frame("resp_next"), _completed_frame("resp_next")]
+    )
+    app = create_runner_app(
+        process_manager=_RecoveryFakeProcessManager(harness),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    edges: list[tuple[str, str | None, str | None]] = []
+
+    def continuation_ended() -> bool:
+        edges.extend(_turn_status_edges(app, conv))
+        return ("idle", "completed", "resp_next") in edges
+
+    async with _recovery_runner_client(app) as http:
+        message = {"type": "message", "role": "user", "agent_id": "ag", "model": "x"}
+        response = await http.post(
+            f"/v1/sessions/{conv}/events",
+            json={**message, "content": [{"type": "input_text", "text": "start"}]},
+        )
+        assert response.status_code == 202, response.text
+        await poll_until_async(lambda: app.state.live_response_id.get(conv) == "resp_held")
+        response = await http.post(f"/v1/sessions/{conv}/events", json=_FOLLOW_UP)
+        assert response.json()["status"] == "buffered", response.text
+
+        response = await http.post(f"/v1/sessions/{conv}/events", json={"type": "interrupt"})
+        assert response.status_code == 204, response.text
+        await poll_until_async(continuation_ended, timeout_s=10)
+
+    # The cancelled drain reports the held response on idle; the turn's teardown
+    # no longer knows its id, so the continuation's running edge names none.
+    assert edges == [
+        ("running", None, None),
+        ("idle", "cancelled", "resp_held"),
+        ("running", "cancelled", None),
+        ("idle", "completed", "resp_next"),
+    ]
+    assert [outcome for _status, outcome, turn_id in edges if turn_id == "resp_held"] == [
+        "cancelled"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_init_failure_reports_a_failed_turn_without_a_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Init fails before any turn opens a response, so the edge names no response."""
+    from omnigent.errors import ErrorCode, OmnigentError
+
+    conv = "conv_init_failure_outcome"
+
+    async def _spec_resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return AgentSpec(
+            spec_version=1,
+            name="claude-sdk-agent",
+            executor=ExecutorSpec(type="omnigent", config={"harness": "claude-sdk"}),
+        )
+
+    def _raising_build(
+        spec: object, *, cwd: object = None, workdir: object = None
+    ) -> dict[str, str]:
+        del spec, cwd, workdir
+        raise OmnigentError("No model resolved", code=ErrorCode.INVALID_INPUT)
+
+    monkeypatch.setattr("omnigent.runtime.workflow._build_claude_sdk_spawn_env", _raising_build)
+    app = create_runner_app(
+        process_manager=_RecoveryFakeProcessManager(_RecoveryScriptedHarnessClient([])),  # type: ignore[arg-type]
+        spec_resolver=_spec_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _recovery_runner_client(app) as http:
+        response = await http.post("/v1/sessions", json={"session_id": conv, "agent_id": "ag"})
+        assert response.status_code == 400, response.text
+
+    assert _turn_status_edges(app, conv) == [("failed", "failed", None)]
+
+
+@pytest.mark.asyncio
+async def test_carried_outcome_is_taken_when_the_queue_empties_during_the_pane_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The drain's second empty-queue exit also consumes the carried outcome (claude-native)."""
+    sid = "conv_carried_pane_check"
+
+    async def _spec_resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return AgentSpec(
+            spec_version=1,
+            name="claude-native-agent",
+            executor=ExecutorSpec(type="omnigent", config={"harness": "claude-native"}),
+        )
+
+    async def _bridge_id(**_: Any) -> str:
+        return "carried-pane-check"
+
+    async def _skip_terminal_launch(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    def _no_tool_relay(**_kwargs: Any) -> None:
+        raise OSError("this test needs no tool relay")
+
+    def _pane_check_empties_queue(_bridge_dir: Path) -> bool:
+        # A stop clears the queue while the drain checks the pane.
+        app.state.session_message_buffers.pop(sid, None)
+        return False
+
+    monkeypatch.setattr("omnigent.runner.app._launch_native_terminal", _skip_terminal_launch)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge.start_tool_relay", _no_tool_relay)
+    monkeypatch.setattr("omnigent.runner.app._claude_native_bridge_id_for_session", _bridge_id)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "cn")
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.has_pending_user_prompt",
+        _pane_check_empties_queue,
+    )
+    app = create_runner_app(
+        process_manager=_RecoveryFakeProcessManager(_RecoveryScriptedHarnessClient([])),  # type: ignore[arg-type]
+        spec_resolver=_spec_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _recovery_runner_client(app) as http:
+        created = await http.post("/v1/sessions", json={"session_id": sid, "agent_id": "ag"})
+        assert created.status_code == 201, created.text
+        app.state.begin_turn_slot(sid)
+        app.state.live_response_id[sid] = "resp_ended"
+        app.state.session_message_buffers[sid] = [{"type": "message", "role": "user"}]
+
+        app.state.on_proxy_stream_end(sid, owner_response_id="resp_ended")
+        assert app.state.carried_turn_outcomes[sid] == ("completed", "resp_ended")
+        await _scheduled_drains()
+
+    assert sid not in app.state.carried_turn_outcomes
 
 
 @pytest.mark.asyncio

@@ -110,7 +110,8 @@ async def test_host_stop_ack_settles_late_native_activity(
 
 # CORAL(S1): an intentional stop reports a running turn as cancelled and a waiting one
 # (whose turn already ended) with no outcome; only the archived session is archive_idle.
-@pytest.mark.parametrize("status", ["running", "waiting"])
+# A continuation still naming the turn the runner reported completed adds no second outcome.
+@pytest.mark.parametrize("status", ["running", "waiting", "continuation"])
 @pytest.mark.parametrize("path", ["stop", "archive", "offline_sweep", "relay_transport"])
 async def test_intentional_stop_idle_edges_carry_cancelled_outcome(
     family: tuple[SqlAlchemyConversationStore, dict[str, str]],
@@ -122,11 +123,21 @@ async def test_intentional_stop_idle_edges_carry_cancelled_outcome(
 
     store, ids = family
     child_id, parent_id = ids["active"], ids["parent"]
-    for session_id in (child_id, parent_id):
-        sessions._session_status_cache[session_id] = status
-        sessions._session_active_response_cache[session_id] = f"resp-{session_id}"
     edges: list[session_live_state.SessionStatusEdge] = []
     unregister = session_live_state.register_status_edge_observer("test-stop", edges.append)
+    for session_id in (child_id, parent_id):
+        sessions._session_status_cache[session_id] = (
+            "waiting" if status == "waiting" else "running"
+        )
+        sessions._session_active_response_cache[session_id] = f"resp-{session_id}"
+        if status == "continuation":
+            # The continuation's running edge reports the previous turn before it opens its own.
+            sessions._publish_status(
+                session_id,
+                "running",
+                turn_outcome="completed",
+                turn_response_id=f"resp-{session_id}",
+            )
     monkeypatch.setattr(sessions, "_stop_session_host_runner", AsyncMock(return_value=True))
     dropped = asyncio.Event()
     try:
@@ -175,13 +186,18 @@ async def test_intentional_stop_idle_edges_carry_cancelled_outcome(
             if edge.session_id == session_id
         ]
 
-    def turn(session_id: str) -> tuple[str | None, str | None]:
-        return ("cancelled", f"resp-{session_id}") if status == "running" else (None, None)
+    def expected(session_id: str, origin: str) -> list[tuple[str, str | None, str | None, str]]:
+        turn_id = f"resp-{session_id}"
+        if status == "running":
+            return [("idle", "cancelled", turn_id, origin)]
+        if status == "continuation":
+            return [("running", "completed", turn_id, "unknown"), ("idle", None, None, origin)]
+        return [("idle", None, None, origin)]
 
     # A session sharing the archived session's runner is not the archived one.
-    assert stop_edges(child_id) == [("idle", *turn(child_id), "unknown")]
+    assert stop_edges(child_id) == expected(child_id, "unknown")
     if path == "archive":
-        assert stop_edges(parent_id) == [("idle", *turn(parent_id), "archive_idle")]
+        assert stop_edges(parent_id) == expected(parent_id, "archive_idle")
 
 
 # CORAL(S1): when the stop's settle publishes first, the relay's later drop adds no outcome.

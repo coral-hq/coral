@@ -835,16 +835,39 @@ def _stopped_turn(session_id: str, persisted_status: str | None) -> tuple[str | 
     Return the outcome and response id a stop's ``idle`` edge reports.
 
     Only a turn still ``running`` was cancelled; a ``waiting`` turn had already
-    ended. Call it right before the synchronous ``_publish_status`` that pops
-    the active response id, so no other edge can land in between.
+    ended, and a response that already carried an outcome keeps it (see
+    :func:`_inferred_turn`). Call it right before the synchronous
+    ``_publish_status`` that pops the active response id, so no other edge can
+    land in between.
 
     :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
     :param persisted_status: The row's live status, used when the cache is cold.
-    :returns: ``("cancelled", <active response id>)`` while running, else ``(None, None)``.
+    :returns: ``("cancelled", <active response id>)`` while running and that
+        response has no recorded outcome, else ``(None, None)``.
     """
     if _session_status_cache.get(session_id, persisted_status) != "running":
         return None, None
-    return "cancelled", _session_active_response_cache.get(session_id)
+    return _inferred_turn(session_id, "cancelled", _session_active_response_cache.get(session_id))
+
+
+# CORAL(S1): a server-inferred outcome never contradicts one already reported.
+def _inferred_turn(
+    session_id: str, outcome: str, response_id: str | None
+) -> tuple[str | None, str | None]:
+    """
+    Return the outcome and response id an inferred turn-end edge reports.
+
+    The active response can still name a turn the runner already reported: a
+    ``waiting`` turn end, or a continuation that has not opened its response.
+
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param outcome: The inferred outcome, e.g. ``"failed"``.
+    :param response_id: The active response id, or ``None`` when unknown.
+    :returns: ``(outcome, response_id)``, or ``(None, None)`` once that response has one.
+    """
+    if session_live_state.turn_outcome_reported(session_id, response_id):
+        return None, None
+    return outcome, response_id
 
 
 async def _stop_host_runner_intentionally(
@@ -4418,15 +4441,18 @@ async def _mark_runner_sessions_offline_once(
             continue
         if binding is None or binding[0] != conv.runner_id:
             continue
-        # CORAL(S1): the drop fails the turn it interrupted, when one is known.
+        # CORAL(S1): the drop fails the turn it interrupted, when one is known and unreported.
+        outcome, failed_turn_id = (
+            _inferred_turn(conv.id, "failed", turn_id) if turn_id is not None else (None, None)
+        )
         _publish_status(
             conv.id,
             "failed",
             error,
             failure_origin="runner_offline_sweep",
             disconnect_evidence=disconnect_evidence,
-            turn_outcome="failed" if turn_id is not None else None,
-            turn_response_id=turn_id,
+            turn_outcome=outcome,
+            turn_response_id=failed_turn_id,
         )
         await record_subagent_activity(
             conv.id, "returned", conversation_store, turn_id=turn_id, status="failed"
@@ -9336,15 +9362,16 @@ async def _relay_runner_stream(
                     message="Runner disconnected unexpectedly.",
                 )
                 turn_id = _session_active_response_cache.get(session_id)
-                # CORAL(S1): a runner drop fails the turn it interrupted.
+                # CORAL(S1): a runner drop fails the turn it interrupted, unless already reported.
+                outcome, failed_turn_id = _inferred_turn(session_id, "failed", turn_id)
                 _publish_status(
                     session_id,
                     "failed",
                     disconnect_error,
                     failure_origin="runner_disconnected_mid_turn",
                     origin="runner_disconnect",
-                    turn_outcome="failed",
-                    turn_response_id=turn_id,
+                    turn_outcome=outcome,
+                    turn_response_id=failed_turn_id,
                 )
                 await record_subagent_activity(
                     session_id, "returned", conversation_store, turn_id=turn_id, status="failed"
@@ -9627,6 +9654,10 @@ async def _relay_runner_stream_once(
                             # would deliver a premature, lock-out completion.
                             raw_blocked_on = event.get("blocked_on")
                             raw_response_id = event.get("response_id")
+                            # CORAL(S43): the runner's outcome for the turn this edge names.
+                            relayed_outcome, relayed_turn_id = session_live_state.turn_fields(
+                                event
+                            )
                             # The runner finishing a turn the server had written
                             # off as a runner drop proves the drop was transient:
                             # honor the completion and clear the disconnect cause.
@@ -9637,9 +9668,6 @@ async def _relay_runner_stream_once(
                                 and _session_status_cache.get(session_id) == "failed"
                             ):
                                 # CORAL(S1): the recovered idle is the runner's turn end.
-                                relayed_outcome, relayed_turn_id = session_live_state.turn_fields(
-                                    event
-                                )
                                 try:
                                     await _publish_runner_recovered_status(
                                         session_id,
@@ -9692,6 +9720,8 @@ async def _relay_runner_stream_once(
                                     if isinstance(raw_blocked_on, str) and raw_blocked_on
                                     else None
                                 ),
+                                turn_outcome=relayed_outcome,  # CORAL(S43)
+                                turn_response_id=relayed_turn_id,
                             )
                         if status == "running":
                             text_acc.clear()

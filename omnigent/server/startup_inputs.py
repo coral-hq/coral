@@ -8,8 +8,8 @@ import logging
 import re
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field  # CORAL(S42): field, Protocol for EngineEventContext
+from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from starlette.datastructures import Headers
@@ -118,6 +118,35 @@ class StartupInputContext:
 StartupDispatch = Callable[
     [StartupInputContext, str, SessionEventInput], Coroutine[Any, Any, dict[str, bool | str]]
 ]
+
+
+# CORAL(S42): in-process engine senders share the request-free event path.
+@dataclass(frozen=True)
+class EngineEventContext:
+    """
+    An in-process engine sender acting as ``user_id``, with no HTTP request.
+
+    Callers pass the run owner's authenticated user id, never a value taken from
+    request input. Headers are always empty, so no runner tunnel credential can
+    ride an engine send.
+    """
+
+    app: Any
+    user_id: str | None
+    headers: Headers = field(default_factory=Headers, init=False)
+
+
+class SessionEventDispatch(Protocol):
+    """The session event handler, as startup inputs and the engine call it."""
+
+    def __call__(
+        self,
+        context: StartupInputContext | EngineEventContext,
+        session_id: str,
+        event: SessionEventInput,
+        in_flight: contextlib.ExitStack | None = None,
+        /,
+    ) -> Coroutine[Any, Any, dict[str, bool | str]]: ...
 
 
 _services: weakref.WeakSet[ManagedStartupInputs] = weakref.WeakSet()

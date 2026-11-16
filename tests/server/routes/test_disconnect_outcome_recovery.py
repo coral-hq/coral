@@ -9,8 +9,11 @@ from tests.debug_log_helpers import capture_debug_rows
 
 
 @pytest.mark.asyncio
-# CORAL(S1): the sweep fails a known interrupted turn; with no turn id there is none to fail.
-@pytest.mark.parametrize("turn_id", ["resp-dropped", None])
+# CORAL(S1): the sweep fails a known interrupted turn; with no turn id there is none to fail,
+# and a turn the runner already reported keeps its one outcome.
+@pytest.mark.parametrize(
+    ("turn_id", "reported"), [("resp-dropped", False), (None, False), ("resp-dropped", True)]
+)
 @pytest.mark.parametrize(
     ("passive", "next_step", "expected"),
     [
@@ -21,7 +24,12 @@ from tests.debug_log_helpers import capture_debug_rows
     ],
 )
 async def test_disconnect_failure_outcome_after_reconnect(
-    db_uri: str, passive: bool, next_step: str, expected: list[str], turn_id: str | None
+    db_uri: str,
+    passive: bool,
+    next_step: str,
+    expected: list[str],
+    turn_id: str | None,
+    reported: bool,
 ) -> None:
     """A reconnect-cleared disconnect failure records whether its turn resumed."""
     from omnigent.runtime import disconnect_outcome, session_stream
@@ -39,6 +47,12 @@ async def test_disconnect_failure_outcome_after_reconnect(
         sessions_module._session_active_response_cache[session_id] = turn_id
     snapshot = store.get_conversation(session_id)
     assert snapshot is not None
+    if reported:  # CORAL(S1): the runner already reported this turn's outcome.
+        session_live_state.notify_status_edge(
+            session_live_state.SessionStatusEdge(
+                session_id, "running", None, turn_outcome="completed", turn_response_id=turn_id
+            )
+        )
     # CORAL(S1): one failed edge for the dropped turn, then one recovered idle edge.
     edges: list[session_live_state.SessionStatusEdge] = []
     unregister = session_live_state.register_status_edge_observer("test-recovery", edges.append)
@@ -76,7 +90,12 @@ async def test_disconnect_failure_outcome_after_reconnect(
             for edge in edges
             if edge.session_id == session_id
         ] == [
-            ("failed", "running", "unknown", "failed" if turn_id else None, turn_id),
+            (
+                "failed",
+                "running",
+                "unknown",
+                *(("failed", turn_id) if turn_id and not reported else (None, None)),
+            ),
             ("idle", "failed", "unknown", None, None),
         ]
     finally:

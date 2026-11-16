@@ -1400,11 +1400,25 @@ seams:
       is known. The two writers that bypass _publish_status notify themselves:
       the runner-recovered status once after its stream publish (never on its
       early returns) and the status probe only when it fills a cold cache with
-      idle, running, waiting or failed.
+      idle, running, waiting or failed. Every notified edge with both an
+      outcome and a response id is recorded per (workspace_id, session_id):
+      the last 8 response ids per session, at most 4,096 sessions (least
+      recently reported evicted first), dropped when the session is deleted.
+      The server-inferred sites (the three intentional-stop idles and the
+      relay and offline-sweep disconnect failures) report an outcome only for
+      a response with none recorded; otherwise their edge carries no outcome
+      and no turn id. The active response can still name a turn the runner
+      already reported (a waiting turn end, or a buffered continuation before
+      its first response), so one response never gets a second, contradicting
+      outcome from an inference. Runner-relayed outcomes are not gated; BA-3
+      (DESIGN-DECISIONS.md) sets the precedence consumers apply between them
+      and the inferred ones. turn_fields passes a turn response id only with a
+      known outcome.
     files:
       - omnigent/server/session_live_state.py
       - omnigent/server/routes/_sessions/helpers.py
       - omnigent/server/routes/_sessions/orchestration.py
+      - omnigent/server/routes/sessions/routes_events.py
       - tests/server/test_session_live_state.py
       - tests/server/routes/test_intentional_runner_stop.py
       - tests/server/routes/test_disconnect_outcome_recovery.py
@@ -1418,28 +1432,180 @@ seams:
       - tests/server/routes/test_sessions_runner_relay.py
     budget_lines: 40
     budget_exception:
-      lines: 461
+      lines: 544
       reason: >-
-        omnigent/server/session_live_state.py (154 lines): the edge dataclass
-        with its bounds, turn_fields, the registry with its replacement warning,
-        and notify with once-per-name failure logging, with their docstrings.
-        omnigent/server/routes/_sessions/orchestration.py (93): the shared
-        _stopped_turn rule, eight sites each with its own anchor, and the
-        keyword-only parameters and docstrings of _stop_host_runner_intentionally
-        and the recovered-status impl. omnigent/server/routes/_sessions/helpers.py
-        is within budget (31). tests/server/test_session_live_state.py (461):
-        the registry (replacement, identity-checked unregister, a raising
-        observer that runs first, once-per-name logging, re-entrancy), the edge
-        bounds, the turn_fields matrix, the field-by-field and ordering contract
-        of _publish_status, the worker-thread publish, and one driver per origin
-        site (archive stop, relay drop, relay recovery, status probe) reusing
-        the relay test's fake runner clients and label store.
-        tests/server/routes/test_intentional_runner_stop.py (114): the running
-        and waiting matrix over stop, archive, offline sweep and relay transport
-        (archive origin on the archived session only) and the
-        settlement-then-relay-drop ordering. tests/server/routes/test_sessions_snapshot.py
-        (60): the cold-fill, warm-read, filled-cache and unrecognized-status
-        probe cases.
+        Changed lines against the upstream base, per file.
+        omnigent/server/session_live_state.py (199): the edge dataclass with its
+        bounds, turn_fields, the registry with its replacement warning, notify
+        with once-per-name failure logging, and the bounded record of reported
+        turn outcomes, with their docstrings.
+        omnigent/server/routes/_sessions/orchestration.py (123, of which 9 are
+        S43's relay change): the shared _stopped_turn and _inferred_turn rules,
+        eight sites each with its own anchor, and the keyword-only parameters
+        and docstrings of _stop_host_runner_intentionally and the
+        recovered-status impl. omnigent/server/routes/_sessions/helpers.py (31)
+        is within budget; omnigent/server/routes/sessions/routes_events.py has 9
+        S1 lines (the delete hook), the rest is S42's.
+        tests/server/test_session_live_state.py (544): the registry
+        (replacement, identity-checked unregister, a raising observer that runs
+        first, once-per-name logging, re-entrancy), the edge bounds, the
+        turn_fields matrix, the field-by-field and ordering contract of
+        _publish_status, the worker-thread publish, one driver per origin site
+        (archive stop, relay drop, relay recovery, status probe) reusing the
+        relay test's fake runner clients and label store, the reported-outcome
+        record's bounds and workspace keys, and the delete hook.
+        tests/server/routes/test_intentional_runner_stop.py (130): the running,
+        waiting and reported-continuation matrix over stop, archive, offline
+        sweep and relay transport (archive origin on the archived session only)
+        and the settlement-then-relay-drop ordering.
+        tests/server/routes/test_sessions_runner_relay.py (155, of which 81 are
+        S43's): a stop with no turn in flight, and a runner drop after a
+        reported waiting or continuation turn end.
+        tests/server/routes/test_sessions_snapshot.py (60) and
+        tests/server/routes/test_disconnect_outcome_recovery.py (54): the probe
+        cases, and the sweep failure with a known, unknown or already-reported
+        turn.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S43
+    title: Runner turn outcomes that survive a buffered continuation
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      The runner's session.status edges for a turn end carry turn_outcome
+      (completed, cancelled or failed) and, when known, turn_response_id: the
+      response the turn ended, read before the live response is released. That
+      covers the stream end (interrupted or cancelled, completed on idle or
+      waiting, failed), the cancelled drain, the desync failure and the
+      session-init failure (no response yet, so no id). The existing
+      response_id key, the buffered-input suppression and the native drop rules
+      are unchanged. A turn whose stream ends with buffered input publishes
+      nothing and carries its outcome to the next turn start's running edge
+      (any turn start, not only the drain's), or to an idle edge when the drain
+      finds the queue emptied (either empty-queue exit); deleting a session
+      drops a carried outcome. A real interrupt force-cancels the runner task
+      instead: the cancelled drain publishes idle with cancelled and the
+      response id even with input buffered, and the turn's teardown then
+      carries an unkeyed cancelled to the continuation's running edge. Either
+      way the interrupted response gets exactly one runner-reported outcome.
+      The relay passes both keys to _publish_status, which hands them to
+      status-edge observers only; old runners send neither key, and an
+      unknown outcome drops the response id with it. BA-3
+      (DESIGN-DECISIONS.md) sets the precedence between these runner-reported
+      outcomes and the server-inferred ones (S1), and lists the unkeyed
+      sources.
+    files:
+      - omnigent/runner/app.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - tests/runner/test_runner_dispatch.py
+      - tests/server/routes/test_sessions_runner_relay.py
+    tests:
+      - tests/runner/test_runner_dispatch.py
+      - tests/server/routes/test_sessions_runner_relay.py
+    budget_lines: 40
+    budget_exception:
+      lines: 445
+      reason: >-
+        omnigent/runner/app.py (58 lines): two keyword-only parameters and the
+        two event keys, the carried-outcome map with its test seam and its pop
+        on every turn start, on delete and at the two drain exits that start no
+        turn, and the outcome and response id at six turn-end sites, each with
+        its anchor. omnigent/server/routes/_sessions/orchestration.py is within
+        budget (9). tests/runner/test_runner_dispatch.py (445): the five-ending
+        stream-end matrix (incl. waiting), a held-open streaming turn cancelled
+        by an interrupt, the same with input buffered, the buffered
+        continuation through a real drain and turn (interrupted, completed,
+        failed), both drain exits with the queue gone, the delete drop, the
+        init failure and the desync response id.
+        tests/server/routes/test_sessions_runner_relay.py (81 of the file's
+        155): relayed outcomes reach observers but never the stream payload,
+        and an id without a known outcome is dropped.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S41
+    title: Session event handler kept for in-process senders
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      create_app always keeps the session event handler on
+      app.state.session_event_dispatch, so an in-process sender can post events
+      on every server, and still hands it to managed startup inputs when they
+      exist, typed as the SessionEventDispatch protocol. Before, the handle
+      was dropped on servers without managed sandboxes.
+    files:
+      - omnigent/server/app.py
+      - tests/server/integration/test_engine_event_dispatch.py
+    tests:
+      - tests/server/integration/test_engine_event_dispatch.py
+    budget_lines: 10
+    budget_exception:
+      lines: 300
+      reason: >-
+        omnigent/server/app.py (17 lines): a named, typed registration function
+        with its anchor replaces the five-line lambda, and the local import
+        gains SessionEventDispatch. The new test file (300) is shared with S42;
+        its S41 part is the registration check with and without managed
+        sandboxes.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S42
+    title: EngineEventContext for request-free engine sends
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      startup_inputs gains EngineEventContext(app, user_id), an in-process
+      engine sender with no HTTP request whose headers are always empty (no
+      caller can pass any, so no runner tunnel credential rides an engine
+      send), and the SessionEventDispatch protocol for the shared handler.
+      Callers pass the run owner's authenticated user id, never a value taken
+      from request input. The event routes accept it wherever the startup and
+      runner contexts are accepted: it is authorized as its own user_id, never
+      a header identity, and its message is dispatched at once instead of
+      being saved behind a managed session's startup. From it,
+      _post_event_impl accepts only message, interrupt and stop_session
+      (anything else is FORBIDDEN) and refuses a message whose first text
+      starts with ! or / after leading whitespace (INVALID_INPUT), before any
+      dispatch, so no shell or slash command runs through an engine brief. A
+      host refusal in the host-bound relaunch ladder raises RUNNER_UNAVAILABLE
+      for it instead of recording a failed turn and reporting queued; a side
+      chat's source-relaunch refusal still records a failed turn (Coral step
+      sessions are never side chats). The other request-only and startup-only
+      branches are unchanged, so the closed check, input policy, owner-only
+      stop and interrupt behave as for an HTTP sender. The context has no
+      connection to wait on, so an ASK input policy ends as a deny at once
+      (BA-3).
+    files:
+      - omnigent/server/startup_inputs.py
+      - omnigent/server/routes/sessions/routes_events.py
+      - tests/server/integration/test_engine_event_dispatch.py
+    tests:
+      - tests/server/integration/test_engine_event_dispatch.py
+    budget_lines: 40
+    budget_exception:
+      lines: 300
+      reason: >-
+        omnigent/server/startup_inputs.py (33) is within budget.
+        omnigent/server/routes/sessions/routes_events.py (71 S42 lines of the
+        file's 80; 9 are S1's delete hook): the import, the context in five
+        unions and three tuples, and the engine event guard (allowed types,
+        first-text command prefixes) with its call, each with an anchor.
+        tests/server/integration/test_engine_event_dispatch.py (300, new,
+        shared with S41): message, interrupt, stop, input-policy deny and the
+        closed check through the real handler; the context's own user, allowed
+        and refused; empty headers; the refused event types and command-shaped
+        briefs; the managed startup queue skipped; the typed relaunch refusal.
       approver: pending
     anchor_exempt: []
     upstream_first: false

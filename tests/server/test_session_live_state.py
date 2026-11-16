@@ -725,6 +725,9 @@ def test_status_edge_observers_may_change_the_registry_or_raise_mid_notify() -> 
         ({"turn_outcome": "completed", "turn_response_id": 7}, ("completed", None)),
         ({"turn_outcome": "succeeded", "turn_response_id": ""}, (None, None)),
         ({"turn_outcome": ["failed"], "turn_response_id": "r" * 129}, (None, None)),
+        # CORAL(S1): a response id travels only with a known outcome.
+        ({"turn_outcome": "done", "turn_response_id": "resp_g"}, (None, None)),
+        ({"turn_response_id": "resp_g"}, (None, None)),
         ({}, (None, None)),
     ],
 )
@@ -1019,6 +1022,7 @@ async def test_observer_sees_every_edge_with_origin_at_the_four_sites(
             sessions._runner_status_probe_backoff,
         ):
             cache.pop(_SITE_SESSION, None)
+        session_live_state.forget_turn_outcomes(_SITE_SESSION)
         session_stream.close(_SITE_SESSION)
 
     edges = [edge for edge in status_edges if edge.session_id == _SITE_SESSION]
@@ -1027,3 +1031,82 @@ async def test_observer_sees_every_edge_with_origin_at_the_four_sites(
             session_id=_SITE_SESSION, origin=site, observed_at_ms=0, **expected
         )
     ]
+
+
+# CORAL(S1): reported turn outcomes are kept per (workspace, session), bounded.
+def test_reported_turn_outcomes_are_bounded_and_scoped_to_their_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.db.db_models import workspace_scope
+
+    edge = session_live_state.SessionStatusEdge
+    reported = session_live_state.turn_outcome_reported
+    session_id = f"conv_reported_{uuid.uuid4().hex}"
+    evicted = [f"{session_id}_{index}" for index in range(3)]
+    try:
+        # Only an edge with both an outcome and a response id counts.
+        session_live_state.notify_status_edge(
+            edge(session_id, "idle", None, turn_response_id="resp_no_outcome")
+        )
+        session_live_state.notify_status_edge(
+            edge(session_id, "failed", None, turn_outcome="failed")
+        )
+        for index in range(9):
+            session_live_state.notify_status_edge(
+                edge(
+                    session_id,
+                    "idle",
+                    None,
+                    turn_outcome="completed",
+                    turn_response_id=f"r{index}",
+                )
+            )
+        assert not reported(session_id, "resp_no_outcome")
+        assert not reported(session_id, None)
+        # A session keeps its last eight reported responses.
+        assert [reported(session_id, f"r{index}") for index in range(9)] == [False] + [True] * 8
+        with workspace_scope(4242):
+            assert not reported(session_id, "r8")
+        session_live_state.forget_turn_outcomes(session_id)
+        assert not reported(session_id, "r8")
+
+        # Past the session bound, the least recently reported session goes first.
+        monkeypatch.setattr(session_live_state, "_REPORTED_TURN_SESSIONS_MAX", 2)
+        for evicted_id in evicted:
+            session_live_state.notify_status_edge(
+                edge(evicted_id, "idle", None, turn_outcome="cancelled", turn_response_id="r")
+            )
+        assert [reported(evicted_id, "r") for evicted_id in evicted] == [False, True, True]
+    finally:
+        for forgotten in (session_id, *evicted):
+            session_live_state.forget_turn_outcomes(forgotten)
+
+
+async def test_deleting_a_session_forgets_its_reported_turn_outcomes(
+    client: Any, db_uri: str
+) -> None:
+    from omnigent.stores.conversation_store.sqlalchemy_store import (
+        SqlAlchemyConversationStore,
+    )
+    from tests.server.helpers import create_session_for_agent, create_test_agent
+
+    agent = await create_test_agent(client)
+    session_id = await create_session_for_agent(client, agent["id"])
+    # Its sub-agent descendants are deleted with it.
+    child = SqlAlchemyConversationStore(db_uri).create_conversation(
+        kind="sub_agent", title="worker:a", parent_conversation_id=session_id
+    )
+    deleted_ids = (session_id, child.id)
+    for deleted_id in deleted_ids:
+        session_live_state.notify_status_edge(
+            session_live_state.SessionStatusEdge(
+                deleted_id, "idle", None, turn_outcome="completed", turn_response_id="resp_deleted"
+            )
+        )
+        assert session_live_state.turn_outcome_reported(deleted_id, "resp_deleted")
+
+    response = await client.delete(f"/v1/sessions/{session_id}")
+
+    assert response.status_code < 300, response.text
+    for deleted_id in deleted_ids:
+        assert not session_live_state.turn_outcome_reported(deleted_id, "resp_deleted")

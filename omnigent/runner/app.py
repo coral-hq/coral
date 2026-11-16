@@ -1502,6 +1502,9 @@ def create_runner_app(
     _model_dialog_watchers: set[asyncio.Task[None]] = set()
     _session_message_buffers: dict[str, list[dict[str, Any]]] = {}
     app.state.session_message_buffers = _session_message_buffers
+    # CORAL(S43): (outcome, response id) of an ended turn whose buffered input runs next.
+    _carried_turn_outcomes: dict[str, tuple[str, str | None]] = {}
+    app.state.carried_turn_outcomes = _carried_turn_outcomes
     _claude_prompt_waiters: dict[str, asyncio.Task[None]] = {}
     app.state.claude_prompt_waiters = _claude_prompt_waiters
     # Sessions whose queued Claude message waits for a launcher sign-in.
@@ -2893,7 +2896,10 @@ def create_runner_app(
             except OmnigentError as exc:
                 # The relay also needs the failure when init precedes the first turn.
                 _publish_turn_status(
-                    session_id, "failed", error={"code": exc.code, "message": str(exc)}
+                    session_id,
+                    "failed",
+                    error={"code": exc.code, "message": str(exc)},
+                    turn_outcome="failed",  # CORAL(S43)
                 )
                 raise
             if spawn_env is None:
@@ -3658,6 +3664,7 @@ def create_runner_app(
         resource_registry.note_terminal_control_request(session_id, "delete_session")
         _cancel_claude_prompt_waiter(session_id)
         _session_message_buffers.pop(session_id, None)
+        _carried_turn_outcomes.pop(session_id, None)  # CORAL(S43): a deleted session reports none
         # Stop initialization before it can recreate resources during teardown.
         init_tasks = [
             task
@@ -3891,7 +3898,12 @@ def create_runner_app(
         *,
         source_error: Mapping[str, object] | None = None,
         response_id: str | None = None,
+        turn_outcome: str | None = None,  # CORAL(S43): completed, cancelled or failed
+        turn_response_id: str | None = None,
     ) -> None:
+        if status == "running" and turn_outcome is None:
+            # CORAL(S43): a turn start reports the ended turn its buffered input followed.
+            turn_outcome, turn_response_id = _carried_turn_outcomes.pop(conv_id, (None, None))
         if status == "waiting" and not (
             _server_version is not None and _version_supports_waiting_status(_server_version)
         ):
@@ -3918,6 +3930,10 @@ def create_runner_app(
             # response's own terminal error; the id lets it recognise this edge
             # as the same failure instead of adding a second card.
             event["response_id"] = response_id
+        if turn_outcome is not None:  # CORAL(S43): the ended turn's outcome and response id
+            event["turn_outcome"] = turn_outcome
+            if turn_response_id is not None:
+                event["turn_response_id"] = turn_response_id
         if status == "failed":
             source = source_error if source_error is not None else (error or {})
             dimensions: dict[str, str] = {}
@@ -4251,6 +4267,7 @@ def create_runner_app(
             )
             return
 
+        ended = owner_response_id or _live_response_id.get(conv_id)  # CORAL(S43)
         _active_turns.pop(conv_id, None)
         _turn_pending_ids.pop(conv_id, None)
         _release_live_turn_markers(conv_id)
@@ -4280,7 +4297,12 @@ def create_runner_app(
             if was_interrupted:
                 _append_cancellation_items(conv_id)
             if not has_buffered and not _suppress_status:
-                _publish_turn_status(conv_id, "idle")
+                # CORAL(S43): report the cancelled turn, or carry it to the continuation.
+                _publish_turn_status(
+                    conv_id, "idle", turn_outcome="cancelled", turn_response_id=ended
+                )
+            elif not _suppress_status:
+                _carried_turn_outcomes[conv_id] = ("cancelled", ended)
         elif sign_in_hold:
             # Nothing failed: the queued message is sent once the sign-in completes.
             pass
@@ -4300,6 +4322,8 @@ def create_runner_app(
                     error=normalized_error,
                     source_error=error,
                     response_id=owner_response_id,
+                    turn_outcome="failed",  # CORAL(S43)
+                    turn_response_id=ended,
                 )
             if normalized_error.get("code") == "databricks_sign_in_pending":
                 _start_sign_in_watch(conv_id)
@@ -4321,7 +4345,15 @@ def create_runner_app(
                     for child_id in children
                 )
                 waiting = has_running_children or conv_id in _subagent_wake_pending
-                _publish_turn_status(conv_id, "waiting" if waiting else "idle")
+                # CORAL(S43): report the completed turn, or carry it to the continuation.
+                _publish_turn_status(
+                    conv_id,
+                    "waiting" if waiting else "idle",
+                    turn_outcome="completed",
+                    turn_response_id=ended,
+                )
+            elif not _suppress_status:
+                _carried_turn_outcomes[conv_id] = ("completed", ended)
         if was_interrupted or cancelled:
             if conv_id in _desynced_sessions and not has_buffered:
                 # This turn was torn down by desync recovery (which sets the
@@ -4528,6 +4560,7 @@ def create_runner_app(
         _desynced_sessions.add(conv_id)
         # Capture entry epoch; an advance during teardown means a replacement ran.
         _entry_epoch = _turn_bind_epoch.get(conv_id, 0)
+        desynced_response_id = _live_response_id.get(conv_id)  # CORAL(S43)
         # Release markers before any await so concurrent callers see no live turn.
         _release_live_turn_markers(conv_id)
         # Pre-claim terminal token for this epoch; authoritative decision re-made after teardown.
@@ -4557,6 +4590,8 @@ def create_runner_app(
                         "could not be recovered. Please send your message again."
                     ),
                 },
+                turn_outcome="failed",  # CORAL(S43)
+                turn_response_id=desynced_response_id,
             )
         else:
             # A continuation owns the terminal status — release our claim (compare-and-pop
@@ -4871,6 +4906,13 @@ def create_runner_app(
         with scheduled_run_scope(None, session_id=session_id):
             await _drain_next_turn(session_id)
 
+    def _publish_carried_turn_outcome(session_id: str) -> None:
+        """CORAL(S43): report a carried turn end on ``idle`` when no continuation starts."""
+        if (carried := _carried_turn_outcomes.pop(session_id, None)) is not None:
+            _publish_turn_status(
+                session_id, "idle", turn_outcome=carried[0], turn_response_id=carried[1]
+            )
+
     async def _drain_next_turn(session_id: str) -> None:
         _seq = _ingest_next_seq.get(session_id, 0)
         _ingest_next_seq[session_id] = _seq + 1
@@ -4887,6 +4929,7 @@ def create_runner_app(
 
             buf = _session_message_buffers.get(session_id)
             if not buf:
+                _publish_carried_turn_outcome(session_id)  # CORAL(S43)
                 _rewake_parent_if_inbox_stranded(session_id)
                 return
 
@@ -4910,6 +4953,7 @@ def create_runner_app(
             # Stop/delete can clear the queue while the pane inspection is in flight.
             buf = _session_message_buffers.get(session_id)
             if not buf:
+                _publish_carried_turn_outcome(session_id)  # CORAL(S43)
                 return
             if pending_bridge_dir is not None:
                 _start_claude_prompt_waiter(session_id, pending_bridge_dir)
@@ -6115,6 +6159,7 @@ def create_runner_app(
             if _slot is None or _slot is asyncio.current_task():
                 _active_turns.pop(session_id, None)
                 _turn_pending_ids.pop(session_id, None)
+                cancelled_response_id = _live_response_id.get(session_id)  # CORAL(S43)
                 # Clear the live response AND the in-flight marker together (B1
                 # class fix): a bare pop would leak the process-manager marker and
                 # the idle reaper would skip the harness forever.
@@ -6125,7 +6170,12 @@ def create_runner_app(
                 if _desync_terminalized.get(session_id) == _turn_bind_epoch.get(session_id, 0):
                     _desync_terminalized.pop(session_id, None)
                 else:
-                    _publish_turn_status(session_id, "idle")
+                    _publish_turn_status(
+                        session_id,
+                        "idle",
+                        turn_outcome="cancelled",  # CORAL(S43)
+                        turn_response_id=cancelled_response_id,
+                    )
             raise
         except (httpx.HTTPError, RuntimeError, StopAsyncIteration) as exc:
             _logger.error(

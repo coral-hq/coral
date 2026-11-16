@@ -943,6 +943,151 @@ async def test_relay_captures_failure_agent_without_reusing_prior_turn_identity(
         session_stream.close(session_id)
 
 
+# CORAL(S43): the relay hands the runner's turn outcome to status-edge observers.
+@pytest.mark.asyncio
+async def test_relay_passes_runner_turn_outcomes_to_observers_not_to_the_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each relayed edge carries the runner's outcome for the turn it names; SSE is unchanged."""
+    from omnigent.runtime import session_stream
+    from omnigent.server import session_live_state
+    from omnigent.server.routes import sessions as sessions_module
+
+    session_id = "a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3"
+    events: list[dict[str, Any]] = [
+        # A continuation's running edge reports the interrupted turn before it.
+        {
+            "type": "session.status",
+            "status": "running",
+            "turn_outcome": "cancelled",
+            "turn_response_id": "resp_interrupted",
+        },
+        {"type": "response.in_progress", "response": {"id": "resp_next"}},
+        {
+            "type": "session.status",
+            "status": "idle",
+            "turn_outcome": "completed",
+            "turn_response_id": "resp_next",
+        },
+        # Old runners send neither key, and unknown values are dropped; an id
+        # without a known outcome is dropped with it.
+        {"type": "session.status", "status": "running"},
+        {
+            "type": "session.status",
+            "status": "idle",
+            "turn_outcome": "done",
+            "turn_response_id": "resp_orphan",
+        },
+    ]
+    payloads: list[dict[str, Any]] = []
+    publish = session_stream.publish
+
+    def record_publish(key: str, payload: dict[str, Any]) -> None:
+        if key == session_id:
+            payloads.append(dict(payload))
+        publish(key, payload)
+
+    monkeypatch.setattr(session_stream, "publish", record_publish)
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer(
+        "test-relay-turn-outcomes", edges.append
+    )
+    gate = asyncio.Event()
+    gate.set()
+    try:
+        await sessions_module._relay_runner_stream(
+            session_id,
+            _ScriptedRunnerClient(gate, events),  # type: ignore[arg-type]
+            _RecordingLabelStore(),  # type: ignore[arg-type]
+        )
+    finally:
+        unregister()
+        sessions_module._session_status_cache.pop(session_id, None)
+        sessions_module._session_active_response_cache.pop(session_id, None)
+        session_live_state.forget_turn_outcomes(session_id)
+        session_stream.close(session_id)
+
+    assert [
+        (edge.status, edge.turn_outcome, edge.turn_response_id)
+        for edge in edges
+        if edge.session_id == session_id
+    ] == [
+        ("running", "cancelled", "resp_interrupted"),
+        ("idle", "completed", "resp_next"),
+        ("running", None, None),
+        ("idle", None, None),
+    ]
+    statuses = [payload for payload in payloads if payload.get("type") == "session.status"]
+    assert [payload["status"] for payload in statuses] == ["running", "idle", "running", "idle"]
+    assert not any(
+        key in payload for payload in statuses for key in ("turn_outcome", "turn_response_id")
+    )
+
+
+# CORAL(S1): a runner drop never gives a turn the runner already reported a second outcome.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("session_id", "turn_end"),
+    [
+        # The turn ended with only background work left.
+        ("c1a2b3c4d5e6f708192a3b4c5d6e7f80", "waiting"),
+        # A buffered continuation started and has not opened its own response yet.
+        ("d1a2b3c4d5e6f708192a3b4c5d6e7f80", "running"),
+    ],
+    ids=["waiting", "continuation"],
+)
+async def test_runner_drop_after_a_reported_turn_end_adds_no_second_outcome(
+    monkeypatch: pytest.MonkeyPatch, session_id: str, turn_end: str
+) -> None:
+    from omnigent.runtime import session_stream
+    from omnigent.server import session_live_state
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration.RUNNER_DISCONNECT_GRACE_S", 0.0
+    )
+    events = [
+        {"type": "session.status", "status": "running"},
+        {"type": "response.in_progress", "response": {"id": "resp_reported"}},
+        {
+            "type": "session.status",
+            "status": turn_end,
+            "turn_outcome": "completed",
+            "turn_response_id": "resp_reported",
+        },
+    ]
+    gate = asyncio.Event()
+    gate.set()
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer(
+        "test-relay-reported-turn", edges.append
+    )
+    try:
+        await sessions_module._relay_runner_stream(
+            session_id,
+            _ScriptedThenDropRunnerClient(  # type: ignore[arg-type]
+                [f"data: {json.dumps(event)}\n\n" for event in events], gate
+            ),
+            _RecordingLabelStore(live_status=turn_end),  # type: ignore[arg-type]
+        )
+    finally:
+        unregister()
+        sessions_module._session_status_cache.pop(session_id, None)
+        sessions_module._session_active_response_cache.pop(session_id, None)
+        session_live_state.forget_turn_outcomes(session_id)
+        session_stream.close(session_id)
+
+    assert [
+        (edge.status, edge.origin, edge.turn_outcome, edge.turn_response_id)
+        for edge in edges
+        if edge.session_id == session_id
+    ] == [
+        ("running", "unknown", None, None),
+        (turn_end, "unknown", "completed", "resp_reported"),
+        ("failed", "runner_disconnect", None, None),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_relay_persists_disconnect_error_labels_on_tunnel_close(
     monkeypatch: pytest.MonkeyPatch,

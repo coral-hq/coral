@@ -305,10 +305,18 @@ from omnigent.server.schemas import (
     McpServerStartup,
     SessionEventInput,
 )
-from omnigent.server.session_live_state import handoff_count, last_liveness_stamp
+from omnigent.server.session_live_state import (  # CORAL(S1): forget_turn_outcomes
+    forget_turn_outcomes,
+    handoff_count,
+    last_liveness_stamp,
+)
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.session_orchestration import require_orchestration_source
-from omnigent.server.startup_inputs import StartupDispatch, StartupInputContext
+from omnigent.server.startup_inputs import (  # CORAL(S42): the engine's sender context
+    EngineEventContext,
+    StartupDispatch,
+    StartupInputContext,
+)
 from omnigent.server.subagent_activity import (
     native_subagent_terminal_status,
     record_subagent_activity,
@@ -889,6 +897,43 @@ _TURN_STARTING_EVENT_TYPES = frozenset({"message", "session_message", _SLASH_COM
 # Also given ``in_flight``: a claude-sdk ``/compact`` runs a harness turn.
 _IN_FLIGHT_EVENT_TYPES = _TURN_STARTING_EVENT_TYPES | {_COMPACT_TYPE}
 
+# CORAL(S42): an engine sends briefs, interrupts and stops only; a brief is model
+# input, never a shell (``!``) or slash (``/``) command for the harness.
+_ENGINE_EVENT_TYPES = frozenset({"message", _INTERRUPT_TYPE, _STOP_SESSION_TYPE})
+_ENGINE_COMMAND_PREFIXES = ("!", "/")
+
+
+def _first_message_text(content: object) -> str:
+    """Return the first text in a message's ``content``, or ``""`` when it has none."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and isinstance(text := block.get("text"), str):
+                return text
+    return ""
+
+
+def _refuse_engine_event(body: SessionEventInput) -> None:
+    """
+    Refuse an engine event it has no business sending, before anything acts on it.
+
+    :param body: The event an :class:`EngineEventContext` posted.
+    :raises OmnigentError: ``FORBIDDEN`` for any type but message, interrupt and
+        stop; ``INVALID_INPUT`` for a message whose first text is a command.
+    """
+    if body.type not in _ENGINE_EVENT_TYPES:
+        raise OmnigentError(
+            "An engine sender may only post messages, interrupts and stops",
+            code=ErrorCode.FORBIDDEN,
+        )
+    text = _first_message_text(body.data.get("content")) if body.type == "message" else ""
+    if text.lstrip().startswith(_ENGINE_COMMAND_PREFIXES):
+        raise OmnigentError(
+            "An engine message cannot start with a shell or slash command",
+            code=ErrorCode.INVALID_INPUT,
+        )
+
 
 def _legacy_side_chat_attachment(
     content: object,
@@ -978,7 +1023,9 @@ def register_events_routes(
     event_router = APIRouter(route_class=_SessionEventBodyLimitRoute)
 
     def _has_bound_runner_authority(
-        request: Request | _RunnerEventContext | StartupInputContext, conv: Any
+        # CORAL(S42): an engine sender takes the request-free paths.
+        request: Request | _RunnerEventContext | StartupInputContext | EngineEventContext,
+        conv: Any,
     ) -> bool:
         if isinstance(request, _RunnerEventContext):
             return conv.runner_id == request.runner_id
@@ -989,7 +1036,8 @@ def register_events_routes(
         return isinstance(runner_id, str) and token_bound_runner_id(token) == runner_id
 
     def _reporting_runner_id(
-        request: Request | _RunnerEventContext | StartupInputContext,
+        # CORAL(S42): an engine sender takes the request-free paths.
+        request: Request | _RunnerEventContext | StartupInputContext | EngineEventContext,
     ) -> str | None:
         """Return the runner that sent *request*, or ``None`` for a non-runner caller."""
         if isinstance(request, _RunnerEventContext):
@@ -998,7 +1046,9 @@ def register_events_routes(
         return token_bound_runner_id(token) if token else None
 
     def _has_runner_created_by_authority(
-        request: Request | _RunnerEventContext | StartupInputContext, conv: Any
+        # CORAL(S42): an engine sender takes the request-free paths.
+        request: Request | _RunnerEventContext | StartupInputContext | EngineEventContext,
+        conv: Any,
     ) -> bool:
         if isinstance(request, _RunnerEventContext):
             return _has_bound_runner_authority(request, conv)
@@ -1008,7 +1058,8 @@ def register_events_routes(
         return _has_bound_runner_authority(request, conv)
 
     async def _authorized_conversation(
-        request: Request | _RunnerEventContext | StartupInputContext,
+        # CORAL(S42): an engine sender takes the request-free paths.
+        request: Request | _RunnerEventContext | StartupInputContext | EngineEventContext,
         session_id: str,
         *,
         external_transcript: bool = False,
@@ -1016,7 +1067,8 @@ def register_events_routes(
         """Authorize event writes, reserving transcripts for owners and bound runners."""
         user_id = (
             request.user_id
-            if isinstance(request, (_RunnerEventContext, StartupInputContext))
+            # CORAL(S42): an engine sender acts as its own user, not a header identity.
+            if isinstance(request, (_RunnerEventContext, StartupInputContext, EngineEventContext))
             else _get_user_id(request, auth_provider)
         )
         conv = None
@@ -1213,7 +1265,8 @@ def register_events_routes(
             )
 
     async def _post_event_impl(
-        request: Request | _RunnerEventContext | StartupInputContext,
+        # CORAL(S42): an engine sender takes the request-free paths.
+        request: Request | _RunnerEventContext | StartupInputContext | EngineEventContext,
         session_id: str,
         body: SessionEventInput,
         in_flight: contextlib.ExitStack | None = None,
@@ -1310,6 +1363,8 @@ def register_events_routes(
             control and internal transient events.
         :raises OmnigentError: 404 if no session exists.
         """
+        if isinstance(request, EngineEventContext):
+            _refuse_engine_event(body)  # CORAL(S42): engine events are briefs, interrupts, stops
         # A report must not land on a replica that hands the session off before it is written.
         handoffs_at_request = handoff_count(session_id)
         start_fire_stage("owner_authorization", session_id=session_id)
@@ -1649,7 +1704,8 @@ def register_events_routes(
 
         startup = getattr(request.app.state, "startup_inputs", None)
         if (
-            not isinstance(request, (StartupInputContext, _RunnerEventContext))
+            # CORAL(S42): an engine message is dispatched now, never saved behind startup.
+            not isinstance(request, (StartupInputContext, _RunnerEventContext, EngineEventContext))
             and startup is not None
             and (
                 (body.type == "message" and body.data.get("role") == "user")
@@ -3367,7 +3423,8 @@ def register_events_routes(
                         # of reflecting arbitrary host-provided text.
                         host_error = _workspace_missing_message(conv.workspace)
                     if host_error_code is not None:
-                        if isinstance(request, StartupInputContext):
+                        # CORAL(S42): an engine sender retries a refusal; never record a turn.
+                        if isinstance(request, (StartupInputContext, EngineEventContext)):
                             raise OmnigentError(
                                 host_error or "The host refused to launch the session",
                                 code=ErrorCode.RUNNER_UNAVAILABLE,
@@ -4227,6 +4284,9 @@ def register_events_routes(
         # A relay still inside an offline runner's reconnect grace must not
         # fail the deleted turns when that grace expires.
         _cancel_runner_relays([session_id, *descendant_ids])
+        # CORAL(S1): deleted sessions keep no record of their reported turn outcomes.
+        for deleted_id in (session_id, *descendant_ids):
+            forget_turn_outcomes(deleted_id)
         # The session is gone, so is its launch-progress state. Failed
         # launches are retained in the cache for reload visibility while
         # the session exists; without this eviction every deleted

@@ -45,6 +45,7 @@ import functools
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -154,6 +155,14 @@ StatusEdgeObserver = Callable[[SessionStatusEdge], None]
 _status_edge_observers: dict[str, StatusEdgeObserver] = {}
 _status_edge_observers_lock = threading.Lock()
 
+# CORAL(S1): responses whose outcome observers already received, so a server-inferred
+# outcome never gives one response a second one. Recent ids per session; LRU sessions.
+_REPORTED_TURNS_PER_SESSION = 8
+_REPORTED_TURN_SESSIONS_MAX = 4096
+# custom-lint: disable-next=workspace-scoped-cache -- keys carry their workspace_id
+_reported_turns: OrderedDict[tuple[int, str], tuple[str, ...]] = OrderedDict()
+_reported_turns_lock = threading.Lock()
+
 
 def _known_turn_outcome(value: object) -> str | None:
     return value if isinstance(value, str) and value in TURN_OUTCOMES else None
@@ -174,12 +183,13 @@ def turn_fields(event: Mapping[str, object]) -> tuple[str | None, str | None]:
     :param event: A runner ``session.status`` event, e.g.
         ``{"status": "idle", "turn_outcome": "cancelled", "turn_response_id": "resp_1"}``.
     :returns: ``(turn_outcome, turn_response_id)``; an unknown outcome, or an id
-        that is not a non-empty string of at most 128 characters, is ``None``.
+        that is not a non-empty string of at most 128 characters, is ``None``. The
+        id travels only with a known outcome, so ``(None, None)`` without one.
     """
-    return (
-        _known_turn_outcome(event.get("turn_outcome")),
-        _bounded_id(event.get("turn_response_id")),
-    )
+    outcome = _known_turn_outcome(event.get("turn_outcome"))
+    if outcome is None:
+        return None, None
+    return outcome, _bounded_id(event.get("turn_response_id"))
 
 
 def register_status_edge_observer(name: str, fn: StatusEdgeObserver) -> Callable[[], None]:
@@ -218,6 +228,7 @@ def notify_status_edge(edge: SessionStatusEdge) -> None:
 
     :param edge: The published edge.
     """
+    _record_reported_turn(edge)
     with _status_edge_observers_lock:
         observers = tuple(_status_edge_observers.items())
     for name, fn in observers:
@@ -237,6 +248,40 @@ def notify_status_edge(edge: SessionStatusEdge) -> None:
                 name,
                 extra={"session_id": edge.session_id},
             )
+
+
+def _record_reported_turn(edge: SessionStatusEdge) -> None:
+    """Remember that *edge* gave its ``turn_response_id`` an outcome."""
+    if edge.turn_outcome is None or edge.turn_response_id is None:
+        return
+    key = (edge.workspace_id, edge.session_id)
+    with _reported_turns_lock:
+        reported = _reported_turns.pop(key, ())
+        if edge.turn_response_id not in reported:
+            reported = (*reported, edge.turn_response_id)[-_REPORTED_TURNS_PER_SESSION:]
+        _reported_turns[key] = reported
+        while len(_reported_turns) > _REPORTED_TURN_SESSIONS_MAX:
+            _reported_turns.popitem(last=False)
+
+
+def turn_outcome_reported(session_id: str, response_id: str | None) -> bool:
+    """
+    Whether observers already received an outcome for *response_id* in this workspace.
+
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param response_id: The turn's response id; ``None`` was never reported.
+    :returns: ``True`` when one of the session's recent edges reported it.
+    """
+    if response_id is None:
+        return False
+    with _reported_turns_lock:
+        return response_id in _reported_turns.get((current_workspace_id(), session_id), ())
+
+
+def forget_turn_outcomes(session_id: str) -> None:
+    """Drop the reported turn outcomes of a deleted session in this workspace."""
+    with _reported_turns_lock:
+        _reported_turns.pop((current_workspace_id(), session_id), None)
 
 
 def configure(
