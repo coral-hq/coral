@@ -1758,6 +1758,7 @@ describe("coral__ engine agents", () => {
       [BUILTINS_URL]: mockResponse({
         data: [
           { id: "ag_anchor", name: "coral__anchor", harness: "claude-sdk", builtin: true },
+          { id: "ag_upper", name: "Coral__x", harness: "claude-sdk", builtin: true },
           { id: "ag_polly", name: "polly", harness: "claude-sdk", builtin: true },
         ],
         has_more: false,

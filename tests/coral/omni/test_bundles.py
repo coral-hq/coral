@@ -110,6 +110,11 @@ def test_every_seed_and_step_bundle_passes_hygiene(
             "spawn is false",
         ),
         (Stance.ANCHOR, lambda c: c.update(skills="all"), "skills is none"),
+        (
+            Stance.ANCHOR,
+            lambda c: c["executor"]["config"].update(harness="codex"),
+            "harness is claude-sdk",
+        ),
         (Stance.ANCHOR, lambda c: c.update(timers=True), "timers is false"),
         (
             Stance.ANCHOR,

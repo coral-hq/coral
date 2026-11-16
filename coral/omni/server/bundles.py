@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from coral.omni._upstream import _tar_gz_dir
 from coral.profiles.bundle_spec import DENY_VENDOR_ASK_HANDLER, ENGINE_PREFIX, Stance
 from omnigent.errors import OmnigentError
+from omnigent.harness_aliases import is_claude_sdk_harness_name
 from omnigent.server.bundles import uploaded_agent_for, validate_agent_bundle
 from omnigent.spec.types import AgentSpec, FunctionPolicySpec, SharePolicy
 from omnigent.stores.agent_store import AgentStore
@@ -55,6 +56,7 @@ def _hygiene_violations(spec: AgentSpec, stance: Stance) -> list[str]:
     rules = {
         f"name starts with {ENGINE_PREFIX}": (spec.name or "").startswith(ENGINE_PREFIX),
         "params.coral is set": "coral" in spec.params,
+        "harness is claude-sdk": is_claude_sdk_harness_name(spec.executor.harness_kind),
         "spawn is false": not spec.spawn,
         "tools.agents is empty": not spec.tools.agents,
         "timers is false": not spec.timers,

@@ -744,10 +744,11 @@ def test_list_user_agents_reads_a_bounded_window(
 def test_list_user_agents_hides_coral_engine_rows_before_the_read_cap(
     agent_store: SqlAlchemyAgentStore, clock: None
 ) -> None:
-    """CORAL(S54): engine rows never fill the page, and ``_`` is not a wildcard."""
+    """CORAL(S54): engine rows never fill the page, case is ignored, ``_`` is not a wildcard."""
     mine = _user_agent(agent_store, "orion")
     lookalike = _user_agent(agent_store, "coralXYz")
     engine = [_user_agent(agent_store, f"coral__x__n{i}__m0") for i in range(60)]
+    _user_agent(agent_store, "Coral__x")
 
     page = agent_store.list_user_agents(_OWNER)
 

@@ -486,7 +486,7 @@ def create_builtin_agents_router(
                     _to_agent_object(a, agent_cache)
                     for a in page.data
                     # CORAL(S54): engine step rows never list
-                    if a.name not in suppressed and not a.name.startswith("coral__")
+                    if a.name not in suppressed and not a.name.lower().startswith("coral__")
                 ],
                 first_id=page.first_id,
                 last_id=page.last_id,

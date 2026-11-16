@@ -131,7 +131,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/runtime/prompt.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/runtime/workflow.py` | S95, S13, S21 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Sets `HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL=1` and `HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK=1` for claude-sdk specs with `params.coral` (S13, S21). |
 | `omnigent/server/app.py` | S95, S32 | upstream-extension | Wires `server_plugins` loading, router mounting ahead of `_SPAStaticFiles`, policy-module merging, and lifespan hook execution (S32). Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/server/routes/builtin_agents.py` | S54 | coral-specific | `GET /v1/agents` leaves out server agents whose name starts with `coral__` (S54). |
+| `omnigent/server/routes/builtin_agents.py` | S54 | coral-specific | `GET /v1/agents` leaves out server agents whose name starts with `coral__`, ignoring case (S54). |
 | `omnigent/server/server_plugins.py` | S32 | upstream-extension | Added. Defines `ServerServices`, `ServerPluginRegistration`, `load_server_plugins`, and `enter_lifespan_hooks` (S32). |
 | `omnigent/server/mcp_compatibility.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/server/performance_metrics.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -147,7 +147,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/spec/__init__.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/spec/_omnigent_compat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/spec/omnigent.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/stores/agent_store/sqlalchemy_store.py` | S54 | coral-specific | `list_user_agents` leaves out `coral__` rows in SQL, before the read cap (S54). |
+| `omnigent/stores/agent_store/sqlalchemy_store.py` | S54 | coral-specific | `list_user_agents` leaves out `coral__` rows in SQL, ignoring case, before the read cap (S54). |
 | `omnigent/stores/scheduled_task_store/sqlalchemy_store.py` | S58 | upstream-extension | Delegates _cursor_after to shared keyset_after helper (S58). |
 | `omnigent/telemetry/client.py` | S98 | coral-specific | Telemetry is always disabled: Coral sends no usage telemetry to Omnigent's service. |
 | `omnigent/tools/builtins/async_inbox.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -425,7 +425,7 @@ OPS-01's generator will maintain this file later.
 | `web/src/index.css.test.ts` | S83 | coral-specific | Asserts the Newsreader import and `--font-display`, and that `--font-heading` stays sans (S83). |
 | `web/src/lib/branding.ts` | S79 | coral-specific | Built-in defaults become "Coral" and "Direct the run…"; operator branding still overrides them (S79). |
 | `web/src/lib/customTheme.test.ts` | S82 | coral-specific | Rebaselines the default palette's selection tint to Coral's washes (S82). |
-| `web/src/lib/engineAgents.ts` | S54 | coral-specific | Added. `isEngineAgentName`, the `coral__` prefix check the agent hooks share (S54). |
+| `web/src/lib/engineAgents.ts` | S54 | coral-specific | Added. `isEngineAgentName`, the case-insensitive `coral__` prefix check the agent hooks share (S54). |
 | `web/src/lib/harnessSetup.ts` | S89 | coral-specific | resolveSetupSteps takes an optional appName (default DEFAULT_APP_NAME), and the synthesized tmux step's detail uses it instead of hard-coded Omnigent (S89). |
 | `web/src/lib/settingsPortability.ts` | S89 | coral-specific | Settings export now downloads as coral-settings.json and the invalid-file import error names DEFAULT_APP_NAME; import checks only the .json extension and content shape, so omnigent-settings.json exports still load (S89). |
 | `web/src/lib/terminalClipboardPreferences.test.ts` | S89 | coral-specific | Clipboard-preference import test expects the 'valid Coral settings' error (S89). |

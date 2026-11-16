@@ -543,7 +543,7 @@ class SqlAlchemyAgentStore(AgentStore):
             SqlAgent.kind == encode_agent_kind("user"),
             SqlAgent.created_by == owner,
             # CORAL(S54): engine step rows stay reachable by id but never list
-            ~SqlAgent.name.startswith("coral__", autoescape=True),
+            ~SqlAgent.name.istartswith("coral__", autoescape=True),
         )
         with self._session("list_user_agents") as session:
             stmt = select(SqlAgent).where(*mine)

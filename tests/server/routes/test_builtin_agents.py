@@ -127,11 +127,12 @@ async def test_coral_engine_agents_are_not_listed(
     client: httpx.AsyncClient,
     db_uri: str,
 ) -> None:
-    """CORAL(S54): ``coral__`` rows of either kind never list but stay readable by id."""
+    """CORAL(S54): ``coral__`` rows of either kind, in any case, never list but stay readable."""
     agent_store = SqlAlchemyAgentStore(db_uri)
     agent_store.create(
         builtin_agent_id("coral__seed"), name="coral__seed", bundle_location="t:///"
     )
+    agent_store.create(builtin_agent_id("Coral__x"), name="Coral__x", bundle_location="t:///c")
     agent_store.create(generate_agent_id(), name="house-agent", bundle_location="t:///h")
     engine_id, orion_id = generate_agent_id(), generate_agent_id()
     # A user row lists only as the original of its blob, ``<id>/<digest>``.

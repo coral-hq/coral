@@ -1286,9 +1286,10 @@ seams:
       agents, session discovery and the Custom agents list filter them through
       `isEngineAgentName` from `web/src/lib/engineAgents.ts`, a module with no
       imports, so the Custom agents page does not load the picker hooks. Reads
-      by id are unchanged, so sessions bound to an engine row keep working. A
-      user agent named with the prefix is hidden too; rename protection
-      belongs to S53.
+      by id are unchanged, so sessions bound to an engine row keep working.
+      Every filter ignores case, matching SQLite LIKE, so `Coral__x` is hidden
+      everywhere. A user agent named with the prefix is hidden too; rename
+      protection belongs to S53.
     files:
       - omnigent/stores/agent_store/sqlalchemy_store.py
       - omnigent/server/routes/builtin_agents.py
