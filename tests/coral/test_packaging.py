@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import zipfile
 from importlib.metadata import packages_distributions
 from pathlib import Path
 
@@ -43,6 +44,20 @@ def test_built_wheel_runs_coral_help_in_no_deps_venv(tmp_path: Path) -> None:
     )
     wheels = list(wheel_dir.glob("omnigent-*.whl"))
     assert len(wheels) == 1
+    with zipfile.ZipFile(wheels[0]) as wheel:
+        seed_files = {
+            name for name in wheel.namelist() if name.startswith("coral/profiles/seeds/")
+        }
+    assert {
+        f"coral/profiles/seeds/{name}"
+        for name in (
+            "seeds.lock",
+            "anchor.yaml",
+            "orchestrator.yaml",
+            "implementer.yaml",
+            "reviewer.yaml",
+        )
+    } <= seed_files
 
     venv_dir = tmp_path / "venv"
     subprocess.run(

@@ -598,7 +598,7 @@ seams:
     note: >-
       Points the `coral` console script at `coral.cli:main`, includes `coral*`
       in package discovery, and registers package data for Coral's migrations,
-      templates, and built-in profile seeds.
+      templates, and built-in profile seeds with their seeds.lock.
     files:
       - pyproject.toml
     tests:
