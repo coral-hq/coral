@@ -33,7 +33,7 @@ OPS-01's generator will maintain this file later.
 | `SECURITY.md` | S94 | coral-specific | Vulnerability reports go to Coral's private security advisories or coralai.team@gmail.com; the code-scanning link points to Coral's repository. |
 | `deploy/databricks/src/app.py` | S57 | upstream-extension | Runs Coral schema migrations with retry strictly after Omnigent migrations at startup (S57). |
 | `dev/lint/custom_lint.py` | S39 | coral-specific | Registers the `coral-import-boundary` rule last in `RULES` (S39). |
-| `dev/lint/lint_coral_import_boundary.py` | S39, S58 | coral-specific | Added. Enforces Coral's pure/omni/db/app/root three-tier import boundaries (S39). Allowlist permits shared Omnigent DB utilities in coral.db (S58). |
+| `dev/lint/lint_coral_import_boundary.py` | S39, S58 | coral-specific | Added. Enforces Coral's pure/omni/db/app/root three-tier import boundaries (S39). Allowlist permits shared Omnigent DB utilities in coral.db (S58). Marks `coral.signals` as pure so the workflow reducer can import the outbox table. |
 | `dev/lint/lint_workspace_scoped_cache.py` | S39 | coral-specific | Adds `coral/` to `SCANNED_ROOTS` (S39). |
 | `justfile` | S87, S76 | coral-specific | `electron-run` finds, quits and resets the "Coral Dev" build, and `electron-mdm` writes and imports Coral's app-id preference domains (S87). Mounts `mod coral 'coral/coral.just'` (S76). |
 | `omnigent/chat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
