@@ -131,6 +131,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/runtime/prompt.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/runtime/workflow.py` | S95, S13, S21 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Sets `HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL=1` and `HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK=1` for claude-sdk specs with `params.coral` (S13, S21). |
 | `omnigent/server/app.py` | S95, S32 | upstream-extension | Wires `server_plugins` loading, router mounting ahead of `_SPAStaticFiles`, policy-module merging, and lifespan hook execution (S32). Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/server/routes/builtin_agents.py` | S54 | coral-specific | `GET /v1/agents` leaves out server agents whose name starts with `coral__` (S54). |
 | `omnigent/server/server_plugins.py` | S32 | upstream-extension | Added. Defines `ServerServices`, `ServerPluginRegistration`, `load_server_plugins`, and `enter_lifespan_hooks` (S32). |
 | `omnigent/server/mcp_compatibility.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/server/performance_metrics.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -146,6 +147,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/spec/__init__.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/spec/_omnigent_compat.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/spec/omnigent.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `omnigent/stores/agent_store/sqlalchemy_store.py` | S54 | coral-specific | `list_user_agents` leaves out `coral__` rows in SQL, before the read cap (S54). |
 | `omnigent/stores/scheduled_task_store/sqlalchemy_store.py` | S58 | upstream-extension | Delegates _cursor_after to shared keyset_after helper (S58). |
 | `omnigent/telemetry/client.py` | S98 | coral-specific | Telemetry is always disabled: Coral sends no usage telemetry to Omnigent's service. |
 | `omnigent/tools/builtins/async_inbox.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -262,12 +264,14 @@ OPS-01's generator will maintain this file later.
 | `tests/server/integration/test_oidc_cli_ticket_hijack_e2e.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/integration/test_session_create_harness_readiness.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/integration/test_sessions_compact.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/server/routes/test_builtin_agents.py` | S54 | coral-specific | Adds the `coral__` hiding test for server and `scope=user` lists (S54). |
 | `tests/server/routes/test_session_resources.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/routes/test_sessions_upload_limits.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/test_admin_list.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/test_app.py` | S32 | upstream-extension | Adds server-plugin loading, failure abort, lifespan ordering, bundle policy registration, and `/v1/coral/info` gate tests (S32). |
 | `tests/server/test_oidc_cli_ticket.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/test_runner_session_init.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/stores/test_agent_store.py` | S54 | coral-specific | Adds the 60-row `coral__` hiding and wildcard test (S54). |
 | `tests/test_codex_effort_terminal_composer_mirror.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/test_conversation_browser.py` | S38 | coral-specific | Expects `coral://` deep links; fake openers key on `coral:` (S38). |
 | `tests/test_devin_native.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -414,6 +418,9 @@ OPS-01's generator will maintain this file later.
 | `web/src/components/scheduled/CreateScheduledTaskDialog.test.tsx` | S89 | coral-specific | Updated the expected trigger attribution note ("Sent with Coral") and link-back prompt text ("Coral session:") in the trigger dialog tests (S89). |
 | `web/src/components/scheduled/triggerTemplates.test.ts` | S89 | coral-specific | Updated the expected attribution and link-back text to say Coral, and added a test for each source showing that a rendered prompt with its attribution swapped back to "Sent with Omnigent" still splits into the same userPrompt and round-trips through combineTriggerPrompt (S89). |
 | `web/src/components/scheduled/triggerTemplates.ts` | S89 | coral-specific | Trigger templates now use the Jira label placeholder "coral", the link-back text "Coral session:" and OMNIGENT_ATTRIBUTION "Sent with Coral"; splitTriggerPrompt and combineTriggerPrompt also accept the legacy posting instructions built from "Sent with Omnigent", so saved prompts still split and round-trip byte for byte (S89). |
+| `web/src/hooks/useAvailableAgents.test.tsx` | S54 | coral-specific | Adds the `coral__` hiding tests for the four agent hooks (S54). |
+| `web/src/hooks/useAvailableAgents.ts` | S54 | coral-specific | Adds `isEngineAgentName` and drops `coral__` agents from the catalog, the caller's agents and session discovery (S54). |
+| `web/src/hooks/useCustomAgents.ts` | S54 | coral-specific | The Custom agents list drops `coral__` agents (S54). |
 | `web/src/index.css` | S83 | coral-specific | Imports Newsreader and `./brand/coral.css`, and adds `--font-display` (S83). |
 | `web/src/index.css.test.ts` | S83 | coral-specific | Asserts the Newsreader import and `--font-display`, and that `--font-heading` stays sans (S83). |
 | `web/src/lib/branding.ts` | S79 | coral-specific | Built-in defaults become "Coral" and "Direct the run…"; operator branding still overrides them (S79). |

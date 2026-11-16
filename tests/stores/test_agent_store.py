@@ -741,6 +741,21 @@ def test_list_user_agents_reads_a_bounded_window(
     assert ([a.id for a in rest.data], rest.has_more) == ([orion.id], False)
 
 
+def test_list_user_agents_hides_coral_engine_rows_before_the_read_cap(
+    agent_store: SqlAlchemyAgentStore, clock: None
+) -> None:
+    """CORAL(S54): engine rows never fill the page, and ``_`` is not a wildcard."""
+    mine = _user_agent(agent_store, "orion")
+    lookalike = _user_agent(agent_store, "coralXYz")
+    engine = [_user_agent(agent_store, f"coral__x__n{i}__m0") for i in range(60)]
+
+    page = agent_store.list_user_agents(_OWNER)
+
+    assert {a.id for a in page.data} == {mine.id, lookalike.id}
+    assert page.has_more is False
+    assert agent_store.get(engine[0].id) is not None
+
+
 def test_list_user_agents_pages_by_limit(agent_store: SqlAlchemyAgentStore, clock: None) -> None:
     for name in ("a", "b", "c"):
         _user_agent(agent_store, name)

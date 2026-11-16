@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Agent } from "./useAgents";
+import { isEngineAgentName } from "./useAvailableAgents";
 import { authenticatedFetch } from "@/lib/identity";
 import { apiErrorFromResponse } from "@/lib/sessionsApi";
 import { buildAgentBundle, type AgentBundleInput } from "@/lib/agentBundle";
@@ -40,7 +41,9 @@ export function useCustomAgents(scope: "server" | "user", enabled: boolean) {
       if (pageParam) params.set("after", pageParam);
       const res = await authenticatedFetch(`/v1/agents?${params}`, { signal });
       if (!res.ok) throw await apiErrorFromResponse(res);
-      return res.json();
+      const page: AgentPage = await res.json();
+      // CORAL(S54): engine step agents are not user-managed
+      return { ...page, data: page.data.filter((agent) => !isEngineAgentName(agent.name)) };
     },
     getNextPageParam: (page) => (page.has_more ? page.last_id : undefined),
     enabled,

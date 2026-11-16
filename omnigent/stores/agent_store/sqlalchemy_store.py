@@ -542,6 +542,8 @@ class SqlAlchemyAgentStore(AgentStore):
             SqlAgent.workspace_id == current_workspace_id(),
             SqlAgent.kind == encode_agent_kind("user"),
             SqlAgent.created_by == owner,
+            # CORAL(S54): engine step rows stay reachable by id but never list
+            ~SqlAgent.name.startswith("coral__", autoescape=True),
         )
         with self._session("list_user_agents") as session:
             stmt = select(SqlAgent).where(*mine)

@@ -121,3 +121,26 @@ async def test_suppressed_agents_are_hidden_and_named(
     assert body["suppressed_agent_names"] == ["debby", "polly"]
     # Hidden, not deleted: sessions bound to the row can still resolve it.
     assert agent_store.get_by_name("polly") is not None
+
+
+async def test_coral_engine_agents_are_not_listed(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """CORAL(S54): ``coral__`` rows of either kind never list but stay readable by id."""
+    agent_store = SqlAlchemyAgentStore(db_uri)
+    agent_store.create(
+        builtin_agent_id("coral__seed"), name="coral__seed", bundle_location="t:///"
+    )
+    agent_store.create(generate_agent_id(), name="house-agent", bundle_location="t:///h")
+    engine_id, orion_id = generate_agent_id(), generate_agent_id()
+    # A user row lists only as the original of its blob, ``<id>/<digest>``.
+    agent_store.create_user_agent(engine_id, "coral__wf__n__m0", f"{engine_id}/d", owner=None)
+    agent_store.create_user_agent(orion_id, "orion", f"{orion_id}/d", owner=None)
+
+    servers = await client.get("/v1/agents?limit=100")
+    users = await client.get("/v1/agents", params={"scope": "user"})
+
+    assert [a["name"] for a in servers.json()["data"]] == ["house-agent"]
+    assert [a["name"] for a in users.json()["data"]] == ["orion"]
+    assert agent_store.get(engine_id) is not None

@@ -1263,6 +1263,44 @@ seams:
     anchor_exempt: []
     upstream_first: false
 
+  - id: S54
+    title: Hide coral__ engine agents from agent lists and pickers
+    owner: WS-PROFILES
+    status: landed
+    category: coral-specific
+    note: >-
+      Coral step bundles are ordinary agent rows named `coral__...`. The
+      `list_user_agents` query drops them in SQL before its 50-row read cap
+      (`autoescape=True`, so `_` is not a LIKE wildcard), and `GET /v1/agents`
+      drops server-kind rows with the prefix. The web catalog, the caller's
+      agents, session discovery and the Custom agents list filter them through
+      `isEngineAgentName`. Reads by id are unchanged, so sessions bound to an
+      engine row keep working. A user agent named with the prefix is hidden
+      too; rename protection belongs to S53.
+    files:
+      - omnigent/stores/agent_store/sqlalchemy_store.py
+      - omnigent/server/routes/builtin_agents.py
+      - web/src/hooks/useAvailableAgents.ts
+      - web/src/hooks/useCustomAgents.ts
+      - tests/stores/test_agent_store.py
+      - tests/server/routes/test_builtin_agents.py
+      - web/src/hooks/useAvailableAgents.test.tsx
+    tests:
+      - tests/stores/test_agent_store.py
+      - tests/server/routes/test_builtin_agents.py
+      - web/src/hooks/useAvailableAgents.test.tsx
+    budget_lines: 40
+    budget_exception:
+      lines: 100
+      reason: >-
+        web/src/hooks/useAvailableAgents.test.tsx carries the two hook
+        scenarios for the catalog, the caller's agents, session discovery and
+        Custom agents (about 85 lines).
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true
+
   - id: S58
     title: Shared DB utilities for keyset pagination, enum codecs, and engine inspection
     owner: WS-PLATFORM
