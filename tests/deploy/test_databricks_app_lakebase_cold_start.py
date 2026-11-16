@@ -142,6 +142,7 @@ def _patch_migrations(
     behavior: Callable[[int], None],
 ) -> dict[str, int]:
     """Route the boot's migration step through ``behavior``; count attempts."""
+    import coral.db.migrate as coral_migrate
     import omnigent.db.utils as db_utils
 
     attempts = {"n": 0}
@@ -151,6 +152,7 @@ def _patch_migrations(
         behavior(attempts["n"])
 
     monkeypatch.setattr(db_utils, "_run_migrations", _migrate)
+    monkeypatch.setattr(coral_migrate, "run_coral_migrations_with_retry", lambda *a, **kw: None)
     return attempts
 
 
@@ -282,3 +284,62 @@ def test_boot_without_migration_failure_does_not_exit(
 
     assert attempts["n"] == 1
     assert boot_exit_codes == []
+
+
+def test_boot_runs_omnigent_migrations_strictly_before_coral(
+    boot_exit_codes: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omnigent migrations must run and succeed strictly before Coral migrations begin."""
+    import coral.db.migrate as coral_migrate
+    import omnigent.db.utils as db_utils
+
+    order: list[str] = []
+
+    def _omni_migrate(_engine: object, _uri: str) -> None:
+        order.append("omnigent")
+
+    def _coral_migrate(
+        _uri: str,
+        *,
+        max_attempts: int = 5,
+        backoff_seconds: float = 1.0,
+        **kw: object,
+    ) -> None:
+        order.append("coral")
+
+    monkeypatch.setattr(db_utils, "_run_migrations", _omni_migrate)
+    monkeypatch.setattr(coral_migrate, "run_coral_migrations_with_retry", _coral_migrate)
+    _stub_downstream_boot(monkeypatch)
+
+    importlib.import_module(_APP_MODULE)
+
+    assert order == ["omnigent", "coral"], f"Expected Omnigent before Coral, got {order}"
+    assert boot_exit_codes == []
+
+
+def test_boot_omnigent_failure_prevents_coral_migrations(
+    boot_exit_codes: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When Omnigent migration fails, Coral migrations must not be invoked."""
+    import coral.db.migrate as coral_migrate
+    import omnigent.db.utils as db_utils
+
+    coral_called = False
+
+    def _omni_fail(_engine: object, _uri: str) -> None:
+        raise _transient_resume_error()
+
+    def _coral_migrate(*_a: object, **_kw: object) -> None:
+        nonlocal coral_called
+        coral_called = True
+
+    monkeypatch.setattr(db_utils, "_run_migrations", _omni_fail)
+    monkeypatch.setattr(coral_migrate, "run_coral_migrations_with_retry", _coral_migrate)
+
+    with pytest.raises(SystemExit):
+        importlib.import_module(_APP_MODULE)
+
+    assert boot_exit_codes == [1]
+    assert not coral_called, "Coral migrations should not run when Omnigent migrations fail"

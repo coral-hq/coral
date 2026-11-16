@@ -259,6 +259,12 @@ import {
   type SidebarViewPreferences,
 } from "@/lib/sidebarViewPreferences";
 import { ExtensionPrimaryNavigation } from "@/extensions/ExtensionPrimaryNavigation";
+import { CoralPrimaryNavigation } from "@/workflows/nav/CoralPrimaryNavigation";
+import {
+  isCoralDeskPath,
+  isProfilesPathname,
+  isWorkflowsPathname,
+} from "@/workflows/nav/coralPaths";
 import { PrimaryNavLink } from "@/shell/PrimaryNavLink";
 import { useViewerId } from "@/hooks/useViewerId";
 import { useExtensions } from "@/extensions/ExtensionProvider";
@@ -570,6 +576,8 @@ function useActiveNavItem(): {
   isCanvasPage: boolean;
   isTasksPage: boolean;
   isUsagePage: boolean;
+  isWorkflowsPage: boolean;
+  isProfilesPage: boolean;
   activeExtensionPageId: string | null;
   newSessionProjectName: string | null;
 } {
@@ -584,13 +592,18 @@ function useActiveNavItem(): {
   const segments = location.pathname.split("/").filter(Boolean);
   const leaf = segments.at(-1);
   const isExtensionRoute = extensionPathParts(location.pathname) !== null;
-  const isInboxPage = !isExtensionRoute && leaf === "inbox";
-  const isCanvasPage =
-    !isExtensionRoute && isCanvasPathname(location.pathname, rebasePath("/canvas"));
+  // CORAL(S34): Coral desk routes own their nav rows, never "New session", and
+  // their last segment (e.g. a workflow key) must not alias another nav leaf.
+  const isCoralDesk = isCoralDeskPath(location.pathname, rebasePath);
+  const isLeafRoute = !isExtensionRoute && !isCoralDesk;
+  const isInboxPage = isLeafRoute && leaf === "inbox";
+  const isCanvasPage = isLeafRoute && isCanvasPathname(location.pathname, rebasePath("/canvas"));
   // True for both /tasks (list) and /tasks/:taskId (detail). Basename-agnostic:
   // match the "tasks" segment by position from the end, not an absolute path.
-  const isTasksPage = !isExtensionRoute && (leaf === "tasks" || segments.at(-2) === "tasks");
-  const isUsagePage = !isExtensionRoute && leaf === "usage";
+  const isTasksPage = isLeafRoute && (leaf === "tasks" || segments.at(-2) === "tasks");
+  const isUsagePage = isLeafRoute && leaf === "usage";
+  const isWorkflowsPage = isWorkflowsPathname(location.pathname, rebasePath);
+  const isProfilesPage = isProfilesPathname(location.pathname, rebasePath);
   const activeExtensionPageId =
     resolveExtensionPageFromPath(extensions, location.pathname)?.page.id ?? null;
   const isNewSessionRoute =
@@ -600,6 +613,7 @@ function useActiveNavItem(): {
     !isCanvasPage &&
     !isTasksPage &&
     !isUsagePage &&
+    !isCoralDesk &&
     !isExtensionRoute;
   const requestedProject = isNewSessionRoute
     ? new URLSearchParams(location.search).get("project")
@@ -615,6 +629,8 @@ function useActiveNavItem(): {
     isCanvasPage,
     isTasksPage,
     isUsagePage,
+    isWorkflowsPage,
+    isProfilesPage,
     activeExtensionPageId,
     newSessionProjectName,
   };
@@ -900,6 +916,8 @@ function SidebarImpl({
     isCanvasPage,
     isTasksPage,
     isUsagePage,
+    isWorkflowsPage,
+    isProfilesPage,
     activeExtensionPageId,
     newSessionProjectName,
   } = useActiveNavItem();
@@ -1406,6 +1424,12 @@ function SidebarImpl({
                   )}
                 </Link>
               </Button>
+              {/* CORAL(S34): Workflows / Agent Profiles follow Inbox. */}
+              <CoralPrimaryNavigation
+                workflowsActive={isWorkflowsPage}
+                profilesActive={isProfilesPage}
+                onNavigate={onNavClick}
+              />
               {canvasEnabled && (
                 <PrimaryNavLink
                   to={canvasDestination.pathname + canvasDestination.search}

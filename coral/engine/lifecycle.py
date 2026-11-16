@@ -440,7 +440,9 @@ def _mark_decision(state: RunState, subject: str, stage: int) -> tuple[Decision,
     )
 
 
-def _drop_causes(state: RunState, reasons: frozenset[str] | set[str]) -> RunState:
+def _drop_causes(
+    state: RunState, reasons: frozenset[PauseReason] | set[PauseReason] | frozenset[str] | set[str]
+) -> RunState:
     remaining = tuple(cause for cause in state.causes if cause.reason not in reasons)
     status = "running" if not remaining and state.status == "paused" else state.status
     if remaining == state.causes and status == state.status:
@@ -465,7 +467,10 @@ def _retry_slots(state: RunState, owner_id: str, seq: int) -> tuple[RunState, tu
                 seq,
                 "retry_step",
                 slot.id,
-                {"generation": generation, "phases": list(_RETRY_PHASES)},
+                {
+                    "generation": generation,
+                    "phases": [str(phase) for phase in _RETRY_PHASES],
+                },
             )
         )
     return state.model_copy(update={"slots": tuple(slots)}), tuple(effects)
@@ -552,9 +557,12 @@ def _refused_opens(
 
 
 def _path(value: JsonValue | None) -> tuple[str, ...]:
-    if not isinstance(value, list) or any(not isinstance(part, str) for part in value):
+    if not isinstance(value, list):
         return ()
-    return tuple(value)
+    parts = tuple(part for part in value if isinstance(part, str))
+    if len(parts) != len(value):
+        return ()
+    return parts
 
 
 def _target_is_open(

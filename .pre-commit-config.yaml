@@ -30,7 +30,8 @@ repos:
         # CORAL(S101): check against this checkout's .venv, not an inherited VIRTUAL_ENV
         entry: .venv/bin/pyrefly check --python-interpreter-path .venv/bin/python
         pass_filenames: false
-        files: ^(omnigent/.*\.pyi?|sdks/python-client/.*\.py|pyproject\.toml|pyrefly\.toml|uv\.lock)$
+        # CORAL(S39e): trigger pyrefly on coral/ changes
+        files: ^(omnigent/.*\.pyi?|coral/.*\.pyi?|sdks/python-client/.*\.py|pyproject\.toml|pyrefly\.toml|uv\.lock)$
 
       # Project-specific test-quality lint rules (dev/lint/). Run on test
       # files only — the patterns never occur in production code.

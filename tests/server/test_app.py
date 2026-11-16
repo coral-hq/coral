@@ -3067,3 +3067,295 @@ def test_picker_restriction_warning_names_the_agents_new_chat_cannot_offer(
         assert text in caplog.text
     for text in absent:
         assert text not in caplog.text
+
+
+# ── server plugin seam & Coral gate ─────────────────────────────────
+
+
+def _register_temp_module(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    attrs: dict[str, object],
+) -> None:
+    import sys
+    from types import ModuleType
+
+    mod = ModuleType(name)
+    for key, val in attrs.items():
+        setattr(mod, key, val)
+    monkeypatch.setitem(sys.modules, name, mod)
+
+
+@pytest.mark.asyncio
+async def test_coral_info_enabled_and_disabled_and_before_spa(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``GET /v1/coral/info`` returns 200 JSON ahead of SPA when enabled and 404 when disabled."""
+    from coral.api.sub_features import SUB_FEATURE_KEYS
+    from coral.version import CORAL_VERSION
+
+    monkeypatch.setattr(server_app, "_WEB_UI_DIST", tmp_path / "missing-web-ui")
+    disabled_app = _build_branding_app(db_uri, tmp_path, "plugin-disabled")
+    disabled_transport = httpx.ASGITransport(app=disabled_app)
+    async with httpx.AsyncClient(transport=disabled_transport, base_url="http://test") as client:
+        resp = await client.get("/v1/coral/info")
+    assert resp.status_code == 404
+
+    dist = tmp_path / "web-ui"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html><body>spa</body></html>", encoding="utf-8")
+    monkeypatch.setattr(server_app, "_WEB_UI_DIST", dist)
+
+    enabled_app = _build_branding_app(
+        db_uri,
+        tmp_path,
+        "plugin-enabled",
+        server_plugins=["coral.server_plugin"],
+    )
+    enabled_transport = httpx.ASGITransport(app=enabled_app)
+    async with httpx.AsyncClient(transport=enabled_transport, base_url="http://test") as client:
+        info_resp = await client.get("/v1/coral/info")
+        spa_resp = await client.get("/some/client/route")
+
+    assert info_resp.status_code == 200
+    assert info_resp.json() == {
+        "enabled": True,
+        "version": CORAL_VERSION,
+        "sub_features": dict.fromkeys(SUB_FEATURE_KEYS, False),
+    }
+    assert spa_resp.status_code == 200
+    assert "<html>" in spa_resp.text
+
+
+@pytest.mark.asyncio
+async def test_server_plugin_failures_abort_startup(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broken plugin, missing register, broken policy module, host_sharded, bad flag fail boot."""
+    from omnigent.server.server_plugins import ServerPluginError, ServerPluginRegistration
+
+    with pytest.raises(ServerPluginError, match="Failed to import server plugin"):
+        _build_branding_app(
+            db_uri, tmp_path, "missing-mod", server_plugins=["nope.missing.plugin"]
+        )
+
+    _register_temp_module(monkeypatch, "test_plugin_no_reg", {})
+    with pytest.raises(ServerPluginError, match="does not define a callable 'register'"):
+        _build_branding_app(db_uri, tmp_path, "missing-reg", server_plugins=["test_plugin_no_reg"])
+
+    _register_temp_module(
+        monkeypatch,
+        "test_plugin_bad_policy_import",
+        {
+            "register": lambda _services: ServerPluginRegistration(
+                policy_modules=("nope.missing.policy_mod",)
+            )
+        },
+    )
+    with pytest.raises(ServerPluginError, match="failed to import policy module"):
+        _build_branding_app(
+            db_uri, tmp_path, "bad-policy-import", server_plugins=["test_plugin_bad_policy_import"]
+        )
+
+    _register_temp_module(monkeypatch, "test_policy_no_list", {})
+    _register_temp_module(
+        monkeypatch,
+        "test_plugin_no_policy_list",
+        {
+            "register": lambda _services: ServerPluginRegistration(
+                policy_modules=("test_policy_no_list",)
+            )
+        },
+    )
+    with pytest.raises(ServerPluginError, match="POLICY_REGISTRY list"):
+        _build_branding_app(
+            db_uri,
+            tmp_path,
+            "missing-policy-list",
+            server_plugins=["test_plugin_no_policy_list"],
+        )
+
+    with pytest.raises(ServerPluginError, match="host_sharded"):
+        _build_branding_app(
+            db_uri,
+            tmp_path,
+            "host-sharded",
+            host_sharded=True,
+            server_plugins=["coral.server_plugin"],
+        )
+
+    with pytest.raises(ServerPluginError, match="Unknown Coral sub-feature key"):
+        _build_branding_app(
+            db_uri,
+            tmp_path,
+            "unknown-subfeature",
+            server_config={"coral_sub_features": {"nonexistent_flag": True}},
+            server_plugins=["coral.server_plugin"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_server_plugin_lifespan_order_and_failure_teardown(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin hooks enter in order after core startup and unwind first on shutdown/error."""
+    from contextlib import asynccontextmanager
+
+    from omnigent.runner.routing import RunnerRouter
+    from omnigent.server.server_plugins import ServerPluginRegistration
+
+    events: list[str] = []
+    orig_aclose = RunnerRouter.aclose
+
+    async def _tracked_aclose(self: RunnerRouter) -> None:
+        events.append("runner_router.aclose")
+        await orig_aclose(self)
+
+    monkeypatch.setattr(RunnerRouter, "aclose", _tracked_aclose)
+
+    def _make_hook(name: str, *, fail_enter: bool = False) -> Any:
+        @asynccontextmanager
+        async def _hook(_app: FastAPI, _services: Any) -> Any:
+            events.append(f"enter:{name}")
+            if fail_enter:
+                raise RuntimeError(f"boom in {name}")
+            try:
+                yield
+            finally:
+                events.append(f"exit:{name}")
+
+        return _hook
+
+    _register_temp_module(
+        monkeypatch,
+        "test_plugin_order_a",
+        {"register": lambda _s: ServerPluginRegistration(lifespan_hooks=(_make_hook("a"),))},
+    )
+    _register_temp_module(
+        monkeypatch,
+        "test_plugin_order_b",
+        {"register": lambda _s: ServerPluginRegistration(lifespan_hooks=(_make_hook("b"),))},
+    )
+
+    app = _build_branding_app(
+        db_uri,
+        tmp_path,
+        "lifespan-order",
+        server_plugins=["test_plugin_order_a", "test_plugin_order_b"],
+    )
+    async with app.router.lifespan_context(app):
+        events.append("yield")
+
+    assert events == [
+        "enter:a",
+        "enter:b",
+        "yield",
+        "exit:b",
+        "exit:a",
+        "runner_router.aclose",
+    ]
+
+    events.clear()
+    _register_temp_module(
+        monkeypatch,
+        "test_plugin_order_fail",
+        {
+            "register": lambda _s: ServerPluginRegistration(
+                lifespan_hooks=(_make_hook("fail", fail_enter=True),)
+            )
+        },
+    )
+    failing_app = _build_branding_app(
+        db_uri,
+        tmp_path,
+        "lifespan-fail",
+        server_plugins=["test_plugin_order_a", "test_plugin_order_fail"],
+    )
+    with pytest.raises(RuntimeError, match="boom in fail"):
+        async with failing_app.router.lifespan_context(failing_app):
+            pass
+
+    assert events == [
+        "enter:a",
+        "enter:fail",
+        "exit:a",
+        "runner_router.aclose",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plugin_registered_policy_passes_validate_agent_bundle_without_policy_modules(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin policy module registers handlers in load_registry without policy_modules arg."""
+    import yaml
+
+    from omnigent.policies.registry import load_registry
+    from omnigent.server.bundles import validate_agent_bundle
+    from omnigent.server.server_plugins import ServerPluginRegistration
+    from tests.server.test_bundles import _make_bundle_bytes
+
+    def allow_all_policy() -> None:
+        return None
+
+    _register_temp_module(
+        monkeypatch,
+        "test_plugin_policies_mod",
+        {
+            "allow_all_policy": allow_all_policy,
+            "POLICY_REGISTRY": [
+                {"handler": "test_plugin_policies_mod.allow_all_policy", "kind": "callable"}
+            ],
+        },
+    )
+    _register_temp_module(
+        monkeypatch,
+        "test_plugin_with_policy",
+        {
+            "register": lambda _s: ServerPluginRegistration(
+                policy_modules=("test_plugin_policies_mod",)
+            )
+        },
+    )
+
+    try:
+        app = _build_branding_app(
+            db_uri,
+            tmp_path,
+            "policy-bundle",
+            server_plugins=["test_plugin_with_policy"],
+        )
+        bundle = _make_bundle_bytes(
+            {
+                "agent.yaml": yaml.safe_dump(
+                    {
+                        "name": "plugin_policy_agent",
+                        "prompt": "hello",
+                        "executor": {"harness": "claude-sdk"},
+                        "policies": {
+                            "gate": {
+                                "type": "function",
+                                "handler": "test_plugin_policies_mod.allow_all_policy",
+                            }
+                        },
+                    }
+                )
+            }
+        )
+        async with app.router.lifespan_context(app):
+            spec = validate_agent_bundle(bundle)
+        assert spec.name == "plugin_policy_agent"
+    finally:
+        load_registry()

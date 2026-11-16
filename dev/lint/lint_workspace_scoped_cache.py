@@ -37,7 +37,8 @@ from dev.lint._framework import disabled_rules_by_line
 
 # Roots whose module-level caches must be workspace-scoped. These are the
 # request-handling surfaces where a cross-tenant read is possible.
-SCANNED_ROOTS = ("omnigent/server/", "omnigent/runtime/")
+# CORAL(S39): enforce workspace-scoped module caches under coral/ as well
+SCANNED_ROOTS = ("omnigent/server/", "omnigent/runtime/", "coral/")
 
 # cachetools cache classes (all runtime-populated caches).
 _CACHETOOLS_CACHES = frozenset(

@@ -43,12 +43,6 @@ class TurnFact(TurnSnapshot):
         _require_aware_runner(value)
         return value
 
-    def __init__(self, **data: object) -> None:
-        seen = data.get("runner_last_seen")
-        if isinstance(seen, datetime):
-            _require_aware_runner(seen)
-        super().__init__(**data)
-
 
 def _require_aware_runner(value: datetime | None) -> None:
     """Reject a naive timestamp the same way ``transition`` rejects a naive ``now``."""

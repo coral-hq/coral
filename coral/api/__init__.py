@@ -1,1 +1,3 @@
-"""Coral HTTP routers; these may import Omnigent and FastAPI."""
+"""Coral HTTP API surface; modules here may import Omnigent and FastAPI."""
+
+from __future__ import annotations

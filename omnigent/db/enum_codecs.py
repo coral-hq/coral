@@ -207,6 +207,17 @@ def _decode(table: dict[str, int], code: int, *, field: str) -> str:
         raise ValueError(f"unknown {field} code: {code!r}") from None
 
 
+# CORAL(S58): public enum codec helpers for Coral schema codecs
+def encode_enum(table: dict[str, int], name: str, *, field: str) -> int:
+    """Map an enum name to its stable integer code."""
+    return _encode(table, name, field=field)
+
+
+def decode_enum(table: dict[str, int], code: int, *, field: str) -> str:
+    """Map an integer code back to its enum name."""
+    return _decode(table, code, field=field)
+
+
 def encode_conversation_kind(name: str) -> int:
     """Encode a ``conversations.kind`` name to its int code."""
     return _encode(CONVERSATION_KIND, name, field="conversations.kind")

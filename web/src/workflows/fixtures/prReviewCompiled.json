@@ -1,0 +1,285 @@
+{
+  "ir_version": 1,
+  "workflow_id": "review-prs",
+  "name": "Review labelled pull requests",
+  "description": "Find open PRs, review them, fix findings (up to 3 rounds), then approve and merge.",
+  "nodes": [
+    {
+      "id": "start",
+      "kind": "start",
+      "name": null,
+      "goal": null,
+      "question": null,
+      "prompt": null,
+      "roster": [],
+      "harness": null,
+      "attempts": null,
+      "concurrency": null,
+      "list_from": null,
+      "parts": [],
+      "outcomes": []
+    },
+    {
+      "id": "find_prs",
+      "kind": "step",
+      "name": "Find PRs",
+      "goal": "Handle the pull requests labelled needs-review",
+      "question": null,
+      "prompt": null,
+      "roster": ["claude"],
+      "harness": null,
+      "attempts": 3,
+      "concurrency": 1,
+      "list_from": null,
+      "parts": [
+        {
+          "name": "pull_requests",
+          "kind": "list"
+        }
+      ],
+      "outcomes": []
+    },
+    {
+      "id": "review",
+      "kind": "step",
+      "name": "Review",
+      "goal": "Review the pull request",
+      "question": null,
+      "prompt": null,
+      "roster": ["claude", "codex"],
+      "harness": null,
+      "attempts": 2,
+      "concurrency": 2,
+      "list_from": null,
+      "parts": [],
+      "outcomes": []
+    },
+    {
+      "id": "triage",
+      "kind": "decision",
+      "name": "Triage",
+      "goal": null,
+      "question": "Approved or changes requested?",
+      "prompt": null,
+      "roster": [],
+      "harness": null,
+      "attempts": null,
+      "concurrency": null,
+      "list_from": null,
+      "parts": [],
+      "outcomes": []
+    },
+    {
+      "id": "fix",
+      "kind": "step",
+      "name": "Fix",
+      "goal": "Address review findings",
+      "question": null,
+      "prompt": null,
+      "roster": ["claude"],
+      "harness": null,
+      "attempts": 3,
+      "concurrency": 1,
+      "list_from": null,
+      "parts": [],
+      "outcomes": []
+    },
+    {
+      "id": "approve_merge",
+      "kind": "gate",
+      "name": "Approve merge",
+      "goal": null,
+      "question": null,
+      "prompt": null,
+      "roster": [],
+      "harness": null,
+      "attempts": null,
+      "concurrency": null,
+      "list_from": null,
+      "parts": [],
+      "outcomes": ["approve"]
+    },
+    {
+      "id": "summarize",
+      "kind": "step",
+      "name": "Summarize",
+      "goal": "Summarize results per pull request",
+      "question": null,
+      "prompt": null,
+      "roster": ["claude"],
+      "harness": null,
+      "attempts": 3,
+      "concurrency": 1,
+      "list_from": null,
+      "parts": [],
+      "outcomes": []
+    },
+    {
+      "id": "end",
+      "kind": "end",
+      "name": null,
+      "goal": null,
+      "question": null,
+      "prompt": null,
+      "roster": [],
+      "harness": null,
+      "attempts": null,
+      "concurrency": null,
+      "list_from": null,
+      "parts": [],
+      "outcomes": []
+    }
+  ],
+  "arrows": [
+    {
+      "id": "a1",
+      "source": "start",
+      "target": "find_prs",
+      "label": null,
+      "kind": "forward",
+      "limit": null,
+      "at_limit": null
+    },
+    {
+      "id": "a2",
+      "source": "find_prs",
+      "target": "review",
+      "label": null,
+      "kind": "forward",
+      "limit": null,
+      "at_limit": null
+    },
+    {
+      "id": "a3",
+      "source": "review",
+      "target": "triage",
+      "label": null,
+      "kind": "forward",
+      "limit": null,
+      "at_limit": null
+    },
+    {
+      "id": "a4",
+      "source": "triage",
+      "target": "fix",
+      "label": "changes_requested",
+      "kind": "forward",
+      "limit": null,
+      "at_limit": null
+    },
+    {
+      "id": "a5",
+      "source": "triage",
+      "target": "approve_merge",
+      "label": "approved",
+      "kind": "forward",
+      "limit": null,
+      "at_limit": null
+    },
+    {
+      "id": "a6",
+      "source": "fix",
+      "target": "review",
+      "label": "revise",
+      "kind": "back",
+      "limit": 3,
+      "at_limit": "a7"
+    },
+    {
+      "id": "a7",
+      "source": "fix",
+      "target": "approve_merge",
+      "label": null,
+      "kind": "at_limit",
+      "limit": null,
+      "at_limit": null
+    },
+    {
+      "id": "a8",
+      "source": "approve_merge",
+      "target": "summarize",
+      "label": "approve",
+      "kind": "forward",
+      "limit": null,
+      "at_limit": null
+    },
+    {
+      "id": "a9",
+      "source": "summarize",
+      "target": "end",
+      "label": null,
+      "kind": "forward",
+      "limit": null,
+      "at_limit": null
+    }
+  ],
+  "content_hash": "1ec4a61c5e14d6d007bf83d0b5e1a023d36da53557bb9811e169e81fde3bf4f3",
+  "analysis": {
+    "join_types": [
+      {
+        "node_id": "approve_merge",
+        "join_type": "xor",
+        "arrow_ids": ["a5", "a7"],
+        "split_node_id": null
+      }
+    ],
+    "loops": [
+      {
+        "back_arrow_id": "a6",
+        "head": "review",
+        "tail": "fix",
+        "body": ["review", "triage", "fix"],
+        "limit": 3,
+        "at_limit_arrow_id": "a7",
+        "entry_arrow_ids": ["a2"]
+      }
+    ],
+    "regions": [],
+    "unresolved": [],
+    "label_sets": [
+      {
+        "node_id": "start",
+        "labels": [],
+        "labelled_arrow_ids": [],
+        "unlabelled_arrow_ids": ["a1"]
+      },
+      {
+        "node_id": "find_prs",
+        "labels": [],
+        "labelled_arrow_ids": [],
+        "unlabelled_arrow_ids": ["a2"]
+      },
+      {
+        "node_id": "review",
+        "labels": [],
+        "labelled_arrow_ids": [],
+        "unlabelled_arrow_ids": ["a3"]
+      },
+      {
+        "node_id": "triage",
+        "labels": ["changes_requested", "approved"],
+        "labelled_arrow_ids": ["a4", "a5"],
+        "unlabelled_arrow_ids": []
+      },
+      {
+        "node_id": "fix",
+        "labels": ["revise"],
+        "labelled_arrow_ids": ["a6"],
+        "unlabelled_arrow_ids": []
+      },
+      {
+        "node_id": "approve_merge",
+        "labels": ["approve"],
+        "labelled_arrow_ids": ["a8"],
+        "unlabelled_arrow_ids": []
+      },
+      {
+        "node_id": "summarize",
+        "labels": [],
+        "labelled_arrow_ids": [],
+        "unlabelled_arrow_ids": ["a9"]
+      }
+    ],
+    "checked_parts": []
+  }
+}

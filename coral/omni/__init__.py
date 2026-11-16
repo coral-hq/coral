@@ -1,1 +1,3 @@
-"""Omnigent adapters for the workflow engine. This package does not import ``omnigent``."""
+"""Omnigent integration adapter layer for Coral."""
+
+from __future__ import annotations

@@ -1,10 +1,17 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Link, Outlet, MemoryRouter, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
+import type * as IdentityModule from "@/lib/identity";
 import { RoutingProvider, basenamedRouting, reactRouterRouting } from "@/lib/routing";
 
+const authenticatedFetch = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof IdentityModule>()),
+  authenticatedFetch,
+}));
 vi.mock("@/lib/analytics", () => ({
   useOmnigentPageView: vi.fn(),
   useOmnigentAnalytics: () => ({ trackClick: vi.fn() }),
@@ -294,6 +301,141 @@ describe("Canvas route", () => {
     renderRoute("/canvas/c/session-one?canvas=project");
     expect(await screen.findByText("not found")).toBeInTheDocument();
     expect(screen.queryByText("chat page")).toBeNull();
+  });
+});
+
+describe("Coral desk routes", () => {
+  interface CoralInfoResponse {
+    enabled: boolean;
+    version: string;
+    sub_features: Record<string, boolean>;
+  }
+  const coralInfo = (
+    sub_features: Record<string, boolean> = {},
+    enabled = true,
+  ): CoralInfoResponse => ({ enabled, version: "1", sub_features });
+  const respondWith = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status });
+
+  function renderCoralRoute(path: string, basename?: string) {
+    const client = new QueryClient();
+    return render(
+      <QueryClientProvider client={client}>
+        <CapabilitiesProvider info={FALLBACK_SERVER_INFO}>
+          <MemoryRouter initialEntries={[path]}>
+            <App basename={basename} />
+          </MemoryRouter>
+        </CapabilitiesProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  // A fresh Response per call: bodies can only be read once.
+  // `/v1/coral/info` gets the given response; the workflow library is empty.
+  function serveCoral(status: number, body: unknown) {
+    authenticatedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/v1/coral/info")) return respondWith(status, body);
+      if (url.includes("/v1/coral/workflows")) return respondWith(200, []);
+      return respondWith(404, {});
+    });
+  }
+
+  beforeEach(() => {
+    authenticatedFetch.mockReset();
+  });
+  afterEach(cleanup);
+
+  it("renders the workflows desk behind the gate when Coral is enabled", async () => {
+    serveCoral(200, coralInfo());
+    renderCoralRoute("/workflows");
+
+    expect(await screen.findByRole("heading", { name: "Workflows", level: 1 })).toBeInTheDocument();
+    expect(await screen.findByText("No workflows yet")).toBeInTheDocument();
+    expect(screen.getByText("app shell")).toBeInTheDocument();
+    expect(screen.queryByText("not found")).toBeNull();
+    expect(authenticatedFetch).toHaveBeenCalledWith("/v1/coral/info", expect.anything());
+  });
+
+  it("renders a run route instead of the catch-all", async () => {
+    serveCoral(200, coralInfo());
+    renderCoralRoute("/workflows/runs/r1?agent=s1");
+    expect(await screen.findByTestId("workflow-run-placeholder")).toHaveTextContent("r1");
+  });
+
+  it("renders the workflow editor route for an unknown key", async () => {
+    serveCoral(200, coralInfo());
+    renderCoralRoute("/workflows/daily-report");
+    expect(
+      await screen.findByTestId("workflow-editor-error", {}, { timeout: 5000 }),
+    ).toHaveTextContent("Workflow daily-report not found");
+  });
+
+  it("renders a settings placeholder instead of the catch-all", async () => {
+    serveCoral(200, coralInfo());
+    renderCoralRoute("/workflows/settings/gates");
+    expect(await screen.findByTestId("workflow-settings-placeholder")).toBeInTheDocument();
+  });
+
+  it("matches desk routes under an embedded basename", async () => {
+    serveCoral(200, coralInfo());
+    renderCoralRoute("/mount/workflows", "/mount");
+
+    expect(await screen.findByText("No workflows yet")).toBeInTheDocument();
+  });
+
+  it("shows a spinner, not 'not found', while Coral info is loading", () => {
+    authenticatedFetch.mockReturnValue(new Promise(() => {}));
+    renderCoralRoute("/workflows");
+
+    expect(screen.getByRole("status", { name: "Loading" })).toBeInTheDocument();
+    expect(screen.queryByText("not found")).toBeNull();
+  });
+
+  it("renders not found when Coral is disabled", async () => {
+    serveCoral(200, coralInfo({}, false));
+    renderCoralRoute("/workflows");
+
+    expect(await screen.findByText("not found")).toBeInTheDocument();
+    expect(screen.queryByText("No workflows yet")).toBeNull();
+  });
+
+  it("renders not found when the Coral plugin is absent (404)", async () => {
+    serveCoral(404, {});
+    renderCoralRoute("/workflows/runs/r1");
+
+    expect(await screen.findByText("not found")).toBeInTheDocument();
+    expect(authenticatedFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides /profiles until profiles_desk is on", async () => {
+    serveCoral(200, coralInfo());
+    renderCoralRoute("/profiles");
+    expect(await screen.findByText("not found")).toBeInTheDocument();
+    cleanup();
+
+    serveCoral(200, coralInfo({ profiles_desk: true }));
+    renderCoralRoute("/profiles");
+    expect(await screen.findByTestId("profiles-placeholder")).toBeInTheDocument();
+  });
+
+  it("offers Retry after a server error and recovers", async () => {
+    serveCoral(500, {});
+    renderCoralRoute("/workflows");
+    const retry = await screen.findByRole("button", { name: "Retry" }, { timeout: 4000 });
+    expect(screen.getByText("Couldn't load Coral")).toBeInTheDocument();
+    expect(screen.queryByText("not found")).toBeNull();
+
+    serveCoral(200, coralInfo());
+    fireEvent.click(retry);
+    expect(await screen.findByText("No workflows yet")).toBeInTheDocument();
+  });
+
+  it("still renders not found for unknown routes", async () => {
+    serveCoral(200, coralInfo());
+    renderCoralRoute("/workflowsx");
+
+    expect(await screen.findByText("not found")).toBeInTheDocument();
   });
 });
 

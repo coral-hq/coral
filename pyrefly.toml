@@ -1,6 +1,9 @@
+# CORAL(S39e): include coral/ in typechecking alongside omnigent/
 project-includes = [
     "omnigent/**/*.py",
     "omnigent/**/*.pyi",
+    "coral/**/*.py",
+    "coral/**/*.pyi",
     "sdks/python-client/**/*.py",
 ]
 

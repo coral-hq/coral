@@ -1,5 +1,42 @@
 """Coral persistence adapters; these may import Omnigent."""
 
+from __future__ import annotations
+
+from coral.db.enum_codecs import RunStatus, WorkKind, WorkStatus
+from coral.stores.fakes import FakeQueueStore, FakeRunStore
+from coral.stores.protocols import (
+    ActivationDraft,
+    ActivationState,
+    AgentSlotDraft,
+    AgentSlotState,
+    CommitOutcome,
+    CoralRun,
+    GateVisitDraft,
+    GateVisitState,
+    HandoffDraft,
+    HandoffItemDraft,
+    HandoffItemState,
+    HandoffState,
+    JoinArrivalDraft,
+    JoinArrivalState,
+    LogEntryDraft,
+    QueueStore,
+    RunContended,
+    RunLogEntry,
+    RunNotFound,
+    RunReceipt,
+    RunStartSpec,
+    RunState,
+    RunStore,
+    RunVersionConflict,
+    StartKeyConflict,
+    Transition,
+    TransitionTooLarge,
+    WorkItem,
+    WorkItemDraft,
+)
+from coral.stores.run_commit import commit_with_retry
+from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.workflows import (
     SqlWorkflowDefinitionStore,
     WorkflowDefinition,
@@ -7,7 +44,43 @@ from coral.stores.workflows import (
 )
 
 __all__ = [
+    "ActivationDraft",
+    "ActivationState",
+    "AgentSlotDraft",
+    "AgentSlotState",
+    "CommitOutcome",
+    "CoralRun",
+    "FakeQueueStore",
+    "FakeRunStore",
+    "GateVisitDraft",
+    "GateVisitState",
+    "HandoffDraft",
+    "HandoffItemDraft",
+    "HandoffItemState",
+    "HandoffState",
+    "JoinArrivalDraft",
+    "JoinArrivalState",
+    "LogEntryDraft",
+    "QueueStore",
+    "RunContended",
+    "RunLogEntry",
+    "RunNotFound",
+    "RunReceipt",
+    "RunStartSpec",
+    "RunState",
+    "RunStatus",
+    "RunStore",
+    "RunVersionConflict",
+    "SqlAlchemyCoralRunStore",
     "SqlWorkflowDefinitionStore",
+    "StartKeyConflict",
+    "Transition",
+    "TransitionTooLarge",
+    "WorkItem",
+    "WorkItemDraft",
+    "WorkKind",
+    "WorkStatus",
     "WorkflowDefinition",
     "WorkflowTooLargeError",
+    "commit_with_retry",
 ]

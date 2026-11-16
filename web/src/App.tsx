@@ -12,6 +12,7 @@ import { isFeatureEnabled, type FeatureKey } from "@/lib/capabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { AppShell } from "@/shell/AppShell";
 import { ExtensionPageRoute } from "@/extensions/ExtensionPageRoute";
+import { coralRoutes } from "@/workflows/routes";
 
 // Bind a page component to its analytics page-view id. Declaring the id here,
 // beside the component, keeps the route table clean and means no route ships
@@ -253,6 +254,8 @@ function AppRoutes({ basename }: AppProps) {
             path={`${prefix}/policies`}
             element={<AppRedirect to={`${prefix}/settings/policies`} />}
           />
+          {/* CORAL(S34): Coral desk routes must precede the catch-all. */}
+          {coralRoutes(prefix, withPageView)}
           <Route path={basename ? `${prefix}/*` : "*"} element={<NotFoundPage />} />
         </Route>
       </Routes>

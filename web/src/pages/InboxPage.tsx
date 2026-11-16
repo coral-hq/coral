@@ -67,6 +67,7 @@ import { ApprovalCard, type SubmitApprovalFn } from "@/components/blocks/Approva
 import { FilePathAwareMessageResponse } from "@/components/blocks/ChatMarkdown";
 import { ElicitationMessage } from "@/components/blocks/ElicitationMessage";
 import { PageScroll } from "@/components/PageScroll";
+import { CoralPageHeader } from "@/brand/CoralPageHeader";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
@@ -870,18 +871,23 @@ export function InboxPage() {
 
   return (
     <PageScroll maxWidthClassName="max-w-[960px]" contentClassName="px-4 md:px-10">
-      <div className="mb-4 flex items-center gap-3">
-        <h1 className="text-2xl font-normal">Inbox</h1>
-        {totalCount > 0 && (
-          <span
-            title={summary}
-            className="rounded-full bg-foreground px-2 py-0.5 text-sm font-medium text-card"
-          >
-            <span aria-hidden>{totalCount}</span>
-            <span className="sr-only">{summary}</span>
-          </span>
-        )}
-      </div>
+      {/* CORAL(S84): shared desk header. */}
+      <CoralPageHeader
+        variant="list"
+        className="mb-4"
+        title="Inbox"
+        titleAccessory={
+          totalCount > 0 && (
+            <span
+              title={summary}
+              className="rounded-full bg-foreground px-2 py-0.5 text-sm font-medium text-card"
+            >
+              <span aria-hidden>{totalCount}</span>
+              <span className="sr-only">{summary}</span>
+            </span>
+          )
+        }
+      />
 
       <Tabs
         value={filter}
