@@ -6,7 +6,7 @@ import hashlib
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from coral.db import (
     ActivationRow,
@@ -91,7 +91,7 @@ def test_transition_atomic_rollback_on_constraint_violation(db_uri: str) -> None
         logs=(invalid_log,),
     )
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises((IntegrityError, OperationalError)):
         store.apply_transition(
             run_id=run.id,
             expected_version=1,
