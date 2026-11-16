@@ -1,9 +1,4 @@
-"""Run the real claude-sdk executor and ``claude`` CLI against ``mock_llm_server`` only.
-
-Tier B tests and the probes under ``docs/coral/decisions/probes/`` share these
-mechanics. The kit sets up processes and environments. Callers keep the
-scripted responses, the faults and every assertion.
-"""
+"""Run the real claude-sdk executor and ``claude`` CLI against ``mock_llm_server`` only."""
 
 from __future__ import annotations
 
@@ -14,10 +9,11 @@ import os
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +31,11 @@ PROBE_MCP_SERVER = Path(__file__).with_name("_probe_mcp_server.py")
 PROBE_SERVER_NAME = "probe"
 MOCK_API_KEY_HELPER = "printf %s mock-key"
 LOCAL_HOSTS = "127.0.0.1,localhost"
+_INHERITED_NAMES = frozenset(
+    {"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "USER", "LOGNAME", "SHELL"}
+)
+_INHERITED_PREFIXES = ("PYTEST_", "COV_CORE_", "COVERAGE_")
+_PROXY_NAMES = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
 
 
 _REFUSAL = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -42,9 +43,14 @@ _REFUSAL = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\
 
 class _RefuseAndRecord(socketserver.StreamRequestHandler):
     server: _RecordingServer
+    timeout = 5
 
     def handle(self) -> None:
-        self.server.request_lines.append(self.rfile.readline(65536).decode("latin-1").strip())
+        try:
+            line = self.rfile.readline(65536)
+        except TimeoutError:
+            return
+        self.server.request_lines.append(line.decode("latin-1").strip())
         self.wfile.write(_REFUSAL)
 
 
@@ -57,12 +63,7 @@ class _RecordingServer(socketserver.ThreadingTCPServer):
 
 
 class EgressRecorder:
-    """A local HTTP proxy that refuses every request and records its request line.
-
-    Point ``HTTPS_PROXY`` and ``HTTP_PROXY`` at :attr:`url` with ``NO_PROXY``
-    covering the mock. A request that tries to leave the machine through a
-    proxy-aware client then fails and shows up in :attr:`request_lines`.
-    """
+    """A local HTTP proxy that refuses every request and records its request line."""
 
     def __init__(self) -> None:
         self._server = _RecordingServer()
@@ -99,26 +100,33 @@ def write_claude_home(root: Path, *, marker: Path) -> Path:
     return home
 
 
-def mock_only_env(*, home: Path, base_url: str, proxy_url: str) -> dict[str, str | None]:
-    """Environment changes that leave the CLI only the mock to talk to; ``None`` means unset.
+def mock_only_env(
+    *, home: Path, base_url: str, proxy_url: str, inherited: Mapping[str, str]
+) -> dict[str, str | None]:
+    """Changes that leave the CLI only the mock; ``None`` unsets each non-allowlisted name.
 
-    :param home: Fresh home from :func:`write_claude_home`.
     :param base_url: Mock root URL with no ``/v1`` suffix, e.g. ``"http://127.0.0.1:5123"``.
-    :param proxy_url: Where non-local traffic goes, usually :attr:`EgressRecorder.url`.
     """
-    return {
-        "HOME": str(home),
-        "CLAUDE_CONFIG_DIR": None,
-        "ANTHROPIC_API_KEY": None,
-        "ANTHROPIC_AUTH_TOKEN": None,
-        "ANTHROPIC_BASE_URL": base_url,
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        # The CLI sandbox cannot see an editable checkout outside the workspace.
-        "OMNIGENT_CLAUDE_SDK_NO_SANDBOX": "1",
-        "HTTPS_PROXY": proxy_url,
-        "HTTP_PROXY": proxy_url,
-        "NO_PROXY": LOCAL_HOSTS,
+    changes: dict[str, str | None] = {
+        name: None
+        for name in inherited
+        if name not in _INHERITED_NAMES and not name.startswith(_INHERITED_PREFIXES)
     }
+    proxies = {**dict.fromkeys(_PROXY_NAMES, proxy_url), "NO_PROXY": LOCAL_HOSTS}
+    changes.update(proxies)
+    changes.update({name.lower(): value for name, value in proxies.items()})
+    changes.update(
+        {
+            "HOME": str(home),
+            # The CLI reads .claude.json and settings.json here, not in the real ~/.claude.
+            "CLAUDE_CONFIG_DIR": str(home),
+            "ANTHROPIC_BASE_URL": base_url,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            # The CLI sandbox cannot see an editable checkout outside the workspace.
+            "OMNIGENT_CLAUDE_SDK_NO_SANDBOX": "1",
+        }
+    )
+    return changes
 
 
 def make_executor(workspace: Path, *, model: str, permission_mode: str) -> ClaudeSDKExecutor:
@@ -135,11 +143,7 @@ def probe_tool(tool: str) -> str:
 
 
 def tool_search_then_call(tool: str, arguments: dict[str, Any], *, call_id: str) -> list[dict]:
-    """The two scripted responses that load a deferred MCP tool and then call it.
-
-    The CLI hides MCP tools behind ``ToolSearch``, so a direct call answers
-    ``No such tool available``.
-    """
+    """Script ToolSearch then the tool call; the CLI hides MCP tools behind ToolSearch."""
     search = json.dumps({"query": f"select:{tool}", "max_results": 1})
     search_call = {"name": "ToolSearch", "arguments": search, "call_id": f"{call_id}_search"}
     tool_call = {"name": tool, "arguments": json.dumps(arguments), "call_id": call_id}
@@ -165,7 +169,6 @@ def tool_results(message_requests: list[dict], *, call_id: str) -> list[str]:
 
 
 async def collect_turn(executor: ClaudeSDKExecutor, text: str, *, session_id: str) -> list:
-    """Run one user turn and return every executor event."""
     messages = [{"role": "user", "content": text, "session_id": session_id}]
     return [event async for event in executor.run_turn(messages, [], "")]
 
@@ -190,7 +193,6 @@ def apply_env(changes: dict[str, str | None], environ: MutableMapping[str, str])
 
 
 async def run_probe_case(
-    root: Path,
     *,
     model: str,
     permission_mode: str,
@@ -201,15 +203,41 @@ async def run_probe_case(
     extra_queues: tuple[dict[str, Any], ...] = (),
     extra_env: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
-    """One turn in a fresh mock, home and egress recorder; returns what was observed.
+    """One turn in a fresh temp dir, mock and egress recorder; returns what was observed.
 
-    The mock answers ``ToolSearch``, then the probe server's ``tool`` with
-    ``arguments``, then ``done <token>``. Without ``tool`` it answers only
-    ``done <token>``. ``extra_queues`` are more ``configure_mock_llm`` keyword
-    sets. ``policy_evaluator`` goes where the executor adapter installs one.
-    This sets ``os.environ``, so it is for probe scripts, not pytest.
+    It swaps ``os.environ`` for the turn, so it is for probe scripts, not pytest.
     """
-    root.mkdir(parents=True)
+    saved_environ = dict(os.environ)
+    try:
+        with tempfile.TemporaryDirectory(prefix="claude-sdk-probe-") as temp_dir:
+            return await _run_probe_turn(
+                Path(temp_dir),
+                model=model,
+                permission_mode=permission_mode,
+                turn_timeout_s=turn_timeout_s,
+                tool=tool,
+                arguments=arguments,
+                policy_evaluator=policy_evaluator,
+                extra_queues=extra_queues,
+                extra_env=extra_env or {},
+            )
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_environ)
+
+
+async def _run_probe_turn(
+    root: Path,
+    *,
+    model: str,
+    permission_mode: str,
+    turn_timeout_s: float,
+    tool: str | None,
+    arguments: dict[str, Any] | None,
+    policy_evaluator: Callable[[str, dict], Awaitable[object]] | None,
+    extra_queues: tuple[dict[str, Any], ...],
+    extra_env: dict[str, str | None],
+) -> dict[str, Any]:
     token = f"PROBE-{uuid.uuid4().hex[:8]}"
     call_id = f"toolu_{token.lower().replace('-', '_')}"
     marker = root / "marker.txt"
@@ -224,8 +252,11 @@ async def run_probe_case(
         configure_mock_llm(base_url, [*scripted, *[{"text": f"done {token}"}] * 3], match=token)
         for queue in extra_queues:
             configure_mock_llm(base_url, **queue)
-        apply_env(mock_only_env(home=home, base_url=base_url, proxy_url=recorder.url), os.environ)
-        apply_env(extra_env or {}, os.environ)
+        changes = mock_only_env(
+            home=home, base_url=base_url, proxy_url=recorder.url, inherited=os.environ
+        )
+        apply_env(changes, os.environ)
+        apply_env(extra_env, os.environ)
         executor = make_executor(workspace, model=model, permission_mode=permission_mode)
         if policy_evaluator is not None:
             executor._policy_evaluator = policy_evaluator  # type: ignore[attr-defined]

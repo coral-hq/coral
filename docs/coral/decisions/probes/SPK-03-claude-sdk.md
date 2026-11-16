@@ -38,17 +38,29 @@ probes after a CLI or SDK upgrade and compare.
 2. Creates a fresh `HOME` whose `.claude.json` declares one stdio MCP server,
    `probe` (`tests/e2e/coral/_probe_mcp_server.py`). Its `touch` tool writes a
    marker file. Its `nap` tool sleeps first.
-3. Sets `ANTHROPIC_BASE_URL` to the mock root URL with no `/v1` suffix, removes
-   `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CONFIG_DIR`, and sets
+3. Builds the CLI environment from an allowlist (`PATH`, locale, `TMPDIR` and a
+   few others) and unsets every other inherited name, including credentials and
+   provider switches. It sets `HOME` and `CLAUDE_CONFIG_DIR` to the fresh home,
+   `ANTHROPIC_BASE_URL` to the mock root URL with no `/v1` suffix, and
    `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`.
-4. Points `HTTPS_PROXY` and `HTTP_PROXY` at `EgressRecorder`, a local proxy that
-   refuses and records every request, with `NO_PROXY=127.0.0.1,localhost`.
+4. Points `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY`, in upper and lower case,
+   at `EgressRecorder`, a local proxy that refuses and records every request.
+   `NO_PROXY` and `no_proxy` are `127.0.0.1,localhost`.
 5. Builds the executor with `api_key_helper="printf %s mock-key"` and runs one
    turn whose user text carries a unique token. The mock routes on that token.
 
 The CLI hides MCP tools behind `ToolSearch`. The mock therefore answers
 `ToolSearch` with `select:mcp__probe__<tool>` first, then the tool call, then
 `done <token>`.
+
+The first runs of spikes 4 and 1 used an earlier scrub that unset only the API
+key and token variables. Both spikes were rerun with the allowlist on
+2026-11-15 and gave the same results.
+
+The recorder sees only clients that honor the proxy variables. It does not see
+raw sockets, DNS, or child processes that ignore those variables. So the
+verdicts below show no proxied HTTP(S) egress, not that nothing left the
+machine.
 
 ## Spike 4: mock `ANTHROPIC_BASE_URL`
 
@@ -67,13 +79,12 @@ with the model id `mock-spk03-probe`:
 | Stdio MCP `touch` | 3 | 0 requests | tool ran once, the model got `TOUCHED-spike-04`, `done <token>` |
 | Control: `ANTHROPIC_BASE_URL=https://api.example.invalid` | 0 | `CONNECT api.example.invalid:443 HTTP/1.1` | turn failed with `API Error: 403` |
 
-The CLI sent every model call to the mock root URL and made no request through
-the proxy. The control case proves the recorder sees the CLI's non-local
-traffic, so an empty recorder means the CLI made no proxied request. The CLI
-had no credential, so a call to a real Anthropic host could not have succeeded
-either. Non-`claude-*` model ids work.
+The CLI sent every model call to the mock root URL and made no proxied HTTP(S)
+request. The control case proves the recorder sees the CLI's non-local model
+traffic, so an empty recorder means the CLI made no proxied request. The probe
+unset the API key and token variables. Non-`claude-*` model ids work.
 
-Consequence: Tier B uses claude-sdk. The openai-agents fallback is not needed.
+Tier B therefore uses claude-sdk. The openai-agents fallback is not needed.
 `register_dir_agent_with_mock_llm` builds a URL that ends in `/v1`. The
 claude-sdk form is the mock root, as `register_inline_agent` passes it.
 
@@ -115,16 +126,21 @@ What this shows:
   The classifier sends its own `/v1/messages` calls through the same base URL:
   10 extra calls when the mock's answer did not match its `<block>` contract,
   1 when the mock answered `<block>no</block>`. When it allows the call, the
-  tool runs and `_can_use_tool_gate` is never called. When it blocks, the tool does not run, but the Omnigent policy
-  still did not decide.
+  tool runs and `_can_use_tool_gate` is never called. When it blocks, the tool
+  does not run, but the Omnigent policy still did not decide.
 - Under `default`, the gate is called and the DENY holds.
 - `mcp__omnigent__*` tools do not go through this gate. `_evaluate_tool_call_policy`
   returns early for them (`omnigent/inner/claude_sdk_executor.py:2784`) because
   the server gates them on the dispatch path.
 
-The harness default is `auto` (`omnigent/inner/claude_sdk_harness.py:135`). So
-in a default claude-sdk session a connector MCP tool can run while an Omnigent
-TOOL_CALL policy says DENY, whenever the classifier runs and allows.
+The harness default is `auto` (`omnigent/inner/claude_sdk_harness.py:135`). In
+that default configuration an Omnigent TOOL_CALL DENY on a connector MCP tool
+is not enforced. With `mock-spk03-probe` and `claude-sonnet-4-6`, the gate was
+not called in `auto` at all, whether the classifier blocked or allowed. A
+connector MCP tool runs whenever the classifier allows it, for example after a
+prompt injection. This is a product-level policy gap, not only a test limit.
+The S21 `PreToolUse` hook work fixes it. Until then, run connector-heavy
+sessions in `default` permission mode, where the DENY holds.
 
 The comments at `omnigent/inner/claude_sdk_executor.py:2833-2843` and
 `:3132-3148` say the gate runs in every permission mode. These results show it
@@ -140,7 +156,8 @@ Verdict: partial.
 
 ```bash
 uv run --no-sync python docs/coral/decisions/probes/spike_07.py --seconds 30
-uv run --no-sync python docs/coral/decisions/probes/spike_07.py --seconds 10 --mcp-tool-timeout-ms 3000
+uv run --no-sync python docs/coral/decisions/probes/spike_07.py --seconds 10 \
+  --mcp-tool-timeout-ms 3000
 ```
 
 Run these by hand. Each takes two to ten minutes:
@@ -156,7 +173,7 @@ given.
 
 | Nap | `MCP_TOOL_TIMEOUT` | Elapsed | Outcome |
 | --- | --- | --- | --- |
-| 30 s | unset | 33.7 s | the model got `NAPPED-30.0`, turn completed |
+| 30 s | unset | about 33 s | the model got `NAPPED-30.0`, turn completed |
 | 10 s | 3000 | 5.7 s | the model got `MCP server "probe" tool "nap" timed out after 3s`, turn completed |
 | 120 s | unset | 123.7 s | the model got `NAPPED-120.0`, turn completed |
 | 600 s | unset | 603.7 s | the model got `NAPPED-600.0`, turn completed |

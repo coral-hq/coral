@@ -1,8 +1,9 @@
-"""The real claude-sdk executor and ``claude`` CLI talk to the mock and to nothing else."""
+"""The real claude-sdk executor and ``claude`` CLI use the mock with no proxied HTTP(S) egress."""
 
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from pathlib import Path
 
@@ -47,7 +48,7 @@ async def _one_turn(workspace: Path, text: str, *, session_id: str) -> list:
 
 
 @pytest.mark.timeout(180)
-async def test_scripted_mcp_tool_turn_completes_with_no_egress(
+async def test_scripted_mcp_tool_turn_completes_with_no_proxied_egress(
     isolated_mock_llm_server_url: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -67,7 +68,10 @@ async def test_scripted_mcp_tool_turn_completes_with_no_egress(
 
     with EgressRecorder() as recorder:
         env = mock_only_env(
-            home=home, base_url=isolated_mock_llm_server_url, proxy_url=recorder.url
+            home=home,
+            base_url=isolated_mock_llm_server_url,
+            proxy_url=recorder.url,
+            inherited=os.environ,
         )
         _set_env(monkeypatch, env)
         events = await _one_turn(workspace, f"Call the tool. {token}", session_id=token)
@@ -94,7 +98,10 @@ async def test_egress_recorder_sees_model_traffic_aimed_off_the_machine(
 
     with EgressRecorder() as recorder:
         env = mock_only_env(
-            home=home, base_url="https://api.example.invalid", proxy_url=recorder.url
+            home=home,
+            base_url="https://api.example.invalid",
+            proxy_url=recorder.url,
+            inherited=os.environ,
         )
         _set_env(monkeypatch, env)
         events = await _one_turn(workspace, "Reply.", session_id=uuid.uuid4().hex[:8])

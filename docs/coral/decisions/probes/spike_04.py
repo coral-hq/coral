@@ -1,21 +1,12 @@
 """Spike 4: does the claude-sdk executor send every model call to a mock ``ANTHROPIC_BASE_URL``?
 
-Run from the repository root::
-
-    uv run --no-sync python docs/coral/decisions/probes/spike_04.py
-
-Prints one JSON verdict. ``pass`` needs both mock turns (text only, then one
-stdio MCP tool call) to finish with the mock's scripted token and leave no
-request at the egress recorder. A control turn aims ``ANTHROPIC_BASE_URL`` off
-the machine and must show up at the recorder, which proves the recorder sees
-CLI traffic.
+Run from the repository root: ``uv run --no-sync python docs/coral/decisions/probes/spike_04.py``.
 """
 
 import argparse
 import asyncio
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
@@ -34,12 +25,10 @@ def _passed(case: dict) -> bool:
 
 
 async def _probe(model: str) -> dict:
-    root = Path(tempfile.mkdtemp(prefix="spike-04-"))
     text_only = await run_probe_case(
-        root / "text", model=model, permission_mode="bypassPermissions", turn_timeout_s=120
+        model=model, permission_mode="bypassPermissions", turn_timeout_s=120
     )
     with_tool = await run_probe_case(
-        root / "tool",
         model=model,
         permission_mode="bypassPermissions",
         turn_timeout_s=120,
@@ -47,7 +36,6 @@ async def _probe(model: str) -> dict:
         arguments={"note": "spike-04"},
     )
     off_machine = await run_probe_case(
-        root / "control",
         model=model,
         permission_mode="bypassPermissions",
         turn_timeout_s=120,

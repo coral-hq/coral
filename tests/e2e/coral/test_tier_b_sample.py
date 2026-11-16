@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -22,8 +23,14 @@ from tests.e2e.coral._claude_sdk_kit import tool_results
 from tests.e2e.coral.conftest import CORAL_TIER_B_HARNESS
 
 _SHELL_TOOL = "mcp__omnigent__sys_os_shell"
+_OPT_IN = "CORAL_TIER_B_STACK_SAMPLE"
 
 
+# The shared live_server runner inherits this process's environment and real HOME.
+@pytest.mark.skipif(
+    os.environ.get(_OPT_IN) != "1",
+    reason=f"set {_OPT_IN}=1 in an environment with no Claude login or provider credentials",
+)
 @pytest.mark.compat_smoke
 @pytest.mark.timeout(300)
 def test_claude_sdk_session_runs_scripted_shell_tool_through_the_runner(

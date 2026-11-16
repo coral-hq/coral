@@ -1,19 +1,12 @@
 """Spike 1: does ``_can_use_tool_gate`` enforce a TOOL_CALL DENY on a connector MCP tool?
 
-Run from the repository root::
-
-    uv run --no-sync python docs/coral/decisions/probes/spike_01.py [--model <id>]
-
-Each case installs a policy evaluator that denies ``PHASE_TOOL_CALL`` and allows
-every other phase, then scripts one call to the stdio probe tool
-``mcp__probe__touch``. ``pass`` needs every case to keep the tool from running.
+Run from the repository root: ``uv run --no-sync python docs/coral/decisions/probes/spike_01.py``.
 """
 
 import argparse
 import asyncio
 import json
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,12 +44,10 @@ def _deny_tool_calls(phases: list[tuple[str, str | None]]):
 
 
 async def _probe(model: str) -> dict:
-    root = Path(tempfile.mkdtemp(prefix="spike-01-"))
     cases = []
-    for index, (label, mode, classifier_queues) in enumerate(CASES):
+    for label, mode, classifier_queues in CASES:
         phases: list[tuple[str, str | None]] = []
         observed = await run_probe_case(
-            root / str(index),
             model=model,
             permission_mode=mode,
             turn_timeout_s=180,

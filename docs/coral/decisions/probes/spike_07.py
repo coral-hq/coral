@@ -1,22 +1,12 @@
 """Spike 7: how long does the ``claude`` CLI wait for a slow stdio MCP tool?
 
-Run from the repository root::
-
-    uv run --no-sync python docs/coral/decisions/probes/spike_07.py --seconds 30
-    uv run --no-sync python docs/coral/decisions/probes/spike_07.py --seconds 10 \\
-        --mcp-tool-timeout-ms 3000
-
-The probe tool ``nap`` sleeps ``--seconds``. Without ``--mcp-tool-timeout-ms``
-the probe unsets ``MCP_TOOL_TIMEOUT``. The verdict stays ``partial`` because
-this probe cannot reach the in-process ``mcp__omnigent__*`` path; it is
-``fail`` only when the turn errors or outlives ``--seconds`` plus 120 s.
+Run from the repository root: ``uv run --no-sync python docs/coral/decisions/probes/spike_07.py``.
 """
 
 import argparse
 import asyncio
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
@@ -30,7 +20,6 @@ TURN_ALLOWANCE_S = 120
 
 async def _probe(model: str, seconds: float, timeout_ms: int | None) -> dict:
     observed = await run_probe_case(
-        Path(tempfile.mkdtemp(prefix="spike-07-")) / "case",
         model=model,
         permission_mode="bypassPermissions",
         turn_timeout_s=seconds + TURN_ALLOWANCE_S,
