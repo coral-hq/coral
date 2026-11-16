@@ -28,7 +28,6 @@ from tests.stores.coral._faults import (
     short_sqlite_busy,
 )
 from tests.stores.coral._schema import ProbeRow
-from tests.stores.coral.conftest import CoralDbLayout
 
 
 def _probe_sessions(engine: Engine, *, immediate: bool = False) -> NamedManagedSessionMaker:
@@ -72,16 +71,14 @@ def test_two_writes_in_one_named_session_commit_both_rows(coral_db_uri: str) -> 
 
 @pytest.mark.parametrize("when", ["before", "after"])
 def test_crash_between_two_writes_in_one_named_session_leaves_no_rows(
-    coral_db_layout: CoralDbLayout,
-    monkeypatch: pytest.MonkeyPatch,
-    when: Literal["before", "after"],
+    coral_db_uri: str, monkeypatch: pytest.MonkeyPatch, when: Literal["before", "after"]
 ) -> None:
     crash_around(monkeypatch, sys.modules[__name__], "_add_second", when=when)
 
     with pytest.raises(SimulatedCrash):
-        _write_pair(get_or_create_engine(coral_db_layout.operational_uri))
+        _write_pair(get_or_create_engine(coral_db_uri))
 
-    assert _probe_count(fresh_process(coral_db_layout.operational_uri)) == 0
+    assert _probe_count(fresh_process(coral_db_uri)) == 0
 
 
 def test_racing_inserts_on_one_key_have_one_winner(coral_db_uri: str) -> None:

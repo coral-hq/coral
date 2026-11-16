@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import pytest
 from sqlalchemy import make_url
@@ -78,25 +77,3 @@ def coral_split_db(
     )
     # db_uri evicts only the operational engine.
     evict_cached_engine(conversation_uri)
-
-
-@dataclass(frozen=True)
-class CoralDbLayout:
-    kind: Literal["single", "split"]
-    operational_uri: str
-    conversation_uri: str
-
-
-@pytest.fixture(params=["single", "split"])
-def coral_db_layout(request: pytest.FixtureRequest, coral_db_uri: str) -> CoralDbLayout:
-    """Run a test on one shared DB and on the split layout; split skips on external lanes."""
-    if request.param == "single":
-        return CoralDbLayout(
-            kind="single", operational_uri=coral_db_uri, conversation_uri=coral_db_uri
-        )
-    split: CoralSplitDb = request.getfixturevalue("coral_split_db")
-    return CoralDbLayout(
-        kind="split",
-        operational_uri=split.operational_uri,
-        conversation_uri=split.conversation_uri,
-    )

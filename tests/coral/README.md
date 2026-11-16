@@ -7,10 +7,10 @@ test inherits and which CI job runs it.
 | --- | --- | --- | --- | --- |
 | Tier A: unit, API, validation | `tests/coral/` | SQLite | default `pytest` shards | `just coral test` |
 | DB lanes | `tests/stores/coral/` | SQLite, Postgres, CockroachDB, MySQL | default `pytest` shards (SQLite); `stores-postgres`, `stores-crdb-*`, `stores-mysql` in `.github/workflows/ci.yml` | `just coral test-db`, `just coral test-crdb` |
-| Split-DB lane | `tests/stores/coral/` (`coral_split_db`, `coral_db_layout[split]`) | SQLite operational DB and SQLite conversation DB | default `pytest` shards; a dedicated job is OPS-02 | `just coral test-split` |
+| Split fixture contract | `tests/stores/coral/test_split_layout.py` (`coral_split_db`) | SQLite operational DB and SQLite conversation DB | default `pytest` shards; no dedicated job yet | `just coral test-split` |
 | Tier B: real `claude` CLI against `mock_llm_server` | `tests/e2e/coral/` | server-owned | e2e gate (`.github/workflows/e2e.yml` runs `tests/e2e/`) | `just coral test-e2e` |
-| Tier C: claude-native | `tests/e2e/coral/` | server-owned | e2e gate | owned by HRN-03 |
-| Tier D: credentialed claude-sdk live bench | not created yet | n/a | not wired | owned by HRN-08 |
+| Tier C: claude-native | `tests/e2e/coral/` | server-owned | e2e gate | no tests yet |
+| Tier D: credentialed claude-sdk live bench | not created yet | n/a | not wired | none |
 
 Tier B rules, including what it cannot prove yet, are in
 `docs/coral/testing/tier-b.md`.
@@ -27,8 +27,16 @@ Tier B rules, including what it cannot prove yet, are in
 - `coral_split_db`: a `CoralSplitDb` with an operational DB from
   `coral_db_uri`, a separate SQLite conversation DB, both file paths, and a
   `SqlAlchemyConversationStore` wired to the pair. It skips on external lanes.
-- `coral_db_layout`: a `CoralDbLayout` parametrized as `single` and `split`.
-  Request it to run one test on both layouts. `split` skips on external lanes.
+
+The split tests are a fixture contract. The fixture's SQLite template puts the
+Coral tables in the operational file, and the tests build engines straight
+from the two URIs, so they show where the fixture puts state. They do not yet
+prove that Coral code picks the right database. When Coral stores are built
+from server config, these tests must go through that factory.
+
+`drop_coral_schema` drops only the Coral and test tables. Once the shared Coral
+schema bootstrap with its own Alembic version table lands, it must also clear
+that version table, or a later module sees the schema at head with no tables.
 
 `tests/stores/coral/_faults.py` holds the fault and contention helpers. Each
 takes its inputs from the caller and asserts nothing:
@@ -48,8 +56,8 @@ takes its inputs from the caller and asserts nothing:
 ## Add a Coral store test
 
 1. Put the test in `tests/stores/coral/` so it runs on all four DB lanes.
-2. Request `coral_db_uri`, or `coral_db_layout` when the behavior must also hold
-   with a separate conversation DB.
+2. Request `coral_db_uri`, or `coral_split_db` when the test needs a separate
+   conversation DB.
 3. Build inputs with `tests.coral.workflow_builders` where one exists.
 4. Inject the fault in the test with the helpers above, then assert on what a
    caller can read back after `fresh_process`.

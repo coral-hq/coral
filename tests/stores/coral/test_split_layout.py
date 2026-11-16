@@ -1,4 +1,4 @@
-"""Split-DB lane: Coral state shares no engine, transaction or file with the conversation DB."""
+"""Split fixture contract: Coral tables and writes stay in the operational DB file."""
 
 from __future__ import annotations
 
@@ -8,23 +8,18 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine, func, select
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from coral.stores.workflows import SqlWorkflowDefinitionStore
 from omnigent.db.utils import (
     get_or_create_conversation_engine,
     get_or_create_engine,
     make_named_managed_session_maker,
 )
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
-from tests.coral.workflow_builders import compile_text, fixture_text
 from tests.stores.coral._faults import (
     SimulatedCrash,
     crash_around,
     fresh_process,
-    hold_sqlite_write_lock,
-    short_sqlite_busy,
 )
 from tests.stores.coral._schema import ProbeRow
 from tests.stores.coral.conftest import CoralSplitDb
@@ -51,19 +46,6 @@ def _write_probe(engine: Engine, key: str) -> None:
     sessions = make_named_managed_session_maker(engine, query_name_prefix="coral.test_probe")
     with sessions("write_probe") as session:
         _add_probe(session, key)
-
-
-def _save_minimal_workflow(engine: Engine) -> None:
-    yaml_text = fixture_text("minimal")
-    graph, _ = compile_text(yaml_text)
-    SqlWorkflowDefinitionStore(engine).save(
-        workspace_id=1,
-        workflow_key=graph.workflow_id,
-        name=graph.name,
-        yaml_text=yaml_text,
-        compiled=graph,
-        runnable=True,
-    )
 
 
 def test_coral_tables_live_only_in_operational_db(coral_split_db: CoralSplitDb) -> None:
@@ -100,30 +82,3 @@ def test_crash_after_conversation_write_keeps_conversation_and_no_probe_row(
     assert restored.title == "survives"
     with operational_engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(ProbeRow)) == 0
-
-
-def test_locked_conversation_db_does_not_block_coral_store_write(
-    coral_split_db: CoralSplitDb,
-) -> None:
-    operational_engine = get_or_create_engine(coral_split_db.operational_uri)
-
-    with (
-        hold_sqlite_write_lock(coral_split_db.conversation_path),
-        short_sqlite_busy(operational_engine, 200),
-    ):
-        _save_minimal_workflow(operational_engine)
-
-    assert _row_count(coral_split_db.operational_path, "coral_workflows") == 1
-
-
-def test_locked_operational_db_blocks_coral_store_write(coral_split_db: CoralSplitDb) -> None:
-    operational_engine = get_or_create_engine(coral_split_db.operational_uri)
-
-    with (
-        hold_sqlite_write_lock(coral_split_db.operational_path),
-        short_sqlite_busy(operational_engine, 200),
-        pytest.raises(OperationalError, match="locked"),
-    ):
-        _save_minimal_workflow(operational_engine)
-
-    assert _row_count(coral_split_db.operational_path, "coral_workflows") == 0
