@@ -1,0 +1,160 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { PageScroll } from "@/components/PageScroll";
+import { CoralPageHeader } from "@/brand/CoralPageHeader";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useNavigate } from "@/lib/routing";
+import {
+  WORKFLOWS_QUERY_KEY,
+  listTemplates,
+  listWorkflows,
+  saveWorkflow,
+  shouldRetryWorkflows,
+} from "../api/client";
+import type { WorkflowSummary, WorkflowTemplate } from "../api/workflowTypes";
+import { CORAL_LABELS } from "../nav/labels";
+import { workflowPath } from "../nav/coralPaths";
+
+const TEMPLATES_QUERY_KEY = ["coral-templates"] as const;
+
+export function WorkflowsDeskPage() {
+  return (
+    <PageScroll
+      maxWidthClassName="max-w-[960px]"
+      contentClassName="px-4 md:px-10"
+      data-testid="workflows-desk"
+    >
+      <CoralPageHeader
+        title={CORAL_LABELS.workflows}
+        description="Multi-agent workflows you can run and inspect."
+      />
+      <Tabs defaultValue="workflows" componentId="coral.desk.tabs">
+        <TabsList variant="line">
+          <TabsTrigger value="workflows">Your Workflows</TabsTrigger>
+          <TabsTrigger value="runs">Runs</TabsTrigger>
+          <TabsTrigger value="templates">Templates</TabsTrigger>
+        </TabsList>
+        <TabsContent value="workflows">
+          <YourWorkflows />
+        </TabsContent>
+        <TabsContent value="runs">
+          <p className="py-16 text-center text-muted-foreground text-ui">Coming soon.</p>
+        </TabsContent>
+        <TabsContent value="templates">
+          <Templates />
+        </TabsContent>
+      </Tabs>
+    </PageScroll>
+  );
+}
+
+function YourWorkflows() {
+  const navigate = useNavigate();
+  const workflows = useQuery({
+    queryKey: WORKFLOWS_QUERY_KEY,
+    retry: shouldRetryWorkflows,
+    queryFn: ({ signal }) => listWorkflows(signal),
+  });
+
+  if (workflows.isPending) {
+    return (
+      <div className="flex justify-center py-16">
+        <Spinner className="size-5 text-muted-foreground" aria-label="Loading workflows" />
+      </div>
+    );
+  }
+  if (workflows.isError) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-16 text-center">
+        <p className="text-muted-foreground text-ui">Couldn't load workflows.</p>
+        <Button variant="outline" onClick={() => void workflows.refetch()}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (workflows.data.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-2 py-16 text-center">
+        <h2 className="font-medium text-foreground text-lg">No workflows yet</h2>
+        <p className="max-w-sm text-muted-foreground text-ui">
+          Start from a template, or upload a workflow through the API or CLI and it will appear
+          here.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <ul className="flex flex-col divide-y divide-border" data-testid="workflow-list">
+      {workflows.data.map((workflow: WorkflowSummary) => (
+        <li key={workflow.id} className="flex items-center gap-3 py-3">
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span className="truncate font-medium text-foreground text-ui">{workflow.name}</span>
+            <span className="truncate text-muted-foreground text-xs">{workflow.workflow_key}</span>
+          </div>
+          {!workflow.runnable && <Badge variant="secondary">Draft</Badge>}
+          <Button
+            variant="outline"
+            size="sm"
+            componentId="coral.desk.open_workflow"
+            onClick={() => navigate(workflowPath(workflow.workflow_key))}
+          >
+            Open
+          </Button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Templates() {
+  const templates = useQuery({ queryKey: TEMPLATES_QUERY_KEY, queryFn: listTemplates });
+  if (templates.isPending) {
+    return (
+      <div className="flex justify-center py-16">
+        <Spinner className="size-5 text-muted-foreground" aria-label="Loading templates" />
+      </div>
+    );
+  }
+  return (
+    <div className="grid gap-3 sm:grid-cols-2" data-testid="template-list">
+      {(templates.data ?? []).map((template) => (
+        <TemplateCard key={template.id} template={template} />
+      ))}
+    </div>
+  );
+}
+
+function TemplateCard({ template }: { template: WorkflowTemplate }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  // Saving the starter makes it an ordinary workflow, then the editor takes over.
+  const useTemplate = useMutation({
+    mutationFn: () => saveWorkflow(template.yaml),
+    onSuccess: (saved) => {
+      void queryClient.invalidateQueries({ queryKey: WORKFLOWS_QUERY_KEY });
+      navigate(workflowPath(saved.workflow_key));
+    },
+  });
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-border p-4">
+      <h3 className="font-medium text-foreground text-ui">{template.name}</h3>
+      <p className="flex-1 text-muted-foreground text-ui">{template.description}</p>
+      {useTemplate.isError && (
+        <p className="text-destructive text-xs">Couldn't create the workflow. Try again.</p>
+      )}
+      <Button
+        variant="outline"
+        size="sm"
+        className="self-start"
+        componentId="coral.desk.use_template"
+        loading={useTemplate.isPending}
+        onClick={() => useTemplate.mutate()}
+      >
+        Use template
+      </Button>
+    </div>
+  );
+}

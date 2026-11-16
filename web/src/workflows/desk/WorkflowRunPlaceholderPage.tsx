@@ -8,13 +8,6 @@ export function WorkflowRunPlaceholderPage() {
   );
 }
 
-export function WorkflowEditorPlaceholderPage() {
-  const { workflowKey } = useParams<{ workflowKey: string }>();
-  return (
-    <DeskPlaceholderPage title="Workflow" detail={workflowKey} testId="workflow-placeholder" />
-  );
-}
-
 export function WorkflowSettingsPlaceholderPage() {
   return <DeskPlaceholderPage title="Workflow settings" testId="workflow-settings-placeholder" />;
 }

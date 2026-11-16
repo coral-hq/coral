@@ -1,0 +1,19 @@
+id: demo
+name: Demo
+nodes:
+  - id: start
+    kind: start
+  - id: work
+    kind: step
+    name: Work
+    goal: Do the thing
+    roster: [implementer]
+  - id: end
+    kind: end
+arrows:
+  - id: a1
+    from: start
+    to: work
+  - id: a2
+    from: work
+    to: end
