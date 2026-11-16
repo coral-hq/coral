@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Protocol, runtime_checkable
 
 
@@ -22,4 +23,22 @@ class RunScopeRunner(Protocol):
     ) -> AbstractAsyncContextManager[None]: ...
 
 
-__all__ = ["RunScopeRunner"]
+class NoOpScopeRunner:
+    """Default no-op RunScopeRunner for standalone tests or environments without host scopes."""
+
+    @asynccontextmanager
+    async def run_scope(
+        self,
+        *,
+        workspace_id: int,
+        run_id: str | None = None,
+        user_id: str | None = None,
+        account_generation: str | None = None,
+        host_id: str | None = None,
+        owner_key: str | None = None,
+    ) -> AsyncIterator[None]:
+        del workspace_id, run_id, user_id, account_generation, host_id, owner_key
+        yield
+
+
+__all__ = ["NoOpScopeRunner", "RunScopeRunner"]
