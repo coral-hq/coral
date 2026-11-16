@@ -7,7 +7,7 @@ directory that prints one JSON verdict. Nothing imports these scripts.
 | Spike | Verdict | Decides | Consumer |
 | --- | --- | --- | --- |
 | 4, mock `ANTHROPIC_BASE_URL` | pass | Tier B harness is claude-sdk | FND-04 |
-| 1, `can_use_tool` gate under `bypassPermissions` and `auto` | fail | S21 is needed | HRN-02 |
+| 1, TOOL_CALL DENY on a connector MCP tool | pass with S21 for Coral specs; fail for other sessions | S21 landed for `params.coral` specs | HRN-02 |
 | 7, CLI MCP tool timeout | partial | Bounds for long tool calls | TLS-02, EVD-02 |
 | 2, Agent and Task unreachable | not run | Outside this change | K9 attribution |
 | 16, watchdog against a long turn | not run | Outside this change | S27 retest placement |
@@ -88,18 +88,56 @@ Tier B therefore uses claude-sdk. The openai-agents fallback is not needed.
 `register_dir_agent_with_mock_llm` builds a URL that ends in `/v1`. The
 claude-sdk form is the mock root, as `register_inline_agent` passes it.
 
-## Spike 1: `_can_use_tool_gate` with a DENY-all TOOL_CALL policy
+## Spike 1: TOOL_CALL DENY on a connector MCP tool
 
-Verdict: fail. S21 is needed.
+Verdict: pass with S21 for Coral specs. Sessions from other specs still fail,
+as recorded in the first run below.
 
 ```bash
 uv run --no-sync python docs/coral/decisions/probes/spike_01.py
-uv run --no-sync python docs/coral/decisions/probes/spike_01.py --model claude-sonnet-4-6
 ```
 
-The probe sets `executor._policy_evaluator`, the attribute that
-`omnigent/runtime/harnesses/_executor_adapter.py:302` sets in production. The
-evaluator answers `POLICY_ACTION_DENY` for `PHASE_TOOL_CALL` and
+### Rerun with S21 (2026-11-16, CLI 2.1.185, SDK 0.2.121)
+
+A claude-sdk spec with `params.coral` sets
+`HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK=1`, and the executor then installs a
+catch-all `PreToolUse` hook that runs `_evaluate_tool_call_policy`. The CLI runs
+`PreToolUse` hooks in every permission mode. The hook denies when the evaluator
+raises or takes longer than 60 s, and `can_use_tool` skips its own policy check
+so each call is evaluated once. The probe builds the executor as a Coral spec
+does (`coral=True` in `tests/e2e/coral/_claude_sdk_kit.py`).
+
+The evaluator now denies only `mcp__probe__touch`. Denying every TOOL_CALL also
+denies `ToolSearch`, so the connector tool never loads and a pass would not show
+that the connector call itself was denied.
+
+Results with `mock-spk03-probe`:
+
+| Mode | Policy evaluations | Tool ran | Mock calls | What the model got back |
+| --- | --- | --- | --- | --- |
+| `bypassPermissions` | `ToolSearch`, `mcp__probe__touch` | no | 3 | `probe deny` |
+| `default` | `ToolSearch`, `mcp__probe__touch` | no | 3 | `probe deny` |
+| `auto` | `ToolSearch`, `mcp__probe__touch` | no | 3 | `probe deny` |
+| `auto`, classifier answers `<block>no</block>` | `ToolSearch`, `mcp__probe__touch` | no | 3 | `probe deny` |
+
+Every case completed with the done token, with no executor errors and an empty
+egress recorder. In `auto` the hook denied before the auto-mode classifier ran,
+so the classifier made no model calls. `tests/e2e/coral/test_tier_b_tool_gate.py`
+asserts the same result under `bypassPermissions` and `auto`.
+
+Sessions whose spec has no `params.coral` keep Omnigent's upstream behavior: no
+policy hook, and the gaps in the first run below still apply. The Tier B test
+`test_non_coral_session_keeps_upstream_policy_gating` pins that: under
+`bypassPermissions` the denied tool still runs and the evaluator never sees it.
+Offering the hook for every session is an upstream decision.
+
+### First run (2026-11-15, before S21)
+
+The first run had verdict fail.
+
+That probe set `executor._policy_evaluator`, the attribute that
+`omnigent/runtime/harnesses/_executor_adapter.py:302` sets in production. Its
+evaluator answered `POLICY_ACTION_DENY` for every `PHASE_TOOL_CALL` and
 `POLICY_ACTION_ALLOW` for every other phase. The mock then scripts a call to
 the connector tool `mcp__probe__touch`.
 
@@ -139,13 +177,11 @@ is not enforced. With `mock-spk03-probe` and `claude-sonnet-4-6`, the gate was
 not called in `auto` at all, whether the classifier blocked or allowed. A
 connector MCP tool runs whenever the classifier allows it, for example after a
 prompt injection. This is a product-level policy gap, not only a test limit.
-The S21 `PreToolUse` hook work fixes it. Until then, run connector-heavy
-sessions in `default` permission mode, where the DENY holds.
+S21 fixes it for Coral specs. Other sessions should run connector-heavy work
+in `default` permission mode, where the DENY holds.
 
-The comments at `omnigent/inner/claude_sdk_executor.py:2833-2843` and
-`:3132-3148` say the gate runs in every permission mode. These results show it
-does not. The fix is S21, a gate on a `PreToolUse` hook, and it belongs to
-HRN-02. This change does not touch the executor or those comments.
+The executor comments that said the gate runs in every permission mode now say
+that the CLI skips `can_use_tool` under `bypassPermissions`.
 
 The classifier transcript that the CLI sends to the base URL includes the
 local OS user name.

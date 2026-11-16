@@ -6713,3 +6713,154 @@ async def test_coral_spec_with_os_sandbox_reaches_the_cli(monkeypatch, sandbox_t
 
     assert not [e for e in events if isinstance(e, ExecutorError)], events
     assert len(fake_sdk.created_clients) == 1
+
+
+# CORAL(S21): Coral specs check every tool call against TOOL_CALL policy from PreToolUse.
+
+
+def _policy_verdict(action, reason=None):
+    from omnigent.runtime.harnesses._scaffold import PolicyVerdictPayload
+
+    return PolicyVerdictPayload(action=action, reason=reason)
+
+
+def _policy_hook_executor(*, evaluator, permission_mode="bypassPermissions", hooked=True):
+    executor = _default_executor(permission_mode=permission_mode, tool_call_policy_hook=hooked)
+    executor._policy_evaluator = evaluator
+    return executor
+
+
+def _catch_all_policy_hooks(options):
+    return [m for m in (options.hooks or {}).get("PreToolUse", []) if m.matcher is None]
+
+
+async def _policy_gate(executor):
+    (matcher,) = _catch_all_policy_hooks(await _turn_options(executor))
+    (gate,) = matcher.hooks
+    return gate
+
+
+def _deny_output(reason):
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("hooked", "with_evaluator", "installed"),
+    [(True, True, True), (True, False, False), (False, True, False)],
+    ids=["coral-with-evaluator", "coral-without-evaluator", "non-coral"],
+)
+async def test_tool_call_policy_hook_installed_only_for_coral_sessions_with_policy(
+    hooked, with_evaluator, installed
+):
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ALLOW"))
+    executor = _policy_hook_executor(
+        evaluator=evaluator if with_evaluator else None, hooked=hooked
+    )
+
+    options = await _turn_options(executor)
+
+    assert len(_catch_all_policy_hooks(options)) == int(installed)
+    if not hooked:
+        assert options.can_use_tool == executor._can_use_tool_gate
+
+
+async def test_tool_call_policy_hook_denies_a_deny_verdict():
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_DENY", reason="no github"))
+    gate = await _policy_gate(_policy_hook_executor(evaluator=evaluator))
+
+    decision = await gate(
+        {"tool_name": "mcp__github__issue_write", "tool_input": {"title": "x"}}, "tu_1", None
+    )
+
+    assert decision == _deny_output("no github")
+    evaluator.assert_awaited_once_with(
+        "PHASE_TOOL_CALL", {"name": "mcp__github__issue_write", "arguments": {"title": "x"}}
+    )
+
+
+async def test_tool_call_policy_hook_has_no_opinion_on_allow_and_omnigent_tools():
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ALLOW"))
+    gate = await _policy_gate(_policy_hook_executor(evaluator=evaluator))
+
+    assert (
+        await gate({"tool_name": "mcp__omnigent__sys_os_read", "tool_input": {}}, "t", None) == {}
+    )
+    evaluator.assert_not_awaited()
+    assert await gate({"tool_name": "ToolSearch", "tool_input": {}}, "t", None) == {}
+    evaluator.assert_awaited_once()
+
+
+async def test_tool_call_policy_hook_allows_an_approved_ask():
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ASK", reason="check"))
+    executor = _policy_hook_executor(evaluator=evaluator)
+    executor._elicitation_handler = AsyncMock(return_value=True)
+    gate = await _policy_gate(executor)
+
+    decision = await gate({"tool_name": "mcp__github__issue_write", "tool_input": {}}, "t", None)
+
+    assert decision == {
+        "hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+    }
+
+
+async def test_tool_call_policy_hook_fails_closed_on_error_and_deadline(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    async def slow_verdict(phase, payload):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(ClaudeSDKExecutor, "_TOOL_CALL_POLICY_DEADLINE_S", 0.01)
+    unchecked = _deny_output("Coral could not check this tool call against policy")
+    call = {"tool_name": "mcp__github__issue_write", "tool_input": {}}
+
+    raising = await _policy_gate(
+        _policy_hook_executor(evaluator=AsyncMock(side_effect=RuntimeError("server down")))
+    )
+    slow = await _policy_gate(_policy_hook_executor(evaluator=slow_verdict))
+
+    assert await raising(call, "t", None) == unchecked
+    assert await slow(call, "t", None) == unchecked
+
+
+async def test_tool_call_policy_hook_propagates_cancellation():
+    gate = await _policy_gate(
+        _policy_hook_executor(evaluator=AsyncMock(side_effect=asyncio.CancelledError))
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await gate({"tool_name": "mcp__github__issue_write", "tool_input": {}}, "t", None)
+
+
+async def test_tool_call_policy_hook_leaves_ask_user_question_to_its_own_hook():
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_DENY", reason="no"))
+    executor = _policy_hook_executor(evaluator=evaluator)
+    executor._ask_question_handler = AsyncMock(return_value="unused")
+    gate = await _policy_gate(executor)
+
+    assert await gate({"tool_name": "AskUserQuestion", "tool_input": {}}, "t", None) == {}
+    evaluator.assert_not_awaited()
+
+
+async def test_tool_call_policy_hook_can_use_tool_does_not_evaluate_again():
+    from claude_agent_sdk import PermissionResultAllow
+
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ALLOW"))
+    executor = _policy_hook_executor(evaluator=evaluator, permission_mode="default")
+    executor._elicitation_handler = AsyncMock(return_value=True)
+    options = await _turn_options(executor)
+    (matcher,) = _catch_all_policy_hooks(options)
+    call = ("mcp__github__issue_write", {"title": "x"})
+    perm_ctx = SimpleNamespace(tool_use_id="t", agent_id=None, suggestions=[])
+
+    assert await matcher.hooks[0]({"tool_name": call[0], "tool_input": call[1]}, "t", None) == {}
+    result = await options.can_use_tool(*call, perm_ctx)
+
+    assert isinstance(result, PermissionResultAllow)
+    evaluator.assert_awaited_once()
+    executor._elicitation_handler.assert_awaited_once_with(*call)

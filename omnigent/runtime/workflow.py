@@ -1406,6 +1406,8 @@ def _build_claude_sdk_spawn_env(
     # CORAL(S13): Coral specs must run on an API key or provider, never a subscription login
     if "coral" in spec.params:
         env["HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL"] = "1"
+        # CORAL(S21): enforce TOOL_CALL policy even where the CLI skips can_use_tool
+        env["HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK"] = "1"
     _add_claude_sdk_skills_env(env, spec, workdir)
     # OS env: enabling this in the inner ClaudeSDKExecutor is
     # what gates the SDK-native ``Bash/Read/Edit/Write/Glob/Grep``

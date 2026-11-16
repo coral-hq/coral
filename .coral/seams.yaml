@@ -1135,3 +1135,45 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S21
+    title: claude-sdk PreToolUse hook enforces TOOL_CALL policy for Coral specs
+    owner: WS-HARNESS
+    status: landed
+    category: coral-specific
+    note: >-
+      The CLI never calls `can_use_tool` under bypassPermissions or for tools
+      that allowed_tools pre-approves, so a TOOL_CALL DENY on a connector MCP
+      tool did not hold there (SPK-03 spike 1). For specs with `params.coral`,
+      `_build_claude_sdk_spawn_env` sets HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK=1,
+      and the executor installs a catch-all PreToolUse hook that runs
+      `_evaluate_tool_call_policy`. The hook denies on a DENY verdict, on an
+      evaluator error and after a 60 s deadline (under a 90 s SDK hook
+      timeout), allows an approved ASK, and leaves AskUserQuestion to its own
+      hook. `can_use_tool` then skips its policy half, so each call is
+      evaluated once. Sessions from other specs keep upstream behavior.
+      The two executor comments that said `can_use_tool` gates every
+      permission mode are corrected.
+    files:
+      - omnigent/runtime/workflow.py
+      - omnigent/inner/claude_sdk_harness.py
+      - omnigent/inner/claude_sdk_executor.py
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/inner/test_claude_sdk_executor.py
+    tests:
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/e2e/coral/test_tier_b_tool_gate.py
+      - docs/coral/decisions/probes/spike_01.py
+    budget_lines: 40
+    budget_exception:
+      lines: 180
+      reason: >-
+        The executor carries the hook installer, the single-evaluation change
+        to `can_use_tool` and the two corrected comments (about 110 changed
+        lines), and its test file carries the hook decision matrix (about 160
+        lines).
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true

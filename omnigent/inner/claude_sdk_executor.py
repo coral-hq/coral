@@ -41,6 +41,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
+from functools import partial
 from types import ModuleType
 from typing import Any, NamedTuple, Protocol, TypeAlias, cast
 
@@ -1819,6 +1820,7 @@ class ClaudeSDKExecutor(Executor):
         api_key_helper: str | None = None,
         system_prompt_preset: str | None = None,
         require_api_credential: bool = False,
+        tool_call_policy_hook: bool = False,
     ) -> None:
         """Create a ClaudeSDKExecutor.
 
@@ -1897,6 +1899,9 @@ class ClaudeSDKExecutor(Executor):
             require_api_credential: Refuse turns unless *api_key_helper* or
                 *gateway* is set and any *os_env* has a bwrap or seatbelt
                 sandbox; strip inherited subscription tokens from the CLI.
+            tool_call_policy_hook: Check every non-Omnigent tool call against
+                TOOL_CALL policy from a PreToolUse hook, which the CLI runs in
+                every permission mode, unlike ``can_use_tool``.
         """
         # Fail loud: a Databricks model requires the gateway transport.
         if not gateway and model is not None and is_databricks_model_id(model):
@@ -1912,6 +1917,8 @@ class ClaudeSDKExecutor(Executor):
         self._system_prompt_preset = system_prompt_preset
         # CORAL(S13): set for Coral specs
         self._require_api_credential = require_api_credential
+        # CORAL(S21): set for Coral specs
+        self._tool_call_policy_hook = tool_call_policy_hook
         self._cwd = cwd
         self._os_env_spec = os_env
         self._os_env = os_env is not None
@@ -2699,6 +2706,61 @@ class ClaudeSDKExecutor(Executor):
         hooks["PreToolUse"] = entries
         options.hooks = hooks
 
+    # CORAL(S21): the hook's own deadline sits under the SDK hook timeout, so a
+    # slow evaluator denies instead of reaching the CLI as fail-open "no opinion".
+    _TOOL_CALL_POLICY_HOOK_TIMEOUT_S: float = 90.0
+    _TOOL_CALL_POLICY_DEADLINE_S: float = 60.0
+
+    def _install_tool_call_policy_hook(self, sdk: _ClaudeSDK, options: SdkOptions) -> bool:
+        """CORAL(S21): gate every tool call on TOOL_CALL policy from a catch-all PreToolUse hook.
+
+        :param sdk: The ``claude_agent_sdk`` module (or a test double).
+        :param options: ``ClaudeAgentOptions`` to mutate.
+        :returns: Whether the hook was installed, so ``can_use_tool`` skips its policy half.
+        """
+        hook_matcher_cls = getattr(sdk, "HookMatcher", None)
+        policy_evaluator = getattr(self, "_policy_evaluator", None)
+        if not self._tool_call_policy_hook or policy_evaluator is None or hook_matcher_cls is None:
+            return False
+        ask_hook_installed = self._ask_user_question_enabled(sdk)
+
+        def _decide(decision: str, reason: str | None = None) -> _JsonObject:
+            output: _JsonObject = {"hookEventName": "PreToolUse", "permissionDecision": decision}
+            if reason is not None:
+                output["permissionDecisionReason"] = reason
+            return {"hookSpecificOutput": output}
+
+        async def gate(payload: object, _tool_use_id: str | None, _context: object) -> _JsonObject:
+            unchecked = "Coral could not check this tool call against policy"
+            if not isinstance(payload, dict):
+                return _decide("deny", unchecked)
+            tool_name = str(payload.get("tool_name") or "")
+            if ask_hook_installed and tool_name == "AskUserQuestion":
+                return {}
+            try:
+                result = await asyncio.wait_for(
+                    self._evaluate_tool_call_policy(tool_name, payload.get("tool_input") or {}),
+                    self._TOOL_CALL_POLICY_DEADLINE_S,
+                )
+            except Exception:
+                logger.exception("TOOL_CALL policy hook failed; denying tool=%s", tool_name)
+                return _decide("deny", unchecked)
+            behavior = getattr(result, "behavior", None)
+            if behavior == "deny":
+                return _decide("deny", getattr(result, "message", "") or "Denied by Coral policy")
+            if behavior == "allow":
+                return _decide("allow")
+            return {}
+
+        hooks = dict(getattr(options, "hooks", None) or {})
+        hooks.setdefault("PreToolUse", []).append(
+            hook_matcher_cls(
+                matcher=None, timeout=self._TOOL_CALL_POLICY_HOOK_TIMEOUT_S, hooks=[gate]
+            )
+        )
+        options.hooks = hooks
+        return True
+
     async def _can_use_tool_for_permission(
         self,
         tool_name: str,
@@ -2846,19 +2908,21 @@ class ClaudeSDKExecutor(Executor):
         tool_name: str,
         tool_input: ToolArgs,
         perm_ctx: object,
+        *,
+        policy_checked: bool = False,
     ) -> object:
         """
         Unified ``options.can_use_tool`` callback for the claude-sdk path.
 
         Composes two independent gates, in order:
 
-        1. **TOOL_CALL policy** (always, when a ``_policy_evaluator`` is
-           wired): a hard DENY short-circuits to
-           :class:`~claude_agent_sdk.PermissionResultDeny`. This runs in
-           EVERY permission mode — including ``bypassPermissions`` — so
-           connector-native MCP tools can't slip past policy. ALLOW /
-           no-match falls through with no human interaction, preserving
-           ``bypassPermissions`` ergonomics for un-gated tools.
+        1. **TOOL_CALL policy** (when a ``_policy_evaluator`` is wired and
+           *policy_checked* is false): a hard DENY short-circuits to
+           :class:`~claude_agent_sdk.PermissionResultDeny`. ALLOW /
+           no-match falls through with no human interaction. CORAL(S21):
+           the CLI never calls ``can_use_tool`` under ``bypassPermissions``
+           or for tools ``allowed_tools`` pre-approves, so this gate alone
+           does not enforce policy there; the PreToolUse policy hook does.
         2. **Human-consent elicitation** (only when the permission mode is
            NOT ``bypassPermissions`` and an elicitation handler is wired):
            the pre-existing per-tool approval prompt. Under
@@ -2869,11 +2933,16 @@ class ClaudeSDKExecutor(Executor):
             ``"mcp__github__issue_write"``.
         :param tool_input: Arguments dict for the tool call.
         :param perm_ctx: :class:`claude_agent_sdk.ToolPermissionContext`.
+        :param policy_checked: The PreToolUse policy hook already evaluated this call.
         :returns: A :class:`~claude_agent_sdk.PermissionResult`.
         """
         from claude_agent_sdk import PermissionResultAllow
 
-        policy_result = await self._evaluate_tool_call_policy(tool_name, tool_input)
+        policy_result = (
+            None
+            if policy_checked
+            else await self._evaluate_tool_call_policy(tool_name, tool_input)
+        )
         if policy_result is not None:
             # Hard DENY from policy — block before execution.
             return policy_result
@@ -3185,28 +3254,21 @@ class ClaudeSDKExecutor(Executor):
             options.model = model
         if self._cwd:
             options.cwd = self._cwd
-        # Install the unified can_use_tool gate. It runs the TOOL_CALL
-        # policy evaluation in EVERY permission mode — including
-        # ``bypassPermissions`` — so connector-native MCP tools
-        # (``mcp__github__*``, ``mcp__atlassian__*``) that execute inside
-        # the CLI subprocess are evaluated against Omnigent TOOL_CALL
-        # policy before they run, instead of bypassing policy entirely.
-        #
-        # The gate is no-friction when nothing matches: a policy ALLOW /
-        # no-match returns allow with no human prompt, so
-        # ``bypassPermissions`` ergonomics are preserved for un-gated
-        # tools. The human-consent elicitation half of the gate still only
-        # fires for non-bypass modes (see ``_can_use_tool_gate``).
-        #
-        # Install whenever EITHER a policy evaluator OR an elicitation
-        # handler is wired. Previously this only installed for non-bypass
-        # modes, which is why default ``claude-sdk`` sessions (which
-        # default to ``bypassPermissions``) had no per-tool TOOL_CALL gate.
+        # Install the unified can_use_tool gate whenever a policy evaluator or
+        # an elicitation handler is wired. CORAL(S21): the CLI calls it only for
+        # tools that need a permission prompt, never under ``bypassPermissions``,
+        # so Coral specs also install the PreToolUse policy hook and the gate
+        # then skips its policy half to evaluate each call once.
+        policy_hooked = self._install_tool_call_policy_hook(sdk, options)
         if (
             getattr(self, "_policy_evaluator", None) is not None
             or self._elicitation_handler is not None
         ):
-            options.can_use_tool = self._can_use_tool_gate
+            options.can_use_tool = (
+                partial(self._can_use_tool_gate, policy_checked=True)
+                if policy_hooked
+                else self._can_use_tool_gate
+            )
 
         self._install_subagent_router_hook(sdk, options, model)
         self._install_framework_context_hook(sdk, options, session_key)

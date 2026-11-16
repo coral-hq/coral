@@ -78,8 +78,8 @@ OPS-01's generator will maintain this file later.
 | `omnigent/host/service.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/host/service_entry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/inner/_acp_omnigent_mcp.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/inner/claude_sdk_executor.py` | S95, S13 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Under the Coral credential flag, refuses a turn before the CLI starts when there is no API key helper or gateway, or when `os_env` has no available bwrap or seatbelt sandbox, and strips subscription tokens from the CLI env (S13). |
-| `omnigent/inner/claude_sdk_harness.py` | S13 | coral-specific | Reads `HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL` into the executor (S13). |
+| `omnigent/inner/claude_sdk_executor.py` | S95, S13, S21 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Under the Coral credential flag, refuses a turn before the CLI starts when there is no API key helper or gateway, or when `os_env` has no available bwrap or seatbelt sandbox, and strips subscription tokens from the CLI env (S13). Under the Coral policy-hook flag, installs a catch-all `PreToolUse` hook that checks every non-Omnigent tool call against TOOL_CALL policy in every permission mode and fails closed, and `can_use_tool` then skips its policy check (S21). |
+| `omnigent/inner/claude_sdk_harness.py` | S13, S21 | coral-specific | Reads `HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL` (S13) and `HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK` (S21) into the executor. |
 | `omnigent/inner/codex_executor.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/inner/codex_native_executor.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/inner/copilot_executor.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -124,7 +124,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/runtime/harnesses/_executor_adapter.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/runtime/harnesses/process_manager.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/runtime/prompt.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `omnigent/runtime/workflow.py` | S95, S13 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Sets `HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL=1` for claude-sdk specs with `params.coral` (S13). |
+| `omnigent/runtime/workflow.py` | S95, S13, S21 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Sets `HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL=1` and `HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK=1` for claude-sdk specs with `params.coral` (S13, S21). |
 | `omnigent/server/app.py` | S95, S32 | upstream-extension | Wires `server_plugins` loading, router mounting ahead of `_SPAStaticFiles`, policy-module merging, and lifespan hook execution (S32). Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/server/server_plugins.py` | S32 | upstream-extension | Added. Defines `ServerServices`, `ServerPluginRegistration`, `load_server_plugins`, and `enter_lifespan_hooks` (S32). |
 | `omnigent/server/mcp_compatibility.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -228,8 +228,8 @@ OPS-01's generator will maintain this file later.
 | `tests/helpers/ui_url_safety.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/host/test_cli_host.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/host/test_local_server.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `tests/inner/test_claude_sdk_executor.py` | S95, S13 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Adds the Coral credential and sandbox refusal tests, with the non-Coral regression (S13). |
-| `tests/inner/test_claude_sdk_harness.py` | S13 | coral-specific | Adds the Coral credential flag threading test (S13). |
+| `tests/inner/test_claude_sdk_executor.py` | S95, S13, S21 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Adds the Coral credential and sandbox refusal tests, with the non-Coral regression (S13). Adds the PreToolUse policy hook tests (S21). |
+| `tests/inner/test_claude_sdk_harness.py` | S13, S21 | coral-specific | Adds the Coral credential and policy-hook flag threading test (S13, S21). |
 | `tests/inner/test_terminal.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/inner/test_ui.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/onboarding/test_harness_install.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -245,7 +245,7 @@ OPS-01's generator will maintain this file later.
 | `tests/runner/test_native_terminal_start_error_payload.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/runner/test_runner_entry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/runtime/harnesses/test_executor_adapter.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `tests/runtime/test_claude_sdk_spawn_env.py` | S13 | coral-specific | Adds the Coral credential flag tests for Coral and non-Coral specs (S13). |
+| `tests/runtime/test_claude_sdk_spawn_env.py` | S13, S21 | coral-specific | Adds the Coral credential and policy-hook flag tests for Coral and non-Coral specs (S13, S21). |
 | `tests/runtime/test_filesystem_registry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/scripts/test_dependency_ci.py` | S39d | coral-specific | Asserts the `coral` matrix group collects `tests/coral` and `misc` ignores it (S39d). |
 | `tests/scripts/test_security_gate.py` | S99 | coral-specific | Expects the gate and scan to fetch their trust rules from the default branch. |
