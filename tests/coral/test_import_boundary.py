@@ -101,3 +101,42 @@ def test_db_tier_rejects_unallowlisted_omnigent_imports(tmp_path: Path) -> None:
     violations = boundary.scan_directory(coral_root)
     assert len(violations) == 1
     assert "db/bad.py" in violations[0]
+
+
+def test_db_tier_allows_allowlisted_omnigent_symbols_and_rejects_others(tmp_path: Path) -> None:
+    coral_root = tmp_path / "coral"
+    # Allowlisted public symbols in DB_OMNIGENT_ALLOWLIST
+    _write(
+        coral_root,
+        "db/good.py",
+        "from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, current_workspace_id\n"
+        "from omnigent.db.enum_codecs import decode_enum, encode_enum\n"
+        "from omnigent.db.pagination import keyset_after\n"
+        "from omnigent.db.query_context import query_name_scope\n"
+        "from omnigent.db.utils import (\n"
+        "    create_db_engine,\n"
+        "    get_db_revision_state,\n"
+        "    get_or_create_engine,\n"
+        "    is_cockroachdb,\n"
+        "    is_postgresql_family,\n"
+        "    normalize_database_url,\n"
+        "    run_write_transaction,\n"
+        "    shared_read_scope,\n"
+        ")\n",
+    )
+    # Non-allowlisted or private symbols
+    _write(
+        coral_root,
+        "db/bad_private.py",
+        "from omnigent.db.utils import _create_engine\n",
+    )
+    _write(
+        coral_root,
+        "db/bad_unallowlisted.py",
+        "from omnigent.db.db_models import SqlConversation\n",
+    )
+
+    violations = boundary.scan_directory(coral_root)
+    assert len(violations) == 2
+    assert any("db/bad_private.py" in v for v in violations)
+    assert any("db/bad_unallowlisted.py" in v for v in violations)

@@ -42,6 +42,18 @@ if db_url:
     _set_alembic_database_url(config, db_url)
 
 
+# CORAL(S30): exclude Coral-owned tables and coral_alembic_version from
+# Omnigent Alembic autogenerate
+def _include_name(name: str | None, type_: str, _parent_names: object) -> bool:
+    if (
+        type_ == "table"
+        and name is not None
+        and (name.startswith("coral_") or name == "coral_alembic_version")
+    ):
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     """
     Run migrations in 'offline' mode — emit SQL to stdout
@@ -53,6 +65,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_name=_include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -86,6 +99,7 @@ def _run_with_connection(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         render_as_batch=True,  # required for SQLite ALTER TABLE support
+        include_name=_include_name,
     )
     with context.begin_transaction():
         context.run_migrations()

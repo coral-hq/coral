@@ -136,3 +136,27 @@ def test_shipped_codes_are_stable() -> None:
         "skipped": 5,
         "starting": 6,
     }
+
+
+def test_generic_encode_decode_enum() -> None:
+    """Public encode_enum and decode_enum round-trip accurately with custom tables."""
+    custom_table = {"draft": 1, "published": 2, "archived": 3}
+
+    assert ec.encode_enum(custom_table, "draft", field="test.status") == 1
+    assert ec.encode_enum(custom_table, "published", field="test.status") == 2
+    assert ec.encode_enum(custom_table, "archived", field="test.status") == 3
+
+    assert ec.decode_enum(custom_table, 1, field="test.status") == "draft"
+    assert ec.decode_enum(custom_table, 2, field="test.status") == "published"
+    assert ec.decode_enum(custom_table, 3, field="test.status") == "archived"
+
+
+def test_generic_encode_decode_enum_error_messages() -> None:
+    """Public encode_enum and decode_enum raise informative ValueErrors."""
+    custom_table = {"alpha": 10, "beta": 20}
+
+    with pytest.raises(ValueError, match=r"unknown test\.kind value: 'gamma'"):
+        ec.encode_enum(custom_table, "gamma", field="test.kind")
+
+    with pytest.raises(ValueError, match=r"unknown test\.kind code: 99"):
+        ec.decode_enum(custom_table, 99, field="test.kind")

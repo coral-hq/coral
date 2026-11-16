@@ -1,0 +1,1 @@
+"""Coral database migrations package."""
