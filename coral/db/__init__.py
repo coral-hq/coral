@@ -38,11 +38,19 @@ from coral.db.types import (
     CaseSensitiveString,
 )
 from omnigent.db.compression import CompressedText, encode
-from omnigent.db.utils import make_named_managed_session_maker
+from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, current_workspace_id
+from omnigent.db.pagination import keyset_after
+from omnigent.db.query_context import query_name_scope
+from omnigent.db.utils import (
+    make_named_managed_session_maker,
+    run_write_transaction,
+    shared_read_scope,
+)
 
 __all__ = [
     "CAPPED_TEXT",
     "CHECKSUM32",
+    "DEFAULT_WORKSPACE_ID",
     "LARGE_CAPPED_TEXT",
     "LARGE_MAX_STORED_BYTES",
     "MAX_STORED_BYTES",
@@ -69,8 +77,13 @@ __all__ = [
     "clear_coral_schema_cache",
     "coral_engine",
     "current_coral_revision",
+    "current_workspace_id",
     "encode",
     "ensure_coral_schema",
+    "keyset_after",
     "make_named_managed_session_maker",
+    "query_name_scope",
     "run_coral_migrations_with_retry",
+    "run_write_transaction",
+    "shared_read_scope",
 ]
