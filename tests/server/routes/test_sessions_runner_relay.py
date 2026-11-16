@@ -1109,6 +1109,7 @@ async def test_relay_suppresses_disconnect_error_on_intentional_stop(
     labels) rather than rendering "Error · runner_disconnected".
     """
     from omnigent.runtime import session_stream
+    from omnigent.server import session_live_state  # CORAL(S1): status-edge observer
     from omnigent.server.routes import sessions as sessions_module
 
     sessions_module._runner_relay_tasks.clear()
@@ -1116,6 +1117,9 @@ async def test_relay_suppresses_disconnect_error_on_intentional_stop(
     fake_runner = _TunnelCloseRunnerClient(gate)
     store = _RecordingLabelStore()
     session_id = "b7c1e2d3f4a5968778695a4b3c2d1e0f"
+    # CORAL(S1): a stop of a session with no turn in flight reports no turn outcome.
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer("test-relay", edges.append)
 
     collector = None
     try:
@@ -1158,7 +1162,13 @@ async def test_relay_suppresses_disconnect_error_on_intentional_stop(
         persisted = store.labels.get(session_id)
         assert persisted is not None
         assert sessions_module._last_task_error_from_labels(persisted) is None
+        assert [
+            (edge.status, edge.turn_outcome, edge.turn_response_id)
+            for edge in edges
+            if edge.session_id == session_id
+        ] == [("idle", None, None)]
     finally:
+        unregister()
         gate.set()
         sessions_module._intentional_stop_sessions.pop(session_id, None)
         if collector is not None:

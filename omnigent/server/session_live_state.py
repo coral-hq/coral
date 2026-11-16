@@ -38,16 +38,22 @@ unaffected.
 
 from __future__ import annotations
 
+# CORAL(S1): threading, Mapping, dataclass/field, current_workspace_id and log_once
+# serve the status-edge observers below.
 import contextvars
 import functools
 import logging
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from omnigent.db.db_models import current_workspace_id
 from omnigent.db.enum_codecs import SESSION_LIVE_STATUS
 from omnigent.db.workspace_cache import WorkspaceScopedCache
+from omnigent.process_logging import log_once
 
 if TYPE_CHECKING:
     from omnigent.stores import ConversationStore
@@ -85,6 +91,152 @@ _handoffs: WorkspaceScopedCache[str, int] = WorkspaceScopedCache()
 # Never erased by clear_runner_liveness — only configure() resets it.
 # custom-lint: disable-next=workspace-scoped-cache -- keyed by globally-unique runner_id
 _last_liveness_stamp: dict[str, int] = {}
+
+
+# CORAL(S1): in-process observers of every published status edge, with origin and turn outcome.
+TURN_OUTCOMES: frozenset[str] = frozenset({"completed", "cancelled", "failed"})
+# Ids and short codes on an edge; the session list caps ``blocked_on`` the same way.
+_EDGE_ID_MAX_CHARS = 128
+# Error text on an edge; the server's failure log caps its detail the same way.
+_EDGE_MESSAGE_MAX_CHARS = 4500
+
+
+@dataclass(frozen=True)
+class SessionStatusEdge:
+    """
+    One published session status edge, as in-process observers receive it.
+
+    ``turn_outcome`` is how the turn named by ``turn_response_id`` ended; an
+    outcome outside :data:`TURN_OUTCOMES` is dropped. ``response_id`` is the
+    publish's own id, which opens a turn on a ``running``/``waiting`` edge.
+    ``origin`` names the publishing path, e.g. ``"archive_idle"``.
+
+    Edges arrive from every workspace, and session ids can repeat across
+    workspaces, so identify a session by ``(workspace_id, session_id)``.
+    Runner-supplied values are bounded on construction and never raise: an
+    id (``turn_response_id``, ``response_id``) that is empty or longer than
+    128 characters is dropped, as :func:`turn_fields` does; ``error_code`` and
+    ``blocked_on`` are cut to 128 characters and ``error_message`` to 4,500.
+    """
+
+    session_id: str
+    status: str
+    previous_status: str | None
+    origin: str = "unknown"
+    turn_completed: bool = False
+    turn_outcome: str | None = None
+    turn_response_id: str | None = None
+    response_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    failure_origin: str | None = None
+    persist_live_status: bool = True
+    scheduled_run_outcome: str = "auto"
+    background_task_count: int | None = None
+    blocked_on: str | None = None
+    workspace_id: int = field(default_factory=current_workspace_id)
+    observed_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+
+    def __post_init__(self) -> None:
+        bound = object.__setattr__
+        bound(self, "turn_outcome", _known_turn_outcome(self.turn_outcome))
+        bound(self, "turn_response_id", _bounded_id(self.turn_response_id))
+        bound(self, "response_id", _bounded_id(self.response_id))
+        bound(self, "error_code", _truncated(self.error_code, _EDGE_ID_MAX_CHARS))
+        bound(self, "error_message", _truncated(self.error_message, _EDGE_MESSAGE_MAX_CHARS))
+        bound(self, "blocked_on", _truncated(self.blocked_on, _EDGE_ID_MAX_CHARS))
+
+
+StatusEdgeObserver = Callable[[SessionStatusEdge], None]
+
+# Process-wide observer registry keyed by observer name, never by session.
+# custom-lint: disable-next=workspace-scoped-cache -- keyed by observer name, not a tenant id
+_status_edge_observers: dict[str, StatusEdgeObserver] = {}
+_status_edge_observers_lock = threading.Lock()
+
+
+def _known_turn_outcome(value: object) -> str | None:
+    return value if isinstance(value, str) and value in TURN_OUTCOMES else None
+
+
+def _bounded_id(value: object) -> str | None:
+    return value if isinstance(value, str) and 0 < len(value) <= _EDGE_ID_MAX_CHARS else None
+
+
+def _truncated(value: object, limit: int) -> str | None:
+    return value[:limit] if isinstance(value, str) else None
+
+
+def turn_fields(event: Mapping[str, object]) -> tuple[str | None, str | None]:
+    """
+    Read a runner status event's turn outcome and the response it reports on.
+
+    :param event: A runner ``session.status`` event, e.g.
+        ``{"status": "idle", "turn_outcome": "cancelled", "turn_response_id": "resp_1"}``.
+    :returns: ``(turn_outcome, turn_response_id)``; an unknown outcome, or an id
+        that is not a non-empty string of at most 128 characters, is ``None``.
+    """
+    return (
+        _known_turn_outcome(event.get("turn_outcome")),
+        _bounded_id(event.get("turn_response_id")),
+    )
+
+
+def register_status_edge_observer(name: str, fn: StatusEdgeObserver) -> Callable[[], None]:
+    """
+    Register *fn* to receive every published status edge under *name*.
+
+    Use one static, namespaced name per component, e.g. ``"coral.status_edges"``.
+    Registering a name again replaces its observer and logs a warning. Observers
+    run on the publishing thread, which may be a worker thread, so they must be
+    thread-safe and must not block. Every workspace's edges reach every
+    observer: match sessions on ``(edge.workspace_id, edge.session_id)``, never
+    on a bare session id.
+
+    :param name: Observer name, e.g. ``"coral.status_edges"``.
+    :param fn: Callable receiving each :class:`SessionStatusEdge`.
+    :returns: An idempotent unregister function that removes *fn* only while it
+        is still the observer registered under *name*.
+    """
+    with _status_edge_observers_lock:
+        replaced = _status_edge_observers.get(name)
+        _status_edge_observers[name] = fn
+    if replaced is not None and replaced is not fn:
+        _logger.warning("status-edge observer %r replaced an earlier registration", name)
+
+    def unregister() -> None:
+        with _status_edge_observers_lock:
+            if _status_edge_observers.get(name) is fn:
+                del _status_edge_observers[name]
+
+    return unregister
+
+
+def notify_status_edge(edge: SessionStatusEdge) -> None:
+    """
+    Hand *edge* to every registered observer. Never raises and never awaits.
+
+    :param edge: The published edge.
+    """
+    with _status_edge_observers_lock:
+        observers = tuple(_status_edge_observers.items())
+    for name, fn in observers:
+        try:
+            fn(edge)
+        except Exception:  # noqa: BLE001 — an observer bug must not break the publish
+            # One traceback per observer name; repeats go to debug without one.
+            log_once(
+                _logger,
+                logging.WARNING,
+                "status-edge observer %r failed; later failures are logged at debug",
+                name,
+                exc_info=True,
+            )
+            _logger.debug(
+                "status-edge observer %r failed",
+                name,
+                extra={"session_id": edge.session_id},
+            )
 
 
 def configure(

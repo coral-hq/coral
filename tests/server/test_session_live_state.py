@@ -15,13 +15,29 @@ short polling deadline — the same shape as the host-tunnel route tests'
 
 from __future__ import annotations
 
+# CORAL(S1): asyncio, dataclasses, logging, uuid, Iterator, SimpleNamespace, Any, AsyncMock,
+# session_stream, ErrorDetail and the relay fakes serve the status-edge tests below.
+import asyncio
+import dataclasses
+import logging
 import threading
 import time
+import uuid
+from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
-from omnigent.runtime import pending_elicitations
+from omnigent.runtime import pending_elicitations, session_stream
 from omnigent.server import session_live_state
+from omnigent.server.schemas import ErrorDetail
+from tests.server.routes.test_sessions_runner_relay import (
+    _RecordingLabelStore,
+    _ScriptedRunnerClient,
+    _TunnelCloseRunnerClient,
+)
 
 
 def _wait_until(predicate, *, timeout_s: float = 10.0) -> None:
@@ -567,4 +583,447 @@ async def test_liveness_pass_zeroes_pending_count_for_offline_runner() -> None:
     ] == [
         (False, 0, False, None),
         (True, 3, True, "permission prompt"),
+    ]
+
+
+# CORAL(S1): in-process status-edge observers, their fields and the four origin sites.
+@pytest.fixture()
+def status_edges() -> Iterator[list[Any]]:
+    """Record every status edge published while the test runs."""
+    edges: list[Any] = []
+    unregister = session_live_state.register_status_edge_observer("test-recorder", edges.append)
+    yield edges
+    unregister()
+
+
+def _without_clock(edge: Any) -> Any:
+    return dataclasses.replace(edge, observed_at_ms=0)
+
+
+def test_status_edge_observers_replace_by_name_unregister_by_identity_and_are_isolated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    seen: list[tuple[str, str]] = []
+    # A fresh name: a failure is logged once per observer name for the whole process.
+    failing_name = f"test-raising-{uuid.uuid4().hex}"
+
+    def failing(_edge: Any) -> None:
+        raise RuntimeError("observer bug")
+
+    with caplog.at_level(logging.DEBUG, logger=session_live_state.__name__):
+        # Registered first, so the observers after it prove a failure stops no one.
+        remove_failing = session_live_state.register_status_edge_observer(failing_name, failing)
+        stale = session_live_state.register_status_edge_observer(
+            "test-a", lambda edge: seen.append(("first", edge.session_id))
+        )
+        current = session_live_state.register_status_edge_observer(
+            "test-a", lambda edge: seen.append(("second", edge.session_id))
+        )
+        try:
+            session_live_state.configure(None)
+            for session_id in ("conv_a", "conv_a2"):
+                session_live_state.notify_status_edge(
+                    session_live_state.SessionStatusEdge(session_id, "idle", "running")
+                )
+            assert seen == [("second", "conv_a"), ("second", "conv_a2")]
+            stale()
+            session_live_state.notify_status_edge(
+                session_live_state.SessionStatusEdge("conv_b", "running", None)
+            )
+            assert seen[-1] == ("second", "conv_b")
+            current()
+            current()
+            session_live_state.notify_status_edge(
+                session_live_state.SessionStatusEdge("conv_c", "idle", None)
+            )
+            assert seen[-1] == ("second", "conv_b")
+        finally:
+            current()
+            remove_failing()
+
+    replaced = [r for r in caplog.records if "'test-a' replaced" in r.getMessage()]
+    assert [r.levelno for r in replaced] == [logging.WARNING]
+    failures = [r for r in caplog.records if failing_name in r.getMessage()]
+    # One traceback for the first failure; each of the four failures also at debug.
+    assert [(r.levelno, r.exc_info is not None) for r in failures] == [
+        (logging.WARNING, True),
+        *[(logging.DEBUG, False)] * 4,
+    ]
+
+
+def test_status_edge_bounds_runner_supplied_values_without_raising() -> None:
+    edge = session_live_state.SessionStatusEdge(
+        "conv_bounds",
+        "failed",
+        "running",
+        turn_outcome="cancelled",
+        turn_response_id="r" * 129,
+        response_id="r" * 128,
+        error_code="c" * 200,
+        error_message="m" * 5000,
+        blocked_on="b" * 200,
+    )
+    assert (edge.turn_response_id, edge.response_id) == (None, "r" * 128)
+    assert (edge.error_code, edge.blocked_on) == ("c" * 128, "b" * 128)
+    assert edge.error_message == "m" * 4500
+    odd = session_live_state.SessionStatusEdge(
+        "conv_bounds",
+        "idle",
+        None,
+        turn_outcome=["failed"],  # type: ignore[arg-type]
+        response_id="",
+        error_message=7,  # type: ignore[arg-type]
+    )
+    assert (odd.turn_outcome, odd.response_id, odd.error_message) == (None, None, None)
+
+
+def test_status_edge_observers_may_change_the_registry_or_raise_mid_notify() -> None:
+    """Observers run unlocked on a snapshot; one that raised still gets the next edge."""
+    first, second = "conv_reentrant_a", "conv_reentrant_b"
+    seen: list[tuple[str, str]] = []
+    unregister_late: list[Any] = []
+
+    def late(edge: Any) -> None:
+        if edge.session_id in (first, second):
+            seen.append(("late", edge.session_id))
+
+    def leaving(edge: Any) -> None:
+        if edge.session_id in (first, second):
+            seen.append(("leaving", edge.session_id))
+            unregister_leaving()
+            unregister_late.append(
+                session_live_state.register_status_edge_observer("test-late", late)
+            )
+
+    def flaky(edge: Any) -> None:
+        if edge.session_id == first:
+            raise RuntimeError("observer bug on one edge")
+        if edge.session_id == second:
+            seen.append(("flaky", second))
+
+    # The raising observer runs first, so "leaving" proves the observers after it still run.
+    unregister_flaky = session_live_state.register_status_edge_observer("test-flaky", flaky)
+    unregister_leaving = session_live_state.register_status_edge_observer("test-leaving", leaving)
+    try:
+        for session_id in (first, second):
+            session_live_state.notify_status_edge(
+                session_live_state.SessionStatusEdge(session_id, "idle", None)
+            )
+    finally:
+        unregister_leaving()
+        unregister_flaky()
+        for unregister in unregister_late:
+            unregister()
+    assert seen == [("leaving", first), ("flaky", second), ("late", second)]
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        ({"turn_outcome": "cancelled", "turn_response_id": "resp_1"}, ("cancelled", "resp_1")),
+        ({"turn_outcome": "failed", "turn_response_id": "r" * 128}, ("failed", "r" * 128)),
+        ({"turn_outcome": "completed", "turn_response_id": 7}, ("completed", None)),
+        ({"turn_outcome": "succeeded", "turn_response_id": ""}, (None, None)),
+        ({"turn_outcome": ["failed"], "turn_response_id": "r" * 129}, (None, None)),
+        ({}, (None, None)),
+    ],
+)
+def test_turn_fields_keep_only_known_outcomes_and_bounded_ids(
+    event: dict[str, object], expected: tuple[str | None, str | None]
+) -> None:
+    assert session_live_state.turn_fields(event) == expected
+
+
+def test_publish_status_notifies_one_edge_per_publish_after_the_stream(
+    monkeypatch: pytest.MonkeyPatch, status_edges: list[Any]
+) -> None:
+    """Every publish past the sticky return reaches observers once, after SSE and caches."""
+    from omnigent.server.routes._sessions import helpers
+
+    session_id = "conv_edge_fields"
+    calls: list[tuple[str, object]] = []
+    publish = session_stream.publish
+
+    def record_publish(key: str, payload: dict[str, Any]) -> None:
+        calls.append(("publish", dict(payload)))
+        publish(key, payload)
+
+    def record_edge(edge: Any) -> None:
+        cached = (
+            helpers._session_status_cache.get(edge.session_id),
+            helpers._session_active_response_cache.get(edge.session_id),
+        )
+        calls.append(("edge", cached))
+
+    monkeypatch.setattr(session_stream, "publish", record_publish)
+    unregister = session_live_state.register_status_edge_observer("test-order", record_edge)
+    before_ms = int(time.time() * 1000)
+    try:
+        helpers._publish_status(
+            session_id,
+            "running",
+            response_id="resp_1",
+            background_task_count=2,
+            blocked_on="permission prompt",
+            failure_origin="dropped_on_non_failed_edges",
+            origin="relay_turn_end",
+        )
+        helpers._publish_status(
+            session_id,
+            "failed",
+            ErrorDetail(code="runner_error", message="boom"),
+            failure_origin="runner_rejected_event",
+            scheduled_run_outcome="failed",
+            origin="runner_disconnect",
+            turn_outcome="failed",
+            turn_response_id="resp_1",
+        )
+        helpers._publish_status(session_id, "idle", turn_outcome="cancelled")  # sticky
+        helpers._publish_status(
+            session_id, "idle", persist_live_status=False, turn_completed=True, turn_outcome="odd"
+        )
+    finally:
+        unregister()
+        helpers._session_status_cache.pop(session_id, None)
+        helpers._session_active_response_cache.pop(session_id, None)
+        helpers._session_blocked_on_cache.pop(session_id, None)
+        session_stream.close(session_id)
+
+    edges = [edge for edge in status_edges if edge.session_id == session_id]
+    assert all(before_ms <= edge.observed_at_ms <= int(time.time() * 1000) for edge in edges)
+    edge_type = session_live_state.SessionStatusEdge
+    assert [_without_clock(edge) for edge in edges] == [
+        edge_type(
+            session_id,
+            "running",
+            None,
+            origin="relay_turn_end",
+            response_id="resp_1",
+            background_task_count=2,
+            blocked_on="permission prompt",
+            observed_at_ms=0,
+        ),
+        edge_type(
+            session_id,
+            "failed",
+            "running",
+            origin="runner_disconnect",
+            turn_outcome="failed",
+            turn_response_id="resp_1",
+            error_code="runner_error",
+            error_message="boom",
+            failure_origin="runner_rejected_event",
+            scheduled_run_outcome="failed",
+            observed_at_ms=0,
+        ),
+        edge_type(
+            session_id,
+            "idle",
+            "failed",
+            turn_completed=True,
+            persist_live_status=False,
+            observed_at_ms=0,
+        ),
+    ]
+    # Each edge follows its own stream publish, with every cache already written.
+    assert [kind for kind, _ in calls] == ["publish", "edge", "publish", "edge", "publish", "edge"]
+    assert [cached for kind, cached in calls if kind == "edge"] == [
+        ("running", "resp_1"),
+        ("failed", None),
+        ("idle", None),
+    ]
+    payloads = [payload for kind, payload in calls if kind == "publish"]
+    assert not any(
+        key in payload
+        for payload in payloads
+        for key in ("origin", "turn_outcome", "turn_response_id")
+    )
+
+
+async def test_status_edge_observer_runs_on_the_orphan_reconcile_worker_thread(
+    status_edges: list[Any],
+) -> None:
+    from omnigent.db.db_models import workspace_scope
+    from omnigent.server.routes._sessions import helpers
+
+    session_id = "conv_orphan_edge"
+    threads: list[int] = []
+    unregister = session_live_state.register_status_edge_observer(
+        "test-thread", lambda _edge: threads.append(threading.get_ident())
+    )
+    store = SimpleNamespace(settle_orphaned_live_status=lambda _session_id, _stale: True)
+    try:
+        with workspace_scope(4242):
+            assert await asyncio.to_thread(
+                helpers.reconcile_orphaned_running_status, session_id, store, 0
+            )
+    finally:
+        unregister()
+        with workspace_scope(4242):
+            helpers._session_status_cache.pop(session_id, None)
+        session_stream.close(session_id)
+
+    [edge] = [edge for edge in status_edges if edge.session_id == session_id]
+    assert (edge.status, edge.scheduled_run_outcome, edge.persist_live_status) == (
+        "idle",
+        "failed",
+        False,
+    )
+    assert edge.workspace_id == 4242
+    assert threads and threads[0] != threading.get_ident()
+
+
+_SITE_SESSION = "5e55a7e0c0de4d1e8a0b1c2d3e4f5a6b"
+
+
+async def _archive_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omnigent.server.routes import sessions
+    from omnigent.server.routes._sessions import orchestration
+
+    conv = SimpleNamespace(
+        id=_SITE_SESSION,
+        archived=True,
+        host_id="host-site",
+        runner_id="runner-site",
+        parent_conversation_id=None,
+    )
+    store = SimpleNamespace(
+        get_conversation=lambda _session_id: conv,
+        list_runner_session_statuses=lambda _runner_id, **_page: [(conv.id, "running")],
+        settle_intentionally_stopped_session=lambda _session_id, _runner_id: True,
+    )
+    monkeypatch.setattr(sessions, "_best_effort_stop", AsyncMock())
+    monkeypatch.setattr(sessions, "_stop_session_host_runner", AsyncMock(return_value=True))
+    sessions._session_status_cache[_SITE_SESSION] = "running"
+    sessions._session_active_response_cache[_SITE_SESSION] = "resp_site"
+    await orchestration._archive_stop(_SITE_SESSION, store, None, None)  # type: ignore[arg-type]
+
+
+async def _runner_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omnigent.server.routes import sessions
+    from omnigent.server.routes._sessions import orchestration
+
+    monkeypatch.setattr(orchestration, "RUNNER_DISCONNECT_GRACE_S", 0.0)
+    dropped = asyncio.Event()
+    dropped.set()
+    sessions._session_status_cache[_SITE_SESSION] = "running"
+    sessions._session_active_response_cache[_SITE_SESSION] = "resp_site"
+    await sessions._relay_runner_stream(
+        _SITE_SESSION,
+        _TunnelCloseRunnerClient(dropped),  # type: ignore[arg-type]
+        _RecordingLabelStore(),  # type: ignore[arg-type]
+    )
+
+
+async def _relay_turn_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omnigent.server.routes import sessions
+
+    del monkeypatch
+    store = _RecordingLabelStore()
+    store.set_labels(
+        _SITE_SESSION,
+        {
+            sessions._LAST_TASK_ERROR_CODE_LABEL_KEY: "runner_disconnected",
+            sessions._LAST_TASK_ERROR_MESSAGE_LABEL_KEY: "Runner disconnected unexpectedly.",
+        },
+    )
+    sessions._session_status_cache[_SITE_SESSION] = "failed"
+    released = asyncio.Event()
+    released.set()
+    turn_end = {
+        "type": "session.status",
+        "status": "idle",
+        "turn_outcome": "completed",
+        "turn_response_id": "resp_site",
+    }
+    await sessions._relay_runner_stream(
+        _SITE_SESSION,
+        _ScriptedRunnerClient(released, [turn_end]),  # type: ignore[arg-type]
+        store,  # type: ignore[arg-type]
+    )
+
+
+async def _status_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omnigent.server.routes._sessions import orchestration
+
+    del monkeypatch
+    reply = SimpleNamespace(status_code=200, json=lambda: {"status": "running"})
+    runner_client = SimpleNamespace(get=AsyncMock(return_value=reply))
+    probed = await orchestration._probe_runner_live_status(
+        runner_client,  # type: ignore[arg-type]
+        _SITE_SESSION,
+    )
+    assert probed == "running"
+
+
+_SITES = {
+    "archive_idle": _archive_idle,
+    "runner_disconnect": _runner_disconnect,
+    "relay_turn_end": _relay_turn_end,
+    "status_probe": _status_probe,
+}
+
+
+@pytest.mark.parametrize(
+    ("site", "expected"),
+    [
+        (
+            "archive_idle",
+            {
+                "status": "idle",
+                "previous_status": "running",
+                "turn_outcome": "cancelled",
+                "turn_response_id": "resp_site",
+                "persist_live_status": False,
+            },
+        ),
+        (
+            "runner_disconnect",
+            {
+                "status": "failed",
+                "previous_status": "running",
+                "turn_outcome": "failed",
+                "turn_response_id": "resp_site",
+                "error_code": "runner_disconnected",
+                "error_message": "Runner disconnected unexpectedly.",
+                "failure_origin": "runner_disconnected_mid_turn",
+            },
+        ),
+        (
+            "relay_turn_end",
+            {
+                "status": "idle",
+                "previous_status": "failed",
+                "turn_outcome": "completed",
+                "turn_response_id": "resp_site",
+            },
+        ),
+        ("status_probe", {"status": "running", "previous_status": None}),
+    ],
+)
+async def test_observer_sees_every_edge_with_origin_at_the_four_sites(
+    monkeypatch: pytest.MonkeyPatch,
+    status_edges: list[Any],
+    site: str,
+    expected: dict[str, Any],
+) -> None:
+    from omnigent.server.routes import sessions
+
+    try:
+        await _SITES[site](monkeypatch)
+    finally:
+        for cache in (
+            sessions._session_status_cache,
+            sessions._session_active_response_cache,
+            sessions._intentional_stop_sessions,
+            sessions._runner_status_probe_backoff,
+        ):
+            cache.pop(_SITE_SESSION, None)
+        session_stream.close(_SITE_SESSION)
+
+    edges = [edge for edge in status_edges if edge.session_id == _SITE_SESSION]
+    assert [_without_clock(edge) for edge in edges] == [
+        session_live_state.SessionStatusEdge(
+            session_id=_SITE_SESSION, origin=site, observed_at_ms=0, **expected
+        )
     ]

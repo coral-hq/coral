@@ -1360,3 +1360,87 @@ seams:
     anchor_exempt: []
     upstream_first: true
     upstream_candidate: true
+
+  - id: S1
+    title: Status-edge observers with origin and turn outcome
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      session_live_state gains a process-wide, lock-guarded registry of named
+      status-edge observers (one static, namespaced name per component; a
+      replacement by name logs a warning). _publish_status notifies once per
+      published edge, after the stream publish so a re-reading observer finds
+      every cache updated; the sticky-failed return notifies nothing. Each
+      SessionStatusEdge carries origin, turn_outcome (completed, cancelled or
+      failed; anything else is dropped), turn_response_id (the ended turn's id;
+      it never opens a turn), the call's error, failure_origin (failed edges
+      only), workspace and observed_at_ms. Runner-supplied values are bounded
+      on construction and never raise: ids over 128 characters are dropped,
+      error_code and blocked_on are cut to 128 characters and error_message to
+      4,500. Edges from every workspace reach every observer, so observers
+      match on (workspace_id, session_id). Nothing new reaches the stream
+      payload, the caches or the scheduled-run hook, so without an observer
+      behaviour is unchanged. Observers run on the publishing thread (orphan
+      reconcile publishes from a worker thread), each in its own try/except; a
+      failing observer logs one traceback per name, then debug lines. Origins:
+      archive_idle (the archived session's own stop settlement; sessions
+      sharing its runner report unknown), runner_disconnect (the relay's
+      mid-turn drop, failed with its turn id), relay_turn_end (the relay's
+      runner-recovered idle, with the runner's turn_outcome and
+      turn_response_id when sent) and status_probe (a cold-cache probe fill);
+      every other site keeps unknown. The three intentional-stop idle edges
+      (stop and archive settlement, the offline sweep's settlement, the
+      relay's stop idle) report cancelled with the active response id only
+      when the session is still running at the publish (the cache, or the
+      persisted status when it is cold); a waiting session's turn had already
+      ended, and whichever of settlement and relay drop publishes second
+      reports no outcome, so a stopped turn is reported cancelled once. The
+      offline sweep's mid-turn failure reports failed with its turn id when one
+      is known. The two writers that bypass _publish_status notify themselves:
+      the runner-recovered status once after its stream publish (never on its
+      early returns) and the status probe only when it fills a cold cache with
+      idle, running, waiting or failed.
+    files:
+      - omnigent/server/session_live_state.py
+      - omnigent/server/routes/_sessions/helpers.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - tests/server/test_session_live_state.py
+      - tests/server/routes/test_intentional_runner_stop.py
+      - tests/server/routes/test_disconnect_outcome_recovery.py
+      - tests/server/routes/test_sessions_snapshot.py
+      - tests/server/routes/test_sessions_runner_relay.py
+    tests:
+      - tests/server/test_session_live_state.py
+      - tests/server/routes/test_intentional_runner_stop.py
+      - tests/server/routes/test_disconnect_outcome_recovery.py
+      - tests/server/routes/test_sessions_snapshot.py
+      - tests/server/routes/test_sessions_runner_relay.py
+    budget_lines: 40
+    budget_exception:
+      lines: 461
+      reason: >-
+        omnigent/server/session_live_state.py (154 lines): the edge dataclass
+        with its bounds, turn_fields, the registry with its replacement warning,
+        and notify with once-per-name failure logging, with their docstrings.
+        omnigent/server/routes/_sessions/orchestration.py (93): the shared
+        _stopped_turn rule, eight sites each with its own anchor, and the
+        keyword-only parameters and docstrings of _stop_host_runner_intentionally
+        and the recovered-status impl. omnigent/server/routes/_sessions/helpers.py
+        is within budget (31). tests/server/test_session_live_state.py (461):
+        the registry (replacement, identity-checked unregister, a raising
+        observer that runs first, once-per-name logging, re-entrancy), the edge
+        bounds, the turn_fields matrix, the field-by-field and ordering contract
+        of _publish_status, the worker-thread publish, and one driver per origin
+        site (archive stop, relay drop, relay recovery, status probe) reusing
+        the relay test's fake runner clients and label store.
+        tests/server/routes/test_intentional_runner_stop.py (114): the running
+        and waiting matrix over stop, archive, offline sweep and relay transport
+        (archive origin on the archived session only) and the
+        settlement-then-relay-drop ordering. tests/server/routes/test_sessions_snapshot.py
+        (60): the cold-fill, warm-read, filled-cache and unrecognized-status
+        probe cases.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

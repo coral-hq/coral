@@ -9,6 +9,8 @@ from tests.debug_log_helpers import capture_debug_rows
 
 
 @pytest.mark.asyncio
+# CORAL(S1): the sweep fails a known interrupted turn; with no turn id there is none to fail.
+@pytest.mark.parametrize("turn_id", ["resp-dropped", None])
 @pytest.mark.parametrize(
     ("passive", "next_step", "expected"),
     [
@@ -19,10 +21,11 @@ from tests.debug_log_helpers import capture_debug_rows
     ],
 )
 async def test_disconnect_failure_outcome_after_reconnect(
-    db_uri: str, passive: bool, next_step: str, expected: list[str]
+    db_uri: str, passive: bool, next_step: str, expected: list[str], turn_id: str | None
 ) -> None:
     """A reconnect-cleared disconnect failure records whether its turn resumed."""
     from omnigent.runtime import disconnect_outcome, session_stream
+    from omnigent.server import session_live_state  # CORAL(S1): status-edge observer
     from omnigent.server.routes import sessions as sessions_module
     from omnigent.server.schemas import ErrorDetail
 
@@ -32,8 +35,13 @@ async def test_disconnect_failure_outcome_after_reconnect(
     session_id = conv.id
     store.set_session_live_status(session_id, "running")
     sessions_module._session_status_cache[session_id] = "running"
+    if turn_id is not None:
+        sessions_module._session_active_response_cache[session_id] = turn_id
     snapshot = store.get_conversation(session_id)
     assert snapshot is not None
+    # CORAL(S1): one failed edge for the dropped turn, then one recovered idle edge.
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer("test-recovery", edges.append)
     try:
         await sessions_module._mark_runner_sessions_offline(
             [snapshot],
@@ -57,9 +65,25 @@ async def test_disconnect_failure_outcome_after_reconnect(
             if row["event_name"] == "session_turn_failure_outcome"
         ]
         assert outcomes == expected
+        assert [
+            (
+                edge.status,
+                edge.previous_status,
+                edge.origin,
+                edge.turn_outcome,
+                edge.turn_response_id,
+            )
+            for edge in edges
+            if edge.session_id == session_id
+        ] == [
+            ("failed", "running", "unknown", "failed" if turn_id else None, turn_id),
+            ("idle", "failed", "unknown", None, None),
+        ]
     finally:
+        unregister()
         disconnect_outcome.reset_for_tests()
         sessions_module._session_status_cache.pop(session_id, None)
+        sessions_module._session_active_response_cache.pop(session_id, None)
         session_stream.close(session_id)
 
 
@@ -67,6 +91,7 @@ async def test_disconnect_failure_outcome_after_reconnect(
 async def test_passive_reconnect_keeps_genuine_failure_unwatched(db_uri: str) -> None:
     """A real task failure survives a reconnect and is never marked resumed."""
     from omnigent.runtime import disconnect_outcome, session_stream
+    from omnigent.server import session_live_state  # CORAL(S1): status-edge observer
     from omnigent.server.routes import sessions as sessions_module
 
     disconnect_outcome.reset_for_tests()
@@ -79,8 +104,12 @@ async def test_passive_reconnect_keeps_genuine_failure_unwatched(db_uri: str) ->
             "omnigent.last_task_error_message": "Synthetic provider rejection",
         },
     )
-    sessions_module._session_status_cache[conv.id] = "failed"
+    # CORAL(S1): neither early return (not failed; a genuine failure) reports an edge.
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer("test-recovery", edges.append)
     try:
+        await sessions_module._publish_runner_recovered_status(conv.id, store)
+        sessions_module._session_status_cache[conv.id] = "failed"
         with capture_debug_rows("server") as rows:
             await sessions_module._publish_runner_recovered_status(
                 conv.id, store, require_disconnect_code=True
@@ -91,7 +120,9 @@ async def test_passive_reconnect_keeps_genuine_failure_unwatched(db_uri: str) ->
             row["event_name"] in ("session_turn_failure_cleared", "session_turn_failure_outcome")
             for row in rows
         )
+        assert not [edge for edge in edges if edge.session_id == conv.id]
     finally:
+        unregister()
         disconnect_outcome.reset_for_tests()
         sessions_module._session_status_cache.pop(conv.id, None)
         session_stream.close(conv.id)

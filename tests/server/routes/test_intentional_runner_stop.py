@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses  # CORAL(S1): rebuilds an archived row for the status-edge archive case
 import threading
 import time
 from collections.abc import Iterator
@@ -105,6 +106,119 @@ async def test_host_stop_ack_settles_late_native_activity(
     finally:
         await asyncio.wrap_future(session_live_state.submit("drain_test_writes", lambda: None))
         session_live_state.configure(None)
+
+
+# CORAL(S1): an intentional stop reports a running turn as cancelled and a waiting one
+# (whose turn already ended) with no outcome; only the archived session is archive_idle.
+@pytest.mark.parametrize("status", ["running", "waiting"])
+@pytest.mark.parametrize("path", ["stop", "archive", "offline_sweep", "relay_transport"])
+async def test_intentional_stop_idle_edges_carry_cancelled_outcome(
+    family: tuple[SqlAlchemyConversationStore, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    status: str,
+) -> None:
+    from tests.server.routes.test_sessions_runner_relay import _TunnelCloseRunnerClient
+
+    store, ids = family
+    child_id, parent_id = ids["active"], ids["parent"]
+    for session_id in (child_id, parent_id):
+        sessions._session_status_cache[session_id] = status
+        sessions._session_active_response_cache[session_id] = f"resp-{session_id}"
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer("test-stop", edges.append)
+    monkeypatch.setattr(sessions, "_stop_session_host_runner", AsyncMock(return_value=True))
+    dropped = asyncio.Event()
+    try:
+        if path == "stop":
+            assert await orchestration._stop_host_runner_intentionally(
+                parent_id, "host", _RUNNER, None, store
+            )
+        elif path == "archive":
+            archived = dataclasses.replace(
+                store.get_conversation(parent_id), archived=True, host_id="host"
+            )
+            read = store.get_conversation
+            monkeypatch.setattr(
+                store,
+                "get_conversation",
+                lambda session_id: archived if session_id == parent_id else read(session_id),
+            )
+            monkeypatch.setattr(sessions, "_best_effort_stop", AsyncMock())
+            await orchestration._archive_stop(parent_id, store, None, None)
+        elif path == "offline_sweep":
+            sessions._intentional_stop_sessions[child_id] = _RUNNER
+            await sessions._mark_runner_sessions_offline(
+                [store.get_conversation(child_id)],
+                ErrorDetail(code="runner_disconnected", message="Runner disappeared."),
+                store,
+            )
+        else:
+            sessions._intentional_stop_sessions[child_id] = _RUNNER
+            handle = await sessions._ensure_runner_relay_ready(
+                child_id,
+                _RUNNER,
+                _TunnelCloseRunnerClient(dropped),  # type: ignore[arg-type]
+                conversation_store=store,
+            )
+            assert handle is not None
+            dropped.set()
+            await asyncio.wait_for(handle.task, timeout=10)
+    finally:
+        dropped.set()
+        unregister()
+
+    def stop_edges(session_id: str) -> list[tuple[str, str | None, str | None, str]]:
+        return [
+            (edge.status, edge.turn_outcome, edge.turn_response_id, edge.origin)
+            for edge in edges
+            if edge.session_id == session_id
+        ]
+
+    def turn(session_id: str) -> tuple[str | None, str | None]:
+        return ("cancelled", f"resp-{session_id}") if status == "running" else (None, None)
+
+    # A session sharing the archived session's runner is not the archived one.
+    assert stop_edges(child_id) == [("idle", *turn(child_id), "unknown")]
+    if path == "archive":
+        assert stop_edges(parent_id) == [("idle", *turn(parent_id), "archive_idle")]
+
+
+# CORAL(S1): when the stop's settle publishes first, the relay's later drop adds no outcome.
+async def test_stop_settle_then_relay_drop_reports_one_cancelled_turn(
+    family: tuple[SqlAlchemyConversationStore, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.server.routes.test_sessions_runner_relay import _TunnelCloseRunnerClient
+
+    store, ids = family
+    child_id = ids["active"]
+    sessions._session_active_response_cache[child_id] = "resp-stopped"
+    monkeypatch.setattr(sessions, "_stop_session_host_runner", AsyncMock(return_value=True))
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer("test-stop", edges.append)
+    dropped = asyncio.Event()
+    try:
+        handle = await sessions._ensure_runner_relay_ready(
+            child_id,
+            _RUNNER,
+            _TunnelCloseRunnerClient(dropped),  # type: ignore[arg-type]
+            conversation_store=store,
+        )
+        assert handle is not None
+        assert await orchestration._stop_host_runner_intentionally(
+            ids["parent"], "host", _RUNNER, None, store
+        )
+        dropped.set()
+        await asyncio.wait_for(handle.task, timeout=10)
+    finally:
+        dropped.set()
+        unregister()
+    assert [
+        (edge.status, edge.turn_outcome, edge.turn_response_id)
+        for edge in edges
+        if edge.session_id == child_id
+    ] == [("idle", "cancelled", "resp-stopped"), ("idle", None, None)]
 
 
 @pytest.mark.parametrize("outcome", ["delivered", "offline", "error", "cancelled"])
