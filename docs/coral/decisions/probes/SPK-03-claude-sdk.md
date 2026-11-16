@@ -104,10 +104,11 @@ A claude-sdk spec with `params.coral` sets
 catch-all `PreToolUse` hook that runs `_evaluate_tool_call_policy`. The CLI runs
 `PreToolUse` hooks in every permission mode. The hook denies when the evaluator
 raises or takes longer than 60 s, and `can_use_tool` skips its own policy check
-so each call is evaluated once. The probe builds the executor as a Coral spec
+so each call is evaluated once. A Coral spec is refused when the hook cannot
+install. The probe builds the executor as a Coral spec
 does (`coral=True` in `tests/e2e/coral/_claude_sdk_kit.py`).
 
-The evaluator now denies only `mcp__probe__touch`. Denying every TOOL_CALL also
+The probe's evaluator denies only `mcp__probe__touch`. Denying every TOOL_CALL also
 denies `ToolSearch`, so the connector tool never loads and a pass would not show
 that the connector call itself was denied.
 
@@ -198,8 +199,8 @@ prompt injection. This is a product-level policy gap, not only a test limit.
 S21 fixes it for Coral specs. Other sessions should run connector-heavy work
 in `default` permission mode, where the DENY holds.
 
-The executor comments that said the gate runs in every permission mode now say
-that the CLI skips `can_use_tool` under `bypassPermissions`.
+The executor comments say that the CLI skips `can_use_tool` under
+`bypassPermissions`.
 
 The classifier transcript that the CLI sends to the base URL includes the
 local OS user name.

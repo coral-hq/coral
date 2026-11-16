@@ -1204,12 +1204,14 @@ seams:
       `_build_claude_sdk_spawn_env` sets HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK=1,
       and the executor installs a catch-all PreToolUse hook that runs
       `_evaluate_tool_call_policy`. The hook denies on a DENY verdict, on an
-      evaluator error and after a 60 s deadline (under a 90 s SDK hook
-      timeout), allows an approved ASK, and leaves AskUserQuestion to its own
-      hook. `can_use_tool` then skips its policy half, so each call is
-      evaluated once. Sessions from other specs keep upstream behavior.
-      The two executor comments that said `can_use_tool` gates every
-      permission mode are corrected.
+      evaluator error and when the evaluator takes longer than 60 s. An ASK
+      approval waits under the 24 h AskUserQuestion ceiling, not the
+      evaluator deadline. The hook leaves AskUserQuestion to its own hook.
+      `can_use_tool` then skips its policy half, so each call is evaluated
+      once. A Coral spec whose hook cannot install (no evaluator or no
+      HookMatcher) is refused before the CLI starts. Sessions from other
+      specs keep upstream behavior. The two executor comments that said
+      `can_use_tool` gates every permission mode are corrected.
     files:
       - omnigent/runtime/workflow.py
       - omnigent/inner/claude_sdk_harness.py

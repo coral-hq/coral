@@ -6751,23 +6751,52 @@ def _deny_output(reason):
 
 
 @pytest.mark.parametrize(
-    ("hooked", "with_evaluator", "installed"),
-    [(True, True, True), (True, False, False), (False, True, False)],
-    ids=["coral-with-evaluator", "coral-without-evaluator", "non-coral"],
+    ("hooked", "installed"),
+    [(True, True), (False, False)],
+    ids=["coral", "non-coral"],
 )
-async def test_tool_call_policy_hook_installed_only_for_coral_sessions_with_policy(
-    hooked, with_evaluator, installed
-):
+async def test_tool_call_policy_hook_installed_only_for_coral_sessions(hooked, installed):
     evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ALLOW"))
-    executor = _policy_hook_executor(
-        evaluator=evaluator if with_evaluator else None, hooked=hooked
-    )
+    executor = _policy_hook_executor(evaluator=evaluator, hooked=hooked)
 
     options = await _turn_options(executor)
 
     assert len(_catch_all_policy_hooks(options)) == int(installed)
     if not hooked:
         assert options.can_use_tool == executor._can_use_tool_gate
+
+
+def test_tool_call_policy_hook_keeps_the_callers_hook_list():
+    import claude_agent_sdk
+
+    caller_hooks = [claude_agent_sdk.HookMatcher(matcher="Bash", hooks=[AsyncMock()])]
+    options = SimpleNamespace(hooks={"PreToolUse": caller_hooks})
+    executor = _policy_hook_executor(evaluator=AsyncMock())
+
+    assert executor._install_tool_call_policy_hook(claude_agent_sdk, options) is True
+
+    assert len(caller_hooks) == 1
+    assert len(options.hooks["PreToolUse"]) == 2
+
+
+@pytest.mark.parametrize("missing", ["evaluator", "hook-matcher"])
+async def test_coral_spec_is_refused_when_the_policy_hook_cannot_install(missing):
+    from omnigent.inner.claude_sdk_executor import CORAL_POLICY_HOOK_UNAVAILABLE_CODE
+
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ALLOW"))
+    executor = _policy_hook_executor(evaluator=None if missing == "evaluator" else evaluator)
+    fake_sdk = _make_recovery_fake_sdk()
+    if missing == "evaluator":
+        from claude_agent_sdk import HookMatcher
+
+        fake_sdk.HookMatcher = HookMatcher
+
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        events = [e async for e in executor.run_turn([{"role": "user", "content": "hi"}], [], "")]
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert [(e.code, e.retryable) for e in errors] == [(CORAL_POLICY_HOOK_UNAVAILABLE_CODE, False)]
+    assert fake_sdk.created_clients == []
 
 
 async def test_tool_call_policy_hook_denies_a_deny_verdict():
@@ -6800,6 +6829,26 @@ async def test_tool_call_policy_hook_allows_an_approved_ask():
     evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ASK", reason="check"))
     executor = _policy_hook_executor(evaluator=evaluator)
     executor._elicitation_handler = AsyncMock(return_value=True)
+    gate = await _policy_gate(executor)
+
+    decision = await gate({"tool_name": "mcp__github__issue_write", "tool_input": {}}, "t", None)
+
+    assert decision == {
+        "hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+    }
+
+
+async def test_tool_call_policy_hook_waits_for_a_slow_ask_approval(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    async def slow_approval(tool_name, tool_input):
+        await asyncio.sleep(0.05)
+        return True
+
+    monkeypatch.setattr(ClaudeSDKExecutor, "_TOOL_CALL_POLICY_DEADLINE_S", 0.01)
+    evaluator = AsyncMock(return_value=_policy_verdict("POLICY_ACTION_ASK", reason="check"))
+    executor = _policy_hook_executor(evaluator=evaluator)
+    executor._elicitation_handler = slow_approval
     gate = await _policy_gate(executor)
 
     decision = await gate({"tool_name": "mcp__github__issue_write", "tool_input": {}}, "t", None)

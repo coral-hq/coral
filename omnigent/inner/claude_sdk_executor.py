@@ -130,6 +130,7 @@ CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE = (
     "(Console, plan-linked Console, or cloud provider)."
 )
 CORAL_SANDBOX_UNAVAILABLE_CODE = "coral_sandbox_unavailable"
+CORAL_POLICY_HOOK_UNAVAILABLE_CODE = "coral_policy_hook_unavailable"
 _CORAL_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec"}
 _SUBSCRIPTION_TOKEN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
 
@@ -1915,9 +1916,8 @@ class ClaudeSDKExecutor(Executor):
         if system_prompt_preset not in (None, "claude_code"):
             raise ValueError("system_prompt_preset must be 'claude_code' or unset")
         self._system_prompt_preset = system_prompt_preset
-        # CORAL(S13): set for Coral specs
+        # CORAL(S13, S21)
         self._require_api_credential = require_api_credential
-        # CORAL(S21): set for Coral specs
         self._tool_call_policy_hook = tool_call_policy_hook
         self._cwd = cwd
         self._os_env_spec = os_env
@@ -2706,9 +2706,7 @@ class ClaudeSDKExecutor(Executor):
         hooks["PreToolUse"] = entries
         options.hooks = hooks
 
-    # CORAL(S21): the hook's own deadline sits under the SDK hook timeout, so a
-    # slow evaluator denies instead of reaching the CLI as fail-open "no opinion".
-    _TOOL_CALL_POLICY_HOOK_TIMEOUT_S: float = 90.0
+    # CORAL(S21): a slow evaluator denies; a raw ASK waits as long as AskUserQuestion
     _TOOL_CALL_POLICY_DEADLINE_S: float = 60.0
 
     def _install_tool_call_policy_hook(self, sdk: _ClaudeSDK, options: SdkOptions) -> bool:
@@ -2738,9 +2736,10 @@ class ClaudeSDKExecutor(Executor):
             if ask_hook_installed and tool_name == "AskUserQuestion":
                 return {}
             try:
-                result = await asyncio.wait_for(
-                    self._evaluate_tool_call_policy(tool_name, payload.get("tool_input") or {}),
-                    self._TOOL_CALL_POLICY_DEADLINE_S,
+                result = await self._evaluate_tool_call_policy(
+                    tool_name,
+                    payload.get("tool_input") or {},
+                    evaluator_deadline_s=self._TOOL_CALL_POLICY_DEADLINE_S,
                 )
             except Exception:
                 logger.exception("TOOL_CALL policy hook failed; denying tool=%s", tool_name)
@@ -2753,11 +2752,12 @@ class ClaudeSDKExecutor(Executor):
             return {}
 
         hooks = dict(getattr(options, "hooks", None) or {})
-        hooks.setdefault("PreToolUse", []).append(
+        hooks["PreToolUse"] = [
+            *hooks.get("PreToolUse", []),
             hook_matcher_cls(
-                matcher=None, timeout=self._TOOL_CALL_POLICY_HOOK_TIMEOUT_S, hooks=[gate]
-            )
-        )
+                matcher=None, timeout=self._ASK_QUESTION_HOOK_TIMEOUT_S, hooks=[gate]
+            ),
+        ]
         options.hooks = hooks
         return True
 
@@ -2812,6 +2812,8 @@ class ClaudeSDKExecutor(Executor):
         self,
         tool_name: str,
         tool_input: ToolArgs,
+        *,
+        evaluator_deadline_s: float | None = None,
     ) -> object | None:
         """
         Run a pre-execution TOOL_CALL policy evaluation for one tool call.
@@ -2846,6 +2848,8 @@ class ClaudeSDKExecutor(Executor):
         :param tool_name: Full SDK tool name, e.g.
             ``"mcp__github__issue_write"``.
         :param tool_input: Arguments dict for the tool call.
+        :param evaluator_deadline_s: CORAL(S21): seconds the evaluator may take,
+            raising ``TimeoutError`` past it; elicitation is not bounded by it.
         :returns: :class:`claude_agent_sdk.PermissionResultDeny` when a
             policy denies the call. ``POLICY_ACTION_ASK`` is normally
             collapsed to a hard ALLOW/DENY by the server-side
@@ -2867,9 +2871,9 @@ class ClaudeSDKExecutor(Executor):
         # the dispatch bridge / ProxyMcpManager — don't evaluate them twice.
         if tool_name.startswith(_OMNIGENT_MCP_PREFIX):
             return None
-        _verdict = await _policy_eval(
-            "PHASE_TOOL_CALL",
-            {"name": tool_name, "arguments": tool_input},
+        _verdict = await asyncio.wait_for(
+            _policy_eval("PHASE_TOOL_CALL", {"name": tool_name, "arguments": tool_input}),
+            evaluator_deadline_s,
         )
         _action = getattr(_verdict, "action", None)
         if _action in ("POLICY_ACTION_ALLOW", "POLICY_ACTION_UNSPECIFIED"):
@@ -2920,9 +2924,8 @@ class ClaudeSDKExecutor(Executor):
            *policy_checked* is false): a hard DENY short-circuits to
            :class:`~claude_agent_sdk.PermissionResultDeny`. ALLOW /
            no-match falls through with no human interaction. CORAL(S21):
-           the CLI never calls ``can_use_tool`` under ``bypassPermissions``
-           or for tools ``allowed_tools`` pre-approves, so this gate alone
-           does not enforce policy there; the PreToolUse policy hook does.
+           the CLI skips ``can_use_tool`` under ``bypassPermissions`` and for
+           pre-approved tools, so Coral specs rely on the PreToolUse hook.
         2. **Human-consent elicitation** (only when the permission mode is
            NOT ``bypassPermissions`` and an elicitation handler is wired):
            the pre-existing per-tool approval prompt. Under
@@ -3255,11 +3258,16 @@ class ClaudeSDKExecutor(Executor):
         if self._cwd:
             options.cwd = self._cwd
         # Install the unified can_use_tool gate whenever a policy evaluator or
-        # an elicitation handler is wired. CORAL(S21): the CLI calls it only for
-        # tools that need a permission prompt, never under ``bypassPermissions``,
-        # so Coral specs also install the PreToolUse policy hook and the gate
-        # then skips its policy half to evaluate each call once.
+        # an elicitation handler is wired. CORAL(S21): Coral specs gate policy
+        # in PreToolUse instead, and refuse the turn when that hook cannot run.
         policy_hooked = self._install_tool_call_policy_hook(sdk, options)
+        if self._tool_call_policy_hook and not policy_hooked:
+            yield ExecutorError(
+                message="Coral steps need a TOOL_CALL policy check, which is unavailable.",
+                code=CORAL_POLICY_HOOK_UNAVAILABLE_CODE,
+                retryable=False,
+            )
+            return
         if (
             getattr(self, "_policy_evaluator", None) is not None
             or self._elicitation_handler is not None

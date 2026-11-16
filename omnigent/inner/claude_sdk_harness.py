@@ -305,9 +305,8 @@ def _build_claude_sdk_executor() -> Executor:
         agent_name=agent_name,
         skills_filter=_resolve_skills_filter(),
         api_key_helper=os.environ.get(_ENV_API_KEY_HELPER) or None,
-        # CORAL(S13): Coral specs need an API key or provider
+        # CORAL(S13, S21)
         require_api_credential=os.environ.get(_ENV_REQUIRE_API_CREDENTIAL) == "1",
-        # CORAL(S21): Coral specs enforce TOOL_CALL policy in every permission mode
         tool_call_policy_hook=os.environ.get(_ENV_TOOL_CALL_POLICY_HOOK) == "1",
     )
 

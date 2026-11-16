@@ -90,7 +90,7 @@ def _assert_completed(events: list, token: str) -> None:
 
 
 @pytest.mark.timeout(240)
-@pytest.mark.parametrize("permission_mode", ["bypassPermissions", "auto"])
+@pytest.mark.parametrize("permission_mode", ["default", "bypassPermissions", "auto"])
 async def test_coral_session_denies_a_connector_tool_in_every_mode(
     isolated_mock_llm_server_url: str,
     tmp_path: Path,
@@ -174,6 +174,7 @@ async def test_coral_session_has_no_native_subagent_tools(
         token=token,
         permission_mode="bypassPermissions",
         coral=True,
+        calls=[],
     )
 
     _assert_completed(events, token)
