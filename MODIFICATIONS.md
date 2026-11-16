@@ -247,6 +247,7 @@ OPS-01's generator will maintain this file later.
 | `tests/server/integration/test_lifespan.py` | S98 | coral-specific | Expects the server never to start the telemetry client, in CI or not. |
 | `tests/server/integration/test_oidc_cli_ticket_hijack_e2e.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/integration/test_session_create_harness_readiness.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
+| `tests/server/integration/test_session_host_launch.py` | S51 | upstreamable | Topology probes for a run anchor with no host: each host child launches, keeps and stops its own runner and outlives the anchor's stop, a replacement child launches its own while its sibling keeps its runner, a host-bound anchor's child rides its runner instead, and of two blocked children only the one not labelled `omnigent.parent_wake: off` wakes the anchor after the 120 s grace (S51). |
 | `tests/server/integration/test_sessions_compact.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/routes/test_session_resources.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/server/routes/test_sessions_upload_limits.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |

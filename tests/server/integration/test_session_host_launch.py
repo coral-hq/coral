@@ -72,6 +72,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 )
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
+from tests._helpers.polling import poll_until_async
 from tests.budgets import Deadline, budget
 from tests.debug_log_helpers import capture_debug_rows
 from tests.server.helpers import create_test_agent
@@ -4971,6 +4972,184 @@ async def test_archiving_grandchild_on_roots_shared_runner_does_not_stop_it(
         f"archiving grandchild {grandchild['id']} asked the host to stop "
         f"{host.stopped_runner_ids}; it still rides the root's runner {parent['runner_id']}"
     )
+
+
+# ── Run anchor: a runner-less root whose host children own their runners ─────
+# CORAL(S51): the run topology Coral builds on, through the real create, stop and event routes.
+
+_PARENT_WAKE_OFF = {"omnigent.parent_wake": "off"}
+
+
+async def _create_run_anchor(client: httpx.AsyncClient) -> dict[str, Any]:
+    """Create a root session without a host, so it never binds a runner."""
+    agent = await create_test_agent(client)
+    create_resp = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "title": "run anchor"}
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    anchor = create_resp.json()
+    assert (anchor["runner_id"], anchor["host_id"]) == (None, None), anchor
+    return anchor
+
+
+async def _create_step_child(
+    client: httpx.AsyncClient, anchor: dict[str, Any], labels: dict[str, str]
+) -> dict[str, Any]:
+    """Create a host child of the run anchor; with no runner to inherit, it launches its own."""
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": anchor["agent_id"],
+            "parent_session_id": anchor["id"],
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "labels": labels,
+        },
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    child = create_resp.json()
+    assert child["parent_session_id"] == anchor["id"], child
+    assert child["runner_id"].startswith("runner_token_"), child
+    return child
+
+
+async def test_run_anchor_children_own_runners_and_outlive_its_stop(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    _shared_runner_family: dict[str, str],
+) -> None:
+    """Each host child of a runner-less anchor launches, keeps and stops its own runner."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    comm = await _connect_host(app)
+    anchor = await _create_run_anchor(client)
+    store = SqlAlchemyConversationStore(db_uri)
+    async with _HostFrameResponder(comm) as host:
+        first = await _create_step_child(client, anchor, _PARENT_WAKE_OFF)
+        second = await _create_step_child(client, anchor, _PARENT_WAKE_OFF)
+        _shared_runner_family.update(anchor=anchor["id"], first=first["id"], second=second["id"])
+        assert [frame.session_id for frame in host.launch_frames] == [first["id"], second["id"]]
+        assert first["runner_id"] != second["runner_id"]
+        for child in (first, second):
+            labels = await client.get(f"/v1/sessions/{child['id']}/labels")
+            assert child["labels"]["omnigent.parent_wake"] == "off", child
+            assert labels.json()["labels"]["omnigent.parent_wake"] == "off", labels.text
+
+        # The anchor has no runner: its stop stops none and leaves both children bound.
+        anchor_stop = await client.post(
+            f"/v1/sessions/{anchor['id']}/events", json={"type": "stop_session"}
+        )
+        assert anchor_stop.status_code == 202, anchor_stop.text
+        await _drain_detached_stops()
+        assert host.stopped_runner_ids == []
+        for child in (first, second):
+            assert store.get_conversation(child["id"]).runner_id == child["runner_id"]
+            assert child["id"] not in sessions_module._intentional_stop_sessions
+
+        first_stop = await client.post(
+            f"/v1/sessions/{first['id']}/events", json={"type": "stop_session"}
+        )
+        assert first_stop.status_code == 202, first_stop.text
+        await _drain_detached_stops()
+        assert host.stopped_runner_ids == [first["runner_id"]]
+        assert store.get_conversation(second["id"]).runner_id == second["runner_id"]
+        assert second["id"] not in sessions_module._intentional_stop_sessions
+
+        replacement = await _create_step_child(client, anchor, _PARENT_WAKE_OFF)
+        _shared_runner_family.update(replacement=replacement["id"])
+        # The sibling keeps its runner once the replacement is up.
+        assert host.stopped_runner_ids == [first["runner_id"]]
+        assert store.get_conversation(second["id"]).runner_id == second["runner_id"]
+        assert second["id"] not in sessions_module._intentional_stop_sessions
+    assert [frame.session_id for frame in host.launch_frames[2:]] == [replacement["id"]]
+    assert replacement["runner_id"] not in (first["runner_id"], second["runner_id"])
+
+
+async def test_host_bound_anchor_children_ride_its_runner(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    _shared_runner_family: dict[str, str],
+) -> None:
+    """Counter-case: a host child of an anchor with a runner inherits it and launches none."""
+    comm = await _connect_host(app)
+    anchor = await _inline_launch_session(client, comm)
+    async with _HostFrameResponder(comm) as host:
+        child = await _inline_child_session(client, anchor["id"])
+        _shared_runner_family.update(anchor=anchor["id"], child=child["id"])
+    assert child["runner_id"] == anchor["runner_id"]
+    # The anchor's own launch is the only one.
+    assert host.launch_frames == []
+
+
+# CORAL(S51): of two blocked children of a run anchor, only the unlabelled one wakes it.
+async def test_run_anchor_woken_only_by_child_without_parent_wake_off(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    _shared_runner_family: dict[str, str],
+) -> None:
+    """A blocked child labelled ``omnigent.parent_wake: off`` does not wake the run anchor."""
+    from omnigent.runtime import pending_elicitations, subagent_block_notifier
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import orchestration
+
+    comm = await _connect_host(app)
+    anchor = await _create_run_anchor(client)
+    async with _HostFrameResponder(comm):
+        labelled = await _create_step_child(client, anchor, _PARENT_WAKE_OFF)
+        unlabelled = await _create_step_child(client, anchor, {})
+    _shared_runner_family.update(
+        anchor=anchor["id"], labelled=labelled["id"], unlabelled=unlabelled["id"]
+    )
+    graces: list[float] = []
+    grace_over = asyncio.Event()
+
+    async def _held_grace(seconds: float) -> None:
+        graces.append(seconds)
+        await grace_over.wait()
+
+    woken: list[tuple[str, str]] = []
+
+    async def _record_wake(parent_id: str, child: Conversation, notice: str, **_: Any) -> bool:
+        woken.append((parent_id, child.id))
+        return True
+
+    monkeypatch.setattr(subagent_block_notifier, "_escalation_sleep", _held_grace)
+    monkeypatch.setattr(orchestration, "_wake_parent_for_blocked_child", _record_wake)
+    # The ASGI test app skips the lifespan that installs the notifier in a real server.
+    uninstall = sessions_module.configure_subagent_block_notifier(
+        SqlAlchemyConversationStore(db_uri), app.state.runner_router
+    )
+    try:
+        notifier = pending_elicitations._observer.__self__
+        handlers: list[set[Any]] = []
+        for child in (labelled, unlabelled):
+            block = await client.post(
+                f"/v1/sessions/{child['id']}/events",
+                json={"type": "mcp_elicitation", "data": {"message": "Run git push?"}},
+            )
+            assert block.status_code == 202, block.text
+            # The child's handler and the anchor mirror's, both held in the grace.
+            handlers.append(set(notifier._inflight).difference(*handlers))
+        assert [len(pair) for pair in handlers] == [2, 2]
+        await poll_until_async(lambda: len(graces) == 4)
+        # One 120 s grace per armed block: each child's and the anchor mirror of each.
+        assert graces == [120.0] * 4
+        blocked = [labelled["id"], unlabelled["id"], anchor["id"], anchor["id"]]
+        assert sorted(session_id for session_id, _ in notifier._notified) == sorted(blocked)
+
+        grace_over.set()
+        # Stop once the labelled child's handlers return and a wake lands, or at a second wake.
+        await poll_until_async(
+            lambda: (all(handler.done() for handler in handlers[0]) and woken) or len(woken) > 1
+        )
+        # A handler that raised is done too, so "no wake" needs clean returns.
+        assert all(h.done() and h.exception() is None for h in handlers[0]), woken
+        assert woken == [(anchor["id"], unlabelled["id"])]
+    finally:
+        uninstall()
 
 
 class _StagedRunners:

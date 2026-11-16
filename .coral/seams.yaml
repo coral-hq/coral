@@ -1046,11 +1046,13 @@ seams:
       - omnigent/runtime/subagent_block_notifier.py
       - omnigent/util/session_lifecycle.py
       - tests/runtime/test_subagent_block_notifier.py
+      - tests/server/integration/test_session_host_launch.py
     tests:
       - tests/runtime/test_subagent_block_notifier.py
+      - tests/server/integration/test_session_host_launch.py
     budget_lines: 10
     budget_exception:
-      lines: 64
+      lines: 179
       reason: >-
         tests/runtime/test_subagent_block_notifier.py (64 lines): the label
         matrix test, which pins the exact "off" match against near misses and
@@ -1058,6 +1060,15 @@ seams:
         only after the handler has returned. The production
         files are within budget: subagent_block_notifier.py 8,
         session_lifecycle.py 3.
+        tests/server/integration/test_session_host_launch.py (179 lines): the
+        permanent SPK-02 topology probes behind ADR-05, through the real create,
+        stop and event routes: the children of a runner-less anchor own, keep
+        and stop their runners, and a sibling keeps its runner across a
+        replacement; the host-bound anchor counter-case, kept as the named
+        DD-3 pin although the shared-runner helpers already imply it; and only
+        the unlabelled one of two blocked children wakes the anchor, checked
+        after the labelled handlers returned cleanly. Two helpers and one
+        import are included.
       approver: pending
     anchor_exempt: []
     upstream_first: false
