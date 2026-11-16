@@ -418,6 +418,17 @@ def validate_coral_ref(ref: str) -> None:
             raise ValueError(f"invalid ref component {component!r} in {ref!r}")
 
 
+def validate_workspace_path(path: str) -> None:
+    """
+    Check a ``read`` path: relative POSIX, with no empty, ``.`` or ``..`` segment.
+
+    :raises ValueError: for anything else, including an absolute path, a trailing
+        ``/`` or a non-string.
+    """
+    if not isinstance(path, str) or any(part in ("", ".", "..") for part in path.split("/")):
+        raise ValueError(f"path must be relative to the worktree root: {path!r}")
+
+
 def validate_timeout(timeout_s: float) -> None:
     """
     Check a ``check`` timeout: a number from 1 to ``MAX_CHECK_TIMEOUT_S`` seconds.
@@ -524,13 +535,13 @@ class ShellOutcome:
 
 
 class SessionShellBackend(Protocol):
-    """Runs one POSIX shell command in a step session's environment (CRL-128)."""
+    """Runs one POSIX shell command in a step session's environment."""
 
     async def run(self, session_id: str, command: str, *, timeout_s: float) -> ShellOutcome: ...
 
 
 class HostChannelBackend(Protocol):
-    """Sends one op to a host's workspace-ops channel and returns its payload (WSP-02)."""
+    """Sends one op to a host's workspace-ops channel and returns its payload."""
 
     # ``op_key`` is ``None`` for ops that take none.
     async def request(

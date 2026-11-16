@@ -1070,8 +1070,9 @@ seams:
         permanent SPK-02 topology probes behind ADR-05, through the real create,
         stop and event routes: the children of a runner-less anchor own, keep
         and stop their runners, and a sibling keeps its runner across a
-        replacement; the host-bound anchor counter-case, kept as the named
-        DD-3 pin although the shared-runner helpers already imply it; and only
+        replacement; the host-bound anchor counter-case, kept as the named pin
+        for the runner-less anchor rule although the shared-runner helpers
+        already imply it; and only
         the unlabelled one of two blocked children wakes the anchor, checked
         after the labelled handlers returned cleanly. Two helpers and one
         import are included.
@@ -1081,7 +1082,7 @@ seams:
     upstream_candidate: true
 
   - id: S72
-    title: Created worktrees report their start commit
+    title: Created worktrees report their start commit; listed worktrees their lock
     owner: WS-WORKSPACE
     status: landed
     category: upstreamable
@@ -1101,8 +1102,13 @@ seams:
       capability token: like workspace before it, an absent field already
       means None. Upstream-first in the roadmap: the Omnigent
       PR still has to be opened by a maintainer; that does not block Coral's
-      use of the field. worktree_parent and a list-side head stay out of
-      scope.
+      use of the field. list_worktrees also parses git's porcelain lock line
+      (locked, or locked <reason>) into WorktreeInfo.locked, and the list
+      handler sends it as each entry's locked key; the relay and the list proxy
+      pass entries through unchanged. git worktree add holds that lock while it
+      checks a worktree out and an interrupted add leaves it, so a caller can
+      refuse a half-checked-out worktree instead of adopting it. Older hosts
+      omit the key. worktree_parent and a list-side head stay out of scope.
     files:
       - omnigent/host/connect.py
       - omnigent/host/frames.py
@@ -1122,15 +1128,16 @@ seams:
       - tests/server/integration/test_hosts_worktrees.py
     budget_lines: 40
     budget_exception:
-      lines: 88
+      lines: 103
       reason: >-
         The production files are within budget (largest:
-        omnigent/host/git_worktree.py 31, omnigent/server/routes/_host_worktree.py
-        24). tests/host/test_git_worktree.py (88 lines): head_commit checks on
+        omnigent/host/git_worktree.py 39, omnigent/server/routes/_host_worktree.py
+        24). tests/host/test_git_worktree.py (103 lines): head_commit checks on
         the new-branch, existing-branch recreate and both pinned paths, the
         unreadable-HEAD matrix (non-zero exit, OSError, decode error, timeout,
-        spent budget) and the missing / plain directory / file non-repo
-        matrix. tests/server/integration/test_hosts_worktrees.py (53): the
+        spent budget), the missing / plain directory / file non-repo matrix,
+        and the listing of plain, locked and locked-with-reason worktrees.
+        tests/server/integration/test_hosts_worktrees.py (53): the
         fixture's drain now also answers create frames, failing a create with
         no registered reply at once, and the relay test bounds its wait; this
         is the only layer that exercises the real tunnel relay of a create
@@ -1139,6 +1146,7 @@ seams:
     anchor_exempt: []
     upstream_first: true
     upstream_candidate: true
+
   - id: S32
     title: Server plugin seam and lifespan hooks
     owner: WS-PLATFORM

@@ -43,7 +43,7 @@ anchor (root; no host_id, so no runner; inert agent; never takes a turn)
 ## Topology rules
 
 1. **The anchor is created without `host_id`, and it never gets a runner.**
-   Without a runner on the anchor, its children cannot inherit one (DD-3).
+   Without a runner on the anchor, its children cannot inherit one.
    The counter-case is pinned by test (B).
    - The rule does not enforce itself. An owner can still attach a runner to
      the anchor (`PATCH /v1/sessions/{anchor} {"runner_id": …}`, OWNER only,
@@ -53,8 +53,8 @@ anchor (root; no host_id, so no runner; inert agent; never takes a turn)
      is set.
 2. **Every child is created with `host_id` and `workspace`, and with no `git`
    options.** `workspace` is the run worktree that Coral creates once,
-   request-free (DESIGN §7.5). The `git` create mode would make a new branch
-   and worktree per session.
+   request-free (`coral/workspace/run_worktree.py`). The `git` create mode
+   would make a new branch and worktree per session.
 3. **Every child carries `omnigent.parent_wake: off`.** This covers the
    orchestrator and each step (S51). The facade (SES-03) sets the label at
    create, because the key is not reserved.
@@ -84,10 +84,10 @@ anchor (root; no host_id, so no runner; inert agent; never takes a turn)
 | Concern | Omnigent behaviour (evidence) | Consequence for Coral |
 |---|---|---|
 | Runner | A child inherits the parent's runner (`orchestration.py:12037-12053`). The launch runs only when no runner is bound (`routes_core.py:1395`). | The anchor has no runner, so each step launches its own (test A). A host-bound anchor captures every step (test B). |
-| Recovery root | A child with a `host_id` counts as independent when its runner connects (`omnigent/server/app.py:4595-4599`). | Each step is the recovery root of its own runner. |
+| Recovery root | A child with a `host_id` counts as independent when its runner connects (`omnigent/server/app.py:4642-4646`). | Each step is the recovery root of its own runner. |
 | Stop | A stop stops only the runner the session owns, with no cascade to children (`routes_events.py:2073-2206`; `_stop_host_runner_intentionally`, `orchestration.py:832`). | An anchor stop leaves the steps alone. A step stop ends only that step's runner (test A, live probe). |
 | Archive, delete | Neither ends a step runner. Both first call `_best_effort_stop`, which stops only the *turns* of descendants that this replica's in-memory status cache shows as running or waiting (`orchestration.py:730-794`, descendant loop at `:792`); this is what `tests/server/integration/test_sessions_archive.py:209` and `tests/server/routes/test_sessions_crud.py:248` pin. Archive then tears down a host runner only for the archived session itself (`orchestration.py:1024`), and the anchor has none. Delete runs runner cleanup only for the deleted session (`routes_events.py:4133-4158`), never calls `_stop_host_runner_intentionally`, and then hard-deletes the whole subtree (`routes_events.py:4224`). | Rule 4. Idle steps keep their runners until the runner idle reaper fires. A step whose running status this replica missed keeps running with no row and no stop route. SES-09 automates the stop-and-confirm; an upstream fix could tear down descendant-owned runners in archive and delete (open item 5). |
-| Relaunch | Only roots relaunch when a held host returns (`app.py:4274`). | A step stays `runner_interrupted` until its next message relaunches it. Engine-driven relaunch is SES-06 (probe (f)). |
+| Relaunch | Only roots relaunch when a held host returns (`app.py:4321`). | A step stays `runner_interrupted` until its next message relaunches it. Engine-driven relaunch is SES-06 (probe (f)). |
 | Managed hosts | `host_id` is rejected on a managed child, which "runs on its parent's host" (`omnigent/server/schemas.py:1807-1811`). | Unsupported. Local hosts only through M4 (WSP-04). |
 | `_owns_host_runner` | A child owns its runner only if no ancestor shares the runner or is unbound on the same host. A missing ancestor row also makes it "not own" its runner, which leaves the runner up: fail-open for containment (`omnigent/server/routes/_sessions/helpers.py:6261-6315`). A stop on a step that does not own its runner still returns 202 while the runner stays (`routes_events.py:2115-2147`). | With no `host_id` on the anchor, each step owns its runner, and a step stop sends exactly one stop (test A). An anchor with the steps' `host_id` but no runner would make every step "not own" its runner, so a stop or archive would leave it running (a leak, found by reading). |
 | Access | Access to a child recurses to its parent; the child's own grants are ignored (`omnigent/server/permissions.py:59-65`). Children get no default-public grant of their own; they follow the parent's (`routes_core.py:1419-1436`). | Every grant on the anchor is a grant on the whole run, and a step cannot be shared on its own. EDIT on the anchor lets a collaborator message, stop and answer approvals on any step. A message to a step whose runner is offline relaunches it on the owner's host (`routes_events.py:3306-3358`, `_sessions/helpers.py:6417-6480`). READ or a public link exposes every step's workspace files (rule 6, open item 4). |
@@ -95,7 +95,7 @@ anchor (root; no host_id, so no runner; inert agent; never takes a turn)
 
 ## What S51 fixes, and who can set the label
 
-**What it fixes (DESIGN §18.8).** A runner-less anchor cannot take a wake
+**What it fixes.** A runner-less anchor cannot take a wake
 turn anyway:
 
 - The wake attempt finds no runner, logs a warning and returns `False`
@@ -112,7 +112,7 @@ approval itself is unchanged. It stays pending and answerable in the child, in
 the ancestor mirrors, in the Inbox and on `/approve`. Completion wakes are not
 affected.
 
-**Who can set it (PR-02 security F2).**
+**Who can set it.**
 
 - Writing the label on an existing child (`PATCH /v1/sessions/{child}`) needs
   EDIT on the child. Access to a sub-agent delegates to its parent,
@@ -134,7 +134,7 @@ affected.
 Whoever can mute the nudge can therefore already answer the approval, or
 created the child themselves. The label grants, hides and resolves nothing.
 
-**Per-link rule (PR-02 security F3).** The label governs only the link
+**Per-link rule.** The label governs only the link
 between the labelled child and its parent. The ancestor mirror re-publishes a
 child's approval on every ancestor. In `R → C → G(off)`, G's block does not
 wake C, but C's mirrored copy, being unlabelled, still wakes R.
@@ -148,13 +148,13 @@ label too (SES-03).
 The permanent tests are in `tests/server/integration/test_session_host_launch.py`:
 
 - (A) `test_run_anchor_children_own_runners_and_outlive_its_stop`;
-- (B) `test_host_bound_anchor_children_ride_its_runner`, kept as the named DD-3 pin;
+- (B) `test_host_bound_anchor_children_ride_its_runner`, kept as the named pin for rule 1;
 - (C) `test_run_anchor_woken_only_by_child_without_parent_wake_off`.
 
 They run in process: `_HostFrameResponder` answers the host frames, and no
 runner process connects. They are **server-routing proof** through the real
 create, stop and event routes and the real notifier, and they are the permanent
-CI proof (DD-14). The live probe adds real processes.
+CI proof. The live probe adds real processes.
 
 | Probe | Question | Verdict | Evidence |
 |---|---|---|---|
@@ -228,19 +228,18 @@ Rerun from the repository root (about two and a half minutes):
 uv run --no-sync python docs/coral/decisions/probes/spk02_live_topology.py
 ```
 
-The run recorded here is from 2026-11-16 UTC (2026-11-15 local), on macOS. It
-used the Step 3 working tree based on `5739bb1c3`, with the uncommitted Step 3
-changes (`base_commit_dirty: true`), and exited with code 0. An earlier run of
-the first version of the probe, before the isolation changes, also passed.
-Verdict:
+The run recorded here is from 2026-11-16 UTC, on macOS, on commit `5e9a25aab`
+with a clean working tree (`base_commit_dirty: false`). It exited with code 0
+after 137 s and left no stray processes. Earlier runs during development also
+passed. Verdict:
 
 ```json
 {
   "probe": "spk02_live_topology",
   "verdict": "pass",
   "date": "2026-11-16",
-  "base_commit": "5739bb1c3",
-  "base_commit_dirty": true,
+  "base_commit": "5e9a25aab",
+  "base_commit_dirty": false,
   "platform": "Darwin",
   "python": "3.12.12",
   "grace_s": 120.0,
@@ -269,7 +268,7 @@ Verdict:
       "labelled": 0
     }
   },
-  "duration_s": 138.3,
+  "duration_s": 137.1,
   "error": null
 }
 ```
@@ -320,8 +319,7 @@ the turn-to-completion half of (b).
    - Label every intermediate session that must not wake its parent.
    - Server-side reservation of `coral.*` labels can follow in SES-03/CRL-126.
 4. **Upstream fix candidate: workspace reads bypass the file-sharing opt-in
-   for child sessions.** This is pre-existing upstream behaviour (PR-03
-   security F2).
+   for child sessions.** This is pre-existing upstream behaviour.
    - The workspace content-read gate admits a caller when
      `access.level is None or access.level >= LEVEL_EDIT or conv.share_workspace_files`
      (`omnigent/server/routes/sessions/routes_resources.py:917`). The comment
@@ -350,9 +348,9 @@ the turn-to-completion half of (b).
    - Rule 6 applies until the fix lands.
 5. **Upstream candidate: archive and delete leave descendant-owned runners
    up.** `_archive_stop` and `delete_session` could tear down every
-   descendant runner for which `_owns_host_runner(descendant)` holds (PR-03
-   security F1). Rule 4 applies until then.
-6. **Optional upstream hardening (PR-02 security F1, F4).**
+   descendant runner for which `_owns_host_runner(descendant)` holds. Rule 4
+   applies until then.
+6. **Optional upstream hardening.**
    - Spec-policy label writes can set `omnigent.parent_wake` on the session
      they guard.
    - A suppressed wake leaves no log line.

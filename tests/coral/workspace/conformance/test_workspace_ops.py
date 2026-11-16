@@ -10,8 +10,8 @@ Each factory also supplies a ``WorkspaceSetup``, the backend-specific hook that
 mutates the working tree and prepares refs, because K13 itself offers neither.
 
 Only the in-memory fake is registered today, so these tests pin the contract
-text (``docs/coral/contracts/workspace-ops.md``), not real git. The same suite
-passing on a real backend gates CRL-128.
+text (``docs/coral/contracts/workspace-ops.md``), not real git. A real backend
+must pass the same suite before the engine uses it.
 """
 
 from __future__ import annotations
@@ -49,6 +49,7 @@ from coral.workspace.ops import (
     validate_op_key,
     validate_timeout,
     validate_trailers,
+    validate_workspace_path,
 )
 
 INITIAL_FILES: Mapping[str, bytes] = {
@@ -309,6 +310,9 @@ def test_validators_accept_their_documented_bounds() -> None:
     validate_coral_ref("refs/heads/coral/r-test/base")
     validate_coral_ref("refs/coral/salvage/k-1")
     validate_coral_ref(f"refs/coral/{'a' * 100}/{'b' * 100}/{'c' * 42}")
+    validate_workspace_path("README.md")
+    validate_workspace_path("src/app.py")
+    validate_workspace_path(".coral/runtime/notes..txt")
     assert commit_params_digest("m", {"A": "1", "B": "2"}) == commit_params_digest(
         "m", {"B": "2", "A": "1"}
     )
@@ -1000,10 +1004,24 @@ async def test_read_returns_exact_bytes_at_a_commit_and_in_the_working_tree(
     await _assert_missing(backend, "absent.txt", committed.commit)
 
 
-@pytest.mark.parametrize(
-    "path",
-    ["../outside", "/etc/passwd", "src/../../outside", "", "./README.md", "src//app.py", "src/"],
-)
+UNSAFE_PATHS = [
+    "../outside",
+    "/etc/passwd",
+    "src/../../outside",
+    "",
+    "./README.md",
+    "src//app.py",
+    "src/",
+]
+
+
+@pytest.mark.parametrize("path", [*UNSAFE_PATHS, None])
+def test_validate_workspace_path_refuses_paths_outside_the_root(path: object) -> None:
+    with pytest.raises(ValueError):
+        validate_workspace_path(path)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("path", UNSAFE_PATHS)
 async def test_read_refuses_paths_outside_the_root(backend: BackendUnderTest, path: str) -> None:
     with pytest.raises(ValueError):
         await _read(backend, path)

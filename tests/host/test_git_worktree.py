@@ -606,6 +606,21 @@ def test_list_worktrees_reports_detached_head(git_repo: Path) -> None:
     assert detached.detached is True
 
 
+# CORAL(S72): a lock with or without a reason lists as locked; others do not.
+def test_list_worktrees_reports_locked_worktrees(git_repo: Path) -> None:
+    plain, locked, initializing = (
+        create_worktree(repo_path=str(git_repo), branch_name=name).worktree_path
+        for name in ("feature/plain", "feature/locked", "feature/initializing")
+    )
+    _git(git_repo, "worktree", "lock", locked)
+    # The state ``git worktree add`` leaves when it is killed mid-checkout.
+    _git(git_repo, "worktree", "lock", "--reason", "initializing", initializing)
+
+    result = {w.path: w.locked for w in list_worktrees(repo_path=str(git_repo))}
+
+    assert result == {str(git_repo): False, plain: False, locked: True, initializing: True}
+
+
 def test_list_worktrees_non_git_path_fails(tmp_path: Path) -> None:
     """A non-git directory fails loud (the route maps this to 'no worktrees')."""
     plain = (tmp_path / "plain").resolve()

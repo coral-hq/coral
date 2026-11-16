@@ -43,8 +43,15 @@ CRL-128's real backend, not this ticket's acceptance criteria.
 
 **Decision.**
 
-- **Hooks.** Engine git runs no repository hooks, including hooks defined in
-  config.
+- **Hooks.** Engine git in the K13 ops runs no repository hooks, including
+  hooks defined in config.
+  - **Not yet for run-worktree creation.** That is not a K13 op. It currently
+    uses Omnigent's worktree create (`git worktree add`), which runs the
+    repository's `post-checkout` hook, and its `reference-transaction` hook for
+    the new branch, as Omnigent's own session worktrees do.
+  - **Follow-up: a hookless run-worktree create.** An S72 extension runs the
+    create with `-c core.hooksPath=/dev/null` and refuses config-defined hooks,
+    as the K13 ops do.
 - **Config and flags.**
   - The ops run with global and system config disabled, and with the "Git
     defaults" from the contract: hardening flags, and `GIT_OPTIONAL_LOCKS=0`
@@ -272,8 +279,11 @@ Both are expectations; neither probe was run.
     the session's `os_env`.
   - *Restart is not sessionless.* The roadmap's restart ladder fences the old
     session, creates the next generation unbriefed, and then salvages and
-    resets through the new generation's session shell (ladder step 4), before
-    the brief. The host channel (S40, WSP-02) is the other route.
+    resets for the new generation (ladder step 4), before the brief. The new
+    generation's session authorizes those WRITE ops, and git runs in an
+    engine-owned executor, never inside the agent's sandbox; a sandboxed
+    session shell cannot run them. The host channel (S40, WSP-02) is the other
+    route.
   - *Not run:* S40 does not exist yet.
 - **Reviewer, `write_paths: []`.**
   - *Expected:* L1 works, and L2 and the writes fail.
@@ -317,5 +327,6 @@ verdict, and nothing here depends on it:
 
 - ADR-05 treats managed hosts as unsupported, with local hosts only through M4.
   A managed child rejects `host_id` (`omnigent/server/schemas.py:1807-1811`).
-- This ticket's run-worktree step will refuse a host whose `sandbox_provider`
-  is set, as scheduled fires do (`omnigent/server/scheduled/fire.py:1983`).
+- The run-worktree adapter (`coral/omni/server/worktrees.py`) refuses a host
+  whose `sandbox_provider` is set, as scheduled fires do
+  (`omnigent/server/scheduled/fire.py:1983`).

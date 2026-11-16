@@ -52,8 +52,8 @@ async def connect_run_worktree_host(
     """
     Authorize the run owner for the host from its stored row, then require a live connection.
 
-    Callers (the run executor, CRL-126) take ``user_id``, ``account_generation``
-    and ``workspace_id`` from the stored run, never from a request.
+    Callers (the run executor) take ``user_id``, ``account_generation`` and
+    ``workspace_id`` from the stored run, never from a request.
 
     :param user_id: The run owner. ``None`` only when auth is disabled, which
         skips the owner and generation checks, as Omnigent does.
@@ -188,6 +188,8 @@ class _HostRunWorktreeHost(RunWorktreeHost):
                         path=path,
                         branch=branch if isinstance(branch, str) else None,
                         is_main=item.get("is_main") is True,
+                        # Older hosts send no lock state; only a real ``true`` counts.
+                        locked=item.get("locked") is True,
                     )
                 )
         return entries
@@ -208,7 +210,8 @@ class _HostRunWorktreeHost(RunWorktreeHost):
                     existing_branch=existing_branch,
                 )
         except WorktreeHostUnavailableError as exc:
-            # Not a git failure: a late create may still finish, and the next call adopts it.
+            # Not a git failure. A late create may still finish; until it does (for good, if
+            # git was killed) its worktree is locked, and later calls refuse, not adopt, it.
             raise self._lost_or_failed(conn, exc.message) from exc
         except WorktreeProxyError as exc:
             raise WorktreeCreateFailed(exc.message) from exc

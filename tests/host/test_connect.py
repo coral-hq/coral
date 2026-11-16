@@ -72,6 +72,7 @@ from omnigent.host.frames import (
     HostListDirFrame,
     HostListDirResultFrame,
     HostListWorktreesFrame,
+    HostListWorktreesResultFrame,
     HostMcpServersFrame,
     HostMcpServersResultFrame,
     HostMcpToolsFrame,
@@ -101,7 +102,7 @@ from omnigent.host.frames import (
     decode_host_frame,
     encode_host_frame,
 )
-from omnigent.host.git_worktree import CreatedWorktree
+from omnigent.host.git_worktree import CreatedWorktree, WorktreeInfo
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
@@ -4525,6 +4526,30 @@ async def test_handle_create_worktree_replies_when_create_raises(
     # CORAL(S71): a raising git worker still releases the orphan reaper's pause.
     assert host._owned_subprocess_ops == 0
     assert host._host_subprocess_tasks == set()
+
+
+# CORAL(S72): each listed worktree reports whether git holds it locked.
+async def test_handle_list_worktrees_reports_each_worktree_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _make_host_process()
+    listed = [
+        WorktreeInfo(path="/repo", branch="main", is_main=True, detached=False),
+        WorktreeInfo(path="/wt", branch="feature/a", is_main=False, detached=False, locked=True),
+    ]
+    monkeypatch.setattr("omnigent.host.connect.list_worktrees", lambda **_kwargs: listed)
+
+    result = await host._handle_list_worktrees(
+        HostListWorktreesFrame(request_id="r1", repo_path="/repo")
+    )
+
+    assert isinstance(result, HostListWorktreesResultFrame)
+    assert result.status == "ok"
+    assert result.worktrees is not None
+    assert [(entry["path"], entry["locked"]) for entry in result.worktrees] == [
+        ("/repo", False),
+        ("/wt", True),
+    ]
 
 
 def test_reap_orphans_is_noop_without_wnohang(

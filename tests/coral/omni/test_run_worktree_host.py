@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import shutil
+import subprocess
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -84,6 +85,13 @@ def _host_row(
         sandbox_provider=sandbox_provider,
         account_generation=generation,
     )
+
+
+def _status(worktree: Path) -> str:
+    """``git status --porcelain`` of a worktree: empty when nothing is missing or changed."""
+    return subprocess.run(
+        ["git", "status", "--porcelain"], cwd=worktree, capture_output=True, text=True, check=True
+    ).stdout
 
 
 def _relayed(result: object) -> dict[str, object]:
@@ -290,6 +298,42 @@ async def test_a_detached_run_worktree_is_refused_not_forked(
     assert tunnel.frame_types().count(HostCreateWorktreeFrame) == 1
 
 
+async def test_a_locked_run_worktree_is_refused_until_unlocked(
+    git_repo: Path, tunnel: _Tunnel
+) -> None:
+    created = await _run_worktree(tunnel, str(git_repo))
+    _git(git_repo, "worktree", "lock", created.path)
+
+    failure = await _failure(tunnel, str(git_repo))
+
+    assert failure.code == "worktree_failed"
+    assert "run worktree is locked" in failure.message
+    assert _worktree_count(git_repo) == 2
+    assert tunnel.frame_types().count(HostCreateWorktreeFrame) == 1
+
+    _git(git_repo, "worktree", "unlock", created.path)
+
+    assert await _run_worktree(tunnel, str(git_repo)) == RunWorktree(
+        path=created.path, branch=created.branch, start_commit=None, adopted=True
+    )
+
+
+async def test_an_interrupted_create_is_never_adopted(git_repo: Path, tunnel: _Tunnel) -> None:
+    branch = run_branch_name("run-1")
+    path = git_repo.parent / "myrepo-worktrees" / branch.replace("/", "-")
+    # What a killed ``git worktree add`` leaves: registered, locked, files missing.
+    _git(git_repo, "worktree", "add", "-q", "--no-checkout", "-b", branch, str(path), "main")
+    _git(git_repo, "worktree", "lock", "--reason", "initializing", str(path))
+
+    failure = await _failure(tunnel, str(git_repo))
+
+    assert failure.code == "worktree_failed"
+    assert "run worktree is locked; it may still be being created" in failure.message
+    assert HostCreateWorktreeFrame not in tunnel.frame_types()
+    assert _worktree_count(git_repo) == 2
+    assert [child.name for child in path.iterdir()] == [".git"]
+
+
 async def test_concurrent_calls_for_one_run_share_one_worktree(
     git_repo: Path, tunnel: _Tunnel
 ) -> None:
@@ -297,20 +341,34 @@ async def test_concurrent_calls_for_one_run_share_one_worktree(
     tunnel.concurrent = True
     host = await _connect(tunnel)
 
-    results = await asyncio.gather(
+    outcomes = await asyncio.gather(
         *(
             create_or_adopt_run_worktree(
                 host, repo_root=str(git_repo), run_id="run-1", base_ref="main"
             )
             for _ in range(4)
-        )
+        ),
+        return_exceptions=True,
     )
 
+    results = [outcome for outcome in outcomes if isinstance(outcome, RunWorktree)]
+    refusals = [outcome for outcome in outcomes if not isinstance(outcome, RunWorktree)]
+    # A loser that lists the winner's worktree while git still checks it out is refused.
+    for refusal in refusals:
+        assert isinstance(refusal, RunWorktreeError), refusal
+        assert refusal.code == "worktree_failed"
+        assert "run worktree is locked" in refusal.message
     assert len({result.path for result in results}) == 1
     assert _worktree_count(git_repo) == 2
     # Only the call that made the branch may report its start commit.
     assert sum(not result.adopted for result in results) <= 1
     assert {result.start_commit for result in results} <= {None, _rev_parse(git_repo, "main")}
+    # Once the creates are done, the one worktree is complete, clean and adoptable.
+    again = await create_or_adopt_run_worktree(
+        host, repo_root=str(git_repo), run_id="run-1", base_ref="main"
+    )
+    assert (again.path, again.adopted) == (results[0].path, True)
+    assert _status(Path(again.path)) == ""
 
 
 @pytest.mark.parametrize(

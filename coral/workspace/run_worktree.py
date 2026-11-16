@@ -9,6 +9,8 @@ adopts it when an earlier call (or a concurrent one) already made it, so it can
 be retried freely. No host error text is interpreted: after a failed create the
 algorithm lists the worktrees again and adopts what it finds. Liveness follows
 git's own rule: a linked worktree is live while ``<path>/.git`` (a file) exists.
+A worktree git lists as locked is never adopted: ``git worktree add`` holds that
+lock while it checks the worktree out, and an interrupted add leaves it behind.
 """
 
 from __future__ import annotations
@@ -83,11 +85,16 @@ class HostWorktreeEntry:
     :param branch: Checked-out branch, e.g. ``"coral/r-0a1b2c3d4e5f/base"``;
         ``None`` when detached.
     :param is_main: The repository's main worktree.
+    :param locked: Git lists it as locked, by ``git worktree lock`` or by a
+        ``git worktree add`` that is still checking it out or was interrupted.
+        Always ``False`` from an older host that does not report locks, so such
+        a host's interrupted checkout can still look adoptable.
     """
 
     path: str
     branch: str | None
     is_main: bool
+    locked: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,7 +206,8 @@ async def create_or_adopt_run_worktree(
     Create the run's worktree, or adopt the one an earlier or concurrent call made.
 
     Paths compare exactly on a POSIX host, so on a case-insensitive macOS volume
-    ``repo_root`` must be spelled as git lists the repository.
+    ``repo_root`` must be spelled as git lists the repository. An older host
+    does not report worktree locks, so its interrupted checkout can be adopted.
 
     :param host: The run owner's host.
     :param repo_root: Absolute local root of a worktree of the repository
@@ -212,7 +220,7 @@ async def create_or_adopt_run_worktree(
         both the branch and the worktree.
     :raises RunWorktreeError: ``not_a_git_repo`` for a root that is not an
         absolute local path or not a worktree root; ``worktree_failed`` when the
-        run's worktree is detached, when the host's answers are unusable, or
+        run's worktree is locked or detached, when the host's answers are unusable, or
         (with both host errors) when neither a create nor its retry worked and
         no worktree can be adopted; or the host's own error.
     """
@@ -292,7 +300,7 @@ async def _adoptable(
     host: RunWorktreeHost, entries: Sequence[HostWorktreeEntry], branch: str
 ) -> RunWorktree | None:
     """
-    Adopt the run's live linked worktree, or refuse one that was detached.
+    Adopt the run's live linked worktree, or refuse one that is locked or detached.
 
     Git checks a branch out in at most one worktree, and the run's worktree
     directory names one worktree, so only the first matching entry of each
@@ -309,15 +317,24 @@ async def _adoptable(
         ),
         None,
     )
+    on_branch = next(
+        (entry for entry in entries if entry.branch == branch and not entry.is_main), None
+    )
+    for candidate in (detached, on_branch):
+        # A locked worktree may be half checked out, so it is refused whether or not it is live.
+        if candidate is not None and candidate.locked:
+            path = _checked_host_path(candidate.path, "listed worktree")
+            raise RunWorktreeError(
+                "worktree_failed",
+                "run worktree is locked; it may still be being created — retry later or "
+                f"repair it: {truncate_host_message(path)}",
+            )
     # Recreating the branch elsewhere would strand the detached worktree's work.
     if detached is not None and await _is_live_worktree(host, detached.path):
         raise RunWorktreeError(
             "worktree_failed",
             f"run worktree is detached; repair it: {truncate_host_message(detached.path)}",
         )
-    on_branch = next(
-        (entry for entry in entries if entry.branch == branch and not entry.is_main), None
-    )
     if on_branch is not None and await _is_live_worktree(host, on_branch.path):
         return RunWorktree(path=on_branch.path, branch=branch, start_commit=None, adopted=True)
     return None
@@ -366,7 +383,7 @@ def _checked_creation(created: CreatedRunWorktree, branch: str, *, adopted: bool
 
 
 def _full_commit_id(commit: str | None) -> str | None:
-    """Defence in depth for DD-17: anything but a full hex id reads as unknown."""
+    """Re-check the host's start commit: anything but a full hex id reads as unknown."""
     if commit is None:
         return None
     try:

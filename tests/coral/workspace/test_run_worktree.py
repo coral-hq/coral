@@ -51,12 +51,12 @@ def _marker(worktree: str) -> str:
 _GIT_FILE = HostPathStat(exists=True, is_directory=False, canonical_path=None)
 
 
-def _run_entry(path: str) -> HostWorktreeEntry:
-    return HostWorktreeEntry(path=path, branch=_BRANCH, is_main=False)
+def _run_entry(path: str, *, locked: bool = False) -> HostWorktreeEntry:
+    return HostWorktreeEntry(path=path, branch=_BRANCH, is_main=False, locked=locked)
 
 
-def _detached(path: str) -> HostWorktreeEntry:
-    return HostWorktreeEntry(path=path, branch=None, is_main=False)
+def _detached(path: str, *, locked: bool = False) -> HostWorktreeEntry:
+    return HostWorktreeEntry(path=path, branch=None, is_main=False, locked=locked)
 
 
 def _created(
@@ -229,6 +229,47 @@ async def test_concurrent_create_adopts_the_winner_after_the_retry_fails() -> No
 
     assert result == RunWorktree(path=_WORKTREE, branch=_BRANCH, start_commit=None, adopted=True)
     assert host.calls[-3:] == [("list", _ROOT), _ENTRY_STAT, _MARKER_STAT]
+
+
+# Fully live, so only the lock can be the reason for the refusal.
+_LIVE_WORKTREE_STATS = {
+    _ROOT: _directory(_ROOT),
+    _WORKTREE: _directory(_WORKTREE),
+    _marker(_WORKTREE): _GIT_FILE,
+}
+
+
+@pytest.mark.parametrize("entry", [_run_entry, _detached], ids=["on-run-branch", "detached"])
+async def test_a_locked_run_worktree_is_refused_not_adopted(
+    entry: Callable[..., HostWorktreeEntry],
+) -> None:
+    host = _ScriptedHost(
+        stats=_LIVE_WORKTREE_STATS, listings=[[_MAIN, entry(_WORKTREE, locked=True)]]
+    )
+
+    failure = await _failure(host)
+
+    assert failure.code == "worktree_failed"
+    assert "run worktree is locked; it may still be being created" in failure.message
+    assert host.calls == [("stat", _ROOT), ("list", _ROOT)]
+
+
+async def test_a_locked_worktree_listed_after_the_retry_fails_is_refused() -> None:
+    # A concurrent call's create is still checking its worktree out.
+    host = _ScriptedHost(
+        stats=_LIVE_WORKTREE_STATS,
+        listings=[[_MAIN], [_MAIN, _run_entry(_WORKTREE, locked=True)]],
+        creates=[
+            WorktreeCreateFailed("a branch named it already exists"),
+            WorktreeCreateFailed("it is already checked out elsewhere"),
+        ],
+    )
+
+    failure = await _failure(host)
+
+    assert failure.code == "worktree_failed"
+    assert "run worktree is locked; it may still be being created" in failure.message
+    assert host.calls[-1] == ("list", _ROOT)
 
 
 async def test_failure_reports_both_host_messages_cut_to_size() -> None:

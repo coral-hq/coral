@@ -296,6 +296,8 @@ class WorktreeInfo:
         (no branch checked out).
     :param updated_at: Unix epoch seconds of the checked-out HEAD commit, or
         ``None`` when the commit timestamp cannot be resolved.
+    :param locked: Git lists it as locked: by ``git worktree lock``, or by a
+        ``git worktree add`` still checking it out or interrupted.
     """
 
     path: str
@@ -303,6 +305,7 @@ class WorktreeInfo:
     is_main: bool
     detached: bool
     updated_at: int | None = None
+    locked: bool = False  # CORAL(S72)
 
 
 def _commit_updated_ats(repo_root: str, heads: list[str | None]) -> dict[str, int]:
@@ -364,6 +367,7 @@ def list_worktrees(*, repo_path: str, for_cleanup: bool = False) -> list[Worktre
     branch: str | None = None
     head: str | None = None
     detached = False
+    locked_paths: set[str] = set()
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
             path = line[len("worktree ") :].strip()
@@ -377,6 +381,9 @@ def list_worktrees(*, repo_path: str, for_cleanup: bool = False) -> list[Worktre
             branch = ref[len("refs/heads/") :] if ref.startswith("refs/heads/") else ref
         elif line == "detached":
             detached = True
+        elif (line == "locked" or line.startswith("locked ")) and path is not None:
+            # CORAL(S72): ``locked`` or ``locked <reason>``.
+            locked_paths.add(path)
         elif line == "" and path is not None:
             # Blank line terminates a record.
             records.append((path, branch, detached, head))
@@ -392,6 +399,7 @@ def list_worktrees(*, repo_path: str, for_cleanup: bool = False) -> list[Worktre
             is_main=index == 0,
             detached=worktree_detached,
             updated_at=updated_ats.get(worktree_head) if worktree_head is not None else None,
+            locked=worktree_path in locked_paths,
         )
         for index, (worktree_path, worktree_branch, worktree_detached, worktree_head) in enumerate(
             records

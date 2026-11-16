@@ -18,6 +18,23 @@ resets on restart, merges agent branches, runs checks and reads files.
 Every requirement below is **fail-closed**. When a backend cannot meet one, it
 refuses the op; it never runs a weaker version of it.
 
+## Normative text and recipes
+
+- **Normative:** the values, the ops table, each obligation's observable
+  results and refusals, the security requirements, the op-host rule, the
+  idempotency rules, the git defaults, the errors and the change policy.
+  - A flag or setting that a requirement or the git defaults make mandatory,
+    such as `--end-of-options`, `--no-ext-diff --no-textconv` or `GIT_ENV`, is
+    part of the requirement.
+  - L1's three inputs are normative, because digests from different backends
+    must compare.
+- **Illustrative (non-normative):** the exact git command lines and step
+  sequences marked *Recipe*. They show one way to meet an obligation with real
+  git, and no real backend has run them yet. A backend may use other commands
+  when it gives the same observable results and meets every security
+  requirement. The first real backend's run of the conformance suite, and its
+  own tests, settle the recipes.
+
 ## Values
 
 - **`WorkspaceRef(host_id, root, branch)`** names the worktree an op acts on.
@@ -64,8 +81,8 @@ The tables below use these names:
 - **`.coral/runtime/`** holds Coral's own files in a worktree. No op records,
   fingerprints, diffs or cleans it.
 - **`<id>`** is a commit id checked by `validate_commit_id`. Before any use it
-  is resolved with `git rev-parse --verify --quiet --end-of-options
-  <id>^{commit}`.
+  is resolved as a commit, passed after `--end-of-options` (*Recipe:* `git
+  rev-parse --verify --quiet --end-of-options <id>^{commit}`).
 
 ## Obligations
 
@@ -91,7 +108,9 @@ marked with a test name.
      (`validate_commit_message`,
      `test_commit_and_merge_reject_nul_or_blank_messages`);
    - `check` timeouts (`validate_timeout`,
-     `test_check_rejects_unbounded_timeouts`).
+     `test_check_rejects_unbounded_timeouts`);
+   - `read` paths (`validate_workspace_path`,
+     `test_validate_workspace_path_refuses_paths_outside_the_root`).
 
    Any failure raises `ValueError`.
 3. **Verified target.** Every WRITE op verifies its target first (security
@@ -129,7 +148,7 @@ marked with a test name.
        (`test_l1_is_stable_without_edits_and_changes_on_every_edit`). Equal
        digests mean "unchanged" with high probability. Different digests mean
        "changed".
-   - **L2** is the git tree id of what `commit` would record now:
+   - **L2** is the git tree id of what `commit` would record now. *Recipe:*
      1. copy the index at `git rev-parse --git-path index` into a fresh
         `mkstemp` file (mode 0600) in an engine-private directory outside the
         worktree, in Python, without following symlinks;
@@ -149,26 +168,29 @@ marked with a test name.
    reports a merge that someone else left unfinished. K13's own `merge` never
    leaves one (`test_head_reports_the_branch_and_no_merge_in_progress`).
 6. **`diff_stat`.**
-   - It runs `git diff --numstat -z --no-renames --no-ext-diff --no-textconv
-     <from> <to> -- <pathspec>`, where `to_commit=None` means HEAD. With `-z`,
-     paths come back NUL-delimited instead of C-quoted.
+   - It counts changed lines per path between `from_commit` and `to_commit`,
+     where `to_commit=None` means HEAD. *Recipe:* `git diff --numstat -z
+     --no-renames --no-ext-diff --no-textconv <from> <to> -- <pathspec>`; with
+     `-z`, paths come back NUL-delimited instead of C-quoted.
    - It compares two commits only, which is why it stays READ.
    - A rename counts as a delete plus an add. A binary file counts 0 lines.
    - `paths` is sorted
      (`test_diff_stat_between_commits_defaults_to_head`).
 7. **`read`.**
    - It returns the file's exact bytes: from the working tree when
-     `at_commit` is `None`, otherwise the blob at `<at_commit>:<path>`. For a
-     blob it uses `git cat-file -s` first, then `cat-file blob`.
-   - `path` is a relative POSIX path with no empty, `.` or `..` segment.
-     Anything else raises `ValueError`
+     `at_commit` is `None`, otherwise the blob at `<at_commit>:<path>`.
+     *Recipe:* for a blob, `git cat-file -s` first, then `cat-file blob`.
+   - `path` is a relative POSIX path with no empty, `.` or `..` segment,
+     checked with `validate_workspace_path`. Anything else raises `ValueError`
      (`test_read_refuses_paths_outside_the_root`).
    - A missing path, a non-regular file, and a file over `MAX_READ_BYTES` all
      raise `workspace.git_failed`
      (`test_read_returns_exact_bytes_at_a_commit_and_in_the_working_tree` for a
      missing path, `test_read_refuses_a_file_over_the_size_cap` for the cap).
 8. **`commit`.** This uses the plumbing path; the engine never runs porcelain
-   `git commit`.
+   `git commit`. The git commands in the steps below are a *Recipe*. The record
+   and HEAD checks, the empty result, the message layout, the identity, and a
+   branch move that succeeds only from `expected_head` are normative.
    1. **Record check.** HEAD is the op's record when it carries
       `Coral-Op: <op_key>` and its parent is `expected_head`. Trust is checked
       first; only then are the params compared:
@@ -216,7 +238,8 @@ marked with a test name.
    - **Clean tree** (nothing `commit` would record): it returns `commit=None`
      and writes nothing
      (`test_salvage_of_a_clean_tree_records_nothing`).
-   - **Dirty tree:**
+   - **Dirty tree:** the op records the tree `commit` would record in a new
+     commit on HEAD, and creates the ref only when it is absent. *Recipe:*
      1. Build the tree on a temporary index, as L2 does.
      2. Run `commit-tree --no-gpg-sign -p HEAD`, with the identity of
         obligation 8.4 and `Coral-Hooks: skipped` as the only trailer.
@@ -225,7 +248,7 @@ marked with a test name.
 
      HEAD, the index and the working tree stay unchanged
      (`test_salvage_of_a_dirty_tree_keeps_head_and_working_tree`).
-10. **`reset`.**
+10. **`reset`.** *Recipe:*
     1. Run `git reset --hard <id>`. This also clears an unfinished merge.
     2. Run `git clean -fd -e /.coral/runtime/ -- .` (`CLEAN_EXCLUDE`).
 
@@ -250,16 +273,16 @@ marked with a test name.
        `dirty_count` above 0, as for L1. The reason is that aborting a
        conflicted merge can lose uncommitted changes
        (`test_merge_refuses_a_dirty_working_tree`).
-    3. Otherwise the backend runs `git merge --ff --no-edit --no-verify
-       --no-gpg-sign -m <message> --end-of-options <source_ref>`, with the
-       identity of obligation 8.4.
+    3. Otherwise the backend merges `source_ref` into HEAD, with the identity
+       of obligation 8.4. *Recipe:* `git merge --ff --no-edit --no-verify
+       --no-gpg-sign -m <message> --end-of-options <source_ref>`.
        - The `-m` message is composed in Python: `message`, a blank line, then
          `Coral-Hooks: skipped`.
        - A fast-forward is allowed and returns `merge_commit=<source commit>`
          (`test_merge_fast_forwards_onto_a_ref_ahead_of_head`).
-    4. On a conflict, the backend lists the conflicting paths and runs
-       `git merge --abort`. It returns `conflict`, and HEAD and the tree are
-       unchanged
+    4. On a conflict, the backend lists the conflicting paths and aborts the
+       merge (*Recipe:* `git merge --abort`). It returns `conflict`, and HEAD
+       and the tree are unchanged
        (`test_merge_conflict_reports_paths_and_leaves_head_and_tree`).
 12. **`check`.**
     - It runs `argv` as an argument vector, with no shell, in `root`.
@@ -275,12 +298,13 @@ marked with a test name.
 
 ## Security requirements
 
-These come from the PR-05 security review. Each is fail-closed.
+These keep repository content and agents from making engine git run code, act
+on the wrong worktree or forge a record. Each is fail-closed.
 
-1. **No hooks or drivers.** Engine git runs no repository hooks: neither
-   hookdir hooks nor config-defined `hook.<name>.*` hooks. Before an op, a
-   backend runs two read-only checks with `git config --get-regexp`; reading
-   config runs no program. Either check refuses with
+1. **No hooks or drivers.** Engine git in K13 ops runs no repository hooks:
+   neither hookdir hooks nor config-defined `hook.<name>.*` hooks. Before an op,
+   a backend runs two read-only config checks (*Recipe:* `git config
+   --get-regexp`); reading config runs no program. Either check refuses with
    `workspace.backend_unavailable`:
    - **Hooks**, in the config the op itself runs under (the repository's,
      with `GIT_ENV`): any `hook.*.command`. Global and system hooks need no
@@ -300,6 +324,14 @@ These come from the PR-05 security review. Each is fail-closed.
    every diff passes `--no-ext-diff --no-textconv`. The backend writes
    `Coral-Hooks: skipped` only after both checks pass. Engine commits take the
    plumbing path in obligation 8.
+
+   **Scope.** This covers the K13 ops only. Creating a run's worktree is not a
+   K13 op: Coral currently creates it with Omnigent's worktree create (`git
+   worktree add`), which runs the repository's `post-checkout` hook, and its
+   `reference-transaction` hook for the new branch, as Omnigent's own session
+   worktrees do. A hookless run-worktree create is a follow-up: an S72
+   extension that runs the create with `-c core.hooksPath=/dev/null` and
+   refuses config-defined hooks, as this requirement does.
 2. **Isolated git config.** Every op runs with the "Git defaults" below
    (`GIT_ENV`, `GIT_HARDENING_CONFIG`, `GIT_DIFF_FLAGS`), so global and system
    config are disabled for the op itself.
@@ -530,9 +562,10 @@ Homebrew-git rerun of spike 8.**
 | READ: `fingerprint(L1)`, `head`, `diff_stat`, `read` | In an agent's sandboxed shell they need `GIT_DIR` pinned, with `.git` and the common dir read-only. Whether their results count as evidence is D-K13-2. |
 | WRITE: `fingerprint(L2)`, `commit`, `salvage`, `reset`, `merge`, `check` | Engine-owned, never inside the agent sandbox. `check` runs in Coral's own sandbox. |
 
-At restart, `salvage` and `reset` run at ladder step 4. The old session is
-fenced, and they run through the new generation's session or through the host
-channel.
+At restart, `salvage` and `reset` run at ladder step 4, after the old session
+is fenced. The new generation's step session (or the host channel) authorizes
+them, and git runs in an engine-owned executor, never inside the agent's
+sandbox: a sandboxed session shell cannot run them.
 
 The SPK-04 memo declares the spike-8 contingency triggered. Under the roadmap,
 host-channel commit, reset and salvage then move into WSP-06.

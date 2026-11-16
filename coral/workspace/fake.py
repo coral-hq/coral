@@ -60,6 +60,7 @@ from coral.workspace.ops import (
     validate_op_key,
     validate_timeout,
     validate_trailers,
+    validate_workspace_path,
 )
 
 _SALVAGE_MESSAGE = "Coral salvage"
@@ -102,14 +103,17 @@ class FakeWorkspaceOps(WorkspaceOps):
         return commit
 
     def write_file(self, ref: WorkspaceRef, path: str, content: bytes) -> None:
-        self._worktree(ref).files[_checked_path(path)] = content
+        validate_workspace_path(path)
+        self._worktree(ref).files[path] = content
 
     def delete_file(self, ref: WorkspaceRef, path: str) -> None:
+        validate_workspace_path(path)
         del self._worktree(ref).files[path]
 
     def ignore(self, ref: WorkspaceRef, path: str) -> None:
         """Ignore ``path`` as an ``info/exclude`` line would: only while it is untracked."""
-        self._worktree(ref).ignored.add(_checked_path(path))
+        validate_workspace_path(path)
+        self._worktree(ref).ignored.add(path)
 
     def add_ref(self, ref: WorkspaceRef, name: str, files: Mapping[str, bytes]) -> str:
         """Point the full ref ``name`` at a new commit on HEAD with ``files`` written."""
@@ -193,7 +197,7 @@ class FakeWorkspaceOps(WorkspaceOps):
         self, ref: WorkspaceRef, executor: OpExecutor, *, path: str, at_commit: str | None = None
     ) -> ReadResult:
         check_op_host("read", executor)
-        path = _checked_path(path)
+        validate_workspace_path(path)
         if at_commit is not None:
             validate_commit_id(at_commit)
         worktree = self._worktree(ref, executor)
@@ -443,13 +447,6 @@ def _is_ignored(worktree: _Worktree, path: str, tracked: Mapping[str, bytes]) ->
 
 def _in_runtime_dir(path: str) -> bool:
     return path.startswith(f"{RUNTIME_DIR}/")
-
-
-def _checked_path(path: str) -> str:
-    parts = path.split("/")
-    if path.startswith("/") or any(part in ("", ".", "..") for part in parts):
-        raise ValueError(f"path must be relative to the worktree root: {path!r}")
-    return path
 
 
 def _tree_id(files: Mapping[str, bytes]) -> str:

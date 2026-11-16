@@ -4705,6 +4705,7 @@ class HostProcess:
                     "is_main": wt.is_main,
                     "detached": wt.detached,
                     "updated_at": wt.updated_at,
+                    "locked": wt.locked,  # CORAL(S72)
                 }
                 for wt in worktrees
             ],
