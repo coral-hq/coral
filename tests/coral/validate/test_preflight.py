@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from coral.validate.preflight import (
     API_KEY_REQUIRED_MESSAGE,
+    SANDBOX_UNREPORTED_MESSAGE,
     PreflightFacts,
     PreflightItem,
     PreflightReport,
@@ -48,6 +49,14 @@ def test_subscription_only_fails_auth_with_add_api_key() -> None:
     assert report.ok is False
 
 
+def test_failing_credential_names_its_step() -> None:
+    report = run_preflight(_facts(credential="none", credential_step_ref="implement"))
+
+    auth = _item(report, "auth")
+    assert auth.status == "fail"
+    assert auth.message == f"{API_KEY_REQUIRED_MESSAGE} (step implement)"
+
+
 def test_invalid_credential_carries_the_detail() -> None:
     report = run_preflight(
         _facts(credential="invalid", credential_detail="provider 'team' is not declared")
@@ -69,12 +78,21 @@ def test_offline_host_fails_host_and_sandbox_with_connect_host() -> None:
     assert report.ok is False
 
 
-def test_sandboxed_step_without_backend_needs_bwrap() -> None:
-    report = run_preflight(_facts(sandbox=None))
+def test_sandboxed_step_on_a_host_without_a_backend_needs_bwrap() -> None:
+    report = run_preflight(_facts(sandbox="none"))
 
     sandbox = _item(report, "sandbox")
     assert sandbox.status == "fail"
     assert sandbox.fix is not None and sandbox.fix.target == "install_bwrap"
+
+
+def test_sandboxed_step_on_a_host_that_reports_no_sandbox_needs_a_host_update() -> None:
+    report = run_preflight(_facts(sandbox=None))
+
+    sandbox = _item(report, "sandbox")
+    assert sandbox.status == "fail"
+    assert sandbox.message == SANDBOX_UNREPORTED_MESSAGE
+    assert sandbox.fix is not None and sandbox.fix.target == "update_host"
 
 
 def test_no_sandboxed_step_skips_the_sandbox_check() -> None:
@@ -126,11 +144,15 @@ def test_facts_are_frozen_and_reject_unknown_fields() -> None:
         (["os_sandbox:darwin_seatbelt"], "seatbelt"),
         (["coral_host_sandbox:1:linux:bwrap:1"], "bwrap"),
         (["coral_host_sandbox:1:darwin:seatbelt:1"], "seatbelt"),
-        (["coral_host_sandbox:1:linux:bwrap:0"], None),
-        (["os_sandbox:windows_jobobject", "os_sandbox:none"], None),
-        (["coral_host_sandbox:2:linux:bwrap:1", "coral_host_sandbox:1:linux:jail:1"], None),
+        (["os_sandbox:none"], "none"),
+        (["os_sandbox:windows_jobobject"], "none"),
+        (["coral_host_sandbox:1:linux:bwrap:0"], "none"),
+        (["coral_host_sandbox:2:linux:bwrap:1", "coral_host_sandbox:1:linux:jail:1"], "none"),
+        (["coral_host_sandbox:2:linux:bwrap:1"], None),
+        (["host_hello_v1"], None),
         ([], None),
     ],
 )
 def test_sandbox_from_capabilities(capabilities: list[str], expected: str | None) -> None:
+    """``None`` means the host sent no sandbox token, so it predates them."""
     assert sandbox_from_capabilities(capabilities) == expected

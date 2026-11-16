@@ -20,6 +20,7 @@ CheckName = Literal["auth", "host_online", "sandbox"]
 CheckStatus = Literal["ok", "warn", "fail"]
 CredentialKind = Literal["api_key", "provider", "none", "invalid"]
 SandboxBackend = Literal["bwrap", "seatbelt"]
+HostSandbox = Literal["bwrap", "seatbelt", "none"]
 
 CLAUDE_SDK_HARNESS = "claude-sdk"
 CLAUDE_SDK_CAPABILITIES: dict[str, object] = {
@@ -35,7 +36,12 @@ SANDBOX_MISSING_MESSAGE = (
     "Steps that read or change files need an OS sandbox: install bwrap on Linux; "
     "macOS uses sandbox-exec. Windows hosts can't run these steps."
 )
+SANDBOX_UNREPORTED_MESSAGE = (
+    "The host does not report its OS sandbox. Update Coral on the host to run steps "
+    "that read or change files."
+)
 
+_OS_SANDBOX_PREFIX = "os_sandbox:"
 _OS_SANDBOX_TOKENS: dict[str, SandboxBackend] = {
     "os_sandbox:linux_bwrap": "bwrap",
     "os_sandbox:darwin_seatbelt": "seatbelt",
@@ -78,24 +84,27 @@ class StepNeeds(_Frozen):
 class PreflightFacts(_Frozen):
     credential: CredentialKind
     credential_detail: str | None = None
+    credential_step_ref: str | None = None
     host_online: bool
-    sandbox: SandboxBackend | None
+    sandbox: HostSandbox | None
     steps: tuple[StepNeeds, ...]
 
 
-def sandbox_from_capabilities(capabilities: Iterable[str]) -> SandboxBackend | None:
-    """Read the host's OS sandbox backend from its hello capability tokens.
+def sandbox_from_capabilities(capabilities: Iterable[str]) -> HostSandbox | None:
+    """Read the host's OS sandbox from its hello capability tokens.
 
     Accepts ``os_sandbox:<platform_backend>`` and the richer
-    ``coral_host_sandbox:1:<platform>:<backend>:<available>`` report.
+    ``coral_host_sandbox:1:<platform>:<backend>:<available>`` report. A host that
+    reports a sandbox Coral cannot use gives ``"none"``; one that reports none gives ``None``.
     """
     for token in capabilities:
-        if token in _OS_SANDBOX_TOKENS:
-            return _OS_SANDBOX_TOKENS[token]
+        if token.startswith(_OS_SANDBOX_PREFIX):
+            return _OS_SANDBOX_TOKENS.get(token, "none")
         if token.startswith(_HOST_SANDBOX_REPORT_PREFIX):
             parts = token.removeprefix(_HOST_SANDBOX_REPORT_PREFIX).split(":")
-            if len(parts) == 3 and parts[2] == "1" and parts[1] in _REPORTED_BACKENDS:
-                return _REPORTED_BACKENDS[parts[1]]
+            if len(parts) == 3:
+                available = parts[2] == "1"
+                return _REPORTED_BACKENDS.get(parts[1], "none") if available else "none"
     return None
 
 
@@ -106,10 +115,12 @@ def _fail(check: CheckName, message: str, target: FixTarget) -> PreflightItem:
 def _auth_item(facts: PreflightFacts) -> PreflightItem:
     if facts.credential in ("api_key", "provider"):
         return PreflightItem(check="auth", status="ok", message="Claude has an API credential.")
+    step = f" (step {facts.credential_step_ref})" if facts.credential_step_ref else ""
     if facts.credential == "invalid":
         detail = facts.credential_detail or "the configured provider could not be resolved"
-        return _fail("auth", f"The Claude API credential is not usable: {detail}", "add_api_key")
-    return _fail("auth", API_KEY_REQUIRED_MESSAGE, "add_api_key")
+        message = f"The Claude API credential is not usable{step}: {detail}"
+        return _fail("auth", message, "add_api_key")
+    return _fail("auth", f"{API_KEY_REQUIRED_MESSAGE}{step}", "add_api_key")
 
 
 def _host_item(facts: PreflightFacts) -> PreflightItem:
@@ -126,6 +137,8 @@ def _sandbox_item(facts: PreflightFacts) -> PreflightItem:
             "sandbox", "The OS sandbox is checked once the host connects.", "connect_host"
         )
     if facts.sandbox is None:
+        return _fail("sandbox", SANDBOX_UNREPORTED_MESSAGE, "update_host")
+    if facts.sandbox == "none":
         return _fail("sandbox", SANDBOX_MISSING_MESSAGE, "install_bwrap")
     return PreflightItem(
         check="sandbox", status="ok", message=f"The host has an OS sandbox ({facts.sandbox})."

@@ -79,7 +79,7 @@ OPS-01's generator will maintain this file later.
 | `omnigent/harnesses/qwen_native/main.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/host/_daemon_entry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/host/connect.py` | S95, S102 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. The hello carries `host_capabilities()`, which adds the OS sandbox token (S102). |
-| `omnigent/host/frames.py` | S102 | upstream-extension | Adds `host_capabilities()`: `HOST_CAPABILITIES` plus `os_sandbox:<backend>` when the platform sandbox binary is on PATH (S102). |
+| `omnigent/host/frames.py` | S102 | upstream-extension | Adds `host_capabilities()`: `HOST_CAPABILITIES` plus `os_sandbox:<backend>` when the platform sandbox binary is on PATH, or `os_sandbox:none` (S102). |
 | `omnigent/host/service.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/host/service_entry.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `omnigent/inner/_acp_omnigent_mcp.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
@@ -236,7 +236,7 @@ OPS-01's generator will maintain this file later.
 | `tests/harnesses/codex_native/test_codex_native_hook.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/helpers/ui_url_safety.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/host/test_cli_host.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
-| `tests/host/test_connect.py` | S102 | upstream-extension | Adds the OS sandbox token tests for `host_capabilities()` and the hello frame (S102). |
+| `tests/host/test_connect.py` | S102 | upstream-extension | Adds the OS sandbox token tests for `host_capabilities()`, the hello frame and decoding unknown tokens (S102). |
 | `tests/host/test_local_server.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/inner/test_claude_sdk_executor.py` | S95, S13, S21 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. Adds the Coral credential and sandbox refusal tests, with the non-Coral regression (S13). Adds the PreToolUse policy hook tests (S21). |
 | `tests/inner/test_claude_sdk_harness.py` | S13, S21 | coral-specific | Adds the Coral credential and policy-hook flag threading test (S13, S21). |

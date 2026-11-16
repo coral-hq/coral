@@ -25,6 +25,14 @@ class StepPlan:
     spec: AgentSpec
 
 
+_CREDENTIAL_SEVERITY: dict[CredentialKind, int] = {
+    "api_key": 0,
+    "provider": 0,
+    "none": 1,
+    "invalid": 2,
+}
+
+
 def _credential_kind(spec: AgentSpec) -> tuple[CredentialKind, str | None]:
     """Classify the spawn env's credential; the env may hold a literal key, so it never leaves."""
     try:
@@ -38,26 +46,39 @@ def _credential_kind(spec: AgentSpec) -> tuple[CredentialKind, str | None]:
     return "none", None
 
 
+async def _worst_credential(
+    claude_steps: Sequence[StepPlan],
+) -> tuple[CredentialKind, str | None, str | None]:
+    """Classify each distinct (auth, model); return the worst kind, its detail and first step."""
+    by_auth_and_model: dict[tuple[str, str | None], tuple[CredentialKind, str | None]] = {}
+    results: list[tuple[CredentialKind, str | None, str]] = []
+    for plan in claude_steps:
+        key = (repr(plan.spec.executor.auth), plan.spec.executor.model)
+        if key not in by_auth_and_model:
+            by_auth_and_model[key] = await asyncio.to_thread(_credential_kind, plan.spec)
+        results.append((*by_auth_and_model[key], plan.step_ref))
+    if not results:
+        return "none", None, None
+    kind, detail, step_ref = max(results, key=lambda result: _CREDENTIAL_SEVERITY[result[0]])
+    return kind, detail, step_ref if _CREDENTIAL_SEVERITY[kind] else None
+
+
 async def gather_preflight_facts(
     host_registry: HostRegistry, *, host_id: str, steps: Sequence[StepPlan]
 ) -> PreflightFacts:
-    """Read whether the host is online, its OS sandbox, and the claude-sdk credential kind.
+    """Read whether the host is online, its OS sandbox, and the worst claude-sdk credential.
 
     The server's provider config stands in for the host's; the executor repeats the
     credential check on the host before the CLI starts.
     """
-    claude_specs = [
-        plan.spec for plan in steps if is_claude_sdk_harness_name(plan.spec.executor.harness_kind)
-    ]
-    credential, detail = (
-        await asyncio.to_thread(_credential_kind, claude_specs[0])
-        if claude_specs
-        else ("none", None)
+    credential, detail, credential_step_ref = await _worst_credential(
+        [plan for plan in steps if is_claude_sdk_harness_name(plan.spec.executor.harness_kind)]
     )
     connection = host_registry.get(host_id)
     return PreflightFacts(
         credential=credential,
         credential_detail=detail,
+        credential_step_ref=credential_step_ref,
         host_online=connection is not None,
         sandbox=(
             sandbox_from_capabilities(connection.hello.capabilities)

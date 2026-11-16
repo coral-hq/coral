@@ -116,14 +116,14 @@ _OS_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec
 
 
 def host_capabilities() -> list[str]:
-    """CORAL(S102): ``HOST_CAPABILITIES`` plus the OS sandbox token when its binary is on PATH."""
+    """CORAL(S102): ``HOST_CAPABILITIES`` plus ``os_sandbox:<backend>``, or ``os_sandbox:none``."""
     try:
         backend = _default_sandbox_for_platform().type
     except OSError:
-        return list(HOST_CAPABILITIES)
+        backend = "none"
     binary = _OS_SANDBOX_BINARIES.get(backend)
     if binary is None or shutil.which(binary) is None:
-        return list(HOST_CAPABILITIES)
+        backend = "none"
     return [*HOST_CAPABILITIES, f"{CAP_OS_SANDBOX_PREFIX}{backend}"]
 
 

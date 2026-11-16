@@ -29,7 +29,12 @@ def _write_config(config_home: Path, config: dict[str, object]) -> None:
     (config_home / "config.yaml").write_text(yaml.safe_dump(config))
 
 
-def _coral_step(*, auth: ProviderAuth | None = None, os_env: OSEnvSpec | None = None) -> StepPlan:
+def _coral_step(
+    *,
+    auth: ProviderAuth | None = None,
+    os_env: OSEnvSpec | None = None,
+    step_ref: str = "review",
+) -> StepPlan:
     spec = AgentSpec(
         spec_version=1,
         name="coral__demo__review__m0",
@@ -43,7 +48,7 @@ def _coral_step(*, auth: ProviderAuth | None = None, os_env: OSEnvSpec | None = 
         os_env=os_env,
         params={"coral": {"generated": {"stance": "reviewer"}}},
     )
-    return StepPlan(step_ref="review", spec=spec)
+    return StepPlan(step_ref=step_ref, spec=spec)
 
 
 def _online_registry(capabilities: list[str]) -> HostRegistry:
@@ -67,6 +72,7 @@ async def test_offline_host_reports_no_host_and_no_sandbox(config_home: Path) ->
     [
         ("os_sandbox:darwin_seatbelt", "seatbelt"),
         ("os_sandbox:linux_bwrap", "bwrap"),
+        ("os_sandbox:none", "none"),
         (None, None),
     ],
 )
@@ -111,6 +117,32 @@ async def test_declared_provider_gives_provider(config_home: Path) -> None:
     )
 
     assert facts.credential == "provider"
+
+
+async def test_later_step_without_a_credential_fails_preflight_naming_it(
+    config_home: Path,
+) -> None:
+    family = {
+        "base_url": "https://anthropic.example.com/v1",
+        "api_key": LITERAL_KEY,
+        "models": {"default": "claude-sonnet-4-6"},
+    }
+    _write_config(
+        config_home, {"providers": {"team-anthropic": {"kind": "key", "anthropic": family}}}
+    )
+    team = ProviderAuth(name="team-anthropic")
+    steps = [
+        _coral_step(auth=team, step_ref="plan"),
+        _coral_step(auth=team, step_ref="review"),
+        _coral_step(auth=ProviderAuth(name="missing-provider"), step_ref="implement"),
+    ]
+
+    facts = await gather_preflight_facts(_online_registry([]), host_id=HOST_ID, steps=steps)
+
+    assert (facts.credential, facts.credential_step_ref) == ("invalid", "implement")
+    auth = run_preflight(facts).items[0]
+    assert auth.status == "fail"
+    assert "(step implement)" in auth.message and "missing-provider" in auth.message
 
 
 async def test_no_credential_gives_none(config_home: Path) -> None:

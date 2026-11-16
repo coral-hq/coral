@@ -1244,8 +1244,11 @@ seams:
     note: >-
       `omnigent/host/frames.py` adds `host_capabilities()`, which returns
       HOST_CAPABILITIES plus `os_sandbox:<linux_bwrap|darwin_seatbelt>` when the
-      platform default sandbox's binary (bwrap or sandbox-exec) is on PATH.
-      `omnigent/host/connect.py` sends it in host.hello. HOST_CAPABILITIES is
+      platform default sandbox's binary (bwrap or sandbox-exec) is on PATH, and
+      `os_sandbox:none` otherwise, so preflight can tell a host without a
+      sandbox (install bwrap) from one that predates the token (update the
+      host). `omnigent/host/connect.py` sends it in host.hello. Servers that
+      do not know the token ignore it. HOST_CAPABILITIES is
       unchanged. Coral's preflight reads the token through
       `coral.validate.preflight.sandbox_from_capabilities`, which also accepts
       WSP-01's richer `coral_host_sandbox:1:...` report, so the producer can
@@ -1260,10 +1263,11 @@ seams:
       - tests/coral/omni/test_preflight_facts.py
     budget_lines: 40
     budget_exception:
-      lines: 60
+      lines: 80
       reason: >-
         tests/host/test_connect.py carries the platform and binary matrix for
-        `host_capabilities()` plus a hello-frame test (about 55 lines).
+        `host_capabilities()`, a hello-frame test and an unknown-token decode
+        test (about 70 lines).
       approver: pending
     anchor_exempt: []
     upstream_first: false

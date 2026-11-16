@@ -4431,20 +4431,20 @@ async def test_handle_create_worktree_uses_server_budget_or_legacy_bound(
     ("platform", "binary_on_path", "expected_token"),
     [
         ("linux", "bwrap", "os_sandbox:linux_bwrap"),
-        ("linux", None, None),
+        ("linux", None, "os_sandbox:none"),
         ("darwin", "sandbox-exec", "os_sandbox:darwin_seatbelt"),
-        ("darwin", None, None),
-        ("darwin", "bwrap", None),
-        ("sunos5", "bwrap", None),
+        ("darwin", None, "os_sandbox:none"),
+        ("darwin", "bwrap", "os_sandbox:none"),
+        ("sunos5", "bwrap", "os_sandbox:none"),
     ],
 )
-def test_host_capabilities_advertise_the_os_sandbox_only_with_its_binary(
+def test_host_capabilities_always_advertise_the_os_sandbox(
     monkeypatch: pytest.MonkeyPatch,
     platform: str,
     binary_on_path: str | None,
-    expected_token: str | None,
+    expected_token: str,
 ) -> None:
-    """CORAL(S102): the hello names the OS sandbox only when its binary is installed."""
+    """CORAL(S102): the hello names the OS sandbox, or ``none`` when its binary is missing."""
     base = list(HOST_CAPABILITIES)
     monkeypatch.setattr("omnigent.inner.sandbox.sys.platform", platform)
     monkeypatch.setattr(
@@ -4454,8 +4454,23 @@ def test_host_capabilities_advertise_the_os_sandbox_only_with_its_binary(
 
     capabilities = host_capabilities()
 
-    assert capabilities == [*base, *([expected_token] if expected_token else [])]
+    assert capabilities == [*base, expected_token]
     assert base == HOST_CAPABILITIES
+
+
+def test_hello_with_sandbox_tokens_decodes_where_tokens_are_unknown() -> None:
+    """CORAL(S102): a server that knows no sandbox token still accepts the hello."""
+    hello = HostHelloFrame(
+        version="0.22.0",
+        frame_protocol_version=1,
+        name="laptop",
+        capabilities=[*HOST_CAPABILITIES, "os_sandbox:none", "os_sandbox:future_backend"],
+    )
+
+    decoded = decode_host_frame(encode_host_frame(hello))
+
+    assert isinstance(decoded, HostHelloFrame)
+    assert decoded.capabilities == hello.capabilities
 
 
 async def test_hello_carries_the_os_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
