@@ -131,6 +131,24 @@ policy hook, and the gaps in the first run below still apply. The Tier B test
 `bypassPermissions` the denied tool still runs and the evaluator never sees it.
 Offering the hook for every session is an upstream decision.
 
+### Reviewer and spawn checks on generated step bundles (2026-11-16)
+
+Two tests run the reviewer bundle that `build_step_bundle_yaml` generates:
+
+- `tests/coral/omni/test_reviewer_sandbox.py` drives the real
+  `create_os_environment` on the reviewer and implementer os_env. Under
+  seatbelt, the reviewer's `sys_os_write` returns "blocked by sandbox", and the
+  shell redirect and append fail with `Operation not permitted`. The
+  implementer's same writes succeed. The test skips without bwrap or
+  sandbox-exec.
+- `tests/e2e/coral/test_tier_b_reviewer_stack.py` runs the same bundle through
+  the real server, runner and `claude` CLI. The scripted shell write fails in
+  the sandbox, `read_only_os` denies `sys_os_write`, and the workspace holds no
+  new file. It skips unless `CORAL_TIER_B_STACK_SAMPLE=1`.
+
+`test_tier_b_tool_gate.py` also shows that the CLI answers native `Agent` and
+`Task` calls with "No such tool available", so a step cannot spawn through them.
+
 ### First run (2026-11-15, before S21)
 
 The first run had verdict fail.

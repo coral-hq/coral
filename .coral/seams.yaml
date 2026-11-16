@@ -1134,6 +1134,9 @@ seams:
         carries the refusal matrix with the non-Coral regression (about 160
         lines).
       approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
 
   - id: S30
     title: Exclude Coral-owned tables and coral_alembic_version from Omnigent migrations
@@ -1262,6 +1265,7 @@ seams:
       approver: pending
     anchor_exempt: []
     upstream_first: false
+    upstream_candidate: true
 
   - id: S54
     title: Hide coral__ engine agents from agent lists and pickers
