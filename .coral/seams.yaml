@@ -1137,15 +1137,16 @@ seams:
   - id: S57
     title: Databricks deployment app schema migration entry point
     owner: WS-PLATFORM
-    status: planned
+    status: landed
     category: upstream-extension
     note: >-
-      Planned seam for running Coral schema migrations alongside Omnigent
-      migrations in Databricks app startup (`deploy/databricks/src/app.py`).
-      Runtime call lands in Unit 3 when `coral/db/migrate.py` exists.
+      Runs Coral schema migrations via `run_coral_migrations_with_retry(DB_URI)`
+      strictly after Omnigent migrations in Databricks app startup
+      (`deploy/databricks/src/app.py`).
     files:
       - deploy/databricks/src/app.py
-    tests: []
+    tests:
+      - tests/deploy/test_databricks_app_lakebase_cold_start.py
     budget_lines: 10
     anchor_exempt: []
     upstream_first: false

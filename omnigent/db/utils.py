@@ -294,6 +294,18 @@ def _create_engine(db_uri: str) -> Engine:
         # asyncio.to_thread). The library still serializes access via
         # the pool, so this isn't a footgun — it just removes the
         # legacy single-thread restriction.
+        # CORAL(S58): in-memory SQLite uses SingletonThreadPool which rejects QueuePool kwargs
+        pool_kwargs: dict[str, int] = {}
+        if (
+            ":memory:" not in db_uri
+            and "mode=memory" not in db_uri
+            and db_uri not in {"sqlite://", "sqlite:///"}
+        ):
+            pool_kwargs = {
+                "pool_size": 15,
+                "max_overflow": 25,
+                "pool_timeout": 10,
+            }
         engine = create_engine(
             db_uri,
             connect_args={"check_same_thread": False, "timeout": 20.0},
@@ -306,9 +318,7 @@ def _create_engine(db_uri: str) -> Engine:
             # worker threads thrash SQLite's page-cache mutex and burn CPU
             # instead of queuing cheaply on the pool. ~40 total clears the
             # exhaustion without inviting lock contention.
-            pool_size=15,
-            max_overflow=25,
-            pool_timeout=10,
+            **pool_kwargs,
         )
 
         # Apply WAL + busy_timeout on every fresh DBAPI connection

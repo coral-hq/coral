@@ -31,6 +31,7 @@ OPS-01's generator will maintain this file later.
 | `NOTICE` | S77 | coral-specific | Appends the Coral addendum after Omnigent's unchanged NOTICE: Coral's copyright, the attribution to Omnigent, the CORAL anchor rule, and notices for fonts Coral adds or newly documents. |
 | `README.md` | S91 | coral-specific | Replaced by Coral's README: what Coral is, its status, running it from source with `coral start` (the `coral` command wraps the same CLI as `omnigent`), documentation, contributing, and the credit and attribution to Omnigent. |
 | `SECURITY.md` | S94 | coral-specific | Vulnerability reports go to Coral's private security advisories or coralai.team@gmail.com; the code-scanning link points to Coral's repository. |
+| `deploy/databricks/src/app.py` | S57 | upstream-extension | Runs Coral schema migrations with retry strictly after Omnigent migrations at startup (S57). |
 | `dev/lint/custom_lint.py` | S39 | coral-specific | Registers the `coral-import-boundary` rule last in `RULES` (S39). |
 | `dev/lint/lint_coral_import_boundary.py` | S39, S58 | coral-specific | Added. Enforces Coral's pure/omni/db/app/root three-tier import boundaries (S39). Allowlist permits shared Omnigent DB utilities in coral.db (S58). |
 | `dev/lint/lint_workspace_scoped_cache.py` | S39 | coral-specific | Adds `coral/` to `SCANNED_ROOTS` (S39). |
