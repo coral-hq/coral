@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import secrets
 from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
@@ -35,6 +36,9 @@ _WORKTREE_TIMEOUT_S: float = 150.0
 # A successful create ends within the host's budget plus at most one trailing
 # metadata command; outwait that rather than strand a late success.
 _WORKTREE_CREATE_TIMEOUT_S: float = WORKTREE_CREATE_BUDGET_S + _WORKTREE_TIMEOUT_S
+
+# CORAL(S72): a full git object id, SHA-1 (40) or SHA-256 (64) lowercase hex.
+_GIT_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 WORKTREE_ROOT_LABEL_KEY = "omnigent.git.worktree_root_sha256"
@@ -121,11 +125,15 @@ class CreatedWorktree:
         ``"feature/login"``.
     :param workspace: Selected directory relocated into the new worktree.
         ``None`` for results from older hosts.
+    :param head_commit: ``git rev-parse HEAD`` of the new worktree, e.g.
+        ``"3f2a9c1e…"``. ``None`` for older hosts, when the host could not read
+        it, or when the host sent anything but a full git object id.
     """
 
     worktree_path: str
     branch: str
     workspace: str | None = None
+    head_commit: str | None = None  # CORAL(S72)
 
 
 async def _await_host_worktree_result(
@@ -254,7 +262,23 @@ async def create_worktree_on_host(
         worktree_path=worktree_path,
         branch=branch,
         workspace=workspace if isinstance(workspace, str) else None,
+        head_commit=_git_object_id(result.get("head_commit")),  # CORAL(S72)
     )
+
+
+def _git_object_id(value: object) -> str | None:
+    """Keep a host-sent commit only when it is a full git object id.
+
+    Callers later record the value and pass it to git, so a host must not be
+    able to plant an option, shell text or a huge string in its place.
+
+    :param value: The result's ``head_commit``, e.g. ``"3f2a9c1e…"`` (40 or 64
+        lowercase hex characters).
+    :returns: ``value`` when it matches, else ``None``, as for an older host.
+    """
+    if isinstance(value, str) and _GIT_OBJECT_ID.fullmatch(value):
+        return value
+    return None
 
 
 async def remove_worktree_on_host(

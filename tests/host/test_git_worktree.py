@@ -8,6 +8,7 @@ root resolution, or removal ordering fails loud here.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -260,6 +261,8 @@ def test_create_worktree_from_base_branch(git_repo: Path) -> None:
         repo_path=str(git_repo), branch_name="from-develop", base_branch="develop"
     )
     assert _current_branch(Path(created.worktree_path)) == "from-develop"
+    # CORAL(S72): the reported start commit is the worktree's HEAD, the base's tip.
+    assert created.head_commit == _rev_parse(Path(created.worktree_path))
     # Points at develop's tip, not main's — proves base_branch routed
     # the new branch to develop rather than falling back to HEAD.
     assert _rev_parse(Path(created.worktree_path)) == _rev_parse(git_repo, "develop")
@@ -335,11 +338,16 @@ def test_create_worktree_existing_branch_recreates_after_dir_deleted(git_repo: P
     import shutil
 
     created = create_worktree(repo_path=str(git_repo), branch_name="fix-1")
+    # CORAL(S72): move fix-1 past main so only the branch's own commit matches.
+    _git(Path(created.worktree_path), "commit", "--allow-empty", "-qm", "fix")
     shutil.rmtree(created.worktree_path)
     recreated = create_worktree(repo_path=str(git_repo), branch_name="fix-1", existing_branch=True)
     assert recreated.branch == "fix-1"
     assert Path(recreated.worktree_path).is_dir()
     assert _current_branch(Path(recreated.worktree_path)) == "fix-1"
+    head = _rev_parse(Path(recreated.worktree_path))
+    assert recreated.head_commit == head == _rev_parse(git_repo, "fix-1")
+    assert head != _rev_parse(git_repo, "main")
 
 
 def test_create_worktree_existing_branch_missing_branch_fails(git_repo: Path) -> None:
@@ -389,13 +397,67 @@ def test_create_worktree_checkout_outlasting_command_timeout_completes(
     assert _current_branch(Path(created.worktree_path)) == "large-checkout"
 
 
-def test_create_worktree_non_repo_fails(tmp_path: Path) -> None:
-    """A directory that isn't a git repo is rejected."""
-    plain = tmp_path / "plain"
-    plain.mkdir()
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    [
+        ("missing", "path is not a directory"),
+        ("plain", "not a git repository"),
+        ("file", "path is not a directory"),
+    ],
+)
+def test_create_worktree_non_repo_fails(tmp_path: Path, kind: str, message: str) -> None:
+    """CORAL(S72): a missing path, a plain directory or a file is not a repo to branch from."""
+    path = tmp_path / kind
+    if kind == "plain":
+        path.mkdir()
+    elif kind == "file":
+        path.write_text("not a repository")
     with pytest.raises(WorktreeError) as exc:
-        create_worktree(repo_path=str(plain), branch_name="x")
-    assert "not a git repository" in exc.value.message
+        create_worktree(repo_path=str(path), branch_name="x")
+    assert message in exc.value.message
+    assert not (tmp_path / f"{kind}-worktrees").exists()
+
+
+@pytest.mark.parametrize(
+    "failure", ["exit", "os-error", "decode-error", "timeout", "budget-spent"]
+)
+def test_create_worktree_unreadable_head_keeps_worktree(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """CORAL(S72): a failed HEAD read reports no start commit and keeps the new worktree."""
+    clock = [1000.0]
+    monkeypatch.setattr(git_worktree_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    real_exec = git_worktree_module._exec_git
+    head_reads: list[list[str]] = []
+
+    def run(args: list[str], *, cwd: str, timeout: float) -> subprocess.CompletedProcess[str]:
+        if args[0] == "rev-parse" and args[-1] == "HEAD":
+            head_reads.append(args)
+            if failure == "exit":
+                return subprocess.CompletedProcess(args, 128, "", "fatal: bad HEAD")
+            if failure == "os-error":
+                raise PermissionError(13, "Permission denied", "git")
+            if failure == "decode-error":
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            raise subprocess.TimeoutExpired(args, timeout)
+        result = real_exec(args, cwd=cwd, timeout=timeout)
+        if failure == "budget-spent" and args[:2] == ["worktree", "add"]:
+            clock[0] += git_worktree_module.WORKTREE_CREATE_BUDGET_S
+        return result
+
+    monkeypatch.setattr(git_worktree_module, "_exec_git", run)
+    with caplog.at_level(logging.WARNING, logger=git_worktree_module.__name__):
+        created = create_worktree(repo_path=str(git_repo), branch_name="feature/head")
+
+    assert created.head_commit is None
+    assert _current_branch(Path(created.worktree_path)) == "feature/head"
+    assert _worktree_count(git_repo) == 2
+    # A spent budget stops the read before git starts.
+    assert len(head_reads) == (0 if failure == "budget-spent" else 1)
+    assert "Could not read HEAD" in caplog.text
 
 
 def test_remove_worktree_deletes_dir_and_branch(git_repo: Path) -> None:
@@ -637,6 +699,8 @@ def test_existing_branch_directory_probe_ignores_same_named_tag(
             repo_path=str(source), branch_name="feature", existing_branch=True
         )
         assert Path(created.workspace).is_dir()
+        # CORAL(S72): the pinned path reports the commit it validated.
+        assert created.head_commit == after
         assert (
             next(
                 tree.branch
@@ -877,6 +941,18 @@ def test_create_worktree_size_scaling_commands_share_one_budget(
         ("worktree add", 780.0),
         ("checkout", 580.0),
     ]
+
+
+def test_create_worktree_pinned_checkout_reports_validated_commit(
+    git_repo: Path, timed_git: _TimedGit
+) -> None:
+    """CORAL(S72): a pinned checkout reports the commit it validated without running git again."""
+    source = _subdirectory_repo_with_unfetched_base(git_repo)
+
+    created = create_worktree(repo_path=str(source), branch_name="feature/pinned")
+
+    assert created.head_commit == _rev_parse(Path(created.worktree_path)) == _rev_parse(git_repo)
+    assert timed_git.bounds[-1][0] == "checkout"
 
 
 @pytest.mark.parametrize(

@@ -1006,6 +1006,8 @@ async def _receive_loop(
                         "workspace": frame.workspace,
                         "branch": frame.branch,
                         "error": frame.error,
+                        # CORAL(S72): relay the start commit; the dict drops unlisted fields.
+                        "head_commit": frame.head_commit,
                     }
                 )
             continue

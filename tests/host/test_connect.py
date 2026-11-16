@@ -4466,10 +4466,13 @@ async def test_handle_create_worktree_uses_server_budget_or_legacy_bound(
     """The host spends the budget the server sent, or stays within an older server's deadline."""
     host = _make_host_process()
     captured: dict[str, object] = {}
+    head_commit = "3f2a9c1e" * 5
 
     def _fake_create_worktree(**kwargs: object) -> CreatedWorktree:
         captured.update(kwargs)
-        return CreatedWorktree(worktree_path="/wt", branch="feature/login", workspace="/wt")
+        return CreatedWorktree(
+            worktree_path="/wt", branch="feature/login", workspace="/wt", head_commit=head_commit
+        )
 
     monkeypatch.setattr("omnigent.host.connect.create_worktree", _fake_create_worktree)
 
@@ -4484,6 +4487,8 @@ async def test_handle_create_worktree_uses_server_budget_or_legacy_bound(
 
     assert isinstance(result, HostCreateWorktreeResultFrame)
     assert result.status == "ok"
+    # CORAL(S72): the reply carries the created worktree's start commit.
+    assert result.head_commit == head_commit
     assert captured["timeout_s"] == expected_timeout_s
     # The server outwaits the budget only for hosts that advertise honouring it.
     assert CAP_WORKTREE_CREATE_BUDGET in HOST_CAPABILITIES

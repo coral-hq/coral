@@ -1073,3 +1073,63 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
+
+  - id: S72
+    title: Created worktrees report their start commit
+    owner: WS-WORKSPACE
+    status: landed
+    category: upstreamable
+    note: >-
+      create_worktree reads git rev-parse HEAD in the new worktree and returns
+      it as head_commit, so a caller can record the commit a worktree started
+      from. The read uses the create's deadline-aware git helper after the
+      worktree is complete and outside the rollback path: a non-zero exit,
+      a timeout, a spent budget or any other error logs a warning and reports
+      None, and the worktree is kept. A pinned-subdirectory checkout reports
+      the commit it already validated without running git again. The field
+      rides host.create_worktree_result as an optional head_commit and the
+      server relay passes it on. The create proxy keeps it only when it is a
+      full git object id (40 or 64 lowercase hex); anything else, like an
+      older host's absent field, becomes None, so a host cannot plant an
+      option, shell text or a huge string as a start commit. There is no
+      capability token: like workspace before it, an absent field already
+      means None. Upstream-first in the roadmap: the Omnigent
+      PR still has to be opened by a maintainer; that does not block Coral's
+      use of the field. worktree_parent and a list-side head stay out of
+      scope.
+    files:
+      - omnigent/host/connect.py
+      - omnigent/host/frames.py
+      - omnigent/host/git_worktree.py
+      - omnigent/server/routes/_host_worktree.py
+      - omnigent/server/routes/host_tunnel.py
+      - tests/host/test_connect.py
+      - tests/host/test_frames.py
+      - tests/host/test_git_worktree.py
+      - tests/server/integration/test_hosts_worktrees.py
+      - tests/server/routes/test_host_worktree.py
+    tests:
+      - tests/host/test_git_worktree.py
+      - tests/host/test_frames.py
+      - tests/host/test_connect.py
+      - tests/server/routes/test_host_worktree.py
+      - tests/server/integration/test_hosts_worktrees.py
+    budget_lines: 40
+    budget_exception:
+      lines: 88
+      reason: >-
+        The production files are within budget (largest:
+        omnigent/host/git_worktree.py 31, omnigent/server/routes/_host_worktree.py
+        24). tests/host/test_git_worktree.py (88 lines): head_commit checks on
+        the new-branch, existing-branch recreate and both pinned paths, the
+        unreadable-HEAD matrix (non-zero exit, OSError, decode error, timeout,
+        spent budget) and the missing / plain directory / file non-repo
+        matrix. tests/server/integration/test_hosts_worktrees.py (53): the
+        fixture's drain now also answers create frames, failing a create with
+        no registered reply at once, and the relay test bounds its wait; this
+        is the only layer that exercises the real tunnel relay of a create
+        result.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: true
+    upstream_candidate: true

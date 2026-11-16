@@ -4623,6 +4623,7 @@ class HostProcess:
             worktree_path=created.worktree_path,
             branch=created.branch,
             workspace=created.workspace,
+            head_commit=created.head_commit,  # CORAL(S72)
         )
 
     async def _handle_remove_worktree(
