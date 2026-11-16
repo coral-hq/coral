@@ -1,0 +1,95 @@
+{
+  "ir_version": 1,
+  "workflow_id": "demo",
+  "name": "Demo",
+  "description": null,
+  "nodes": [
+    {
+      "id": "start",
+      "kind": "start",
+      "name": null,
+      "goal": null,
+      "question": null,
+      "prompt": null,
+      "roster": [],
+      "harness": null,
+      "attempts": null,
+      "concurrency": null,
+      "list_from": null,
+      "parts": [],
+      "outcomes": []
+    },
+    {
+      "id": "work",
+      "kind": "step",
+      "name": "Work",
+      "goal": "Do the thing",
+      "question": null,
+      "prompt": null,
+      "roster": ["implementer"],
+      "harness": null,
+      "attempts": 3,
+      "concurrency": 1,
+      "list_from": null,
+      "parts": [],
+      "outcomes": []
+    },
+    {
+      "id": "end",
+      "kind": "end",
+      "name": null,
+      "goal": null,
+      "question": null,
+      "prompt": null,
+      "roster": [],
+      "harness": null,
+      "attempts": null,
+      "concurrency": null,
+      "list_from": null,
+      "parts": [],
+      "outcomes": []
+    }
+  ],
+  "arrows": [
+    {
+      "id": "a1",
+      "source": "start",
+      "target": "work",
+      "label": null,
+      "kind": "forward",
+      "limit": null,
+      "at_limit": null
+    },
+    {
+      "id": "a2",
+      "source": "work",
+      "target": "end",
+      "label": null,
+      "kind": "forward",
+      "limit": null,
+      "at_limit": null
+    }
+  ],
+  "content_hash": "735341285b49b50d7b75d5324f64d8f361993760d46c4039e03e6ac4bc8a42d8",
+  "analysis": {
+    "join_types": [],
+    "loops": [],
+    "regions": [],
+    "unresolved": [],
+    "label_sets": [
+      {
+        "node_id": "start",
+        "labels": [],
+        "labelled_arrow_ids": [],
+        "unlabelled_arrow_ids": ["a1"]
+      },
+      {
+        "node_id": "work",
+        "labels": [],
+        "labelled_arrow_ids": [],
+        "unlabelled_arrow_ids": ["a2"]
+      }
+    ],
+    "checked_parts": []
+  }
+}

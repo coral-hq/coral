@@ -331,8 +331,14 @@ describe("Coral desk routes", () => {
   }
 
   // A fresh Response per call: bodies can only be read once.
+  // `/v1/coral/info` gets the given response; the workflow library is empty.
   function serveCoral(status: number, body: unknown) {
-    authenticatedFetch.mockImplementation(async () => respondWith(status, body));
+    authenticatedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/v1/coral/info")) return respondWith(status, body);
+      if (url.includes("/v1/coral/workflows")) return respondWith(200, []);
+      return respondWith(404, {});
+    });
   }
 
   beforeEach(() => {
@@ -340,27 +346,33 @@ describe("Coral desk routes", () => {
   });
   afterEach(cleanup);
 
-  it("renders the placeholder desk behind the gate when Coral is enabled", async () => {
+  it("renders the workflows desk behind the gate when Coral is enabled", async () => {
     serveCoral(200, coralInfo());
     renderCoralRoute("/workflows");
 
     expect(await screen.findByRole("heading", { name: "Workflows", level: 1 })).toBeInTheDocument();
-    expect(screen.getByText("No workflows yet")).toBeInTheDocument();
+    expect(await screen.findByText("No workflows yet")).toBeInTheDocument();
     expect(screen.getByText("app shell")).toBeInTheDocument();
     expect(screen.queryByText("not found")).toBeNull();
     expect(authenticatedFetch).toHaveBeenCalledWith("/v1/coral/info", expect.anything());
   });
 
-  it("renders run and workflow routes instead of the catch-all", async () => {
+  it("renders a run route instead of the catch-all", async () => {
     serveCoral(200, coralInfo());
     renderCoralRoute("/workflows/runs/r1?agent=s1");
     expect(await screen.findByTestId("workflow-run-placeholder")).toHaveTextContent("r1");
-    cleanup();
+  });
 
+  it("renders the workflow editor route for an unknown key", async () => {
+    serveCoral(200, coralInfo());
     renderCoralRoute("/workflows/daily-report");
-    expect(await screen.findByTestId("workflow-placeholder")).toHaveTextContent("daily-report");
-    cleanup();
+    expect(
+      await screen.findByTestId("workflow-editor-error", {}, { timeout: 5000 }),
+    ).toHaveTextContent("Workflow daily-report not found");
+  });
 
+  it("renders a settings placeholder instead of the catch-all", async () => {
+    serveCoral(200, coralInfo());
     renderCoralRoute("/workflows/settings/gates");
     expect(await screen.findByTestId("workflow-settings-placeholder")).toBeInTheDocument();
   });
