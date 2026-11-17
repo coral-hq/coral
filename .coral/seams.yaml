@@ -1989,7 +1989,11 @@ seams:
       names or prompt text yet. The `_connect_host` helper in
       tests/server/integration/test_session_host_launch.py takes optional
       hello capabilities so Coral's facade tests can connect a host with the
-      token; existing callers send none.
+      token; existing callers send none. It also exposes
+      is_extension_tool_name(name) (a valid tool name without `__`) and
+      is_framework_tool_name(name) (any `sys_` name, a builtin registry name
+      or a skill tool; it imports the builtin registry only when called),
+      which S7 and S10 share.
     files:
       - omnigent/tools/extensions.py
       - omnigent/host/frames.py
@@ -2008,11 +2012,11 @@ seams:
     budget_exception:
       lines: 581
       reason: >-
-        omnigent/tools/extensions.py (new, 473 lines) holds the provider
+        omnigent/tools/extensions.py (new, 490 lines) holds the provider
         protocol and tool-set type, the single-shot loader, the guarded
         tool-set normalisation and checks, the conflict rule, the name and
-        token checks, the once-per-process problem log and the accessors,
-        with docstrings. tests/tools/test_extensions.py (new, 581 lines)
+        token checks, the shared tool-name and framework-name predicates, the
+        once-per-process problem log and the accessors, with docstrings. tests/tools/test_extensions.py (new, 581 lines)
         covers the loader (broken entries named by distribution, discovery
         order with the value tie-break, the cache, unreadable metadata),
         eighteen malformed tool-set shapes checked through the tool manager and
@@ -2043,9 +2047,10 @@ seams:
       browser tools. It wraps each plain-JSON schema copy from S50's
       extension_tool_sets(spec) in `_SchemaOnlyTool`. A provider tool is
       skipped, with an error logged once per process, when its name belongs
-      to a framework tool whether or not the spec enables it (any `sys_`
-      name, a name in the builtin registry `BUILTIN_NAMES`, or a skill tool),
-      so a provider cannot grant back a tool the spec left out, or when the
+      to a framework tool whether or not the spec enables it (S50's
+      is_framework_tool_name: any `sys_` name, a name in the builtin registry
+      `BUILTIN_NAMES`, or a skill tool), so a provider cannot grant back a
+      tool the spec left out, or when the
       name is already registered (the registered tool stays). It never
       raises, because a raise leaves the runner's conversation without any
       tools and other ToolManager builds do not all catch it. The runner's
@@ -2066,7 +2071,7 @@ seams:
         clash test (a client tool kept, the error logged once over two
         builds) and the framework-name test (every runner-dispatched builtin
         and registry name refused for a spec without os_env, timers or the
-        browser group). omnigent/tools/manager.py (40) is within budget.
+        browser group). omnigent/tools/manager.py (39) is within budget.
       approver: pending
     anchor_exempt: []
     upstream_first: false
@@ -2119,6 +2124,131 @@ seams:
     tests:
       - tests/runtime/test_prompt.py
     budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S10
+    title: Server tool registry and its /mcp call site
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `omnigent/server/server_tools.py` holds a process-wide, lock-guarded
+      registry of server tools keyed by tool name. register_server_tool(name,
+      handler) refuses a name that is not a valid extension tool name
+      (S50's is_extension_tool_name: fullmatch, no `__`) or starts with
+      `sys_` (framework tools keep their own handling, such as
+      sys_advise_models); registering a name again replaces it, with a
+      warning when the handler changes; it returns an idempotent unregister
+      that removes only its own registration, so an older unregister never
+      removes a newer registration, even of the same handler.
+      server_tool(name) returns None for a name that is not a string, strips
+      one leading `mcp__omnigent__` and does an exact lookup.
+      granted_server_tool(name, spec) returns the handler only when an
+      installed tool provider (S50) offers that tool for the session's spec,
+      the name is not a framework tool's (S7's rule, shared as
+      is_framework_tool_name: any `sys_` name, a builtin registry name or a
+      skill tool), the spec declares no local tool of that name (the runner
+      keeps the spec's own tool, S7) and, for the `mcp__omnigent__` form, the
+      spec has no MCP server named `mcp` (whose tools share that prefix).
+      Providers are consulted only for a registered name. run_server_tool
+      awaits the handler; an exception (not cancellation) or a result that
+      is not a ServerToolResult with string text is logged with the session
+      id and answered "server tool failed; see the server log" as an error.
+      `_handle_mcp_tools_call` in orchestration.py runs the lookup right
+      after the sys_advise_models intercept, so after TOOL_CALL policy
+      (DENY, ASK and its approved retry, ALLOW transforms) and before the
+      runner forward, and only when no backend executor is passed (the MCP
+      gateway adapter's service tools never reach it). Arguments that are
+      not a dict (from the caller or a policy transform) get -32000 and
+      never reach the handler. It builds a ServerToolCall (session id, bare
+      name, the policy-owned arguments dict, the caller's operation id,
+      runner proof from S49, the policy actor), returns -32000 with the
+      text for an error result and an MCP text result otherwise, and skips
+      TOOL_RESULT policy, redaction policies included, as advise does. S10
+      authorizes nothing beyond the route's edit access: each handler checks
+      runner_proven and the operation id itself and treats both, and the
+      arguments, as untrusted. S10 sets no time limit, so handlers bound their
+      own work; the runner may resend an operation id while the first call
+      runs. No approved_after_ask flag. With nothing registered the proxy is
+      unchanged, malformed names included. Residuals: one registry per
+      process (the later lifespan's registration wins); on the runner's
+      direct-stream path a per-request client tool named like a tool granted
+      to the session is answered by the server tool (S8 already forwards
+      it); a Python tool file's `@tool` function named unlike the file but
+      like a granted tool is answered by the server tool (spec-local tools
+      are known by file stem, as in the runner's own check).
+    files:
+      - omnigent/server/server_tools.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - tests/server/test_server_tools.py
+      - tests/server/routes/test_sessions_mcp_proxy_policy_retry.py
+    tests:
+      - tests/server/test_server_tools.py
+      - tests/server/routes/test_sessions_mcp_proxy_policy_retry.py
+    budget_lines: 40
+    budget_exception:
+      lines: 370
+      reason: >-
+        tests/server/routes/test_sessions_mcp_proxy_policy_retry.py (370
+        changed lines) adds a server-tool harness (bound runner token,
+        recorded policy phases, a MockTransport runner, the test provider)
+        and thirty route cases: deny, ask-accept and allow-transform in both
+        name forms with the exact ServerToolCall and no runner or TOOL_RESULT
+        call; a declined, a denied-on-retry and a changed-arguments approval
+        that never reach the handler; an unregister during a call; a
+        raising, an is_error and a non-result handler; runner proof for the
+        session runner, another token and no request; a session not given
+        the tool, a same-named local tool and the gateway backend keeping
+        their old paths; sys_advise_models unchanged in both name forms;
+        non-string names answered as without server tools, with and without
+        a registration; non-object arguments refused.
+        omnigent/server/server_tools.py (new, 206 lines) holds the call and
+        result types, the registry, the grant check and the failure handling
+        with docstrings. tests/server/test_server_tools.py (new, 255 lines)
+        covers lookup (non-string names included), identity-checked
+        unregister (no warning for the same handler), eight invalid names,
+        handler failures, cancellation and the grant check (framework names,
+        the `mcp` server alias, a conflict), and exports the echo spec and
+        provider the route tests reuse. orchestration.py (36) is within
+        budget.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S49
+    title: runner_proven extracted from mcp_policy_actor
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `omnigent/server/mcp_identity.py` gains runner_proven(request,
+      conversation): true when the request's runner tunnel token (stripped,
+      non-empty) is bound to the session's runner_id or is in the server's
+      runner_tunnel_tokens allow-list. It is exactly the rule
+      mcp_policy_actor used inline; mcp_policy_actor now calls it, so the
+      policy actor is unchanged for every token case. S10 passes the result
+      to server tools as ServerToolCall.runner_proven. Proof is
+      runner-granular: anything holding the runner's token proves every
+      session that runner serves.
+    files:
+      - omnigent/server/mcp_identity.py
+      - tests/server/test_mcp_identity.py
+    tests:
+      - tests/server/test_mcp_identity.py
+    budget_lines: 40
+    budget_exception:
+      lines: 82
+      reason: >-
+        tests/server/test_mcp_identity.py (new, 82 lines) checks
+        runner_proven and the policy actor over eleven token cases (bound,
+        padded, another runner's, missing, blank, a session without a runner
+        or on a stable id, allow-listed with and without a runner, not
+        allow-listed, a blank allow-list entry). omnigent/server/mcp_identity.py
+        (22) is within budget.
+      approver: pending
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

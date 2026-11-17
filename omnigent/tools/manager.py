@@ -203,24 +203,23 @@ class ToolManager:
         registered. It never raises: a raise leaves the conversation without
         any tools.
         """
-        from omnigent.tools.builtins import BUILTIN_NAMES
         from omnigent.tools.extensions import (
             extension_tool_name,
             extension_tool_sets,
+            is_framework_tool_name,
             log_extension_problem,
         )
 
         tool_sets = extension_tool_sets(self._spec)
         if not tool_sets:
             return
-        framework_names = BUILTIN_NAMES | {LoadSkillTool.name(), ReadSkillFileTool.name()}
         for tool_set in tool_sets:
             for schema in tool_set.tools:
                 name = extension_tool_name(schema)
                 if name is None:  # extension_tool_sets drops malformed sets
                     continue
                 existing = self._tools.get(name)
-                if name.startswith("sys_") or name in framework_names:
+                if is_framework_tool_name(name):
                     log_extension_problem(
                         f"Extension tool {name!r} has a framework tool's name; skipping it"
                     )

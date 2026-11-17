@@ -311,9 +311,31 @@ def extension_tool_name(schema: object) -> str | None:
     name = function.get("name")
     if not isinstance(function.get("description"), str):
         return None
-    if not isinstance(function.get("parameters"), dict) or not _is_extension_tool_name(name):
+    if not isinstance(function.get("parameters"), dict) or not is_extension_tool_name(name):
         return None
     return name
+
+
+def is_extension_tool_name(name: object) -> TypeGuard[str]:
+    """Whether *name* is a valid tool name (by fullmatch) without ``__``."""
+    # ``__`` is excluded because the runner's MCP refresh drops builtins whose name has it.
+    return isinstance(name, str) and TOOL_NAME_RE.fullmatch(name) is not None and "__" not in name
+
+
+def is_framework_tool_name(name: str) -> bool:
+    """Whether *name* belongs to a framework tool, whether or not a spec enables it.
+
+    That is any ``sys_`` name, a builtin registry name or a skill tool. No
+    provider tool with such a name is registered or run by the server. Imports
+    the builtin registry on first call, never at module import.
+    """
+    from omnigent.tools.builtins import BUILTIN_NAMES, LoadSkillTool, ReadSkillFileTool
+
+    return (
+        name.startswith("sys_")
+        or name in BUILTIN_NAMES
+        or name in (LoadSkillTool.name(), ReadSkillFileTool.name())
+    )
 
 
 def log_extension_problem(message: str) -> None:
@@ -410,7 +432,7 @@ def _unconflicted(owners: Mapping[str, list[str]], kind: str) -> set[str]:
 def _server_names_problem(declared: tuple[str, ...] | None) -> str | None:
     if declared is None:
         return "not a collection of strings"
-    invalid = next((name for name in declared if not _is_extension_tool_name(name)), None)
+    invalid = next((name for name in declared if not is_extension_tool_name(name)), None)
     return None if invalid is None else f"invalid name {invalid[:80]!r}"
 
 
@@ -425,11 +447,6 @@ def _host_capabilities_problem(declared: tuple[str, ...] | None) -> str | None:
         if token.startswith(RESERVED_HOST_CAPABILITY_PREFIXES):
             return f"reserved token {token[:40]!r}"
     return None
-
-
-def _is_extension_tool_name(name: object) -> TypeGuard[str]:
-    # ``__`` is excluded because the runner's MCP refresh drops builtins whose name has it.
-    return isinstance(name, str) and TOOL_NAME_RE.fullmatch(name) is not None and "__" not in name
 
 
 def _string_items(value: object) -> tuple[str, ...] | None:
