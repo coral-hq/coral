@@ -21,8 +21,14 @@ from coral.db.enum_codecs import (
 from coral.model.ids import derived_id
 from coral.omni.protocols import HostAccessRefused
 from coral.queue.executors import ExecutionContext
-from coral.stores.fakes import FakeRunStore
-from coral.stores.protocols import AgentSlotDraft, CoralRun, RunStartSpec, Transition, WorkItem
+from coral.stores.protocols import (
+    AgentSlotDraft,
+    CoralRun,
+    RunStartSpec,
+    RunStore,
+    Transition,
+    WorkItem,
+)
 from coral.stores.session_bindings import SessionBinding, SessionBindingDraft, effect_checksum
 from coral.stores.workspace_op_intents import OpIntentConflict, WorkspaceOpIntent
 from coral.workspace.ops import HostChannelBackend, OpName
@@ -37,12 +43,12 @@ OWN_BRANCH = "<the run's own branch>"
 
 
 def started_run_id(*, user_id: str | None, start_key: str) -> str:
-    """The id ``FakeRunStore.start_run`` gives a run started with ``start_key``."""
+    """The id a run store's ``start_run`` gives a run started with ``start_key``."""
     return derived_id("coral-run", user_id or "", start_key)
 
 
 def start_run(
-    run_store: FakeRunStore,
+    run_store: RunStore,
     *,
     workspace_id: int,
     user_id: str | None,
@@ -82,7 +88,7 @@ def start_run(
 
 
 def add_slot(
-    run_store: FakeRunStore,
+    run_store: RunStore,
     run: CoralRun,
     *,
     session_id: str,

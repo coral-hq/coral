@@ -96,6 +96,12 @@ def test_seed_bundles_are_named_for_their_stance() -> None:
         assert config["params"]["coral"]["generated"]["stance"] == stance.value
 
 
+def test_the_anchor_agent_keeps_the_harness_default_permission_mode() -> None:
+    # An owner can attach a runner to the anchor; it must not skip approvals then.
+    config = yaml.safe_load(build_seed_bundle_yaml(Stance.ANCHOR))
+    assert "permission_mode" not in config["executor"]["config"]
+
+
 def test_step_names_map_dots_and_reject_bad_slugs() -> None:
     assert step_agent_name(StepRef(workflow_id="a.b", node_id="c.d", roster_index=3)) == (
         "coral__a-b__c-d__m3"
