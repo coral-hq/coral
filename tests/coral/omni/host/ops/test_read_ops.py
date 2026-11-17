@@ -116,6 +116,7 @@ def test_diff_stat_counts_lines_between_commits_and_defaults_to_head(
             "insertions": 3,
             "deletions": 0,
             "paths": ["README.md", "docs/new.md"],
+            "paths_truncated": False,
         }
     )
 
@@ -128,7 +129,37 @@ def test_diff_stat_counts_lines_between_commits_and_defaults_to_head(
         "insertions": 0,
         "deletions": 1,
         "paths": ["image.bin", "src/app.py"],
+        "paths_truncated": False,
     }
+
+
+def test_diff_stat_cuts_a_path_list_too_large_for_the_channel_but_keeps_the_counts(
+    worktree: LinkedWorktree, handlers: Handlers, tmp_path: Path
+) -> None:
+    # 4,200 deep vendored paths (1,011 characters, under PATH_MAX): about 4.3 MB of
+    # names, over the payload bound. The tree is built in a scratch index from one
+    # blob, so no file is written.
+    deep = "/".join(["n" * 99] * 10)
+    names = [f"vendor/{index:04d}/{deep}" for index in range(4_200)]
+    blob = run_git(worktree.root, "hash-object", "-w", "--stdin", input=b"line\n").strip()
+    scratch_index = {"GIT_INDEX_FILE": str(tmp_path / "scratch-index")}
+    run_git(worktree.root, "read-tree", worktree.base, env=scratch_index)
+    index_info = "".join(f"100644 {blob}\t{name}\n" for name in names).encode()
+    run_git(worktree.root, "update-index", "--index-info", env=scratch_index, input=index_info)
+    tree = run_git(worktree.root, "write-tree", env=scratch_index).strip()
+    vendored = run_git(worktree.root, "commit-tree", tree, "-p", worktree.base, "-m", "vendor")
+
+    diff = handlers["diff_stat"](
+        op_request("diff_stat", worktree, from_commit=worktree.base, to_commit=vendored.strip())
+    )
+
+    assert (diff["files_changed"], diff["insertions"], diff["deletions"]) == (4_200, 4_200, 0)
+    assert diff["paths_truncated"] is True
+    kept = diff["paths"]
+    assert isinstance(kept, list) and kept == names[: len(kept)]
+    bound = _read_ops.MAX_DIFF_STAT_PAYLOAD_BYTES
+    assert len(json.dumps(diff)) <= bound
+    assert len(json.dumps({**diff, "paths": names[: len(kept) + 1]})) > bound
 
 
 def test_diff_stat_of_an_unknown_commit_fails(

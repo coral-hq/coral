@@ -19,6 +19,7 @@ from coral.omni.protocols import HostAccessRefused
 from omnigent.db.db_models import workspace_scope
 from omnigent.server.host_registry import HostConnection, HostRegistry, host_owner_scope
 from omnigent.stores.host_store import Host, HostStore
+from omnigent.util.uuid import InvalidUuidError, uuid_to_bytes
 
 
 class HostAccessError(HostAccessRefused):
@@ -45,9 +46,15 @@ async def authorize_owner_host(
         run. A host row from another registration of the same user id is
         refused, as ``fire.py`` refuses it for scheduled tasks.
     :param workspace_id: The tenant partition the host row lives in.
-    :raises HostAccessError: ``not_permitted`` for an unknown host, another
-        user's or registration's host, or a managed sandbox host.
+    :raises HostAccessError: ``not_permitted`` for an unknown host (an id no
+        host row can have included), another user's or registration's host, or
+        a managed sandbox host.
     """
+    try:
+        # The store raises an untyped error for an id that is not a uuid.
+        uuid_to_bytes(host_id)
+    except InvalidUuidError:
+        raise HostAccessError("not_permitted", host_not_available(host_id)) from None
     with workspace_scope(workspace_id):
         host = await asyncio.to_thread(host_store.get_host, host_id)
     # One message for unknown and foreign hosts, so neither is revealed.

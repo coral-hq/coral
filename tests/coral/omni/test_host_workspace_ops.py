@@ -581,6 +581,33 @@ async def test_a_host_the_run_owner_may_not_use_is_refused_before_any_frame(
     assert tunnel.frames == []
 
 
+async def test_a_host_id_no_host_row_can_have_is_refused_before_any_frame(
+    engine: _Engine, worktree: LinkedWorktree, tunnel: _HostTunnel
+) -> None:
+    # The host store raises for an id that is not a uuid; it never reaches the store.
+    run = start_run(
+        engine.run_store,
+        workspace_id=_WORKSPACE_ID,
+        user_id=_OWNER,
+        account_generation=_GENERATION,
+        host_id="laptop-1",
+        repo_path=str(worktree.repo_root),
+        worktree_path=str(worktree.root),
+    )
+
+    for kind, fields in (("salvage", {}), ("reset", {"commit": worktree.base})):
+        payload = {
+            "effect_type": f"workspace.{kind}",
+            "effect_key": f"{run.id}:1:{kind}:slot-1",
+            **fields,
+        }
+        ctx = effect_context(workspace_id=_WORKSPACE_ID, run_id=run.id, payload=payload)
+        failure = _failed(await engine.executors[kind](ctx))
+        assert (failure.error_code, failure.retryable) == ("workspace.host_not_permitted", False)
+
+    assert tunnel.frames == []
+
+
 @pytest.mark.parametrize(
     ("owner", "generation"),
     [("bob@example.com", _GENERATION), (_OWNER, "gen-2")],

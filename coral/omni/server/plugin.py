@@ -179,7 +179,13 @@ def _wire_session_engine(
         WORKSPACE_RESET: reset_executor(channels, run_store, scope_runner),
     }
     for effect_type, executor in executors.items():
-        register_executor(effect_type, executor, replace=True)
+        # A cancelled run is finished when its cancel_sessions items are claimed.
+        register_executor(
+            effect_type,
+            executor,
+            replace=True,
+            runs_after_terminal=effect_type == CANCEL_SESSIONS,
+        )
         stack.callback(unregister_executor, effect_type, executor)
     stack.callback(register_status_edge_observer(STATUS_EDGE_OBSERVER, edges.observe))
     stack.callback(register_status_edge_observer(CONFIRMED_STOPS_OBSERVER, stops.observe))

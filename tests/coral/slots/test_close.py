@@ -19,6 +19,7 @@ from coral.omni.protocols import CoralSessionError, LiveStatus, engine_message_t
 from coral.queue.executors import EffectCompleted
 from coral.queue.run_effects import EffectRefused
 from coral.slots.close import (
+    AcceptedEdits,
     CloseBlocked,
     CloseBounds,
     CloseOutcome,
@@ -170,6 +171,12 @@ class _Close:
         self.start = self.workspace.add_workspace(REF, {"README.md": b"start\n"})
         self.intents = FakeIntents(self.events)
         self.stops = ConfirmedStops()
+        self.accepted_edits = AcceptedEdits()
+
+    def restart_worker(self) -> None:
+        """A new server process: the in-memory stop and post-accept records are gone."""
+        self.stops = ConfirmedStops()
+        self.accepted_edits = AcceptedEdits()
 
     async def lease(self) -> None:
         self.events.append("lease")
@@ -201,6 +208,7 @@ class _Close:
             "ensure_lease": self.lease,
             "bounds": BOUNDS,
             "stops": self.stops,
+            "accepted_edits": self.accepted_edits,
             **changes,
         }
         return await close_session(**params)
@@ -663,9 +671,49 @@ async def test_a_retry_after_a_crash_at_each_step_returns_the_same_result(crash_
     env.dispatch.hooks.clear()
     retried = await env.close()
 
-    assert retried == await _reference_outcome()
+    reference = await _reference_outcome()
+    if crash_at == "stopped_fingerprint":
+        # The first try stopped the session but never compared the trees: flag for review.
+        reference = replace(reference, post_accept_edits=True, pending_input=True)
+    assert retried == reference
     # The start commit and the one close commit.
     assert len(env.workspace._commits) == 2
+
+
+@pytest.mark.parametrize(
+    ("late_edit", "restart", "flagged"),
+    [
+        (True, False, True),
+        (True, True, True),
+        (False, False, False),
+        (False, True, True),
+    ],
+    ids=["late-edit", "late-edit-after-restart", "no-late-edit", "no-late-edit-after-restart"],
+)
+async def test_a_retry_after_the_commit_landed_never_loses_post_accept_edits(
+    late_edit: bool, restart: bool, flagged: bool
+) -> None:
+    env = _Close()
+    env.workspace.write_file(REF, "work.txt", b"accepted\n")
+    if late_edit:
+        # A background shell writes after the turn end, before the stop ends it.
+        env.workspace.after_once["fingerprint"] = lambda: env.workspace.write_file(
+            REF, "late.txt", b"after the turn end\n"
+        )
+    env.workspace.faults["diff_stat"] = WorkspaceOpError(
+        "workspace.backend_unavailable", "the tunnel dropped"
+    )
+    with pytest.raises(EffectRefused):
+        await env.close()
+    if restart:
+        env.restart_worker()
+
+    retried = await env.close()
+
+    # Both of the retry's fingerprints show the committed tree; the first try's
+    # answer is kept in process, and a lost one flags the tree for review.
+    assert (retried.post_accept_edits, retried.pending_input) == (flagged, flagged)
+    assert env.events.count("commit") == 2 and len(env.workspace._commits) == 2
 
 
 async def test_an_unconfirmed_stop_is_retryable_and_nothing_is_committed() -> None:

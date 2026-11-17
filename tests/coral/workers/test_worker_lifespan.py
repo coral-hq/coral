@@ -23,12 +23,14 @@ from sqlalchemy.orm import Session
 from coral.db import WorkRow
 from coral.db.enum_codecs import SessionBindingProgress, WorkStatus
 from coral.omni.server import OmnigentRunScopeRunner, coral_lifespan
+from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue import executors as queue_executors
 from coral.queue.executors import (
     EffectCompleted,
     EffectFailed,
     EffectOutcome,
     get_executor,
+    get_registration,
     registered_executor_kinds,
 )
 from coral.queue.store import SqlAlchemyCoralQueueStore
@@ -56,7 +58,12 @@ from omnigent.stores.host_store import HostStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
-from tests.coral.workspace._executor_fakes import add_slot, effect_context, start_run
+from tests.coral.workspace._executor_fakes import (
+    FakeHostChannel,
+    add_slot,
+    effect_context,
+    start_run,
+)
 from tests.server.helpers import create_session_for_agent, create_test_agent
 
 ENGINE_EFFECT_TYPES = frozenset(
@@ -236,6 +243,13 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
             state = server.app.state
             assert observers["coral"] == state.coral_status_edges.observe
             assert observers["coral.confirmed_stops"] == state.coral_confirmed_stops.observe
+            # Only cancel_sessions runs for a run that already ended (cancel_run ends it).
+            registrations = {kind: get_registration(kind) for kind in ENGINE_EFFECT_TYPES}
+            assert {
+                kind
+                for kind, registration in registrations.items()
+                if registration is not None and registration.runs_after_terminal
+            } == {CANCEL_SESSIONS}
         assert _engine_registrations() == NOTHING
     # The supervisor stopped while every executor was still registered, so no
     # item can be claimed and find its executor missing.
@@ -384,12 +398,29 @@ async def test_item_claimed_during_exit_is_retried_not_failed(
     assert done.result is not None and json.loads(done.result) == {"session_id": None}
 
 
-async def test_a_close_and_a_commit_share_one_stop_record(server: _Server) -> None:
+async def test_a_close_and_a_commit_share_one_stop_record(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A close's confirmed stop lets a later commit past its turn check, until the step runs."""
     workspace_id = DEFAULT_WORKSPACE_ID
     slot = "review/item-0/m0"
-    # No host row has this id, so a commit past its turn check stops at the host check.
     host_id = uuid.uuid4().hex
+    # The run worktree's host answers each op from canned replies.
+    host_ops: list[str] = []
+    host = FakeHostChannel(
+        host_ops,
+        {
+            "fingerprint": {"level": "L1", "digest": "d" * 64, "head": "1" * 40, "dirty_count": 1},
+            "head": {"head": "1" * 40, "branch": None, "merge_in_progress": False},
+            "commit": {"commit": "2" * 40, "empty": False},
+            "diff_stat": {"files_changed": 1, "insertions": 1, "deletions": 0, "paths": ["a"]},
+        },
+    )
+
+    async def host_channel(*_args: object, **_scope: object) -> FakeHostChannel:
+        return host
+
+    monkeypatch.setattr(OmnigentHostWorkspaceChannels, "channel", host_channel)
     run_store = SqlAlchemyCoralRunStore(server.db_uri)
     run = start_run(
         run_store,
@@ -437,10 +468,9 @@ async def test_a_close_and_a_commit_share_one_stop_record(server: _Server) -> No
     try:
         # The step's turn has ended.
         session_helpers._publish_status(session_id, "idle", persist_live_status=False)
+        add_slot(run_store, run, session_id=session_id)
         async with coral_lifespan(server.app, server.services):
-            # The slot does not name the session yet, so its close stops it without a commit.
             closed = await deliver(CLOSE_SLOT, 5)
-            add_slot(run_store, run, session_id=session_id)
             after_close = await deliver(WORKSPACE_COMMIT, 6, **commit)
             # The session ran again: the record's observer drops the stop.
             session_helpers._publish_status(session_id, "running", persist_live_status=False)
@@ -451,11 +481,9 @@ async def test_a_close_and_a_commit_share_one_stop_record(server: _Server) -> No
         session_helpers._session_active_response_cache.pop(session_id, None)
 
     assert isinstance(closed, EffectCompleted) and closed.result is not None
-    assert closed.result["commit"] is None
-    assert isinstance(after_close, EffectFailed)
-    assert (after_close.error_code, after_close.retryable) == (
-        "workspace.host_not_permitted",
-        False,
-    )
+    assert closed.result["commit"] == "2" * 40
+    # The close's own stop let the later commit past its turn check.
+    assert isinstance(after_close, EffectCompleted), after_close
+    assert host_ops.count("commit") == 2
     assert isinstance(after_rerun, EffectFailed)
     assert (after_rerun.error_code, after_rerun.retryable) == ("session.turn_state_unknown", True)

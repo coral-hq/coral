@@ -48,11 +48,12 @@ from omnigent.host.identity import HostIdentity
 from omnigent.server import host_registry as host_registry_module
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.stores.host_store import Host
+from omnigent.util.uuid import uuid_to_bytes
 from tests.host.test_git_worktree import _current_branch, _git, _rev_parse, _worktree_count
 from tests.host.test_git_worktree import git_repo as git_repo
 from tests.server.routes.test_host_worktree import _FakeWebSocket, _hello_frame
 
-_HOST_ID = "host_run_worktree"
+_HOST_ID = "7" * 32
 _OWNER = "alice@example.com"
 _GENERATION = "gen-1"
 # A non-default workspace proves the host row and the connection are read in its scope.
@@ -66,6 +67,8 @@ class _HostRows:
         self.rows: dict[tuple[int, str], Host] = {}
 
     def get_host(self, host_id: str) -> Host | None:
+        # The real store's uuid column raises for an id that is not a uuid.
+        uuid_to_bytes(host_id)
         return self.rows.get((current_workspace_id(), host_id))
 
 
@@ -194,13 +197,14 @@ async def _connect(
     user_id: str | None = _OWNER,
     generation: str | None = _GENERATION,
     workspace_id: int = _WORKSPACE_ID,
+    host_id: str = _HOST_ID,
 ) -> RunWorktreeHost:
     return await connect_run_worktree_host(
         host_registry=tunnel.registry,
         host_store=tunnel.host_rows,  # type: ignore[arg-type]
         user_id=user_id,
         account_generation=generation,
-        host_id=_HOST_ID,
+        host_id=host_id,
         workspace_id=workspace_id,
     )
 
@@ -583,14 +587,16 @@ async def test_every_frame_is_sent_under_the_owner_scope(
 
 
 @pytest.mark.parametrize(
-    ("row", "user_id", "workspace_id"),
+    ("row", "user_id", "workspace_id", "host_id"),
     [
-        (None, _OWNER, _WORKSPACE_ID),
-        (_host_row(user_id="bob@example.com"), _OWNER, _WORKSPACE_ID),
-        (_host_row(generation="gen-2"), _OWNER, _WORKSPACE_ID),
-        (_host_row(sandbox_provider="modal"), _OWNER, _WORKSPACE_ID),
-        (_host_row(sandbox_provider="modal"), None, _WORKSPACE_ID),
-        (_host_row(), _OWNER, 0),
+        (None, _OWNER, _WORKSPACE_ID, _HOST_ID),
+        (_host_row(user_id="bob@example.com"), _OWNER, _WORKSPACE_ID, _HOST_ID),
+        (_host_row(generation="gen-2"), _OWNER, _WORKSPACE_ID, _HOST_ID),
+        (_host_row(sandbox_provider="modal"), _OWNER, _WORKSPACE_ID, _HOST_ID),
+        (_host_row(sandbox_provider="modal"), None, _WORKSPACE_ID, _HOST_ID),
+        (_host_row(), _OWNER, 0, _HOST_ID),
+        # An id no host row can have; the store would raise instead of answering.
+        (_host_row(), _OWNER, _WORKSPACE_ID, "laptop-1"),
     ],
     ids=[
         "unknown-host",
@@ -599,17 +605,18 @@ async def test_every_frame_is_sent_under_the_owner_scope(
         "sandbox-host",
         "sandbox-host-no-auth",
         "other-workspace",
+        "malformed-host-id",
     ],
 )
 async def test_refuses_a_host_the_user_may_not_use_before_any_frame(
-    tunnel: _Tunnel, row: Host | None, user_id: str | None, workspace_id: int
+    tunnel: _Tunnel, row: Host | None, user_id: str | None, workspace_id: int, host_id: str
 ) -> None:
     tunnel.host_rows.rows.clear()
     if row is not None:
         tunnel.host_rows.rows[(_WORKSPACE_ID, _HOST_ID)] = row
 
     with pytest.raises(RunWorktreeError) as caught:
-        await _connect(tunnel, user_id=user_id, workspace_id=workspace_id)
+        await _connect(tunnel, user_id=user_id, workspace_id=workspace_id, host_id=host_id)
 
     assert caught.value.code == "not_permitted"
     assert "bob" not in caught.value.message

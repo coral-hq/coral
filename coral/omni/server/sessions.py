@@ -11,8 +11,9 @@ a session the user deleted, nor launches one the user archived, after its row
 existed. The repair relies on one worker draining at a time (the primary
 worker lease).
 
-The anchor is a visible session that is never launched, filed in the owner's
-"Coral runs" project and bound to the hidden, inert ``coral__anchor`` agent.
+The anchor is a visible session Coral never launches, filed in the owner's
+"Coral runs" project and bound to the hidden ``coral__anchor`` agent (a chat
+agent from the anchor seed, which runs only if a user binds a runner to it).
 A step is a child of the anchor on the run owner's host, in the run worktree,
 with no runner until its own create launches one inside the owner's host
 scope. Both get an owner grant and no public grant.
@@ -82,6 +83,7 @@ from omnigent.util.session_lifecycle import (
     PARENT_WAKE_LABEL_KEY,
     PARENT_WAKE_OFF_VALUE,
 )
+from omnigent.util.uuid import InvalidUuidError, uuid_to_bytes
 
 _logger = logging.getLogger(__name__)
 
@@ -440,7 +442,7 @@ class OmnigentSessionFacade(SessionFacade):
         )
 
     async def _anchor_agent(self, workspace_id: int) -> str:
-        """The inert, hidden anchor agent, seeded on the first anchor of this process."""
+        """The hidden anchor agent, seeded on this process's first anchor; Coral never runs it."""
         async with self._anchor_agent_lock:
             agent_id = self._anchor_agent_ids.get(workspace_id)
             if agent_id is None:
@@ -642,15 +644,18 @@ class OmnigentSessionFacade(SessionFacade):
         """
         services = self._services
         agent_id = request.agent_id or ""
+        try:
+            # The store raises an untyped error for an id that is not a uuid.
+            uuid_to_bytes(agent_id)
+        except InvalidUuidError:
+            raise _agent_not_permitted(agent_id) from None
         agent = await asyncio.to_thread(services.agent_store.get, agent_id)
         if (
             agent is None
             or agent.name.lower() == ANCHOR_AGENT_NAME
             or not (agent.operator_authored or agent.created_by == request.user_id)
         ):
-            raise _refused(
-                "session.agent_not_permitted", f"agent {agent_id} is not available to this run"
-            )
+            raise _agent_not_permitted(agent_id)
         try:
             await validate_session_agent(
                 user_id=request.user_id,
@@ -660,9 +665,7 @@ class OmnigentSessionFacade(SessionFacade):
                 conversation_store=services.conversation_store,
             )
         except (OmnigentError, HTTPException):
-            raise _refused(
-                "session.agent_not_permitted", f"agent {agent_id} is not available to this run"
-            ) from None
+            raise _agent_not_permitted(agent_id) from None
         return agent
 
     async def _spec_effort(self, agent: Any) -> str | None:
@@ -950,6 +953,12 @@ class OmnigentSessionFacade(SessionFacade):
             )
         except OmnigentError as exc:
             raise _owner_failure(exc, "own sessions") from exc
+
+
+def _agent_not_permitted(agent_id: str) -> CoralSessionError:
+    return _refused(
+        "session.agent_not_permitted", f"agent {agent_id} is not available to this run"
+    )
 
 
 def _bad_spec(agent_id: str) -> CoralSessionError:

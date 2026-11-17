@@ -70,7 +70,7 @@ dataclass from `ops.py`.
 | --- | --- | --- | --- | --- |
 | `fingerprint` | READ at `L1`, WRITE at `L2` | `level` | `Fingerprint(level, digest, head, dirty_count)` | no `op_key`: L2 writes only content-addressed objects |
 | `head` | READ | none | `HeadResult(head, branch, merge_in_progress)` | no `op_key` |
-| `diff_stat` | READ | `from_commit`, `to_commit=None` (HEAD) | `DiffStat(files_changed, insertions, deletions, paths)` | no `op_key` |
+| `diff_stat` | READ | `from_commit`, `to_commit=None` (HEAD) | `DiffStat(files_changed, insertions, deletions, paths, paths_truncated)` | no `op_key` |
 | `read` | READ | `path`, `at_commit=None` | `ReadResult(path, content, sha256)` | no `op_key` |
 | `commit` | WRITE | `op_key`, `expected_head`, `message`, `trailers=None`, `run_id=None`, `attempt_id=None` | `CommitResult(commit, empty)` | returns HEAD when HEAD is the op's verified record |
 | `salvage` | WRITE | `op_key` | `SalvageResult(ref, commit)` | returns the commit at `refs/coral/salvage/<op_key>` when it is the op's verified record |
@@ -201,6 +201,8 @@ marked with a test name.
    - A rename counts as a delete plus an add. A binary file counts 0 lines.
    - `paths` is sorted
      (`test_diff_stat_between_commits_defaults_to_head`).
+   - A backend may cut `paths` to its longest sorted prefix under a size bound
+     and set `paths_truncated`; the counts still cover the whole diff.
 7. **`read`.**
    - It returns the file's exact bytes: from the working tree when
      `at_commit` is `None`, otherwise the blob at `<at_commit>:<path>`.
@@ -931,7 +933,7 @@ WSP-02 extends it.
   | Op | Params besides `repo_root`, `branch` | Payload |
   | --- | --- | --- |
   | `head` | none | `{head, branch\|null, merge_in_progress}` |
-  | `diff_stat` | `from_commit`, `to_commit\|null` | `{files_changed, insertions, deletions, paths}` |
+  | `diff_stat` | `from_commit`, `to_commit\|null` | `{files_changed, insertions, deletions, paths, paths_truncated}`; a list that would take the payload over 4 MiB of JSON is cut, never failed (`paths_truncated` absent reads `false`) |
   | `read` | `path`, `at_commit\|null` | `{path, content_b64, sha256}` |
   | `fingerprint` | `level` (`"L1"` only) | `{level, digest, head, dirty_count}` |
   | `commit` | `expected_head`, `message`, `trailers` (`[[key, value], …]`), `run_id\|null`, `attempt_id\|null`; `op_key` | `{commit, empty}` |

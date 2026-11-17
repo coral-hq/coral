@@ -143,6 +143,21 @@ _ROUND_TRIPS: dict[str, tuple[OpCall, dict, dict, object]] = {
         {"files_changed": 2, "insertions": 3, "deletions": 0, "paths": ["a.md", "b.md"]},
         DiffStat(files_changed=2, insertions=3, deletions=0, paths=("a.md", "b.md")),
     ),
+    # A path list too large for the channel arrives cut; the counts still cover the diff.
+    "diff_stat-paths-truncated": (
+        lambda ops: ops.diff_stat(REF, READ_ONLY, from_commit=HEAD),
+        _wire("diff_stat", READ_TIMEOUT_S, from_commit=HEAD, to_commit=None),
+        {
+            "files_changed": 9,
+            "insertions": 9,
+            "deletions": 0,
+            "paths": ["a.md"],
+            "paths_truncated": True,
+        },
+        DiffStat(
+            files_changed=9, insertions=9, deletions=0, paths=("a.md",), paths_truncated=True
+        ),
+    ),
     "read": (
         lambda ops: ops.read(REF, READ_ONLY, path="data.bin", at_commit=HEAD),
         _wire("read", READ_TIMEOUT_S, path="data.bin", at_commit=HEAD),
@@ -373,6 +388,16 @@ _BAD_PAYLOADS: dict[str, tuple[OpCall, object]] = {
     "diff_stat-count-mismatch": (
         lambda ops: ops.diff_stat(REF, WRITER, from_commit=HEAD),
         {"files_changed": 2, "insertions": 0, "deletions": 0, "paths": ["a"]},
+    ),
+    "diff_stat-more-paths-than-files": (
+        lambda ops: ops.diff_stat(REF, WRITER, from_commit=HEAD),
+        {
+            "files_changed": 1,
+            "insertions": 0,
+            "deletions": 0,
+            "paths": ["a", "b"],
+            "paths_truncated": True,
+        },
     ),
     "diff_stat-path-not-str": (
         lambda ops: ops.diff_stat(REF, WRITER, from_commit=HEAD),

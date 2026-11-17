@@ -11664,8 +11664,8 @@ async def test_deleting_a_session_drops_its_carried_turn_outcome() -> None:
 
 
 @pytest.mark.asyncio
-async def test_force_cancelled_interrupt_with_buffered_input_reports_the_turn_once() -> None:
-    """A real interrupt cancels the streaming turn while a message waits; one outcome results."""
+async def test_force_cancelled_interrupt_with_buffered_input_keys_one_turn_outcome() -> None:
+    """A real interrupt cancels the turn while a message waits: one keyed, one unkeyed cancel."""
     conv = "conv_force_cancelled_with_buffer"
     harness = _HeldOpenHarnessClient(
         [_created_frame("resp_held")], [_created_frame("resp_next"), _completed_frame("resp_next")]

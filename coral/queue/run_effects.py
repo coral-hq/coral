@@ -31,7 +31,8 @@ MAX_FAILURE_MESSAGE_CHARS = 2000
 MAX_INVALID_PAYLOAD_MESSAGE_CHARS = 500
 # Session ids are derived ids, and the bindings table keeps 64 characters.
 _SESSION_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# C0, DEL and C1 control characters, which could drive a terminal; shared by the executors.
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 class EffectRefused(Exception):
@@ -146,7 +147,7 @@ def echoed_text(payload: Mapping[str, Any], name: str, *, max_stored_bytes: int)
     """
     value = optional_text(payload, name)
     if value is not None and (
-        _CONTROL.search(value) or stored_text_bytes(value) > max_stored_bytes
+        CONTROL_CHARACTERS.search(value) or stored_text_bytes(value) > max_stored_bytes
     ):
         raise invalid_payload(
             f"{name} must be text without control characters, at most {max_stored_bytes} "
@@ -185,7 +186,10 @@ async def load_effect_run(
 
 def refuse_paused_run(state: RunState) -> None:
     """
-    Hold a session effect while its run is paused; the drainer retries it after a resume.
+    Refuse a session effect while its run is paused.
+
+    The drainer retries with backoff only up to its attempt cap (minutes), so a
+    longer pause fails the effect unless the engine bridge holds it until a resume.
 
     :raises EffectRefused: Retryable ``run.paused``.
     """

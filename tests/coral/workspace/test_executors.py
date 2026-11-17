@@ -655,6 +655,40 @@ async def test_a_large_diff_is_bounded_in_the_commit_result() -> None:
     assert len(result["subject"]) == 256
 
 
+async def test_a_path_list_the_host_cut_stays_marked_cut_in_the_result() -> None:
+    harness = _Harness()
+    # A vendored tree too large for the host channel: the host kept the counts, cut the list.
+    harness.channel.replies["diff_stat"] = {
+        "files_changed": 40_000,
+        "insertions": 40_000,
+        "deletions": 0,
+        "paths": ["vendor/00000"],
+        "paths_truncated": True,
+    }
+
+    result = _completed(await harness.run_effect("commit"))
+
+    assert result["diff_stat"] == {
+        "files_changed": 40_000,
+        "insertions": 40_000,
+        "deletions": 0,
+        "paths": ["vendor/00000"],
+        "paths_truncated": True,
+    }
+
+
+async def test_an_item_path_at_the_payload_bound_is_echoed_whole() -> None:
+    harness = _Harness()
+    # 1,024 stored bytes, the most the payload accepts; the engine finds its item by it.
+    item_path = "items/" + "p" * 1_018
+
+    result = _completed(
+        await harness.run_effect("commit", harness.payload("commit", item_path=item_path))
+    )
+
+    assert result["item_path"] == item_path
+
+
 async def test_echoed_text_too_large_for_the_result_fails_before_any_commit() -> None:
     harness = _Harness()
     # Each astral character is stored as a 12-byte escape: 600 of them would not fit the

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import re
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -46,6 +45,7 @@ from coral.queue.executors import (
     ExecutionContext,
 )
 from coral.queue.run_effects import (
+    CONTROL_CHARACTERS,
     MAX_FAILURE_MESSAGE_CHARS,
     EffectBody,
     EffectRefused,
@@ -88,7 +88,6 @@ TURN_STATE_UNKNOWN = "session.turn_state_unknown"
 # Stored bytes the commit result may spend on the echoed engine ids.
 NODE_ID_MAX_BYTES = 128
 ITEM_PATH_MAX_BYTES = 1_024
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 class TurnEndCheck(Protocol):
@@ -359,7 +358,7 @@ def commit_id_field(
 
 def _printable(path: str) -> str:
     """A host-reported path with control characters escaped, so it cannot drive a terminal."""
-    return _CONTROL.sub(lambda match: f"\\x{ord(match.group()):02x}", path)
+    return CONTROL_CHARACTERS.sub(lambda match: f"\\x{ord(match.group()):02x}", path)
 
 
 # ── Ops ─────────────────────────────────────────────────────────────────────
@@ -627,4 +626,5 @@ def diff_stat_result(stat: DiffStat) -> dict[str, Any]:
         "insertions": stat.insertions,
         "deletions": stat.deletions,
         "paths": [_printable(path) for path in stat.paths],
+        "paths_truncated": stat.paths_truncated,
     }

@@ -15,15 +15,18 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from coral.workspace.ops import paths_within
+
 RESULT_BYTE_BUDGET = 12_288
 DIFF_PATHS_BYTE_BUDGET = 8_192
 SUBJECT_MAX_CHARS = 256
 SUBJECT_MAX_BYTES = 1_536
 FREE_TEXT_MAX_CHARS = 512
 FREE_TEXT_MAX_BYTES = 3_072
+# Engine ids a result echoes, bounded by the payload parser; a cut id names no item.
+ECHOED_ID_KEYS = frozenset({"node_id", "item_path"})
 _CUT_MARK = "…"
-# ``json.dumps`` puts ", " between list items and "[]" around them.
-_ITEM_SEPARATOR_BYTES = 2
+# ``json.dumps`` puts "[]" around a list.
 _EMPTY_LIST_BYTES = 2
 
 
@@ -46,7 +49,8 @@ def bound_result(result: Mapping[str, Any]) -> dict[str, Any]:
     Return a copy of ``result`` that fits the queue's result column.
 
     ``subject`` keeps at most :data:`SUBJECT_MAX_CHARS` characters and
-    :data:`SUBJECT_MAX_BYTES` stored bytes, any other top-level text
+    :data:`SUBJECT_MAX_BYTES` stored bytes, and echoed ids
+    (:data:`ECHOED_ID_KEYS`) are kept whole; any other top-level text keeps
     :data:`FREE_TEXT_MAX_CHARS` and :data:`FREE_TEXT_MAX_BYTES`.
     ``diff_stat.paths`` keeps the longest prefix that fits both
     :data:`DIFF_PATHS_BYTE_BUDGET` and what the rest of the result leaves of
@@ -58,7 +62,7 @@ def bound_result(result: Mapping[str, Any]) -> dict[str, Any]:
     """
     bounded: dict[str, Any] = {}
     for key, value in result.items():
-        if isinstance(value, str):
+        if isinstance(value, str) and key not in ECHOED_ID_KEYS:
             if key == "subject":
                 bounded[key] = _cut(value, SUBJECT_MAX_CHARS, SUBJECT_MAX_BYTES)
             else:
@@ -83,21 +87,10 @@ def _bounded_diff_stat(result: Mapping[str, Any], diff_stat: Mapping[str, Any]) 
     # Measured with no paths and the longer flag value, so the kept paths always fit.
     skeleton = {**diff_stat, "paths": [], "paths_truncated": False}
     rest = stored_result_bytes({**result, "diff_stat": skeleton}) - _EMPTY_LIST_BYTES
-    kept = _paths_within(paths, min(DIFF_PATHS_BYTE_BUDGET, RESULT_BYTE_BUDGET - rest))
-    return {**diff_stat, "paths": kept, "paths_truncated": len(kept) < len(paths)}
-
-
-def _paths_within(paths: Sequence[Any], budget: int) -> list[Any]:
-    """The longest prefix of ``paths`` whose ``json.dumps`` is at most ``budget`` bytes."""
-    kept: list[Any] = []
-    used = _EMPTY_LIST_BYTES
-    for path in paths:
-        cost = len(json.dumps(path).encode()) + (_ITEM_SEPARATOR_BYTES if kept else 0)
-        if used + cost > budget:
-            break
-        kept.append(path)
-        used += cost
-    return kept
+    kept = paths_within(paths, min(DIFF_PATHS_BYTE_BUDGET, RESULT_BYTE_BUDGET - rest))
+    # The host may already have cut the list to fit its channel.
+    truncated = diff_stat.get("paths_truncated") is True or len(kept) < len(paths)
+    return {**diff_stat, "paths": kept, "paths_truncated": truncated}
 
 
 def _cut(text: str, max_chars: int, max_bytes: int) -> str:

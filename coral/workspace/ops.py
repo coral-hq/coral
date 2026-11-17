@@ -86,7 +86,8 @@ MAX_CHECK_TIMEOUT_S = 7200.0
 _OP_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}")
 _TRAILER_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
 _RESERVED_TRAILER_PREFIX = "coral-"
-_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+# A full lowercase hex object id, SHA-1 or SHA-256.
+COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _REF_COMPONENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}")
 _MAX_REF_LENGTH = 255
 # C0 control characters (terminal escapes among them); a message body keeps tabs and newlines.
@@ -236,13 +237,30 @@ class HeadResult:
 @dataclass(frozen=True)
 class DiffStat:
     """
+    :param files_changed: Changed paths in the whole diff, as are both line counts.
     :param paths: Changed paths, sorted. A rename counts as a delete and an add.
+    :param paths_truncated: ``paths`` is a prefix of the sorted list, cut to a size bound.
     """
 
     files_changed: int
     insertions: int
     deletions: int
     paths: tuple[str, ...]
+    paths_truncated: bool = False
+
+
+def paths_within(paths: Sequence[str], max_json_bytes: int) -> list[str]:
+    """The longest prefix of ``paths`` whose ``json.dumps`` list fits ``max_json_bytes``."""
+    kept: list[str] = []
+    # "[]" around the items and ", " between them.
+    used = 2
+    for path in paths:
+        cost = len(json.dumps(path)) + (2 if kept else 0)
+        if used + cost > max_json_bytes:
+            break
+        kept.append(path)
+        used += cost
+    return kept
 
 
 @dataclass(frozen=True)
@@ -446,7 +464,7 @@ def validate_commit_id(commit: str) -> None:
 
     :raises ValueError: for anything else, including ``HEAD``, short or uppercase ids.
     """
-    if not isinstance(commit, str) or not _COMMIT_ID.fullmatch(commit):
+    if not isinstance(commit, str) or not COMMIT_ID.fullmatch(commit):
         raise ValueError(f"expected a full hex commit id, got {commit!r}")
 
 

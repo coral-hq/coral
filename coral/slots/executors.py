@@ -12,9 +12,9 @@ this step deleted) pauses the run, and the effect fails permanently as
 sending, so a redelivery never sends twice; the dispatch's drift hook pauses a
 drifted run the same way. ``close_slot`` and ``cancel_sessions`` act only on a
 step session this run bound; a send or close waits (retryable
-``session.not_ready``) until the session's row exists. A close commits only
-for its slot's current writer session, and a writer's close must set the
-closed label.
+``session.not_ready``) until the session's row exists, and a writer's close
+also until a slot of the run names the session. A close commits only for its
+slot's current writer session, and a writer's close must set the closed label.
 
 A paused run holds ``create_session`` and ``send_input`` (retryable
 ``run.paused``); a close still finishes an accepted handoff, and a cancel is
@@ -46,6 +46,7 @@ from coral.omni.protocols import (
 )
 from coral.queue.executors import EffectExecutor, EffectOutcome, ExecutionContext
 from coral.queue.run_effects import (
+    CONTROL_CHARACTERS,
     EffectRefused,
     invalid_payload,
     optional_text,
@@ -57,6 +58,7 @@ from coral.queue.run_effects import (
 from coral.recovery.drift import DriftDetected, DriftPauser
 from coral.slots.close import (
     DEFAULT_BOUNDS,
+    AcceptedEdits,
     CloseBounds,
     CommitSpec,
     ConfirmedStops,
@@ -95,7 +97,6 @@ MAX_NODE_ID_CHARS = 128
 # A session generation is stored as a small integer.
 MAX_GENERATION = 32_767
 _AGENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def create_session_executor(
@@ -212,7 +213,9 @@ def _bounded_text(
     payload: Mapping[str, Any], name: str, *, max_chars: int, required: bool = False
 ) -> str | None:
     value = required_text(payload, name) if required else optional_text(payload, name)
-    if value is not None and (not value or len(value) > max_chars or _CONTROL.search(value)):
+    if value is not None and (
+        not value or len(value) > max_chars or CONTROL_CHARACTERS.search(value)
+    ):
         raise invalid_payload(
             f"{name} must be 1-{max_chars} characters without control characters"
         )
@@ -275,6 +278,8 @@ def close_slot_executor(
 
     :param stops: Records each confirmed stop for ``workspace.commit``'s turn-end check.
     """
+    # One per executor: a redelivered close in this process repeats its first answer.
+    accepted_edits = AcceptedEdits()
 
     async def execute(ctx: ExecutionContext) -> EffectOutcome:
         body = functools.partial(
@@ -288,6 +293,7 @@ def close_slot_executor(
             bindings=bindings,
             bounds=bounds,
             stops=stops,
+            accepted_edits=accepted_edits,
         )
         return await run_workspace_effect(ctx, run_store, scope_runner, _close_payload, body)
 
@@ -306,9 +312,9 @@ def cancel_sessions_executor(
     """
     The ``cancel_sessions`` executor (:func:`coral.slots.close.cancel_session`).
 
-    Payload: ``effect_key``, ``session_id`` (``null`` for a slot with no session
-    yet), optional ``closed_label`` (default ``true``). Result: ``{session_id}``.
-    A session already deleted counts as cancelled.
+    Payload: ``effect_key``, ``session_id`` (required; ``null`` for a slot with
+    no session yet), optional ``closed_label`` (default ``true``). Result:
+    ``{session_id}``. A session already deleted counts as cancelled.
     """
 
     async def execute(ctx: ExecutionContext) -> EffectOutcome:
@@ -383,6 +389,7 @@ async def _close(
     bindings: SessionBindings,
     bounds: CloseBounds,
     stops: ConfirmedStops | None,
+    accepted_edits: AcceptedEdits,
 ) -> dict[str, Any]:
     session_id = payload["session_id"]
     binding = await _bound_step(bindings, state, session_id, created=True)
@@ -407,6 +414,7 @@ async def _close(
         ensure_lease=ctx.ensure_lease,
         bounds=bounds,
         stops=stops,
+        accepted_edits=accepted_edits,
     )
     if outcome.forced_stop:
         _logger.info(
@@ -430,9 +438,21 @@ async def _commit_spec(
     channels: HostWorkspaceChannels,
     intents: WorkspaceOpIntents,
 ) -> CommitSpec | None:
-    """The close's commit, only for its slot's current writer session; readers never commit."""
+    """
+    The close's commit, only for its slot's current writer session; readers never commit.
+
+    :raises EffectRefused: Retryable ``session.not_ready`` while no slot of the
+        run names the writer's session: closing then would drop its commit.
+    """
     if binding.slot_role not in WRITER_SLOT_ROLES:
         return None
+    # The bridge records a slot's session once its create completes.
+    if not any(slot.session_id == binding.session_id for slot in state.agent_slots):
+        raise EffectRefused(
+            "session.not_ready",
+            f"no slot of run {state.run_id} names step session {binding.session_id} yet",
+            retryable=True,
+        )
     target = run_target(state)
     reason = writer_refusal(binding, state, target, binding.session_id)
     if reason is not None:
@@ -546,7 +566,10 @@ def _close_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _cancel_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    session_id = None if payload.get("session_id") is None else session_id_field(payload)
+    # Only an explicit null means "no session yet": a payload that lost the key cancels nothing.
+    if "session_id" not in payload:
+        raise invalid_payload("session_id is required: null for a slot with no session yet")
+    session_id = None if payload["session_id"] is None else session_id_field(payload)
     return {"session_id": session_id, "closed_label": _flag(payload, "closed_label")}
 
 

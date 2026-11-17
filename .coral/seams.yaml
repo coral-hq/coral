@@ -1571,10 +1571,10 @@ seams:
       and no turn id. The active response can still name a turn the runner
       already reported (a waiting turn end, or a buffered continuation before
       its first response), so one response never gets a second, contradicting
-      outcome from an inference. Runner-relayed outcomes are not gated; BA-3
-      (DESIGN-DECISIONS.md) sets the precedence consumers apply between them
-      and the inferred ones. turn_fields passes a turn response id only with a
-      known outcome.
+      outcome from an inference. Runner-relayed outcomes are not gated;
+      docs/coral/contracts/session-facade.md (Status edges) sets the
+      precedence consumers apply between them and the inferred ones.
+      turn_fields passes a turn response id only with a known outcome.
     files:
       - omnigent/server/session_live_state.py
       - omnigent/server/routes/_sessions/helpers.py
@@ -1652,13 +1652,14 @@ seams:
       instead: the cancelled drain publishes idle with cancelled and the
       response id even with input buffered, and the turn's teardown then
       carries an unkeyed cancelled to the continuation's running edge. Either
-      way the interrupted response gets exactly one runner-reported outcome.
+      way the interrupted response gets exactly one keyed runner-reported
+      outcome.
       The relay passes both keys to _publish_status, which hands them to
       status-edge observers only; old runners send neither key, and an
-      unknown outcome drops the response id with it. BA-3
-      (DESIGN-DECISIONS.md) sets the precedence between these runner-reported
-      outcomes and the server-inferred ones (S1), and lists the unkeyed
-      sources.
+      unknown outcome drops the response id with it.
+      docs/coral/contracts/session-facade.md (Status edges) sets the
+      precedence between these runner-reported outcomes and the
+      server-inferred ones (S1); its residuals list the unkeyed sources.
     files:
       - omnigent/runner/app.py
       - omnigent/server/routes/_sessions/orchestration.py
@@ -1746,7 +1747,7 @@ seams:
       branches are unchanged, so the closed check, input policy, owner-only
       stop and interrupt behave as for an HTTP sender. The context has no
       connection to wait on, so an ASK input policy ends as a deny at once
-      (BA-3).
+      (a residual in docs/coral/contracts/session-facade.md).
     files:
       - omnigent/server/startup_inputs.py
       - omnigent/server/routes/sessions/routes_events.py
@@ -1824,8 +1825,9 @@ seams:
       HostWorkspaceOpUnavailableError with timed_out set. Replies are
       bounded: error text is cut to its last 2,000 characters and a malformed
       error code reads as handler_failed; payload shapes are the caller's to
-      check. No handler is registered and nothing calls the helper yet, so
-      the channel is dark. Known cost: a handler's thread cannot be stopped,
+      check. S40b registers the handlers; the only caller is Coral's server
+      adapter (coral/omni/server/workspace_ops.py), which runs only for engine
+      effects nothing enqueues yet, so the server side is dark. Known cost: a handler's thread cannot be stopped,
       so an op runs until its handler returns. Handlers enforce
       request.deadline themselves, and the 900 s bound holds only if they do.
       While an op runs it holds a default-executor thread and keeps the
@@ -1853,8 +1855,8 @@ seams:
     budget_exception:
       lines: 503
       reason: >-
-        omnigent/host/workspace_ops.py (590 lines, new, shared with S40b;
-        about 469 are S40): the frame dataclasses, the request and
+        omnigent/host/workspace_ops.py (591 lines, new, shared with S40b;
+        about 470 are S40): the frame dataclasses, the request and
         handler-error types with field checks, the codec, the shared root and
         op-key checks, the guarded, slot-bounded dispatcher with its
         one-pass payload serialisation and size cap, with docstrings.

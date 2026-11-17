@@ -32,7 +32,8 @@ engine effects are enqueued on such a server they fail permanently as
    `OmnigentSessionDispatch` with a `DriftPreSendHook`,
    `OmnigentHostWorkspaceChannels`, `CoralStatusEdges` on the server's event
    loop, and one `ConfirmedStops` record.
-2. It registers the seven executors, then the S1 observers: `"coral"`
+2. It registers the seven executors (`cancel_sessions` with
+   `runs_after_terminal`, see Finished runs), then the S1 observers: `"coral"`
    (`CoralStatusEdges.observe`) and `"coral.confirmed_stops"`
    (`ConfirmedStops.observe`).
 3. It starts the supervisor.
@@ -87,10 +88,15 @@ finds sessions only through its bindings (ADR-05 rule 5).
   `session.anchor_missing`.
 - **Slots.** The writer interlock reads `coral_agent_slots`: the bridge must
   record each slot's current `session_id` and `session_generation` when a
-  create completes. Bindings keep the engine slot id; the drainer's fencing
-  uses the payload's store `slot_id` (DESIGN OQ-2).
+  create completes. Until a slot names it, a writer's `close_slot` fails with
+  retryable `session.not_ready` rather than closing without its commit.
+  Bindings keep the engine slot id; the drainer's fencing uses the payload's
+  store `slot_id`.
 - **Writer close.** A writer's `close_slot` must keep `closed_label` true;
   `false` is `effect.invalid_payload`.
+- **Cancel.** `cancel_sessions` must carry `session_id`: an explicit `null`
+  for a slot with no session yet. A payload without the key is
+  `effect.invalid_payload`, never a silent success.
 - **Reset after salvage (SES-06, CRL-137).** Enqueue `workspace.reset` only after
   `workspace.salvage` for the same session completed. The reset executor
   cannot see the salvage and checks nothing about it. A salvage whose
@@ -110,30 +116,36 @@ reproduces. Each passes `run_executor_conformance`.
 | `create_session` | `role` (`anchor` or `step`). A step adds `agent_id` (1-64 of `A-Za-z0-9_-`), `engine_slot_id` (≤ 512 chars), `slot_role` (`step_agent`, `orchestrator`, `verifier`, `merge_resolver`), optional `title` (≤ 200), `node_id` (≤ 128), `generation` (1-32,767, default 1). | `{session_id, role, generation}` |
 | `send_input` | `session_id`, `text` (≤ 1 MiB as sent, no NUL), `kind` (`brief`, `steer`, `nudge`) | `{session_id, stable_id}` |
 | `close_slot` | `session_id`; optional `interrupt` and `closed_label` (default `true`), `message`, `attempt_id`, `diff_from`. `accepted_at_ms`, `node_id` and `item_path` are accepted and ignored. | `{pending_input, queued_input, post_accept_edits, commit, empty, diff_stat}`; the last three are `null` for a reader or when no commit is made |
-| `cancel_sessions` | `session_id` (`null` for a slot with no session yet), optional `closed_label` (default `true`) | `{session_id}`; `null` succeeds without action |
+| `cancel_sessions` | `session_id` (required; `null` for a slot with no session yet), optional `closed_label` (default `true`) | `{session_id}`; `null` succeeds without action |
 | `workspace.commit` | `session_id`, `message`, `attempt_id`; optional `expected_head`, `diff_from`, `node_id` (≤ 128 stored bytes), `item_path` (≤ 1,024 stored bytes) | `{commit, empty, subject, diff_stat, node_id, item_path}` |
 | `workspace.salvage` | none | `{ref, commit}` |
 | `workspace.reset` | `commit` (full lowercase hex) | `{head}` |
 
 `diff_stat` is `{files_changed, insertions, deletions, paths, paths_truncated}`;
-control characters in paths are escaped as `\xNN`. Commit ids are full
-lowercase hex. A step's title is the payload `title`, else the engine slot id
-with ` (attempt N)` for generation N > 1, and the facade adds ` · ` and the
-first 6 characters of the session id.
+control characters in paths are escaped as `\xNN`. The counts always cover the
+whole diff. The host cuts a path list too large for its channel to its sorted
+prefix (`paths_truncated: true`), so a large diff never fails after its commit.
+Commit ids are full lowercase hex. A step's title is the payload `title`, else
+the engine slot id with ` (attempt N)` for generation N > 1, and the facade
+adds ` · ` and the first 6 characters of the session id.
 
 **Result budget.** A result is at most 12,288 bytes as the queue stores it
 (`json.dumps`, ASCII-escaped). `diff_stat.paths` gets at most 8,192 of them and
 is cut first, with `paths_truncated: true`; `subject` keeps at most 256
 characters and 1,536 bytes, free text 512 characters and 3,072 bytes. Echoed
-payload fields are bounded before any side effect, so valid input never
-reaches `effect.result_too_large`.
+ids (`node_id`, `item_path`) are never cut: the payload bounds them before any
+side effect, so valid input never reaches `effect.result_too_large`.
 
 **Paused runs.** `create_session` and `send_input` refuse a paused run with
 retryable `run.paused`. `close_slot` and `cancel_sessions` still run: a close
 finishes an accepted handoff, and a cancel is how a paused run ends. The
 `workspace.*` executors also run while a run is paused; whether WRITE effects
-wait is for CRL-137 (SES-06) and the bridge's ticket to decide. The drainer
-abandons work of a finished run.
+wait is for CRL-137 (SES-06) and the bridge's ticket to decide.
+
+**Finished runs.** The drainer abandons a finished run's items as
+`run.terminal`, except an effect type registered with `runs_after_terminal`:
+only `cancel_sessions`, because `cancel_run` marks the run cancelled in the
+transition that enqueues it. The slot-generation fence still applies.
 
 ## Error codes
 
@@ -148,10 +160,11 @@ text lands only in the run owner's work record.
 | `effect.run_missing` | no | The run is not in the item's workspace. |
 | `effect.result_too_large` | no | A bug: valid input never reaches it. |
 | `executor.missing` | no | Drainer: a claimed item whose effect type has no registered executor (a server whose engine is not wired). |
+| `executor.unhandled_exception` | yes | Drainer: the executor raised an unexpected exception (a bug or a store fault). Retried up to the attempt cap, then failed as `infra.transient`. |
 | `run.paused` | yes | `create_session` or `send_input` for a paused run. |
 | `drift.<cause>` | no | Drift found; the run was paused first (see Drift). |
 | `session.anchor_missing` | yes | A step before its anchor is `initialized`. |
-| `session.not_ready` | yes | A send or close before the step's row exists. |
+| `session.not_ready` | yes | A send or close before the step's row exists; a writer's close before a slot names its session. |
 | `session.host_offline` | yes | The owner's host is not connected, or the server refused for now (`CONFLICT`, `WRONG_REPLICA`, `HOST_OFFLINE`). |
 | `session.runner_unavailable` | yes | The launch or session init did not complete. |
 | `session.workspace_unverified` | yes | The host could not confirm the run worktree (stat timeout, I/O error). |
@@ -163,10 +176,10 @@ text lands only in the run owner's work record.
 | `session.title_conflict` | no | Another row holds the step's exact title under the anchor. |
 | `session.identity_conflict` | no | The row has no binding in this run, a torn row is not this create's own, or an adopted row differs or has another owner; send, close or cancel of a session that is not a step of this run. |
 | `session.binding_conflict` | no | A redelivery would bind the session differently. |
-| `session.agent_not_permitted` | no | The agent is missing, owned by another user, or is `coral__anchor`. |
+| `session.agent_not_permitted` | no | The agent is missing (an id no agent can have included), owned by another user, or is `coral__anchor`. |
 | `session.harness_not_supported` | no | The agent's harness is native, or its stored spec no longer loads. |
 | `session.harness_not_configured`, `session.workspace_missing` | no | The host refused the step's launch, or dispatch's runner wake before a send, for these reasons. |
-| `session.host_not_permitted` | no | The host is another user's, another registration's or a managed sandbox. |
+| `session.host_not_permitted` | no | The host is unknown (an id no host can have included), another user's, another registration's or a managed sandbox. |
 | `session.owner_revoked` | no | The run owner's account was revoked or re-registered. |
 | `session.invalid` | no | An ownerless run on a server with auth; a step run with no worktree on a host; a server with no project store or no host access; another refusal. |
 | `dispatch.runner_unavailable` | yes | The runner did not take the event in 120 s, or the server answered `RUNNER_UNAVAILABLE` (a relaunch refusal included), `HOST_OFFLINE`, `WRONG_REPLICA` or `CONFLICT`. |
@@ -243,7 +256,10 @@ unknown statuses are an ended turn.
 5. Stop the runner, confirmed, and record the stop.
 6. Writers: fingerprint again (`post_accept_edits` when the digest changed),
    re-check that the session did not run again (`slot.close_restarted`), then
-   commit at the HEAD recorded before the first try.
+   commit at the HEAD recorded before the first try. A retry past an earlier
+   try's stop (its stop or commit intent is recorded) cannot see the turn-end
+   tree: it returns that try's `post_accept_edits`, kept in process, or `true`
+   when it was lost.
 7. `diff_stat` of the commit.
 8. Queued input: any item a client created after the slot's last engine item
    (a user or meta message, a slash command, posted tool output, a pending
@@ -318,6 +334,49 @@ anchor (the test's session is hostless and bound with `PATCH runner_id`); a
 writer's close and commit (`tests/coral/slots/test_close.py` and the AC3
 host-channel test).
 
+## Requirements for the engine bridge
+
+ENG-04/DUR-04 must settle these before it enqueues these effects:
+
+1. **Hold waiting items.** K21 fails an item as `infra.transient` after 8
+   attempts, about 1-3 minutes of backoff plus each try's own time. Hold
+   `run.paused` items until a resume and `slot.close_blocked` items until the
+   prompt is answered (likewise `session.not_ready`, `session.anchor_missing`,
+   `session.host_offline` and `session.turn_state_unknown`) instead of
+   spending their retries.
+2. **No head-of-line blocking.** The supervisor drains one item at a time, and
+   a close may wait 120 s for the turn end and 30 s to settle before its host
+   ops. Drain with bounded concurrency (per-slot fencing exists), or re-enqueue
+   a waiting close with a not-before time, so one close cannot stall every run.
+3. **Map the reducer's payloads.** They are not the executors' (see
+   Executors): `create_session` and `send_input` carry `{node_id, profile,
+   goal}`; the reducer's `nudge` kind has no executor (`executor.missing`),
+   while the executors send a nudge as `send_input` with `kind: "nudge"`;
+   `cancel_sessions` has no `session_id`; the engine's `item_path` is a list.
+   Own a written per-kind mapping with a test per kind.
+4. **Record slot sessions** when a create completes, before any writer close
+   (see Preconditions).
+5. **One lifespan per process** (see Wiring).
+
+Also known before runs are enabled:
+
+- **macOS move-aside and `git worktree prune`.** A WRITE op renames the
+  worktree to `<root>.coral-op` and back; after a host crash it moves back only
+  at the next op. A `git worktree prune` in between (Omnigent's
+  `create_worktree` for an existing branch runs one) deletes the worktree's
+  admin dir, so the next op refuses with permanent `workspace.worktree_displaced`
+  and the uncommitted work stays in `<root>.coral-op`.
+- **The anchor is a live chat agent.** Its seed is a `claude-sdk` agent. Coral
+  never launches it, but a user can bind a runner to it (see Anchor runner).
+- **Two `cancelled` reports.** A force-cancelled interrupt with buffered input
+  reports `cancelled` keyed to its response, and the turn's teardown carries a
+  second, unkeyed `cancelled` on the continuation's `running` edge. The unkeyed
+  one never matches a response-keyed waiter; a slot-keyed consumer must not
+  count it as another turn's outcome.
+- **Auth-off tests.** Most facade tests run without an auth provider, which a
+  production server always has (single-user mode acts as `"local"`), so the
+  owner, grant and launch-permission paths are proven mostly with auth off.
+
 ## Residuals and limitations
 
 - **ASK input policies** deny an engine message at once (permanent
@@ -349,8 +408,11 @@ host-channel test).
   counted as queued input; only the owner can post one.
 - **Same-author race.** A squat in the moment between the check and the append
   can make a crash retry send a second copy.
-- **Lost post-accept edits.** A crash between the two fingerprints recomputes
-  `post_accept_edits` from the current tree on the retry.
+- **Post-accept edits on a retry.** After a restart, a retry past the stop
+  reports `post_accept_edits: true` (review first), so its result can differ
+  from the first try's. A retry recomputes from the current tree only when no
+  earlier stop is known: the stop's reply was lost, or a restart came between
+  the stop and the commit's recorded HEAD.
 - **Shared run worktree.** M2 has one writer per run worktree; readers never
   commit, and the commit runs after the writer's runner stopped.
 - **Native harnesses** are refused as steps until HRN-03 (CRL-138). Their

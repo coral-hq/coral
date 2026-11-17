@@ -162,8 +162,8 @@ async def test_the_servers_own_stop_rule_reaches_coral_as_cancelled_and_ends_the
     assert evaluate(_filled(stop.fact)) == "cancelled"
     # The first terminal outcome ends a close's or cancel's wait: the stop's.
     assert first is stop
-    # The runner's own later report is the response's latest outcome (BA-11); the
-    # server never infers one after a runner report, so "latest" is the runner's.
+    # The runner's own later report is the response's latest outcome; the server
+    # never infers one after a runner report, so "latest" is the runner's.
     assert (late.fact.turn_outcome, late.fact.response_id) == ("completed", "resp_1")
 
 

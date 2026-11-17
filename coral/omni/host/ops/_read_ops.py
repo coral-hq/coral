@@ -40,12 +40,13 @@ from coral.omni.host.ops._git import (
 )
 from coral.omni.host.ops._locks import one_op_per_worktree
 from coral.omni.host.ops._target import commit_param, invalid_params, op_params, pinned
-from coral.workspace.ops import MAX_READ_BYTES, validate_workspace_path
+from coral.workspace.ops import MAX_READ_BYTES, paths_within, validate_workspace_path
 from omnigent.host.workspace_ops import WorkspaceOpHandlerError, WorkspaceOpRequest
 
 # Base64 of this many bytes, plus the payload's other fields, stays under the
 # host channel's 8 MiB result cap; larger files are refused permanently.
 MAX_HOST_READ_BYTES = 6_000_000
+# Half the channel's result cap: past it the sorted path list is cut, never the counts.
 MAX_DIFF_STAT_PAYLOAD_BYTES = 4 * 1024 * 1024
 # Tree modes of a regular file; symlinks (120000) and gitlinks (160000) are refused.
 _REGULAR_FILE_MODES = (b"100644", b"100755")
@@ -53,7 +54,7 @@ _REGULAR_FILE_MODES = (b"100644", b"100755")
 _HFS_IGNORED = frozenset(
     [*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF]
 )
-# Interim L1 byte layout, until EVD-01's shared l1_digest(): digests compare
+# Interim L1 byte layout, until a shared L1 digest exists: digests compare
 # only within this backend.
 _L1_LAYOUT = b"coral-host-l1-interim-1\0"
 
@@ -78,7 +79,12 @@ def head(request: WorkspaceOpRequest) -> Mapping[str, object]:
 
 @one_op_per_worktree
 def diff_stat(request: WorkspaceOpRequest) -> Mapping[str, object]:
-    """``{files_changed, insertions, deletions, paths}`` between two commits (default HEAD)."""
+    """
+    ``{files_changed, insertions, deletions, paths, paths_truncated}`` between two commits.
+
+    ``to_commit`` defaults to HEAD. The counts cover the whole diff; a path list
+    too large for the channel keeps its longest sorted prefix that fits.
+    """
     params = op_params(request, required=("from_commit",), optional=("to_commit",))
     from_commit = commit_param(params, "from_commit", required=True)
     to_commit = commit_param(params, "to_commit")
@@ -100,16 +106,19 @@ def diff_stat(request: WorkspaceOpRequest) -> Mapping[str, object]:
             insertions += 0 if added == b"-" else int(added)
             deletions += 0 if removed == b"-" else int(removed)
             paths.append(path.decode("utf-8", "replace"))
-        payload = {
+        paths.sort()
+        payload: dict[str, object] = {
             "files_changed": len(paths),
             "insertions": insertions,
             "deletions": deletions,
-            "paths": sorted(paths),
+            "paths": paths,
+            "paths_truncated": False,
         }
         if len(json.dumps(payload)) > MAX_DIFF_STAT_PAYLOAD_BYTES:
-            raise WorkspaceOpHandlerError(
-                GIT_FAILED, f"the diff names too many paths to report ({len(paths)})"
-            )
+            # A failure here would come after a commit landed, so cut the list instead.
+            rest = len(json.dumps({**payload, "paths": [], "paths_truncated": True})) - 2
+            payload["paths"] = paths_within(paths, MAX_DIFF_STAT_PAYLOAD_BYTES - rest)
+            payload["paths_truncated"] = True
         return payload
 
 

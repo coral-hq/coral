@@ -21,11 +21,14 @@ A close finishes an accepted handoff in this order, each step safe to repeat:
 ``pending_input`` is true when client input is queued or the tree changed after
 the turn end, so the user reviews before the run goes on. A message accepted
 between the turn end and the close is queued input; edits its turn made before
-the stop are in the commit, flagged by ``post_accept_edits``.
+the stop are in the commit, flagged by ``post_accept_edits``. A retry past an
+earlier try's stop no longer sees the turn-end tree: it returns that try's
+answer, kept in process, or ``True`` when the answer was lost.
 """
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
@@ -176,6 +179,28 @@ class ConfirmedStops:
             self._stopped.pop((edge.workspace_id, edge.session_id), None)
 
 
+class AcceptedEdits:
+    """
+    Each writer close's ``post_accept_edits``, by its commit's op key, in memory only.
+
+    Recorded before the commit, so a retry after the commit landed (when both
+    of its fingerprints show the committed tree) returns the first try's answer.
+    """
+
+    def __init__(self, *, limit: int = 4096) -> None:
+        self._limit = limit
+        self._edited: OrderedDict[str, bool] = OrderedDict()
+
+    def record(self, op_key: str, edited: bool) -> None:
+        self._edited[op_key] = edited
+        self._edited.move_to_end(op_key)
+        while len(self._edited) > self._limit:
+            self._edited.popitem(last=False)
+
+    def get(self, op_key: str) -> bool | None:
+        return self._edited.get(op_key)
+
+
 class StopConfirmedTurnEnd:
     """
     ``workspace.commit``'s turn-end check: the session is ``idle`` and a close confirmed its stop.
@@ -271,6 +296,7 @@ async def close_session(
     ensure_lease: EnsureLease,
     bounds: CloseBounds = DEFAULT_BOUNDS,
     stops: ConfirmedStops | None = None,
+    accepted_edits: AcceptedEdits | None = None,
 ) -> CloseOutcome:
     """
     Close a step session in the order in the module docstring.
@@ -282,6 +308,7 @@ async def close_session(
         checksums of their texts, for the queued-input check.
     :param stops: Records the close's confirmed stop; a ``running`` edge it
         observes afterwards makes the commit refuse.
+    :param accepted_edits: Keeps ``post_accept_edits`` for a retry past the stop.
     :raises CloseBlocked: A prompt is open; nothing was changed.
     :raises CloseRestarted: The session ran again after the stop; nothing was committed.
     :raises CoralSessionError: From dispatch, e.g. retryable ``dispatch.stop_unconfirmed``.
@@ -289,6 +316,9 @@ async def close_session(
     """
     if commit is not None and not closed_label:
         raise ValueError("a writer's close sets the closed label")
+    past_stop = commit is not None and await _past_an_earlier_stop(
+        commit, stops, workspace_id, session_id
+    )
     reader = StepSession(session_id, writable=commit is not None, at_turn_end=False)
     forced_stop = await _end_turn(
         edges.watch(session_id, workspace_id=workspace_id, slot_id=slot_id),
@@ -317,6 +347,14 @@ async def close_session(
     if commit is not None and turn_end_tree is not None:
         stopped_tree = await commit.workspace.fingerprint(commit.ref, reader, level="L1")
         post_accept_edits = stopped_tree.digest != turn_end_tree.digest
+        earlier = None if accepted_edits is None else accepted_edits.get(commit.op_key)
+        if earlier is not None:
+            post_accept_edits = earlier or post_accept_edits
+        elif past_stop:
+            # Both fingerprints follow an earlier stop: flag the tree for review.
+            post_accept_edits = True
+        if accepted_edits is not None:
+            accepted_edits.record(commit.op_key, post_accept_edits)
         # Nothing may run between the stop and the commit; a retry stops it again.
         if _restarted(await dispatch.live_status(session_id=session_id)) or (
             stops is not None and not stops.confirmed(workspace_id, session_id)
@@ -369,6 +407,18 @@ async def cancel_session(
         await dispatch.set_closed(session_id=session_id)
     await ensure_lease()
     await dispatch.stop(session_id=session_id, user_id=user_id)
+
+
+async def _past_an_earlier_stop(
+    spec: CommitSpec, stops: ConfirmedStops | None, workspace_id: int, session_id: str
+) -> bool:
+    """Whether an earlier try of this close stopped the session: its stop or commit intent."""
+    if stops is not None and stops.confirmed(workspace_id, session_id):
+        return True
+    stored = await asyncio.to_thread(
+        spec.intents.get, spec.workspace_id, spec.op_key, run_id=spec.run_id
+    )
+    return stored is not None
 
 
 async def _end_turn(
@@ -460,6 +510,7 @@ __all__ = [
     "DEFAULT_BOUNDS",
     "ENDED_STATUSES",
     "LIVE_STATUSES",
+    "AcceptedEdits",
     "CloseBlocked",
     "CloseBounds",
     "CloseOutcome",

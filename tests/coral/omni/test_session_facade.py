@@ -322,10 +322,12 @@ class _Coral:
         owner: str | None = None,
         generation: str | None = None,
         auth_on: bool = False,
+        host_id: str = _HOST_ID,
     ) -> None:
         """
         :param owner: The run owner; ``None`` is the local user with auth off.
         :param auth_on: Give the facade an auth provider, as a multi-user server has.
+        :param host_id: The host the run's spec names for its steps.
         """
         self.stores = stores
         self.bindings = SqlAlchemySessionBindingStore(db_uri)
@@ -357,7 +359,7 @@ class _Coral:
             workspace_id=WORKSPACE,
             user_id=owner,
             account_generation=generation,
-            host_id=_HOST_ID,
+            host_id=host_id,
             repo_path="/work",
             worktree_path=_WORKSPACE,
         )
@@ -753,6 +755,34 @@ async def test_another_users_agent_is_not_permitted(
 
     assert (failure.error_code, failure.retryable) == ("session.agent_not_permitted", False)
     assert unlaunched.progress(unlaunched.step_id()) is None
+
+
+async def test_an_agent_id_no_agent_row_can_have_is_not_permitted(
+    unlaunched: _Coral, launcher: _RecordingLauncher, host: _Host
+) -> None:
+    # The real agent store raises for an id that is not a uuid; it is never asked.
+    await unlaunched.anchor()
+
+    failure = _failed(await unlaunched.deliver(unlaunched.step_payload(agent_id="reviewer")))
+
+    assert (failure.error_code, failure.retryable) == ("session.agent_not_permitted", False)
+    assert unlaunched.progress(unlaunched.step_id()) is None
+    assert launcher.calls == []
+
+
+async def test_a_host_id_no_host_row_can_have_is_not_permitted(
+    app: FastAPI, stores: _Stores, db_uri: str, launcher: _RecordingLauncher
+) -> None:
+    # The real host store raises for an id that is not a uuid; it is never asked.
+    coral = _Coral(app, stores, db_uri, launcher=launcher, host_id="laptop-1")
+    await coral.anchor()
+
+    failure = _failed(await coral.deliver(coral.step_payload()))
+
+    assert (failure.error_code, failure.retryable) == ("session.host_not_permitted", False)
+    assert coral.progress(coral.step_id()) is None
+    assert coral.conversation(coral.step_id()) is None
+    assert launcher.calls == []
 
 
 async def test_a_missing_run_worktree_is_permanent_and_nothing_is_created(

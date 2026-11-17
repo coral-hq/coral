@@ -88,7 +88,7 @@ class _WatchedSession:
 
 class CoralStatusEdges(SessionEdgeWatcher):
     """
-    The S1 observer for sessions a close or cancel is watching (SES-08 replaces it).
+    The S1 observer for sessions a close or cancel is watching, until turn facts persist.
 
     :param loop: The server's event loop; watches and waiters live on it.
     :param sink: Receives each watched session's ``TurnFact``; unset until

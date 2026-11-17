@@ -23,6 +23,7 @@ from collections.abc import Mapping, Sequence
 from typing import cast, override
 
 from coral.workspace.ops import (
+    COMMIT_ID,
     WORKSPACE_ERROR_CODES,
     CheckResult,
     CommitResult,
@@ -67,7 +68,6 @@ _UNKNOWN_OP = "unknown_op"
 ALWAYS_PERMANENT_CODES: frozenset[str] = frozenset(
     {"workspace.capability_unavailable", "workspace.worktree_displaced"}
 )
-_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -206,13 +206,16 @@ class HostWorkspaceOps(WorkspaceOps):
         )
         paths = payload.texts("paths")
         files_changed = payload.count("files_changed")
-        if files_changed != len(paths):
+        # A host cuts a list too large for its channel; an older host never does.
+        truncated = payload.optional_flag("paths_truncated")
+        if files_changed < len(paths) or (files_changed > len(paths) and not truncated):
             raise payload.malformed("files_changed")
         return DiffStat(
             files_changed=files_changed,
             insertions=payload.count("insertions"),
             deletions=payload.count("deletions"),
             paths=paths,
+            paths_truncated=truncated,
         )
 
     @override
@@ -394,7 +397,7 @@ class _Payload:
         return value
 
     def commit_id(self, name: str) -> str:
-        return self.matching(name, _COMMIT_ID)
+        return self.matching(name, COMMIT_ID)
 
     def optional_commit_id(self, name: str) -> str | None:
         if name in self._payload and self._payload[name] is None:
@@ -406,6 +409,10 @@ class _Payload:
         if not isinstance(value, bool):
             raise self.malformed(name)
         return value
+
+    def optional_flag(self, name: str) -> bool:
+        """A flag that reads ``False`` when absent."""
+        return name in self._payload and self.flag(name)
 
     def count(self, name: str) -> int:
         value = self._payload.get(name)

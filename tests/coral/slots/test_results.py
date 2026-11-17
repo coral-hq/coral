@@ -9,7 +9,6 @@ import pytest
 
 from coral.slots.results import (
     DIFF_PATHS_BYTE_BUDGET,
-    FREE_TEXT_MAX_BYTES,
     FREE_TEXT_MAX_CHARS,
     RESULT_BYTE_BUDGET,
     SUBJECT_MAX_BYTES,
@@ -85,22 +84,28 @@ def test_a_small_result_is_unchanged_but_says_its_paths_are_whole() -> None:
     assert bound_result({"head": "c" * 40}) == {"head": "c" * 40}
 
 
-def test_subject_and_free_text_are_cut_to_their_limits() -> None:
+def test_subject_and_free_text_are_cut_to_their_limits_but_echoed_ids_are_kept_whole() -> None:
+    # The payload parser accepts an item_path of 1,024 stored bytes; the engine
+    # finds its item by the exact value, so it is never cut.
+    item_path = "i" * 1_024
     bounded = bound_result(
-        _commit_result([], subject="s" * 1000, item_path="i" * 1000, node_id="n" * 10)
+        _commit_result(
+            [], subject="s" * 1000, item_path=item_path, node_id="n" * 128, note="t" * 1000
+        )
     )
 
     assert bounded["subject"] == "s" * (SUBJECT_MAX_CHARS - 1) + "…"
-    assert bounded["item_path"] == "i" * (FREE_TEXT_MAX_CHARS - 1) + "…"
-    assert bounded["node_id"] == "n" * 10
+    assert bounded["note"] == "t" * (FREE_TEXT_MAX_CHARS - 1) + "…"
+    assert (bounded["item_path"], bounded["node_id"]) == (item_path, "n" * 128)
     assert bounded["commit"] == "c" * 40
 
 
 @pytest.mark.parametrize(
     ("subject", "item_path"),
     [
-        ("\u4e2d\u6587\u63d0\u4ea4\u4fe1\u606f" * 200, "\u8def\u5f84/" * 400),
-        ("\U0001f680 shipped " * 200, "\U0001f4c1/" * 400),
+        # The widest item paths the payload parser accepts: 1,020 stored bytes.
+        ("\u4e2d\u6587\u63d0\u4ea4\u4fe1\u606f" * 200, "\u8def" * 170),
+        ("\U0001f680 shipped " * 200, "\U0001f4c1" * 85),
     ],
     ids=["cjk", "emoji"],
 )
@@ -113,9 +118,8 @@ def test_wide_text_and_a_full_path_list_fit_as_stored(subject: str, item_path: s
     # Text is cut by what the queue stores: six bytes per CJK character, twelve per emoji.
     assert stored_text_bytes(bounded["subject"]) <= SUBJECT_MAX_BYTES
     assert len(bounded["subject"]) <= SUBJECT_MAX_CHARS
-    assert stored_text_bytes(bounded["item_path"]) <= FREE_TEXT_MAX_BYTES
     assert subject.startswith(bounded["subject"][:-1]) and bounded["subject"].endswith("…")
-    assert item_path.startswith(bounded["item_path"][:-1])
+    assert bounded["item_path"] == item_path
     assert bounded["node_id"] == "\u8282"
     # The paths get only what the text leaves.
     kept = bounded["diff_stat"]["paths"]
@@ -135,8 +139,8 @@ def test_paths_never_take_bytes_the_rest_of_the_result_needs() -> None:
     result = _commit_result(
         _FULL_DIFF,
         subject="\u4e2d" * SUBJECT_MAX_CHARS,
-        node_id="\u8282" * FREE_TEXT_MAX_CHARS,
-        item_path="\u8def" * FREE_TEXT_MAX_CHARS,
+        message="\u8282" * FREE_TEXT_MAX_CHARS,
+        note="\u8def" * FREE_TEXT_MAX_CHARS,
     )
 
     bounded = bound_result(result)

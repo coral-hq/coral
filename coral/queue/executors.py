@@ -68,8 +68,22 @@ class ExecutionContext:
 
 EffectExecutor = Callable[[ExecutionContext], Awaitable[EffectOutcome]]
 
+
+@dataclass(frozen=True, slots=True)
+class ExecutorRegistration:
+    """
+    A registered effect executor and how the drainer fences its items.
+
+    :param runs_after_terminal: Items of a finished run still run instead of
+        being abandoned as ``run.terminal``; the slot-generation fence still applies.
+    """
+
+    fn: EffectExecutor
+    runs_after_terminal: bool = False
+
+
 # custom-lint: disable-next=workspace-scoped-cache -- process-level effect executor registry
-_EXECUTORS: dict[str, EffectExecutor] = {}
+_EXECUTORS: dict[str, ExecutorRegistration] = {}
 
 
 def register_executor(
@@ -77,13 +91,19 @@ def register_executor(
     fn: EffectExecutor,
     *,
     replace: bool = False,
+    runs_after_terminal: bool = False,
 ) -> None:
-    """Register an async effect executor for the given effect_type."""
+    """
+    Register an async effect executor for the given effect_type.
+
+    :param runs_after_terminal: For effects that wind a finished run down, such
+        as stopping its sessions: the drainer runs them after the run ended.
+    """
     if not effect_type:
         raise ValueError("effect_type must be a non-empty string")
     if effect_type in _EXECUTORS and not replace:
         raise ValueError(f"Effect executor already registered for {effect_type!r}")
-    _EXECUTORS[effect_type] = fn
+    _EXECUTORS[effect_type] = ExecutorRegistration(fn, runs_after_terminal=runs_after_terminal)
 
 
 def unregister_executor(effect_type: str, fn: EffectExecutor) -> bool:
@@ -92,15 +112,22 @@ def unregister_executor(effect_type: str, fn: EffectExecutor) -> bool:
 
     :returns: ``False`` when another executor replaced ``fn`` (it stays) or none is registered.
     """
-    if _EXECUTORS.get(effect_type) is not fn:
+    registration = _EXECUTORS.get(effect_type)
+    if registration is None or registration.fn is not fn:
         return False
     del _EXECUTORS[effect_type]
     return True
 
 
+def get_registration(effect_type: str) -> ExecutorRegistration | None:
+    """Look up the registration of an effect type: its executor and its fencing."""
+    return _EXECUTORS.get(effect_type)
+
+
 def get_executor(effect_type: str) -> EffectExecutor | None:
     """Look up a registered effect executor by effect_type."""
-    return _EXECUTORS.get(effect_type)
+    registration = _EXECUTORS.get(effect_type)
+    return None if registration is None else registration.fn
 
 
 def clear_executors() -> None:
@@ -119,9 +146,11 @@ __all__ = [
     "EffectFailed",
     "EffectOutcome",
     "ExecutionContext",
+    "ExecutorRegistration",
     "StartupLeaseLost",
     "clear_executors",
     "get_executor",
+    "get_registration",
     "register_executor",
     "registered_executor_kinds",
     "unregister_executor",

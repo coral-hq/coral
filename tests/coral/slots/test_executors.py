@@ -418,6 +418,7 @@ class _Sessions:
         bound: bool = True,
         binding_generation: int = 1,
         slot_generation: int = 1,
+        slot_session: str = SESSION,
         progress: SessionBindingProgress = SessionBindingProgress.INITIALIZED,
     ) -> None:
         self.events: list[str] = []
@@ -431,7 +432,9 @@ class _Sessions:
             repo_path="/Users/alice/repo",
             worktree_path=WORKTREE,
         )
-        add_slot(self.run_store, self.run, session_id=SESSION, session_generation=slot_generation)
+        add_slot(
+            self.run_store, self.run, session_id=slot_session, session_generation=slot_generation
+        )
         self.dispatch = FakeDispatch(self.events, owner=OWNER)
         self.session = self.dispatch.session(SESSION)
         self.edges = FakeEdgeWatcher(self.events)
@@ -712,6 +715,20 @@ async def test_only_the_current_writer_session_commits_at_its_close(
     assert "stop" in env.events
 
 
+async def test_a_writers_close_waits_until_a_slot_names_its_session() -> None:
+    # The slot still names another session: closing now would drop the writer's commit.
+    writer = _Sessions(slot_session="6" * 32)
+    reader = _Sessions(slot_role=SlotRole.VERIFIER, slot_session="6" * 32)
+
+    waiting = _failed(await writer.deliver(writer.close, writer.close_payload()))
+    closed = _completed(await reader.deliver(reader.close, reader.close_payload()))
+
+    assert (waiting.error_code, waiting.retryable) == ("session.not_ready", True)
+    assert writer.events == [] and writer.channel.requests == []
+    # A reader never commits, so its close does not wait for the slot.
+    assert closed["commit"] is None and "stop" in reader.events
+
+
 async def test_a_close_of_a_session_this_run_did_not_bind_is_refused() -> None:
     env = _Sessions(bound=False)
 
@@ -780,6 +797,20 @@ async def test_a_slot_with_no_session_yet_is_cancelled_without_action() -> None:
     result = _completed(await env.deliver(env.cancel, env.cancel_payload(session_id=None)))
 
     assert result == {"session_id": None}
+    assert env.events == []
+
+
+async def test_a_cancel_without_a_session_id_key_is_refused() -> None:
+    # The reducer's own cancel_sessions payload names no session; forwarded as is,
+    # it must fail loudly instead of cancelling nothing.
+    env = _Sessions()
+    payload = env.cancel_payload()
+    del payload["session_id"]
+
+    failure = _failed(await env.deliver(env.cancel, payload))
+
+    assert (failure.error_code, failure.retryable) == ("effect.invalid_payload", False)
+    assert "session_id" in failure.message
     assert env.events == []
 
 

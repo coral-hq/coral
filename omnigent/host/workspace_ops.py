@@ -60,7 +60,8 @@ RESULT_TOO_LARGE = "result_too_large"
 _OP_NAME = re.compile(r"[a-z][a-z0-9_.]{0,63}")
 # Failure codes share the op-name shape, e.g. "workspace.git_failed".
 ERROR_CODE_PATTERN = _OP_NAME
-# K13's op-key format: a key names refs and commit trailers.
+# K13's op-key format: a key names refs and commit trailers. A copy of
+# coral.workspace.ops' pattern, since Omnigent must not import Coral.
 _OP_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}")
 
 
