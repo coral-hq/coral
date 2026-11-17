@@ -414,6 +414,14 @@ _BAD_PAYLOADS: dict[str, tuple[OpCall, object]] = {
         lambda ops: ops.reset(REF, WRITER, op_key="k", commit=HEAD),
         {"commit": HEAD},
     ),
+    "reset-to-another-commit": (
+        lambda ops: ops.reset(REF, WRITER, op_key="k", commit=HEAD),
+        {"head": NEW},
+    ),
+    "commit-empty-off-expected-head": (
+        lambda ops: ops.commit(REF, WRITER, op_key="k", expected_head=HEAD, message="m"),
+        {"commit": NEW, "empty": True},
+    ),
 }
 
 

@@ -7,6 +7,18 @@ from pathlib import Path
 # omnigent/runtime/workflow.py: claude-sdk CLI env, used by coral/omni/server/preflight.py.
 from omnigent.runtime.workflow import _build_claude_sdk_spawn_env
 
+# Host workspace-op channel, used by coral/omni/server/workspace_ops.py.
+from omnigent.server.routes._host_workspace_ops import (
+    # omnigent/server/routes/_host_workspace_ops.py: no owner scope matched; nothing was sent.
+    HostWorkspaceOpNotPermittedError,
+    # omnigent/server/routes/_host_workspace_ops.py: the host lacks workspace_ops:1.
+    HostWorkspaceOpsUnsupportedError,
+    # omnigent/server/routes/_host_workspace_ops.py: lost or timed out; outcome unknown.
+    HostWorkspaceOpUnavailableError,
+    # omnigent/server/routes/_host_workspace_ops.py: request-free host.workspace_op.
+    request_workspace_op_on_host,
+)
+
 # Host worktree proxies, used by coral/omni/server/worktrees.py.
 from omnigent.server.routes._host_worktree import (
     # omnigent/server/routes/_host_worktree.py: the host could not be reached.
@@ -30,6 +42,9 @@ from omnigent.version import VERSION as OMNIGENT_VERSION
 
 __all__ = [
     "OMNIGENT_VERSION",
+    "HostWorkspaceOpNotPermittedError",
+    "HostWorkspaceOpUnavailableError",
+    "HostWorkspaceOpsUnsupportedError",
     "WorkspaceValidationError",
     "WorktreeHostUnavailableError",
     "WorktreeProxyError",
@@ -38,6 +53,7 @@ __all__ = [
     "_tar_gz_dir",
     "create_worktree_on_host",
     "list_worktrees_on_host",
+    "request_workspace_op_on_host",
 ]
 
 

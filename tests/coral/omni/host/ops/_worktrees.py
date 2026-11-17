@@ -100,18 +100,18 @@ def make_repository(path: Path, files: Mapping[str, bytes] = INITIAL_FILES) -> s
 
 
 def make_linked_worktree(
-    parent: Path, files: Mapping[str, bytes] = INITIAL_FILES
+    parent: Path, files: Mapping[str, bytes] = INITIAL_FILES, *, branch: str = BRANCH
 ) -> LinkedWorktree:
     """Lay out ``<parent>/repo``, with ``files`` at ``base``, and its linked worktree.
 
-    The worktree is ``<parent>/repo-worktrees/coral-r-test-base`` on ``BRANCH``.
+    The worktree is ``<parent>/repo-worktrees/coral-r-test-base`` on ``branch``.
     """
     parent = parent.resolve()
     repo_root = parent / "repo"
     base = make_repository(repo_root, files)
     root = parent / "repo-worktrees" / "coral-r-test-base"
-    run_git(repo_root, "worktree", "add", "-q", "-b", BRANCH, str(root))
-    return LinkedWorktree(repo_root=repo_root, root=root, branch=BRANCH, base=base)
+    run_git(repo_root, "worktree", "add", "-q", "-b", branch, str(root))
+    return LinkedWorktree(repo_root=repo_root, root=root, branch=branch, base=base)
 
 
 def make_partial_clone_worktree(parent: Path) -> tuple[LinkedWorktree, str]:

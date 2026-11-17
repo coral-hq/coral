@@ -86,6 +86,18 @@ def register_executor(
     _EXECUTORS[effect_type] = fn
 
 
+def unregister_executor(effect_type: str, fn: EffectExecutor) -> bool:
+    """
+    Remove the executor for ``effect_type`` if it is still ``fn``.
+
+    :returns: ``False`` when another executor replaced ``fn`` (it stays) or none is registered.
+    """
+    if _EXECUTORS.get(effect_type) is not fn:
+        return False
+    del _EXECUTORS[effect_type]
+    return True
+
+
 def get_executor(effect_type: str) -> EffectExecutor | None:
     """Look up a registered effect executor by effect_type."""
     return _EXECUTORS.get(effect_type)
@@ -112,4 +124,5 @@ __all__ = [
     "get_executor",
     "register_executor",
     "registered_executor_kinds",
+    "unregister_executor",
 ]

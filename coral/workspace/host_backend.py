@@ -63,7 +63,10 @@ WRITE_TIMEOUT_S = 600.0
 # The host's own failure codes besides K13's.
 _INVALID_PARAMS = "workspace.invalid_params"
 _UNKNOWN_OP = "unknown_op"
-_ALWAYS_PERMANENT = frozenset({"workspace.capability_unavailable", "workspace.worktree_displaced"})
+# Codes a retry never fixes, whatever the host's ``permanent`` flag says.
+ALWAYS_PERMANENT_CODES: frozenset[str] = frozenset(
+    {"workspace.capability_unavailable", "workspace.worktree_displaced"}
+)
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -104,7 +107,7 @@ def map_host_reply(
     if code in WORKSPACE_ERROR_CODES:
         # A missing capability or a displaced worktree never mends by retrying;
         # a timeout may pass.
-        permanent = code in _ALWAYS_PERMANENT or (
+        permanent = code in ALWAYS_PERMANENT_CODES or (
             code != "workspace.timeout" and reply.get("permanent") is True
         )
         raise WorkspaceOpError(cast("WorkspaceErrorCode", code), message, permanent=permanent)
@@ -268,7 +271,11 @@ class HostWorkspaceOps(WorkspaceOps):
             run_id=run_id,
             attempt_id=attempt_id,
         )
-        return CommitResult(commit=payload.commit_id("commit"), empty=payload.flag("empty"))
+        result = CommitResult(commit=payload.commit_id("commit"), empty=payload.flag("empty"))
+        # Nothing recorded means the branch stayed at the HEAD the caller expected.
+        if result.empty and result.commit != expected_head:
+            raise payload.malformed("commit")
+        return result
 
     @override
     async def salvage(
@@ -289,7 +296,10 @@ class HostWorkspaceOps(WorkspaceOps):
         validate_op_key(op_key)
         validate_commit_id(commit)
         payload = await self._write(ref, executor, "reset", op_key, commit=commit)
-        return ResetResult(head=payload.commit_id("head"))
+        head = payload.commit_id("head")
+        if head != commit:
+            raise payload.malformed("head")
+        return ResetResult(head=head)
 
     @override
     async def merge(

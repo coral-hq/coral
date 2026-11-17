@@ -15,6 +15,7 @@ from coral.queue import (
     register_executor,
     registered_executor_kinds,
     run_executor_conformance,
+    unregister_executor,
 )
 
 
@@ -52,6 +53,32 @@ def test_executor_registry_rejects_duplicate_registration() -> None:
 
         with pytest.raises(ValueError, match="non-empty"):
             register_executor("", _dummy)
+    finally:
+        clear_executors()
+
+
+def test_unregister_executor_removes_only_the_function_it_names() -> None:
+    clear_executors()
+    try:
+
+        async def _first(ctx: ExecutionContext) -> EffectCompleted:
+            return EffectCompleted()
+
+        async def _replacement(ctx: ExecutionContext) -> EffectCompleted:
+            return EffectCompleted()
+
+        register_executor("workspace.commit", _first)
+        register_executor("workspace.commit", _replacement, replace=True)
+
+        # A stale owner cannot remove the executor that replaced its own.
+        assert unregister_executor("workspace.commit", _first) is False
+        assert get_executor("workspace.commit") is _replacement
+
+        assert unregister_executor("workspace.commit", _replacement) is True
+        assert get_executor("workspace.commit") is None
+        assert "workspace.commit" not in registered_executor_kinds()
+        # Repeat-safe: a second exit finds nothing to remove.
+        assert unregister_executor("workspace.commit", _replacement) is False
     finally:
         clear_executors()
 

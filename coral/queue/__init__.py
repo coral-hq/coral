@@ -16,6 +16,7 @@ from coral.queue.executors import (
     get_executor,
     register_executor,
     registered_executor_kinds,
+    unregister_executor,
 )
 from coral.queue.store import SqlAlchemyCoralQueueStore
 
@@ -34,4 +35,5 @@ __all__ = [
     "register_executor",
     "registered_executor_kinds",
     "run_executor_conformance",
+    "unregister_executor",
 ]
