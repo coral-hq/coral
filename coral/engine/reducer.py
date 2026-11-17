@@ -139,7 +139,7 @@ def _dispatch(
     if state.status in TERMINAL_STATUSES:
         return refuse(state, "run_terminal")
     if isinstance(command, HandoffReceived):
-        return receive_handoff(state, command)
+        return receive_handoff(graph, state, command)
     if isinstance(command, HandoffEvaluated):
         return _evaluate(graph, state, command)
     if isinstance(command, PostCloseActivity):
@@ -179,7 +179,7 @@ def _evaluate(graph: CompiledGraph, state: RunState, command: HandoffEvaluated) 
         if isinstance(found, ApplyResult):
             return found
         return refuse_unknown(state)
-    return evaluate_handoff(state, command)
+    return evaluate_handoff(graph, state, command)
 
 
 def _effect_completed(

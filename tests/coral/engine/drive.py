@@ -1,4 +1,4 @@
-"""Scripted driver: fixed clock, optional effect ack, fold equals state."""
+"""Scripted driver: fixed clock, optional effect ack, fold equals state, settled bodies."""
 
 from __future__ import annotations
 
@@ -12,6 +12,15 @@ from coral.model.ir import CompiledGraph
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _AUTO_ACK = frozenset({"create_session", "send_input", "close_slot"})
+_HOLDS_HANDOFF = frozenset({"evaluating", "closing", "closed"})
+
+
+def assert_handoff_bodies_settled(state: RunState) -> None:
+    """A slot keeps a handoff body or label only while evaluating, closing or closed."""
+    for slot in state.slots:
+        if slot.status not in _HOLDS_HANDOFF:
+            assert slot.handoff is None, slot
+            assert slot.handoff_label is None, slot
 
 
 @dataclass(frozen=True)
@@ -26,11 +35,15 @@ def drive(
     *,
     config: EngineConfig | None = None,
     auto_ack: bool = True,
+    after: Driven | None = None,
 ) -> Driven:
-    """Apply ``steps``. When ``auto_ack`` is set, complete session, brief, and close."""
+    """Apply ``steps``, continuing ``after`` when given.
+
+    When ``auto_ack`` is set, complete session, brief, and close.
+    """
     cfg = config if config is not None else EngineConfig()
-    state = empty_state()
-    log: list[LogEntry] = []
+    state = after.state if after is not None else empty_state()
+    log: list[LogEntry] = list(after.log) if after is not None else []
     pending: list[Input] = list(steps)
     while pending:
         command = pending.pop(0)
@@ -38,6 +51,7 @@ def drive(
         assert result.entry.now == NOW
         log.append(result.entry)
         assert fold(graph, log, cfg) == result.state
+        assert_handoff_bodies_settled(result.state)
         state = result.state
         if auto_ack and result.entry.rejection is None:
             acknowledgements = [

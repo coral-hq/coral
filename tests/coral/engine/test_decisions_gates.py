@@ -12,7 +12,9 @@ from coral.engine.types import (
     HandoffReceived,
     PauseCause,
     PostCloseActivity,
+    Rejection,
     StartRun,
+    activation_id,
 )
 from coral.model.ir import CompiledGraph
 from tests.coral.engine.drive import NOW, drive
@@ -21,6 +23,7 @@ from tests.coral.workflow_builders import (
     compile_text,
     decision,
     end,
+    fixture_text,
     gate,
     start,
     step,
@@ -123,6 +126,114 @@ def test_empty_decision_reason_is_illegal() -> None:
     assert result.entry.rejection.code == "tool.illegal"
     assert result.entry.rejection.allowed_values == ("approved", "rejected")
     assert fold(graph, (*opened.log, result.entry), CONFIG) == opened.state
+
+
+def test_choice_after_decision_is_decision_closed() -> None:
+    into_steps = _graph(
+        workflow_text(
+            [start(), decision("choose"), step("work"), step("other"), end()],
+            [
+                arrow("a1", "start", "choose"),
+                arrow("a2", "choose", "work", label="approved"),
+                arrow("a3", "choose", "other", label="rejected"),
+                arrow("a4", "work", "end"),
+                arrow("a5", "other", "end"),
+            ],
+        )
+    )
+    approve = ChooseArrow(node_id="choose", label="approved", reason="ship it")
+    for graph, status in ((into_steps, "running"), (_decision_graph(), "completed")):
+        decided = drive(graph, [RUN, approve], config=CONFIG)
+        assert decided.state.status == status
+        other = transition(
+            graph,
+            decided.state,
+            ChooseArrow(node_id="choose", label="rejected", reason="changed my mind"),
+            NOW,
+            CONFIG,
+        )
+        assert other.entry.rejection == Rejection(code="decision_closed")
+        assert other.entry.effects == ()
+        assert other.state == decided.state
+        same = transition(
+            graph,
+            decided.state,
+            ChooseArrow(node_id="choose", label="approved", reason="again"),
+            NOW,
+            CONFIG,
+        )
+        assert same.entry.rejection is None
+        assert same.entry.receipt_key == "choice:choose||:approved"
+        assert same.state == decided.state
+        assert fold(graph, (*decided.log, other.entry, same.entry), CONFIG) == decided.state
+
+
+def test_choice_and_skip_receipts_keep_their_keys_and_payloads() -> None:
+    graph = _graph(fixture_text("loop"))
+
+    def work(iteration: str) -> list[HandoffReceived | HandoffEvaluated]:
+        slot = f"{activation_id('work', (), (iteration,))}:0"
+        return [
+            HandoffReceived(slot_id=slot, body="done"),
+            HandoffEvaluated(slot_id=slot, outcome="accepted"),
+        ]
+
+    def revise(iteration: str, reason: str) -> ChooseArrow:
+        return ChooseArrow(
+            node_id="review", label="revise", reason=reason, iteration_path=(iteration,)
+        )
+
+    driven = drive(
+        graph,
+        [
+            RUN,
+            *work("a4:1"),
+            revise("a4:1", "once"),
+            *work("a4:2"),
+            revise("a4:2", "twice"),
+            *work("a4:3"),
+            revise("a4:3", "third"),
+        ],
+        config=CONFIG,
+    )
+    choice_receipts = [
+        (item.key, item.payload)
+        for item in driven.state.receipts
+        if item.key.startswith(("choice:", "skipped:", "loop:"))
+    ]
+    skipped = {"code": "arrow.skipped", "arrow_id": "a3"}
+    assert choice_receipts == [
+        ("skipped:review||a4:1:a3", skipped),
+        (
+            "choice:review||a4:1:revise",
+            {"label": "revise", "reason": "once", "code": "decision.made"},
+        ),
+        ("skipped:review||a4:2:a3", skipped),
+        (
+            "choice:review||a4:2:revise",
+            {"label": "revise", "reason": "twice", "code": "decision.made"},
+        ),
+        ("loop:a4||", {"code": "loop.limit_reached", "redirected": True, "decision.made": True}),
+        ("skipped:review||a4:3:a3", skipped),
+        (
+            "choice:review||a4:3:revise",
+            {
+                "label": "revise",
+                "reason": "third",
+                "code": "loop.limit_reached",
+                "redirected": True,
+                "decision.made": True,
+            },
+        ),
+    ]
+    chosen = [entry for entry in driven.log if isinstance(entry.input, ChooseArrow)]
+    assert [
+        (entry.receipt_key, [effect.kind for effect in entry.effects]) for entry in chosen
+    ] == [
+        ("choice:review||a4:1:revise", ["create_session"]),
+        ("choice:review||a4:2:revise", ["create_session"]),
+        ("choice:review||a4:3:revise", []),
+    ]
 
 
 def test_legal_decision_reaches_end_and_fold_matches() -> None:

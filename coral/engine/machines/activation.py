@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from coral.engine.machines.decision import open_decision
+from coral.engine.machines.decision import open_decision, take_labelled_arrow
 from coral.engine.machines.gate import open_gate
 from coral.engine.types import (
     Activation,
     ActivationOutcome,
     ActivationStatus,
     Effect,
+    Receipt,
     RunState,
     Slot,
     SlotHandoff,
@@ -158,7 +159,10 @@ def traverse_arrow(
 def finish_activation(
     state: RunState, graph: CompiledGraph, owner_id: str
 ) -> tuple[RunState, tuple[Effect, ...]]:
-    """Close an activation whose slots are done and open its successor."""
+    """Close an activation whose slots are done and open its successor.
+
+    A step routed by label follows the label its handoff chose. Other nodes advance.
+    """
     owner = find_activation(state, owner_id)
     if owner is None or owner.status == "closed" or owner.outcome == "failed":
         return state, ()
@@ -172,16 +176,78 @@ def finish_activation(
     )
     if closed.status != "running":
         return closed, ()
-    advanced, effects = advance(
-        closed,
-        graph,
-        owner.node_id,
-        item_path=owner.item_path,
-        iteration_path=owner.iteration_path,
-    )
+    if routes_by_label(graph, owner.node_id):
+        advanced, effects = _take_handoff_label(closed, graph, owner)
+    else:
+        advanced, effects = advance(
+            closed,
+            graph,
+            owner.node_id,
+            item_path=owner.item_path,
+            iteration_path=owner.iteration_path,
+        )
     from coral.engine.control import check_liveness
 
     return check_liveness(advanced, graph), effects
+
+
+def route_closed_step(
+    state: RunState, graph: CompiledGraph, owner: Activation
+) -> tuple[RunState, tuple[Effect, ...]]:
+    """Follow the stored label of a step routed by label that closed while the run was paused.
+
+    Each session generation routes once: its ``route:`` receipt makes a later resume a
+    no-op, and a retried step's new generation routes again.
+    """
+    if not routes_by_label(graph, owner.node_id):
+        return state, ()
+    slot = _owner_slot(state, owner.id)
+    if slot is not None and _has_receipt(state, _route_key(owner.id, slot.session_generation)):
+        return state, ()
+    return _take_handoff_label(state, graph, owner)
+
+
+def _owner_slot(state: RunState, owner_id: str) -> Slot | None:
+    """The single slot of a step routed by label (single-agent by validation)."""
+    return next((slot for slot in state.slots if slot.activation_id == owner_id), None)
+
+
+def _route_key(owner_id: str, generation: int) -> str:
+    return f"route:{owner_id}:{generation}"
+
+
+def _has_receipt(state: RunState, key: str) -> bool:
+    return any(item.key == key for item in state.receipts)
+
+
+def _take_handoff_label(
+    state: RunState, graph: CompiledGraph, owner: Activation
+) -> tuple[RunState, tuple[Effect, ...]]:
+    """Follow the arrow a single-agent step's accepted handoff named, and receipt the route.
+
+    Validation keeps the label on the slot. A missing or unknown one means a corrupt
+    log, so the run pauses rather than guess a route.
+    """
+    slot = _owner_slot(state, owner.id)
+    label = slot.handoff_label if slot is not None else None
+    if slot is None or label is None or label not in choosable_labels(graph, owner.node_id):
+        from coral.engine.machines.run import record_pause
+
+        return record_pause(state, "failure_path", "handoff_label_missing", owner.node_id), ()
+    taken, effects, _redirected = take_labelled_arrow(
+        state,
+        graph,
+        node_id=owner.node_id,
+        owner_id=owner.id,
+        label=label,
+        item_path=owner.item_path,
+        iteration_path=owner.iteration_path,
+    )
+    key = _route_key(owner.id, slot.session_generation)
+    if _has_receipt(taken, key):
+        return taken, effects
+    route = Receipt(key=key, payload={"label": label})
+    return taken.model_copy(update={"receipts": (*taken.receipts, route)}), effects
 
 
 def replace_activation(state: RunState, owner_id: str, **changes: object) -> RunState:
@@ -204,6 +270,22 @@ def choosable_labels(graph: CompiledGraph, node_id: str) -> tuple[str, ...]:
         and arrow.kind in {"forward", "back"}
         and arrow.label is not None
     )
+
+
+def routes_by_label(graph: CompiledGraph, node_id: str) -> bool:
+    """True when a step's handoff label picks its successor.
+
+    That is a step with a labelled forward arrow, which ``advance`` never opens, or with
+    more than one choosable label. A step whose single label loops back keeps ``advance``.
+    """
+    node = find_node(graph, node_id)
+    if node is None or node.kind != "step":
+        return False
+    labelled_forward = any(
+        arrow.source == node_id and arrow.kind == "forward" and arrow.label is not None
+        for arrow in graph.arrows
+    )
+    return labelled_forward or len(choosable_labels(graph, node_id)) > 1
 
 
 def arrow_by_label(graph: CompiledGraph, node_id: str, label: str) -> CompiledArrow | None:
