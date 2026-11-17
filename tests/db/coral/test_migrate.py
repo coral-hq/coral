@@ -180,7 +180,7 @@ def test_schema_cache_and_clear_cache() -> None:
         # First call migrates
         ensure_coral_schema(uri)
         current, head = current_coral_revision(uri)
-        assert current == head == "coral_0002_session_facade"
+        assert current == head == "coral_0003_engine_bridge"
 
         # Second call returns early via cache
         ensure_coral_schema(uri)
@@ -310,7 +310,7 @@ def test_cli_upgrade_and_current() -> None:
             check=False,
         )
         assert res.returncode == 0, res.stderr
-        assert "Current Coral revision: coral_0002_session_facade" in res.stdout
+        assert "Current Coral revision: coral_0003_engine_bridge" in res.stdout
 
 
 def test_s30_omnigent_autogenerate_ignores_coral_tables() -> None:
@@ -404,3 +404,45 @@ def test_standalone_alembic_cli_upgrade_and_env_populates_models() -> None:
             assert "coral_alembic_version" in tables
         finally:
             engine.dispose()
+
+
+def test_each_revision_commits_when_the_cockroachdb_runner_owns_the_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CockroachDB runner's open transaction is committed after every revision."""
+    from alembic import command
+
+    import coral.db.migrate as migrate_mod
+    import omnigent.db.utils as db_utils
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'coral.db'}")
+    committed: list[str] = []
+
+    def commit_revision(conn: sa.Connection) -> None:
+        conn.commit()
+        with engine.connect() as observer:
+            committed.append(
+                observer.execute(
+                    sa.text("SELECT version_num FROM coral_alembic_version")
+                ).scalar_one()
+            )
+
+    # SQLite stands in for CockroachDB, whose runner opens the transaction before Alembic.
+    monkeypatch.setattr(db_utils, "is_cockroachdb", lambda _name: True)
+    monkeypatch.setattr(migrate_mod, "commit_crdb_revision", commit_revision)
+    config = migrate_mod._build_coral_alembic_config(str(engine.url))
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa.text("SELECT 1"))
+            config.attributes["connection"] = conn
+            command.upgrade(config, "coral_0003_engine_bridge")
+            conn.commit()
+    finally:
+        engine.dispose()
+
+    assert committed == [
+        "coral_0000_base",
+        "coral_0001_core",
+        "coral_0002_session_facade",
+        "coral_0003_engine_bridge",
+    ]

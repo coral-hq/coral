@@ -115,6 +115,8 @@ WORKSPACE = DEFAULT_WORKSPACE_ID
 STEP_AGENT_NAME = "coral-test-step"
 NATIVE_AGENT_NAME = "coral-test-native"
 SLOT = "review/item-0/m0"
+# Each slot holds one session per generation, so a second step session needs its own slot.
+OTHER_SLOT = "review/item-1/m0"
 
 
 @dataclass
@@ -395,13 +397,13 @@ class _Coral:
             "role": "anchor",
         }
 
-    def step_payload(self, seq: int = 2, **fields: object) -> dict[str, Any]:
+    def step_payload(self, seq: int = 2, subject: str = SLOT, **fields: object) -> dict[str, Any]:
         return {
             "effect_type": CREATE_SESSION,
-            "effect_key": self.key(seq, SLOT),
+            "effect_key": self.key(seq, subject),
             "role": "step",
             "agent_id": self.step_agent,
-            "engine_slot_id": SLOT,
+            "engine_slot_id": subject,
             "slot_role": "step_agent",
             "node_id": "review",
             **fields,
@@ -731,14 +733,14 @@ async def test_squatted_title_is_a_title_conflict_and_nothing_launches(
     )
     _completed(await unlaunched.deliver(unlaunched.step_payload()))
     # Only the exact title, with that id part, can still be taken first.
-    later = unlaunched.step_id(seq=3)
+    later = unlaunched.step_id(seq=3, subject=OTHER_SLOT)
     store.create_conversation(
         kind="sub_agent",
-        title=f"{SLOT} · {later[:TITLE_ID_SUFFIX_CHARS]}",
+        title=f"{OTHER_SLOT} · {later[:TITLE_ID_SUFFIX_CHARS]}",
         parent_conversation_id=unlaunched.anchor_id,
     )
 
-    failure = _failed(await unlaunched.deliver(unlaunched.step_payload(seq=3)))
+    failure = _failed(await unlaunched.deliver(unlaunched.step_payload(seq=3, subject=OTHER_SLOT)))
 
     assert (failure.error_code, failure.retryable) == ("session.title_conflict", False)
     assert unlaunched.conversation(later) is None
@@ -978,7 +980,10 @@ async def test_orchestrator_slot_needs_an_orchestrator_bundle(
     assert launcher.calls == []
 
     for seq, (stance, slot_role) in enumerate(accepted, start=10):
-        payload = unlaunched.step_payload(seq, agent_id=agents[stance], slot_role=slot_role)
+        # One session per slot and generation: each accepted role gets its own slot.
+        payload = unlaunched.step_payload(
+            seq, f"{SLOT}/{slot_role}", agent_id=agents[stance], slot_role=slot_role
+        )
         _completed(await unlaunched.deliver(payload))
     assert [
         (call["conv"].agent_id, call["conv"].labels["coral.role"]) for call in launcher.calls
@@ -1837,9 +1842,11 @@ async def test_with_auth_on_the_owner_holds_the_grants_and_omnigent_checks_them_
 
     # Without the anchor's grant, that check refuses the launch of the next step.
     permission.revoke(OWNER, coral.anchor_id)
-    refused = _failed(await coral.deliver(coral.step_payload(seq=3)))
+    refused = _failed(await coral.deliver(coral.step_payload(seq=3, subject=OTHER_SLOT)))
     assert (refused.error_code, refused.retryable) == ("session.host_not_permitted", False)
-    assert coral.progress(coral.step_id(seq=3)) == SessionBindingProgress.ROW_CREATED
+    assert coral.progress(coral.step_id(seq=3, subject=OTHER_SLOT)) == (
+        SessionBindingProgress.ROW_CREATED
+    )
     assert len(owned_host.launch_frames) == 1
 
     # A connection held by another registration of the owner is refused before any write.

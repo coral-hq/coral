@@ -75,7 +75,7 @@ def test_drift_pause_persists_on_every_lane(coral_db_uri: str) -> None:
         reopened.apply_transition(
             run.id,
             version,
-            Transition(pause_reason=int(RunPauseReason.DRIFT) + 1),
+            Transition(pause_reason=max(RunPauseReason) + 1),
             workspace_id=WORKSPACE,
         )
     _, unchanged_version = reopened.load_run_state(run.id, workspace_id=WORKSPACE)

@@ -50,6 +50,7 @@ RUN_PAUSE_REASON: dict[str, int] = {
     "failure_path": 10,
     "engine_upgrade": 11,
     "drift": 12,
+    "auth": 13,
 }
 
 RUN_TRIGGER_KIND: dict[str, int] = {
@@ -115,6 +116,8 @@ SLOT_STATUS: dict[str, int] = {
     "refreshing": 7,
     "restarting": 8,
     "closed": 9,
+    "evaluating": 10,
+    "closing": 11,
 }
 
 SLOT_TURN_ORIGIN: dict[str, int] = {
@@ -186,6 +189,7 @@ LOG_KIND: dict[str, int] = {
     "alert": 19,
     "run_finished": 20,
     "command_rejected": 21,
+    "engine": 22,
 }
 
 SIMULATION_CASE_STATUS: dict[str, int] = {
@@ -285,6 +289,7 @@ class RunPauseReason(IntEnum):
     FAILURE_PATH = 10
     ENGINE_UPGRADE = 11
     DRIFT = 12
+    AUTH = 13
 
 
 class RunTriggerKind(IntEnum):
@@ -353,6 +358,8 @@ class SlotStatus(IntEnum):
     REFRESHING = 7
     RESTARTING = 8
     CLOSED = 9
+    EVALUATING = 10
+    CLOSING = 11
 
 
 class SlotTurnOrigin(IntEnum):
@@ -424,6 +431,8 @@ class LogKind(IntEnum):
     ALERT = 19
     RUN_FINISHED = 20
     COMMAND_REJECTED = 21
+    # One reducer log entry, stored whole in the row body.
+    ENGINE = 22
 
 
 class SimulationCaseStatus(IntEnum):

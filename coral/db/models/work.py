@@ -41,6 +41,8 @@ class WorkRow(CoralBase):
     idempotency_cksum: Mapped[bytes] = mapped_column(CHECKSUM32, nullable=False)
     created_at_us: Mapped[int] = mapped_column(BigInteger, nullable=False)
     finished_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    # Epoch seconds of the first refusal of the current hold; null when not held.
+    held_since: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
 
     def __init__(self, **kwargs: object) -> None:
         kwargs.setdefault("attempts", 0)

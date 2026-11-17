@@ -56,6 +56,7 @@ EXPECTED_TABLE_NAMES = frozenset(
         "coral_session_bindings",
         "coral_stable_ids",
         "coral_workspace_op_intents",
+        "coral_tool_replies",
     }
 )
 
@@ -83,10 +84,10 @@ def _column_index_byte_length(col: Column) -> int:
     return 8
 
 
-def test_exactly_19_tables_registered_and_no_metadata_overlap() -> None:
+def test_exactly_20_tables_registered_and_no_metadata_overlap() -> None:
     tables = CoralBase.metadata.tables
     assert set(tables.keys()) == EXPECTED_TABLE_NAMES
-    assert len(tables) == 19
+    assert len(tables) == 20
 
     omnigent_tables = set(OmnigentBase.metadata.tables.keys())
     conversation_tables = set(ConversationBase.metadata.tables.keys())
@@ -131,8 +132,9 @@ def test_constraint_and_index_naming_prefixes() -> None:
         for index in table.indexes:
             ix_name = index.name
             assert isinstance(ix_name, str), f"Unnamed index in {table_name}"
-            assert ix_name.startswith("ix_coral_"), (
-                f"Index {ix_name} on {table_name} missing 'ix_coral_' prefix"
+            prefix = "uq_coral_" if index.unique else "ix_coral_"
+            assert ix_name.startswith(prefix), (
+                f"Index {ix_name} on {table_name} missing {prefix!r} prefix"
             )
 
 
@@ -175,6 +177,7 @@ def test_exact_internal_and_external_id_lengths() -> None:
         "coral_session_bindings": {"run_id"},
         "coral_stable_ids": {"stable_id", "run_id"},
         "coral_workspace_op_intents": {"run_id"},
+        "coral_tool_replies": {"run_id"},
     }
 
     external_ref_columns: dict[str, set[str]] = {
@@ -551,6 +554,49 @@ def test_stored_codes_for_drift_and_session_facade_enums() -> None:
         < ec.SessionBindingProgress.ROW_CREATED
         < ec.SessionBindingProgress.INITIALIZED
     )
+
+
+def test_stored_codes_for_engine_bridge_enums() -> None:
+    """Stored integers are a persistence contract; renumbering breaks existing rows."""
+    assert ec.encode_run_pause_reason("auth") == ec.RunPauseReason.AUTH == 13
+    assert ec.encode_slot_status("evaluating") == ec.SlotStatus.EVALUATING == 10
+    assert ec.encode_slot_status("closing") == ec.SlotStatus.CLOSING == 11
+    assert ec.encode_log_kind("engine") == ec.LogKind.ENGINE == 22
+
+
+def test_engine_bridge_columns_table_and_binding_index() -> None:
+    tables = CoralBase.metadata.tables
+    versions = tables["coral_workflow_versions"]
+    # A pinned version holds its graph inline, so the blob refs are optional.
+    for name in ("yaml_ref", "compiled_ref", "yaml_text", "compiled_json"):
+        assert versions.c[name].nullable is True, name
+    assert versions.c.compiled_json.type.max_stored_bytes == MAX_STORED_BYTES
+    assert tables["coral_run_specs"].c.engine_config.nullable is True
+    assert isinstance(tables["coral_work"].c.held_since.type, BigInteger)
+    assert tables["coral_work"].c.held_since.nullable is True
+
+    replies = tables["coral_tool_replies"]
+    assert [column.name for column in replies.primary_key.columns] == [
+        "workspace_id",
+        "run_id",
+        "cksum",
+    ]
+    assert replies.primary_key.name == "pk_coral_tool_replies"
+    for name in ("reply", "run_version", "created_at_us"):
+        assert replies.c[name].nullable is False, name
+
+    (index,) = [
+        index
+        for index in tables["coral_session_bindings"].indexes
+        if index.name == "uq_coral_session_bindings_slot_generation"
+    ]
+    assert index.unique is True
+    assert [column.name for column in index.columns] == [
+        "workspace_id",
+        "run_id",
+        "slot_id",
+        "session_generation",
+    ]
 
 
 def test_session_facade_tables_enforce_their_enum_checks_on_sqlite() -> None:
