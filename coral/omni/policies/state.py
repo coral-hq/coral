@@ -147,7 +147,7 @@ class RunStatusCache:
                 "Coral run %s status unreadable (%s); denying its sessions' tool calls",
                 run_id,
                 type(error).__name__,
-                extra={"workspace_id": workspace_id},
+                extra={"coral_workspace_id": workspace_id},
             )
             raise RunStateUnavailable(f"run {run_id!r} status is unavailable") from error
         _logger.warning(
@@ -155,7 +155,7 @@ class RunStatusCache:
             run_id,
             type(error).__name__,
             started - entry.read_at,
-            extra={"workspace_id": workspace_id},
+            extra={"coral_workspace_id": workspace_id},
         )
         return entry.view
 

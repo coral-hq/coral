@@ -35,7 +35,12 @@ from omnigent.runtime.policies.builder import build_policy_engine
 from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.spec.types import PolicyAction
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
-from tests.coral.omni.policies.conftest import CoralPolicies, coral_spec, tool_call
+from tests.coral.omni.policies.conftest import (
+    SESSION_CAP_USD,
+    CoralPolicies,
+    coral_spec,
+    tool_call,
+)
 from tests.coral.tools.fake_decision_port import WORKSPACE, FakeBindingLookup, step_binding
 
 WAIT_S = 30.0
@@ -104,7 +109,12 @@ async def sql_coral(db_uri: str) -> AsyncIterator[_SqlCoral]:
         bindings=SqlAlchemySessionBindingStore(db_uri),
     )
     async with AsyncExitStack() as stack:
-        _wire_guards(run_store=coral.runs, bindings=coral.bindings, stack=stack)
+        _wire_guards(
+            run_store=coral.runs,
+            bindings=coral.bindings,
+            session_cap_usd=SESSION_CAP_USD,
+            stack=stack,
+        )
         yield coral
 
 

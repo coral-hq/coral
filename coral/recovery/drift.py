@@ -15,24 +15,16 @@ created and, through :class:`DriftPreSendHook`, before each engine message.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from coral.db.enum_codecs import (
-    ActorKind,
-    LogKind,
-    RunPauseReason,
-    RunStatus,
-    SessionBindingProgress,
-)
+from coral.db.enum_codecs import RunPauseReason, SessionBindingProgress
 from coral.model.ids import anchor_session_id
 from coral.omni.protocols import CoralSessionError, PreSendRequest, SessionFacade, SessionState
-from coral.stores.protocols import CommitOutcome, LogEntryDraft, RunState, RunStore, Transition
-from coral.stores.run_commit import commit_with_retry
+from coral.recovery.pause import pause_log_checksum, pause_run_once
+from coral.stores.protocols import CommitOutcome, RunStore
 from coral.stores.session_bindings import SessionBindings
 
 DriftCause = Literal[
@@ -47,7 +39,6 @@ SESSION_CODES: dict[DriftCause, str] = {
     "session_archived": "session.archived",
     "session_deleted": "session.deleted",
 }
-_PAUSABLE_STATUSES = frozenset({int(RunStatus.STARTING), int(RunStatus.RUNNING)})
 
 
 @dataclass(frozen=True)
@@ -133,10 +124,13 @@ async def find_drift(
     return None
 
 
+def _drift_checksum_parts(run_id: str, finding: DriftFinding) -> tuple[str, ...]:
+    return ("coral-drift", run_id, finding.cause, finding.session_id)
+
+
 def drift_log_checksum(run_id: str, finding: DriftFinding, run_version: int) -> bytes:
     """The pause entry's identity: one per run, cause, session and pause epoch."""
-    parts = ("coral-drift", run_id, finding.cause, finding.session_id, str(run_version))
-    return hashlib.sha256("\0".join(parts).encode()).digest()
+    return pause_log_checksum(_drift_checksum_parts(run_id, finding), run_version)
 
 
 def pause_run_for_drift(
@@ -153,37 +147,22 @@ def pause_run_for_drift(
     A run already paused for another reason records nothing now: the drift is
     found again by the first engine action after it resumes.
     """
-    body = {
-        "kind": "pause_run",
-        "reason": "drift",
-        "cause": finding.cause,
-        "session_id": finding.session_id,
-        "detail": finding.occurrence,
-    }
-
-    def reduce(state: RunState) -> Transition:
-        if state.status not in _PAUSABLE_STATUSES:
-            return Transition.empty()
-        entry = LogEntryDraft(
-            kind=int(LogKind.PAUSED),
-            actor_kind=int(ActorKind.ENGINE),
-            body=json.dumps(body, sort_keys=True),
-            idempotency_cksum=drift_log_checksum(run_id, finding, state.version),
-            created_at_us=now_us,
-        )
-        return Transition(
-            status=int(RunStatus.PAUSED),
-            pause_reason=int(RunPauseReason.DRIFT),
-            logs=(entry,),
-        )
-
-    return commit_with_retry(
-        run_store=run_store,
+    result = pause_run_once(
+        run_store,
         workspace_id=workspace_id,
         run_id=run_id,
-        reduce_fn=reduce,
-        now=now_us // 1_000_000,
+        reason=RunPauseReason.DRIFT,
+        body={
+            "kind": "pause_run",
+            "reason": "drift",
+            "cause": finding.cause,
+            "session_id": finding.session_id,
+            "detail": finding.occurrence,
+        },
+        checksum_parts=_drift_checksum_parts(run_id, finding),
+        now_us=now_us,
     )
+    return result.commit
 
 
 def _now_us() -> int:

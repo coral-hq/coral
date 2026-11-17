@@ -20,6 +20,12 @@ from tests.stores.coral._schema import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_session_cap_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cost cap the developer exported must not decide or break a test's Coral lifespan."""
+    monkeypatch.delenv("CORAL_SESSION_COST_CAP_USD", raising=False)
+
+
 @pytest.fixture(scope="session")
 def _sqlite_db_template(
     tmp_path_factory: pytest.TempPathFactory, _worker_db_uri: str

@@ -32,6 +32,7 @@ from omnigent.server.routes import sessions as sessions_mod
 from omnigent.server.routes.sessions import _handle_mcp_tools_call, _pending_policy_ask_writes
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
+from tests.coral.omni.policies.conftest import SESSION_CAP_USD
 from tests.coral.omni.test_engine_tools_mcp import (
     AGENT,
     CHOOSE,
@@ -133,8 +134,10 @@ async def guarded(db_uri: str, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
         stack.enter_context(installed_tool_providers(CoralToolProvider(ENGINE_TOOLS)))
         mcp.register(mcp.port)
         runs = FakeRunStore(default_workspace_id=WORKSPACE)
-        # The provider and the commit hook, exactly as the lifespan registers them.
-        _wire_guards(run_store=runs, bindings=mcp.lookup, stack=stack)
+        # The provider, the commit hook and the budget pauser, as the lifespan registers them.
+        _wire_guards(
+            run_store=runs, bindings=mcp.lookup, session_cap_usd=SESSION_CAP_USD, stack=stack
+        )
         yield _Guarded(mcp=mcp, runs=runs)
         mcp.port.assert_folds()
 
@@ -187,6 +190,29 @@ async def test_state_change_between_calls_applies_to_the_second(guarded: _Guarde
     # Six policy builds (two per forwarded call), one binding read: the provider uses the
     # lifespan's cache of found bindings, not the store the engine tools read fresh.
     assert guarded.mcp.lookup.reads == [(WORKSPACE, SESSION)]
+
+
+async def test_over_cap_step_is_denied_and_its_run_paused_then_the_run_guard_answers(
+    guarded: _Guarded,
+) -> None:
+    run_id = guarded.start_run(_plain())
+    # The session's own priced spend, as Omnigent records it after a turn.
+    with workspace_scope(WORKSPACE):
+        guarded.mcp.store.set_session_usage(SESSION, {"total_cost_usd": SESSION_CAP_USD})
+
+    denied = _error(await guarded.mcp.call("sys_os_shell", {"command": "ls"}))
+    assert denied == (
+        "Denied by policy: [budget] This session has spent about $25.00 of its $25.00 cap "
+        f"(an estimate), so Coral paused the run. {STOP}."
+    )
+    # The lifespan's pauser committed the pause through the run store.
+    run = guarded.runs.get_run(run_id, workspace_id=WORKSPACE)
+    assert run is not None
+    assert (run.status, run.pause_reason) == (RunStatus.PAUSED, RunPauseReason.BUDGET)
+    # That commit cleared the status cache, so the next call meets the run guard first.
+    paused = _error(await guarded.mcp.call(f"{OMNIGENT}sys_os_shell", {"command": "pwd"}))
+    assert paused.startswith("Denied by policy: [run.paused] The Coral run is paused (budget)")
+    assert guarded.mcp.forwarded == []
 
 
 async def test_orchestrator_mcp_edit_tool_is_denied(guarded: _Guarded) -> None:
