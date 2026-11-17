@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import threading
 import time
 import uuid
@@ -33,9 +32,7 @@ from coral.stores.protocols import (
     WorkItem,
     WorkItemDraft,
 )
-from coral.stores.runs import _compute_spec_digest
-
-_logger = logging.getLogger(__name__)
+from coral.stores.runs import PostCommitHooks, _compute_spec_digest
 
 
 class FakeRunStore:
@@ -54,15 +51,14 @@ class FakeRunStore:
         self.gate_visits: dict[tuple[int, str, str], GateVisitState] = {}
         self.logs: dict[tuple[int, str], list[RunLogEntry]] = {}
         self.work: dict[tuple[int, str], WorkItem] = {}
-        self.post_commit_hooks: list[Callable[[str, int], None]] = []
+        self.post_commit_hooks = PostCommitHooks()
         self.before_apply_hook: Callable[[str, int], None] | None = None
 
     def _resolve_ws(self, ws: int | None) -> int:
         return ws if ws is not None else self._default_workspace_id
 
-    def register_post_commit(self, callback: Callable[[str, int], None]) -> None:
-        with self._lock:
-            self.post_commit_hooks.append(callback)
+    def register_post_commit(self, callback: Callable[[str, int], None]) -> Callable[[], None]:
+        return self.post_commit_hooks.register(callback)
 
     def start_run(
         self,
@@ -505,12 +501,7 @@ class FakeRunStore:
                 log_seqs=tuple(assigned_seqs),
             )
 
-        for hook in list(self.post_commit_hooks):
-            try:
-                hook(run_id, outcome.version)
-            except Exception:
-                _logger.exception("FakeRunStore: error in post_commit hook")
-
+        self.post_commit_hooks.run(run_id, outcome.version)
         return outcome
 
     def get_run(

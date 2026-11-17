@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import Engine, asc, desc, select, update
@@ -337,6 +339,49 @@ def _to_run_spec(row: RunSpecRow, run: RunRow) -> RunStartSpec:
     )
 
 
+@dataclass(eq=False)
+class _PostCommitHook:
+    """One registration; its identity lets an unregister remove only itself."""
+
+    callback: Callable[[str, int], None]
+
+
+class PostCommitHooks:
+    """Callbacks a run store calls after each committed transition, best effort.
+
+    Thread-safe: a registration or unregister made while hooks run applies from
+    the next commit on.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._hooks: tuple[_PostCommitHook, ...] = ()
+
+    def register(self, callback: Callable[[str, int], None]) -> Callable[[], None]:
+        """Add *callback*; returns an idempotent unregister that removes only this registration."""
+        hook = _PostCommitHook(callback)
+        with self._lock:
+            self._hooks = (*self._hooks, hook)
+
+        def unregister() -> None:
+            with self._lock:
+                self._hooks = tuple(other for other in self._hooks if other is not hook)
+
+        return unregister
+
+    def run(self, run_id: str, version: int) -> None:
+        """Call each callback with the committed run and version; a failing one is logged."""
+        with self._lock:
+            hooks = self._hooks
+        for hook in hooks:
+            try:
+                hook.callback(run_id, version)
+            except Exception:
+                _logger.exception(
+                    "Error executing post_commit hook for run %r version %r", run_id, version
+                )
+
+
 class SqlAlchemyCoralRunStore:
     """SQLAlchemy implementation of the Coral RunStore protocol."""
 
@@ -361,7 +406,7 @@ class SqlAlchemyCoralRunStore:
             query_name_prefix="coral.run_store",
             immediate=True,
         )
-        self._post_commit_hooks: list[Callable[[str, int], None]] = []
+        self._post_commit_hooks = PostCommitHooks()
 
     def _resolve_workspace_id(self, workspace_id: int | None) -> int:
         if workspace_id is not None:
@@ -373,9 +418,14 @@ class SqlAlchemyCoralRunStore:
         except LookupError:
             return DEFAULT_WORKSPACE_ID
 
-    def register_post_commit(self, callback: Callable[[str, int], None]) -> None:
-        """Register a callback invoked best-effort after each committed transition."""
-        self._post_commit_hooks.append(callback)
+    def register_post_commit(self, callback: Callable[[str, int], None]) -> Callable[[], None]:
+        """Register a callback invoked best-effort after each committed transition.
+
+        ``start_run`` commits no transition and calls no callback.
+
+        :returns: An idempotent unregister that removes only this registration.
+        """
+        return self._post_commit_hooks.register(callback)
 
     def start_run(
         self,
@@ -875,16 +925,7 @@ class SqlAlchemyCoralRunStore:
 
         outcome = run_write_transaction(self._write_session, "apply_run_transition", write)
 
-        for hook in self._post_commit_hooks:
-            try:
-                hook(run_id, outcome.version)
-            except Exception:
-                _logger.exception(
-                    "Error executing post_commit hook for run %r version %r",
-                    run_id,
-                    outcome.version,
-                )
-
+        self._post_commit_hooks.run(run_id, outcome.version)
         return outcome
 
     def get_run(

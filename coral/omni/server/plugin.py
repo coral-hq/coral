@@ -35,6 +35,8 @@ _CORAL_DB_FILENAME = "coral.db"
 # Status-edge observer names: watched sessions' edges, and the confirmed-stop record.
 STATUS_EDGE_OBSERVER = "coral"
 CONFIRMED_STOPS_OBSERVER = "coral.confirmed_stops"
+# The name Coral's policies for bound sessions are registered under (S52).
+REQUIRED_POLICY_PROVIDER = "coral"
 # The server stores the session engine builds on; anchors need the project store.
 _ENGINE_SERVICES = (
     "agent_store",
@@ -83,18 +85,33 @@ def _missing_engine_input(app: Any, services: ServerServices) -> str | None:
     return None
 
 
-def _wire_guards(*, bindings: FreshBindingLookup, stack: AsyncExitStack) -> None:
+def _wire_guards(
+    *, run_store: RunStore, bindings: FreshBindingLookup, stack: AsyncExitStack
+) -> None:
     """
     Register what protects bound sessions, whether or not the session engine is wired.
 
     The engine tools register from the production catalog with no decision
     port: nothing while the catalog is empty, and once it lists a tool each
-    call answers that the engine is not running.
+    call answers that the engine is not running. They read bindings fresh.
+    Coral's required-policy provider reads them through a cache of found rows
+    and reads run status through a cache each run-store commit clears. Every
+    registration's undo goes on ``stack``.
     """
+    from coral.omni.policies.bindings_cache import CachedBindingLookup
+    from coral.omni.policies.provider import CoralPolicyProvider
+    from coral.omni.policies.state import RunStatusCache
     from coral.omni.server.tool_bridge import register_engine_tools
     from coral.tools.catalog import CATALOG
+    from omnigent.runtime.policies.required_providers import register_required_policy_provider
 
     register_engine_tools(catalog=CATALOG, port=None, bindings=bindings, stack=stack)
+    statuses = RunStatusCache(run_store)
+    stack.callback(run_store.register_post_commit(statuses.invalidate))
+    # One cache of found bindings for every guard that classifies sessions.
+    found_bindings = CachedBindingLookup(bindings)
+    provider = CoralPolicyProvider(bindings=found_bindings, statuses=statuses)
+    stack.callback(register_required_policy_provider(REQUIRED_POLICY_PROVIDER, provider))
 
 
 def _wire_session_engine(
@@ -248,7 +265,7 @@ async def coral_lifespan(
                 app.state.coral_queue_store = queue_store
                 app.state.coral_worker_supervisor = supervisor
             bindings = SqlAlchemySessionBindingStore(storage_location)
-            _wire_guards(bindings=bindings, stack=stack)
+            _wire_guards(run_store=run_store, bindings=bindings, stack=stack)
             missing = _missing_engine_input(app, services)
             if missing is None:
                 _wire_session_engine(

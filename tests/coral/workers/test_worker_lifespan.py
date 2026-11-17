@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import threading
@@ -21,7 +22,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from coral.db import WorkRow
-from coral.db.enum_codecs import SessionBindingProgress, WorkStatus
+from coral.db.enum_codecs import RunPauseReason, RunStatus, SessionBindingProgress, WorkStatus
+from coral.omni.policies.state import RunStatusCache
 from coral.omni.server import OmnigentRunScopeRunner, coral_lifespan
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue import executors as queue_executors
@@ -35,7 +37,7 @@ from coral.queue.executors import (
 )
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.slots.executors import CANCEL_SESSIONS, CLOSE_SLOT, CREATE_SESSION, SEND_INPUT
-from coral.stores.protocols import RunStartSpec, WorkItemDraft
+from coral.stores.protocols import RunStartSpec, Transition, WorkItemDraft
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import SessionBindingDraft, SqlAlchemySessionBindingStore
 from coral.tools import catalog as tool_catalog
@@ -46,13 +48,18 @@ from omnigent.db.account_authority import account_generation, current_account_us
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, current_workspace_id
 from omnigent.db.utils import _run_migrations as run_omni_migrations
 from omnigent.db.utils import create_db_engine, get_or_create_engine
+from omnigent.policies.types import EvaluationContext, PolicyResult
 from omnigent.runtime.agent_cache import AgentCache
+from omnigent.runtime.policies.builder import build_policy_engine
+from omnigent.runtime.policies.required_providers import required_policies_apply
 from omnigent.server import session_live_state
 from omnigent.server.app import create_app
 from omnigent.server.host_registry import _expected_host_owner
 from omnigent.server.routes._sessions import helpers as session_helpers
 from omnigent.server.server_plugins import ServerServices
 from omnigent.server.server_tools import ServerToolCall, ServerToolResult, server_tool
+from omnigent.spec import AgentSpec
+from omnigent.spec.types import Phase, PolicyAction
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -96,6 +103,11 @@ def _engine_registrations() -> tuple[frozenset[str], frozenset[str]]:
 def _engine_tools() -> frozenset[str]:
     """Coral's engine tools registered as server tools now."""
     return frozenset(name for name in ENGINE_TOOL_NAMES if server_tool(name) is not None)
+
+
+def _coral_policies_registered() -> bool:
+    """Whether Coral's required-policy provider claims a Coral bundle's sessions now."""
+    return required_policies_apply(AgentSpec(spec_version=1, params={"coral": {}}), None)
 
 
 @dataclass
@@ -286,8 +298,10 @@ async def test_an_overlapping_lifespan_takes_over_and_outlives_the_earlier_exit(
             assert session_live_state._status_edge_observers["coral"] == edges.observe
             assert _engine_tools() == ENGINE_TOOL_NAMES
             assert server_tool(SUBMIT_HANDOFF.name) is handler
+            assert _coral_policies_registered()
     assert _engine_registrations() == NOTHING
     assert _engine_tools() == frozenset()
+    assert not _coral_policies_registered()
 
 
 @pytest.mark.parametrize("engine", ["wired", "unwired"])
@@ -346,6 +360,116 @@ async def test_engine_tools_are_wired_without_the_session_engine_and_removed_on_
     assert _engine_tools() == frozenset()
 
 
+@pytest.mark.parametrize("engine", ["wired", "unwired"])
+async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifespan(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    hooks: list[str] = []
+    register_post_commit = SqlAlchemyCoralRunStore.register_post_commit
+
+    def recording_register(
+        store: SqlAlchemyCoralRunStore, callback: Callable[[str, int], None]
+    ) -> Callable[[], None]:
+        unregister = register_post_commit(store, callback)
+        hooks.append("registered")
+
+        def recording_unregister() -> None:
+            hooks.append("unregistered")
+            unregister()
+
+        return recording_unregister
+
+    monkeypatch.setattr(SqlAlchemyCoralRunStore, "register_post_commit", recording_register)
+    if engine == "unwired":
+        monkeypatch.delattr(server.app.state, "session_event_dispatch")
+
+    assert not _coral_policies_registered()
+    async with coral_lifespan(server.app, server.services):
+        # Bound sessions are guarded whether or not the session engine is wired.
+        assert _coral_policies_registered()
+        assert hooks == ["registered"]
+    assert not _coral_policies_registered()
+    assert hooks == ["registered", "unregistered"]
+
+
+async def test_each_lifespan_guards_bound_sessions_through_its_own_run_store_only(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    heard: list[tuple[int, str]] = []
+    invalidate = RunStatusCache.invalidate
+
+    def recording_invalidate(cache: RunStatusCache, run_id: str, version: int) -> None:
+        heard.append((id(cache), run_id))
+        invalidate(cache, run_id, version)
+
+    monkeypatch.setattr(RunStatusCache, "invalidate", recording_invalidate)
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    conversations = cast(SqlAlchemyConversationStore, server.services.conversation_store)
+    spec = AgentSpec(spec_version=1, params={"coral": {}})
+
+    async def bash(session_id: str) -> PolicyResult:
+        engine = await asyncio.to_thread(
+            build_policy_engine,
+            spec=spec,
+            conversation_id=session_id,
+            conversation_store=conversations,
+        )
+        call = EvaluationContext(
+            phase=Phase.TOOL_CALL, content={"name": "Bash", "arguments": {}}, tool_name="Bash"
+        )
+        return await engine.evaluate(call)
+
+    def set_status(run_store: SqlAlchemyCoralRunStore, run_id: str, status: RunStatus) -> None:
+        _, version = run_store.load_run_state(run_id, workspace_id=DEFAULT_WORKSPACE_ID)
+        reason = int(RunPauseReason.USER) if status == RunStatus.PAUSED else None
+        transition = Transition(
+            status=int(status), pause_reason=reason, clear_pause_reason=reason is None
+        )
+        run_store.apply_transition(run_id, version, transition, workspace_id=DEFAULT_WORKSPACE_ID)
+
+    earlier: list[tuple[SqlAlchemyCoralRunStore, str]] = []
+    # Enter, exit and enter again: each lifespan's provider hears its own store's commits.
+    for _ in range(2):
+        async with coral_lifespan(server.app, server.services):
+            run_store: SqlAlchemyCoralRunStore = server.app.state.coral_run_store
+            run = run_store.start_run(
+                RunStartSpec("wf", "v1", "Run", "", workspace_id=DEFAULT_WORKSPACE_ID)
+            )
+            set_status(run_store, run.id, RunStatus.RUNNING)
+            session_id = conversations.create_conversation().id
+            bindings.reserve(
+                SessionBindingDraft(
+                    workspace_id=DEFAULT_WORKSPACE_ID,
+                    session_id=session_id,
+                    run_id=run.id,
+                    role="step",
+                    effect_key=f"{run.id}:2:create_session:work",
+                    slot_id="work||:0",
+                    slot_role="step_agent",
+                )
+            )
+            assert (await bash(session_id)).action == PolicyAction.ALLOW
+            heard.clear()
+            set_status(run_store, run.id, RunStatus.PAUSED)
+            # One cache heard the commit: no earlier lifespan's hook is still attached.
+            assert [run_id for _, run_id in heard] == [run.id]
+            denied = await bash(session_id)
+            assert denied.deciding_policies == ["__coral_run_guard"]
+            for old_store, old_run in earlier:
+                set_status(old_store, old_run, RunStatus.CANCELLED)
+            earlier.append((run_store, run.id))
+            assert [run_id for _, run_id in heard] == [run.id]
+
+        assert not _coral_policies_registered()
+        heard.clear()
+        set_status(run_store, run.id, RunStatus.RUNNING)
+        # After exit the commit reaches no cache and the session gets no Coral policy.
+        assert heard == []
+        set_status(run_store, run.id, RunStatus.PAUSED)
+        unguarded = await bash(session_id)
+        assert unguarded.action == PolicyAction.ALLOW
+
+
 @pytest.mark.parametrize("missing", ["session_event_dispatch", "project_store"])
 async def test_a_server_without_an_engine_input_wires_nothing(
     server: _Server, monkeypatch: pytest.MonkeyPatch, missing: str
@@ -400,6 +524,7 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
 
     assert _engine_registrations() == NOTHING
     assert _engine_tools() == frozenset()
+    assert not _coral_policies_registered()
 
 
 async def test_item_claimed_during_exit_is_retried_not_failed(

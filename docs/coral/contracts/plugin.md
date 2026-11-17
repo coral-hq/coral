@@ -17,6 +17,7 @@
 4. `registration.routers` are appended to `all_extra_routers` and mounted **before** `_SPAStaticFiles` mounts `/`.
 5. `registration.lifespan_hooks` enter inside `lifespan` after scheduler and sandbox reaper startup, and exit in reverse order before `pull_request_refresher`, scheduler, reaper, `startup_inputs`, and `runner_router` shut down.
 6. `coral_lifespan` wires Coral's session engine before the worker supervisor starts, and on exit stops the supervisor before it unregisters the engine's effect executors and status-edge observers ([`session-facade.md`](session-facade.md), "Wiring").
+7. On a usable operational database, whether or not the session engine is wired, `coral_lifespan` also registers Coral's required-policy provider `"coral"` (S52, `omnigent/runtime/policies/required_providers.py`) and, for that provider's run-status cache, a post-commit hook on the run store; both are undone on exit. The provider's policies go ahead of every other policy for sessions bound to a run: the anchor's deny-all, or the run guard followed by the orchestrator allowlist or the step roster ([`session-facade.md`](session-facade.md), "Run protection").
 
 ## Coral Capability Probe & Process Tokens
 - `GET /v1/coral/info` returns `200` with `{enabled, version, sub_features}` (13 keys defaulting to `false`; overrides validated against `coral_sub_features` in server config) when the Coral plugin is active, and `404` when absent.

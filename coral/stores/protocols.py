@@ -746,7 +746,14 @@ class RunStore(Protocol):
     def register_post_commit(
         self,
         callback: Callable[[str, int], None],
-    ) -> None: ...
+    ) -> Callable[[], None]:
+        """Call *callback* with the run id and version after each committed transition.
+
+        ``start_run`` commits no transition and calls no callback.
+
+        :returns: An idempotent unregister that removes only this registration.
+        """
+        ...
 
 
 @runtime_checkable

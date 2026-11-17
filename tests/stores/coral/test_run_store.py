@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 
 import pytest
 from sqlalchemy import select
 
 from coral.db import WorkRow, coral_engine, ensure_coral_schema
 from coral.db.enum_codecs import GateVisitStatus, RunStatus, WorkStatus
+from coral.stores.fakes import FakeRunStore
 from coral.stores.protocols import (
     ActivationDraft,
     GateVisitDraft,
     LogEntryDraft,
     RunStartSpec,
     RunState,
+    RunStore,
     RunVersionConflict,
     StartKeyConflict,
     Transition,
@@ -353,6 +356,91 @@ def test_post_commit_hook_execution_and_resilience(db_uri: str) -> None:
     loaded, v = store.load_run_state(run.id, workspace_id=1)
     assert v == 2
     assert loaded.status == int(RunStatus.RUNNING)
+
+
+@pytest.mark.parametrize("store_kind", ["sqlalchemy", "fake"])
+def test_post_commit_unregister_removes_only_its_own_registration(
+    db_uri: str, store_kind: str
+) -> None:
+    """Each registration's unregister is idempotent and leaves the same callback's other one."""
+    ensure_coral_schema(db_uri)
+    store: RunStore = (
+        SqlAlchemyCoralRunStore(db_uri) if store_kind == "sqlalchemy" else FakeRunStore()
+    )
+    run = store.start_run(RunStartSpec("wf", "v1", "Hook Run", "p", workspace_id=1))
+    calls: list[tuple[str, str, int]] = []
+
+    def first(run_id: str, version: int) -> None:
+        calls.append(("first", run_id, version))
+
+    def second(run_id: str, version: int) -> None:
+        calls.append(("second", run_id, version))
+
+    unregister_first = store.register_post_commit(first)
+    unregister_second = store.register_post_commit(second)
+    unregister_second_again = store.register_post_commit(second)
+    store.apply_transition(run.id, 1, Transition(status=int(RunStatus.RUNNING)), workspace_id=1)
+    assert calls == [("first", run.id, 2), ("second", run.id, 2), ("second", run.id, 2)]
+
+    unregister_first()
+    unregister_second()
+    unregister_second()
+    calls.clear()
+    store.apply_transition(run.id, 2, Transition(status=int(RunStatus.PAUSED)), workspace_id=1)
+    # The second registration of the same callback survives the first one's unregister.
+    assert calls == [("second", run.id, 3)]
+
+    unregister_second_again()
+    calls.clear()
+    store.apply_transition(run.id, 3, Transition(status=int(RunStatus.RUNNING)), workspace_id=1)
+    assert calls == []
+
+
+@pytest.mark.parametrize("store_kind", ["sqlalchemy", "fake"])
+def test_post_commit_hooks_survive_a_failing_hook_and_changes_made_while_they_run(
+    db_uri: str, store_kind: str
+) -> None:
+    """A raising hook never stops the next; (un)registering inside a hook applies next commit."""
+    ensure_coral_schema(db_uri)
+    store: RunStore = (
+        SqlAlchemyCoralRunStore(db_uri) if store_kind == "sqlalchemy" else FakeRunStore()
+    )
+    run = store.start_run(RunStartSpec("wf", "v1", "Hook Run", "p", workspace_id=1))
+    calls: list[str] = []
+    unregisters: dict[str, Callable[[], None]] = {}
+
+    def failing(_run_id: str, _version: int) -> None:
+        calls.append("failing")
+        raise RuntimeError("an unrelated hook failed")
+
+    def late(_run_id: str, _version: int) -> None:
+        calls.append("late")
+
+    def once(_run_id: str, _version: int) -> None:
+        calls.append("once")
+        # Called on the committing thread with the registry unlocked: no deadlock.
+        unregisters["once"]()
+        unregisters["late"] = store.register_post_commit(late)
+
+    def cache(_run_id: str, _version: int) -> None:
+        calls.append("cache")
+
+    store.register_post_commit(failing)
+    unregisters["once"] = store.register_post_commit(once)
+    store.register_post_commit(cache)
+
+    store.apply_transition(run.id, 1, Transition(status=int(RunStatus.RUNNING)), workspace_id=1)
+    assert calls == ["failing", "once", "cache"]
+    calls.clear()
+    store.apply_transition(run.id, 2, Transition(status=int(RunStatus.PAUSED)), workspace_id=1)
+    assert calls == ["failing", "cache", "late"]
+    # A conflicting transition commits nothing and calls no hook.
+    calls.clear()
+    with pytest.raises(RunVersionConflict):
+        store.apply_transition(
+            run.id, 2, Transition(status=int(RunStatus.RUNNING)), workspace_id=1
+        )
+    assert calls == []
 
 
 def test_updating_activation_preserves_original_created_at(db_uri: str) -> None:
