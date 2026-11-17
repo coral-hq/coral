@@ -140,10 +140,13 @@ def test_write_ops_run_git_in_the_moved_worktree_and_put_it_back(
     aside = aside_path(str(worktree.root))
     worktree.write("README.md", b"edited\n")
 
-    # Success.
+    # Success. Only the read-only refusal checks run before the move.
     committed = handlers["commit"](requests_for_every_op(worktree)["commit"])
     assert committed["empty"] is False
-    assert {path for path in work_trees if path is not None} == {aside}
+    pinned = [path for path in work_trees if path is not None]
+    moved = pinned.index(aside)
+    assert set(pinned[:moved]) == {str(worktree.root)}
+    assert set(pinned[moved:]) == {aside}
     assert worktree.root.is_dir() and not os.path.lexists(aside)
 
     # Failure.

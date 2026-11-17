@@ -84,6 +84,7 @@ _FIRST_LOCK_BACKOFF_S = 0.25
 _MAX_LOCK_BACKOFF_S = 2.0
 # After SIGTERM, git gets this long to remove its lock files before SIGKILL.
 _TERM_GRACE_S = 2.0
+_GROUP_POLL_S = 0.02
 # How long to wait for a killed git; one stuck in the kernel is then left to the reaper.
 _KILL_WAIT_S = 2.0
 # Directories git may need besides its own; the host's PATH is never passed on.
@@ -616,14 +617,31 @@ def _stop_group(process: subprocess.Popen[bytes]) -> None:
     """
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGTERM)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=_TERM_GRACE_S)
+    _wait_for_group(process, _TERM_GRACE_S)
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGKILL)
     try:
         process.wait(timeout=_KILL_WAIT_S)
     except subprocess.TimeoutExpired:
         _logger.warning("git process %d did not exit after SIGKILL; leaving it", process.pid)
+
+
+def _wait_for_group(process: subprocess.Popen[bytes], timeout_s: float) -> None:
+    """
+    Wait until ``process`` and the rest of its process group exit, or ``timeout_s`` passes.
+
+    Under bwrap the direct child is the jail, which dies on SIGTERM at once while
+    git, its child in the same group, is still removing its lock files.
+    """
+    end = time.monotonic() + timeout_s
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=timeout_s)
+    while time.monotonic() < end:
+        try:
+            os.killpg(process.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+        time.sleep(_GROUP_POLL_S)
 
 
 def _close_pipes(process: subprocess.Popen[bytes]) -> None:

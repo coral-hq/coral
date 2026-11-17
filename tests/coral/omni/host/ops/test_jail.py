@@ -10,7 +10,6 @@ without a working jail tool; under CI they fail instead, so CI proves the jail.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import subprocess
 import sys
@@ -24,6 +23,7 @@ import pytest
 from coral.omni.host.ops import _git, _jail, _target
 from coral.omni.host.ops._git import Git, host_git
 from coral.omni.host.ops._jail import Jail, JailTool, JailUnavailable, locate_jail_tool
+from coral.workspace.ops import WORKSPACE_ERROR_CODES
 from omnigent.host.workspace_ops import WorkspaceOpHandler, WorkspaceOpHandlerError
 from tests._helpers.polling import poll_until
 from tests.coral.omni.host.ops._worktrees import (
@@ -142,43 +142,79 @@ def test_sandbox_exec_without_a_home_limits_writes_only() -> None:
     ]
 
 
-def test_bwrap_binds_the_writable_paths_over_a_read_only_root_and_hides_home() -> None:
+def test_bwrap_binds_the_writable_paths_over_a_read_only_root_and_hides_home(
+    tmp_path: Path,
+) -> None:
+    home = str(tmp_path / "h")
+    op = str(tmp_path / "op")
+    for directory in ("h/code/root", "h/code/repo/.git/objects", "h/dotfiles", "op"):
+        (tmp_path / directory).mkdir(parents=True)
+    (tmp_path / "h" / "dotfiles" / "gitignore").write_text("*.log\n")
     jail = Jail(
         tool=BWRAP,
-        writable=("/h/code/root", "/h/code/repo/.git/objects", "/tmp/op"),
-        writable_files=("/h/code/repo/.git/packed-refs",),
-        home="/h",
+        writable=(f"{home}/code/root", f"{home}/code/repo/.git/objects", op),
+        writable_files=(f"{home}/code/repo/.git/packed-refs",),
+        home=home,
         readable=(
-            "/h/code/root",
-            "/h/code/repo/.git",
-            "/tmp/op",
-            "/h/dotfiles/gitignore",
+            f"{home}/code/root",
+            f"{home}/code/repo/.git",
+            op,
+            f"{home}/dotfiles/gitignore",
             "/opt/git",
         ),
         # ~/.gitignore_global is a symlink to ~/dotfiles/gitignore.
-        aliases=(("/h/.gitignore_global", "/h/dotfiles/gitignore"),),
+        aliases=((f"{home}/.gitignore_global", f"{home}/dotfiles/gitignore"),),
     )
 
-    command = jail.command(["/usr/bin/git", "status"], cwd="/h/code/root")
+    command = jail.command(["/usr/bin/git", "status"], cwd=f"{home}/code/root")
 
     assert command == [
         "/usr/bin/bwrap",
-        *("--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", "/h"),
+        *("--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", home),
         # Readable paths under home come back read-only, a symlinked one at both
         # its target and its spelling; writable ones get a read-write bind.
-        *("--ro-bind-try", "/h/code/repo/.git", "/h/code/repo/.git"),
-        *("--ro-bind-try", "/h/dotfiles/gitignore", "/h/dotfiles/gitignore"),
-        *("--ro-bind-try", "/h/dotfiles/gitignore", "/h/.gitignore_global"),
-        *("--bind-try", "/h/code/root", "/h/code/root"),
-        *("--bind-try", "/h/code/repo/.git/objects", "/h/code/repo/.git/objects"),
-        *("--bind-try", "/tmp/op", "/tmp/op"),
-        *("--chdir", "/h/code/root", "--"),
+        *("--ro-bind-try", f"{home}/code/repo/.git", f"{home}/code/repo/.git"),
+        *("--ro-bind-try", f"{home}/dotfiles/gitignore", f"{home}/dotfiles/gitignore"),
+        *("--ro-bind-try", f"{home}/dotfiles/gitignore", f"{home}/.gitignore_global"),
+        *("--bind-try", f"{home}/code/root", f"{home}/code/root"),
+        *("--bind-try", f"{home}/code/repo/.git/objects", f"{home}/code/repo/.git/objects"),
+        *("--bind-try", op, op),
+        *("--chdir", f"{home}/code/root", "--"),
         "/usr/bin/git",
         "status",
     ]
     # No new session or pid namespace: git stays in the group the deadline kills.
     assert "--new-session" not in command
     assert "--unshare-pid" not in command
+
+
+def test_bwrap_never_binds_a_missing_or_non_directory_path(tmp_path: Path) -> None:
+    real = tmp_path / "refs-coral"
+    real.mkdir()
+    # A reftable store keeps a file at refs/heads, so refs/heads/coral is under a file.
+    a_file = tmp_path / "refs-heads"
+    a_file.write_text("this repository uses the reftable format\n")
+    link = tmp_path / "linked"
+    link.symlink_to(real)
+    home = tmp_path / "h"
+    writable = (real, a_file, a_file / "coral", link, tmp_path / "missing")
+    jail = Jail(
+        tool=BWRAP,
+        writable=tuple(str(path) for path in writable),
+        home=str(home),
+        readable=(str(home / "gone"),),
+    )
+
+    command = jail.command(["/usr/bin/git", "status"], cwd=None)
+
+    assert command == [
+        "/usr/bin/bwrap",
+        *("--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", str(home)),
+        *("--bind-try", str(real), str(real)),
+        "--",
+        "/usr/bin/git",
+        "status",
+    ]
 
 
 def test_a_symlinked_readable_path_keeps_its_spelling(tmp_path: Path) -> None:
@@ -251,6 +287,37 @@ def test_a_write_op_jail_opens_only_what_git_writes_and_reads(
         assert jail.home == os.path.realpath(git_home)
         # Nothing of the user's own config: global config is /dev/null for the ops.
         assert not any(path.startswith(f"{jail.home}/") for path in jail.readable)
+
+
+@pytest.mark.parametrize("planted", ["file", "symlink"])
+def test_a_write_jail_refuses_a_ref_directory_that_is_not_a_real_directory(
+    worktree: LinkedWorktree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
+) -> None:
+    monkeypatch.setattr(_jail, "_checked_tool", BWRAP)
+    temp_dir = tmp_path / "op"
+    temp_dir.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    # refs/coral is missing in a fresh repository; here something else holds its place.
+    path = worktree.common_dir / "refs" / "coral"
+    if planted == "file":
+        path.write_text("not a directory\n")
+    else:
+        path.symlink_to(elsewhere)
+
+    with pytest.raises(WorkspaceOpHandlerError) as caught:
+        _target.op_jail(
+            host_git(time.monotonic() + 60),
+            root=str(worktree.root),
+            repo_root=str(worktree.repo_root),
+            temp_dir=str(temp_dir),
+            admin_dir=str(worktree.admin_dir),
+        )
+
+    error = caught.value
+    assert (error.code, error.permanent) == ("workspace.backend_unavailable", True)
+    assert "refs/coral" in error.message
+    assert list(elsewhere.iterdir()) == []
 
 
 @pytest.mark.parametrize("home", [None, "/"], ids=["unset", "root"])
@@ -371,7 +438,15 @@ def test_every_git_process_of_an_op_runs_in_its_jail(
         for jail in limited:
             # Never the whole common dir: no hooks/, config, info/ or other refs.
             assert common not in jail.writable, op
-            assert len(jail.writable) == (8 if op in ("commit", "salvage", "reset") else 1), op
+        # The refusal checks run in the READ jail (the temp dir only); a WRITE op's
+        # write jail comes after them.
+        writable_counts = [len(jail.writable) for jail in limited]
+        if op in ("commit", "salvage", "reset"):
+            checks = writable_counts.index(8)
+            assert set(writable_counts[:checks]) == {1}, op
+            assert set(writable_counts[checks:]) == {8}, op
+        else:
+            assert set(writable_counts) == {1}, op
 
 
 def test_jailed_git_cannot_write_delete_or_read_through_a_symlinked_directory(
@@ -554,8 +629,8 @@ while time.monotonic() < end:
 
 def _race(
     racer: str, target: Path, outside: Path, tmp_path: Path, op: Callable[[], object]
-) -> None:
-    """Run ``op`` while ``racer`` swaps ``target`` for a symlink to ``outside``."""
+) -> object:
+    """Run ``op`` while ``racer`` swaps ``target`` for a symlink to ``outside``; its outcome."""
     tmp_path.mkdir(exist_ok=True)
     ready = tmp_path / "racer-ready"
     process = subprocess.Popen(
@@ -564,11 +639,20 @@ def _race(
     try:
         poll_until(ready.exists, timeout_s=30, interval_s=0.01)
         # A raced op may fail; what it did outside the worktree is the question.
-        with contextlib.suppress(WorkspaceOpHandlerError):
-            op()
+        try:
+            return op()
+        except WorkspaceOpHandlerError as exc:
+            return exc
     finally:
         process.kill()
         process.wait()
+
+
+def _assert_success_or_typed_failure(outcome: object, success: object) -> None:
+    if isinstance(outcome, WorkspaceOpHandlerError):
+        assert outcome.code in WORKSPACE_ERROR_CODES, outcome
+    else:
+        assert outcome == success
 
 
 @pytest.mark.usefixtures("without_move_aside")
@@ -592,15 +676,18 @@ def test_a_racing_symlink_swap_cannot_make_reset_write_outside_the_worktree(
     # about half of these runs write outside); the deterministic proof is
     # test_jailed_git_cannot_write_delete_or_read_through_a_symlinked_directory.
     for attempt in range(2):
+        # Test setup only, after the last op returned: a raced git may leave its lock.
+        (worktree.admin_dir / "index.lock").unlink(missing_ok=True)
         run_git(worktree.root, "reset", "-q", "--hard", worktree.base)
         run_git(worktree.root, "clean", "-fdq")
-        _race(
+        outcome = _race(
             _CHECKOUT_RACER,
             worktree.root / "d",
             outside,
             tmp_path / f"attempt-{attempt}",
             lambda: handlers["reset"](request),
         )
+        _assert_success_or_typed_failure(outcome, {"head": target})
         assert sorted(os.listdir(outside)) == before, attempt
 
 
@@ -621,8 +708,9 @@ def test_a_racing_symlink_swap_cannot_make_reset_delete_outside_the_worktree(
     request = op_request("reset", worktree, op_key="k-r", commit=worktree.base)
 
     reset = handlers["reset"]
-    _race(_CLEAN_RACER, worktree.root / "u", outside, tmp_path, lambda: reset(request))
+    outcome = _race(_CLEAN_RACER, worktree.root / "u", outside, tmp_path, lambda: reset(request))
 
+    _assert_success_or_typed_failure(outcome, {"head": worktree.base})
     assert sorted(os.listdir(outside)) == names
     assert {(outside / name).read_bytes() for name in names} == {content}
 

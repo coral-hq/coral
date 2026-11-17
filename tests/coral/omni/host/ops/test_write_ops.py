@@ -801,7 +801,9 @@ def test_write_ops_work_on_a_packed_branch(worktree: LinkedWorktree, handlers: H
     assert handlers["head"](op_request("head", worktree))["merge_in_progress"] is False
 
 
-def test_write_ops_refuse_a_reftable_ref_store(handlers: Handlers, tmp_path: Path) -> None:
+def test_write_ops_refuse_a_reftable_ref_store(
+    handlers: Handlers, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo_root = (tmp_path / "reftable").resolve() / "repo"
     repo_root.mkdir(parents=True)
     created = subprocess.run(
@@ -823,6 +825,11 @@ def test_write_ops_refuse_a_reftable_ref_store(handlers: Handlers, tmp_path: Pat
     )
     worktree.write("README.md", b"edited\n")
 
+    # refs/heads is a file here: the refusal must come before the write jail binds refs.
+    def no_write_jail(common_dir: str) -> tuple[str, ...]:
+        raise AssertionError("the write jail was built for a reftable repository")
+
+    monkeypatch.setattr(_target, "_writable_git_dirs", no_write_jail)
     error = expect_op_error(
         lambda: handlers["commit"](_commit_request(worktree)),
         "workspace.backend_unavailable",

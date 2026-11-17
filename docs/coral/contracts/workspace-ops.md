@@ -526,10 +526,14 @@ on the wrong worktree or forge a record. Each is fail-closed.
       counterparts, and `packed-refs` and its lock; the worktree's own admin
       dir `worktrees/<name>/`; the op's private temp dir; and `/dev/null`.
       Never `hooks/`, `config`, `info/` or other refs. A READ op's git may
-      write only the temp dir and `/dev/null`. A repository whose refs live
-      in a reftable is refused for WRITE ops (`backend_unavailable`,
-      permanent): its refs are one table, not files the jail can open one by
-      one.
+      write only the temp dir and `/dev/null`. A WRITE op runs its
+      repository refusal checks (hooks, filters and drivers, sparse checkout,
+      reftable and the rest) read-only, in the READ op's jail, before its
+      write jail is built. A repository whose refs live in a reftable is
+      refused for WRITE ops (`backend_unavailable`, permanent): its refs are
+      one table, not files the jail can open one by one. The host creates a
+      missing ref directory the jail opens only inside a real directory; a
+      file or symlink in its place is refused the same way.
     - **Reads.** Under the user's home directory git may read file data only
       of those paths, the repository, git's own install (when it is under the
       home directory: its directory and its exec path), the repository's
@@ -776,8 +780,9 @@ is not built (SPK-04's CRL-128 decision record).
   `workspace.timeout`. A write retries while another git process holds an
   `index.lock` or ref lock, for at most 30 s or the op's deadline, then fails
   with a retryable `workspace.timeout` naming the lock; the lock is never
-  removed. A timed-out git gets SIGTERM, then SIGKILL, so it can remove its
-  own locks. Only POSIX hosts are served.
+  removed. A timed-out git gets SIGTERM and up to 2 s for its whole process
+  group to exit (under bwrap, git is the jail's child), then SIGKILL, so it
+  can remove its own locks. Only POSIX hosts are served.
 - **Stalls.** Git opens some files with a blocking `open()`, so a FIFO an
   agent plants as a `.gitignore` or as a nested repository's or submodule's
   `.git/HEAD` stalls it. The attributes listing every op runs, and the

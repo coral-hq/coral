@@ -151,6 +151,23 @@ def test_a_timed_out_git_gets_sigterm_first_so_it_can_remove_its_lock(tmp_path: 
     assert not lock.exists()
 
 
+def test_git_under_a_jail_that_exits_first_still_gets_its_sigterm_grace(tmp_path: Path) -> None:
+    # As under bwrap: the direct child dies on SIGTERM at once, while git, its child
+    # in the same process group, still needs a moment to remove its lock.
+    lock, ready = tmp_path / "index.lock", tmp_path / "ready"
+    git_like = f'trap \'sleep 0.5; rm -f "{lock}"; exit 143\' TERM; : > "{lock}"; : > "{ready}"'
+    git = _stub(
+        tmp_path,
+        f"( {git_like}; while :; do sleep 0.05; done ) & wait",
+        deadline_s=2,
+    )
+
+    expect_op_error(lambda: git.run("reset"), "workspace.timeout")
+
+    assert ready.exists()
+    assert not lock.exists()
+
+
 def test_a_git_that_ignores_sigterm_is_killed(tmp_path: Path) -> None:
     git = _stub(
         tmp_path,

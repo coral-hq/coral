@@ -21,10 +21,12 @@ symlink resolves to, so a raced link leads nowhere.
 Linux: ``bwrap`` with the root file system bound read-only, a fresh ``/dev``,
 the home directory replaced by an empty tmpfs (readable paths bound back, a
 symlinked one at both its spelling and its target) and read-write binds of the
-writable directories. No new session or pid namespace: the jail stays in git's
-process group, so the deadline's group kill reaches git and git's exit code
-passes through. Single writable files (``packed-refs``) cannot be bound before
-they exist, so they stay read-only there.
+writable directories. Only paths that exist now are bound, a writable one only
+as a real directory, so bwrap never fails on a missing or file path (it stays
+read-only). No new session or pid namespace: the jail stays in git's process
+group, so the deadline's group kill reaches git and git's exit code passes
+through. Single writable files (``packed-refs``) cannot be bound before they
+exist, so they stay read-only there.
 
 The tool is checked once per process by running ``git --version`` inside a
 jail, after it is checked to sit outside the op's worktree and repository.
@@ -38,6 +40,7 @@ import logging
 import os
 import platform
 import shutil
+import stat
 import tempfile
 import threading
 from collections.abc import Callable, Iterable, Sequence
@@ -142,10 +145,12 @@ class Jail:
         if self.home is not None:
             args += ["--tmpfs", self.home]
             for source, destination in self._home_binds():
-                args += ["--ro-bind-try", source, destination]
+                if _exists(source):
+                    args += ["--ro-bind-try", source, destination]
         for path in self.writable:
-            # A missing directory stays unwritable rather than failing every call.
-            args += ["--bind-try", path, path]
+            # A missing path, or one that is not a real directory, stays read-only.
+            if _is_real_directory(path):
+                args += ["--bind-try", path, path]
         if cwd is not None:
             args += ["--chdir", cwd]
         return [*args, "--"]
@@ -259,6 +264,23 @@ def _ancestors_within(paths: Sequence[str], home: str) -> list[str]:
                 break
             directory = os.path.dirname(directory)
     return sorted(ancestors)
+
+
+def _exists(path: str) -> bool:
+    """Whether ``path`` exists; bwrap fails a bind whose source path cannot be reached."""
+    try:
+        os.lstat(path)
+    except OSError:
+        return False
+    return True
+
+
+def _is_real_directory(path: str) -> bool:
+    """Whether ``path`` is a directory, not a symlink to one or another file type."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _is_within(path: str, directory: str) -> bool:

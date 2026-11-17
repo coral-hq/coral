@@ -14,7 +14,6 @@ allowed: the op's isolated config never loads it (K13 security requirement 1).
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import os
 import posixpath
@@ -171,10 +170,12 @@ def pinned(
     """
     The request's target, resolved after :func:`op_params`, with its git jailed.
 
-    The op's private temp dir lives until the block ends. A WRITE op without a
-    working jail is refused (``_jail``). On macOS a WRITE op's worktree is moved
-    aside for the block (``_aside``), and any op first brings back a worktree an
-    interrupted op left aside.
+    The op's private temp dir lives until the block ends. A WRITE op first runs
+    the repository checks under the READ jail, so a repository its write jail
+    cannot hold (a reftable store, say) is refused before that jail is built. A
+    WRITE op without a working jail is refused (``_jail``). On macOS a WRITE op's
+    worktree is moved aside for the block (``_aside``), and any op first brings
+    back a worktree an interrupted op left aside.
     """
     repo_root = str(params["repo_root"])
     root = request.root
@@ -184,19 +185,29 @@ def pinned(
     # Git inside this op's worktree or repository must not run, even to print its version.
     git = host_git(request.deadline, outside=(repo_root, root))
     with op_temp_dir() as temp_dir:
+        read_jail = op_jail(git, root=root, repo_root=repo_root, temp_dir=temp_dir)
         if not write:
-            jail = op_jail(git, root=root, repo_root=repo_root, temp_dir=temp_dir)
             yield resolve_pinned(
                 git,
                 repo_root=repo_root,
                 root=root,
                 branch=branch,
                 write=False,
-                jail=jail,
+                jail=read_jail,
                 temp_dir=temp_dir,
             )
             return
         admin_dir = linked_worktree_admin_dir(repo_root, root, request.deadline)
+        # Every refusal check, read-only, before the write jail binds the ref dirs.
+        resolve_pinned(
+            git,
+            repo_root=repo_root,
+            root=root,
+            branch=branch,
+            write=True,
+            jail=read_jail,
+            temp_dir=temp_dir,
+        )
         # The jail, and its tool's check, come before the worktree moves.
         jail = op_jail(
             git,
@@ -309,7 +320,8 @@ def op_jail(
 
     :raises WorkspaceOpHandlerError: for a WRITE op, ``workspace.capability_unavailable``
         (permanent) when no jail works on this host, and
-        ``workspace.backend_unavailable`` (permanent) without a home directory.
+        ``workspace.backend_unavailable`` (permanent) without a home directory or
+        when a ref directory git writes cannot be a real directory.
     """
     write = admin_dir is not None
     try:
@@ -350,14 +362,47 @@ def op_jail(
 
 
 def _writable_git_dirs(common_dir: str) -> tuple[str, ...]:
-    """The common-dir directories a WRITE op's git writes, created when missing."""
-    directories = tuple(os.path.join(common_dir, name) for name in _WRITABLE_GIT_DIRS)
-    for directory in directories:
-        # bwrap binds only what exists; git would otherwise create these itself. A
-        # reftable store has a file at refs/heads: the write-target check refuses it.
-        with contextlib.suppress(OSError):
-            os.makedirs(directory, exist_ok=True)
-    return directories
+    """
+    The common-dir directories a WRITE op's git writes, created here when missing.
+
+    bwrap binds only a directory that exists, and git inside the jail could not
+    create one outside a bind. Each missing level is made only inside a real
+    directory; a file or symlink on the way is refused.
+
+    :raises WorkspaceOpHandlerError: ``workspace.backend_unavailable`` (permanent)
+        for a path on the way that is not a real directory.
+    """
+    return tuple(_real_directory(common_dir, name) for name in _WRITABLE_GIT_DIRS)
+
+
+def _real_directory(common_dir: str, relpath: str) -> str:
+    """``<common_dir>/<relpath>``, each missing level made inside a real directory."""
+    path = common_dir
+    for part in relpath.split("/"):
+        path = os.path.join(path, part)
+        try:
+            os.mkdir(path)
+        except FileExistsError:
+            pass
+        except NotADirectoryError:
+            raise _not_a_directory(os.path.dirname(path)) from None
+        except OSError as exc:
+            # A full disk, say: a later try may succeed.
+            raise WorkspaceOpHandlerError(
+                BACKEND_UNAVAILABLE,
+                f"cannot create {printable(path)} for the write jail: "
+                f"{exc.strerror or type(exc).__name__}",
+            ) from None
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            raise _not_a_directory(path)
+    return path
+
+
+def _not_a_directory(path: str) -> WorkspaceOpHandlerError:
+    return _refused(
+        f"{printable(path)} is not a directory; Coral's write jail needs the files ref "
+        "store's directories there"
+    )
 
 
 def _jailed_version_failure(git: Git, jail: Jail) -> str | None:
