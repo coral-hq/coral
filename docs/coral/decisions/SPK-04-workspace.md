@@ -25,6 +25,7 @@
 | Spike 8 | `darwin_seatbelt`: **blocked**; `linux_bwrap`: **not run** | CRL-128 |
 | Contingency | **Triggered**, HIGH confidence; Linux confirmation owned by CRL-128 | WSP-06 schedule |
 | Draft K13 | [K13 draft v1](../contracts/workspace-ops.md): not frozen, D-K13-1..3 open | CRL-128, WSP-02, EVD-01 |
+| M2 backend | **Decided in CRL-128:** engine git runs on the user's host, through Coral-owned host frames; no session-shell backend (record below) | CRL-128, WSP-02, WSP-06 |
 
 ## Open decisions for a person
 
@@ -59,8 +60,11 @@ CRL-128's real backend, not this ticket's acceptance criteria.
   - Commits use plumbing (`commit-tree`, `update-ref`), never porcelain
     `git commit`.
 - **Refusal.** Until D-K13-1 is decided, a repository is refused when its own
-  config defines hooks, or when the user's full config (global included)
-  defines filter or merge drivers, such as Git LFS. Reading config runs no
+  config defines hooks, or when the repository declares filters or merge
+  drivers: in its own config, or with `filter=` in an attribute source the op
+  reads. CRL-128 narrowed this from "drivers anywhere in the user's full
+  config", so a global Git LFS install alone no longer refuses every
+  repository (record below). Reading config and attribute files runs no
   program.
 - **Identity.** Commits keep the user's own `user.name` and `user.email`, read
   from the full config. `Coral <coral@localhost>` is used only when they are
@@ -266,6 +270,104 @@ WRITE ops into the agent's sandbox.
 **Schedule effect** (roadmap SPK-04, risks): host-channel commit, reset and
 salvage move into WSP-06 in PH2, adding 3 eng-weeks for WS-WORKSPACE. A person
 must accept this. The ticket comment flags it.
+
+## CRL-128: engine git on the host (decision record)
+
+- **Status:** Decided by the person owning CRL-128 (binding for that ticket).
+- **Date:** 2026-11-16.
+- **Decides:** the M2 backend for every K13 op, and how the real-backend gate
+  runs.
+
+**Decision.**
+
+- **Host-side ops.** Engine git runs on the user's host, never in an agent's
+  sandbox and never through a runner shell. The host serves `head`,
+  `diff_stat`, `read`, `fingerprint(L1)`, `commit`, `salvage` and `reset`
+  through a minimal host workspace-op channel in the WSP-02/K20 shape: a
+  `host.workspace_op` frame and its result, the `workspace_ops:1` capability
+  token, and handlers from `omnigent.host_workspace_ops` entry points. The
+  frames are the K13 contract's "K20 draft (minimal)" appendix.
+- **Not built:** the session-shell backend and a runner shell route. K13 keeps
+  the session-shell text for a future backend, marked as not built.
+- **Not served at M2:** `fingerprint(L2)` (WSP-02), `merge` (WSP-03) and
+  `check` (EVD-04). They raise a permanent `workspace.capability_unavailable`.
+- **Fork seams, Coral-owned.** Coral cannot change upstream Omnigent. Every
+  Omnigent file the channel touches is a Coral-owned fork seam (S40 for the
+  frames, dispatcher, server pending map, routing and request helper; S40b for
+  the handler registry and `pyproject.toml`), with `category: coral-specific`
+  and `upstream_candidate: false`. No upstream PR is planned. Coral's own
+  code is `coral/omni/host/ops/` (the handlers) and
+  `coral/workspace/host_backend.py` (the K13 backend).
+- **Per-op gate.** Each conformance backend declares the ops it serves; the
+  suite skips the rest for that backend. The `host` entry drives Coral's real
+  handlers in-process through the channel's real codec and dispatcher, on real
+  git.
+- **D-K13-1 narrowed.** The interim rule refuses only repositories that
+  declare filters or drivers (K13 security requirement 1). The isolated config
+  never loads a global filter definition, so it alone changes nothing.
+  D-K13-1 itself stays open.
+- **Write jail.** Every git process of a host op runs in a jail the kernel
+  enforces: `/usr/bin/sandbox-exec` on macOS, `bwrap` on Linux.
+  - A WRITE op may write only the worktree; in the common dir `objects/`, the
+    `coral/` refs and their logs, and `packed-refs`; its own admin dir; and a
+    private temp dir. Never `hooks/`, `config`, `info/` or other refs. A READ
+    op may write only the temp dir.
+  - Under the user's home, git may read only those paths, the repository,
+    its own install, the repository's config includes and exactly the global
+    ignore and attribute files it consults; never `~/.gitconfig`, the system
+    config or the rest of `~/.config/git`.
+  - Without a working jail, WRITE ops refuse with a permanent
+    `workspace.capability_unavailable` naming the missing tool; without a
+    home directory, or for a reftable ref store, with a permanent
+    `workspace.backend_unavailable`. READ ops run unjailed when no jail
+    works.
+  - The system and Xcode git on macOS work in the jail (probed). The Linux
+    jail was not run on a Linux host during CRL-128; CI, which installs
+    bubblewrap and allows unprivileged user namespaces, must prove that bwrap
+    starts, that exit codes and the deadline kill pass through it, that the
+    jail and race tests run there, and that a symlinked global ignore file
+    still applies (K13 security requirement 14).
+- **Move-aside (macOS).** The jail cannot keep a racer out of the paths git
+  must write, the worktree among them. On macOS a surviving agent process is
+  confined by a seatbelt profile that grants writes by path, so each WRITE op
+  renames the worktree to `<worktree>.coral-op` before its git runs and
+  renames it back afterwards; such a process can then write nothing in it.
+  An aside copy left by a host that died mid-op is moved back by the next op;
+  if both copies exist, the op fails with a permanent
+  `workspace.worktree_displaced`. Linux needs none: agents there run in a PID
+  namespace that the stop ends.
+- **Limits.** A host op's timeout above 900 s is rejected before the frame is
+  sent, never clamped. READ ops get 120 s and WRITE ops 600 s. The host runs
+  at most 2 ops at once and one per worktree; results stay under 8 MiB, so
+  `read` serves at most 6,000,000 bytes.
+
+**Why.**
+
+- The spike-8 contingency stands: WRITE ops need write access to the common
+  dir, which no agent sandbox may have. The host already runs git outside any
+  sandbox for its worktrees, needs no live session (restart ladder step 4 is
+  sessionless after the fence), and takes argument vectors, not shell strings.
+- A default agent sandbox masks `.git`, so even READ ops could not run in a
+  session shell, and D-K13-2 is undecided; serving them on the host keeps the
+  conformance suite's observation helpers unchanged.
+- The gate per op lets the real backend prove exactly what it serves.
+- The jail and the move-aside close a race the session stop cannot: an agent
+  process can outlive its session (on macOS a double-forked `setsid` process
+  survives the teardown) and swap a worktree directory for a symlink while
+  host git works. Unjailed, git then created, deleted or read files outside
+  the worktree; with the whole common dir writable, it planted a hook the
+  user's next commit ran and deleted the user's tags. The kernel resolves the
+  symlink before it applies the jail's rules, and the moved tree is out of
+  the agent's reach, so git is refused instead.
+
+**Consequences.**
+
+- The Linux bwrap and Homebrew-git reruns of spike 8 are no longer needed for
+  the M2 decision; they stay open only for D-K13-2.
+- A host without the token, or with Coral's handlers switched off
+  (`CORAL_DISABLE_HOST_ENTRY_POINTS`), gets a permanent
+  `workspace.capability_unavailable`, never a silent empty commit.
+- Coral's handlers serve POSIX hosts only.
 
 ## Sessionless and reviewer probes
 

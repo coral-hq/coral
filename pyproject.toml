@@ -418,6 +418,10 @@ omni = "omnigent.cli:main"
 # CORAL(S29): Coral console entrypoint
 coral = "coral.cli:main"
 
+# CORAL(S40b): Coral's handlers for the host workspace-op channel
+[project.entry-points."omnigent.host_workspace_ops"]
+coral = "coral.omni.host.ops:workspace_op_handlers"
+
 [tool.uv]
 # Keep plain `uv sync` aligned with the published base package. Repository
 # workflows opt into the smallest dependency group they need.

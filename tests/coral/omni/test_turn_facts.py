@@ -92,6 +92,26 @@ def test_observer_copies_present_fields_and_keeps_no_memory() -> None:
     assert observe_status_edge({"session_id": "sess-1", "slot_id": 3}).slot_id == ""
 
 
+def test_the_fact_names_the_response_its_outcome_reports_on() -> None:
+    # A continuation's running edge opens resp_2 and reports resp_1's outcome.
+    carried = observe_status_edge(
+        {
+            "session_id": "sess-1",
+            "status": "running",
+            "response_id": "resp_2",
+            "turn_outcome": "cancelled",
+            "turn_response_id": "resp_1",
+        }
+    )
+    assert carried is not None
+    assert (carried.turn_outcome, carried.response_id) == ("cancelled", "resp_1")
+    opened = observe_status_edge({"session_id": "sess-1", "status": "running", "response_id": "r"})
+    assert opened is not None and opened.response_id == "r"
+    for missing in ({}, {"response_id": ""}, {"turn_response_id": "", "response_id": 7}):
+        fact = observe_status_edge({"session_id": "sess-1", "status": "idle", **missing})
+        assert fact is not None and fact.response_id is None
+
+
 def test_user_and_archive_origins_do_not_nudge() -> None:
     key = "turn:sess-1"
     assert decide(_completed(origin="user"), "working", fact_key=key) is False

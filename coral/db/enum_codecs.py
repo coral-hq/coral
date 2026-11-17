@@ -49,6 +49,7 @@ RUN_PAUSE_REASON: dict[str, int] = {
     "merge_conflict": 9,
     "failure_path": 10,
     "engine_upgrade": 11,
+    "drift": 12,
 }
 
 RUN_TRIGGER_KIND: dict[str, int] = {
@@ -214,6 +215,29 @@ WORK_STATUS: dict[str, int] = {
     "abandoned": 5,
 }
 
+SESSION_BINDING_ROLE: dict[str, int] = {
+    "anchor": 1,
+    "step": 2,
+}
+
+SESSION_BINDING_PROGRESS: dict[str, int] = {
+    "reserved": 1,
+    "row_created": 2,
+    "initialized": 3,
+}
+
+STABLE_ID_KIND: dict[str, int] = {
+    "brief": 1,
+    "steer": 2,
+    "nudge": 3,
+}
+
+WORKSPACE_OP_INTENT_OP: dict[str, int] = {
+    "commit": 1,
+    "salvage": 2,
+    "reset": 3,
+}
+
 
 # ── Python Enums (IntEnum & StrEnum) ────────────────────────────────────────
 
@@ -260,6 +284,7 @@ class RunPauseReason(IntEnum):
     MERGE_CONFLICT = 9
     FAILURE_PATH = 10
     ENGINE_UPGRADE = 11
+    DRIFT = 12
 
 
 class RunTriggerKind(IntEnum):
@@ -426,6 +451,31 @@ class WorkStatus(IntEnum):
     SUCCEEDED = 3
     FAILED = 4
     ABANDONED = 5
+
+
+class SessionBindingRole(IntEnum):
+    ANCHOR = 1
+    STEP = 2
+
+
+class SessionBindingProgress(IntEnum):
+    """Ordered create progress; stored progress only ever increases."""
+
+    RESERVED = 1
+    ROW_CREATED = 2
+    INITIALIZED = 3
+
+
+class StableIdKind(IntEnum):
+    BRIEF = 1
+    STEER = 2
+    NUDGE = 3
+
+
+class WorkspaceOpIntentOp(IntEnum):
+    COMMIT = 1
+    SALVAGE = 2
+    RESET = 3
 
 
 # ── StrEnum Variants ─────────────────────────────────────────────────────────
@@ -755,3 +805,50 @@ def encode_work_status(val: str | WorkStatus) -> int:
 
 def decode_work_status(code: int) -> str:
     return decode_enum(WORK_STATUS, code, field="coral_work.status")
+
+
+def encode_session_binding_role(val: str | SessionBindingRole) -> int:
+    return _encode_val(
+        SESSION_BINDING_ROLE,
+        val,
+        "coral_session_bindings.role",
+        expected_enum=SessionBindingRole,
+    )
+
+
+def decode_session_binding_role(code: int) -> str:
+    return decode_enum(SESSION_BINDING_ROLE, code, field="coral_session_bindings.role")
+
+
+def encode_session_binding_progress(val: str | SessionBindingProgress) -> int:
+    return _encode_val(
+        SESSION_BINDING_PROGRESS,
+        val,
+        "coral_session_bindings.progress",
+        expected_enum=SessionBindingProgress,
+    )
+
+
+def decode_session_binding_progress(code: int) -> str:
+    return decode_enum(SESSION_BINDING_PROGRESS, code, field="coral_session_bindings.progress")
+
+
+def encode_stable_id_kind(val: str | StableIdKind) -> int:
+    return _encode_val(STABLE_ID_KIND, val, "coral_stable_ids.kind", expected_enum=StableIdKind)
+
+
+def decode_stable_id_kind(code: int) -> str:
+    return decode_enum(STABLE_ID_KIND, code, field="coral_stable_ids.kind")
+
+
+def encode_workspace_op_intent_op(val: str | WorkspaceOpIntentOp) -> int:
+    return _encode_val(
+        WORKSPACE_OP_INTENT_OP,
+        val,
+        "coral_workspace_op_intents.op",
+        expected_enum=WorkspaceOpIntentOp,
+    )
+
+
+def decode_workspace_op_intent_op(code: int) -> str:
+    return decode_enum(WORKSPACE_OP_INTENT_OP, code, field="coral_workspace_op_intents.op")

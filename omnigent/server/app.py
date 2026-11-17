@@ -2327,7 +2327,10 @@ def create_app(
     app.state.runner_session_initializer = runner_session_initializer
     app.state.background_title_coordinator = background_title_coordinator
     app.state.host_registry = host_registry
-    from omnigent.server.startup_inputs import ManagedStartupInputs
+    from omnigent.server.startup_inputs import (  # CORAL(S41): SessionEventDispatch
+        ManagedStartupInputs,
+        SessionEventDispatch,
+    )
 
     # Only managed creates accept a durable first input, and only managed hosts
     # need their startup recovered on the replica holding the tunnel.
@@ -3826,6 +3829,12 @@ def create_app(
         # Still report the list, so admin chrome shows even if promotion failed.
         return {"user_id": user_id, "is_admin": flagged or listed}
 
+    # CORAL(S41): in-process senders keep the event handler, with or without managed sandboxes.
+    def _register_session_event_dispatch(handler: SessionEventDispatch) -> None:
+        app.state.session_event_dispatch = handler
+        if startup_inputs is not None:
+            startup_inputs.dispatch = handler
+
     app.include_router(
         create_sessions_router(
             conversation_store,
@@ -3860,11 +3869,7 @@ def create_app(
             project_store=project_store,
             background_title_coordinator=background_title_coordinator,
             pull_request_refresher=pull_request_refresher,
-            register_startup_dispatch=lambda handler: (
-                setattr(startup_inputs, "dispatch", handler)
-                if startup_inputs is not None
-                else None
-            ),
+            register_startup_dispatch=_register_session_event_dispatch,  # CORAL(S41)
             register_initial_file_upload=lambda handler: setattr(
                 app.state, "initial_file_upload", handler
             ),

@@ -1521,3 +1521,421 @@ seams:
     anchor_exempt: []
     upstream_first: true
     upstream_candidate: true
+
+  - id: S1
+    title: Status-edge observers with origin and turn outcome
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      session_live_state gains a process-wide, lock-guarded registry of named
+      status-edge observers (one static, namespaced name per component; a
+      replacement by name logs a warning). _publish_status notifies once per
+      published edge, after the stream publish so a re-reading observer finds
+      every cache updated; the sticky-failed return notifies nothing. Each
+      SessionStatusEdge carries origin, turn_outcome (completed, cancelled or
+      failed; anything else is dropped), turn_response_id (the ended turn's id;
+      it never opens a turn), the call's error, failure_origin (failed edges
+      only), workspace and observed_at_ms. Runner-supplied values are bounded
+      on construction and never raise: ids over 128 characters are dropped,
+      error_code and blocked_on are cut to 128 characters and error_message to
+      4,500. Edges from every workspace reach every observer, so observers
+      match on (workspace_id, session_id). Nothing new reaches the stream
+      payload, the caches or the scheduled-run hook, so without an observer
+      behaviour is unchanged. Observers run on the publishing thread (orphan
+      reconcile publishes from a worker thread), each in its own try/except; a
+      failing observer logs one traceback per name, then debug lines. Origins:
+      archive_idle (the archived session's own stop settlement; sessions
+      sharing its runner report unknown), runner_disconnect (the relay's
+      mid-turn drop, failed with its turn id), relay_turn_end (the relay's
+      runner-recovered idle, with the runner's turn_outcome and
+      turn_response_id when sent) and status_probe (a cold-cache probe fill);
+      every other site keeps unknown. The three intentional-stop idle edges
+      (stop and archive settlement, the offline sweep's settlement, the
+      relay's stop idle) report cancelled with the active response id only
+      when the session is still running at the publish (the cache, or the
+      persisted status when it is cold); a waiting session's turn had already
+      ended, and whichever of settlement and relay drop publishes second
+      reports no outcome, so a stopped turn is reported cancelled once. The
+      offline sweep's mid-turn failure reports failed with its turn id when one
+      is known. The two writers that bypass _publish_status notify themselves:
+      the runner-recovered status once after its stream publish (never on its
+      early returns) and the status probe only when it fills a cold cache with
+      idle, running, waiting or failed. Every notified edge with both an
+      outcome and a response id is recorded per (workspace_id, session_id):
+      the last 8 response ids per session, at most 4,096 sessions (least
+      recently reported evicted first), dropped when the session is deleted.
+      The server-inferred sites (the three intentional-stop idles and the
+      relay and offline-sweep disconnect failures) report an outcome only for
+      a response with none recorded; otherwise their edge carries no outcome
+      and no turn id. The active response can still name a turn the runner
+      already reported (a waiting turn end, or a buffered continuation before
+      its first response), so one response never gets a second, contradicting
+      outcome from an inference. Runner-relayed outcomes are not gated;
+      docs/coral/contracts/session-facade.md (Status edges) sets the
+      precedence consumers apply between them and the inferred ones.
+      turn_fields passes a turn response id only with a known outcome.
+    files:
+      - omnigent/server/session_live_state.py
+      - omnigent/server/routes/_sessions/helpers.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - omnigent/server/routes/sessions/routes_events.py
+      - tests/server/test_session_live_state.py
+      - tests/server/routes/test_intentional_runner_stop.py
+      - tests/server/routes/test_disconnect_outcome_recovery.py
+      - tests/server/routes/test_sessions_snapshot.py
+      - tests/server/routes/test_sessions_runner_relay.py
+    tests:
+      - tests/server/test_session_live_state.py
+      - tests/server/routes/test_intentional_runner_stop.py
+      - tests/server/routes/test_disconnect_outcome_recovery.py
+      - tests/server/routes/test_sessions_snapshot.py
+      - tests/server/routes/test_sessions_runner_relay.py
+    budget_lines: 40
+    budget_exception:
+      lines: 544
+      reason: >-
+        Changed lines against the upstream base, per file.
+        omnigent/server/session_live_state.py (199): the edge dataclass with its
+        bounds, turn_fields, the registry with its replacement warning, notify
+        with once-per-name failure logging, and the bounded record of reported
+        turn outcomes, with their docstrings.
+        omnigent/server/routes/_sessions/orchestration.py (123, of which 9 are
+        S43's relay change): the shared _stopped_turn and _inferred_turn rules,
+        eight sites each with its own anchor, and the keyword-only parameters
+        and docstrings of _stop_host_runner_intentionally and the
+        recovered-status impl. omnigent/server/routes/_sessions/helpers.py (31)
+        is within budget; omnigent/server/routes/sessions/routes_events.py has 9
+        S1 lines (the delete hook), the rest is S42's.
+        tests/server/test_session_live_state.py (544): the registry
+        (replacement, identity-checked unregister, a raising observer that runs
+        first, once-per-name logging, re-entrancy), the edge bounds, the
+        turn_fields matrix, the field-by-field and ordering contract of
+        _publish_status, the worker-thread publish, one driver per origin site
+        (archive stop, relay drop, relay recovery, status probe) reusing the
+        relay test's fake runner clients and label store, the reported-outcome
+        record's bounds and workspace keys, and the delete hook.
+        tests/server/routes/test_intentional_runner_stop.py (130): the running,
+        waiting and reported-continuation matrix over stop, archive, offline
+        sweep and relay transport (archive origin on the archived session only)
+        and the settlement-then-relay-drop ordering.
+        tests/server/routes/test_sessions_runner_relay.py (155, of which 81 are
+        S43's): a stop with no turn in flight, and a runner drop after a
+        reported waiting or continuation turn end.
+        tests/server/routes/test_sessions_snapshot.py (60) and
+        tests/server/routes/test_disconnect_outcome_recovery.py (54): the probe
+        cases, and the sweep failure with a known, unknown or already-reported
+        turn.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S43
+    title: Runner turn outcomes that survive a buffered continuation
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      The runner's session.status edges for a turn end carry turn_outcome
+      (completed, cancelled or failed) and, when known, turn_response_id: the
+      response the turn ended, read before the live response is released. That
+      covers the stream end (interrupted or cancelled, completed on idle or
+      waiting, failed), the cancelled drain, the desync failure and the
+      session-init failure (no response yet, so no id). The existing
+      response_id key, the buffered-input suppression and the native drop rules
+      are unchanged. A turn whose stream ends with buffered input publishes
+      nothing and carries its outcome to the next turn start's running edge
+      (any turn start, not only the drain's), or to an idle edge when the drain
+      finds the queue emptied (either empty-queue exit); deleting a session
+      drops a carried outcome. A real interrupt force-cancels the runner task
+      instead: the cancelled drain publishes idle with cancelled and the
+      response id even with input buffered, and the turn's teardown then
+      carries an unkeyed cancelled to the continuation's running edge. Either
+      way the interrupted response gets exactly one keyed runner-reported
+      outcome.
+      The relay passes both keys to _publish_status, which hands them to
+      status-edge observers only; old runners send neither key, and an
+      unknown outcome drops the response id with it.
+      docs/coral/contracts/session-facade.md (Status edges) sets the
+      precedence between these runner-reported outcomes and the
+      server-inferred ones (S1); its residuals list the unkeyed sources.
+    files:
+      - omnigent/runner/app.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - tests/runner/test_runner_dispatch.py
+      - tests/server/routes/test_sessions_runner_relay.py
+    tests:
+      - tests/runner/test_runner_dispatch.py
+      - tests/server/routes/test_sessions_runner_relay.py
+    budget_lines: 40
+    budget_exception:
+      lines: 445
+      reason: >-
+        omnigent/runner/app.py (58 lines): two keyword-only parameters and the
+        two event keys, the carried-outcome map with its test seam and its pop
+        on every turn start, on delete and at the two drain exits that start no
+        turn, and the outcome and response id at six turn-end sites, each with
+        its anchor. omnigent/server/routes/_sessions/orchestration.py is within
+        budget (9). tests/runner/test_runner_dispatch.py (445): the five-ending
+        stream-end matrix (incl. waiting), a held-open streaming turn cancelled
+        by an interrupt, the same with input buffered, the buffered
+        continuation through a real drain and turn (interrupted, completed,
+        failed), both drain exits with the queue gone, the delete drop, the
+        init failure and the desync response id.
+        tests/server/routes/test_sessions_runner_relay.py (81 of the file's
+        155): relayed outcomes reach observers but never the stream payload,
+        and an id without a known outcome is dropped.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S41
+    title: Session event handler kept for in-process senders
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      create_app always keeps the session event handler on
+      app.state.session_event_dispatch, so an in-process sender can post events
+      on every server, and still hands it to managed startup inputs when they
+      exist, typed as the SessionEventDispatch protocol. Before, the handle
+      was dropped on servers without managed sandboxes.
+    files:
+      - omnigent/server/app.py
+      - tests/server/integration/test_engine_event_dispatch.py
+    tests:
+      - tests/server/integration/test_engine_event_dispatch.py
+    budget_lines: 10
+    budget_exception:
+      lines: 300
+      reason: >-
+        omnigent/server/app.py (17 lines): a named, typed registration function
+        with its anchor replaces the five-line lambda, and the local import
+        gains SessionEventDispatch. The new test file (300) is shared with S42;
+        its S41 part is the registration check with and without managed
+        sandboxes.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S42
+    title: EngineEventContext for request-free engine sends
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      startup_inputs gains EngineEventContext(app, user_id), an in-process
+      engine sender with no HTTP request whose headers are always empty (no
+      caller can pass any, so no runner tunnel credential rides an engine
+      send), and the SessionEventDispatch protocol for the shared handler.
+      Callers pass the run owner's authenticated user id, never a value taken
+      from request input. The event routes accept it wherever the startup and
+      runner contexts are accepted: it is authorized as its own user_id, never
+      a header identity, and its message is dispatched at once instead of
+      being saved behind a managed session's startup. From it,
+      _post_event_impl accepts only message, interrupt and stop_session
+      (anything else is FORBIDDEN) and refuses a message whose first text
+      starts with ! or / after leading whitespace (INVALID_INPUT), before any
+      dispatch, so no shell or slash command runs through an engine brief. A
+      host refusal in the host-bound relaunch ladder raises RUNNER_UNAVAILABLE
+      for it instead of recording a failed turn and reporting queued; a side
+      chat's source-relaunch refusal still records a failed turn (Coral step
+      sessions are never side chats). The other request-only and startup-only
+      branches are unchanged, so the closed check, input policy, owner-only
+      stop and interrupt behave as for an HTTP sender. The context has no
+      connection to wait on, so an ASK input policy ends as a deny at once
+      (a residual in docs/coral/contracts/session-facade.md).
+    files:
+      - omnigent/server/startup_inputs.py
+      - omnigent/server/routes/sessions/routes_events.py
+      - tests/server/integration/test_engine_event_dispatch.py
+    tests:
+      - tests/server/integration/test_engine_event_dispatch.py
+    budget_lines: 40
+    budget_exception:
+      lines: 300
+      reason: >-
+        omnigent/server/startup_inputs.py (33) is within budget.
+        omnigent/server/routes/sessions/routes_events.py (71 S42 lines of the
+        file's 80; 9 are S1's delete hook): the import, the context in five
+        unions and three tuples, and the engine event guard (allowed types,
+        first-text command prefixes) with its call, each with an anchor.
+        tests/server/integration/test_engine_event_dispatch.py (300, new,
+        shared with S41): message, interrupt, stop, input-policy deny and the
+        closed check through the real handler; the context's own user, allowed
+        and refused; empty headers; the refused event types and command-shaped
+        briefs; the managed startup queue skipped; the typed relaunch refusal.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S40
+    title: Host workspace-op frames, guarded dispatcher, token and server request helper
+    owner: WS-WORKSPACE
+    status: landed
+    category: coral-specific
+    note: >-
+      The server can ask a host to run a named workspace op in one of its git
+      worktrees. omnigent/host/workspace_ops.py (standard library only;
+      frames.py imports it, never the reverse) defines host.workspace_op and
+      host.workspace_op_result, their codec and the token workspace_ops:1,
+      which HOST_CAPABILITIES now advertises. The two kinds are not
+      HostFrameKind members: encode_host_frame and decode_host_frame route
+      them to the module first. Decoding checks every field's type, requires
+      a non-empty request id, rejects a timeout_s outside (0, 900] (an integer
+      too large for a float included), and requires a payload on an ok result
+      and an error code on a failed one; a result without permanent reads as
+      retryable. Both sides refuse a root that is not canonical and absolute
+      (no NUL, no // or UNC prefix, no empty, . or .. segment, no trailing
+      separator, judged in the root's own POSIX or Windows-drive flavour) and
+      an op_key outside K13's format. On the host, the host.workspace_op
+      branch of _dispatch_host_frame calls dispatch_workspace_op and reads the
+      handlers through the module, so a patched default_workspace_op_handlers
+      takes effect. The dispatcher always answers; only cancellation
+      propagates. An unknown op is unknown_op and a bad root or op key
+      invalid_request, both permanent and before any handler runs. Otherwise
+      the op waits for one of two per-host slots (an asyncio.Semaphore taken
+      before the guard, so a queued op holds no thread and leaves the reaper
+      running), then runs inside _run_host_subprocess_in_thread (the S71
+      guard) with a monotonic deadline that counts the time queued. The
+      handler's payload is serialised once, in that worker thread, and
+      encoding reuses the text; a non-mapping or non-JSON payload is
+      invalid_payload and one over 8 MiB serialised result_too_large, both
+      permanent. A WorkspaceOpHandlerError checks its own field types and
+      keeps its code, exit code and permanent flag, with its message trimmed
+      to the last 2,000 characters. Any other exception, including a badly
+      built handler error, is handler_failed (retryable) with only its type
+      name on the wire. A frame that does not decode is dropped like any
+      other host frame. On the server, HostConnection.pending_workspace_ops
+      is failed with the worktree maps on replace and deregister; the host
+      tunnel relays the result's six fields to the waiting future and logs a
+      late result at debug. Before a frame is sent,
+      request_workspace_op_on_host refuses a host without the token, then any
+      frame the host would drop or refuse (the same codec, root and op-key
+      checks), then any send outside a host_owner_scope that names the
+      connection's owner, workspace and registration. host_owner_scope now
+      records that it is active, so an ownerless scope (auth off) matches
+      only an ownerless connection. The helper sends a 32-hex request id and
+      waits timeout_s plus 15 s through _await_host_worktree_result (no
+      older-host hint); a lost connection or no reply raises
+      HostWorkspaceOpUnavailableError with timed_out set. Replies are
+      bounded: error text is cut to its last 2,000 characters and a malformed
+      error code reads as handler_failed; payload shapes are the caller's to
+      check. S40b registers the handlers; the only caller is Coral's server
+      adapter (coral/omni/server/workspace_ops.py), which runs only for engine
+      effects nothing enqueues yet, so the server side is dark. Known cost: a handler's thread cannot be stopped,
+      so an op runs until its handler returns. Handlers enforce
+      request.deadline themselves, and the 900 s bound holds only if they do.
+      While an op runs it holds a default-executor thread and keeps the
+      host-wide orphan reaper paused. At most two ops run at once per host,
+      so they cannot exhaust the executor that other host frames share. A
+      server timeout, a dropped tunnel or a cancelled request leaves the
+      outcome unknown, because the host may still finish the op: callers
+      retry with the same op_key and never treat such a failure as not
+      executed.
+    files:
+      - omnigent/host/workspace_ops.py
+      - omnigent/host/frames.py
+      - omnigent/host/connect.py
+      - omnigent/server/host_registry.py
+      - omnigent/server/routes/host_tunnel.py
+      - omnigent/server/routes/_host_workspace_ops.py
+      - tests/host/test_frames.py
+      - tests/host/test_workspace_ops.py
+      - tests/server/routes/test_host_workspace_ops.py
+    tests:
+      - tests/host/test_frames.py
+      - tests/host/test_workspace_ops.py
+      - tests/server/routes/test_host_workspace_ops.py
+    budget_lines: 120
+    budget_exception:
+      lines: 503
+      reason: >-
+        omnigent/host/workspace_ops.py (591 lines, new, shared with S40b;
+        about 470 are S40): the frame dataclasses, the request and
+        handler-error types with field checks, the codec, the shared root and
+        op-key checks, the guarded, slot-bounded dispatcher with its
+        one-pass payload serialisation and size cap, with docstrings.
+        omnigent/server/routes/_host_workspace_ops.py (166, new): the reply
+        type, three errors, the request helper with its pre-send checks and
+        the bounded reply typing. frames.py (16), connect.py (12),
+        host_registry.py (29) and host_tunnel.py (26) are within budget.
+        tests/host/test_frames.py (161): the token, exact round trips, the
+        wire keys, the result without permanent and 27 malformed-frame cases.
+        tests/host/test_workspace_ops.py (695, new, shared with S40b; about
+        503 are S40): the reaper-sweep exit status and the patched registry
+        through the connect branch, the two-op cap, the dispatcher's request
+        and deadline, 12 permanent refusals, typed and ill-typed handler
+        errors, message trimming, type-only exceptions, the catch-all,
+        payload refusals, the size cap, the one-pass serialisation and the
+        root flavours. tests/server/routes/test_host_workspace_ops.py (412,
+        new, including the QA's 49-line stray-result test): the token, 16
+        pre-send frame refusals, the owner-scope matrix, cancellation,
+        immediate failure on deregister and replace, the timeout plus grace,
+        and through the real host tunnel the six relayed fields, bounded host
+        text and stray results.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S40b
+    title: Workspace-op handler registry from entry points
+    owner: WS-WORKSPACE
+    status: landed
+    category: coral-specific
+    note: >-
+      The host's workspace-op handlers come from installed
+      omnigent.host_workspace_ops entry points. Each names a zero-argument
+      callable returning {op name: handler}; op names match
+      [a-z][a-z0-9_.]{0,63}. Installed entry points load in (name, value)
+      order. A contribution that fails to import or call, returns a
+      non-mapping, or names an invalid op or a non-callable handler is
+      skipped whole with a warning; one that returns no ops adds nothing and
+      logs nothing. An op offered by more than one contribution is served by
+      none of them and logged as an error naming every package, so no
+      installed package can silently take over another's op. Each served op
+      is logged at info with the package that serves it.
+      default_workspace_op_handlers loads once per process, on the first
+      host.workspace_op frame and never at host import. It returns a
+      read-only WorkspaceOpHandlers mapping that also records the failed
+      contributions and the conflicting ops, so unknown_op says that a
+      handler failed to load or conflicts, not that none exists. The result
+      stays cached until the host restarts. Installed metadata updates only
+      after uv sync, so tests pass handlers to dispatch_workspace_op or patch
+      default_workspace_op_handlers. pyproject.toml declares Coral's own
+      contribution, coral = coral.omni.host.ops:workspace_op_handlers, which
+      serves head, diff_stat, read, fingerprint (L1), commit, salvage and
+      reset and returns no ops while CORAL_DISABLE_HOST_ENTRY_POINTS is set.
+    files:
+      - omnigent/host/workspace_ops.py
+      - pyproject.toml
+      - tests/host/test_workspace_ops.py
+    tests:
+      - tests/host/test_workspace_ops.py
+      - tests/coral/test_packaging.py
+      - tests/coral/omni/host/ops/test_host_imports.py
+    budget_lines: 40
+    budget_exception:
+      lines: 192
+      reason: >-
+        omnigent/host/workspace_ops.py (new, shared with S40): about 121
+        lines are S40b. They are the entry-point group constant, the
+        WorkspaceOpHandlers mapping, the loader with its conflict rule and
+        source logging, the cached default and the unknown_op wording, with
+        docstrings. tests/host/test_workspace_ops.py (new, shared with S40):
+        about 192 lines are S40b. They cover contributions loaded through
+        real entry points, skipped broken contributions, a contribution
+        without ops (the QA's test), the two-package conflict with its log
+        and unknown_op text, the failed-to-load text, the once-per-process
+        load and the fresh-interpreter check that importing the host loads
+        nothing. pyproject.toml (4) declares Coral's contribution and is
+        within budget.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

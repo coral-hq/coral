@@ -5060,6 +5060,11 @@ def _publish_status(
     failure_intake: Mapping[str, str] | None = None,
     disconnect_evidence: Mapping[str, str] | None = None,
     turn_completed: bool = False,
+    # CORAL(S1): observer-only edge fields; they never reach the stream or the caches.
+    *,
+    origin: str = "unknown",
+    turn_outcome: str | None = None,
+    turn_response_id: str | None = None,
 ) -> None:
     """
     Publish a typed :class:`SessionStatusEvent` to the live stream and
@@ -5100,7 +5105,13 @@ def _publish_status(
     :param turn_completed: Whether an ``"idle"`` edge reports a turn the harness
         confirmed finished (e.g. claude-native's ``Stop`` hook), which clears a
         sticky ``failed`` like a ``running`` edge would.
+    :param origin: Publishing path for status-edge observers, e.g. ``"archive_idle"``.
+    :param turn_outcome: How the turn named by *turn_response_id* ended, for
+        observers only (``"completed"``, ``"cancelled"`` or ``"failed"``).
+    :param turn_response_id: The ended turn's response id; never opens a turn.
     """
+    # CORAL(S1): keep the caller's origin; the failure log below reuses the name.
+    edge_origin = origin
     # ``failed`` is sticky against a trailing ``idle``. A turn error is
     # terminal — it must not be silently downgraded to ``idle`` by a
     # follow-on quiescence signal. This matters for claude-native: the
@@ -5249,6 +5260,26 @@ def _publish_status(
     if blocked_on is None:
         payload.pop("blocked_on", None)
     session_stream.publish(session_id, payload)
+    # CORAL(S1): observers see the edge last, so a re-read finds every cache updated.
+    session_live_state.notify_status_edge(
+        session_live_state.SessionStatusEdge(
+            session_id,
+            status,
+            previous_status,
+            origin=edge_origin,
+            turn_completed=turn_completed,
+            turn_outcome=turn_outcome,
+            turn_response_id=turn_response_id,
+            response_id=response_id,
+            error_code=error.code if error is not None else None,
+            error_message=error.message if error is not None else None,
+            failure_origin=failure_origin if status == "failed" else None,
+            persist_live_status=persist_live_status,
+            scheduled_run_outcome=scheduled_run_outcome,
+            background_task_count=background_task_count,
+            blocked_on=blocked_on,
+        )
+    )
 
 
 def reconcile_orphaned_running_status(

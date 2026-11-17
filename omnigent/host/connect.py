@@ -69,6 +69,7 @@ from omnigent.harness_aliases import (
 )
 from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailability
 from omnigent.host import HOST_FATAL_EXIT_CODE
+from omnigent.host import workspace_ops as _workspace_ops  # CORAL(S40)
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
@@ -1426,6 +1427,8 @@ class HostProcess:
         # Keep cancellation-shielded worker tasks alive until they release the
         # orphan-reaper guard after their subprocesses have actually finished.
         self._host_subprocess_tasks: set[asyncio.Task[object]] = set()
+        # CORAL(S40): bounds engine workspace ops; queued ones hold no thread and no guard.
+        self._workspace_op_slots = asyncio.Semaphore(_workspace_ops.MAX_CONCURRENT_WORKSPACE_OPS)
         # Copy-on-write runner forkserver, on by default; set
         # OMNIGENT_RUNNER_ZYGOTE=0 (or false/no/off) to opt out onto the direct
         # Popen path. POSIX-only (needs os.fork + AF_UNIX fd-passing); the host
@@ -6046,6 +6049,15 @@ class HostProcess:
                 functools.partial(self._handle_fs_write, frame)
             )
             await self._send_text(ws, self._encode_frame(fs_write_result))
+        elif isinstance(frame, _workspace_ops.HostWorkspaceOpFrame):
+            # CORAL(S40): engine workspace ops run git; keep their exit codes from the reaper.
+            op_result = await _workspace_ops.dispatch_workspace_op(
+                frame,
+                run_guarded=self._run_host_subprocess_in_thread,
+                handlers=_workspace_ops.default_workspace_op_handlers(),
+                slots=self._workspace_op_slots,
+            )
+            await self._send_text(ws, self._encode_frame(op_result))
         elif isinstance(frame, HostSkillsFrame):
             # CORAL(S71): skill discovery runs harness CLIs; keep their exit statuses.
             skills_result = await self._run_host_subprocess_in_thread(

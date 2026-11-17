@@ -11,7 +11,9 @@ def observe_status_edge(edge: Mapping[str, object]) -> TurnFact | None:
     """Copy one edge into a fact. The same edge always returns an equal fact.
 
     A missing or empty ``session_id`` returns ``None``. ``previous_status`` and
-    ``observed_at_ms`` are read and ignored. Nothing here is remembered.
+    ``observed_at_ms`` are read and ignored. Nothing here is remembered. The
+    fact's ``response_id`` is the response the edge's outcome reports on
+    (``turn_response_id``), else the one the edge opens (``response_id``).
     """
     _ = (edge.get("previous_status"), edge.get("observed_at_ms"))
     session_id = edge.get("session_id")
@@ -24,7 +26,16 @@ def observe_status_edge(edge: Mapping[str, object]) -> TurnFact | None:
         turn_outcome=_optional_text(edge, "turn_outcome"),
         failure_origin=_optional_text(edge, "failure_origin"),
         origin=_origin(edge),
+        response_id=_response_id(edge),
     )
+
+
+def _response_id(edge: Mapping[str, object]) -> str | None:
+    for name in ("turn_response_id", "response_id"):
+        value = edge.get(name)
+        if isinstance(value, str) and value != "":
+            return value
+    return None
 
 
 def _slot_id(value: object) -> str:

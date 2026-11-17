@@ -11,6 +11,7 @@ import pytest
 from omnigent.harness_availability import HarnessAvailability
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
+    HOST_CAPABILITIES,
     LAUNCH_HANDLER_FAILED_ERROR_CODE,
     SERVER_CAP_TMUX_READINESS,
     WORKSPACE_MISSING_ERROR_CODE,
@@ -84,6 +85,11 @@ from omnigent.host.frames import (
     frame_for_server,
     parse_server_capabilities,
     workspace_missing_message,
+)
+from omnigent.host.workspace_ops import (  # CORAL(S40)
+    CAP_WORKSPACE_OPS,
+    HostWorkspaceOpFrame,
+    HostWorkspaceOpResultFrame,
 )
 
 
@@ -3010,3 +3016,158 @@ def test_runner_exit_rejects_non_boolean_connection_evidence(invalid: object) ->
                 }
             )
         )
+
+
+# ── host.workspace_op frames ─────────────────────────────
+# CORAL(S40): engine workspace-op frames ride the host tunnel behind workspace_ops:1.
+
+
+def test_host_capabilities_advertise_workspace_ops() -> None:
+    """A host that can run engine workspace ops says so in its hello."""
+    assert CAP_WORKSPACE_OPS == "workspace_ops:1"
+    assert CAP_WORKSPACE_OPS in HOST_CAPABILITIES
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        HostWorkspaceOpFrame(
+            request_id="a" * 32,
+            op="commit",
+            root="/Users/a/repo-worktrees/coral-r-0a1b2c3d4e5f-base",
+            params={
+                "repo_root": "/Users/a/repo",
+                "branch": "coral/r-0a1b2c3d4e5f/base",
+                "trailers": [["Reviewed-By", "x"]],
+                "run_id": None,
+            },
+            timeout_s=600.0,
+            op_key="b" * 32,
+        ),
+        HostWorkspaceOpFrame(request_id="req", op="head", root="/repo", params={}, timeout_s=0.5),
+        HostWorkspaceOpResultFrame(
+            request_id="req", status="ok", payload={"commit": "c" * 40, "empty": False}
+        ),
+        HostWorkspaceOpResultFrame(
+            request_id="req",
+            status="failed",
+            error_code="workspace.backend_unavailable",
+            error="repository declares filter=lfs in .gitattributes",
+            exit_code=128,
+            permanent=True,
+        ),
+    ],
+    ids=["commit-request", "head-request", "ok-result", "permanent-failure"],
+)
+def test_workspace_op_frames_round_trip(
+    frame: HostWorkspaceOpFrame | HostWorkspaceOpResultFrame,
+) -> None:
+    """Every field, ``permanent`` included, survives the tunnel unchanged."""
+    assert decode_host_frame(encode_host_frame(frame)) == frame
+
+
+def test_workspace_op_frames_use_their_documented_wire_keys() -> None:
+    """The K20 draft wire shape: every field is always present on the wire."""
+    request = HostWorkspaceOpFrame(
+        request_id="req", op="head", root="/repo", params={"branch": "main"}, timeout_s=120
+    )
+    assert json.loads(encode_host_frame(request)) == {
+        "kind": "host.workspace_op",
+        "request_id": "req",
+        "op": "head",
+        "root": "/repo",
+        "params": {"branch": "main"},
+        "timeout_s": 120,
+        "op_key": None,
+    }
+    result = HostWorkspaceOpResultFrame(request_id="req", status="ok", payload={"head": "c"})
+    assert json.loads(encode_host_frame(result)) == {
+        "kind": "host.workspace_op_result",
+        "request_id": "req",
+        "status": "ok",
+        "payload": {"head": "c"},
+        "error_code": None,
+        "error": None,
+        "exit_code": None,
+        "permanent": False,
+    }
+
+
+def test_workspace_op_result_without_permanent_decodes_as_retryable() -> None:
+    """A result that omits ``permanent`` (and the other optional fields) reads as retryable."""
+    decoded = decode_host_frame(
+        json.dumps(
+            {
+                "kind": "host.workspace_op_result",
+                "request_id": "req",
+                "status": "failed",
+                "error_code": "unknown_op",
+            }
+        )
+    )
+    assert decoded == HostWorkspaceOpResultFrame(
+        request_id="req", status="failed", error_code="unknown_op"
+    )
+
+
+_MISSING = object()
+_VALID_WORKSPACE_OP: dict[str, object] = {
+    "kind": "host.workspace_op",
+    "request_id": "req",
+    "op": "head",
+    "root": "/repo",
+    "params": {},
+    "timeout_s": 120,
+}
+_VALID_WORKSPACE_OP_RESULT: dict[str, object] = {
+    "kind": "host.workspace_op_result",
+    "request_id": "req",
+    "status": "ok",
+    "payload": {},
+}
+
+
+@pytest.mark.parametrize(
+    ("valid", "change"),
+    [
+        pytest.param(_VALID_WORKSPACE_OP, {"request_id": _MISSING}, id="op-no-request-id"),
+        pytest.param(_VALID_WORKSPACE_OP, {"request_id": ""}, id="op-empty-request-id"),
+        pytest.param(_VALID_WORKSPACE_OP, {"op": 7}, id="op-name-not-str"),
+        pytest.param(_VALID_WORKSPACE_OP, {"root": None}, id="op-root-null"),
+        pytest.param(_VALID_WORKSPACE_OP, {"params": _MISSING}, id="op-no-params"),
+        pytest.param(_VALID_WORKSPACE_OP, {"params": [["branch", "x"]]}, id="op-params-list"),
+        pytest.param(_VALID_WORKSPACE_OP, {"timeout_s": _MISSING}, id="op-no-timeout"),
+        pytest.param(_VALID_WORKSPACE_OP, {"timeout_s": True}, id="op-timeout-bool"),
+        pytest.param(_VALID_WORKSPACE_OP, {"timeout_s": "120"}, id="op-timeout-str"),
+        pytest.param(_VALID_WORKSPACE_OP, {"timeout_s": 0}, id="op-timeout-zero"),
+        pytest.param(_VALID_WORKSPACE_OP, {"timeout_s": -1}, id="op-timeout-negative"),
+        pytest.param(_VALID_WORKSPACE_OP, {"timeout_s": 900.5}, id="op-timeout-over-cap"),
+        pytest.param(_VALID_WORKSPACE_OP, {"timeout_s": float("nan")}, id="op-timeout-nan"),
+        pytest.param(_VALID_WORKSPACE_OP, {"timeout_s": float("inf")}, id="op-timeout-inf"),
+        pytest.param(_VALID_WORKSPACE_OP, {"timeout_s": 10**400}, id="op-timeout-overflows-float"),
+        pytest.param(_VALID_WORKSPACE_OP, {"op_key": 5}, id="op-key-not-str"),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"request_id": _MISSING}, id="result-no-id"),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"status": "maybe"}, id="result-bad-status"),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"payload": [1, 2]}, id="result-payload-list"),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"payload": None}, id="result-ok-null-payload"),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"payload": _MISSING}, id="result-ok-no-payload"),
+        pytest.param(
+            _VALID_WORKSPACE_OP_RESULT,
+            {"status": "failed", "error": "boom"},
+            id="result-failed-no-code",
+        ),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"error_code": 3}, id="result-code-not-str"),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"error": ["boom"]}, id="result-error-list"),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"exit_code": True}, id="result-exit-bool"),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"exit_code": "128"}, id="result-exit-str"),
+        pytest.param(_VALID_WORKSPACE_OP_RESULT, {"permanent": "yes"}, id="result-permanent-str"),
+    ],
+)
+def test_malformed_workspace_op_frames_raise(
+    valid: dict[str, object], change: dict[str, object]
+) -> None:
+    """A frame with a missing or ill-typed field never decodes; the timeout is bounded, an
+    ok result needs a payload and a failed one an error code."""
+    msg = {key: value for key, value in {**valid, **change}.items() if value is not _MISSING}
+    with pytest.raises(ValueError):
+        decode_host_frame(json.dumps(msg))

@@ -180,7 +180,7 @@ def test_schema_cache_and_clear_cache() -> None:
         # First call migrates
         ensure_coral_schema(uri)
         current, head = current_coral_revision(uri)
-        assert current == head == "coral_0001_core"
+        assert current == head == "coral_0002_session_facade"
 
         # Second call returns early via cache
         ensure_coral_schema(uri)
@@ -310,7 +310,7 @@ def test_cli_upgrade_and_current() -> None:
             check=False,
         )
         assert res.returncode == 0, res.stderr
-        assert "Current Coral revision: coral_0001_core" in res.stdout
+        assert "Current Coral revision: coral_0002_session_facade" in res.stdout
 
 
 def test_s30_omnigent_autogenerate_ignores_coral_tables() -> None:
@@ -380,7 +380,7 @@ def test_crdb_ddl_prep_respects_server_version() -> None:
 
 
 def test_standalone_alembic_cli_upgrade_and_env_populates_models() -> None:
-    """Running alembic -c coral/db/alembic.ini upgrade head populates all 16 Coral tables."""
+    """Running alembic -c coral/db/alembic.ini upgrade head populates every Coral table."""
     repo_root = Path(__file__).resolve().parents[3]
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "alembic_cli.db"

@@ -15,12 +15,12 @@ from coral.omni.protocols import RunScopeRunner
 from coral.queue.backoff import compute_effect_backoff
 from coral.queue.executors import (
     EffectCompleted,
-    EffectExecutor,
     EffectFailed,
     EffectOutcome,
     ExecutionContext,
+    ExecutorRegistration,
     StartupLeaseLost,
-    get_executor,
+    get_registration,
 )
 from coral.stores.protocols import QueueStore, WorkItem
 
@@ -62,7 +62,7 @@ def _extract_slot_id(item: WorkItem, payload_dict: dict[str, Any]) -> str | None
     return None
 
 
-def _resolve_executor(item: WorkItem, payload_dict: dict[str, Any]) -> EffectExecutor | None:
+def _resolve_executor(item: WorkItem, payload_dict: dict[str, Any]) -> ExecutorRegistration | None:
     for candidate in (
         payload_dict.get("effect_type"),
         payload_dict.get("kind"),
@@ -71,9 +71,9 @@ def _resolve_executor(item: WorkItem, payload_dict: dict[str, Any]) -> EffectExe
         str(item.kind),
     ):
         if isinstance(candidate, str) and candidate:
-            executor = get_executor(candidate)
-            if executor is not None:
-                return executor
+            registration = get_registration(candidate)
+            if registration is not None:
+                return registration
     return None
 
 
@@ -135,13 +135,16 @@ class WorkDrainer:
             else int(self._clock()) + self._lease_seconds
         )
         payload_dict = _parse_payload_dict(claimed.payload)
+        registration = _resolve_executor(claimed, payload_dict)
 
         run_status = await asyncio.to_thread(
             self._queue_store.get_run_status,
             claimed.run_id,
             workspace_id=claimed.workspace_id,
         )
-        if run_status in _TERMINAL_RUN_STATUSES:
+        if run_status in _TERMINAL_RUN_STATUSES and not (
+            registration is not None and registration.runs_after_terminal
+        ):
             await asyncio.to_thread(
                 self._queue_store.finish_work,
                 claimed.id,
@@ -176,8 +179,7 @@ class WorkDrainer:
                     )
                     return claimed
 
-        executor = _resolve_executor(claimed, payload_dict)
-        if executor is None:
+        if registration is None:
             await asyncio.to_thread(
                 self._queue_store.finish_work,
                 claimed.id,
@@ -189,6 +191,7 @@ class WorkDrainer:
                 now_fn=self._clock,
             )
             return claimed
+        executor = registration.fn
 
         lease_lock = asyncio.Lock()
         ctx = ExecutionContext(

@@ -5,17 +5,30 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tomllib
 import zipfile
-from importlib.metadata import packages_distributions
+from importlib.metadata import EntryPoint, packages_distributions
 from pathlib import Path
 
 import click
+
+from coral.omni.host.ops import workspace_op_handlers
 
 
 def test_coral_package_has_no_conflicting_distribution() -> None:
     """No non-omnigent distribution claims the ``coral`` top-level package."""
     owners = packages_distributions().get("coral", [])
     assert set(owners) <= {"omnigent"}
+
+
+def test_coral_declares_its_host_workspace_op_handlers() -> None:
+    """The host loads Coral's workspace-op handlers from this entry point."""
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[2] / "pyproject.toml").read_text())
+    group = pyproject["project"]["entry-points"]["omnigent.host_workspace_ops"]
+
+    assert group == {"coral": "coral.omni.host.ops:workspace_op_handlers"}
+    entry = EntryPoint(name="coral", value=group["coral"], group="omnigent.host_workspace_ops")
+    assert entry.load() is workspace_op_handlers
 
 
 def test_built_wheel_runs_coral_help_in_no_deps_venv(tmp_path: Path) -> None:

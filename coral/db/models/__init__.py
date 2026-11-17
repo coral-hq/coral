@@ -19,6 +19,11 @@ from coral.db.models.core import (
     WorkflowRow,
     WorkflowVersionRow,
 )
+from coral.db.models.sessions import (
+    SessionBindingRow,
+    StableIdRow,
+    WorkspaceOpIntentRow,
+)
 from coral.db.models.work import (
     WorkerLeaseRow,
     WorkRow,
@@ -36,10 +41,13 @@ __all__ = [
     "RunLogRow",
     "RunRow",
     "RunSpecRow",
+    "SessionBindingRow",
     "SimulationCaseRow",
+    "StableIdRow",
     "WorkRow",
     "WorkerLeaseRow",
     "WorkflowDraftRow",
     "WorkflowRow",
     "WorkflowVersionRow",
+    "WorkspaceOpIntentRow",
 ]

@@ -50,3 +50,33 @@ def derived_id(kind: str, *parts: str) -> str:
     """
     payload = f"{kind}:".encode() + b"\0".join(part.encode() for part in parts)
     return hashlib.sha256(payload).hexdigest()[:32]
+
+
+def anchor_session_id(workspace_id: int, run_id: str) -> str:
+    """Return the run's anchor session id; one per run, so a re-keyed anchor effect reuses it."""
+    return derived_id("coral-anchor", str(workspace_id), run_id)
+
+
+def effect_session_id(workspace_id: int, effect_key: str) -> str:
+    """Return the step session id an effect creates; a redelivery derives the same one."""
+    return derived_id("coral-session", str(workspace_id), effect_key)
+
+
+def effect_message_id(workspace_id: int, effect_key: str) -> str:
+    """Return the stable id of the message an effect sends, so a resend is recognised."""
+    return derived_id("coral-message", str(workspace_id), effect_key)
+
+
+def fallback_message_id(stable_id: str) -> str:
+    """Return the id an engine message is sent under when another item took ``stable_id``."""
+    return derived_id("coral-message-fallback", stable_id)
+
+
+def effect_op_key(workspace_id: int, effect_key: str, *qualifiers: str) -> str:
+    """
+    Return the K13 op key of a workspace write an effect makes.
+
+    :param qualifiers: Name one op among several of one effect, e.g. ``"commit"``
+        for the commit a close makes.
+    """
+    return derived_id("coral-op", str(workspace_id), effect_key, *qualifiers)

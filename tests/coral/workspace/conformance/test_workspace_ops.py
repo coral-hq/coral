@@ -9,14 +9,20 @@ by adding a factory; the ``backend`` fixture is parametrized over ``BACKENDS``.
 Each factory also supplies a ``WorkspaceSetup``, the backend-specific hook that
 mutates the working tree and prepares refs, because K13 itself offers neither.
 
-Only the in-memory fake is registered today, so these tests pin the contract
-text (``docs/coral/contracts/workspace-ops.md``), not real git. A real backend
-must pass the same suite before the engine uses it.
+K13's gate is per op: each ``BACKENDS`` entry declares the ops its backend
+serves, and a test of an op a backend does not serve skips with the gate's
+reason (``_require``). ``fake`` serves every op and pins the contract text
+(``docs/coral/contracts/workspace-ops.md``). ``host`` is the real backend:
+``HostWorkspaceOps`` over Coral's host handlers, run in this process through
+the host channel's real codec and dispatcher, on real git in ``tmp_path``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import secrets
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -26,7 +32,9 @@ from typing import Protocol
 
 import pytest
 
+from coral.omni.host.ops import workspace_op_handlers
 from coral.workspace.fake import FakeWorkspaceOps
+from coral.workspace.host_backend import HOST_CHANNEL_OPS, HostWorkspaceOps, map_host_reply
 from coral.workspace.ops import (
     MAX_CHECK_TIMEOUT_S,
     MAX_READ_BYTES,
@@ -43,13 +51,28 @@ from coral.workspace.ops import (
     WorkspaceRef,
     check_op_host,
     commit_params_digest,
+    commit_record_trailers,
     salvage_ref_name,
     validate_commit_id,
     validate_coral_ref,
     validate_op_key,
+    validate_record_id,
     validate_timeout,
     validate_trailers,
     validate_workspace_path,
+)
+from omnigent.host.frames import decode_host_frame, encode_host_frame
+from omnigent.host.workspace_ops import (
+    HostWorkspaceOpFrame,
+    HostWorkspaceOpResultFrame,
+    WorkspaceOpHandler,
+    dispatch_workspace_op,
+)
+from tests.coral.omni.host.ops._worktrees import (
+    LinkedWorktree,
+    isolate_git_home,
+    make_linked_worktree,
+    run_git,
 )
 
 INITIAL_FILES: Mapping[str, bytes] = {
@@ -58,6 +81,21 @@ INITIAL_FILES: Mapping[str, bytes] = {
 }
 AGENT_REF = "refs/heads/coral/r-test/agent-1"
 UNKNOWN_COMMIT = "0" * 40
+# Op ids for the per-op gate: fingerprint counts once per level.
+ALL_OP_IDS: frozenset[str] = frozenset(
+    {
+        "head",
+        "diff_stat",
+        "read",
+        "fingerprint-L1",
+        "fingerprint-L2",
+        "commit",
+        "salvage",
+        "reset",
+        "merge",
+        "check",
+    }
+)
 
 
 class WorkspaceSetup(Protocol):
@@ -92,11 +130,26 @@ class BackendUnderTest:
     # A writable step session at a turn end: it may run every op.
     session: StepSession
     setup: WorkspaceSetup
+    # Op ids from ALL_OP_IDS this backend serves; set from its BACKENDS entry.
+    supported_ops: frozenset[str] = ALL_OP_IDS
 
 
 BackendFactory = Callable[
     [pytest.FixtureRequest, Path], AbstractAsyncContextManager[BackendUnderTest]
 ]
+
+
+@dataclass(frozen=True)
+class BackendEntry:
+    factory: BackendFactory
+    supported_ops: frozenset[str]
+
+
+def _require(backend: BackendUnderTest, *op_ids: str) -> None:
+    """Skip the calling test unless ``backend`` serves every op in ``op_ids`` (K13 per-op gate)."""
+    for op_id in op_ids:
+        if op_id not in backend.supported_ops:
+            pytest.skip(f"{op_id} is not served by this backend (K13 per-op gate)")
 
 
 @dataclass(frozen=True)
@@ -152,15 +205,155 @@ async def _fake_backend(
     )
 
 
-BACKENDS: dict[str, BackendFactory] = {"fake": _fake_backend}
+@dataclass(frozen=True)
+class InProcessHostChannel:
+    """A ``HostChannelBackend`` that serves one host's ops in this process.
+
+    Each request and result crosses the host channel's real frame codec, and
+    the host's real dispatcher runs the handler in a worker thread; replies map
+    through ``map_host_reply``, as the server adapter's do.
+    """
+
+    host_id: str
+    handlers: Mapping[str, WorkspaceOpHandler]
+
+    async def request(
+        self,
+        host_id: str,
+        op: OpName,
+        *,
+        root: str,
+        params: Mapping[str, object],
+        timeout_s: float,
+        op_key: str | None,
+    ) -> Mapping[str, object]:
+        if host_id != self.host_id:
+            raise WorkspaceOpError("workspace.backend_unavailable", f"host {host_id} is offline")
+        sent = HostWorkspaceOpFrame(
+            request_id=secrets.token_hex(16),
+            op=op,
+            root=root,
+            params=dict(params),
+            timeout_s=timeout_s,
+            op_key=op_key,
+        )
+        frame = decode_host_frame(encode_host_frame(sent))
+        assert isinstance(frame, HostWorkspaceOpFrame)
+        result = await dispatch_workspace_op(
+            frame, run_guarded=asyncio.to_thread, handlers=self.handlers
+        )
+        reply = decode_host_frame(encode_host_frame(result))
+        assert isinstance(reply, HostWorkspaceOpResultFrame)
+        return map_host_reply(
+            {
+                "status": reply.status,
+                "payload": reply.payload,
+                "error_code": reply.error_code,
+                "error": reply.error,
+                "exit_code": reply.exit_code,
+                "permanent": reply.permanent,
+            },
+            host_id=host_id,
+        )
+
+
+@dataclass(frozen=True)
+class _GitSetup:
+    """Test setup on a real linked worktree, with test git outside the ops under test."""
+
+    worktree: LinkedWorktree
+
+    def write_file(self, path: str, content: bytes) -> None:
+        self.worktree.write(path, content)
+
+    def delete_file(self, path: str) -> None:
+        (self.worktree.root / path).unlink()
+
+    def ignore(self, path: str) -> None:
+        git_path = run_git(self.worktree.root, "rev-parse", "--git-path", "info/exclude")
+        exclude = self.worktree.root / git_path.strip()
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a") as stream:
+            stream.write(f"/{path}\n")
+
+    def add_ref(self, name: str, files: Mapping[str, bytes]) -> str:
+        # A private index: the worktree, its index and HEAD stay as they are.
+        root = self.worktree.root
+        index = {"GIT_INDEX_FILE": str(self.worktree.repo_root.parent / "setup-index")}
+        run_git(root, "read-tree", "HEAD", env=index)
+        for path, content in files.items():
+            blob = run_git(root, "hash-object", "-w", "--stdin", input=content).strip()
+            entry = f"100644,{blob},{path}"
+            run_git(root, "update-index", "--add", "--cacheinfo", entry, env=index)
+        tree = run_git(root, "write-tree", env=index).strip()
+        commit = run_git(root, "commit-tree", "-p", "HEAD", "-m", f"update {name}", tree).strip()
+        run_git(root, "update-ref", name, commit)
+        return commit
+
+    def add_conflicting_ref(self, name: str, path: str) -> None:
+        self.add_ref(name, {path: b"theirs\n"})
+        self.write_file(path, b"ours\n")
+        self.worktree.commit("ours")
+
+    def check_argv(self, exit_code: int | None) -> tuple[str, ...]:
+        if exit_code is None:
+            return (sys.executable, "-c", "import time; time.sleep(30)")
+        return (sys.executable, "-c", f"raise SystemExit({exit_code})")
+
+
+@asynccontextmanager
+async def _host_backend(
+    request: pytest.FixtureRequest, tmp_path: Path
+) -> AsyncIterator[BackendUnderTest]:
+    # The handlers read the user's full git config; the developer's must not leak in.
+    isolate_git_home(request.getfixturevalue("monkeypatch"), tmp_path / "home")
+    worktree = make_linked_worktree(tmp_path / "work", files=INITIAL_FILES)
+    channel = InProcessHostChannel(host_id="host-1", handlers=workspace_op_handlers())
+    yield BackendUnderTest(
+        ops=HostWorkspaceOps(channel, repo_root=str(worktree.repo_root)),
+        ref=WorkspaceRef(host_id="host-1", root=str(worktree.root), branch=worktree.branch),
+        session=StepSession("step-1", writable=True, at_turn_end=True),
+        setup=_GitSetup(worktree),
+    )
+
+
+BACKENDS: dict[str, BackendEntry] = {
+    "fake": BackendEntry(_fake_backend, ALL_OP_IDS),
+    "host": BackendEntry(_host_backend, HOST_CHANNEL_OPS),
+}
 
 
 @pytest.fixture(params=sorted(BACKENDS))
 async def backend(
     request: pytest.FixtureRequest, tmp_path: Path
 ) -> AsyncIterator[BackendUnderTest]:
-    async with BACKENDS[request.param](request, tmp_path) as under_test:
-        yield under_test
+    entry = BACKENDS[request.param]
+    async with entry.factory(request, tmp_path) as under_test:
+        yield replace(under_test, supported_ops=entry.supported_ops)
+
+
+def test_backends_declare_ops_the_contract_names() -> None:
+    for entry in BACKENDS.values():
+        assert entry.supported_ops <= ALL_OP_IDS
+    assert BACKENDS["fake"].supported_ops == ALL_OP_IDS
+    unserved = ALL_OP_IDS - HOST_CHANNEL_OPS
+    assert unserved == {"fingerprint-L2", "merge", "check"}
+
+
+def test_the_per_op_gate_skips_an_unserved_op_with_its_reason() -> None:
+    fake = FakeWorkspaceOps()
+    ref = WorkspaceRef(host_id="host-1", root="/w", branch="coral/r-test/base")
+    under_test = BackendUnderTest(
+        ops=fake,
+        ref=ref,
+        session=StepSession("step-1", writable=True, at_turn_end=True),
+        setup=_FakeSetup(fake, ref),
+        supported_ops=HOST_CHANNEL_OPS,
+    )
+
+    _require(under_test, "commit", "fingerprint-L1")
+    with pytest.raises(pytest.skip.Exception, match=r"merge is not served by this backend"):
+        _require(under_test, "commit", "merge")
 
 
 async def _fingerprint(backend: BackendUnderTest, level: FingerprintLevel = "L1") -> Fingerprint:
@@ -313,9 +506,52 @@ def test_validators_accept_their_documented_bounds() -> None:
     validate_workspace_path("README.md")
     validate_workspace_path("src/app.py")
     validate_workspace_path(".coral/runtime/notes..txt")
+    validate_record_id("0a1b2c3d" * 4)
+    validate_record_id("r" * 128)
     assert commit_params_digest("m", {"A": "1", "B": "2"}) == commit_params_digest(
         "m", {"B": "2", "A": "1"}
     )
+
+
+def test_commit_params_digest_without_record_ids_is_unchanged() -> None:
+    # Pinned before run and attempt ids existed: records written then still match.
+    assert commit_params_digest("m", {"Run": "r"}) == (
+        "40b96ce4071778e4723c83d9fe7efcaa8b35fe688088f98828b95c26a43a90e9"
+    )
+    assert commit_params_digest("step 1", {}) == (
+        "55935a4b1d52526f735b874f505d01f90cd6ef210951ad7ff85863c130ba86c1"
+    )
+    assert commit_params_digest("m", {}, run_id="r-1") != commit_params_digest("m", {})
+    assert commit_params_digest("m", {}, attempt_id="a-1") != commit_params_digest(
+        "m", {}, run_id="a-1"
+    )
+
+
+def test_commit_record_trailers_follow_the_caller_trailers_in_order() -> None:
+    assert commit_record_trailers(
+        op_key="k-1", params_digest="d", run_id="r-1", attempt_id="a-1"
+    ) == (
+        ("Coral-Run", "r-1"),
+        ("Coral-Attempt", "a-1"),
+        ("Coral-Op", "k-1"),
+        ("Coral-Op-Params", "d"),
+        ("Coral-Hooks", "skipped"),
+    )
+    assert commit_record_trailers(op_key="k-1", params_digest="d") == (
+        ("Coral-Op", "k-1"),
+        ("Coral-Op-Params", "d"),
+        ("Coral-Hooks", "skipped"),
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "Upper", "a b", "a\nCoral-Op: forged", "-dash", "x" * 129, 5, None],
+    ids=["empty", "upper", "space", "line-break", "dash", "129-chars", "int", "none"],
+)
+def test_validate_record_id_refuses_values_that_could_break_a_trailer(value: object) -> None:
+    with pytest.raises(ValueError):
+        validate_record_id(value)  # type: ignore[arg-type]
 
 
 def _write_op_calls(
@@ -351,6 +587,7 @@ KEYED_WRITE_OP_IDS = [op for op in WRITE_OP_IDS if op != "fingerprint-L2"]
 async def test_backend_refuses_write_ops_before_changing_anything(
     backend: BackendUnderTest, op: str, turn_state: str
 ) -> None:
+    _require(backend, op)
     backend.setup.add_ref(AGENT_REF, {"agent.txt": b"agent\n"})
     backend.setup.write_file("README.md", b"edited\n")
     before = await _fingerprint(backend)
@@ -385,6 +622,7 @@ def _unverified_target(backend: BackendUnderTest, target: str) -> tuple[Workspac
 async def test_backend_refuses_write_ops_on_an_unverified_target(
     backend: BackendUnderTest, op: str, target: str
 ) -> None:
+    _require(backend, op)
     base = await _head(backend)
     backend.setup.add_ref(AGENT_REF, {"agent.txt": b"agent\n"})
     backend.setup.write_file("README.md", b"edited\n")
@@ -500,6 +738,7 @@ async def test_ops_reject_commit_ids_that_are_not_full_hex(
 async def test_merge_rejects_refs_outside_the_coral_namespaces(
     backend: BackendUnderTest, source_ref: str
 ) -> None:
+    _require(backend, "merge")
     head = await _head(backend)
 
     with pytest.raises(ValueError):
@@ -518,6 +757,7 @@ async def test_merge_rejects_refs_outside_the_coral_namespaces(
 async def test_check_rejects_unbounded_timeouts(
     backend: BackendUnderTest, timeout_s: float
 ) -> None:
+    _require(backend, "check")
     argv = backend.setup.check_argv(0)
 
     with pytest.raises(ValueError):
@@ -536,6 +776,8 @@ async def test_write_ops_reject_op_keys_that_cannot_name_a_ref(
     calls = _write_op_calls(backend, backend.ref, base, op_key=op_key)
 
     for op in KEYED_WRITE_OP_IDS:
+        if op not in backend.supported_ops:
+            continue
         with pytest.raises(ValueError):
             await calls[op](backend.session)
 
@@ -581,20 +823,78 @@ async def test_commit_rejects_trailers_that_forge_or_break_records(
     assert await _head(backend) == head
 
 
-@pytest.mark.parametrize("message", ["step\0one", "", " \n"], ids=["nul", "empty", "blank"])
+BAD_MESSAGES = ["step\0one", "", " \n"]
+BAD_MESSAGE_IDS = ["nul", "empty", "blank"]
+
+
+# The commit half of the commit and merge message check; the merge half follows.
+@pytest.mark.parametrize("message", BAD_MESSAGES, ids=BAD_MESSAGE_IDS)
 async def test_commit_and_merge_reject_nul_or_blank_messages(
     backend: BackendUnderTest, message: str
 ) -> None:
-    backend.setup.add_ref(AGENT_REF, {"agent.txt": b"agent\n"})
     backend.setup.write_file("README.md", b"edited\n")
     head = await _head(backend)
 
     with pytest.raises(ValueError):
         await _commit(backend, "k-1", message)
+
+    assert await _head(backend) == head
+
+
+@pytest.mark.parametrize("message", BAD_MESSAGES, ids=BAD_MESSAGE_IDS)
+async def test_merge_rejects_nul_or_blank_messages(
+    backend: BackendUnderTest, message: str
+) -> None:
+    _require(backend, "merge")
+    backend.setup.add_ref(AGENT_REF, {"agent.txt": b"agent\n"})
+    backend.setup.write_file("README.md", b"edited\n")
+    head = await _head(backend)
+
     with pytest.raises(ValueError):
         await backend.ops.merge(
             backend.ref, backend.session, op_key="k-2", source_ref=AGENT_REF, message=message
         )
+
+    assert await _head(backend) == head
+
+
+async def test_commit_messages_may_contain_tabs(backend: BackendUnderTest) -> None:
+    head = await _head(backend)
+    backend.setup.write_file("README.md", b"edited\n")
+
+    result = await _commit(backend, "k-1", "subject\n\n\tindented\tbody", expected_head=head)
+
+    assert result.empty is False
+    assert await _head(backend) == result.commit
+
+
+@pytest.mark.parametrize(
+    ("message", "trailers"),
+    [
+        ("subject \x1b]0;title\x07", None),
+        ("subject\x1b[2J", None),
+        ("step 1\r\n\r\nbody", None),
+        ("m", {"Run": "\x1b[31mred"}),
+        ("m", {"Run": "a\tb"}),
+        ("m", {"Run": "page\x0cbreak"}),
+    ],
+    ids=[
+        "osc-title",
+        "csi-clear",
+        "crlf",
+        "trailer-escape",
+        "trailer-tab",
+        "trailer-form-feed",
+    ],
+)
+async def test_commit_rejects_control_characters_in_messages_and_trailers(
+    backend: BackendUnderTest, message: str, trailers: Mapping[str, str] | None
+) -> None:
+    backend.setup.write_file("README.md", b"edited\n")
+    head = await _head(backend)
+
+    with pytest.raises(ValueError):
+        await _commit(backend, "k-1", message, trailers=trailers)
 
     assert await _head(backend) == head
 
@@ -647,6 +947,59 @@ async def test_commit_op_key_reused_with_other_params_conflicts(
     assert await _read(backend, "README.md") == b"second\n"
 
 
+@pytest.mark.parametrize(
+    ("run_id", "attempt_id", "conflicts"),
+    [("r-1", "a-1", False), ("r-2", "a-1", True), ("r-1", None, True), (None, None, True)],
+    ids=["same-ids", "other-run", "attempt-dropped", "ids-dropped"],
+)
+async def test_commit_record_includes_its_run_and_attempt_ids(
+    backend: BackendUnderTest, run_id: str | None, attempt_id: str | None, conflicts: bool
+) -> None:
+    ops, ref, session = backend.ops, backend.ref, backend.session
+    base = await _head(backend)
+    backend.setup.write_file("README.md", b"first\n")
+    first = await ops.commit(
+        ref, session, op_key="k-1", expected_head=base, message="m", run_id="r-1", attempt_id="a-1"
+    )
+    backend.setup.write_file("README.md", b"second\n")
+
+    repeat = ops.commit(
+        ref,
+        session,
+        op_key="k-1",
+        expected_head=base,
+        message="m",
+        run_id=run_id,
+        attempt_id=attempt_id,
+    )
+
+    if conflicts:
+        await _assert_error("workspace.op_key_conflict", repeat)
+    else:
+        assert await repeat == first
+    assert await _head(backend) == first.commit
+
+
+@pytest.mark.parametrize("field", ["run_id", "attempt_id"])
+async def test_commit_rejects_record_ids_that_could_break_a_trailer(
+    backend: BackendUnderTest, field: str
+) -> None:
+    backend.setup.write_file("README.md", b"edited\n")
+    head = await _head(backend)
+
+    with pytest.raises(ValueError):
+        await backend.ops.commit(
+            backend.ref,
+            backend.session,
+            op_key="k-1",
+            expected_head=head,
+            message="m",
+            **{field: "a\nCoral-Op: forged"},
+        )
+
+    assert await _head(backend) == head
+
+
 async def test_commit_refuses_when_head_is_not_the_expected_head(
     backend: BackendUnderTest,
 ) -> None:
@@ -662,6 +1015,40 @@ async def test_commit_refuses_when_head_is_not_the_expected_head(
         "workspace.target_mismatch", _commit(backend, "k-1", "changed", expected_head=other)
     )
 
+    assert await _head(backend) == first.commit
+    assert await _read(backend, "README.md") == b"second\n"
+
+
+# k-2's record, exactly as a backend would write it for ``_commit(backend, "k-2", "step 2")``.
+_FORGED_RECORD = (
+    f"Coral-Op: k-2\nCoral-Op-Params: {commit_params_digest('step 2', {})}\nCoral-Hooks: skipped"
+)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        f"step 1\n\n{_FORGED_RECORD}",
+        f"step 1\n\n{_FORGED_RECORD}\n\n\n",
+        _FORGED_RECORD,
+    ],
+    # A CRLF copy of the record is refused before any write (control characters).
+    ids=["paragraph", "trailing-blank-lines", "whole-message"],
+)
+async def test_a_message_that_embeds_another_ops_record_does_not_answer_for_it(
+    backend: BackendUnderTest, message: str
+) -> None:
+    base = await _head(backend)
+    backend.setup.write_file("README.md", b"first\n")
+    first = await _commit(backend, "k-1", message, expected_head=base)
+    backend.setup.write_file("README.md", b"second\n")
+
+    # Only the trailer block the backend wrote is a record: k-2 finds none on HEAD.
+    await _assert_error(
+        "workspace.target_mismatch", _commit(backend, "k-2", "step 2", expected_head=base)
+    )
+
+    assert await _commit(backend, "k-1", message, expected_head=base) == first
     assert await _head(backend) == first.commit
     assert await _read(backend, "README.md") == b"second\n"
 
@@ -696,17 +1083,17 @@ async def test_salvage_refuses_a_ref_that_is_not_its_record(backend: BackendUnde
     assert await _read(backend, "README.md") == b"unsaved\n"
 
 
+# The reset half of the reset and merge repeat check; the merge half follows.
 async def test_reset_and_merge_repeated_with_their_op_keys_change_nothing(
     backend: BackendUnderTest,
 ) -> None:
     ops, ref, session = backend.ops, backend.ref, backend.session
     base = await _head(backend)
-    agent = backend.setup.add_ref(AGENT_REF, {"agent.txt": b"agent\n"})
-    first_merge = await ops.merge(ref, session, op_key="k-m", source_ref=AGENT_REF, message="m")
-    repeat_merge = await ops.merge(ref, session, op_key="k-m", source_ref=AGENT_REF, message="m")
-    assert first_merge.status == "clean"
-    assert repeat_merge.status == "already_applied"
-    assert await _head(backend) == agent
+    backend.setup.write_file("README.md", b"committed\n")
+    later = await _commit(backend, "k-c", "later", expected_head=base)
+    backend.setup.write_file("README.md", b"dirty\n")
+    backend.setup.write_file("notes/todo.txt", b"untracked\n")
+    assert later.commit != base
 
     first_reset = await ops.reset(ref, session, op_key="k-r", commit=base)
     after_first = await _fingerprint(backend)
@@ -715,6 +1102,22 @@ async def test_reset_and_merge_repeated_with_their_op_keys_change_nothing(
     assert first_reset == repeat_reset
     assert first_reset.head == base
     assert await _fingerprint(backend) == after_first
+    assert after_first.dirty_count == 0
+
+
+async def test_merge_repeated_with_its_op_key_is_already_applied(
+    backend: BackendUnderTest,
+) -> None:
+    _require(backend, "merge")
+    ops, ref, session = backend.ops, backend.ref, backend.session
+    agent = backend.setup.add_ref(AGENT_REF, {"agent.txt": b"agent\n"})
+
+    first_merge = await ops.merge(ref, session, op_key="k-m", source_ref=AGENT_REF, message="m")
+    repeat_merge = await ops.merge(ref, session, op_key="k-m", source_ref=AGENT_REF, message="m")
+
+    assert first_merge.status == "clean"
+    assert repeat_merge.status == "already_applied"
+    assert await _head(backend) == agent
 
 
 # ── commit ──────────────────────────────────────────────────────────────────
@@ -834,6 +1237,7 @@ async def test_reset_to_an_unknown_commit_fails(backend: BackendUnderTest) -> No
 
 
 async def test_merge_fast_forwards_onto_a_ref_ahead_of_head(backend: BackendUnderTest) -> None:
+    _require(backend, "merge")
     agent = backend.setup.add_ref(AGENT_REF, {"README.md": b"agent edit\n"})
     # Ignored and runtime files do not make the tree dirty, and they survive.
     backend.setup.ignore("build/out.bin")
@@ -859,6 +1263,7 @@ async def test_merge_fast_forwards_onto_a_ref_ahead_of_head(backend: BackendUnde
 async def test_merge_of_a_ref_already_in_head_is_already_applied(
     backend: BackendUnderTest,
 ) -> None:
+    _require(backend, "merge")
     ops, ref, session = backend.ops, backend.ref, backend.session
     agent = backend.setup.add_ref(AGENT_REF, {"agent.txt": b"agent\n"})
     await ops.merge(ref, session, op_key="k-1", source_ref=AGENT_REF, message="merge")
@@ -875,6 +1280,7 @@ async def test_merge_of_a_ref_already_in_head_is_already_applied(
 
 
 async def test_merge_of_an_unknown_ref_fails(backend: BackendUnderTest) -> None:
+    _require(backend, "merge")
     head = await _head(backend)
 
     await _assert_error(
@@ -890,6 +1296,7 @@ async def test_merge_of_an_unknown_ref_fails(backend: BackendUnderTest) -> None:
 async def test_merge_conflict_reports_paths_and_leaves_head_and_tree(
     backend: BackendUnderTest,
 ) -> None:
+    _require(backend, "merge")
     backend.setup.add_conflicting_ref(AGENT_REF, "README.md")
     head = await _head(backend)
     before = await _fingerprint(backend)
@@ -909,6 +1316,7 @@ async def test_merge_conflict_reports_paths_and_leaves_head_and_tree(
 
 
 async def test_merge_refuses_a_dirty_working_tree(backend: BackendUnderTest) -> None:
+    _require(backend, "merge")
     head = await _head(backend)
     backend.setup.add_ref(AGENT_REF, {"agent.txt": b"agent\n"})
     backend.setup.write_file("README.md", b"uncommitted\n")
@@ -956,6 +1364,7 @@ async def test_l1_is_stable_without_edits_and_changes_on_every_edit(
 async def test_fingerprints_skip_ignored_files_and_coral_runtime(
     backend: BackendUnderTest, level: FingerprintLevel
 ) -> None:
+    _require(backend, f"fingerprint-{level}")
     before = await _fingerprint(backend, level)
     backend.setup.ignore("build/out.bin")
     backend.setup.write_file("build/out.bin", b"ignored")
@@ -965,6 +1374,7 @@ async def test_fingerprints_skip_ignored_files_and_coral_runtime(
 
 
 async def test_l2_is_equal_for_equal_tree_content(backend: BackendUnderTest) -> None:
+    _require(backend, "fingerprint-L2")
     clean = await _fingerprint(backend, "L2")
     backend.setup.write_file("README.md", b"edited\n")
     edited = await _fingerprint(backend, "L2")
@@ -1075,6 +1485,7 @@ async def test_head_reports_the_branch_and_no_merge_in_progress(
 async def test_check_reports_exit_codes_and_timeouts_without_raising(
     backend: BackendUnderTest,
 ) -> None:
+    _require(backend, "check")
     ops, ref, session = backend.ops, backend.ref, backend.session
     passing, failing = backend.setup.check_argv(0), backend.setup.check_argv(3)
     overrun = backend.setup.check_argv(None)

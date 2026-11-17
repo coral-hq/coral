@@ -39,6 +39,15 @@ from omnigent.harness_availability import (
     is_harness_availability,
 )
 from omnigent.host.harness_startup import HarnessStartup
+from omnigent.host.workspace_ops import (  # CORAL(S40)
+    CAP_WORKSPACE_OPS,
+    WORKSPACE_OP_KIND,
+    WORKSPACE_OP_RESULT_KIND,
+    HostWorkspaceOpFrame,
+    HostWorkspaceOpResultFrame,
+    decode_workspace_op_frame,
+    encode_workspace_op_frame,
+)
 from omnigent.inner.native_attachments import (
     CAP_FILESYSTEM_ATTACHMENT_DELIVERY,
     CAP_FILESYSTEM_ATTACHMENTS,
@@ -108,6 +117,7 @@ HOST_CAPABILITIES: list[str] = [
     CAP_WORKTREE_CREATE_BUDGET,
     CAP_HARNESS_ACCOUNTS,
     CAP_HARNESS_LOGIN,
+    CAP_WORKSPACE_OPS,  # CORAL(S40)
 ]
 
 # CORAL(S102): ``os_sandbox:<backend>`` names the OS sandbox this host can run.
@@ -1598,6 +1608,8 @@ HostFrame = (
     | HostImportLocalSessionFrame
     | HostImportLocalSessionChunkFrame
     | HostImportLocalDoneFrame
+    | HostWorkspaceOpFrame  # CORAL(S40)
+    | HostWorkspaceOpResultFrame
 )
 
 
@@ -1637,6 +1649,8 @@ def encode_host_frame(frame: HostFrame) -> str:
     :returns: JSON string for the WebSocket text message.
     :raises TypeError: If ``frame`` is not a known host frame type.
     """
+    if isinstance(frame, HostWorkspaceOpFrame | HostWorkspaceOpResultFrame):  # CORAL(S40)
+        return encode_workspace_op_frame(frame, _encode_payload)
     if isinstance(frame, HostHelloFrame):
         return _encode_payload(
             {
@@ -2445,6 +2459,8 @@ def decode_host_frame(text: str) -> HostFrame:
         kind, or missing required fields.
     """
     msg = _parse_frame_object(text)
+    if msg.get("kind") in (WORKSPACE_OP_KIND, WORKSPACE_OP_RESULT_KIND):  # CORAL(S40)
+        return decode_workspace_op_frame(msg)
     kind = _parse_host_frame_kind(msg)
     return _decode_known_host_frame(kind, msg)
 

@@ -18,6 +18,7 @@ from omnigent.native.native_coding_agents import (
     CLAUDE_NATIVE_CODING_AGENT,
     CODEX_NATIVE_CODING_AGENT,
 )
+from omnigent.server import session_live_state  # CORAL(S1): status-edge observer
 from omnigent.server.routes import sessions as _sessions_mod
 from omnigent.server.routes._sessions.helpers import _truncate_error_message_label
 from omnigent.server.routes._sessions.orchestration import _build_session_response
@@ -1055,21 +1056,32 @@ async def test_session_snapshot_queries_runner_on_cache_miss(
     )
 
     conv_store = _ConversationStore([_message_item("item_1", "hi")])
-    snapshot = await _get_session_snapshot(
-        conv_store,
-        "cef2fb55a9d4841cff0b30b2826d91f1",  # type: ignore[arg-type]
-    )
+    # CORAL(S1): the cold-cache fill is reported once; the warm read reports nothing.
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer("test-probe", edges.append)
+    try:
+        snapshot = await _get_session_snapshot(
+            conv_store,
+            "cef2fb55a9d4841cff0b30b2826d91f1",  # type: ignore[arg-type]
+        )
+        snapshot2 = await _get_session_snapshot(
+            conv_store,
+            "cef2fb55a9d4841cff0b30b2826d91f1",  # type: ignore[arg-type]
+        )
+    finally:
+        unregister()
+    assert [
+        (edge.status, edge.previous_status, edge.origin)
+        for edge in edges
+        if edge.session_id == "cef2fb55a9d4841cff0b30b2826d91f1"
+    ] == [("running", None, "status_probe")]
 
     # Runner was queried for this session's status.
     assert "/v1/sessions/cef2fb55a9d4841cff0b30b2826d91f1" in fake_client.get_calls[0]
     assert snapshot.status == "running"
 
-    # Verify the cache is warm: a second call should NOT query the
+    # Verify the cache is warm: the second call above did NOT query the
     # runner again (proves the cache was populated).
-    snapshot2 = await _get_session_snapshot(
-        conv_store,
-        "cef2fb55a9d4841cff0b30b2826d91f1",  # type: ignore[arg-type]
-    )
     # Still "running" from the cached value.
     assert snapshot2.status == "running"
     # Status is server-cached, so only the FIRST snapshot queries the
@@ -1166,6 +1178,9 @@ async def test_session_snapshot_preserves_status_published_during_probe(
     )
     runner_client = _GatedRunnerClient(status=probed_status, status_code=probe_http_status)
     _use_runner_client(monkeypatch, runner_client)
+    # CORAL(S1): a probe that finds the cache filled reports no edge of its own.
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer("test-probe", edges.append)
     snapshot_task = asyncio.create_task(
         _get_session_snapshot(conv_store, session_id)  # type: ignore[arg-type]
     )
@@ -1190,10 +1205,37 @@ async def test_session_snapshot_preserves_status_published_during_probe(
             origin="runner_offline_sweep",
             snapshot=conv,
         ) is (published_status in {"running", "waiting"})
+        assert [edge.origin for edge in edges if edge.session_id == session_id] == ["unknown"]
     finally:
+        unregister()
         runner_client.release.set()
         await asyncio.gather(snapshot_task, return_exceptions=True)
         _sessions_mod._session_status_cache.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_status_probe_reports_no_edge_for_an_unrecognized_status() -> None:
+    """A cold fill with a status outside the four live statuses is not an observed edge."""
+    from omnigent.server.routes._sessions import orchestration
+
+    session_id = "6a0d8f5c2b3e4e4f9c1a2d0e7f6b8c3d"
+    _sessions_mod._session_status_cache.pop(session_id, None)
+    _sessions_mod._runner_status_probe_backoff.pop(session_id, None)
+    runner_client = _GatedRunnerClient(status="compacting")
+    runner_client.release.set()
+    # CORAL(S1): observers only receive idle, running, waiting or failed probe fills.
+    edges: list[session_live_state.SessionStatusEdge] = []
+    unregister = session_live_state.register_status_edge_observer("test-probe", edges.append)
+    try:
+        probed = await orchestration._probe_runner_live_status(
+            runner_client,  # type: ignore[arg-type]
+            session_id,
+        )
+    finally:
+        unregister()
+        _sessions_mod._session_status_cache.pop(session_id, None)
+    assert probed == "compacting"
+    assert not [edge for edge in edges if edge.session_id == session_id]
 
 
 @pytest.mark.asyncio

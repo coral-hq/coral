@@ -829,18 +829,64 @@ _ARCHIVE_STOP_LOOKUP_RETRY_S = 0.2
 _RUNNER_STOP_STATUS_BATCH_SIZE = 200
 
 
+# CORAL(S1): one rule for every intentional-stop idle edge.
+def _stopped_turn(session_id: str, persisted_status: str | None) -> tuple[str | None, str | None]:
+    """
+    Return the outcome and response id a stop's ``idle`` edge reports.
+
+    Only a turn still ``running`` was cancelled; a ``waiting`` turn had already
+    ended, and a response that already carried an outcome keeps it (see
+    :func:`_inferred_turn`). Call it right before the synchronous
+    ``_publish_status`` that pops the active response id, so no other edge can
+    land in between.
+
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param persisted_status: The row's live status, used when the cache is cold.
+    :returns: ``("cancelled", <active response id>)`` while running and that
+        response has no recorded outcome, else ``(None, None)``.
+    """
+    if _session_status_cache.get(session_id, persisted_status) != "running":
+        return None, None
+    return _inferred_turn(session_id, "cancelled", _session_active_response_cache.get(session_id))
+
+
+# CORAL(S1): a server-inferred outcome never contradicts one already reported.
+def _inferred_turn(
+    session_id: str, outcome: str, response_id: str | None
+) -> tuple[str | None, str | None]:
+    """
+    Return the outcome and response id an inferred turn-end edge reports.
+
+    The active response can still name a turn the runner already reported: a
+    ``waiting`` turn end, or a continuation that has not opened its response.
+
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param outcome: The inferred outcome, e.g. ``"failed"``.
+    :param response_id: The active response id, or ``None`` when unknown.
+    :returns: ``(outcome, response_id)``, or ``(None, None)`` once that response has one.
+    """
+    if session_live_state.turn_outcome_reported(session_id, response_id):
+        return None, None
+    return outcome, response_id
+
+
 async def _stop_host_runner_intentionally(
     session_id: str,
     host_id: str,
     runner_id: str,
     host_registry: Any,
     conversation_store: ConversationStore,
+    *,
+    origin: str = "unknown",  # CORAL(S1): status-edge origin of this session's idle edge
 ) -> bool:
     """Carry stop intent to the active sessions sharing the terminated runner.
 
     Relays consume their own markers; the disconnect sweep settles sessions
     without a relay. Definitive rejection removes newly added markers, while
     an unacknowledged dispatch retains intent through timeout or cancellation.
+
+    :param origin: Status-edge origin of *session_id*'s own idle edge, e.g.
+        ``"archive_idle"``; sessions sharing its runner report ``"unknown"``.
     """
     from omnigent.server.routes import sessions as _facade
 
@@ -942,7 +988,17 @@ async def _stop_host_runner_intentionally(
                 handle = _runner_relay_tasks.get(related_id)
                 if settled and (handle is None or handle.runner_id == runner_id):
                     session_live_state.forget_live_status(related_id)
-                    _publish_status(related_id, "idle", persist_live_status=False)
+                    # CORAL(S1): a running turn ends cancelled; siblings sharing the runner
+                    # are not the archived session, so only it carries the caller's origin.
+                    outcome, stopped_turn_id = _stopped_turn(related_id, statuses[related_id])
+                    _publish_status(
+                        related_id,
+                        "idle",
+                        persist_live_status=False,
+                        origin=origin if related_id == session_id else "unknown",
+                        turn_outcome=outcome,
+                        turn_response_id=stopped_turn_id,
+                    )
         return acknowledged
 
 
@@ -1031,6 +1087,7 @@ async def _archive_stop(
                     conv.runner_id,
                     host_registry,
                     conversation_store,
+                    origin="archive_idle",  # CORAL(S1): archive teardown, not a user stop
                 )
         except Exception:  # noqa: BLE001
             _logger.debug(
@@ -4090,6 +4147,10 @@ async def _publish_runner_recovered_status_impl(
     conversation_store: ConversationStore,
     *,
     require_disconnect_code: bool = False,
+    # CORAL(S1): status-edge fields of the recovered edge.
+    origin: str = "unknown",
+    turn_outcome: str | None = None,
+    turn_response_id: str | None = None,
 ) -> None:
     """
     Clear a stale failed session status after runner recovery.
@@ -4127,6 +4188,9 @@ async def _publish_runner_recovered_status_impl(
         ``runner_disconnected``; when ``False`` (default, explicit
         rebind/handshake), clear any stale ``failed`` state. Labels are
         cleared in both cases.
+    :param origin: Status-edge origin of the recovered edge, e.g. ``"relay_turn_end"``.
+    :param turn_outcome: The runner's outcome for the turn that ended, if it sent one.
+    :param turn_response_id: The response that outcome reports on.
     :returns: None.
     """
     if _session_status_cache.get(session_id) != "failed":
@@ -4151,6 +4215,17 @@ async def _publish_runner_recovered_status_impl(
         error=None,
     )
     session_stream.publish(session_id, event.model_dump())
+    # CORAL(S1): this bypasses _publish_status, so it reports its one edge itself.
+    session_live_state.notify_status_edge(
+        session_live_state.SessionStatusEdge(
+            session_id,
+            "idle",
+            "failed",
+            origin=origin,
+            turn_outcome=turn_outcome,
+            turn_response_id=turn_response_id,
+        )
+    )
     if require_disconnect_code:
         # Only a passive reconnect can show the same turn resuming on its own.
         disconnect_outcome.note_disconnect_failure_cleared(
@@ -4317,7 +4392,15 @@ async def _mark_runner_sessions_offline_once(
                         current_handle is None or current_handle.runner_id == stopped_runner_id
                     ):
                         session_live_state.forget_live_status(conv.id)
-                        _publish_status(conv.id, "idle", persist_live_status=False)
+                        # CORAL(S1): a turn still running at this publish ends cancelled.
+                        outcome, stopped_turn_id = _stopped_turn(conv.id, conv.live_status)
+                        _publish_status(
+                            conv.id,
+                            "idle",
+                            persist_live_status=False,
+                            turn_outcome=outcome,
+                            turn_response_id=stopped_turn_id,
+                        )
                 if _intentional_stop_sessions.get(conv.id) == stopped_runner_id:
                     _intentional_stop_sessions.pop(conv.id, None)
             continue
@@ -4358,12 +4441,18 @@ async def _mark_runner_sessions_offline_once(
             continue
         if binding is None or binding[0] != conv.runner_id:
             continue
+        # CORAL(S1): the drop fails the turn it interrupted, when one is known and unreported.
+        outcome, failed_turn_id = (
+            _inferred_turn(conv.id, "failed", turn_id) if turn_id is not None else (None, None)
+        )
         _publish_status(
             conv.id,
             "failed",
             error,
             failure_origin="runner_offline_sweep",
             disconnect_evidence=disconnect_evidence,
+            turn_outcome=outcome,
+            turn_response_id=failed_turn_id,
         )
         await record_subagent_activity(
             conv.id, "returned", conversation_store, turn_id=turn_id, status="failed"
@@ -9210,7 +9299,14 @@ async def _relay_runner_stream(
             if decision == "intentional_stop":
                 # An expected drop must not erase a real failure reported during
                 # teardown: preserve its labels when the sticky status stays failed.
-                _publish_status(session_id, "idle")
+                # CORAL(S1): a turn still running at this publish ends cancelled.
+                outcome, stopped_turn_id = _stopped_turn(session_id, None)
+                _publish_status(
+                    session_id,
+                    "idle",
+                    turn_outcome=outcome,
+                    turn_response_id=stopped_turn_id,
+                )
                 if _session_status_cache.get(session_id) != "failed":
                     await _persist_session_status_error_labels(
                         session_id,
@@ -9266,11 +9362,16 @@ async def _relay_runner_stream(
                     message="Runner disconnected unexpectedly.",
                 )
                 turn_id = _session_active_response_cache.get(session_id)
+                # CORAL(S1): a runner drop fails the turn it interrupted, unless already reported.
+                outcome, failed_turn_id = _inferred_turn(session_id, "failed", turn_id)
                 _publish_status(
                     session_id,
                     "failed",
                     disconnect_error,
                     failure_origin="runner_disconnected_mid_turn",
+                    origin="runner_disconnect",
+                    turn_outcome=outcome,
+                    turn_response_id=failed_turn_id,
                 )
                 await record_subagent_activity(
                     session_id, "returned", conversation_store, turn_id=turn_id, status="failed"
@@ -9553,6 +9654,10 @@ async def _relay_runner_stream_once(
                             # would deliver a premature, lock-out completion.
                             raw_blocked_on = event.get("blocked_on")
                             raw_response_id = event.get("response_id")
+                            # CORAL(S43): the runner's outcome for the turn this edge names.
+                            relayed_outcome, relayed_turn_id = session_live_state.turn_fields(
+                                event
+                            )
                             # The runner finishing a turn the server had written
                             # off as a runner drop proves the drop was transient:
                             # honor the completion and clear the disconnect cause.
@@ -9562,11 +9667,15 @@ async def _relay_runner_stream_once(
                                 status == "idle"
                                 and _session_status_cache.get(session_id) == "failed"
                             ):
+                                # CORAL(S1): the recovered idle is the runner's turn end.
                                 try:
                                     await _publish_runner_recovered_status(
                                         session_id,
                                         conversation_store,
                                         require_disconnect_code=True,
+                                        origin="relay_turn_end",
+                                        turn_outcome=relayed_outcome,
+                                        turn_response_id=relayed_turn_id,
                                     )
                                 except Exception:  # noqa: BLE001 — a read error must not kill the relay
                                     # Fail soft: the session keeps its existing
@@ -9611,6 +9720,8 @@ async def _relay_runner_stream_once(
                                     if isinstance(raw_blocked_on, str) and raw_blocked_on
                                     else None
                                 ),
+                                turn_outcome=relayed_outcome,  # CORAL(S43)
+                                turn_response_id=relayed_turn_id,
                             )
                         if status == "running":
                             text_acc.clear()
@@ -13707,6 +13818,12 @@ async def _run_runner_status_probe(
                     _session_status_cache[session_id] = raw
                     if raw in ("idle", "running", "waiting", "failed"):
                         session_live_state.persist_live_status(session_id, raw)
+                        # CORAL(S1): a cold-cache fill is a status no observer has seen.
+                        session_live_state.notify_status_edge(
+                            session_live_state.SessionStatusEdge(
+                                session_id, raw, None, origin="status_probe"
+                            )
+                        )
                     _runner_status_probe_backoff.pop(session_id, None)
                     return raw
                 failure = "HTTP 200 with a malformed body"

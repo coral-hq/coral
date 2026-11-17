@@ -66,8 +66,11 @@ CLEAN_EXCLUDE: tuple[str, ...] = ("-e", f"/{RUNTIME_DIR}/")
 # Author and committer when the user's full config sets no ``user.name``/``user.email``.
 FALLBACK_IDENTITY_NAME = "Coral"
 FALLBACK_IDENTITY_EMAIL = "coral@localhost"
-# Trailers the backend appends after the caller's. Only ``commit`` writes the op
-# record pair; every engine commit carries the hooks trailer.
+# Trailers the backend appends after the caller's. Only ``commit`` writes the run
+# and attempt ids (when given) and the op record pair; every engine commit
+# carries the hooks trailer.
+RUN_TRAILER_KEY = "Coral-Run"
+ATTEMPT_TRAILER_KEY = "Coral-Attempt"
 OP_TRAILER_KEY = "Coral-Op"
 OP_PARAMS_TRAILER_KEY = "Coral-Op-Params"
 HOOKS_TRAILER_KEY = "Coral-Hooks"
@@ -83,9 +86,13 @@ MAX_CHECK_TIMEOUT_S = 7200.0
 _OP_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}")
 _TRAILER_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
 _RESERVED_TRAILER_PREFIX = "coral-"
-_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+# A full lowercase hex object id, SHA-1 or SHA-256.
+COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _REF_COMPONENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}")
 _MAX_REF_LENGTH = 255
+# C0 control characters (terminal escapes among them); a message body keeps tabs and newlines.
+_CONTROL = re.compile(r"[\x00-\x1f]")
+_MESSAGE_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f]")
 
 # ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -96,16 +103,26 @@ WorkspaceErrorCode = Literal[
     "workspace.timeout",
     "workspace.op_key_conflict",
     "workspace.target_mismatch",
+    "workspace.capability_unavailable",
+    "workspace.worktree_displaced",
 ]
+WORKSPACE_ERROR_CODES: frozenset[str] = frozenset(get_args(WorkspaceErrorCode))
 
 
 class WorkspaceOpError(Exception):
-    """A K13 op failed with one of the contract's error codes."""
+    """
+    A K13 op failed with one of the contract's error codes.
 
-    def __init__(self, code: WorkspaceErrorCode, message: str) -> None:
+    :param permanent: A retry cannot succeed, e.g. a repository with hooks, git
+        older than 2.32 or a host that cannot serve the op. ``False`` leaves the
+        decision to the code: a host that is offline now may be back later.
+    """
+
+    def __init__(self, code: WorkspaceErrorCode, message: str, *, permanent: bool = False) -> None:
         super().__init__(f"{code}: {message}")
         self.code: WorkspaceErrorCode = code
         self.message = message
+        self.permanent = permanent
 
 
 # ── Refs and executors ──────────────────────────────────────────────────────
@@ -220,13 +237,30 @@ class HeadResult:
 @dataclass(frozen=True)
 class DiffStat:
     """
+    :param files_changed: Changed paths in the whole diff, as are both line counts.
     :param paths: Changed paths, sorted. A rename counts as a delete and an add.
+    :param paths_truncated: ``paths`` is a prefix of the sorted list, cut to a size bound.
     """
 
     files_changed: int
     insertions: int
     deletions: int
     paths: tuple[str, ...]
+    paths_truncated: bool = False
+
+
+def paths_within(paths: Sequence[str], max_json_bytes: int) -> list[str]:
+    """The longest prefix of ``paths`` whose ``json.dumps`` list fits ``max_json_bytes``."""
+    kept: list[str] = []
+    # "[]" around the items and ", " between them.
+    used = 2
+    for path in paths:
+        cost = len(json.dumps(path)) + (2 if kept else 0)
+        if used + cost > max_json_bytes:
+            break
+        kept.append(path)
+        used += cost
+    return kept
 
 
 @dataclass(frozen=True)
@@ -331,7 +365,8 @@ def validate_trailers(trailers: Mapping[str, str]) -> None:
 
     :raises ValueError: for a non-string key or value, a key git would not parse as
         a trailer, any ``Coral-*`` key (in any case; the backend writes those), or a
-        value with a line break or NUL, which could forge another trailer.
+        value with a C0 control character: a line break or NUL could forge another
+        trailer, and ESC starts a terminal escape in ``git log``.
     """
     for key, value in trailers.items():
         if not isinstance(key, str) or not isinstance(value, str):
@@ -340,8 +375,19 @@ def validate_trailers(trailers: Mapping[str, str]) -> None:
             raise ValueError(f"invalid trailer key {key!r}")
         if key.lower().startswith(_RESERVED_TRAILER_PREFIX):
             raise ValueError(f"trailer {key!r} is reserved for the backend")
-        if any(char in value for char in "\r\n\0"):
-            raise ValueError(f"trailer {key!r} has a line break or NUL in its value")
+        if _CONTROL.search(value):
+            raise ValueError(f"trailer {key!r} has a control character in its value")
+
+
+def validate_record_id(value: str) -> None:
+    """
+    Check a run or attempt id for the ``Coral-Run`` and ``Coral-Attempt`` trailers.
+
+    :raises ValueError: unless it has the op-key format: 1-128 lowercase ASCII
+        letters, digits, ``_`` or ``-``, starting with a letter or digit.
+    """
+    if not isinstance(value, str) or not _OP_KEY.fullmatch(value):
+        raise ValueError(f"invalid record id {value!r}: use 1-128 of a-z, 0-9, '_' or '-'")
 
 
 def validate_commit_message(message: str) -> None:
@@ -349,25 +395,57 @@ def validate_commit_message(message: str) -> None:
     Check a ``commit`` or ``merge`` message.
 
     :raises ValueError: for a non-string, a blank message (git would read the
-        trailer block as its subject) or a NUL, which git refuses in a message.
+        trailer block as its subject), or a C0 control character other than a
+        tab or newline: NUL, which git refuses, and ESC, which starts a terminal
+        escape in ``git log``, among them.
     """
-    if not isinstance(message, str) or not message.strip() or "\0" in message:
-        raise ValueError("a commit message must be a non-blank string without NUL")
+    if not isinstance(message, str) or not message.strip() or _MESSAGE_CONTROL.search(message):
+        raise ValueError(
+            "a commit message must be a non-blank string without control characters "
+            "other than tabs and newlines"
+        )
 
 
-def commit_params_digest(message: str, trailers: Mapping[str, str]) -> str:
+def commit_params_digest(
+    message: str,
+    trailers: Mapping[str, str],
+    *,
+    run_id: str | None = None,
+    attempt_id: str | None = None,
+) -> str:
     """
     Return the ``Coral-Op-Params`` value: sha256 hex of the canonical commit params.
 
     A retried commit compares this digest, never the stored message, which git may
-    normalize.
+    normalize. The run and attempt ids join the params only when either is set,
+    so a commit without them keeps its earlier digest.
     """
-    canonical = json.dumps(
-        {"message": message, "trailers": sorted(trailers.items())},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+    params: dict[str, object] = {"message": message, "trailers": sorted(trailers.items())}
+    if run_id is not None or attempt_id is not None:
+        params["record"] = [run_id, attempt_id]
+    canonical = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def commit_record_trailers(
+    *,
+    op_key: str,
+    params_digest: str,
+    run_id: str | None = None,
+    attempt_id: str | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """The trailers a backend writes after the caller's on a ``commit``, in order."""
+    record: list[tuple[str, str]] = []
+    if run_id is not None:
+        record.append((RUN_TRAILER_KEY, run_id))
+    if attempt_id is not None:
+        record.append((ATTEMPT_TRAILER_KEY, attempt_id))
+    return (
+        *record,
+        (OP_TRAILER_KEY, op_key),
+        (OP_PARAMS_TRAILER_KEY, params_digest),
+        (HOOKS_TRAILER_KEY, HOOKS_TRAILER_VALUE),
+    )
 
 
 def salvage_ref_name(op_key: str) -> str:
@@ -386,7 +464,7 @@ def validate_commit_id(commit: str) -> None:
 
     :raises ValueError: for anything else, including ``HEAD``, short or uppercase ids.
     """
-    if not isinstance(commit, str) or not _COMMIT_ID.fullmatch(commit):
+    if not isinstance(commit, str) or not COMMIT_ID.fullmatch(commit):
         raise ValueError(f"expected a full hex commit id, got {commit!r}")
 
 
@@ -479,6 +557,7 @@ class WorkspaceOps(Protocol):
     ) -> ReadResult: ...
 
     # ``expected_head`` is HEAD as the op's K21 effect recorded it before the first try.
+    # ``run_id``/``attempt_id`` become ``Coral-Run``/``Coral-Attempt`` and join the digest.
     async def commit(
         self,
         ref: WorkspaceRef,
@@ -488,6 +567,8 @@ class WorkspaceOps(Protocol):
         expected_head: str,
         message: str,
         trailers: Mapping[str, str] | None = None,
+        run_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> CommitResult: ...
 
     async def salvage(

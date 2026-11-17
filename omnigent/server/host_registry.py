@@ -60,6 +60,8 @@ _logger = logging.getLogger(__name__)
 _expected_host_owner: ContextVar[AccountAuthority | None] = ContextVar(
     "expected_host_owner", default=None
 )
+# CORAL(S40): set inside host_owner_scope, even one with no owner (auth off).
+_host_owner_scope_active: ContextVar[bool] = ContextVar("host_owner_scope_active", default=False)
 
 
 @contextmanager
@@ -67,10 +69,32 @@ def host_owner_scope(user_id: str | None, generation: str | None) -> Iterator[No
     """Restrict scheduled host RPCs to their saved owner's registration."""
     owner = AccountAuthority(user_id, generation, current_workspace_id()) if user_id else None
     token = _expected_host_owner.set(owner)
+    active = _host_owner_scope_active.set(True)  # CORAL(S40)
     try:
         yield
     finally:
+        _host_owner_scope_active.reset(active)  # CORAL(S40)
         _expected_host_owner.reset(token)
+
+
+def host_owner_scope_matches(conn: HostConnection) -> bool:
+    """CORAL(S40): whether an active ``host_owner_scope`` names *conn*'s owner registration.
+
+    A scope with no owner (auth off) matches only a connection with no owner.
+
+    :param conn: The connection a frame is about to be sent to.
+    :returns: ``False`` outside any scope or for another owner, workspace or generation.
+    """
+    if not _host_owner_scope_active.get():
+        return False
+    expected = _expected_host_owner.get()
+    if expected is None:
+        return conn.owner is None
+    return (conn.workspace_id, conn.owner, conn.account_generation) == (
+        expected.workspace_id,
+        expected.user_id,
+        expected.generation,
+    )
 
 
 def _canonical_host_id(host_id: str) -> str:
@@ -197,6 +221,7 @@ def _fail_pending_worktrees(conn: HostConnection) -> None:
         conn.pending_create_worktrees,
         conn.pending_remove_worktrees,
         conn.pending_list_worktrees,
+        conn.pending_workspace_ops,  # CORAL(S40)
     ):
         _fail_pending_inventory(pending, conn.host_id)
 
@@ -525,6 +550,10 @@ class HostConnection:
         default_factory=dict,
     )
     pending_list_worktrees: dict[str, asyncio.Future[dict[str, Any]]] = field(
+        default_factory=dict,
+    )
+    # CORAL(S40): engine workspace ops awaiting their host's result.
+    pending_workspace_ops: dict[str, asyncio.Future[dict[str, Any]]] = field(
         default_factory=dict,
     )
     pending_create_dirs: dict[str, asyncio.Future[dict[str, Any]]] = field(

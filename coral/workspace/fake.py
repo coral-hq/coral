@@ -3,7 +3,8 @@
 ``FakeWorkspaceOps`` keeps one worktree per ``(host_id, root)`` and follows the
 contract's observable behaviour, including its git-side idempotency records: a
 retried commit trusts HEAD only when HEAD carries the op's ``Coral-Op`` trailer
-and its parent is the expected HEAD, then compares ``Coral-Op-Params``; a
+and its parent is the expected HEAD, then compares ``Coral-Op-Params`` (which
+covers the run and attempt ids written as ``Coral-Run``/``Coral-Attempt``); a
 retried salvage trusts its ref only when the ref's commit sits on HEAD. It is
 deliberately simple:
 
@@ -53,11 +54,13 @@ from coral.workspace.ops import (
     WorkspaceRef,
     check_op_host,
     commit_params_digest,
+    commit_record_trailers,
     salvage_ref_name,
     validate_commit_id,
     validate_commit_message,
     validate_coral_ref,
     validate_op_key,
+    validate_record_id,
     validate_timeout,
     validate_trailers,
     validate_workspace_path,
@@ -222,6 +225,8 @@ class FakeWorkspaceOps(WorkspaceOps):
         expected_head: str,
         message: str,
         trailers: Mapping[str, str] | None = None,
+        run_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> CommitResult:
         check_op_host("commit", executor)
         validate_op_key(op_key)
@@ -229,8 +234,13 @@ class FakeWorkspaceOps(WorkspaceOps):
         validate_commit_message(message)
         caller_trailers = dict(trailers or {})
         validate_trailers(caller_trailers)
+        for record_id in (run_id, attempt_id):
+            if record_id is not None:
+                validate_record_id(record_id)
         worktree = self._target(ref, executor)
-        params = commit_params_digest(message, caller_trailers)
+        params = commit_params_digest(
+            message, caller_trailers, run_id=run_id, attempt_id=attempt_id
+        )
         head = self._commits[worktree.head]
         recorded = dict(head.trailers)
         # A record counts only on the pre-op HEAD; only then are its params compared.
@@ -250,9 +260,9 @@ class FakeWorkspaceOps(WorkspaceOps):
             return CommitResult(commit=worktree.head, empty=True)
         all_trailers = (
             *caller_trailers.items(),
-            (OP_TRAILER_KEY, op_key),
-            (OP_PARAMS_TRAILER_KEY, params),
-            (HOOKS_TRAILER_KEY, HOOKS_TRAILER_VALUE),
+            *commit_record_trailers(
+                op_key=op_key, params_digest=params, run_id=run_id, attempt_id=attempt_id
+            ),
         )
         worktree.head = self._store(worktree.head, tree, message, all_trailers)
         return CommitResult(commit=worktree.head, empty=False)

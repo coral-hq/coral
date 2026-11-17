@@ -355,3 +355,45 @@ the turn-to-completion half of (b).
      they guard.
    - A suppressed wake leaves no log line.
 7. **Sign-off.** The tech lead and the INTEGRATION lead sign ADR-05 v1.
+
+## Addendum: CRL-128 probe verdicts (2026-11-16)
+
+CRL-128 built the request-free session facade, engine dispatch and the
+status-edge observers on this topology, so it records the probes it owned. The
+topology rules hold as written; the facade enforces rules 1, 2, 3, 5 and 6 at
+create (`coral/omni/server/sessions.py`), and drift pauses a run whose anchor
+is archived, deleted or bound to a runner
+([`../contracts/session-facade.md`](../contracts/session-facade.md), "Drift").
+
+| Probe | Verdict | Evidence or reason | Owner |
+|---|---|---|---|
+| (a) | **not run** | Needs a real model (Tier B). Its workspace half no longer gates anything: engine git runs on the user's host, outside the agent's sandbox (SPK-04 contingency, [`../contracts/workspace-ops.md`](../contracts/workspace-ops.md)). | CRL-137 (Tier B) |
+| (b), turn-to-completion half | **not run** | Needs a real model. Coral's view of a turn end through the real server, relay and runner is proven in process, with a stub harness and outside the anchor topology: `tests/coral/omni/test_ac2_stop_cancel_end_to_end.py`. | CRL-137 (Tier B) |
+| (e) | **not run** | Needs Inbox and gates. | CRL-134 (unchanged) |
+| (f) | **not run** | Needs the engine relauncher. Steps are created only through the facade, which never relaunches a step the owner archived or deleted. | CRL-137 (SES-06) |
+| 14 | **pass for engine sends** | An engine send to a run whose anchor or step is archived or deleted is refused before anything is saved or forwarded, and the run pauses as `paused(drift, <cause>)`: `tests/coral/omni/test_drift.py::test_archived_anchor_pauses_the_run_and_refuses_the_send` (archived anchor, real `PATCH`), `tests/coral/recovery/test_drift.py::test_the_pre_send_hook_pauses_the_run_and_refuses_the_send` (archived anchor, archived step, deleted step). A user's post to an archived session was not probed. | user posts: full SES-09 drift, no live ticket |
+| 15 | **not run** | Outside CRL-128's deliverables. | unassigned (security); decide before ENG-04 enables runs |
+
+Also found or decided in CRL-128:
+
+- **Stop, cancel and close reach the engine as cancelled.** A Coral stop,
+  cancel or reader's close of a session ends its turn as `cancelled` for that
+  turn's response, never `completed`, for an interrupted turn, an interrupt
+  with buffered input, a runner-cancelled turn, a runner that survived a
+  disconnect, and a close whose turn outlives its bound:
+  `tests/coral/omni/test_ac2_stop_cancel_end_to_end.py::test_coral_stop_and_cancel_reach_coral_as_cancelled`.
+  It runs the runner-forwarded stop and interrupt, which production also runs
+  first, on a hostless session bound with `PATCH runner_id`, not a facade step.
+  The host-owner runner kill and the server's own inferred `cancelled` edge are
+  covered only by component tests
+  (`tests/server/routes/test_intentional_runner_stop.py`,
+  `tests/coral/omni/test_status_edges.py`).
+- **Open item 1 (native step completion).** Native-harness steps are refused at
+  create (`session.harness_not_supported`) until HRN-03, so the 503 loop cannot
+  occur for Coral steps. The open item stays for HRN-03 (CRL-138).
+- **Rule 1 and the anchor seed.** If an owner binds a runner to the anchor, the
+  run pauses (`anchor_bound`), but the anchor's runner keeps running. CRL-128
+  removed `permission_mode: bypassPermissions` from the anchor seed (CRL-132's
+  PRF-01), so the harness default applies. A deny-all tool policy for the
+  anchor, and stopping or unbinding an anchor runner on detection, are CRL-131
+  (RUL-01, the run guard).

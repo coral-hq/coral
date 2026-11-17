@@ -19,6 +19,7 @@ from coral.queue import (
     clear_executors,
     register_executor,
 )
+from coral.slots.executors import CANCEL_SESSIONS
 from coral.stores.fakes import FakeQueueStore
 from coral.stores.protocols import (
     AgentSlotDraft,
@@ -378,3 +379,96 @@ async def test_work_drainer_fencing_backoff_and_scope(db_uri: str) -> None:
             assert r_lost.status == int(WorkStatus.CLAIMED)
     finally:
         clear_executors()
+
+
+async def test_work_drainer_runs_wind_down_effects_of_a_cancelled_run(db_uri: str) -> None:
+    """A cancelled run's cancel_sessions item still runs; other effects and stale slots do not."""
+    ensure_coral_schema(db_uri)
+    run_store = SqlAlchemyCoralRunStore(db_uri, default_workspace_id=1)
+    queue_store = SqlAlchemyCoralQueueStore(db_uri, default_workspace_id=1)
+    run = run_store.start_run(
+        RunStartSpec(
+            workflow_id="wf_d",
+            version_id="v1",
+            title="Cancelled Run",
+            request_preview="req",
+            workspace_id=1,
+        ),
+        now=100,
+    )
+    slot = AgentSlotDraft(
+        id="slot_1",
+        activation_id="act_1",
+        node_id="n1",
+        scope_key="root",
+        roster_index=0,
+        role=1,
+        session_generation=2,
+    )
+    run_store.apply_transition(
+        run.id,
+        1,
+        Transition(status=int(RunStatus.RUNNING), agent_slots=(slot,)),
+        workspace_id=1,
+        now=105,
+    )
+    # cancel_run marks the run cancelled in the transition that enqueues cancel_sessions.
+    run_store.apply_transition(
+        run.id,
+        2,
+        Transition(status=int(RunStatus.CANCELLED), finished_at=110),
+        workspace_id=1,
+        now=110,
+    )
+    cancel = WorkItemDraft.effect(
+        run_id=run.id,
+        idempotency_key="eff:cancel",
+        payload={"effect_type": CANCEL_SESSIONS, "slot_id": "slot_1"},
+        slot_generation=2,
+        owner_key="slot:slot_1",
+        available_at=100,
+    )
+    other = WorkItemDraft.effect(
+        run_id=run.id,
+        idempotency_key="eff:other",
+        payload={"effect_type": "test.ok"},
+        available_at=101,
+    )
+    stale_cancel = WorkItemDraft.effect(
+        run_id=run.id,
+        idempotency_key="eff:stale_cancel",
+        payload={"effect_type": CANCEL_SESSIONS, "slot_id": "slot_1"},
+        slot_generation=1,
+        owner_key="slot:slot_1",
+        available_at=102,
+    )
+    queue_store.enqueue_work([cancel, other, stale_cancel], workspace_id=1, now=110)
+    executed: list[str] = []
+
+    async def _record(ctx: ExecutionContext) -> EffectCompleted:
+        executed.append(ctx.work.id)
+        return EffectCompleted()
+
+    clear_executors()
+    try:
+        register_executor(CANCEL_SESSIONS, _record, runs_after_terminal=True)
+        register_executor("test.ok", _record)
+        drainer = WorkDrainer(
+            queue_store, worker_id="drainer-1", workspace_id=1, clock=lambda: 120.0
+        )
+
+        assert await drainer.drain_until_empty() == 3
+    finally:
+        clear_executors()
+
+    assert executed == [cancel.id]
+    with coral_engine(db_uri).connect() as conn:
+        rows = {
+            row.id: (row.status, row.error_code)
+            for row in conn.execute(select(WorkRow).where(WorkRow.run_id == run.id))
+        }
+    assert rows == {
+        cancel.id: (int(WorkStatus.SUCCEEDED), None),
+        other.id: (int(WorkStatus.ABANDONED), "run.terminal"),
+        stale_cancel.id: (int(WorkStatus.ABANDONED), "slot.generation_mismatch"),
+    }
