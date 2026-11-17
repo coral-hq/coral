@@ -123,6 +123,7 @@ from omnigent.runner.identity import (
 )
 from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
 from tests._helpers.providers import isolate_provider_resolution
+from tests.tools.test_extensions import StubToolProvider, installed_tool_providers  # CORAL(S50)
 
 pytestmark = pytest.mark.asyncio
 
@@ -4521,7 +4522,8 @@ def test_host_capabilities_always_advertise_the_os_sandbox(
         lambda name: f"/usr/bin/{name}" if name == binary_on_path else None,
     )
 
-    capabilities = host_capabilities()
+    with installed_tool_providers():  # CORAL(S50): installed providers would add tokens
+        capabilities = host_capabilities()
 
     assert capabilities == [*base, expected_token]
     assert base == HOST_CAPABILITIES
@@ -4553,15 +4555,49 @@ async def test_hello_carries_the_os_sandbox_token(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(host, "_initialize_capabilities", _discover)
     tunnel = _BlockingTunnel()
-    serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
-    try:
-        await asyncio.wait_for(tunnel.first_send.wait(), timeout=1.0)
-    finally:
-        await _cancel(serve_task)
+    with installed_tool_providers():  # CORAL(S50): installed providers would add tokens
+        serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
+        try:
+            await asyncio.wait_for(tunnel.first_send.wait(), timeout=1.0)
+        finally:
+            await _cancel(serve_task)
 
     hello = decode_host_frame(tunnel.sent[0])
     assert isinstance(hello, HostHelloFrame)
     assert hello.capabilities == [*HOST_CAPABILITIES, "os_sandbox:linux_bwrap"]
+
+
+async def test_hello_carries_provider_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CORAL(S50): installed tool providers' new tokens follow the OS sandbox token, once each."""
+    monkeypatch.setattr("omnigent.inner.sandbox.sys.platform", "linux")
+    monkeypatch.setattr("omnigent.host.frames.shutil.which", lambda name: f"/usr/bin/{name}")
+    host = _make_host_process()
+
+    async def _discover() -> None:
+        host._capabilities_initialized = True
+
+    monkeypatch.setattr(host, "_initialize_capabilities", _discover)
+    tunnel = _BlockingTunnel()
+    providers = (
+        StubToolProvider(tokens=("coral_runner:1",)),
+        # A token the host already advertises is not repeated.
+        StubToolProvider(tokens=("coral_runner:1", HOST_CAPABILITIES[0], "extension_tools:1")),
+    )
+    with installed_tool_providers(*providers):
+        serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
+        try:
+            await asyncio.wait_for(tunnel.first_send.wait(), timeout=1.0)
+        finally:
+            await _cancel(serve_task)
+
+    hello = decode_host_frame(tunnel.sent[0])
+    assert isinstance(hello, HostHelloFrame)
+    assert hello.capabilities == [
+        *HOST_CAPABILITIES,
+        "os_sandbox:linux_bwrap",
+        "coral_runner:1",
+        "extension_tools:1",
+    ]
 
 
 @pytest.mark.parametrize(

@@ -956,7 +956,12 @@ def should_dispatch_locally(tool_name: str) -> bool:
     for tools the runner already handled). The executor imports this
     function directly — Phase 5 of RUNNER_TOOL_DISPATCH.md.
     """
-    return tool_name in _ALL_LOCAL_TOOLS
+    if tool_name in _ALL_LOCAL_TOOLS:
+        return True
+    # CORAL(S8): installed tool providers' server-run tools also go through the runner's dispatch.
+    from omnigent.tools.extensions import static_server_dispatched_names
+
+    return tool_name in static_server_dispatched_names()
 
 
 # Granted tool names per live AgentSpec + effective harness, keyed by
