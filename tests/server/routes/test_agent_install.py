@@ -689,6 +689,48 @@ async def test_remove_is_owner_only(client, agent_store) -> None:
     assert agent_store.get(mine["id"]) is None
 
 
+# CORAL(S53): Coral's mutation guard keeps engine agents as the engine wrote them.
+async def test_coral_agents_refuse_edit_and_unforced_delete(client, agent_store) -> None:
+    from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
+    from omnigent.server.mutation_guards import register_mutation_guard
+
+    class _NoBindings:
+        def find_by_session(self, workspace_id: int, session_id: str) -> None:
+            raise AssertionError("agent rules read no bindings")
+
+    engine = (await _install(client, ALICE, "coral__review")).json()
+    other = (await _install(client, ALICE, "orion")).json()
+    path = f"/v1/agents/{engine['id']}"
+    unregister = register_mutation_guard(MUTATION_GUARD, CoralMutationGuard(_NoBindings()))
+    try:
+        outsider = await client.patch(path, json={"description": "x"}, headers=BOB)
+        edited = await client.patch(path, json={"description": "x"}, headers=ALICE)
+        removed = await client.delete(path, headers=ALICE)
+        installs = [
+            await _install(client, ALICE, name) for name in ("coral__new", "Coral__Review")
+        ]
+        other_edit = await client.patch(
+            f"/v1/agents/{other['id']}", json={"description": "v2"}, headers=ALICE
+        )
+        other_install = await _install(client, ALICE, "coralx")
+        forced = await client.delete(path, params={"force": "true"}, headers=ALICE)
+    finally:
+        unregister()
+
+    assert outsider.status_code == 404
+    assert edited.status_code == 409
+    assert edited.json()["error"] == (
+        "Agent 'coral__review' is managed by Coral's workflow engine and can't be edited."
+    )
+    assert removed.status_code == 409 and "force=true" in removed.json()["error"]
+    assert [install.status_code for install in installs] == [409, 409]
+    assert "reserved for Coral's engine agents" in installs[0].json()["error"]
+    assert (other_edit.status_code, other_install.status_code) == (200, 200)
+    assert forced.status_code == 200, forced.text
+    assert agent_store.get(engine["id"]) is None
+    assert sorted(await _my_names(client, ALICE)) == ["coralx", "orion"]
+
+
 async def test_remove_warns_while_sessions_use_the_agent(client, conversation_store) -> None:
     """Removing breaks the sessions using it, so it needs force=true."""
     mine = (await _install(client, ALICE, "orion")).json()

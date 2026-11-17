@@ -17,12 +17,14 @@ from omnigent.db.workspace_cache import WorkspaceScopedCache
 
 # name -> (the module that defines it, its signature as Coral calls it)
 PINNED: dict[str, tuple[str, str]] = {
+    "CLIENT_SESSION_EVENT_TYPES": ("omnigent.server.routes._sessions.common", ""),
     "HostWorkspaceOpNotPermittedError": ("omnigent.server.routes._host_workspace_ops", ""),
     "HostWorkspaceOpUnavailableError": (
         "omnigent.server.routes._host_workspace_ops",
         "(message: 'str', *, timed_out: 'bool') -> 'None'",
     ),
     "HostWorkspaceOpsUnsupportedError": ("omnigent.server.routes._host_workspace_ops", ""),
+    "RUNNER_SESSION_EVENT_TYPES": ("omnigent.server.routes._sessions.common", ""),
     "WorkspaceValidationError": (
         "omnigent.server.routes._workspace_validation",
         "(message: 'str') -> 'None'",
@@ -83,6 +85,10 @@ PINNED: dict[str, tuple[str, str]] = {
         " branch_name: 'str', base_branch: 'str | None', existing_branch: 'bool' = False)"
         " -> 'CreatedWorktree'",
     ),
+    "label_key_skeleton": (
+        "omnigent.server.routes._sessions.helpers",
+        "(key: 'str') -> 'str'",
+    ),
     "list_worktrees_on_host": (
         "omnigent.server.routes._host_worktree",
         "(*, host_registry: 'HostRegistry', host_conn: 'HostConnection', repo_path: 'str',"
@@ -135,8 +141,14 @@ LAZY = frozenset({"_ensure_builtin_agent", "_tar_gz_dir"})
 CACHES = frozenset(
     {"_session_active_response_cache", "_session_blocked_on_cache", "_session_status_cache"}
 )
+# Event-type sets Coral classifies by membership; their members may change upstream.
+TYPE_SETS = frozenset({"CLIENT_SESSION_EVENT_TYPES", "RUNNER_SESSION_EVENT_TYPES"})
 # Pins whose name differs from their source's: pin name -> source attribute.
-ALIASES = {"pending_elicitation_count": "count_for"}
+ALIASES = {
+    "RUNNER_SESSION_EVENT_TYPES": "_RUNNER_SESSION_EVENT_TYPES",
+    "label_key_skeleton": "_label_key_skeleton",
+    "pending_elicitation_count": "count_for",
+}
 # Exceptions Coral raises or catches by type alone; they keep their base.
 BASES: dict[str, type[BaseException]] = {
     "HostWorkspaceOpNotPermittedError": PermissionError,
@@ -169,5 +181,7 @@ def test_pin_keeps_its_upstream_source_and_signature(name: str) -> None:
         assert issubclass(source, BASES[name])
     elif name in CACHES:
         assert isinstance(source, WorkspaceScopedCache)
+    elif name in TYPE_SETS:
+        assert isinstance(source, frozenset) and all(isinstance(kind, str) for kind in source)
     else:
         assert _signature(source) == expected

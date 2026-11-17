@@ -113,6 +113,11 @@ from omnigent.server.failed_status_diagnostics import (
     failed_status_intake_attributes,
 )
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    SESSION_EVENT,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -1035,6 +1040,25 @@ def register_events_routes(
         runner_id = getattr(conv, "runner_id", None)
         return isinstance(runner_id, str) and token_bound_runner_id(token) == runner_id
 
+    async def _check_client_event(
+        # CORAL(S42): an engine sender takes the request-free paths.
+        request: Request | _RunnerEventContext | StartupInputContext | EngineEventContext,
+        session_id: str,
+        conv: Any,
+        event_type: str,
+    ) -> None:
+        """CORAL(S53): let extensions refuse an HTTP event; in-process senders never ask."""
+        if isinstance(request, Request):
+            await check_mutation(
+                MutationAttempt(
+                    SESSION_EVENT,
+                    session_id=session_id,
+                    conversation=conv,
+                    event_type=event_type,
+                    runner_proven=_has_bound_runner_authority(request, conv),
+                )
+            )
+
     def _reporting_runner_id(
         # CORAL(S42): an engine sender takes the request-free paths.
         request: Request | _RunnerEventContext | StartupInputContext | EngineEventContext,
@@ -1157,7 +1181,12 @@ def register_events_routes(
                                 )
                             )
                         continue
-                    await _authorized_conversation(request, session_id, external_transcript=True)
+                    _, batch_conv = await _authorized_conversation(
+                        request, session_id, external_transcript=True
+                    )
+                    await _check_client_event(  # CORAL(S53)
+                        request, session_id, batch_conv, _EXTERNAL_CONVERSATION_ITEM_TYPE
+                    )
                     add_audit_attrs(event_type=_EXTERNAL_CONVERSATION_ITEM_TYPE)
                     item_ids = await _persist_external_conversation_items(
                         session_id, list(run), conversation_store
@@ -1377,6 +1406,7 @@ def register_events_routes(
                 _EXTERNAL_ASSISTANT_MESSAGE_TYPE,
             ),
         )
+        await _check_client_event(request, session_id, conv, body.type)  # CORAL(S53)
         native_harness = (
             await asyncio.to_thread(
                 _native_pane_harness, conv, agent_store=agent_store, agent_cache=agent_cache

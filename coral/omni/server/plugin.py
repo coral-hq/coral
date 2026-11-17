@@ -102,16 +102,20 @@ def _wire_guards(
     Coral's required-policy provider reads them through a cache of found rows
     and reads run status through a cache each run-store commit clears. Its cost
     backstop pauses a run through ``run_store`` once a session spends
-    ``session_cap_usd``. Every registration's undo goes on ``stack``.
+    ``session_cap_usd``. The S53 mutation guard reads the same cache of found
+    rows and refuses clients' changes to bound sessions and engine agents.
+    Every registration's undo goes on ``stack``.
     """
     from coral.omni.policies.bindings_cache import CachedBindingLookup
     from coral.omni.policies.cost_backstop import install_budget_pauser
     from coral.omni.policies.provider import CoralPolicyProvider
     from coral.omni.policies.state import RunStatusCache
+    from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
     from coral.omni.server.tool_bridge import register_engine_tools
     from coral.recovery.pause import pause_run_for_session_cap
     from coral.tools.catalog import CATALOG
     from omnigent.runtime.policies.required_providers import register_required_policy_provider
+    from omnigent.server.mutation_guards import register_mutation_guard
 
     register_engine_tools(catalog=CATALOG, port=None, bindings=bindings, stack=stack)
     statuses = RunStatusCache(run_store)
@@ -123,6 +127,7 @@ def _wire_guards(
         bindings=found_bindings, statuses=statuses, session_cap_usd=session_cap_usd
     )
     stack.callback(register_required_policy_provider(REQUIRED_POLICY_PROVIDER, provider))
+    stack.callback(register_mutation_guard(MUTATION_GUARD, CoralMutationGuard(found_bindings)))
 
 
 def _wire_session_engine(

@@ -84,6 +84,11 @@ from omnigent.server.host_registry import (
     HostRegistry,
     update_harness_accounts,
 )
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    SESSION_LAUNCH_RUNNER,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import (
     LAUNCH_TIMEOUT_ENV_VAR,
@@ -1115,6 +1120,12 @@ def create_hosts_router(
             conversation_store=conversation_store,
             permission_store=permission_store,
             sandbox_profiles=getattr(request.app.state, "sandbox_profiles", None),
+        )
+        # CORAL(S53): an extension may refuse a runner for a session it manages.
+        await check_mutation(
+            MutationAttempt(
+                SESSION_LAUNCH_RUNNER, session_id=body.session_id, conversation=target.conv
+            )
         )
         conn = target.conn
         if target.conv.family_id is not None and flags.enabled(Feature.SIBLING_SESSIONS):

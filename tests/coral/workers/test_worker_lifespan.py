@@ -30,6 +30,8 @@ from coral.omni.policies.cost_backstop import (
 )
 from coral.omni.policies.state import RunStatusCache
 from coral.omni.server import OmnigentRunScopeRunner, coral_lifespan
+from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
+from coral.omni.server.sessions import RUN_ID_LABEL_KEY
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue import executors as queue_executors
 from coral.queue.executors import (
@@ -53,14 +55,17 @@ from omnigent.db.account_authority import account_generation, current_account_us
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, current_workspace_id
 from omnigent.db.utils import _run_migrations as run_omni_migrations
 from omnigent.db.utils import create_db_engine, get_or_create_engine
+from omnigent.entities import Conversation
+from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.policies.schema import PolicyEvent
 from omnigent.policies.types import EvaluationContext, PolicyResult
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.builder import build_policy_engine
 from omnigent.runtime.policies.required_providers import required_policies_apply
-from omnigent.server import session_live_state
+from omnigent.server import mutation_guards, session_live_state
 from omnigent.server.app import create_app
 from omnigent.server.host_registry import _expected_host_owner
+from omnigent.server.mutation_guards import SESSION_UPDATE, MutationAttempt, check_mutation
 from omnigent.server.routes._sessions import helpers as session_helpers
 from omnigent.server.server_plugins import ServerServices
 from omnigent.server.server_tools import ServerToolCall, ServerToolResult, server_tool
@@ -114,6 +119,11 @@ def _engine_tools() -> frozenset[str]:
 def _coral_policies_registered() -> bool:
     """Whether Coral's required-policy provider claims a Coral bundle's sessions now."""
     return required_policies_apply(AgentSpec(spec_version=1, params={"coral": {}}), None)
+
+
+def _coral_mutation_guard() -> object | None:
+    """Coral's S53 mutation guard as registered now, if any."""
+    return dict(mutation_guards._registered()).get(MUTATION_GUARD)
 
 
 @dataclass
@@ -308,6 +318,7 @@ async def test_an_overlapping_lifespan_takes_over_and_outlives_the_earlier_exit(
     assert _engine_registrations() == NOTHING
     assert _engine_tools() == frozenset()
     assert not _coral_policies_registered()
+    assert _coral_mutation_guard() is None
 
 
 @pytest.mark.parametrize("engine", ["wired", "unwired"])
@@ -390,12 +401,53 @@ async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifes
         monkeypatch.delattr(server.app.state, "session_event_dispatch")
 
     assert not _coral_policies_registered()
+    assert _coral_mutation_guard() is None
     async with coral_lifespan(server.app, server.services):
         # Bound sessions are guarded whether or not the session engine is wired.
         assert _coral_policies_registered()
+        assert isinstance(_coral_mutation_guard(), CoralMutationGuard)
         assert hooks == ["registered"]
     assert not _coral_policies_registered()
+    assert _coral_mutation_guard() is None
     assert hooks == ["registered", "unregistered"]
+
+
+async def test_the_mutation_guard_refuses_changes_to_a_bound_session_while_the_lifespan_runs(
+    server: _Server,
+) -> None:
+    """The registered guard reads the real binding store in the request's workspace."""
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    conversations = cast(SqlAlchemyConversationStore, server.services.conversation_store)
+    bound = conversations.create_conversation(labels={RUN_ID_LABEL_KEY: "run-1"})
+    unbound = conversations.create_conversation(labels={RUN_ID_LABEL_KEY: "run-1"})
+    bindings.reserve(
+        SessionBindingDraft(
+            workspace_id=DEFAULT_WORKSPACE_ID,
+            session_id=bound.id,
+            run_id="run-1",
+            role="step",
+            effect_key="run-1:2:create_session:work",
+            slot_id="work||:0",
+            slot_role="step_agent",
+        )
+    )
+
+    def model_change(row: Conversation) -> MutationAttempt:
+        return MutationAttempt(
+            SESSION_UPDATE,
+            session_id=row.id,
+            conversation=row,
+            fields=frozenset({"model_override"}),
+        )
+
+    async with coral_lifespan(server.app, server.services):
+        with pytest.raises(OmnigentError) as refused:
+            await check_mutation(model_change(bound))
+        await check_mutation(model_change(unbound))
+    assert refused.value.code == ErrorCode.CONFLICT
+    assert f"Session {bound.id} is part of a Coral workflow run" in refused.value.message
+    # Without the lifespan nothing is guarded.
+    await check_mutation(model_change(bound))
 
 
 async def test_the_lifespan_pauses_an_over_cap_sessions_run_at_the_configured_cap(
@@ -719,6 +771,7 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
     assert _engine_registrations() == NOTHING
     assert _engine_tools() == frozenset()
     assert not _coral_policies_registered()
+    assert _coral_mutation_guard() is None
 
 
 async def test_item_claimed_during_exit_is_retried_not_failed(

@@ -10918,24 +10918,34 @@ def _reject_reserved_cost_control_label_seed(labels: dict[str, str]) -> None:
 _CORAL_LABEL_PREFIX = "coral."
 
 
-def _is_coral_label_key(key: str) -> bool:
+# CORAL(S53): the skeleton is shared with Coral's mutation guard's label rule.
+def _label_key_skeleton(key: str) -> str:
     """
-    Whether a label key names, or could collate as, one Coral's workflow engine owns.
+    The form of a label key that a case- and accent-insensitive collation compares.
 
-    The key's skeleton is compared: NFKC, without format (zero-width) characters
-    or outer whitespace, casefolded, then without combining marks after NFKD. So
-    the width, zero-width, accent and case variants that a case- and
-    accent-insensitive collation (MySQL) equates are refused too. Look-alike
-    letters from other scripts, such as Cyrillic ``с``, are not folded.
+    NFKC, without format (zero-width) characters or outer whitespace,
+    casefolded, then without combining marks after NFKD. So width, zero-width,
+    accent and case variants share a skeleton, as MySQL's collations equate
+    them. Look-alike letters from other scripts, such as Cyrillic ``с``, are not
+    folded.
 
-    :param key: A label key, e.g. ``"coral.run_id"`` or ``"Coral.Role"``.
-    :returns: ``True`` when the key's skeleton starts with ``coral.``.
+    :param key: A label key, e.g. ``"Coral.Role"``.
+    :returns: Its skeleton, e.g. ``"coral.role"``.
     """
     text = unicodedata.normalize("NFKC", key)
     text = "".join(char for char in text if unicodedata.category(char) != "Cf").strip()
     text = unicodedata.normalize("NFKD", text.casefold())
-    skeleton = "".join(char for char in text if unicodedata.category(char)[0] != "M")
-    return skeleton.startswith(_CORAL_LABEL_PREFIX)
+    return "".join(char for char in text if unicodedata.category(char)[0] != "M")
+
+
+def _is_coral_label_key(key: str) -> bool:
+    """
+    Whether a label key names, or could collate as, one Coral's workflow engine owns.
+
+    :param key: A label key, e.g. ``"coral.run_id"`` or ``"Coral.Role"``.
+    :returns: ``True`` when the key's :func:`_label_key_skeleton` starts with ``coral.``.
+    """
+    return _label_key_skeleton(key).startswith(_CORAL_LABEL_PREFIX)
 
 
 def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:

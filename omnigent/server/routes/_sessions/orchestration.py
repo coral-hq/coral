@@ -170,6 +170,11 @@ from omnigent.server.managed_hosts import (
     parse_repo_workspace,
     read_managed_repo_workspaces,
 )
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    SESSION_CREATE_CHILD,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
@@ -12012,6 +12017,14 @@ async def _create_session_from_existing_agent(
         _parent_for_routing = await asyncio.to_thread(
             conversation_store.get_conversation, body.parent_session_id
         )
+        if _parent_for_routing is not None:  # CORAL(S53): a managed parent may refuse children
+            await check_mutation(
+                MutationAttempt(
+                    SESSION_CREATE_CHILD,
+                    session_id=_parent_for_routing.id,
+                    conversation=_parent_for_routing,
+                )
+            )
         if (
             _parent_for_routing is not None
             and subagent_routing_enabled(_parent_for_routing.subagent_routing_override)

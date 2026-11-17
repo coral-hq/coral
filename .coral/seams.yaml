@@ -2415,3 +2415,133 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S53
+    title: Mutation-guard registry and its route call sites
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `omnigent/server/mutation_guards.py` holds a process-wide, lock-guarded
+      registry of mutation guards keyed by name. register_mutation_guard(name,
+      guard) refuses a name that is not 1-64 letters, digits, `_`, `.` or `-`
+      starting with a letter or digit (ValueError) and an object without
+      callable screen and check (TypeError); registering a name again replaces
+      it, with a warning when the guard changes; it returns an idempotent
+      unregister that removes only its own registration. A mutating route
+      describes its change as a MutationAttempt (action, session id and row,
+      PATCH fields, label keys and title, event type and whether the request's
+      tunnel token is bound to the row's runner_id, agent name, force) after
+      its own authorization, so a caller without access keeps its 401, 403 or
+      404, and before any side effect, and awaits check_mutation(attempt,
+      load_conversation=...). With no guard registered it returns at once.
+      Guards are asked in name order. screen runs inline (O(1), no I/O, never
+      raises) and answers ALLOW, a refusal string, NEEDS_ROW (the attempt has
+      no session row) or CHECK. For NEEDS_ROW the loader is awaited once and
+      those guards are screened again; a row that no longer exists allows (the
+      route answers 404); a guard needing a row the route gave neither as a
+      row nor a loader is a call-site bug (ValueError). Every guard that
+      answered CHECK runs check in one asyncio.to_thread hop (context copied,
+      so current_workspace_id() holds). A refusal is 409 CONFLICT with the
+      guard's message; a guard's own OmnigentError propagates; any other
+      failure, or an answer of the wrong type, is logged with the session id
+      and becomes 500 INTERNAL_ERROR "could not check whether this change is
+      allowed; retry" (fail closed). Call sites, each after the route's access
+      checks: PATCH /v1/sessions/{id} (SESSION_UPDATE with model_fields_set,
+      the label keys and the title, a row loader; after the runner owner
+      check, before the label checks and any write or runner forward);
+      /agent-title and /auto-title (SESSION_UPDATE with the new title);
+      POST /v1/sessions/{id}/events and its batched external_conversation_item
+      path (SESSION_EVENT with runner proof from _has_bound_runner_authority;
+      HTTP requests only: engine, startup and runner-tunnel senders never ask;
+      after _authorized_conversation); the elicitation resolve route
+      (SESSION_EVENT "approval", after the row is resolved); POST
+      /v1/hosts/{host_id}/runners (SESSION_LAUNCH_RUNNER, after
+      resolve_host_launch); PUT /v1/sessions/{id}/permissions (SESSION_GRANT,
+      a row loader, after the access check); JSON create (also
+      /v1/sessions/orchestrated) right after the parent row read, multipart
+      create after the parent is authorized, and both creates' sibling path
+      after authorize_sibling_source, against the family's root
+      (SESSION_CREATE_CHILD); multipart create once the uploaded bundle is
+      validated (AGENT_INSTALL with its name, since the upload is stored as the
+      caller's agent); PUT /v1/sessions/{id}/agent (SESSION_AGENT_REPLACE,
+      after the row is resolved); session MCP create, update, delete and
+      registry select through _bound_agent above LEVEL_READ
+      (SESSION_MCP_CHANGE); PATCH, DELETE and POST /v1/agents (AGENT_UPDATE
+      after editable_agent, AGENT_REMOVE with force after the owner check,
+      AGENT_INSTALL after bundle validation); scheduled-task create and PATCH
+      through _require_continuable once the picked session passes Omnigent's
+      own checks (SESSION_SCHEDULE). `_sessions/helpers.py` splits
+      `_label_key_skeleton` out of S46's `_is_coral_label_key` (same rule) so
+      Coral's guard matches `omnigent.*` labels on the same skeleton through
+      `coral/omni/_upstream.py`. Coral's guard
+      (`coral/omni/server/mutation_guard.py`) screens sessions on the
+      `coral.run_id` label only (a negative filter, sound after S46), so an
+      unlabelled session never reads Coral's store, never makes a thread hop
+      and never fails closed. Omnigent lets owners post runner-only event
+      types too (local forwarders report native settings that way), so
+      Coral allows them on bound sessions only with runner proof. Residuals:
+      one registry per process (the later lifespan's registration wins); new
+      upstream routes are caught by
+      `tests/coral/omni/test_mutation_guard_routes.py`'s route inventory
+      (every mutating route under /v1/sessions and the other session and agent
+      routes, and every WebSocket route), not by construction.
+    files:
+      - omnigent/server/mutation_guards.py
+      - omnigent/server/routes/_sessions/helpers.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - omnigent/server/routes/builtin_agents.py
+      - omnigent/server/routes/hosts.py
+      - omnigent/server/routes/scheduled_tasks.py
+      - omnigent/server/routes/session_mcp_servers.py
+      - omnigent/server/routes/sessions/routes_agent.py
+      - omnigent/server/routes/sessions/routes_core.py
+      - omnigent/server/routes/sessions/routes_elicitations.py
+      - omnigent/server/routes/sessions/routes_events.py
+      - omnigent/server/routes/sessions/routes_permissions.py
+      - tests/server/test_mutation_guards.py
+      - tests/server/integration/test_engine_event_dispatch.py
+      - tests/server/routes/test_agent_install.py
+    tests:
+      - tests/server/test_mutation_guards.py
+      - tests/server/integration/test_engine_event_dispatch.py
+      - tests/server/routes/test_agent_install.py
+    budget_lines: 40
+    budget_exception:
+      lines: 634
+      reason: >-
+        tests/server/test_mutation_guards.py (new, 634 lines) holds the
+        registry tests (no guard is a no-op; a refusal from screen is a 409
+        with no thread hop and no later guard asked; NEEDS_ROW loads the row
+        once and screens again, a missing row allows, a row nobody can give is
+        a ValueError; CHECK guards run in one worker hop in the request's
+        workspace and the first refusal wins; a guard's own error propagates
+        and any other failure is a logged, retryable 500; name validation,
+        replacement and identity-checked unregister), one request to each of
+        the nineteen guarded requests proving the guard is asked only after
+        the route's own authorization with the action and the row it acts on,
+        and that the attempt carries the fields, label keys, title, event
+        type, runner proof (the session's token, another runner's, none),
+        agent name and force sent. It also holds the shared app with every
+        optional store and the MCP registry and alice's targets (a session
+        with its own agent, a host, a session a task can continue, a task and
+        an installed agent), which Coral's HTTP matrix and route inventory
+        reuse. omnigent/server/mutation_guards.py (new, 293 lines) holds the
+        attempt and screen types, the guard protocol and its contract, the
+        registry and the two-phase check with its failure handling, with
+        docstrings. omnigent/server/routes/sessions/routes_core.py (46 changed
+        lines) carries seven call sites (PATCH, two renames, JSON and
+        multipart siblings, multipart parent and bundle name) behind two small
+        helpers. tests/server/integration/test_engine_event_dispatch.py (52)
+        adds one test: a guard refusing every event refuses the HTTP message
+        while the engine's brief, interrupt and stop pass unasked.
+        tests/server/routes/test_agent_install.py (42) adds one test of
+        Coral's engine-agent rules over the real agent routes. The other
+        route files are within budget: helpers.py 32 (21 added, 11 removed),
+        routes_events.py 32, orchestration.py 13, builtin_agents.py 13,
+        routes_elicitations.py 12, routes_permissions.py 12, hosts.py 11,
+        scheduled_tasks.py 9, session_mcp_servers.py 9, routes_agent.py 9.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

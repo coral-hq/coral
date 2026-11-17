@@ -27,6 +27,11 @@ from omnigent.server.auth import (
     LEVEL_EDIT,
     AuthProvider,
 )
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    SESSION_EVENT,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.routes._auth_helpers import (
     get_user_id as _get_user_id,
 )
@@ -35,6 +40,7 @@ from omnigent.server.routes._auth_helpers import (
 )
 from omnigent.server.routes._errors import session_not_found as _session_not_found
 from omnigent.server.routes._sessions.common import (
+    _APPROVAL_TYPE,  # CORAL(S53)
     _logger,
     get_server_runner_router,
     set_server_runner_router,
@@ -131,6 +137,12 @@ def register_elicitations_routes(
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             if conv is None:
                 raise _session_not_found()
+        # CORAL(S53): the same verdict as an approval event, so the same guards answer.
+        await check_mutation(
+            MutationAttempt(
+                SESSION_EVENT, session_id=session_id, conversation=conv, event_type=_APPROVAL_TYPE
+            )
+        )
         _resolve_data = {"elicitation_id": elicitation_id, **body.model_dump(exclude_none=True)}
         await _resolve_elicitation(session_id, _resolve_data, runner_router, conversation_store)
         # Apply any policy writes deferred by the relay tool-call ASK gate

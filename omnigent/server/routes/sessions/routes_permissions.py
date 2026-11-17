@@ -39,6 +39,11 @@ from omnigent.server.auth import (
     SharingMode,
     workspace_sharing_blocked,
 )
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    SESSION_GRANT,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.routes._auth_helpers import (
     get_session_owner_id as _get_session_owner_id,
 )
@@ -115,6 +120,13 @@ def register_permissions_routes(
         user_id = _require_user(request, auth_provider)
         await _require_access(
             user_id, session_id, LEVEL_MANAGE, permission_store, conversation_store
+        )
+        # CORAL(S53): an extension may refuse sharing a session it manages.
+        await check_mutation(
+            MutationAttempt(SESSION_GRANT, session_id=session_id),
+            load_conversation=lambda: asyncio.to_thread(
+                conversation_store.get_conversation, session_id
+            ),
         )
         # Server-wide sharing policy gate (see SharingMode). Applied only
         # to *new* grants — revoke/list and owner grants are unaffected.
