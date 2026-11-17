@@ -14,6 +14,7 @@ from coral.engine.machines.run import (
 from coral.engine.machines.slot import (
     complete_effect,
     evaluate_handoff,
+    fail_effect,
     note_post_close,
     receive_handoff,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "choose_arrow",
     "complete_effect",
     "evaluate_handoff",
+    "fail_effect",
     "finish_activation",
     "note_blocked",
     "note_evidence_missing",

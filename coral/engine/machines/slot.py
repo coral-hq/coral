@@ -13,13 +13,18 @@ from coral.engine.machines.activation import (
     routes_by_label,
 )
 from coral.engine.machines.run import record_pause, refuse, refuse_unknown
+from coral.engine.timers import INFRA_BACKOFF, PLAN_PROBE, drop_slot_backoff
 from coral.engine.types import (
     ActivationStatus,
     ApplyResult,
     Effect,
     EffectCompleted,
+    EffectFailed,
+    EngineConfig,
     HandoffEvaluated,
     HandoffReceived,
+    PauseCause,
+    PauseReason,
     PostCloseActivity,
     Receipt,
     RunState,
@@ -29,6 +34,9 @@ from coral.engine.types import (
 )
 from coral.model.ir import CompiledGraph
 from coral.signals.nudge import decide, turn_ended_snapshot
+
+# A slot's facts wait while its latest effect of these kinds has no receipt.
+_LEASED_KINDS = frozenset({"send_input", "create_session", "nudge"})
 
 
 def complete_effect(
@@ -49,10 +57,36 @@ def complete_effect(
     return refuse_unknown(state)
 
 
-def note_turn_ended(state: RunState, command: TurnEnded) -> ApplyResult:
+def fail_effect(state: RunState, effect: Effect, command: EffectFailed) -> ApplyResult:
+    """Pause for an effect that failed. The slot keeps its status.
+
+    Exhausted retries pause ``infra`` with no receipt, so a resume can revive the same
+    effect; with that cause already present it is a no-op. A permanent failure always
+    receipts the effect and pauses ``failure_path`` unless that cause is present.
+    """
+    reason: PauseReason = "infra" if command.retryable else "failure_path"
+    present = PauseCause(reason=reason, detail=command.code, subject=effect.subject) in (
+        state.causes
+    )
+    if command.retryable and present:
+        return ApplyResult(state=state)
+    paused = state if present else record_pause(state, reason, command.code, effect.subject)
+    paused = paused.model_copy(update={"seq": state.seq + 1})
+    if command.retryable:
+        return ApplyResult(state=paused)
+    receipt = Receipt(key=effect.effect_key, payload={"failed": command.code})
+    receipted = paused.model_copy(update={"receipts": (*paused.receipts, receipt)})
+    return ApplyResult(state=receipted, receipt_key=effect.effect_key)
+
+
+def note_turn_ended(state: RunState, command: TurnEnded, config: EngineConfig) -> ApplyResult:
     """Move a working slot to evaluating and receipt the fact. No handoff body is stored.
 
-    A nudge is emitted when ``decide`` is true for the slot status before that move.
+    A completed turn is a recovery: the slot's backoff and probe timers and its failed
+    turn are dropped, except a probe the slot's own ``plan_limit`` still waits on. A
+    nudge is emitted when ``decide`` is true for the slot status before that move.
+    While running, a turn end after ``nudge_limit`` nudges without a handoff pauses
+    ``rejected_calls`` instead; a nudge sent while paused is not counted.
     A second ``TurnEnded`` returns the receipt and emits nothing.
     """
     if any(item.key == command.fact_key for item in state.receipts):
@@ -69,17 +103,32 @@ def note_turn_ended(state: RunState, command: TurnEnded) -> ApplyResult:
         return refuse(state, "slot.superseded")
     seq = state.seq + 1
     effects: tuple[Effect, ...] = ()
+    nudges = slot.nudges
+    capped = False
     if decide(turn_ended_snapshot(command.origin), slot.status, fact_key=command.fact_key):
-        run_id = state.run_id if isinstance(state.run_id, str) else ""
-        effects = (
-            Effect(
-                effect_key=effect_key(run_id, seq, "nudge", slot.id),
-                kind="nudge",
-                subject=slot.id,
-                payload={"fact_key": command.fact_key},
-            ),
-        )
-    updated = _map_slot(state, slot.id, status="evaluating")
+        counted = state.status == "running"
+        if counted and nudges >= config.nudge_limit:
+            capped = True
+        else:
+            run_id = state.run_id if isinstance(state.run_id, str) else ""
+            effects = (
+                Effect(
+                    effect_key=effect_key(run_id, seq, "nudge", slot.id),
+                    kind="nudge",
+                    subject=slot.id,
+                    payload={"fact_key": command.fact_key},
+                ),
+            )
+            if counted:
+                nudges += 1
+    limited = any(
+        cause.reason == "plan_limit" and cause.subject == slot.id for cause in state.causes
+    )
+    kinds = (INFRA_BACKOFF,) if limited else (INFRA_BACKOFF, PLAN_PROBE)
+    recovered = drop_slot_backoff(state, (slot.id,), kinds)
+    updated = _map_slot(recovered, slot.id, status="evaluating", failed_turn=None, nudges=nudges)
+    if capped:
+        updated = record_pause(updated, "rejected_calls", "nudge_limit", slot.id)
     receipt = Receipt(key=command.fact_key, payload={"status": "evaluating"})
     updated = updated.model_copy(
         update={
@@ -125,6 +174,8 @@ def receive_handoff(
         status="evaluating",
         handoff=command.body,
         handoff_label=command.label,
+        nudges=0,
+        failed_turn=None,
     )
     updated = updated.model_copy(update={"seq": state.seq + 1})
     return ApplyResult(state=_rephase(updated, slot.activation_id))
@@ -206,6 +257,57 @@ def note_post_close(state: RunState, command: PostCloseActivity) -> ApplyResult:
     return ApplyResult(state=paused.model_copy(update={"seq": state.seq + 1}))
 
 
+def finish_pending_closes(
+    graph: CompiledGraph, state: RunState
+) -> tuple[RunState, tuple[Effect, ...]]:
+    """Close each slot whose close reported pending input, and finish its activation.
+
+    The close's commit already exists, so whoever returned the run to running accepts
+    that input. Stops when the run stops running; the rest wait for the next return.
+    """
+    owners = tuple(
+        dict.fromkeys(
+            slot.activation_id
+            for slot in state.slots
+            if slot.status == "closing" and slot.pending_input
+        )
+    )
+    effects: list[Effect] = []
+    for owner_id in owners:
+        if state.status != "running":
+            break
+        for slot in state.slots:
+            if slot.activation_id == owner_id and slot.status == "closing" and slot.pending_input:
+                state = _map_slot(state, slot.id, status="closed", pending_input=False)
+        state, spawned = _settle_activation(graph, state, owner_id)
+        effects.extend(spawned)
+    return state, tuple(effects)
+
+
+def mark_failed_turn(state: RunState, slot_id: str, fact_key: str) -> RunState:
+    """Remember the turn that failed so a later return to work re-prompts it."""
+    return _map_slot(state, slot_id, failed_turn=fact_key)
+
+
+def awaiting_effect(state: RunState, slot_id: str) -> bool:
+    """True while the slot's latest create, send or nudge has no receipt.
+
+    A slot with none of those effects is not waiting.
+    """
+    latest: Effect | None = None
+    latest_seq = -1
+    for effect in state.effects:
+        if effect.subject != slot_id or effect.kind not in _LEASED_KINDS:
+            continue
+        seq = _effect_seq(effect)
+        if latest is None or seq > latest_seq:
+            latest = effect
+            latest_seq = seq
+    if latest is None:
+        return False
+    return not any(item.key == latest.effect_key for item in state.receipts)
+
+
 def find_slot(state: RunState, slot_id: str) -> Slot | None:
     for slot in state.slots:
         if slot.id == slot_id:
@@ -275,7 +377,8 @@ def _nudged(
 ) -> ApplyResult:
     """The nudge started a turn. A slot still waiting for its handoff goes back to work.
 
-    A nudge for an older session generation only records its receipt.
+    Going back to work also clears its failed turn: this nudge is its re-prompt. A
+    nudge for an older session generation only records its receipt.
     """
     fact_key = effect.payload.get("fact_key")
     generation = turn_key_generation(fact_key) if isinstance(fact_key, str) else None
@@ -289,7 +392,7 @@ def _nudged(
         seq=state.seq + 1,
     )
     if waiting:
-        updated = _rephase(updated, slot.activation_id)
+        updated = _rephase(_map_slot(updated, slot.id, failed_turn=None), slot.activation_id)
     return ApplyResult(state=updated, receipt_key=effect.effect_key)
 
 
@@ -310,18 +413,20 @@ def _closed(
         seq=state.seq + 1,
     )
     if pending:
-        return ApplyResult(
-            state=_rephase(updated, slot.activation_id),
-            receipt_key=effect.effect_key,
-        )
-    owners = [item for item in updated.slots if item.activation_id == slot.activation_id]
+        # The slot stays closing until a return to running accepts the pending input.
+        updated = record_pause(updated, "drift", "pending_input", slot.id)
+    settled, spawned = _settle_activation(graph, updated, slot.activation_id)
+    return ApplyResult(state=settled, effects=spawned, receipt_key=effect.effect_key)
+
+
+def _settle_activation(
+    graph: CompiledGraph, state: RunState, owner_id: str
+) -> tuple[RunState, tuple[Effect, ...]]:
+    """Finish an activation whose slots are all closed; otherwise match it to its slots."""
+    owners = [item for item in state.slots if item.activation_id == owner_id]
     if owners and all(item.status == "closed" for item in owners):
-        finished, spawned = finish_activation(updated, graph, slot.activation_id)
-        return ApplyResult(state=finished, effects=spawned, receipt_key=effect.effect_key)
-    return ApplyResult(
-        state=_rephase(updated, slot.activation_id),
-        receipt_key=effect.effect_key,
-    )
+        return finish_activation(state, graph, owner_id)
+    return _rephase(state, owner_id), ()
 
 
 def _commit(
@@ -390,6 +495,18 @@ def _rephase(state: RunState, owner_id: str) -> RunState:
     else:
         status = "starting"
     return replace_activation(state, owner_id, status=status)
+
+
+def _effect_seq(effect: Effect) -> int:
+    """Seq embedded in ``{run_id}:{seq}:{kind}:{subject}``. Unknown keys sort first."""
+    marker = f":{effect.kind}:{effect.subject}"
+    if not effect.effect_key.endswith(marker):
+        return -1
+    seq_text = effect.effect_key[: -len(marker)].rsplit(":", 1)[-1]
+    try:
+        return int(seq_text)
+    except ValueError:
+        return -1
 
 
 def _in_progress(state: RunState) -> ApplyResult:

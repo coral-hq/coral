@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from coral.engine import empty_state, fold, transition
 from coral.engine.facts import TurnFact
-from coral.engine.reconcile import reconcile
+from coral.engine.reconcile import awaiting_effect, reconcile
 from coral.engine.types import (
     EffectCompleted,
     EngineConfig,
     HandoffEvaluated,
     HandoffReceived,
+    Input,
     PauseCause,
+    ResumeRun,
     RunnerLost,
     SessionFailed,
     StartRun,
@@ -23,7 +26,8 @@ from coral.engine.types import (
     UsageLimited,
     WaitingWithoutElicitation,
 )
-from tests.coral.engine.drive import NOW, drive
+from coral.model.ir import CompiledGraph
+from tests.coral.engine.drive import NOW, Driven, drive
 from tests.coral.workflow_builders import (
     arrow,
     compile_text,
@@ -137,27 +141,36 @@ def test_a_slot_with_no_session_effect_is_not_skipped() -> None:
     assert reconcile(bare, (_fact(),), NOW, CFG) == (TurnEnded(slot_id=SLOT, fact_key=FACT_KEY),)
 
 
-def test_unacked_send_input_suppresses_the_slot_until_it_completes() -> None:
+@pytest.mark.parametrize("kind", ["send_input", "nudge"])
+def test_an_unacked_leased_effect_suppresses_the_slot_until_it_completes(kind: str) -> None:
     graph = _graph()
-    started = transition(graph, empty_state(), RUN, NOW, CFG)
-    create = started.entry.effects[0]
-    assert create.kind == "create_session"
-    created = transition(
-        graph, started.state, EffectCompleted(effect_key=create.effect_key), NOW, CFG
-    )
-    brief = created.entry.effects[0]
-    assert brief.kind == "send_input"
-    assert reconcile(created.state, (_fact(),), NOW, CFG) == ()
+    if kind == "send_input":
+        started = transition(graph, empty_state(), RUN, NOW, CFG)
+        create = started.entry.effects[0]
+        assert create.kind == "create_session"
+        created = transition(
+            graph, started.state, EffectCompleted(effect_key=create.effect_key), NOW, CFG
+        )
+        log = [started.entry, created.entry]
+        state = created.state
+        fact = _fact()
+    else:
+        ended = drive(graph, [RUN, TurnEnded(slot_id=SLOT, fact_key=FACT_KEY)], config=CFG)
+        log = list(ended.log)
+        state = ended.state
+        fact = _fact(response_id="resp-2")
+    leased = next(effect for effect in reversed(state.effects) if effect.kind == kind)
+    assert awaiting_effect(state, SLOT)
+    assert reconcile(state, (fact,), NOW, CFG) == ()
 
-    working = transition(
-        graph, created.state, EffectCompleted(effect_key=brief.effect_key), NOW, CFG
-    )
+    working = transition(graph, state, EffectCompleted(effect_key=leased.effect_key), NOW, CFG)
     assert working.state.slots[0].status == "working"
-    emitted = reconcile(working.state, (_fact(),), NOW, CFG)
-    assert emitted == (TurnEnded(slot_id=SLOT, fact_key=FACT_KEY),)
+    assert not awaiting_effect(working.state, SLOT)
+    emitted = reconcile(working.state, (fact,), NOW, CFG)
+    fact_key = f"turn:sess-1:1:{fact.response_id}"
+    assert emitted == (TurnEnded(slot_id=SLOT, fact_key=fact_key),)
     applied = transition(graph, working.state, emitted[0], NOW, CFG)
-    log = (started.entry, created.entry, working.entry, applied.entry)
-    assert fold(graph, log, CFG) == applied.state
+    assert fold(graph, (*log, working.entry, applied.entry), CFG) == applied.state
 
 
 def test_a_stale_runner_emits_one_runner_lost_and_does_not_pause() -> None:
@@ -274,7 +287,12 @@ def test_runner_lost_emits_one_effect_and_agent_failed_pauses() -> None:
     assert lost.entry.effects[0].payload == {"session_id": "sess-1", "generation": 1}
     assert lost.state.status == "running"
     assert lost.state.causes == ()
-    assert all(timer.kind != "infra_backoff" for timer in lost.state.timers)
+    assert [timer.stage for timer in lost.state.timers if timer.kind == "infra_backoff"] == [
+        1,
+        2,
+        3,
+    ]
+    assert lost.state.slots[0].failed_turn == FACT_KEY
     assert fold(graph, (*running.log, lost.entry), CFG) == lost.state
     assert reconcile(lost.state, (fact,), NOW, CFG) == ()
     duplicate = transition(graph, lost.state, failure, NOW, CFG)
@@ -434,7 +452,8 @@ def test_transient_failure_receipts_the_fact_so_reconcile_goes_empty() -> None:
     assert failed.state.status == "running"
     assert [timer.stage for timer in failed.state.timers] == [1, 2, 3]
     assert reconcile(failed.state, (fact,), NOW, CFG) == ()
-    due = transition(graph, failed.state, TimerDue(timer_key=failed.state.timers[0].key), NOW, CFG)
+    stage_one = failed.state.timers[0]
+    due = transition(graph, failed.state, TimerDue(timer_key=stage_one.key), stage_one.due_at, CFG)
     assert [timer.stage for timer in due.state.timers] == [2, 3]
     later = NOW + timedelta(hours=1)
     again = transition(graph, due.state, command, later, CFG)
@@ -450,3 +469,81 @@ def test_a_naive_now_raises() -> None:
     running = drive(graph, [RUN], config=CFG)
     with pytest.raises(ValueError, match="timezone-aware"):
         reconcile(running.state, (), datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None), CFG)
+
+
+def test_a_second_runner_loss_of_one_session_arms_the_ladder_again() -> None:
+    graph = _graph()
+    running = drive(graph, [RUN], config=CFG)
+    lost = _at(graph, running, [_runner_lost("a")], NOW)
+    assert [effect.kind for effect in lost.log[-1].effects] == ["runner_lost"]
+    assert lost.state.slots[0].failed_turn == "turn:sess-1:1:msg:a"
+    first, _second, _third = lost.state.timers
+
+    # Stage 1 re-prompts, and the re-prompted turn completes: a recovery.
+    nudged = _at(graph, lost, [TimerDue(timer_key=first.key)], first.due_at)
+    recovered = _at(
+        graph,
+        _delivered(graph, nudged, first.due_at),
+        [TurnEnded(slot_id=SLOT, fact_key="turn:sess-1:1:msg:b")],
+        first.due_at,
+    )
+    assert recovered.state.timers == ()
+    assert recovered.state.slots[0].failed_turn is None
+    working = _delivered(graph, recovered, first.due_at)
+
+    # The same session and generation is lost again later: only the fact's receipt, no second
+    # runner_lost, but the ladder is armed and the slot marked like the first time.
+    later = first.due_at + timedelta(hours=1)
+    again = _at(graph, working, [_runner_lost("c")], later)
+    entry = again.log[-1]
+    assert (entry.rejection, entry.effects, entry.receipt_key) == (
+        None,
+        (),
+        "turn:sess-1:1:msg:c",
+    )
+    assert again.state.slots[0].failed_turn == "turn:sess-1:1:msg:c"
+    first, second, third = again.state.timers
+    assert [timer.due_at for timer in (first, second, third)] == [
+        later + delay for delay in CFG.timer_policy.infra_backoff
+    ]
+
+    # The slot keeps failing after each re-prompt, so stage 3 pauses infra.
+    retried = _delivered(
+        graph, _at(graph, again, [TimerDue(timer_key=first.key)], first.due_at), first.due_at
+    )
+    failing = _at(graph, retried, [_runner_lost("d")], first.due_at + timedelta(seconds=1))
+    assert failing.log[-1].effects == ()
+    assert failing.state.timers == (second, third)
+    retried = _delivered(
+        graph, _at(graph, failing, [TimerDue(timer_key=second.key)], second.due_at), second.due_at
+    )
+    failing = _at(graph, retried, [_runner_lost("e")], second.due_at + timedelta(seconds=1))
+    paused = _at(graph, failing, [TimerDue(timer_key=third.key)], third.due_at)
+    assert paused.state.status == "paused"
+    assert paused.state.causes == (
+        PauseCause(reason="infra", detail="infra.transient", subject=SLOT),
+    )
+
+    resumed = _at(graph, paused, [ResumeRun()], third.due_at)
+    assert [(effect.kind, effect.payload) for effect in resumed.log[-1].effects] == [
+        ("nudge", {"fact_key": "turn:sess-1:1:msg:e", "reason": "resume"})
+    ]
+
+
+def _runner_lost(tail: str) -> SessionFailed:
+    return SessionFailed(
+        slot_id=SLOT,
+        failure_class="infra.runner_lost",
+        cause="runner_disconnected",
+        fact_key=f"turn:sess-1:1:msg:{tail}",
+    )
+
+
+def _at(graph: CompiledGraph, driven: Driven, commands: Sequence[Input], now: datetime) -> Driven:
+    return drive(graph, commands, config=CFG, after=driven, now=now)
+
+
+def _delivered(graph: CompiledGraph, driven: Driven, now: datetime) -> Driven:
+    """Complete the newest nudge, as its send would."""
+    nudge = next(effect for effect in reversed(driven.state.effects) if effect.kind == "nudge")
+    return _at(graph, driven, [EffectCompleted(effect_key=nudge.effect_key)], now)

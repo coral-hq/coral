@@ -22,6 +22,7 @@ from coral.engine.machines import (
     choose_arrow,
     complete_effect,
     evaluate_handoff,
+    fail_effect,
     note_blocked,
     note_evidence_missing,
     note_post_close,
@@ -40,6 +41,7 @@ from coral.engine.types import (
     ChooseArrow,
     Effect,
     EffectCompleted,
+    EffectFailed,
     EngineConfig,
     HandoffEvaluated,
     HandoffReceived,
@@ -120,6 +122,8 @@ def _dispatch(
 ) -> ApplyResult:
     if isinstance(command, EffectCompleted):
         return _effect_completed(graph, state, command)
+    if isinstance(command, EffectFailed):
+        return _effect_failed(state, command)
     if isinstance(command, StartRun):
         return start_run(graph, state, command, config)
     if state.status == "cancelled" and isinstance(
@@ -155,7 +159,7 @@ def _dispatch(
     if isinstance(command, RejectionObserved):
         return note_rejection(state, command)
     if isinstance(command, TurnEnded):
-        return note_turn_ended(state, command)
+        return note_turn_ended(state, command, config)
     if isinstance(command, RunnerLost):
         return note_runner_lost(state, command)
     if isinstance(command, UsageLimited):
@@ -196,6 +200,20 @@ def _effect_completed(
     if effect is None:
         return refuse_unknown(state)
     return complete_effect(graph, state, effect, command)
+
+
+def _effect_failed(state: RunState, command: EffectFailed) -> ApplyResult:
+    prior = _find_receipt(state, command.effect_key)
+    if prior is not None:
+        return ApplyResult(state=state, receipt_key=prior.key)
+    if state.status is None:
+        return refuse_unknown(state)
+    if state.status in TERMINAL_STATUSES:
+        return refuse(state, "run_terminal")
+    effect = _find_effect(state, command.effect_key)
+    if effect is None:
+        return refuse_unknown(state)
+    return fail_effect(state, effect, command)
 
 
 def _find_receipt(state: RunState, key: str) -> Receipt | None:

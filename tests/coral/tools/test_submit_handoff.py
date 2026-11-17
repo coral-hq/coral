@@ -15,7 +15,6 @@ from coral.db.enum_codecs import (
     SessionBindingRole,
     SlotRole,
 )
-from coral.engine.lifecycle import REJECTED_CALL_LIMIT
 from coral.engine.types import (
     CancelRun,
     EffectCompleted,
@@ -548,13 +547,14 @@ async def test_third_invalid_handoff_pauses_rejected_calls(
     port: InMemoryDecisionPort, dispatcher: ToolDispatcher
 ) -> None:
     port.add_run(_plain())
-    assert REJECTED_CALL_LIMIT == 3
+    limit = port.state().rejected_call_limit
+    assert limit == 3
     for number in (1, 2, 3):
         reply = await dispatcher.dispatch(_call(_done(status="maybe"), op=f"op-{number}"))
         _refused(reply, "handoff.invalid")
         assert (reply.field, reply.allowed_values) == ("status", ("done", "blocked"))
         assert _streak(port) == number
-        if number < REJECTED_CALL_LIMIT:
+        if number < limit:
             assert reply.next == "Fix status and call coral_submit_handoff again."
         else:
             # The refusal that pauses the run says stop instead of asking for a fix.
@@ -600,6 +600,20 @@ async def test_a_session_that_is_not_a_step_of_the_run_is_not_run_member(
     _refused(reply, "not_run_member")
     assert reply.allowed_values == ()
     _untouched(port, version, log_length)
+
+
+def test_the_planner_says_stop_at_the_run_s_own_rejected_call_limit(
+    port: InMemoryDecisionPort,
+) -> None:
+    port.add_run(_plain())
+    state = port.state().model_copy(update={"rejected_call_limit": 1})
+    snapshot = RunSnapshot(run=port.row(), graph=_plain(), state=state)
+
+    planned = plan(snapshot, call=_call(_done(status="maybe")))
+
+    assert isinstance(planned, Commit)
+    assert planned.inputs == (RejectionObserved(slot_id=SLOT, code="handoff.invalid"),)
+    assert planned.reply.next == stop_paused("rejected_calls")
 
 
 def test_the_planner_checks_the_binding_names_the_snapshot_run(port: InMemoryDecisionPort) -> None:

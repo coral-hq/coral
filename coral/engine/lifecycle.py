@@ -15,14 +15,21 @@ from coral.engine.machines.activation import (
     traverse_arrow,
 )
 from coral.engine.machines.run import record_pause, refuse, refuse_unknown
-from coral.engine.machines.slot import find_slot
+from coral.engine.machines.slot import (
+    awaiting_effect,
+    find_slot,
+    finish_pending_closes,
+    mark_failed_turn,
+)
 from coral.engine.timers import (
     INFRA_BACKOFF,
     PLAN_PROBE,
     WATCHDOG_KINDS,
     arm_infra_backoff,
     arm_plan_probe,
+    drop_slot_backoff,
     find_timer,
+    has_live_timer,
     rearm_plan_probe,
 )
 from coral.engine.types import (
@@ -32,6 +39,7 @@ from coral.engine.types import (
     Decision,
     Effect,
     InfraBackoffExhausted,
+    PauseCause,
     PauseReason,
     PauseRun,
     Receipt,
@@ -67,8 +75,8 @@ _RESUME_REASONS: frozenset[PauseReason] = frozenset(
 )
 _RETRY_REASONS: frozenset[PauseReason] = frozenset({"infra", "failure_path", "liveness"})
 _COUNTED_REJECTIONS = frozenset({"handoff.invalid", "tool.illegal"})
-# The counted rejection of a slot that pauses the run ``rejected_calls``.
-REJECTED_CALL_LIMIT = 3
+# A failed turn of a slot in these states came after its accepted handoff.
+_HANDED_OFF = frozenset({"closing", "closed"})
 _RETRY_PHASES: tuple[str, ...] = (
     "fence_stop",
     "create_unbriefed",
@@ -78,13 +86,22 @@ _RETRY_PHASES: tuple[str, ...] = (
 
 
 def pause_run(state: RunState, command: PauseRun) -> ApplyResult:
-    """Record ``command`` with an empty subject. Priority order lives in ``record_pause``."""
+    """Record ``command`` with an empty subject. An identical cause already present is a no-op.
+
+    Priority order lives in ``record_pause``.
+    """
+    if PauseCause(reason=command.reason, detail=command.detail, subject="") in state.causes:
+        return ApplyResult(state=state)
     paused = record_pause(state, command.reason, command.detail, "")
     return ApplyResult(state=paused.model_copy(update={"seq": state.seq + 1}))
 
 
 def resume_run(graph: CompiledGraph, state: RunState, command: ResumeRun) -> ApplyResult:
-    """Clear the causes ResumeRun is allowed to clear. A miss changes nothing."""
+    """Clear the causes ResumeRun is allowed to clear. A miss changes nothing.
+
+    A run that is running again finishes pending closes, advances, and re-prompts its
+    failed and stopped slots.
+    """
     reasons: set[PauseReason] = set()
     for cause in state.causes:
         if cause.reason in _RESUME_REASONS:
@@ -104,10 +121,14 @@ def resume_run(graph: CompiledGraph, state: RunState, command: ResumeRun) -> App
         changes["reject_streaks"] = tuple(
             item.model_copy(update={"count": 0}) for item in updated.reject_streaks
         )
+        changes["slots"] = tuple(item.model_copy(update={"nudges": 0}) for item in updated.slots)
     updated = updated.model_copy(update=changes)
     effects: tuple[Effect, ...] = ()
     if updated.status == "running":
         updated, effects = _advance_closed(graph, updated)
+    if updated.status == "running":
+        updated, nudges = _reprompt(updated, "resume")
+        effects = (*effects, *nudges)
     return ApplyResult(state=updated, effects=effects)
 
 
@@ -149,7 +170,11 @@ def cancel_run(state: RunState) -> ApplyResult:
 
 
 def retry_step(graph: CompiledGraph, state: RunState, command: RetryStep) -> ApplyResult:
-    """Reopen one activation. The retry phases are named, not run."""
+    """Reopen one activation. The retry phases are named, not run.
+
+    A run that is running again finishes pending closes, advances, and re-prompts the
+    failed and stopped slots of other activations, as resume does.
+    """
     owner_id = activation_id(command.node_id, command.item_path, command.iteration_path)
     if find_activation(state, owner_id) is None:
         return refuse_unknown(state)
@@ -157,7 +182,7 @@ def retry_step(graph: CompiledGraph, state: RunState, command: RetryStep) -> App
         return refuse(state, "resume_not_allowed")
     cleared = _drop_causes(state, _RETRY_REASONS)
     slot_ids = {slot.id for slot in state.slots if slot.activation_id == owner_id}
-    cleared = _drop_slot_backoff(cleared, slot_ids)
+    cleared = drop_slot_backoff(cleared, slot_ids)
     seq = state.seq + 1
     retried, effects = _retry_slots(cleared, owner_id, seq)
     retried = replace_activation(
@@ -175,13 +200,16 @@ def retry_step(graph: CompiledGraph, state: RunState, command: RetryStep) -> App
     if retried.status == "running":
         retried, spawned = _advance_closed(graph, retried)
         effects = (*effects, *spawned)
+    if retried.status == "running":
+        retried, nudges = _reprompt(retried, "resume")
+        effects = (*effects, *nudges)
     return ApplyResult(state=retried, effects=effects)
 
 
 def note_rejection(state: RunState, command: RejectionObserved) -> ApplyResult:
     """Count ``handoff.invalid`` and ``tool.illegal``.
 
-    The ``REJECTED_CALL_LIMIT``-th in a row pauses ``rejected_calls``.
+    The run's ``rejected_call_limit``-th in a row pauses ``rejected_calls``.
     """
     slot = find_slot(state, command.slot_id)
     if slot is None:
@@ -192,7 +220,7 @@ def note_rejection(state: RunState, command: RejectionObserved) -> ApplyResult:
         return ApplyResult(state=state)
     count = _streak(state, slot.id) + 1
     updated = _set_streak(state, slot.id, count)
-    if count >= REJECTED_CALL_LIMIT:
+    if count >= state.rejected_call_limit:
         updated = record_pause(updated, "rejected_calls", command.code, slot.id)
     return ApplyResult(state=updated.model_copy(update={"seq": state.seq + 1}))
 
@@ -217,10 +245,15 @@ def note_runner_lost(state: RunState, command: RunnerLost) -> ApplyResult:
 def note_usage_limited(
     state: RunState, command: UsageLimited, now: datetime, policy: TimerPolicy
 ) -> ApplyResult:
-    """Pause ``plan_limit`` and arm the ``plan.usage_limit`` probe. No account switch."""
+    """Pause ``plan_limit`` and arm the ``plan.usage_limit`` probe. No account switch.
+
+    A slot that already handed off refuses a fact it has not receipted: ``slot.closed``.
+    """
     if _has_receipt(state, command.fact_key):
         return ApplyResult(state=state, receipt_key=command.fact_key)
     slot = find_slot(state, command.slot_id)
+    if slot is not None and slot.status in _HANDED_OFF:
+        return refuse(state, "slot.closed")
     if slot is None:
         return refuse_unknown(state)
     if _fact_is_stale(slot, command.fact_key):
@@ -251,16 +284,22 @@ def note_waiting_without_elicitation(
 def note_session_failed(
     state: RunState, command: SessionFailed, now: datetime, policy: TimerPolicy
 ) -> ApplyResult:
-    """Emit the outcome-table effects and apply that class's pause.
+    """Mark the slot's failed turn, keep or arm its ladder, and apply that class's pause.
 
-    Runner loss already emits one ``runner_lost`` effect. ``outcomes`` describes that
-    same kind, and this path does not emit a second copy.
+    A receipted fact answers with its receipt. Otherwise a slot that already handed off
+    refuses ``slot.closed``, runner loss included. A ladder still live after ``now`` is
+    kept, so a re-prompted turn that fails again does not restart it; the ``arm_timer``
+    effects are emitted only when arming. Runner loss already emits one ``runner_lost``
+    effect. ``outcomes`` describes that same kind, and this path does not emit a second
+    copy.
     """
-    if command.failure_class == "infra.runner_lost":
-        return _session_runner_lost(state, command)
     if _has_receipt(state, command.fact_key):
         return ApplyResult(state=state, receipt_key=command.fact_key)
     slot = find_slot(state, command.slot_id)
+    if slot is not None and slot.status in _HANDED_OFF:
+        return refuse(state, "slot.closed")
+    if command.failure_class == "infra.runner_lost":
+        return _session_runner_lost(state, command, now, policy)
     if slot is None:
         return refuse_unknown(state)
     if _fact_is_stale(slot, command.fact_key):
@@ -269,11 +308,18 @@ def note_session_failed(
     if cause is None and command.failure_class != "infra.transient":
         return refuse(state, "not_supported")
     table = outcomes(command.failure_class, slot.id, now, policy)
-    updated = state
+    updated = mark_failed_turn(state, slot.id, command.fact_key)
+    armed = True
     if command.failure_class == "infra.transient":
-        updated = arm_infra_backoff(updated, slot.id, slot.session_generation, now, policy)
+        updated, armed = _arm_infra_unless_live(updated, slot, now, policy)
     elif cause is not None and cause.reason == "plan_limit":
-        updated = arm_plan_probe(updated, slot.id, slot.session_generation, now, policy)
+        armed = not has_live_timer(updated, PLAN_PROBE, slot.id, now)
+        if armed:
+            # A past-due probe that has not fired yet must not clear the new pause at once.
+            updated = drop_slot_backoff(updated, (slot.id,), (PLAN_PROBE,))
+            updated = arm_plan_probe(updated, slot.id, slot.session_generation, now, policy)
+    if not armed:
+        table = tuple(effect for effect in table if effect.kind != "arm_timer")
     if cause is not None:
         updated = record_pause(updated, cause.reason, cause.detail, cause.subject)
     return _commit_outbox(
@@ -308,16 +354,16 @@ def apply_timer_due(
     now: datetime,
     policy: TimerPolicy,
 ) -> ApplyResult:
-    """Fire one due timer. An unknown or disarmed key is an audit no-op."""
+    """Fire one due timer. An unknown, disarmed or not yet due key is an audit no-op."""
     timer = find_timer(state, command.timer_key)
-    if timer is None:
+    if timer is None or timer.due_at > now:
         return ApplyResult(state=state)
     if timer.kind in {INFRA_BACKOFF, PLAN_PROBE} and _timer_is_stale(state, timer):
         kept = tuple(item for item in state.timers if item.key != timer.key)
         dropped = state.model_copy(update={"timers": kept, "seq": state.seq + 1})
         return ApplyResult(state=dropped)
     if timer.kind in WATCHDOG_KINDS:
-        return _watchdog_due(state, timer)
+        return _watchdog_due(state, timer, now)
     if timer.kind == INFRA_BACKOFF:
         return _infra_due(state, timer)
     if timer.kind == PLAN_PROBE:
@@ -326,18 +372,23 @@ def apply_timer_due(
 
 
 def _advance_closed(graph: CompiledGraph, state: RunState) -> tuple[RunState, tuple[Effect, ...]]:
-    """Open targets the cap refused, then the forwards of closed activations.
+    """Finish pending closes, open targets the cap refused, then closed activations' forwards.
 
-    A choice, a gate answer, and a join arrival are already recorded when the cap
-    pauses, so those opens are replayed from that receipt. Back arrows and failure
-    arrows are left alone: a back arrow would bump its loop counter. A target that
-    already has an activation at this scope is not opened again. A step routed by
-    label that closed while paused follows its stored label once, back arrow included.
+    A close that reported pending input finishes on every return to running. A choice,
+    a gate answer, and a join arrival are already recorded when the cap pauses, so
+    those opens are replayed from that receipt. Back arrows and failure arrows are left
+    alone: a back arrow would bump its loop counter. A target that already has an
+    activation at this scope is not opened again. A step routed by label that closed
+    while paused follows its stored label once, back arrow included.
     """
     if state.status != "running":
         return state, ()
-    state, effects_list = _open_refused(graph, state)
-    effects: list[Effect] = list(effects_list)
+    state, finished = finish_pending_closes(graph, state)
+    effects: list[Effect] = list(finished)
+    if state.status != "running":
+        return state, tuple(effects)
+    state, opened = _open_refused(graph, state)
+    effects.extend(opened)
     sources = tuple(
         item
         for item in state.activations
@@ -368,14 +419,17 @@ def _advance_closed(graph: CompiledGraph, state: RunState) -> tuple[RunState, tu
     return state, tuple(effects)
 
 
-def _watchdog_due(state: RunState, timer: Timer) -> ApplyResult:
-    """Emit the newest armed stage once and disarm every watchdog for that subject."""
-    armed = [
+def _watchdog_due(state: RunState, timer: Timer, now: datetime) -> ApplyResult:
+    """Emit the newest stage already due once, and disarm only the stages already due.
+
+    The reminder comes at its own due time and the alert at its own, later one.
+    """
+    due = [
         item
         for item in state.timers
-        if item.subject == timer.subject and item.kind in WATCHDOG_KINDS
+        if item.subject == timer.subject and item.kind in WATCHDOG_KINDS and item.due_at <= now
     ]
-    newest = max(armed, key=lambda item: item.stage)
+    newest = max(due, key=lambda item: item.stage)
     stage_name = "alert" if newest.stage >= 2 else "reminder"
     seq = state.seq + 1
     effect = _effect(
@@ -385,11 +439,7 @@ def _watchdog_due(state: RunState, timer: Timer) -> ApplyResult:
         timer.subject,
         {"kind": "watchdog", "stage": stage_name},
     )
-    kept = tuple(
-        item
-        for item in state.timers
-        if item.subject != timer.subject or item.kind not in WATCHDOG_KINDS
-    )
+    kept = tuple(item for item in state.timers if item not in due)
     decisions = _mark_decision(state, timer.subject, newest.stage)
     changes: dict[str, object] = {
         "timers": kept,
@@ -402,25 +452,36 @@ def _watchdog_due(state: RunState, timer: Timer) -> ApplyResult:
 
 
 def _infra_due(state: RunState, timer: Timer) -> ApplyResult:
-    """Stages 1 and 2 disarm only themselves. Stage 3 pauses ``infra``."""
+    """Stages 1 and 2 re-prompt a failed turn. Stage 3 pauses ``infra`` if it keeps failing.
+
+    A slot that is not working only disarms the stage. Stage 3 pauses only while the
+    slot is marked failed or its re-prompt is undelivered: a re-prompted turn that is
+    still running is left alone.
+    """
     kept = tuple(item for item in state.timers if item.key != timer.key)
-    base = state.model_copy(update={"timers": kept})
+    base = state.model_copy(update={"timers": kept, "seq": state.seq + 1})
+    slot = find_slot(base, timer.subject)
+    if slot is None or slot.status != "working":
+        return ApplyResult(state=base)
     if timer.stage < 3:
-        return ApplyResult(state=base.model_copy(update={"seq": state.seq + 1}))
-    paused = record_pause(base, "infra", "infra.transient", timer.subject)
-    return ApplyResult(state=paused.model_copy(update={"seq": state.seq + 1}))
+        nudged, effects = _reprompt(base, "backoff", only=slot.id)
+        return ApplyResult(state=nudged, effects=effects)
+    if slot.failed_turn is None and not awaiting_effect(base, slot.id):
+        return ApplyResult(state=base)
+    return ApplyResult(state=record_pause(base, "infra", "infra.transient", timer.subject))
 
 
 def _plan_due(
     graph: CompiledGraph, state: RunState, timer: Timer, now: datetime, policy: TimerPolicy
 ) -> ApplyResult:
-    """Clear ``plan_limit`` and arm the next probe. A due with no such cause is a no-op.
+    """Clear ``plan_limit``, arm the next probe, and re-prompt once the run is running.
 
-    The due row is disarmed only when it clears the pause. The next probe does not
-    fire another one after the pause is gone.
+    A due with no such cause only disarms its own key, so a probe left from an earlier
+    limit never blocks the next one.
     """
     if not any(cause.reason == "plan_limit" for cause in state.causes):
-        return ApplyResult(state=state)
+        kept = tuple(item for item in state.timers if item.key != timer.key)
+        return ApplyResult(state=state.model_copy(update={"timers": kept, "seq": state.seq + 1}))
     rearmed, row = rearm_plan_probe(state, timer, now, policy)
     seq = state.seq + 1
     run_id = state.run_id if isinstance(state.run_id, str) else ""
@@ -435,7 +496,10 @@ def _plan_due(
     spawned: tuple[Effect, ...] = ()
     if cleared.status == "running":
         cleared, spawned = _advance_closed(graph, cleared)
-    return ApplyResult(state=cleared, effects=(*probe, *spawned))
+    nudges: tuple[Effect, ...] = ()
+    if cleared.status == "running":
+        cleared, nudges = _reprompt(cleared, "resume")
+    return ApplyResult(state=cleared, effects=(*probe, *spawned, *nudges))
 
 
 def _mark_decision(state: RunState, subject: str, stage: int) -> tuple[Decision, ...]:
@@ -475,6 +539,9 @@ def _retry_slots(state: RunState, owner_id: str, seq: int) -> tuple[RunState, tu
                     "session_generation": generation,
                     "handoff": None,
                     "handoff_label": None,
+                    "pending_input": False,
+                    "failed_turn": None,
+                    "nudges": 0,
                 }
             )
         )
@@ -608,16 +675,44 @@ def _loop_scope(actual: tuple[str, ...], base: tuple[str, ...], prefix: str) -> 
     return len(actual) == len(base) + 1 and actual[:-1] == base and actual[-1].startswith(prefix)
 
 
-def _drop_slot_backoff(state: RunState, slot_ids: set[str]) -> RunState:
-    """Drop infra and plan timers for slots a retry is replacing."""
-    kept = tuple(
-        timer
-        for timer in state.timers
-        if timer.kind not in {INFRA_BACKOFF, PLAN_PROBE} or timer.subject not in slot_ids
+def _reprompt(
+    state: RunState, reason: str, *, only: str | None = None
+) -> tuple[RunState, tuple[Effect, ...]]:
+    """Nudge each slot whose turn failed or that stopped without a handoff, once.
+
+    That is a working slot with ``failed_turn``, or an evaluating slot with no handoff,
+    whose latest nudge is delivered (``awaiting_effect``). Its mark is cleared. ``only``
+    limits it to one slot.
+    """
+    effects: list[Effect] = []
+    slots: list[Slot] = []
+    for slot in state.slots:
+        failed = slot.status == "working" and slot.failed_turn is not None
+        stopped = slot.status == "evaluating" and slot.handoff is None
+        if (only is not None and slot.id != only) or not (failed or stopped):
+            slots.append(slot)
+            continue
+        if awaiting_effect(state, slot.id):
+            slots.append(slot)
+            continue
+        payload: dict[str, JsonValue] = {"fact_key": slot.failed_turn or "", "reason": reason}
+        effects.append(_effect(state, state.seq, "nudge", slot.id, payload))
+        slots.append(slot.model_copy(update={"failed_turn": None}))
+    if not effects:
+        return state, ()
+    updated = state.model_copy(
+        update={"slots": tuple(slots), "effects": (*state.effects, *effects)}
     )
-    if kept == state.timers:
-        return state
-    return state.model_copy(update={"timers": kept})
+    return updated, tuple(effects)
+
+
+def _arm_infra_unless_live(
+    state: RunState, slot: Slot, now: datetime, policy: TimerPolicy
+) -> tuple[RunState, bool]:
+    """Arm stages 1-3 unless the slot's ladder still has a stage due after ``now``."""
+    if has_live_timer(state, INFRA_BACKOFF, slot.id, now):
+        return state, False
+    return arm_infra_backoff(state, slot.id, slot.session_generation, now, policy), True
 
 
 def _fact_is_stale(slot: Slot, fact_key: str) -> bool:
@@ -643,8 +738,15 @@ def _receipt_only(state: RunState, key: str, payload: dict[str, JsonValue]) -> A
     return ApplyResult(state=updated, receipt_key=key)
 
 
-def _session_runner_lost(state: RunState, command: SessionFailed) -> ApplyResult:
-    """Receipt the turn and the runner key so one loss emits one effect."""
+def _session_runner_lost(
+    state: RunState, command: SessionFailed, now: datetime, policy: TimerPolicy
+) -> ApplyResult:
+    """Receipt the turn and the runner key so one loss emits one effect.
+
+    Every loss marks the failed turn and arms the infra ladder unless one is live, so
+    stage nudges relaunch the runner and a slot that keeps failing pauses ``infra``. A
+    repeated loss of one session generation records only the turn's receipt.
+    """
     if _has_receipt(state, command.fact_key):
         return ApplyResult(state=state, receipt_key=command.fact_key)
     slot = find_slot(state, command.slot_id)
@@ -655,9 +757,12 @@ def _session_runner_lost(state: RunState, command: SessionFailed) -> ApplyResult
     session_id, generation = _session_from_turn_key(command.fact_key, slot.session_generation)
     runner_key = f"runner:{session_id}:{generation}"
     payload: dict[str, JsonValue] = {"session_id": session_id, "generation": generation}
+    marked, _armed = _arm_infra_unless_live(
+        mark_failed_turn(state, slot.id, command.fact_key), slot, now, policy
+    )
     if _has_receipt(state, runner_key):
-        return _receipt_only(state, command.fact_key, {"failure_class": "infra.runner_lost"})
-    return _emit_runner_lost(state, slot.id, payload, (runner_key, command.fact_key))
+        return _receipt_only(marked, command.fact_key, {"failure_class": "infra.runner_lost"})
+    return _emit_runner_lost(marked, slot.id, payload, (runner_key, command.fact_key))
 
 
 def _emit_runner_lost(
