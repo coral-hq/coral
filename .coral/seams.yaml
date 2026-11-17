@@ -2252,3 +2252,100 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S52
+    title: Required-policy providers ahead of every policy
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `omnigent/runtime/policies/required_providers.py` holds a process-wide,
+      lock-guarded registry of required-policy providers keyed by name.
+      register_required_policy_provider(name, provider) refuses a name that is
+      not 1-64 letters, digits, `_`, `.` or `-` starting with a letter or
+      digit (ValueError) and an object without callable applies and specs
+      (TypeError); registering a name again replaces it, with a warning when
+      the provider changes; it returns an idempotent unregister that removes
+      only its own registration. A provider has applies(spec, conversation),
+      which the policy fast path calls on the event loop, so it must be O(1)
+      with no I/O (conversation may be None), and specs(spec, conversation),
+      which every engine build calls in a worker thread with the refreshed
+      row. `spec` is the session's bound spec, the root bundle's spec for a
+      sub-agent session. required_policies_apply is true when any provider
+      applies; an applies that raises, or whose answer's truth test raises,
+      counts as applying. required_policy_specs returns nothing without a row
+      and otherwise the applying providers' specs in provider-name order; a
+      provider whose specs raises, or returns anything but FunctionPolicySpec
+      values that resolve (path imports, factory runs), contributes one
+      `__required_policy_unavailable:<name>` policy built from
+      deny_tool_calls, which denies that session's tool calls with a
+      stop-now reason that names the provider and allows every other event,
+      so a provider bug in specs never blocks requests or engine sends. A
+      failing provider logs one traceback per registration at error and one
+      line (with the session id) per failure after that. Provider factories
+      run twice per build, so they must be deterministic and cheap; provider
+      policies see a tool call's arguments before later policies rewrite
+      them, and must be limited to tool calls and never raise while
+      evaluating, because a policy that raises during evaluation is a DENY
+      for whatever phase it ran on. Two lines in
+      `omnigent/runtime/policies/builder.py`: any_policies_apply returns True
+      when required_policies_apply does (after the built-in approval-tool
+      check), and build_policy_engine sets all_policy_specs to the provider
+      specs for the refreshed row followed by the existing list right after
+      root session-policy inheritance, the last of its three assembly sites,
+      so the specs lead root, sub-agent and inheriting-child builds alike and
+      every engine build gets them: the /mcp proxy (the MCP gateway adapter
+      included), POST /policies/evaluate (so S21's claude-sdk hook) and the
+      relay tool-call and approval paths. Prepending lets a provider's DENY
+      decide first and keeps earlier policies' label and state writes from
+      being applied on that call. With no provider registered, or none that
+      applies, both functions behave as before. Residuals: one registry per
+      process (the later lifespan's registration wins); an applies that
+      always fails claims every session, so a provider whose specs also
+      fails denies tool calls server-wide; the input and output gates still
+      skip the build for a session with no guardrails, no default policies
+      and no policy store, so a provider's request or response policies do
+      not run there (Coral's providers act on tool calls only); when the
+      session's agent row is missing, POST /policies/evaluate answers
+      unspecified and the relay tool-call path allows before any policy is
+      built, so providers are not consulted there, and only /mcp fails
+      closed ("Agent not found"); an approval granted for an unrelated ASK
+      (a user or admin policy) is not re-checked on the native/S21 ASK gate
+      or the relay path, so a provider DENY that appears during the human
+      wait (for example a run paused meanwhile) does not stop that one
+      approved call, while /mcp re-evaluates on its retry and the provider
+      wins.
+    files:
+      - omnigent/runtime/policies/required_providers.py
+      - omnigent/runtime/policies/builder.py
+      - tests/runtime/policies/test_required_policy_provider.py
+    tests:
+      - tests/runtime/policies/test_required_policy_provider.py
+    budget_lines: 40
+    budget_exception:
+      lines: 428
+      reason: >-
+        tests/runtime/policies/test_required_policy_provider.py (new, 428
+        lines) builds real engines over a real conversation and policy store:
+        provider specs leading the root, inheriting-child and sub-agent
+        assembly paths with the unchanged policy list beside them (no provider
+        and a provider that does not apply); a provider DENY across two
+        rebuilds that stops a later ALLOW-and-write policy's label write, an
+        unclaimed session untouched and the baseline after unregister; four
+        provider failures (specs raises, a non-spec answer, an unbuildable
+        path, a raising factory) that deny only that session's tool calls,
+        including over the built-in sys_add_policy approval, allow its
+        requests, leave a healthy session alone and log one traceback then
+        one line; the fast path, including an applies that raises and one
+        whose answer cannot be tested for truth; no row; name order,
+        replacement, identity-checked unregister, invalid names and objects
+        without applies and specs.
+        omnigent/runtime/policies/required_providers.py (new, 228 lines)
+        holds the provider protocol and its contract, the registry, the
+        guarded spec collection, the failure log and the deny-tool-calls
+        factory with docstrings. omnigent/runtime/policies/builder.py (11) is
+        within budget.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

@@ -40,6 +40,12 @@ from omnigent.policies.schema import (
 from omnigent.policies.types import PolicyLLMClient
 from omnigent.runtime.credentials.databricks import resolve_databricks_workspace
 from omnigent.runtime.policies.engine import PolicyEngine
+
+# CORAL(S52): registered providers' required policies lead every build.
+from omnigent.runtime.policies.required_providers import (
+    required_policies_apply,
+    required_policy_specs,
+)
 from omnigent.spec.types import (
     DEFAULT_ASK_TIMEOUT,
     AgentSpec,
@@ -455,6 +461,9 @@ def any_policies_apply(
         tool_name == "sys_add_policy" or tool_name in SCHEDULED_TASK_APPROVAL_TOOLS
     ):
         return True
+    # CORAL(S52): a session a registered provider claims always evaluates.
+    if required_policies_apply(spec, conversation):
+        return True
     if spec.guardrails and spec.guardrails.policies:
         return True
     child_spec = _resolve_sub_agent_spec(spec, conversation)
@@ -770,6 +779,8 @@ def build_policy_engine(
             + admin_policy_specs
             + list(_REQUIRED_APPROVAL_SPECS)
         )
+    # CORAL(S52): after the last assembly, providers' policies go first (refreshed row).
+    all_policy_specs = [*required_policy_specs(spec, conv), *all_policy_specs]
     root_conv = (
         conv
         if root_conversation_id == conversation_id
