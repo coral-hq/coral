@@ -42,7 +42,6 @@ from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
-from tests.coral.omni.policies.conftest import SESSION_CAP_USD
 from tests.coral.omni.test_session_facade import _coral_agent, _Stores
 from tests.server.helpers import policy_tool_call_request
 
@@ -155,9 +154,7 @@ async def coral(stores: _Stores, db_uri: str) -> AsyncIterator[_Coral]:
         AsyncExitStack() as stack,
         httpx.AsyncClient(transport=transport, base_url="http://test") as client,
     ):
-        _wire_guards(
-            run_store=runs, bindings=bindings, session_cap_usd=SESSION_CAP_USD, stack=stack
-        )
+        _wire_guards(run_store=runs, bindings=bindings, stack=stack)
         yield _Coral(stores=stores, client=client, runs=runs, bindings=bindings)
 
 
@@ -207,30 +204,6 @@ async def test_orchestrator_is_denied_native_and_connector_tools(
     assert await coral.evaluate(orchestrator, "ToolSearch") == {"result": "POLICY_ACTION_ALLOW"}
     # The provider's copy, keyed on the binding, decides ahead of the bundle's own guard.
     assert _deciding_policies(caplog) == ["__coral_orchestrator_guard"] * 2
-
-
-async def test_over_cap_step_is_denied_native_tools_and_its_run_paused(
-    coral: _Coral, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.INFO)
-    run_id = coral.start_run()
-    step = coral.bound_session(run_id, Stance.IMPLEMENTER)
-    coral.stores.conversation.set_session_usage(step, {"total_cost_usd": SESSION_CAP_USD})
-
-    # ToolSearch passes without a pause; the first native tool pauses the run and is denied.
-    assert await coral.evaluate(step, "ToolSearch") == {"result": "POLICY_ACTION_ALLOW"}
-    assert await coral.evaluate(step, "Skill") == {
-        "result": "POLICY_ACTION_DENY",
-        "reason": "[budget] This session has spent about $25.00 of its $25.00 cap (an "
-        f"estimate), so Coral paused the run. {STOP}.",
-    }
-    run = coral.runs.get_run(run_id, workspace_id=WORKSPACE)
-    assert run is not None
-    assert (run.status, run.pause_reason) == (RunStatus.PAUSED, RunPauseReason.BUDGET)
-    # The pause cleared the status cache: the next hook call meets the run guard.
-    paused = await coral.evaluate(step, "mcp__fs__write_file")
-    assert paused["reason"].startswith("[run.paused] The Coral run is paused (budget).")
-    assert _deciding_policies(caplog) == ["__coral_cost_backstop", "__coral_run_guard"]
 
 
 @dataclass

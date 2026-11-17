@@ -46,7 +46,7 @@ result, keys sorted:
 |---|---|---|---|
 | `handoff.invalid` | submit | yes | an argument is wrong |
 | `tool.illegal` | choose | no | `label` (the decision's labels), `decision_id` (the open decision ids), `reason` or unknown `arguments` |
-| `run.paused` | both | no | the run is paused, by its store row (drift, budget) or its engine state |
+| `run.paused` | both | no | the run is paused, by its store row (drift) or its engine state |
 | `run_cancelled` | both | no | the run was cancelled |
 | `not_run_member` | both | no | no binding, not a step of the run, or the run is gone |
 | `slot_closed` | submit | no | the slot is closing or closed with another handoff, or the run finished |
@@ -200,8 +200,7 @@ reminders and re-briefs; counting orchestrator rejections; `items` (ENG-08);
 
 The bridge's ticket (ENG-04/DUR-04) must also settle these before it fills the
 catalog. Each has a row in [`session-facade.md`](session-facade.md), "Deferred
-work and owners", which also holds the budget-pause cause, the orchestrator's
-spend between tool calls and one lifespan per process.
+work and owners", which also holds one lifespan per process.
 
 - **Stored replies.** No table stores a reply under its checksum yet, so
   `find_reply` and step 5 need a schema change (a migration). The snapshot
@@ -219,11 +218,11 @@ spend between tool calls and one lifespan per process.
   step gets `run.paused` with a stop `next`. The roadmap's RUL-01 line "a
   paused step can still hand off" holds only at the policy layer. Whether the
   engine should accept and hold such a handoff is decided with ENG-06.
-- **Stopped turns.** Every run-guard, `[run.state_unavailable]` and budget
-  deny tells the agent to stop and end its turn, which leaves its slot
-  `evaluating` with no handoff. The paused text promises "Coral resumes this
-  step when the run resumes", so on resume, and after the store recovers, the
-  bridge must nudge or re-brief such slots.
+- **Stopped turns.** Every run-guard and `[run.state_unavailable]` deny
+  tells the agent to stop and end its turn, which leaves its slot `evaluating`
+  with no handoff. The paused text promises "Coral resumes this step when the
+  run resumes", so on resume, and after the store recovers, the bridge must
+  nudge or re-brief such slots.
 - **Nudge lease.** Reconcile leases only `send_input` and `create_session`
   (`_LEASED_KINDS` in `coral/engine/reconcile.py`). A nudged turn's
   `TurnEnded` that arrives before the nudge's completion is folded is refused

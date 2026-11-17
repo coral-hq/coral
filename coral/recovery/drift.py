@@ -152,7 +152,7 @@ def pause_run_for_drift(
     A run already paused for another reason records nothing now: the drift is
     found again by the first engine action after it resumes.
     """
-    result = pause_run_once(
+    return pause_run_once(
         run_store,
         workspace_id=workspace_id,
         run_id=run_id,
@@ -167,7 +167,6 @@ def pause_run_for_drift(
         checksum_parts=_drift_checksum_parts(run_id, finding),
         now_us=now_us,
     )
-    return result.commit
 
 
 def _now_us() -> int:

@@ -423,34 +423,31 @@ native and connector tools) and the relay tool-call and approval paths.
 - **Anchor:** `__coral_anchor_deny_all` denies every tool call ("[anchor] The
   Coral run anchor does not run tools."), engine tools and `ToolSearch`
   included. Nothing else applies to the anchor.
-- Every other bound session gets `__coral_run_guard` first, then
-  `__coral_cost_backstop`, then its role guard:
+- Every other bound session gets `__coral_run_guard` first, then its role
+  guard:
   - **Orchestrator** (slot role `orchestrator`): `__coral_orchestrator_guard`
     allows only `coral_choose_arrow` (bare or `mcp__omnigent__`) and exactly
     `ToolSearch`.
   - **Other steps:** `__coral_step_roster` denies `sys_session_*`,
     `search_conversations`, `Agent`, `Task` and `*spawn_agent` tools.
 
-Because the run guard and the backstop go first, on a stopped run or at the
-cap they decide every tool they do not exempt, so the agent always reads a
-stop text. A role guard's text (the roster's points the step at its handoff
-report) shows only while the run is starting or running and the session is
-under its cap. The verdicts are the same in any order, but this one also
-pauses the run on an over-cap call that the role guard would deny. The role
+Because the run guard goes first, on a stopped run it decides every tool it
+does not exempt, so the agent always reads a stop text. A role guard's text
+(the roster's points the step at its handoff report) shows only while the run
+is starting or running. The verdicts are the same in either order. The role
 guards are the ones each generated bundle carries
 (`coral/omni/policies/guards.py`). The provider's copy is keyed on the binding
 row, so it holds even when a session's agent lacks them.
 
 **Run guard** (`coral/omni/policies/run_guard.py`). It decides from the run's
-stored status, which also carries drift and budget pauses the engine never
-saw, and from the session row's `omnigent.closed` label. Only the label
-counts: the legacy `:closed:` title marker does not, so renaming a step never
-makes it inert. While the run is starting or running and the session is open
-it allows everything. Otherwise it denies every tool call except the exact
-engine tools (`coral_submit_handoff`, `coral_choose_arrow`, bare or
-`mcp__omnigent__`) and exactly `ToolSearch`, which loads them (bundle hygiene
-refuses a local tool with any of these names). An engine tool
-call then gets the engine's own answer, for example `run.paused` with a stop
+stored status, which also carries drift pauses the engine never saw, and from
+the session row's `omnigent.closed` label. Only the label counts: the legacy
+`:closed:` title marker does not, so renaming a step never makes it inert.
+While the run is starting or running and the session is open it allows
+everything. Otherwise it denies every tool call except the exact engine tools
+(`coral_submit_handoff`, `coral_choose_arrow`, bare or `mcp__omnigent__`) and
+exactly `ToolSearch`, which loads them (bundle hygiene refuses a local tool
+with any of these names). An engine tool call then gets the engine's own answer, for example `run.paused` with a stop
 `next`. Every deny tells the agent to stop and end its turn and none mentions
 a handoff:
 
@@ -464,50 +461,6 @@ a handoff:
 
 An orchestrator is never called a step: its texts say "this session" and its
 paused text ends after "end your turn".
-
-**Cost backstop** (`coral/omni/policies/cost_backstop.py`). It reads the
-session's spend from its own row's `session_usage`: the larger of
-`policy_cost_usd` and `total_cost_usd`, each counted only when it is a finite
-number, so an enforcement figure a client posts (`external_session_usage`)
-can never hide what the server recorded. That is the session's own row only,
-never the run-wide usage other policies see, nor a child session's (steps
-cannot start sessions). Unpriced usage (neither figure a finite number)
-passes. At or over the cap it pauses the run and denies every tool call
-except the exact engine tools and exactly `ToolSearch`; it never asks. The
-deny says `[budget] This session has spent about $<spent> of its $<cap> cap
-(an estimate), so Coral paused the run. Stop now and end your turn.` when this
-call paused the run or found it paused for budget already, and otherwise (the
-pause failed, or the run was paused for another reason or finished meanwhile)
-`[budget] This session has reached its cost cap: it has spent about $<spent>
-of its $<cap> cap (an estimate). Stop now and end your turn.` Amounts show
-cents, or two significant digits below a cent. An orchestrator may call only
-the exempt tools, so over its cap every one of its tool calls pauses the run,
-the exempt ones included; those still pass, and the engine answers
-`coral_choose_arrow` with `run.paused`. The anchor gets no backstop (it is
-denied every tool already).
-
-The pause goes through the run store (`pause_run_for_session_cap`,
-`coral/recovery/pause.py`, the same store-only pause as drift): a starting or
-running run moves to `paused(budget)` (`pause_reason` 2) with one `PAUSED` log
-entry, body
-`{"kind": "pause_run", "reason": "budget", "cause": "session_cap", "session_id": <session>, "spent_usd": <spent>, "cap_usd": <cap>}`,
-whose idempotency checksum is
-`sha256("coral-budget\0<run_id>\0session_cap\0<session_id>\0<run version>")`,
-one entry per pause epoch. `budget` is also the engine's own activation-cap
-pause reason; only the entry's `cause: session_cap` tells this pause apart (see
-"Deferred work and owners"). A paused or finished run is left as it is. The
-pause's commit clears the status cache, so the next call meets the run guard.
-A pause that fails is logged; the call is still denied and the next one tries
-again.
-
-The cap is per session: server config `coral_session_cost_cap_usd`,
-overridden by the environment variable `CORAL_SESSION_COST_CAP_USD`, default
-25.0 US dollars (OQ-15, not yet signed off). A value that is not a finite
-number above 0 and at most 1,000,000 stops `coral_lifespan` with a
-`ValueError` before anything starts. Resuming the run is the bridge's job.
-Until a per-run cap exists (WEB-03/API-02), raising the cap means changing the
-server setting and restarting the server, and a resumed run whose session is
-still at or over the cap pauses again on that session's next tool call.
 
 **State reads** (`coral/omni/policies/state.py`). Run status is cached per
 workspace and run for 2 s (4,096 entries). The run store's post-commit hook
@@ -595,12 +548,12 @@ test until someone classifies it.
   an unattended step on its approval, like the ASK limitation for engine
   messages below.
 - The roadmap's RUL-01 says a paused step can still hand off. That holds only
-  at the policy layer: the run guard and the backstop let engine tools
-  through, but the reducer refuses the handoff while the run is paused, so the
-  step gets `run.paused` with a stop `next` and the handoff is not kept. The
-  bridge decides this with ENG-06 (see "Deferred work and owners").
+  at the policy layer: the run guard lets engine tools through, but the
+  reducer refuses the handoff while the run is paused, so the step gets
+  `run.paused` with a stop `next` and the handoff is not kept. The bridge
+  decides this with ENG-06 (see "Deferred work and owners").
 - One lifespan per process: a later lifespan's registration replaces the
-  provider and the budget pauser (see Wiring).
+  provider (see Wiring).
 - A session on a Coral bundle that no run binds (a user chatting with a
   `coral__` agent, a fork of a step) pays one binding read per policy build,
   because misses are never cached, and fails closed: while that read fails,
@@ -610,32 +563,8 @@ test until someone classifies it.
   nothing prompts a step again when the store recovers.
 - While this process cannot read the store, a pause committed by another
   process can go unseen for up to 30 s (the stale fallback), not 2 s.
-- Spend lands when a turn ends (claude-sdk reports usage per turn), and a step
-  usually works in one long turn. So a step is not stopped inside the turn in
-  which it overspends; the backstop fires on the first tool call of a later
-  turn, and the overshoot can be the whole step. The deny says "estimate".
-- Usage the server cannot price (a model its pricing catalog lacks; claude-sdk
-  reports no cost of its own) is never capped, so on such a deployment the
-  backstop never fires.
-- An orchestrator over its cap pauses the run at its next tool call, but its
-  spend lands per turn and each decision request the engine sends starts a
-  turn that spends before any tool call. Bounding that is the bridge's job
-  (see "Deferred work and owners").
-- A child session's spend is on its own row, not its parent's, and an unbound
-  child is never backstopped. Steps cannot reach this today: the roster denies
-  starting sessions and the mutation guard refuses child creates on bound
-  sessions.
-- The budget pause, like the drift pause, changes only the run row; the
-  engine's own state stays `running` until the bridge reconciles it.
-- The pause runs inside policy evaluation, including a read-only `POST
-  /policies/evaluate` by a viewer: Omnigent's read-only evaluation skips label
-  and state writes, not a policy's own side effects. It needs a viewer (bound
-  sessions are created private and the mutation guard refuses grants, so only
-  a grant made some other way) and a session at or over its cap that is not
-  closed; closed steps meet the run guard first. A step that went over its cap
-  in its last turn and handed off makes no further tool call, so such a viewer
-  could pause a run its own calls never would. A fix needs Omnigent to pass
-  `read_only` to policies.
+- The drift pause changes only the run row; the engine's own state stays
+  `running` until the bridge reconciles it.
 - The mutation guard leaves the workspace routes on a step's host unguarded:
   `/resources/terminals`, `/resources/files`, `/resources/environments` and
   terminal attach.
@@ -749,11 +678,9 @@ test until someone classifies it.
 |---|---|
 | Engine-to-queue bridge and EffectCompleted feedback (ENG-04/DUR-04); turn-fact gathering and the `TurnFactSink` (SES-08) | no live ticket: ENG-04/DUR-04/SES-08 were labelled on Done tickets CRL-126/CRL-127 but not built; needs a new ticket |
 | Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)) | CRL-137 |
-| Reconcile store-only budget pauses (RUL-01): a `budget` run whose `PAUSED` entry has `cause: session_cap` is a session-spend pause, not the engine's activation-cap pause, so the activation-cap resume rule (raise `max_activations`) must not apply to it; give it its own engine cause and resume rule | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
-| Bound an orchestrator's spend between tool calls (RUL-01), for example by checking its session cap before sending it a decision request | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
 | Implement `RunDecisionPort` as [`engine-tools.md`](engine-tools.md) states it: a schema that stores each reply under its checksum (none exists; a migration), the graph pinned to the run's version, and the port's four rules (a retried slot's session bound with the slot's `session_generation`; one session per run, slot and generation; a version bump on every write to `status`, `pause_reason` or `orchestrator_session_id`; a byte-exact handoff body) | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
 | Orchestrator bindings: choose a stable `slot_id` for them (the binding store requires one; the engine has no orchestrator slot), and write `CoralRun.orchestrator_session_id`, which nothing writes yet, so `coral_choose_arrow` answers `not_orchestrator` until then | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
-| Prompt stopped steps again: every run-guard, `[run.state_unavailable]` and budget deny ends the turn with the slot `evaluating` and no handoff, and the paused text promises "Coral resumes this step when the run resumes", so nudge or re-brief such slots on resume and after the store recovers | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Prompt stopped steps again: every run-guard and `[run.state_unavailable]` deny ends the turn with the slot `evaluating` and no handoff, and the paused text promises "Coral resumes this step when the run resumes", so nudge or re-brief such slots on resume and after the store recovers | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
 | Lease `nudge` effects in reconcile (`_LEASED_KINDS` in `coral/engine/reconcile.py`), so a nudged turn's `TurnEnded` is not refused before the nudge's completion is folded | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
 | Early submit: keep refusing a handoff sent before the brief's `send_input` completes (`evaluation_in_progress`, retry), or accept it by making a late `send_input` completion a receipt | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
 | Handoffs while paused: RUL-01's "a paused step can still hand off" holds only at the policy layer, and the reducer refuses the handoff with `run.paused` (see Residuals under Run protection); decide whether the engine accepts and holds it | the engine bridge ticket, with ENG-06 |

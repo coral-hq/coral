@@ -3,13 +3,12 @@
 The session's binding row, read by session id, decides: never its labels or
 its bundle. A run's anchor gets a deny-all and nothing else. Every other bound
 session gets the run guard, built from the run's stored status and the row's
-``omnigent.closed`` label, then the cost backstop, built from the row's own
-spend, then its role guard (the orchestrator allowlist or the step roster).
-The run guard and the backstop go first, so on a stopped run or at the cap
-every deny says to stop; a role guard's text shows only while the run is live
-and under the cap. The policies go ahead of every other policy and decide
-tool calls only. A store error never raises: the session's tool calls are
-denied until the state can be read.
+``omnigent.closed`` label, then its role guard (the orchestrator allowlist or
+the step roster). The run guard goes first, so on a stopped run every deny
+says to stop; a role guard's text shows only while the run is live. The
+policies go ahead of every other policy and decide tool calls only. A store
+error never raises: the session's tool calls are denied until the state can
+be read.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from coral.db.enum_codecs import SessionBindingRole, SlotRole
-from coral.omni.policies.cost_backstop import session_spend_usd
 from coral.omni.policies.state import RunStateUnavailable, RunStatusCache, log_traceback_once
 from coral.omni.server.sessions import RUN_ID_LABEL_KEY
 from omnigent.db.db_models import current_workspace_id
@@ -35,7 +33,6 @@ _logger = logging.getLogger(__name__)
 
 _GUARDS = "coral.omni.policies.guards"
 _RUN_GUARD_PATH = "coral.omni.policies.run_guard.run_guard"
-_COST_BACKSTOP_PATH = "coral.omni.policies.cost_backstop.cost_backstop"
 # S52's tool-call-only deny, reused for Coral's own unreadable-state deny.
 _DENY_TOOL_CALLS_PATH = "omnigent.runtime.policies.required_providers.deny_tool_calls"
 _STATE_UNAVAILABLE = (
@@ -47,19 +44,14 @@ _STATE_UNAVAILABLE = (
 class CoralPolicyProvider:
     """The S52 provider registered as ``"coral"``; thread-safe."""
 
-    def __init__(
-        self, *, bindings: SessionBindingLookup, statuses: RunStatusCache, session_cap_usd: float
-    ) -> None:
+    def __init__(self, *, bindings: SessionBindingLookup, statuses: RunStatusCache) -> None:
         """
         :param bindings: Finds a session's binding row (the shared positive-only
             cache in production).
         :param statuses: The run-status cache the run store's commits invalidate.
-        :param session_cap_usd: How much each bound session may spend before its
-            tool calls are denied and its run pauses.
         """
         self._bindings = bindings
         self._statuses = statuses
-        self._session_cap_usd = session_cap_usd
 
     def applies(self, spec: AgentSpec, conversation: Conversation | None) -> bool:
         """Whether the session may be bound: a Coral bundle, or a ``coral.run_id`` label.
@@ -99,23 +91,10 @@ class CoralPolicyProvider:
             if orchestrator
             else _policy("__coral_step_roster", f"{_GUARDS}.step_roster")
         )
-        backstop = _policy(
-            "__coral_cost_backstop",
-            _COST_BACKSTOP_PATH,
-            {
-                "cap_usd": self._session_cap_usd,
-                # The row's own spend: policies otherwise see the whole run's.
-                "spent_usd": session_spend_usd(conversation.session_usage),
-                "workspace_id": binding.workspace_id,
-                "run_id": binding.run_id,
-                "session_id": conversation.id,
-                "orchestrator": orchestrator,
-            },
-        )
         try:
             view = self._statuses.status(binding.workspace_id, binding.run_id)
         except RunStateUnavailable:
-            return [_state_unavailable(), backstop, role_guard]
+            return [_state_unavailable(), role_guard]
         labels = conversation.labels or {}
         run_guard = _policy(
             "__coral_run_guard",
@@ -128,7 +107,7 @@ class CoralPolicyProvider:
                 "orchestrator": orchestrator,
             },
         )
-        return [run_guard, backstop, role_guard]
+        return [run_guard, role_guard]
 
 
 def _policy(

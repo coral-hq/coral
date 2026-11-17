@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
-import functools
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import pytest
 
 from coral.db.enum_codecs import RunPauseReason, RunStatus, SessionBindingRole, SlotRole
 from coral.omni.policies.bindings_cache import CachedBindingLookup
-from coral.omni.policies.cost_backstop import install_budget_pauser
 from coral.omni.policies.provider import CoralPolicyProvider
 from coral.omni.policies.state import RunStatusCache
-from coral.recovery.pause import pause_run_for_session_cap
 from coral.stores.fakes import FakeRunStore
 from coral.stores.protocols import RunStartSpec, Transition
 from omnigent.db.db_models import workspace_scope
@@ -27,8 +24,6 @@ from omnigent.spec.types import Phase
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests.coral.tools.fake_decision_port import WORKSPACE, FakeBindingLookup, step_binding
 
-# The per-session cap the provider gets in these tests (the production default).
-SESSION_CAP_USD = 25.0
 ROLES = {
     "step": (SessionBindingRole.STEP, SlotRole.STEP_AGENT),
     "verifier": (SessionBindingRole.STEP, SlotRole.VERIFIER),
@@ -92,16 +87,10 @@ class CoralPolicies:
         role: str = "step",
         labels: dict[str, str] | None = None,
         title: str | None = None,
-        parent: str | None = None,
     ) -> str:
-        """A session row, bound to *run_id* as *role* unless *run_id* is ``None``.
-
-        :param parent: The session it is a child of, as a step is of its run's anchor.
-        """
+        """A session row, bound to *run_id* as *role* unless *run_id* is ``None``."""
         with workspace_scope(WORKSPACE):
-            session_id = self.conversations.create_conversation(
-                labels=labels, title=title, parent_conversation_id=parent
-            ).id
+            session_id = self.conversations.create_conversation(labels=labels, title=title).id
         if run_id is not None:
             binding_role, slot_role = ROLES[role]
             self.lookup.add(
@@ -114,11 +103,6 @@ class CoralPolicies:
                 )
             )
         return session_id
-
-    def spend(self, session_id: str, usage: Mapping[str, object]) -> None:
-        """Store the session's own usage, as Omnigent records it after each turn."""
-        with workspace_scope(WORKSPACE):
-            self.conversations.set_session_usage(session_id, dict(usage))
 
     def engine(self, spec: AgentSpec, session_id: str) -> PolicyEngine:
         """A fresh engine, as every enforcement path builds one per call."""
@@ -141,19 +125,13 @@ class CoralPolicies:
 
 @pytest.fixture
 def coral_policies(db_uri: str) -> Iterator[CoralPolicies]:
-    """Coral's provider under its production name and the budget pauser; removed after the test.
-
-    The pauser commits through the fake run store, as the lifespan's does through the real one.
-    """
+    """Coral's provider registered under its production name; removed after the test."""
     run_store = FakeRunStore(default_workspace_id=WORKSPACE)
     lookup = FakeBindingLookup()
     statuses = RunStatusCache(run_store)
     unhook = run_store.register_post_commit(statuses.invalidate)
-    provider = CoralPolicyProvider(
-        bindings=lookup, statuses=statuses, session_cap_usd=SESSION_CAP_USD
-    )
+    provider = CoralPolicyProvider(bindings=lookup, statuses=statuses)
     unregister = register_required_policy_provider("coral", provider)
-    uninstall = install_budget_pauser(functools.partial(pause_run_for_session_cap, run_store))
     yield CoralPolicies(
         conversations=SqlAlchemyConversationStore(db_uri),
         run_store=run_store,
@@ -161,7 +139,6 @@ def coral_policies(db_uri: str) -> Iterator[CoralPolicies]:
         statuses=statuses,
         provider=provider,
     )
-    uninstall()
     unregister()
     unhook()
 
@@ -192,9 +169,7 @@ def wired_policies(coral_policies: CoralPolicies, clock: Clock) -> Iterator[Cora
     statuses = RunStatusCache(coral_policies.run_store, clock=clock)
     unhook = coral_policies.run_store.register_post_commit(statuses.invalidate)
     provider = CoralPolicyProvider(
-        bindings=CachedBindingLookup(coral_policies.lookup),
-        statuses=statuses,
-        session_cap_usd=SESSION_CAP_USD,
+        bindings=CachedBindingLookup(coral_policies.lookup), statuses=statuses
     )
     unregister = register_required_policy_provider("coral", provider)
     yield dataclasses.replace(coral_policies, statuses=statuses, provider=provider)
