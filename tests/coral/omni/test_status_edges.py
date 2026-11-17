@@ -314,6 +314,8 @@ async def test_an_unwatched_sessions_edge_allocates_nothing(
     async with running_edges.watch("another-session", workspace_id=WS):
         tracemalloc.start()
         try:
+            # The first call may allocate once (interpreter caches); later calls must not.
+            running_edges.observe(edge)
             before = tracemalloc.take_snapshot()
             for _ in range(200):
                 running_edges.observe(edge)
