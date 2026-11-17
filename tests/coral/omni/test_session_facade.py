@@ -15,7 +15,7 @@ import contextlib
 import dataclasses
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,8 +34,10 @@ from coral.db import SessionBindingRow
 from coral.db.enum_codecs import LogKind, RunPauseReason, RunStatus, SessionBindingProgress
 from coral.db.migrate import ensure_coral_schema
 from coral.model.ids import anchor_session_id, derived_id, effect_session_id
+from coral.omni.process_map import CORAL_RUNNER_TOKEN
+from coral.omni.runner.tool_provider import tool_provider
 from coral.omni.server import sessions as facade_module
-from coral.omni.server.bundles import pack_bundle
+from coral.omni.server.bundles import materialize, pack_bundle
 from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.omni.server.sessions import (
     ANCHOR_AGENT_NAME,
@@ -43,6 +45,7 @@ from coral.omni.server.sessions import (
     TITLE_ID_SUFFIX_CHARS,
     OmnigentSessionFacade,
 )
+from coral.profiles.bundle_spec import Stance, StepRef, build_step_bundle_yaml
 from coral.queue import StartupLeaseLost
 from coral.queue.conformance import run_executor_conformance
 from coral.queue.executors import EffectCompleted, EffectFailed, EffectOutcome
@@ -68,6 +71,7 @@ from omnigent.host.frames import (
     HostStopRunnerResultFrame,
     decode_host_frame,
     encode_host_frame,
+    host_capabilities,
 )
 from omnigent.runner.identity import token_bound_runner_id
 from omnigent.runtime.agent_cache import AgentCache
@@ -105,6 +109,7 @@ from tests.server.integration.test_session_host_launch import (
 )
 from tests.server.routes.test_host_worktree import _FakeWebSocket
 from tests.stores.coral._faults import SimulatedCrash, crash_around
+from tests.tools.test_extensions import installed_tool_providers
 
 WORKSPACE = DEFAULT_WORKSPACE_ID
 STEP_AGENT_NAME = "coral-test-step"
@@ -241,7 +246,7 @@ class _Host:
 
 @pytest_asyncio.fixture
 async def host(app: FastAPI) -> AsyncIterator[_Host]:
-    comm = await _connect_host(app)
+    comm = await _connect_host(app, [CORAL_RUNNER_TOKEN])
     async with _Host(app, comm) as host:
         yield host
 
@@ -371,7 +376,7 @@ class _Coral:
             OmnigentRunScopeRunner(),
         )
         self.lease_checks = 0
-        self.step_agent = _server_agent(stores, STEP_AGENT_NAME, "claude-sdk")
+        self.step_agent = _coral_agent(stores, Stance.IMPLEMENTER)
 
     @property
     def anchor_id(self) -> str:
@@ -453,19 +458,36 @@ class _Coral:
 
 
 def _server_agent(stores: _Stores, name: str, harness: str) -> str:
+    """A plain agent on *harness*, not a Coral bundle."""
+    return _stored_agent(
+        stores,
+        {
+            "spec_version": 1,
+            "name": name,
+            "executor": {
+                "type": "omnigent",
+                "reasoning_effort": "high",
+                "config": {"harness": harness},
+            },
+        },
+    )
+
+
+def _coral_agent(stores: _Stores, stance: Stance, **overrides: object) -> str:
+    """A generated Coral bundle of *stance* pinning a high effort; *overrides* replace top keys."""
+    ref = StepRef(workflow_id="demo-flow", node_id=stance.value, roster_index=0)
+    config = yaml.safe_load(build_step_bundle_yaml(ref, stance, model=None, provider=None))
+    config["executor"]["reasoning_effort"] = "high"
+    config.update(overrides)
+    return _stored_agent(stores, config)
+
+
+def _stored_agent(stores: _Stores, config: dict[str, Any]) -> str:
     """Register an operator-authored agent, as the server's own agents are, once per name."""
+    name = config["name"]
     existing = stores.agent.get_by_name(name)
     if existing is not None:
         return existing.id
-    config = {
-        "spec_version": 1,
-        "name": name,
-        "executor": {
-            "type": "omnigent",
-            "reasoning_effort": "high",
-            "config": {"harness": harness},
-        },
-    }
     bundle = pack_bundle(yaml.safe_dump(config).encode())
     agent_id = derived_id("coral-test-agent", name)
     location = f"{agent_id}/{hashlib.sha256(bundle).hexdigest()}"
@@ -737,6 +759,236 @@ async def test_native_harness_step_is_refused_before_anything_is_created(
     assert launcher.calls == []
 
 
+@pytest.mark.parametrize(
+    "capabilities",
+    [None, ["coral_runner:2", "os_sandbox:none"], ["CORAL_RUNNER:1"]],
+    ids=["none", "another-version", "other-case"],
+)
+async def test_a_host_without_the_coral_runner_token_is_refused(
+    unlaunched: _Coral, launcher: _RecordingLauncher, app: FastAPI, capabilities: list[str] | None
+) -> None:
+    await unlaunched.anchor()
+    step_id = unlaunched.step_id()
+
+    async with _Host(app, await _connect_host(app, capabilities)) as host:
+        failure = _failed(await unlaunched.deliver(unlaunched.step_payload()))
+
+    assert (failure.error_code, failure.retryable) == ("session.host_unsupported", False)
+    assert failure.message == (
+        f"host {_HOST_ID!r} cannot run Coral steps: update Coral on that host, "
+        "or unset CORAL_DISABLE_HOST_ENTRY_POINTS"
+    )
+    assert unlaunched.progress(step_id) is None
+    assert unlaunched.conversation(step_id) is None
+    assert unlaunched.stores.permission.get(RESERVED_USER_LOCAL, step_id) is None
+    assert (launcher.calls, host.frames_seen, host.launch_frames) == ([], 0, [])
+
+
+async def test_a_host_that_loses_the_token_before_the_launch_is_refused(
+    unlaunched: _Coral,
+    launcher: _RecordingLauncher,
+    host: _Host,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await unlaunched.anchor()
+    registry = app.state.host_registry
+    grant_owner = unlaunched.facade._grant_owner
+
+    async def grant_then_reconnect_without_the_token(user_id: str | None, session_id: str) -> None:
+        await grant_owner(user_id, session_id)
+        # Between the row write and the launch, the host comes back with an older Coral.
+        conn = registry.get(_HOST_ID)
+        registry.register(
+            host_id=_HOST_ID,
+            ws=_FakeWebSocket(),
+            hello=HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="laptop"),
+            owner=conn.owner,
+            workspace_id=conn.workspace_id,
+        )
+
+    monkeypatch.setattr(unlaunched.facade, "_grant_owner", grant_then_reconnect_without_the_token)
+
+    failure = _failed(await unlaunched.deliver(unlaunched.step_payload()))
+
+    assert (failure.error_code, failure.retryable) == ("session.host_unsupported", False)
+    assert unlaunched.progress(unlaunched.step_id()) == SessionBindingProgress.ROW_CREATED
+    assert unlaunched.conversation(unlaunched.step_id()) is not None
+    assert (launcher.calls, host.launch_frames) == ([], [])
+
+
+@pytest.mark.parametrize(("disabled", "accepted"), [("", True), ("1", False)])
+async def test_a_hello_built_with_coral_installed_carries_the_token_unless_disabled(
+    unlaunched: _Coral,
+    launcher: _RecordingLauncher,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    disabled: str,
+    accepted: bool,
+) -> None:
+    monkeypatch.setenv("CORAL_DISABLE_HOST_ENTRY_POINTS", disabled)
+    with installed_tool_providers(tool_provider()):
+        capabilities = host_capabilities()
+    await unlaunched.anchor()
+
+    async with _Host(app, await _connect_host(app, capabilities)):
+        outcome = await unlaunched.deliver(unlaunched.step_payload())
+
+    if accepted:
+        _completed(outcome)
+        assert len(launcher.calls) == 1
+    else:
+        assert _failed(outcome).error_code == "session.host_unsupported"
+        assert launcher.calls == []
+
+
+@pytest.mark.parametrize(
+    ("make_agent", "code", "rule"),
+    [
+        (
+            lambda stores: _server_agent(stores, "coral-test-codex", "codex"),
+            "session.agent_not_supported",
+            "it runs on codex, not claude-sdk",
+        ),
+        (
+            lambda stores: _server_agent(stores, STEP_AGENT_NAME, "claude-sdk"),
+            "session.agent_not_supported",
+            "it has no params.coral.generated.stance",
+        ),
+        (
+            lambda stores: _coral_agent(
+                stores, Stance.IMPLEMENTER, name="coral__test-unhygienic", timers=True
+            ),
+            "session.agent_not_supported",
+            "breaks: timers is false",
+        ),
+        # A Coral bundle's params do not make another harness acceptable.
+        (
+            lambda stores: _coral_agent(
+                stores,
+                Stance.IMPLEMENTER,
+                name="coral__test-codex-bundle",
+                executor={"type": "omnigent", "config": {"harness": "codex"}},
+            ),
+            "session.agent_not_supported",
+            "it runs on codex, not claude-sdk",
+        ),
+        # Forged params naming the anchor or an unknown stance, or no stance string.
+        (
+            lambda stores: _coral_agent(
+                stores,
+                Stance.IMPLEMENTER,
+                name="coral__test-anchor-stance",
+                params={"coral": {"generated": {"stance": "anchor"}}},
+            ),
+            "session.agent_not_supported",
+            "its stance is 'anchor'",
+        ),
+        (
+            lambda stores: _coral_agent(
+                stores,
+                Stance.IMPLEMENTER,
+                name="coral__test-planner-stance",
+                params={"coral": {"generated": {"stance": "planner"}}},
+            ),
+            "session.agent_not_supported",
+            "its stance is 'planner'",
+        ),
+        (
+            lambda stores: _coral_agent(
+                stores,
+                Stance.IMPLEMENTER,
+                name="coral__test-list-stance",
+                params={"coral": {"generated": {"stance": ["implementer"]}}},
+            ),
+            "session.agent_not_supported",
+            "it has no params.coral.generated.stance",
+        ),
+        # The native refusal comes first, even for a Coral bundle.
+        (
+            lambda stores: _coral_agent(
+                stores,
+                Stance.IMPLEMENTER,
+                name="coral__test-native",
+                executor={"type": "omnigent", "config": {"harness": "claude-native"}},
+            ),
+            "session.harness_not_supported",
+            "runs on claude-native",
+        ),
+    ],
+    ids=[
+        "codex",
+        "claude_sdk_without_params_coral",
+        "coral_bundle_failing_hygiene",
+        "coral_bundle_on_codex",
+        "forged_anchor_stance",
+        "unknown_stance",
+        "stance_not_a_string",
+        "native",
+    ],
+)
+async def test_non_coral_or_non_claude_sdk_step_agents_are_refused(
+    unlaunched: _Coral,
+    launcher: _RecordingLauncher,
+    host: _Host,
+    make_agent: Callable[[_Stores], str],
+    code: str,
+    rule: str,
+) -> None:
+    await unlaunched.anchor()
+    agent_id = make_agent(unlaunched.stores)
+    frames_before = host.frames_seen
+
+    failure = _failed(await unlaunched.deliver(unlaunched.step_payload(agent_id=agent_id)))
+
+    assert (failure.error_code, failure.retryable) == (code, False)
+    assert rule in failure.message
+    assert unlaunched.progress(unlaunched.step_id()) is None
+    assert unlaunched.conversation(unlaunched.step_id()) is None
+    assert (launcher.calls, host.frames_seen) == ([], frames_before)
+
+
+async def test_orchestrator_slot_needs_an_orchestrator_bundle(
+    unlaunched: _Coral, launcher: _RecordingLauncher, host: _Host
+) -> None:
+    await unlaunched.anchor()
+    agents = {
+        stance: _coral_agent(unlaunched.stores, stance)
+        for stance in Stance
+        if stance is not Stance.ANCHOR
+    }
+    refused = [
+        (Stance.IMPLEMENTER, "orchestrator"),
+        (Stance.REVIEWER, "orchestrator"),
+        (Stance.ORCHESTRATOR, "step_agent"),
+        (Stance.ORCHESTRATOR, "verifier"),
+    ]
+    accepted = [
+        (Stance.ORCHESTRATOR, "orchestrator"),
+        (Stance.REVIEWER, "verifier"),
+        (Stance.IMPLEMENTER, "merge_resolver"),
+    ]
+
+    for seq, (stance, slot_role) in enumerate(refused, start=2):
+        payload = unlaunched.step_payload(seq, agent_id=agents[stance], slot_role=slot_role)
+        failure = _failed(await unlaunched.deliver(payload))
+        assert (failure.error_code, failure.retryable) == ("session.agent_not_supported", False)
+        assert f"for slot role {slot_role}: its stance is {stance.value!r}" in failure.message
+        assert unlaunched.progress(unlaunched.step_id(seq)) is None
+    assert launcher.calls == []
+
+    for seq, (stance, slot_role) in enumerate(accepted, start=10):
+        payload = unlaunched.step_payload(seq, agent_id=agents[stance], slot_role=slot_role)
+        _completed(await unlaunched.deliver(payload))
+    assert [
+        (call["conv"].agent_id, call["conv"].labels["coral.role"]) for call in launcher.calls
+    ] == [
+        (agents[Stance.ORCHESTRATOR], "orchestrator"),
+        (agents[Stance.REVIEWER], "step"),
+        (agents[Stance.IMPLEMENTER], "step"),
+    ]
+
+
 async def test_another_users_agent_is_not_permitted(
     unlaunched: _Coral, launcher: _RecordingLauncher, host: _Host
 ) -> None:
@@ -836,7 +1088,7 @@ async def test_an_offline_host_is_retryable_and_launches_nothing(
     unlaunched: _Coral, launcher: _RecordingLauncher, app: FastAPI
 ) -> None:
     await unlaunched.anchor()
-    comm = await _connect_host(app)
+    comm = await _connect_host(app, [CORAL_RUNNER_TOKEN])
     await comm.send_input({"type": "websocket.disconnect", "code": 1001})
     await comm.wait(timeout=budget(5.0))
 
@@ -1483,7 +1735,10 @@ class _OwnedHost:
                 host_id=_HOST_ID,
                 ws=_FakeWebSocket(),  # type: ignore[arg-type]
                 hello=HostHelloFrame(
-                    version="0.1.0-test", frame_protocol_version=1, name="laptop"
+                    version="0.1.0-test",
+                    frame_protocol_version=1,
+                    name="laptop",
+                    capabilities=[CORAL_RUNNER_TOKEN],
                 ),
                 owner=OWNER,
                 workspace_id=WORKSPACE,
@@ -1595,6 +1850,39 @@ async def test_with_auth_on_the_owner_holds_the_grants_and_omnigent_checks_them_
     assert coral.progress(coral.step_id(seq=4)) is None
     assert coral.conversation(coral.step_id(seq=4)) is None
     assert len(owned_host.launch_frames) == 1
+
+
+@pytest.mark.usefixtures("coral_policy_registry")
+async def test_a_bundle_the_owner_materialized_runs_as_a_step(
+    app: FastAPI,
+    stores: _Stores,
+    db_uri: str,
+    owned_host: _OwnedHost,
+    runner: _Runner,
+) -> None:
+    # The production path: a user agent of the owner, not operator-authored, its env unexpanded.
+    agent = materialize(
+        stores.agent,
+        stores.artifact,
+        owner=OWNER,
+        config_yaml=build_step_bundle_yaml(
+            StepRef(workflow_id="demo-flow", node_id="check", roster_index=0),
+            Stance.REVIEWER,
+            model=None,
+            provider=None,
+        ),
+        stance=Stance.REVIEWER,
+    )
+    coral = _Coral(app, stores, db_uri, owner=OWNER, generation=OWNER_GENERATION, auth_on=True)
+    await coral.anchor()
+
+    payload = coral.step_payload(agent_id=agent.agent_id, slot_role="verifier")
+    step = _completed(await coral.deliver(payload))["session_id"]
+
+    conv = coral.conversation(step)
+    assert conv is not None and conv.agent_id == agent.agent_id
+    assert [frame.session_id for frame in owned_host.launch_frames] == [step]
+    assert coral.progress(step) == SessionBindingProgress.INITIALIZED
 
 
 async def test_with_auth_on_a_run_without_an_owner_is_refused(

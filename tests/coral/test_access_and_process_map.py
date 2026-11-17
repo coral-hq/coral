@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 from starlette.requests import HTTPConnection
 
-from coral.omni.process_map import CORAL_RUNNER_TOKEN, host_entry_points_disabled
+from coral.omni.process_map import CORAL_RUNNER_TOKEN, host_entry_points_disabled, host_tokens
 from coral.omni.server.access import CORAL_LEVEL_READ, has_session_access, resolve_user_id
 from omnigent.entities import Conversation
 from omnigent.server.auth import AuthProvider
@@ -60,3 +61,13 @@ def test_process_map_constants_and_disable_flag() -> None:
     assert host_entry_points_disabled({}) is False
     assert host_entry_points_disabled({"CORAL_DISABLE_HOST_ENTRY_POINTS": "1"}) is True
     assert host_entry_points_disabled({"CORAL_DISABLE_HOST_ENTRY_POINTS": "false"}) is False
+
+
+def test_host_tokens_follow_the_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert host_tokens({}) == ("coral_runner:1",)
+    assert host_tokens({"CORAL_DISABLE_HOST_ENTRY_POINTS": "1"}) == ()
+    # Without an explicit environment the process's own is read.
+    monkeypatch.setenv("CORAL_DISABLE_HOST_ENTRY_POINTS", "true")
+    assert host_tokens() == ()
+    monkeypatch.delenv("CORAL_DISABLE_HOST_ENTRY_POINTS")
+    assert host_tokens() == (CORAL_RUNNER_TOKEN,)

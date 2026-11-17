@@ -1982,17 +1982,28 @@ seams:
       changes only after uv sync, so tests pass entry points or patch
       default_tool_providers and reset the caches with
       clear_tool_provider_caches; the S102 exact-list hello tests serve no
-      providers.
+      providers. pyproject.toml declares Coral's own provider, coral =
+      coral.omni.runner.tool_provider:tool_provider, so hosts advertise
+      coral_runner:1 (none while CORAL_DISABLE_HOST_ENTRY_POINTS is set); its
+      production catalog is empty, so it adds no tools, server-dispatched
+      names or prompt text yet. The `_connect_host` helper in
+      tests/server/integration/test_session_host_launch.py takes optional
+      hello capabilities so Coral's facade tests can connect a host with the
+      token; existing callers send none.
     files:
       - omnigent/tools/extensions.py
       - omnigent/host/frames.py
+      - pyproject.toml
       - tests/tools/test_extensions.py
       - tests/host/test_connect.py
       - tests/host/test_startup_imports.py
+      - tests/server/integration/test_session_host_launch.py
     tests:
       - tests/tools/test_extensions.py
       - tests/host/test_connect.py
       - tests/host/test_startup_imports.py
+      - tests/coral/test_packaging.py
+      - tests/coral/omni/runner/test_tool_provider_imports.py
     budget_lines: 40
     budget_exception:
       lines: 581
@@ -2014,7 +2025,9 @@ seams:
         reuse. tests/host/test_startup_imports.py (50) adds the
         fresh-interpreter hello with a stub provider; tests/host/test_connect.py
         (48) serves no providers to the two S102 exact-list tests and adds the
-        provider-token hello test. frames.py (12) is within budget.
+        provider-token hello test. frames.py (12), pyproject.toml (4) and
+        tests/server/integration/test_session_host_launch.py (14) are within
+        budget.
       approver: pending
     anchor_exempt: []
     upstream_first: false

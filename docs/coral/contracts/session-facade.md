@@ -103,6 +103,24 @@ finds sessions only through its bindings (ADR-05 rule 5).
   `git_failed` would repeat fails permanently, so it is never retried.
 - **One worker.** The torn-row repair assumes one drainer at a time (the
   `coral.worker.primary` lease).
+- **Step agents have a Coral bundle's shape.** The facade still accepts only
+  agents the server or the run owner authored (`session.agent_not_permitted`
+  otherwise). Their spec must then have the shape of a Coral step bundle:
+  the claude-sdk harness, `params.coral.generated.stance` fitting the slot
+  role (`orchestrator` for an orchestrator slot; `implementer` or `reviewer`
+  for the others), and the bundle hygiene rules (`check_hygiene`, which also
+  requires the `coral__` name). Any other spec is
+  `session.agent_not_supported`, for example the owner's ordinary agents.
+  The check is structural: a hand-written spec of that shape passes as well as
+  one from `build_step_bundle_yaml` and `materialize`, so no field that
+  hygiene does not check (other generator metadata, `executor.config`,
+  `mcp_servers`) is trusted to come from the generator. The shape matters
+  because `params.coral` on claude-sdk turns on the tool-policy hook that puts
+  every tool call of the session through the run's policies.
+- **Coral hosts.** The run owner's host must advertise `coral_runner:1`
+  (Coral's tool provider, [`plugin.md`](plugin.md)); an older or Coral-less
+  host, or one with `CORAL_DISABLE_HOST_ENTRY_POINTS` set, is
+  `session.host_unsupported`.
 
 ## Executors
 
@@ -178,8 +196,10 @@ text lands only in the run owner's work record.
 | `session.binding_conflict` | no | A redelivery would bind the session differently. |
 | `session.agent_not_permitted` | no | The agent is missing (an id no agent can have included), owned by another user, or is `coral__anchor`. |
 | `session.harness_not_supported` | no | The agent's harness is native, or its stored spec no longer loads. |
+| `session.agent_not_supported` | no | The agent's spec does not have a Coral step bundle's shape: claude-sdk, `params.coral.generated.stance` fitting the slot role (`orchestrator` for an orchestrator slot; `implementer` or `reviewer` for the others), and the bundle hygiene rules. A structural check, not a provenance one. Checked after the native refusal, before any row. |
 | `session.harness_not_configured`, `session.workspace_missing` | no | The host refused the step's launch, or dispatch's runner wake before a send, for these reasons. |
 | `session.host_not_permitted` | no | The host is unknown (an id no host can have included), another user's, another registration's or a managed sandbox. |
+| `session.host_unsupported` | no | The owner's live host connection does not advertise `coral_runner:1`: update Coral on that host, or unset `CORAL_DISABLE_HOST_ENTRY_POINTS` there. Checked before any row, and again before the launch. |
 | `session.owner_revoked` | no | The run owner's account was revoked or re-registered. |
 | `session.invalid` | no | An ownerless run on a server with auth; a step run with no worktree on a host; a server with no project store or no host access; another refusal. |
 | `dispatch.runner_unavailable` | yes | The runner did not take the event in 120 s, or the server answered `RUNNER_UNAVAILABLE` (a relaunch refusal included), `HOST_OFFLINE`, `WRONG_REPLICA` or `CONFLICT`. |
@@ -430,9 +450,13 @@ Also known before runs are enabled:
 - **One lifespan per process.** See "Wiring": a second lifespan blinds the
   first on entry, and an inner exit leaves the outer unregistered. The bridge's
   ticket must fix this before it enables runs.
-- **No `coral_runner` token check.** Steps need a live connection to a host the
-  run owner owns, with a matching account registration, that is not a managed
-  sandbox. The token check is TLS-01 (CRL-131).
+- **`coral_runner:1` is self-reported.** The host token check is a
+  compatibility gate, not an authorization boundary: steps still need a live
+  connection to a host the run owner owns, with a matching account
+  registration, that is not a managed sandbox.
+- **The agent is checked at create.** The run owner can still edit their
+  `coral__` agent after a step was accepted, until the mutation guard refuses
+  edits to `coral__` agents.
 
 ## Deferred work and owners
 
@@ -442,7 +466,6 @@ Also known before runs are enabled:
 | Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)) | CRL-137 |
 | Anchor deny-all tool policy; stop or unbind an anchor runner on detection (RUL-01) | CRL-131 |
 | ASK input policies for engine sends; closed-session relaunch by `retry_session` or slash command (RUL-01) | CRL-131 |
-| `coral_runner` token check (TLS-01) | CRL-131 |
 | Host channel `fingerprint(L2)`, `merge`, `check`, and the backend swap (WSP-02/WSP-07) | CRL-141 |
 | Native-harness steps (HRN-03) | CRL-138 |
 | `external_session_status` outcome pass-through (HRN-05) | CRL-146 |
