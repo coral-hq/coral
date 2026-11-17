@@ -1126,6 +1126,34 @@ async def test_normal_fork_of_side_chat_drops_sidebar_hiding_label() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("side_chat", [False, True])
+async def test_fork_drops_coral_labels(
+    client: httpx.AsyncClient, db_uri: str, side_chat: bool
+) -> None:
+    """CORAL(S46): a fork or side chat is a plain session, never part of a Coral run.
+
+    Coral's engine writes ``coral.*`` labels through the store. A fork keeps none
+    of them, in any case, and copies every other label as before.
+    """
+    agent = await create_test_agent(client)
+    store = SqlAlchemyConversationStore(db_uri)
+    coral_labels = {"coral.run_id": "run_1", "coral.role": "step", "Coral.Node_Id": "review"}
+    kept = {"team": "ml", "coralx.note": "kept", CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}
+    source = store.create_conversation(agent_id=agent["id"], labels={**coral_labels, **kept})
+
+    response = await client.post(f"/v1/sessions/{source.id}/fork", json={"side_chat": side_chat})
+
+    assert response.status_code == 201, response.text
+    fork = store.get_conversation(response.json()["id"])
+    assert fork is not None
+    assert not fork.labels.keys() & coral_labels.keys()
+    assert {key: fork.labels.get(key) for key in kept} == kept
+    source_after = store.get_conversation(source.id)
+    assert source_after is not None
+    assert coral_labels.items() <= source_after.labels.items()
+
+
+@pytest.mark.asyncio
 async def test_fork_session_shares_source_file_blob_without_copying_bytes() -> None:
     """A fork creates its own file rows but SHARES the source's blob.
 

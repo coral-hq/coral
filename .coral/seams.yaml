@@ -2349,3 +2349,69 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S46
+    title: coral. labels reserved; forks drop them
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `_reject_server_reserved_label_seed` in
+      `omnigent/server/routes/_sessions/helpers.py` refuses a label key whose
+      skeleton starts with `coral.`, with 400 INVALID_INPUT, "label '<key>' is
+      managed by Coral workflow runs and cannot be set by clients". The
+      skeleton is the key NFKC-normalized, without format (Cf, zero-width)
+      characters and outer whitespace, casefolded, then without combining
+      marks after NFKD. So `Coral.Role`, `CORAL.run_id`, a zero-width-prefixed,
+      accented (`ćoral.`), fullwidth or space-prefixed key is refused too,
+      which closes the variants a case- and accent-insensitive collation
+      equates. That one check already runs for JSON create (`/v1/sessions` and
+      `/v1/sessions/orchestrated`), multipart create and PATCH, for every
+      session and with no lookup, before anything is written, so a refused
+      request stores nothing; a PATCH can neither set nor clear (empty value)
+      such a key. `_is_coral_label_key(key)` holds the rule; `_fork_session`
+      in `omnigent/server/routes/sessions/routes_core.py` uses it to add every
+      matching source key to the fork's dropped labels, so a fork, a side chat
+      and the claude-sdk /clear continuation (which forks) are plain sessions.
+      Other labels, `omnigent.closed` and `omnigent.parent_wake` included, are
+      copied as before. Coral's engine writes `coral.*` labels through the
+      conversation store (the session facade creates each row with them),
+      never through these routes, so it is unaffected; nothing in Omnigent or
+      the web UI sets them. Residuals: on MySQL, label keys compare by the
+      column's case- and accent-insensitive collation, and the skeleton does
+      not fold look-alike letters from other scripts (Cyrillic `с`) or
+      letters with no decomposition (`ø`), so such a key could still update
+      an engine label's value there; labels are hints (identity comes from
+      binding rows), an upsert never removes a key, and the facade fails
+      closed with `session.identity_conflict` when it redelivers or adopts a
+      row whose `coral.run_id` changed; the full fix is a binary collation on
+      the label key, an Omnigent schema change. Label writes that bypass these routes are
+      unchecked (agent-spec policy label writes, spec label seeding). Native
+      /clear copies the source's labels into a create, so any native session
+      carrying `coral.*` labels (from spec seeding or spec policies, or set
+      before this seam) now gets 400 on /clear.
+    files:
+      - omnigent/server/routes/_sessions/helpers.py
+      - omnigent/server/routes/sessions/routes_core.py
+      - tests/server/routes/test_sessions_crud.py
+      - tests/server/routes/test_sessions_fork.py
+    tests:
+      - tests/server/routes/test_sessions_crud.py
+      - tests/server/routes/test_sessions_fork.py
+    budget_lines: 40
+    budget_exception:
+      lines: 63
+      reason: >-
+        tests/server/routes/test_sessions_crud.py (63 changed lines) adds one
+        test over seven key spellings (three letter cases and zero-width,
+        accented, fullwidth and space-prefixed variants): JSON create,
+        multipart create and a PATCH, or an empty-value clear, of an
+        engine-labelled closed step are each refused with nothing stored, then
+        a PATCH with look-alike keys outside the prefix succeeds and keeps the
+        engine's `coral.run_id`; two import lines are added and one extended.
+        helpers.py (32), routes_core.py (3) and test_sessions_fork.py (28) are
+        within budget.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

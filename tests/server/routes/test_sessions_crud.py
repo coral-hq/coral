@@ -30,9 +30,11 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
 from omnigent.telemetry.surface import CLIENT_SURFACE_LABEL_KEY
+from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE  # CORAL(S46)
+from tests._helpers.session import post_session_bundle  # CORAL(S46)
 from tests.runner.conftest import _FakeProcessManager, _ScriptedHarnessClient
 from tests.runner.helpers import NullServerClient
-from tests.server.helpers import create_test_agent
+from tests.server.helpers import build_agent_bundle, create_test_agent  # CORAL(S46)
 
 
 @pytest_asyncio.fixture()
@@ -834,6 +836,65 @@ async def test_patch_rejects_client_supplied_archived_at_label(
     conv = conv_store.get_conversation(session_id)
     assert conv is not None
     assert ARCHIVED_AT_LABEL_KEY not in conv.labels
+
+
+@pytest.mark.parametrize(
+    "coral_key",
+    [
+        "coral.run_id",
+        "Coral.Role",
+        "CORAL.Role",
+        # Variants that a case- and accent-insensitive collation (MySQL) stores as coral.*.
+        pytest.param("​coral.run_id", id="zero-width-space"),
+        pytest.param("ćoral.run_id", id="c-acute"),
+        pytest.param("ｃｏｒａｌ.run_id", id="fullwidth"),
+        pytest.param(" coral.x", id="leading-space"),
+    ],
+)
+async def test_create_and_patch_reject_coral_labels(
+    client: httpx.AsyncClient, db_uri: str, coral_key: str
+) -> None:
+    """CORAL(S46): ``coral.*`` labels, in any case, are written only by Coral's engine
+    through its stores, so JSON create, multipart create and PATCH refuse them whole."""
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    agent = await create_test_agent(client, name="coral-labels")
+    # A finished Coral step, labelled by the engine through the store.
+    step_labels = {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE, "coral.run_id": "run_1"}
+    target = conv_store.create_conversation(agent_id=agent["id"], labels=step_labels)
+
+    def session_ids() -> set[str]:
+        return {conv.id for conv in conv_store.list_conversations(limit=100, kind=None).data}
+
+    sessions_before = session_ids()
+    labels = {"team": "ml", coral_key: "forged"}
+    json_create = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "labels": labels}
+    )
+    multipart_create = await post_session_bundle(
+        client.post,
+        "/v1/sessions",
+        build_agent_bundle(name="coral-labels"),
+        metadata={"labels": labels},
+    )
+    patch = await client.patch(f"/v1/sessions/{target.id}", json={"labels": labels})
+    clear = await client.patch(f"/v1/sessions/{target.id}", json={"labels": {coral_key: ""}})
+
+    for response in (json_create, multipart_create, patch, clear):
+        assert response.status_code == 400, response.text
+        message = response.json()["error"]["message"]
+        assert message.startswith(f"label {coral_key!r} is managed by Coral workflow runs")
+    assert session_ids() == sessions_before
+    stored = conv_store.get_conversation(target.id)
+    assert stored is not None
+    assert stored.labels == step_labels
+
+    # Other labels, including look-alikes outside the prefix, stay client-writable.
+    allowed = {"team": "ml", "coralx.note": "kept", "my.coral.run_id": "kept"}
+    response = await client.patch(f"/v1/sessions/{target.id}", json={"labels": allowed})
+    assert response.status_code == 200, response.text
+    stored = conv_store.get_conversation(target.id)
+    assert stored is not None
+    assert stored.labels.items() >= {**step_labels, **allowed}.items()
 
 
 async def test_list_sessions_pinned_filter(

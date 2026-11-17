@@ -154,6 +154,7 @@ from omnigent.server.routes._sessions.helpers import (
     _get_runner_client,
     _grant_default_public,
     _is_codex_native_subagent,
+    _is_coral_label_key,  # CORAL(S46)
     _live_settings_change,
     _LiveSettingsChange,
     _multipart_missing_detail,
@@ -4541,6 +4542,8 @@ def register_core_routes(
             dropped_label_keys_set.update(
                 key for key in source.labels if key.startswith(MCP_SELECTION_PREFIX)
             )
+        # CORAL(S46): a fork (and a /clear continuation) is a plain session, never in a Coral run.
+        dropped_label_keys_set.update(key for key in source.labels if _is_coral_label_key(key))
         dropped_label_keys: frozenset[str] = frozenset(dropped_label_keys_set)
 
         # DANGEROUS codex full-bypass. The source's bypass label is always

@@ -16,6 +16,7 @@ import re
 import secrets
 import threading
 import time
+import unicodedata  # CORAL(S46)
 import urllib.parse
 import weakref
 from collections import deque
@@ -10913,6 +10914,30 @@ def _reject_reserved_cost_control_label_seed(labels: dict[str, str]) -> None:
         )
 
 
+# CORAL(S46): Coral's workflow engine writes these labels through its stores, never a route.
+_CORAL_LABEL_PREFIX = "coral."
+
+
+def _is_coral_label_key(key: str) -> bool:
+    """
+    Whether a label key names, or could collate as, one Coral's workflow engine owns.
+
+    The key's skeleton is compared: NFKC, without format (zero-width) characters
+    or outer whitespace, casefolded, then without combining marks after NFKD. So
+    the width, zero-width, accent and case variants that a case- and
+    accent-insensitive collation (MySQL) equates are refused too. Look-alike
+    letters from other scripts, such as Cyrillic ``с``, are not folded.
+
+    :param key: A label key, e.g. ``"coral.run_id"`` or ``"Coral.Role"``.
+    :returns: ``True`` when the key's skeleton starts with ``coral.``.
+    """
+    text = unicodedata.normalize("NFKC", key)
+    text = "".join(char for char in text if unicodedata.category(char) != "Cf").strip()
+    text = unicodedata.normalize("NFKD", text.casefold())
+    skeleton = "".join(char for char in text if unicodedata.category(char)[0] != "M")
+    return skeleton.startswith(_CORAL_LABEL_PREFIX)
+
+
 def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
     """
     Reject a client-supplied label map that touches server-internal keys.
@@ -11015,6 +11040,13 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
         raise OmnigentError(
             f"label {sandbox_key!r} is in the server-internal "
             f"{MANAGED_SANDBOX_LABEL_NAMESPACE}* namespace and cannot be set by clients",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    # CORAL(S46): run membership labels; a client write would forge or tamper with a run session.
+    coral_key = next((k for k in labels if _is_coral_label_key(k)), None)
+    if coral_key is not None:
+        raise OmnigentError(
+            f"label {coral_key!r} is managed by Coral workflow runs and cannot be set by clients",
             code=ErrorCode.INVALID_INPUT,
         )
     # The codex side-chat child's thread id is what the follow-up path drives
