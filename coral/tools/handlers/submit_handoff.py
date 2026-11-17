@@ -10,25 +10,24 @@ other refusals write nothing. A valid handoff commits ``HandoffReceived`` and
 
 from __future__ import annotations
 
-import heapq
 import json
-import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from coral.db.enum_codecs import (
-    RunStatus,
-    SessionBindingProgress,
-    SessionBindingRole,
-    SlotRole,
-    decode_run_pause_reason,
-)
+from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole, SlotRole
 from coral.engine.lifecycle import REJECTED_CALL_LIMIT
 from coral.engine.machines.activation import choosable_labels, find_activation, routes_by_label
 from coral.engine.machines.slot import find_slot
 from coral.engine.types import HandoffEvaluated, HandoffReceived, RejectionObserved, Slot
 from coral.tools import replies
 from coral.tools.dispatch import EngineToolCall
+from coral.tools.handlers.common import (
+    encodable,
+    pause_reason,
+    run_stop,
+    text_argument,
+    unknown_arguments_message,
+)
 from coral.tools.port import Commit, Plan, Reply, RunSnapshot
 from coral.tools.schemas import (
     ARTIFACT_MAX,
@@ -52,10 +51,6 @@ _REQUIRED = (
 # An explicit null for one of these reads as leaving it out.
 _OPTIONAL = _FIELDS - frozenset(_REQUIRED)
 _NOT_READY = frozenset({"pending", "session_created", "briefed"})
-_FINISHED = frozenset({int(RunStatus.COMPLETED), int(RunStatus.FAILED)})
-# Unknown argument names are never echoed raw: at most this many plain names are listed.
-_UNKNOWN_LISTED = 5
-_PLAIN_NAME = re.compile(r"[A-Za-z0-9_]{1,32}")
 
 
 @dataclass(frozen=True)
@@ -140,13 +135,13 @@ def _member_slot(snapshot: RunSnapshot, call: EngineToolCall) -> Slot | None:
 
 def _run_fence(snapshot: RunSnapshot) -> Reply | None:
     """Refuse a cancelled, finished or paused run, by its store row or its engine state."""
-    stored, engine = snapshot.run.status, snapshot.state.status
-    if stored == RunStatus.CANCELLED or engine == "cancelled":
+    stop = run_stop(snapshot)
+    if stop == "cancelled":
         return Reply(replies.run_cancelled(), log="handoff arrived after cancel")
-    if stored in _FINISHED or engine in {"completed", "failed"}:
+    if stop == "finished":
         return Reply(replies.slot_closed(), log="run finished")
-    if stored == RunStatus.PAUSED or engine == "paused":
-        return Reply(replies.run_paused(_pause_reason(snapshot)))
+    if stop == "paused":
+        return Reply(replies.run_paused(pause_reason(snapshot)))
     return None
 
 
@@ -155,18 +150,6 @@ def _streak(snapshot: RunSnapshot, slot: Slot) -> int:
     return next(
         (item.count for item in snapshot.state.reject_streaks if item.slot_id == slot.id), 0
     )
-
-
-def _pause_reason(snapshot: RunSnapshot) -> str | None:
-    """The store's pause reason (drift and budget pauses live only there), else the engine's."""
-    code = snapshot.run.pause_reason
-    if snapshot.run.status == RunStatus.PAUSED and code is not None:
-        try:
-            return decode_run_pause_reason(code)
-        except ValueError:
-            return None
-    causes = snapshot.state.causes
-    return causes[0].reason if snapshot.state.status == "paused" and causes else None
 
 
 def _checked(
@@ -182,7 +165,7 @@ def _checked(
         return replies.invalid_handoff("kind", "Only handoff is accepted.", (HANDOFF_KIND,))
     unknown = [name for name in arguments if name not in _FIELDS]
     if unknown:
-        return replies.invalid_handoff("arguments", _unknown_message(unknown))
+        return replies.invalid_handoff("arguments", unknown_arguments_message(unknown, _FIELDS))
     for name in _REQUIRED:
         if name not in arguments:
             return replies.invalid_handoff(name, "This argument is required.")
@@ -195,14 +178,14 @@ def _checked(
     status = arguments["status"]
     if not isinstance(status, str) or status not in HANDOFF_STATUSES:
         return replies.invalid_handoff("status", "Use done or blocked.", HANDOFF_STATUSES)
-    report = _text(arguments["report"], REPORT_MAX)
+    report = text_argument(arguments["report"], REPORT_MAX)
     if report is None:
         return replies.invalid_handoff(
             "report", f"Write a report of 1 to {REPORT_MAX} characters."
         )
     blocked_reason: str | None = None
     if status == "blocked":
-        blocked_reason = _text(arguments.get("blocked_reason"), BLOCKED_REASON_MAX)
+        blocked_reason = text_argument(arguments.get("blocked_reason"), BLOCKED_REASON_MAX)
         if blocked_reason is None:
             return replies.invalid_handoff(
                 "blocked_reason",
@@ -261,15 +244,6 @@ def _oversized(fields: dict[str, object]) -> ToolReply:
     )
 
 
-def _unknown_message(unknown: Sequence[object]) -> str:
-    """How many unknown arguments came, naming at most a few plain ones; never raw text."""
-    plain = [name for name in unknown if isinstance(name, str) and _PLAIN_NAME.fullmatch(name)]
-    named = heapq.nsmallest(_UNKNOWN_LISTED, plain)
-    listed = f" ({', '.join(named)})" if named else ""
-    known = ", ".join(sorted(_FIELDS))
-    return f"{len(unknown)} unknown argument(s){listed}; the arguments are {known}."
-
-
 def _label(
     snapshot: RunSnapshot, slot: Slot, status: str, arguments: Mapping[str, object]
 ) -> str | ToolReply | None:
@@ -295,13 +269,6 @@ def _label(
     return given
 
 
-def _text(value: object, max_length: int) -> str | None:
-    """Non-blank text of at most ``max_length`` characters that UTF-8 can encode."""
-    if not isinstance(value, str) or len(value) > max_length or not value.strip():
-        return None
-    return value if _encodable(value) else None
-
-
 def _artifacts(value: object) -> list[str] | None:
     """At most ``ARTIFACTS_MAX`` paths of 1 to ``ARTIFACT_MAX`` characters."""
     if not isinstance(value, list | tuple) or len(value) > ARTIFACTS_MAX:
@@ -310,15 +277,7 @@ def _artifacts(value: object) -> list[str] | None:
     for item in value:
         if not isinstance(item, str) or not 1 <= len(item) <= ARTIFACT_MAX:
             return None
-        if not _encodable(item):
+        if not encodable(item):
             return None
         paths.append(item)
     return paths
-
-
-def _encodable(text: str) -> bool:
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True

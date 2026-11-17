@@ -21,6 +21,7 @@ from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.stores.protocols import RunStore
 from coral.stores.runs import SqlAlchemyCoralRunStore
+from coral.stores.session_bindings import FreshBindingLookup, SqlAlchemySessionBindingStore
 from coral.stores.workflows import SqlWorkflowDefinitionStore
 from coral.workers.supervisor import WorkerSupervisor
 from omnigent.process_logging import data_dir
@@ -82,12 +83,27 @@ def _missing_engine_input(app: Any, services: ServerServices) -> str | None:
     return None
 
 
+def _wire_guards(*, bindings: FreshBindingLookup, stack: AsyncExitStack) -> None:
+    """
+    Register what protects bound sessions, whether or not the session engine is wired.
+
+    The engine tools register from the production catalog with no decision
+    port: nothing while the catalog is empty, and once it lists a tool each
+    call answers that the engine is not running.
+    """
+    from coral.omni.server.tool_bridge import register_engine_tools
+    from coral.tools.catalog import CATALOG
+
+    register_engine_tools(catalog=CATALOG, port=None, bindings=bindings, stack=stack)
+
+
 def _wire_session_engine(
     app: Any,
     services: ServerServices,
     *,
     db_uri: str,
     run_store: RunStore,
+    bindings: SqlAlchemySessionBindingStore,
     scope_runner: RunScopeRunner,
     stack: AsyncExitStack,
 ) -> None:
@@ -118,7 +134,6 @@ def _wire_session_engine(
         create_session_executor,
         send_input_executor,
     )
-    from coral.stores.session_bindings import SqlAlchemySessionBindingStore
     from coral.stores.stable_ids import SqlAlchemyStableIdStore
     from coral.stores.workspace_op_intents import SqlAlchemyWorkspaceOpIntentStore
     from coral.workspace.executors import (
@@ -133,7 +148,6 @@ def _wire_session_engine(
 
     host_store = services.host_store
     assert host_store is not None  # checked by _missing_engine_input
-    bindings = SqlAlchemySessionBindingStore(db_uri)
     stable_ids = SqlAlchemyStableIdStore(db_uri)
     intents = SqlAlchemyWorkspaceOpIntentStore(db_uri)
     pauser = DriftPauser(run_store)
@@ -203,9 +217,10 @@ async def coral_lifespan(
     """
     Run Coral's startup migration check, worker supervisor, and reverse-order shutdown.
 
-    On a usable operational database with the server's stores present, the
-    session engine's executors and status-edge observers are registered before
-    the supervisor starts. Nothing enqueues their effects yet. Exit stops the
+    On a usable operational database the guards for bound sessions are
+    registered, and with the server's stores present also the session engine's
+    executors and status-edge observers, all before the supervisor starts. Both
+    share one binding store. Nothing enqueues engine effects yet. Exit stops the
     supervisor first, so no item is claimed while its executor is missing (an
     item in flight keeps its lease and is reclaimed), then unregisters in
     reverse order, also after a failed start.
@@ -232,6 +247,8 @@ async def coral_lifespan(
                 app.state.coral_run_store = run_store
                 app.state.coral_queue_store = queue_store
                 app.state.coral_worker_supervisor = supervisor
+            bindings = SqlAlchemySessionBindingStore(storage_location)
+            _wire_guards(bindings=bindings, stack=stack)
             missing = _missing_engine_input(app, services)
             if missing is None:
                 _wire_session_engine(
@@ -239,6 +256,7 @@ async def coral_lifespan(
                     services,
                     db_uri=storage_location,
                     run_store=run_store,
+                    bindings=bindings,
                     scope_runner=scope_runner,
                     stack=stack,
                 )

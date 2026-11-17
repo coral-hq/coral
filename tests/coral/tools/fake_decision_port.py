@@ -2,7 +2,8 @@
 
 Tests set the store row (status, pause reason, orchestrator) apart from the
 engine state, as drift and budget pauses do, and can make the next commits lose
-their compare-and-swap.
+their compare-and-swap. :class:`FakeBindingLookup` serves the bindings the
+calls name.
 """
 
 from __future__ import annotations
@@ -58,6 +59,26 @@ def step_binding(
         created_at=0,
         updated_at=0,
     )
+
+
+@dataclass
+class FakeBindingLookup:
+    """``FreshBindingLookup`` over stored bindings; ``error`` makes every read raise it."""
+
+    # Every read looks at ``rows``: nothing found earlier is kept.
+    reads_fresh = True
+    rows: dict[tuple[int, str], SessionBinding] = field(default_factory=dict)
+    error: Exception | None = None
+    reads: list[tuple[int, str]] = field(default_factory=list)
+
+    def add(self, binding: SessionBinding) -> None:
+        self.rows[(binding.workspace_id, binding.session_id)] = binding
+
+    def find_by_session(self, workspace_id: int, session_id: str) -> SessionBinding | None:
+        self.reads.append((workspace_id, session_id))
+        if self.error is not None:
+            raise self.error
+        return self.rows.get((workspace_id, session_id))
 
 
 @dataclass

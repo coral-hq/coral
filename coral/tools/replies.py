@@ -1,7 +1,8 @@
 """The replies engine tools give and the ``next`` text that tells the agent what to do.
 
 No text for a paused, cancelled or finished run, or a replaced session, invites
-another call: each says to stop and end the turn.
+another call: each says to stop and end the turn. An orchestrator is never
+told that Coral resumes a step: it has none.
 """
 
 from __future__ import annotations
@@ -15,12 +16,14 @@ from coral.tools.schemas import (
     DECISION_CLOSED,
     EVALUATION_IN_PROGRESS,
     HANDOFF_INVALID,
+    NOT_ORCHESTRATOR,
     NOT_RUN_MEMBER,
     RUN_CANCELLED,
     RUN_PAUSED,
     SLOT_CLOSED,
     SLOT_SUPERSEDED,
     TOOL_ILLEGAL,
+    LoopUse,
     ToolReply,
 )
 
@@ -38,6 +41,12 @@ NOT_A_MEMBER = (
     "This session is not a Coral step that can make this call. Stop now and end your turn."
 )
 BUSY = "Coral is busy; make the same call again in a moment."
+NOT_THE_ORCHESTRATOR = (
+    "Only the run's current orchestrator can choose arrows. Stop now and end your turn."
+)
+NO_OPEN_DECISION = "No decision is open now. Stop now and end your turn."
+# After a choice: other decisions of the run may be waiting on the orchestrator.
+CHOICE_DONE = "Answer any other open decision request, then end your turn."
 
 
 def stop_paused(reason: str | None) -> str:
@@ -110,6 +119,76 @@ def decision_closed() -> ToolReply:
     return ToolReply(accepted=False, reason=DECISION_CLOSED, next=DECIDED)
 
 
+def not_orchestrator() -> ToolReply:
+    return ToolReply(accepted=False, reason=NOT_ORCHESTRATOR, next=NOT_THE_ORCHESTRATOR)
+
+
+def choice_paused(reason: str | None) -> ToolReply:
+    """A paused run's answer to an orchestrator, naming the pause reason when it is known."""
+    cause = f" ({reason})" if reason else ""
+    return ToolReply(
+        accepted=False,
+        reason=RUN_PAUSED,
+        next=f"The run is paused{cause}. Stop now and end your turn.",
+    )
+
+
+def illegal_choice(field: str, message: str, allowed: tuple[str, ...] = ()) -> ToolReply:
+    """An uncounted refusal of a choice, naming the one argument to fix."""
+    return ToolReply(
+        accepted=False,
+        reason=TOOL_ILLEGAL,
+        allowed_values=allowed,
+        next=f"Fix {field} and call coral_choose_arrow again.",
+        field=field,
+        message=message,
+    )
+
+
+def unknown_decision(open_ids: tuple[str, ...]) -> ToolReply:
+    """A ``decision_id`` that names no open decision; with none open, there is nothing to do."""
+    if not open_ids:
+        return dataclasses.replace(
+            illegal_choice("decision_id", "No decision is open."), next=NO_OPEN_DECISION
+        )
+    return illegal_choice("decision_id", "Use one of the open decision ids.", open_ids)
+
+
+def choice_made(
+    label: str,
+    target: str | None,
+    *,
+    loop: LoopUse | None = None,
+    redirected: bool = False,
+    duplicate: bool = False,
+) -> ToolReply:
+    """
+    A taken choice, or the receipt of one taken earlier.
+
+    :param label: The chosen label, one of the decision's own.
+    :param target: The node Coral went to: the chosen arrow's target, or the
+        at-limit arrow's when a loop limit redirected the choice.
+    :param loop: The pass a back arrow started and the loop's limit.
+    """
+    where = f"'{target}'" if target is not None else "no further node"
+    if redirected:
+        went = f"'{label}' reached its loop limit, so Coral took the at-limit arrow to {where}."
+    elif loop is not None:
+        limit = f" of {loop.limit}" if loop.limit is not None else ""
+        went = f"Coral took '{label}' back to {where} for pass {loop.used}{limit}."
+    else:
+        went = f"Coral took '{label}' to {where}."
+    if duplicate:
+        went = f"This decision is already made: {went}"
+    return ToolReply(
+        accepted=True,
+        next=f"{went} {CHOICE_DONE}",
+        duplicate=duplicate,
+        loop=loop,
+        redirected=redirected,
+    )
+
+
 def reply_for_engine_rejection(tool: str, rejection: Rejection) -> ToolReply:
     """
     The reply for the engine refusing a planned input of ``tool``.
@@ -126,7 +205,7 @@ def reply_for_engine_rejection(tool: str, rejection: Rejection) -> ToolReply:
     if code == "slot.closed":
         return slot_closed()
     if code == "run_paused":
-        return run_paused(None)
+        return choice_paused(None) if tool == CHOOSE_ARROW.name else run_paused(None)
     if code == "run_cancelled":
         return run_cancelled()
     if code == "run_terminal":
@@ -142,12 +221,7 @@ def reply_for_engine_rejection(tool: str, rejection: Rejection) -> ToolReply:
             "label", "Use one of the step's labels.", tuple(rejection.allowed_values)
         )
     if code == TOOL_ILLEGAL:
-        return ToolReply(
-            accepted=False,
-            reason=TOOL_ILLEGAL,
-            allowed_values=tuple(rejection.allowed_values),
-            next="Choose one of the allowed labels and call coral_choose_arrow again.",
-            field="label",
-            message="Use one of the decision's labels.",
+        return illegal_choice(
+            "label", "Use one of the decision's labels.", tuple(rejection.allowed_values)
         )
     raise EngineRefused(rejection)

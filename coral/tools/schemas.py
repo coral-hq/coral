@@ -20,6 +20,9 @@ BLOCKED_REASON_MAX = 2000
 LABEL_MAX = 200
 ARTIFACTS_MAX = 50
 ARTIFACT_MAX = 1024
+# coral_choose_arrow field bounds, shared by its schema and its planner.
+DECISION_ID_MAX = 512
+REASON_MAX = 4000
 
 SUBMIT_HANDOFF_PARAMETERS: Mapping[str, object] = {
     "type": "object",
@@ -80,19 +83,19 @@ CHOOSE_ARROW_PARAMETERS: Mapping[str, object] = {
         "decision_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 512,
+            "maxLength": DECISION_ID_MAX,
             "description": "The decision id from the decision request.",
         },
         "label": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 200,
+            "maxLength": LABEL_MAX,
             "description": "One of the labels the decision request lists.",
         },
         "reason": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 4000,
+            "maxLength": REASON_MAX,
             "description": "A short reason for your choice.",
         },
     },

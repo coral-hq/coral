@@ -5,18 +5,22 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from sqlalchemy import event
 
 from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole, SlotRole
 from coral.model.ids import anchor_session_id
 from coral.stores.session_bindings import (
     BindingConflict,
     BindingNotFound,
+    FreshBindingLookup,
     SessionBinding,
     SessionBindingDraft,
+    SessionBindingLookup,
     SessionBindings,
     SqlAlchemySessionBindingStore,
     effect_checksum,
 )
+from omnigent.db import current_query_name
 from tests.stores.coral._faults import fresh_process, run_racing
 
 WORKSPACE = 7
@@ -218,3 +222,65 @@ def test_list_for_run_returns_the_anchor_first_and_only_that_runs_bindings(
     store.reserve(_step(workspace_id=WORKSPACE + 1))
 
     assert store.list_for_run(WORKSPACE, RUN) == [anchor, step]
+
+
+def test_find_by_session_reads_a_binding_of_any_run(coral_db_uri: str) -> None:
+    store = _store(coral_db_uri)
+    step = store.reserve(_step())
+    other_anchor = store.reserve(
+        _anchor(run_id=OTHER_RUN, session_id=anchor_session_id(WORKSPACE, OTHER_RUN))
+    )
+    engine = fresh_process(coral_db_uri)
+    reopened = SqlAlchemySessionBindingStore(engine, clock=_clock)
+    assert isinstance(reopened, SessionBindingLookup)
+    # The tool bridge accepts only a lookup that reads the store on every call.
+    assert isinstance(reopened, FreshBindingLookup) and reopened.reads_fresh is True
+    names: list[str | None] = []
+
+    def capture_name(*_args: object) -> None:
+        names.append(current_query_name())
+
+    event.listen(engine, "before_cursor_execute", capture_name)
+    try:
+        # No run is named: the caller takes the run, role and slot from the row.
+        assert reopened.find_by_session(WORKSPACE, STEP_SESSION) == step
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_name)
+    assert names and set(names) == {"coral.session_bindings.find_by_session"}
+    assert reopened.find_by_session(WORKSPACE, other_anchor.session_id) == other_anchor
+    assert reopened.find_by_session(WORKSPACE + 1, STEP_SESSION) is None
+    assert reopened.find_by_session(WORKSPACE, "f" * 32) is None
+    # The run-scoped read still treats another run's binding as none.
+    assert reopened.get(WORKSPACE, STEP_SESSION, run_id=OTHER_RUN) is None
+    assert reopened.get(WORKSPACE, STEP_SESSION, run_id=RUN) == step
+
+    # Every read is fresh, so progress made after the first read shows.
+    store.record_progress(WORKSPACE, STEP_SESSION, SessionBindingProgress.ROW_CREATED)
+    found = reopened.find_by_session(WORKSPACE, STEP_SESSION)
+    assert found is not None
+    assert found.progress is SessionBindingProgress.ROW_CREATED
+
+
+def test_find_by_session_reads_only_the_callers_workspace(coral_db_uri: str) -> None:
+    store = _store(coral_db_uri)
+    # One session id bound in two workspaces, to different runs, roles and slots.
+    mine = store.reserve(_step())
+    theirs = store.reserve(
+        _step(
+            workspace_id=WORKSPACE + 1,
+            run_id=OTHER_RUN,
+            slot_id="Build/0:implementer",
+            slot_role=SlotRole.STEP_AGENT,
+            session_generation=1,
+        )
+    )
+    reopened = SqlAlchemySessionBindingStore(fresh_process(coral_db_uri), clock=_clock)
+
+    assert reopened.find_by_session(WORKSPACE, STEP_SESSION) == mine
+    assert reopened.find_by_session(WORKSPACE + 1, STEP_SESSION) == theirs
+    assert reopened.find_by_session(WORKSPACE + 2, STEP_SESSION) is None
+    # Progress in one workspace never shows in the other.
+    store.record_progress(WORKSPACE + 1, STEP_SESSION, SessionBindingProgress.INITIALIZED)
+    assert reopened.find_by_session(WORKSPACE, STEP_SESSION) == mine
+    found = reopened.find_by_session(WORKSPACE + 1, STEP_SESSION)
+    assert found is not None and found.progress is SessionBindingProgress.INITIALIZED

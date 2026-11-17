@@ -115,7 +115,8 @@ def test_a_reply_states_its_reason_exactly_when_refused() -> None:
         (SUBMIT, "slot.superseded", "slot.superseded", None),
         (SUBMIT, "slot.closed", "slot_closed", None),
         (SUBMIT, "run_paused", "run.paused", stop_paused(None)),
-        (CHOOSE, "run_paused", "run.paused", stop_paused(None)),
+        # An orchestrator has no step to resume.
+        (CHOOSE, "run_paused", "run.paused", "The run is paused. Stop now and end your turn."),
         (SUBMIT, "run_cancelled", "run_cancelled", None),
         (SUBMIT, "run_terminal", "slot_closed", None),
         (CHOOSE, "run_terminal", "decision_closed", None),

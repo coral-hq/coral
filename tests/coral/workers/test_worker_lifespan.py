@@ -38,6 +38,8 @@ from coral.slots.executors import CANCEL_SESSIONS, CLOSE_SLOT, CREATE_SESSION, S
 from coral.stores.protocols import RunStartSpec, WorkItemDraft
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import SessionBindingDraft, SqlAlchemySessionBindingStore
+from coral.tools import catalog as tool_catalog
+from coral.tools.catalog import ENGINE_TOOLS, SUBMIT_HANDOFF
 from coral.workers.supervisor import WorkerSupervisor
 from coral.workspace.executors import WORKSPACE_COMMIT, WORKSPACE_RESET, WORKSPACE_SALVAGE
 from omnigent.db.account_authority import account_generation, current_account_user
@@ -50,6 +52,7 @@ from omnigent.server.app import create_app
 from omnigent.server.host_registry import _expected_host_owner
 from omnigent.server.routes._sessions import helpers as session_helpers
 from omnigent.server.server_plugins import ServerServices
+from omnigent.server.server_tools import ServerToolCall, ServerToolResult, server_tool
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -65,6 +68,7 @@ from tests.coral.workspace._executor_fakes import (
     start_run,
 )
 from tests.server.helpers import create_session_for_agent, create_test_agent
+from tests.tools.test_extensions import installed_tool_providers
 
 ENGINE_EFFECT_TYPES = frozenset(
     {
@@ -80,12 +84,18 @@ ENGINE_EFFECT_TYPES = frozenset(
 # The status-edge observer and the confirmed-stop record's observer.
 ENGINE_OBSERVERS = frozenset({"coral", "coral.confirmed_stops"})
 NOTHING: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
+ENGINE_TOOL_NAMES = frozenset(decl.name for decl in ENGINE_TOOLS)
 
 
 def _engine_registrations() -> tuple[frozenset[str], frozenset[str]]:
     """The session engine's effect executors and status-edge observers registered now."""
     observers = frozenset(session_live_state._status_edge_observers) & ENGINE_OBSERVERS
     return registered_executor_kinds() & ENGINE_EFFECT_TYPES, observers
+
+
+def _engine_tools() -> frozenset[str]:
+    """Coral's engine tools registered as server tools now."""
+    return frozenset(name for name in ENGINE_TOOL_NAMES if server_tool(name) is not None)
 
 
 @dataclass
@@ -261,17 +271,79 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
 
 
 async def test_an_overlapping_lifespan_takes_over_and_outlives_the_earlier_exit(
-    server: _Server,
+    server: _Server, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async with AsyncExitStack() as later:
-        async with coral_lifespan(server.app, server.services):
-            # Entered while the first still runs: it replaces the registrations, no conflict.
-            await later.enter_async_context(coral_lifespan(server.app, server.services))
-            edges = server.app.state.coral_status_edges
-        # The earlier exit removes only its own registrations.
-        assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
-        assert session_live_state._status_edge_observers["coral"] == edges.observe
+    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
+    with installed_tool_providers():
+        async with AsyncExitStack() as later:
+            async with coral_lifespan(server.app, server.services):
+                # Entered while the first still runs: it replaces the registrations, no conflict.
+                await later.enter_async_context(coral_lifespan(server.app, server.services))
+                edges = server.app.state.coral_status_edges
+                handler = server_tool(SUBMIT_HANDOFF.name)
+            # The earlier exit removes only its own registrations.
+            assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
+            assert session_live_state._status_edge_observers["coral"] == edges.observe
+            assert _engine_tools() == ENGINE_TOOL_NAMES
+            assert server_tool(SUBMIT_HANDOFF.name) is handler
     assert _engine_registrations() == NOTHING
+    assert _engine_tools() == frozenset()
+
+
+@pytest.mark.parametrize("engine", ["wired", "unwired"])
+async def test_the_production_catalog_registers_no_engine_tool(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    assert tool_catalog.CATALOG == ()
+    if engine == "unwired":
+        monkeypatch.delattr(server.app.state, "session_event_dispatch")
+    async with coral_lifespan(server.app, server.services):
+        assert _engine_registrations() == (
+            (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS) if engine == "wired" else NOTHING
+        )
+        assert _engine_tools() == frozenset()
+        assert all(server_tool(f"mcp__omnigent__{name}") is None for name in ENGINE_TOOL_NAMES)
+
+
+@pytest.mark.parametrize("engine", ["wired", "unwired", "no_database"])
+async def test_engine_tools_are_wired_without_the_session_engine_and_removed_on_exit(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    # A catalog that lists the tools; without a decision port each answers "not running".
+    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
+    services: Any = server.services
+    if engine == "unwired":
+        monkeypatch.delattr(server.app.state, "session_event_dispatch")
+    elif engine == "no_database":
+        services = SimpleNamespace(
+            host_sharded=False,
+            conversation_store=SimpleNamespace(storage_location="sqlite:///:memory:"),
+        )
+    call = ServerToolCall(
+        session_id="session-1",
+        name=SUBMIT_HANDOFF.name,
+        arguments={},
+        operation_id="op-1",
+        runner_proven=True,
+        actor=None,
+    )
+
+    with installed_tool_providers():
+        async with coral_lifespan(server.app, cast(ServerServices, services)):
+            wired = engine == "wired"
+            assert _engine_registrations() == (
+                (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS) if wired else NOTHING
+            )
+            if engine == "no_database":
+                assert _engine_tools() == frozenset()
+            else:
+                assert _engine_tools() == ENGINE_TOOL_NAMES
+                handler = server_tool(SUBMIT_HANDOFF.name)
+                assert handler is not None
+                assert await handler(call) == ServerToolResult(
+                    "Coral's workflow engine is not running on this server", is_error=True
+                )
+    assert _engine_tools() == frozenset()
 
 
 @pytest.mark.parametrize("missing", ["session_event_dispatch", "project_store"])
@@ -294,6 +366,7 @@ async def test_a_server_without_an_engine_input_wires_nothing(
 async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
     server: _Server, monkeypatch: pytest.MonkeyPatch, failing: str
 ) -> None:
+    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
     if failing == "executor":
         register_executor = queue_executors.register_executor
         registered: list[str] = []
@@ -321,11 +394,12 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
 
         monkeypatch.setattr(WorkerSupervisor, "start", failing_start)
 
-    with pytest.raises(RuntimeError, match="failed"):
+    with installed_tool_providers(), pytest.raises(RuntimeError, match="failed"):
         async with coral_lifespan(server.app, server.services):
             pass
 
     assert _engine_registrations() == NOTHING
+    assert _engine_tools() == frozenset()
 
 
 async def test_item_claimed_during_exit_is_retried_not_failed(

@@ -116,6 +116,30 @@ class SessionBindings(Protocol):
     def list_for_run(self, workspace_id: int, run_id: str) -> list[SessionBinding]: ...
 
 
+@runtime_checkable
+class SessionBindingLookup(Protocol):
+    """Classify a session without knowing its run: guards, policies and the tool bridge.
+
+    Callers take the run, role, slot and generation from the row they read and
+    act only for that run, never for one a label or a payload names.
+    """
+
+    def find_by_session(self, workspace_id: int, session_id: str) -> SessionBinding | None: ...
+
+
+@runtime_checkable
+class FreshBindingLookup(SessionBindingLookup, Protocol):
+    """A lookup that reads the store on every call, so a binding's progress is current.
+
+    Engine-tool planners read ``progress``, which grows after a binding is
+    reserved, so a cache that keeps found rows would serve them a stale one.
+    Only an implementation that reads every time sets ``reads_fresh`` to true.
+    """
+
+    @property
+    def reads_fresh(self) -> bool: ...
+
+
 # Fields a repeat reservation must match; the anchor keeps its first effect checksum.
 _MATCHED_FIELDS = ("run_id", "role", "slot_id", "slot_role", "session_generation", "host_id")
 
@@ -198,7 +222,10 @@ def _adopt(row: SessionBindingRow, wanted: SessionBinding) -> SessionBinding:
 
 
 class SqlAlchemySessionBindingStore:
-    """SQLAlchemy implementation of :class:`SessionBindings`."""
+    """SQLAlchemy implementation of :class:`SessionBindings` and :class:`FreshBindingLookup`."""
+
+    # Every lookup reads the database: nothing is cached.
+    reads_fresh = True
 
     def __init__(
         self,
@@ -274,11 +301,20 @@ class SqlAlchemySessionBindingStore:
 
     def get(self, workspace_id: int, session_id: str, *, run_id: str) -> SessionBinding | None:
         """Return the session's binding for ``run_id``; another run's binding reads as none."""
-        with shared_read_scope(), self._session("get") as session:
+        binding = self._read("get", workspace_id, session_id)
+        return binding if binding is not None and binding.run_id == run_id else None
+
+    def find_by_session(self, workspace_id: int, session_id: str) -> SessionBinding | None:
+        """Return the session's binding in whichever run it belongs to, else ``None``.
+
+        Each call reads the store, so it sees progress made since an earlier read.
+        """
+        return self._read("find_by_session", workspace_id, session_id)
+
+    def _read(self, operation: str, workspace_id: int, session_id: str) -> SessionBinding | None:
+        with shared_read_scope(), self._session(operation) as session:
             row = session.get(SessionBindingRow, (workspace_id, session_id))
-            if row is None or row.run_id != run_id:
-                return None
-            return _to_binding(row)
+            return None if row is None else _to_binding(row)
 
     def list_for_run(self, workspace_id: int, run_id: str) -> list[SessionBinding]:
         """Return the run's bindings, anchor first."""
@@ -297,8 +333,10 @@ class SqlAlchemySessionBindingStore:
 __all__ = [
     "BindingConflict",
     "BindingNotFound",
+    "FreshBindingLookup",
     "SessionBinding",
     "SessionBindingDraft",
+    "SessionBindingLookup",
     "SessionBindings",
     "SqlAlchemySessionBindingStore",
     "effect_checksum",
