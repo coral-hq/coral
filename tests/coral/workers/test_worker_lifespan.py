@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import threading
 import time
 import uuid
@@ -23,13 +24,16 @@ from sqlalchemy.orm import Session
 
 from coral.db import WorkRow
 from coral.db.enum_codecs import RunPauseReason, RunStatus, SessionBindingProgress, WorkStatus
+from coral.model.ids import anchor_session_id
 from coral.omni.policies.cost_backstop import (
     SESSION_CAP_CONFIG_KEY,
     SESSION_CAP_ENV,
     cost_backstop,
 )
 from coral.omni.policies.state import RunStatusCache
+from coral.omni.protocols import CoralSessionError
 from coral.omni.server import OmnigentRunScopeRunner, coral_lifespan
+from coral.omni.server.dispatch import OmnigentSessionDispatch
 from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
 from coral.omni.server.sessions import RUN_ID_LABEL_KEY
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
@@ -933,3 +937,69 @@ async def test_a_close_and_a_commit_share_one_stop_record(
     assert host_ops.count("commit") == 2
     assert isinstance(after_rerun, EffectFailed)
     assert (after_rerun.error_code, after_rerun.retryable) == ("session.turn_state_unknown", True)
+
+
+async def test_an_anchor_bound_send_stops_the_anchor_runner_through_the_lifespans_dispatch(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The drift pause's stop reaches the dispatch the lifespan built, which holds the pauser."""
+    stops: list[tuple[str, str | None]] = []
+    real_stop = OmnigentSessionDispatch.stop
+
+    async def recording_stop(
+        dispatch: OmnigentSessionDispatch, *, session_id: str, user_id: str | None
+    ) -> None:
+        stops.append((session_id, user_id))
+        await real_stop(dispatch, session_id=session_id, user_id=user_id)
+
+    monkeypatch.setattr(OmnigentSessionDispatch, "stop", recording_stop)
+    workspace_id = DEFAULT_WORKSPACE_ID
+    run_store = SqlAlchemyCoralRunStore(server.db_uri)
+    run = start_run(
+        run_store,
+        workspace_id=workspace_id,
+        user_id=None,
+        account_generation=None,
+        host_id=None,
+        repo_path=None,
+        worktree_path=None,
+        run_branch=None,
+    )
+    # Someone attached a runner to the run's anchor.
+    anchor = anchor_session_id(workspace_id, run.id)
+    server.services.conversation_store.create_conversation(
+        conversation_id=anchor, runner_id="runner-on-anchor"
+    )
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    bindings.reserve(
+        SessionBindingDraft(
+            workspace_id=workspace_id,
+            session_id=anchor,
+            run_id=run.id,
+            role="anchor",
+            effect_key=f"{run.id}:0:create_session:anchor",
+        )
+    )
+    bindings.record_progress(workspace_id, anchor, SessionBindingProgress.ROW_CREATED)
+
+    with caplog.at_level(logging.WARNING, logger="coral.recovery.drift"):
+        async with coral_lifespan(server.app, server.services):
+            dispatch = server.app.state.coral_session_dispatch
+            for attempt in range(2):
+                with pytest.raises(CoralSessionError) as refused:
+                    await dispatch.send_message(
+                        workspace_id=workspace_id,
+                        run_id=run.id,
+                        session_id=uuid.uuid4().hex,
+                        user_id=None,
+                        stable_id=f"brief-{attempt}",
+                        text="Review the parser.",
+                    )
+                assert refused.value.code == "drift.anchor_bound"
+
+    # Each detection stopped the anchor, as the run owner, and the stop went through.
+    assert stops == [(anchor, None)] * 2
+    assert [r for r in caplog.records if r.name == "coral.recovery.drift"] == []
+    stored = run_store.get_run(run.id, workspace_id=workspace_id)
+    assert stored is not None
+    assert (stored.status, stored.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)

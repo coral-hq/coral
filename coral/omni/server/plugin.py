@@ -150,6 +150,7 @@ def _wire_session_engine(
     first removes only its own registrations, so an inner exit leaves the outer
     lifespan with none.
     """
+    from coral.omni.server.anchor_runner import AnchorRunnerStopper
     from coral.omni.server.dispatch import OmnigentSessionDispatch
     from coral.omni.server.sessions import OmnigentSessionFacade
     from coral.omni.server.status_edges import CoralStatusEdges
@@ -183,7 +184,13 @@ def _wire_session_engine(
     assert host_store is not None  # checked by _missing_engine_input
     stable_ids = SqlAlchemyStableIdStore(db_uri)
     intents = SqlAlchemyWorkspaceOpIntentStore(db_uri)
-    pauser = DriftPauser(run_store)
+    # Resolved at stop time: the dispatch's pre-send hook holds the pauser that holds the stopper.
+    anchor_runner_stopper = AnchorRunnerStopper(
+        conversation_store=services.conversation_store,
+        run_store=run_store,
+        dispatch=lambda: dispatch,
+    )
+    pauser = DriftPauser(run_store, on_anchor_bound=anchor_runner_stopper)
     facade = OmnigentSessionFacade(app, services, bindings)
     dispatch = OmnigentSessionDispatch(
         app,

@@ -29,7 +29,8 @@ engine effects are enqueued on such a server they fail permanently as
 `executor.missing`.
 
 1. It builds the three `coral_0002` stores, `OmnigentSessionFacade`,
-   `OmnigentSessionDispatch` with a `DriftPreSendHook`,
+   `OmnigentSessionDispatch` with a `DriftPreSendHook` (whose pauser stops a
+   runner attached to the anchor, see Anchor runner),
    `OmnigentHostWorkspaceChannels`, `CoralStatusEdges` on the server's event
    loop, and one `ConfirmedStops` record.
 2. It registers the seven executors (`cancel_sessions` with
@@ -242,7 +243,8 @@ branch, or a branch other than `run_branch_name(run_id)`.
   is one entry per pause epoch. A paused or finished run is left as it is. A run
   resumed while the drift persists is paused again by the next engine action.
   The effect then fails as permanent `drift.<cause>`. `anchor_bound` is an
-  additive K2 cause.
+  additive K2 cause; after its pause Coral also stops the anchor's runner,
+  best effort (see Anchor runner).
 
 ## Engine messages
 
@@ -689,13 +691,36 @@ test until someone classifies it.
   commit, and the commit runs after the writer's runner stopped.
 - **Native harnesses** are refused as steps until HRN-03 (CRL-138). Their
   `external_session_status` outcome pass-through is HRN-05 (CRL-146).
-- **Anchor runner.** If an owner attaches a runner to the anchor, the
-  `anchor_bound` drift pause refuses further engine work but does not stop that
-  runner. The anchor seed (`coral/profiles/seeds/anchor.yaml`, from CRL-132's
-  PRF-01) no longer sets `permission_mode: bypassPermissions`, so the
-  harness's default applies. Every anchor tool call is denied (see Run
-  protection). Still open, owner CRL-131 (RUL-01): stopping or unbinding an
-  anchor runner on detection.
+- **Anchor runner.** The mutation guard refuses a client attaching a runner
+  to the anchor (`PATCH runner_id`, runner launch; see Run protection). If a
+  runner is attached anyway (before the guard was registered, or by a path it
+  does not cover), the `anchor_bound` drift pause refuses further engine work,
+  and then `AnchorRunnerStopper` (`coral/omni/server/anchor_runner.py`) sends
+  the anchor `stop_session` through the engine dispatch, as the run owner from
+  the run row, on every detection. The stop is best effort and the primary
+  control stays the anchor's deny-all (every anchor tool call is denied, see
+  Run protection):
+  - What stops is Omnigent's choice. For a runner with no host (an anchor with
+    a `runner_id` and no `host_id`), only the anchor's session on that runner
+    is stopped and the runner process keeps running. When the anchor owns a
+    host runner (it has a `host_id` too), Omnigent ends that runner.
+  - A runner that any other session also uses is left running, with one
+    warning, because ending it would take that session down. This covers a
+    step of this run or another, a chat, and a child made before the guard.
+    One read of the sessions pinned to the runner decides, archived ones
+    included.
+  - A failed stop is logged and the pause stands; the next detection tries
+    again. The stop runs inside the effect that found the drift, bounded by
+    the dispatch's event timeout, and does not re-check the work lease first.
+    That is accepted: the pause has already committed and the stop is safe to
+    repeat.
+  - An anchor bound to a host only has no runner to stop.
+  - The runner stays bound (stop only, no unbind), so its owner can start it
+    again; the run stays paused until someone resumes it.
+
+  The anchor seed (`coral/profiles/seeds/anchor.yaml`, from CRL-132's PRF-01)
+  no longer sets `permission_mode: bypassPermissions`, so the harness's default
+  applies.
 - **Anchor sharing.** The anchor is private at create, and the mutation guard
   refuses any later grant (public included) and `share_workspace_files` on a
   bound session. A grant made some other way would still expose every step's
@@ -718,7 +743,6 @@ test until someone classifies it.
 |---|---|
 | Engine-to-queue bridge and EffectCompleted feedback (ENG-04/DUR-04); turn-fact gathering and the `TurnFactSink` (SES-08) | no live ticket: ENG-04/DUR-04/SES-08 were labelled on Done tickets CRL-126/CRL-127 but not built; needs a new ticket |
 | Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)) | CRL-137 |
-| Stop or unbind an anchor runner on detection (RUL-01) | CRL-131 |
 | Reconcile store-only budget pauses (RUL-01): a `budget` run whose `PAUSED` entry has `cause: session_cap` is a session-spend pause, not the engine's activation-cap pause, so the activation-cap resume rule (raise `max_activations`) must not apply to it; give it its own engine cause and resume rule | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
 | Bound an orchestrator's spend between tool calls (RUL-01), for example by checking its session cap before sending it a decision request | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
 | Host channel `fingerprint(L2)`, `merge`, `check`, and the backend swap (WSP-02/WSP-07) | CRL-141 |

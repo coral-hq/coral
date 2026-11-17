@@ -45,9 +45,13 @@ anchor (root; no host_id, so no runner; inert agent; never takes a turn)
 1. **The anchor is created without `host_id`, and it never gets a runner.**
    Without a runner on the anchor, its children cannot inherit one.
    The counter-case is pinned by test (B).
-   - The rule does not enforce itself. An owner can still attach a runner to
-     the anchor (`PATCH /v1/sessions/{anchor} {"runner_id": …}`, OWNER only,
-     `routes_core.py:3157-3165`). Every later step would then ride that runner.
+   - Omnigent does not enforce the rule: a session's owner can attach a runner
+     (`PATCH /v1/sessions/{id} {"runner_id": …}`, OWNER only, or
+     `POST /v1/hosts/{host_id}/runners`), and later children would ride it.
+     Since CRL-131, Coral's mutation guard (S53) refuses both on a bound
+     anchor. A runner attached anyway (data from before the guard, or a path
+     the guard does not cover) is `anchor_bound` drift: the run pauses and
+     Coral stops that runner (see "Rule 1 and the anchor seed").
    - So the facade (SES-03) re-reads the anchor before each step create and
      refuses to create the step while `anchor.runner_id` or `anchor.host_id`
      is set.
@@ -66,10 +70,14 @@ anchor (root; no host_id, so no runner; inert agent; never takes a turn)
 5. **The engine identifies steps only by the session ids it created and
    stored in its run record.** It never identifies a step by listing the
    anchor's children or by filtering on labels.
-   - Anyone with READ on the anchor can add children to it, with any title,
-     agent and labels (`orchestration.py:11803-11815`). Labels are free-form,
-     and neither `coral.*` nor `omnigent.parent_wake` is reserved
-     (`_sessions/helpers.py:10885`).
+   - Omnigent lets anyone with READ on the anchor add children to it, with any
+     title, agent and labels (`orchestration.py:11803-11815`). Since CRL-131,
+     clients cannot set a `coral.*` label on any session (S46), and on a bound
+     session Coral's mutation guard (S53) refuses child and sibling creates and
+     any change to an `omnigent.*` label (`omnigent.parent_wake` included)
+     other than `omnigent.pinned`
+     ([`../contracts/session-facade.md`](../contracts/session-facade.md), "Run
+     protection").
    - An EDIT collaborator can relabel real steps (`routes_core.py:3141-3156`).
    - `coral.*` labels are display hints only, never identity or authorization.
 6. **Anchors stay private or are shared at EDIT only, until the upstream fix
@@ -392,8 +400,12 @@ Also found or decided in CRL-128:
   create (`session.harness_not_supported`) until HRN-03, so the 503 loop cannot
   occur for Coral steps. The open item stays for HRN-03 (CRL-138).
 - **Rule 1 and the anchor seed.** If an owner binds a runner to the anchor, the
-  run pauses (`anchor_bound`), but the anchor's runner keeps running. CRL-128
-  removed `permission_mode: bypassPermissions` from the anchor seed (CRL-132's
-  PRF-01), so the harness default applies. A deny-all tool policy for the
-  anchor, and stopping or unbinding an anchor runner on detection, are CRL-131
-  (RUL-01, the run guard).
+  run pauses (`anchor_bound`). CRL-128 removed `permission_mode:
+  bypassPermissions` from the anchor seed (CRL-132's PRF-01), so the harness
+  default applies. Since CRL-131 (RUL-01) the mutation guard refuses a client
+  attaching a runner to a bound anchor, every anchor tool call is denied, and
+  after an `anchor_bound` pause Coral stops the anchor's session on that runner
+  (and the runner itself when the anchor owns a host runner) as the run owner,
+  best effort and without unbinding it, unless another session uses that
+  runner ([`../contracts/session-facade.md`](../contracts/session-facade.md),
+  "Anchor runner").

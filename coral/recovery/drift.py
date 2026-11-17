@@ -10,13 +10,16 @@ run version, so it is unique per pause epoch: a run resumed while the drift
 remains pauses again on the next detection, and compare-and-swap keeps
 concurrent detectors to one pause. Drift is detected when a step session is
 created and, through :class:`DriftPreSendHook`, before each engine message.
+After an ``anchor_bound`` pause, :class:`DriftPauser` can also stop the
+anchor's runner, best effort.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -26,6 +29,8 @@ from coral.omni.protocols import CoralSessionError, PreSendRequest, SessionFacad
 from coral.recovery.pause import pause_log_checksum, pause_run_once
 from coral.stores.protocols import CommitOutcome, RunStore
 from coral.stores.session_bindings import SessionBindings
+
+_logger = logging.getLogger(__name__)
 
 DriftCause = Literal[
     "anchor_archived", "anchor_deleted", "anchor_bound", "session_archived", "session_deleted"
@@ -170,16 +175,30 @@ def _now_us() -> int:
 
 
 class DriftPauser:
-    """Pauses a run for a drift finding, with the store's sync work in a thread."""
+    """
+    Pauses a run for a drift finding, with the store's sync work in a thread.
 
-    def __init__(self, run_store: RunStore, *, now_us: Callable[[], int] = _now_us) -> None:
+    :param on_anchor_bound: Awaited with ``(workspace_id, run_id, anchor_id)``
+        after each ``anchor_bound`` pause, even when the run was paused already,
+        because the anchor's runner may still be live. A failure is logged and
+        the pause stands.
+    """
+
+    def __init__(
+        self,
+        run_store: RunStore,
+        *,
+        now_us: Callable[[], int] = _now_us,
+        on_anchor_bound: Callable[[int, str, str], Awaitable[None]] | None = None,
+    ) -> None:
         self._run_store = run_store
         self._now_us = now_us
+        self._on_anchor_bound = on_anchor_bound
 
     async def pause(
         self, *, workspace_id: int, run_id: str, finding: DriftFinding
     ) -> CommitOutcome:
-        return await asyncio.to_thread(
+        outcome = await asyncio.to_thread(
             pause_run_for_drift,
             self._run_store,
             workspace_id=workspace_id,
@@ -187,6 +206,22 @@ class DriftPauser:
             finding=finding,
             now_us=self._now_us(),
         )
+        hook = self._on_anchor_bound
+        if finding.cause != "anchor_bound" or hook is None:
+            return outcome
+        try:
+            await hook(workspace_id, run_id, finding.session_id)
+        except Exception:
+            # Best effort: the run stays paused, and the next detection tries again.
+            _logger.warning(
+                "Coral paused run %s but could not stop the runner of its anchor %s",
+                run_id,
+                finding.session_id,
+                exc_info=True,
+                # Not ``workspace_id``: the debug-log sink reads that as the deployment's.
+                extra={"session_id": finding.session_id, "coral_workspace_id": workspace_id},
+            )
+        return outcome
 
 
 class DriftPreSendHook:

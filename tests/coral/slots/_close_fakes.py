@@ -110,6 +110,8 @@ class FakeDispatch:
         self.refusals: dict[str, BaseException] = {}
         self.sends: list[dict[str, object]] = []
         self.interrupts: list[str | None] = []
+        # Each stop that reached a session: its id and the user it ran as.
+        self.stops: list[tuple[str, str | None]] = []
         self.settle_on_interrupt: Callable[[str], None] | None = None
 
     def session(self, session_id: str, **state: object) -> FakeSession:
@@ -174,6 +176,7 @@ class FakeDispatch:
 
     async def stop(self, *, session_id: str, user_id: str | None) -> None:
         session = self._act("stop", session_id)
+        self.stops.append((session_id, user_id))
         if self.unconfirmed_stops:
             self.unconfirmed_stops -= 1
             raise CoralSessionError(
