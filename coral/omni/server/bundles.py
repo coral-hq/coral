@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from coral.omni._upstream import _tar_gz_dir
-from coral.omni.policies.guards import is_engine_tool
+from coral.omni.policies.guards import is_engine_tool, is_tool_search
 from coral.profiles.bundle_spec import (
     DENY_VENDOR_ASK_HANDLER,
     ENGINE_PREFIX,
@@ -101,9 +101,13 @@ def _hygiene_violations(spec: AgentSpec, stance: Stance) -> list[str]:
             DENY_VENDOR_ASK_HANDLER in enforced
         ),
         f"{guard} is an unconditional tool-call policy": stance_guard_handler(stance) in enforced,
-        # Engine tools are exempt by exact name, so no tool of the spec's own may share one.
+        # Engine tools and ToolSearch are exempt by exact name, so no tool of the spec's own
+        # may share one.
         "no local tool has an engine tool's name": not any(
             is_engine_tool(tool.name) for tool in spec.local_tools
+        ),
+        "no local tool is named ToolSearch": not any(
+            is_tool_search(tool.name) for tool in spec.local_tools
         ),
         "no MCP server is named mcp": not any(server.name == "mcp" for server in spec.mcp_servers),
     }

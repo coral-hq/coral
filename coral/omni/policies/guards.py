@@ -86,7 +86,12 @@ def is_engine_tool(name: str) -> bool:
 
 
 def is_tool_search(name: str) -> bool:
-    """Whether *name* is exactly claude-sdk's ``ToolSearch``, which loads deferred tools."""
+    """
+    Whether *name* is exactly claude-sdk's ``ToolSearch``, which loads deferred tools.
+
+    Like :func:`is_engine_tool`, this holds only for a spec that passes Coral's
+    bundle hygiene, which refuses a local tool of that name.
+    """
     return name == TOOL_SEARCH
 
 

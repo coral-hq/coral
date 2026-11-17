@@ -2409,8 +2409,9 @@ seams:
         engine-labelled closed step are each refused with nothing stored, then
         a PATCH with look-alike keys outside the prefix succeeds and keeps the
         engine's `coral.run_id`; two import lines are added and one extended.
-        helpers.py (32), routes_core.py (3) and test_sessions_fork.py (28) are
-        within budget.
+        routes_core.py (3) and test_sessions_fork.py (28) are within budget.
+        helpers.py had 32 changed lines from S46; with S53's skeleton split it
+        totals 42, which S53's budget exception covers.
       approver: pending
     anchor_exempt: []
     upstream_first: false
@@ -2536,9 +2537,15 @@ seams:
         adds one test: a guard refusing every event refuses the HTTP message
         while the engine's brief, interrupt and stop pass unasked.
         tests/server/routes/test_agent_install.py (42) adds one test of
-        Coral's engine-agent rules over the real agent routes. The other
-        route files are within budget: helpers.py 32 (21 added, 11 removed),
-        routes_events.py 32, orchestration.py 13, builtin_agents.py 13,
+        Coral's engine-agent rules over the real agent routes.
+        omnigent/server/routes/_sessions/helpers.py is over the 40-line budget
+        with 42 changed lines against the base (42 added, none removed),
+        shared with S46: S46 added 32, and S53 replaced 11 of them with 21
+        (net 10) to split `_label_key_skeleton` out of `_is_coral_label_key`,
+        so Coral's guard reaches the same skeleton through
+        `coral/omni/_upstream.py` instead of copying it. The other route files
+        are within budget: routes_events.py 32, orchestration.py 13,
+        builtin_agents.py 13,
         routes_elicitations.py 12, routes_permissions.py 12, hosts.py 11,
         scheduled_tasks.py 9, session_mcp_servers.py 9, routes_agent.py 9.
       approver: pending

@@ -13,7 +13,7 @@
    - imports each module, invokes `register(services) -> ServerPluginRegistration`
    - eagerly imports every module in `registration.policy_modules` and verifies `POLICY_REGISTRY` is a `list`
    - raises `ServerPluginError` on any import, attribute, validation, or registration failure (aborting boot instead of running half-enabled)
-3. `registration.policy_modules` are merged into `load_registry(extra_modules=...)` so agent bundle uploads accept plugin-registered policy handlers without duplicating `policy_modules` in server config.
+3. `registration.policy_modules` are merged into `load_registry(extra_modules=...)` so agent bundle uploads accept plugin-registered policy handlers without duplicating `policy_modules` in server config. Coral registers two: `coral.omni.policies.hygiene` (`deny_vendor_ask`) and `coral.omni.policies.guards` (the stance guards `step_roster`, `orchestrator_guard` and `deny_all_tools`, marked `internal_only`, so the policy registry route leaves them out of the list it shows).
 4. `registration.routers` are appended to `all_extra_routers` and mounted **before** `_SPAStaticFiles` mounts `/`.
 5. `registration.lifespan_hooks` enter inside `lifespan` after scheduler and sandbox reaper startup, and exit in reverse order before `pull_request_refresher`, scheduler, reaper, `startup_inputs`, and `runner_router` shut down.
 6. `coral_lifespan` wires Coral's session engine before the worker supervisor starts, and on exit stops the supervisor before it unregisters the engine's effect executors and status-edge observers ([`session-facade.md`](session-facade.md), "Wiring").

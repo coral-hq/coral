@@ -448,7 +448,8 @@ counts: the legacy `:closed:` title marker does not, so renaming a step never
 makes it inert. While the run is starting or running and the session is open
 it allows everything. Otherwise it denies every tool call except the exact
 engine tools (`coral_submit_handoff`, `coral_choose_arrow`, bare or
-`mcp__omnigent__`) and exactly `ToolSearch`, which loads them. An engine tool
+`mcp__omnigent__`) and exactly `ToolSearch`, which loads them (bundle hygiene
+refuses a local tool with any of these names). An engine tool
 call then gets the engine's own answer, for example `run.paused` with a stop
 `next`. Every deny tells the agent to stop and end its turn and none mentions
 a handoff:
@@ -593,6 +594,11 @@ test until someone classifies it.
 - A user's or admin's TOOL_CALL ASK policy that matches a `coral_*` tool parks
   an unattended step on its approval, like the ASK limitation for engine
   messages below.
+- The roadmap's RUL-01 says a paused step can still hand off. That holds only
+  at the policy layer: the run guard and the backstop let engine tools
+  through, but the reducer refuses the handoff while the run is paused, so the
+  step gets `run.paused` with a stop `next` and the handoff is not kept. The
+  bridge decides this with ENG-06 (see "Deferred work and owners").
 - One lifespan per process: a later lifespan's registration replaces the
   provider and the budget pauser (see Wiring).
 - A session on a Coral bundle that no run binds (a user chatting with a
@@ -745,6 +751,13 @@ test until someone classifies it.
 | Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)) | CRL-137 |
 | Reconcile store-only budget pauses (RUL-01): a `budget` run whose `PAUSED` entry has `cause: session_cap` is a session-spend pause, not the engine's activation-cap pause, so the activation-cap resume rule (raise `max_activations`) must not apply to it; give it its own engine cause and resume rule | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
 | Bound an orchestrator's spend between tool calls (RUL-01), for example by checking its session cap before sending it a decision request | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Implement `RunDecisionPort` as [`engine-tools.md`](engine-tools.md) states it: a schema that stores each reply under its checksum (none exists; a migration), the graph pinned to the run's version, and the port's four rules (a retried slot's session bound with the slot's `session_generation`; one session per run, slot and generation; a version bump on every write to `status`, `pause_reason` or `orchestrator_session_id`; a byte-exact handoff body) | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Orchestrator bindings: choose a stable `slot_id` for them (the binding store requires one; the engine has no orchestrator slot), and write `CoralRun.orchestrator_session_id`, which nothing writes yet, so `coral_choose_arrow` answers `not_orchestrator` until then | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Prompt stopped steps again: every run-guard, `[run.state_unavailable]` and budget deny ends the turn with the slot `evaluating` and no handoff, and the paused text promises "Coral resumes this step when the run resumes", so nudge or re-brief such slots on resume and after the store recovers | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Lease `nudge` effects in reconcile (`_LEASED_KINDS` in `coral/engine/reconcile.py`), so a nudged turn's `TurnEnded` is not refused before the nudge's completion is folded | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Early submit: keep refusing a handoff sent before the brief's `send_input` completes (`evaluation_in_progress`, retry), or accept it by making a late `send_input` completion a receipt | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Handoffs while paused: RUL-01's "a paused step can still hand off" holds only at the policy layer, and the reducer refuses the handoff with `run.paused` (see Residuals under Run protection); decide whether the engine accepts and holds it | the engine bridge ticket, with ENG-06 |
+| One lifespan per process (see Wiring and Run protection) | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet), before it enables runs |
 | Host channel `fingerprint(L2)`, `merge`, `check`, and the backend swap (WSP-02/WSP-07) | CRL-141 |
 | Native-harness steps (HRN-03) | CRL-138 |
 | `external_session_status` outcome pass-through (HRN-05) | CRL-146 |

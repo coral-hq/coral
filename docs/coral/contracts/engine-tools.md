@@ -195,3 +195,37 @@ exit stack. A catalog tool that no planner answers fails registration with
 The bridge and its port; lazy orchestrator creation, decision requests,
 reminders and re-briefs; counting orchestrator rejections; `items` (ENG-08);
 `refresh_note`; the evidence check.
+
+### Left to the bridge
+
+The bridge's ticket (ENG-04/DUR-04) must also settle these before it fills the
+catalog. Each has a row in [`session-facade.md`](session-facade.md), "Deferred
+work and owners", which also holds the budget-pause cause, the orchestrator's
+spend between tool calls and one lifespan per process.
+
+- **Stored replies.** No table stores a reply under its checksum yet, so
+  `find_reply` and step 5 need a schema change (a migration). The snapshot
+  must load the graph pinned to the run's version.
+- **Orchestrator bindings.** The binding store requires a `slot_id` for every
+  step binding, but the engine has no orchestrator slot, so the bridge must
+  choose a stable value. Nothing writes `CoralRun.orchestrator_session_id`
+  yet, so until the bridge does, `coral_choose_arrow` answers
+  `not_orchestrator`.
+- **Early submit.** A handoff sent before the brief's `send_input` completes
+  is refused with `evaluation_in_progress` (retry). The bridge may keep that,
+  or accept it early by making a late `send_input` completion a receipt.
+- **Paused handoffs.** The run guard lets engine tools through on a stopped
+  run, but the reducer refuses a handoff while the run is paused, so a paused
+  step gets `run.paused` with a stop `next`. The roadmap's RUL-01 line "a
+  paused step can still hand off" holds only at the policy layer. Whether the
+  engine should accept and hold such a handoff is decided with ENG-06.
+- **Stopped turns.** Every run-guard, `[run.state_unavailable]` and budget
+  deny tells the agent to stop and end its turn, which leaves its slot
+  `evaluating` with no handoff. The paused text promises "Coral resumes this
+  step when the run resumes", so on resume, and after the store recovers, the
+  bridge must nudge or re-brief such slots.
+- **Nudge lease.** Reconcile leases only `send_input` and `create_session`
+  (`_LEASED_KINDS` in `coral/engine/reconcile.py`). A nudged turn's
+  `TurnEnded` that arrives before the nudge's completion is folded is refused
+  until a later reconcile emits it again. Add `nudge` when mapping effects to
+  work.

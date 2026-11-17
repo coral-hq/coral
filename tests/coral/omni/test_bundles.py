@@ -339,6 +339,16 @@ def test_a_required_policy_counts_only_when_it_judges_every_tool_call(
             "no local tool has an engine tool's name",
         ),
         (
+            # The run guard and the backstop let ToolSearch through on a stopped run.
+            lambda spec: dataclasses.replace(
+                spec,
+                local_tools=[
+                    LocalToolInfo(name="ToolSearch", path="tools/python/s.py", language="python")
+                ],
+            ),
+            "no local tool is named ToolSearch",
+        ),
+        (
             # Its tools are listed as mcp__omnigent__<tool>, like Omnigent's own.
             lambda spec: dataclasses.replace(
                 spec, mcp_servers=[MCPServerConfig(name="mcp", url="http://localhost:9/mcp")]
@@ -346,9 +356,9 @@ def test_a_required_policy_counts_only_when_it_judges_every_tool_call(
             "no MCP server is named mcp",
         ),
     ],
-    ids=["local_tool", "prefixed_local_tool", "mcp_server_named_mcp"],
+    ids=["local_tool", "prefixed_local_tool", "tool_search", "mcp_server_named_mcp"],
 )
-def test_a_spec_tool_cannot_take_an_engine_tools_name(
+def test_a_spec_tool_cannot_take_an_exempt_tools_name(
     stance: Stance, loosen: Callable[[AgentSpec], AgentSpec], rule: str
 ) -> None:
     with pytest.raises(StepBundleRejected, match=re.escape(rule)):
