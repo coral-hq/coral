@@ -6,13 +6,18 @@ imports nothing but the standard library and pure Coral modules.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
+from coral.engine.facts import TurnFact
 from coral.workspace.ops import HostChannelBackend
 
 HostAccessCode = Literal["not_permitted", "host_offline"]
+# K4 session roles: the run's one anchor, or a step of an engine slot.
+SessionRole = Literal["anchor", "step"]
+SlotRoleName = Literal["step_agent", "orchestrator", "verifier", "merge_resolver"]
 
 
 @runtime_checkable
@@ -102,11 +107,221 @@ class HostWorkspaceChannels(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class SessionCreateRequest:
+    """
+    One ``create_session`` effect, with its identity taken from the stored run.
+
+    :param effect_key: Derives a step's session id; an anchor's id comes from ``run_id``.
+    :param user_id: The run owner, or ``None`` when auth is off.
+    :param title: The session title; a step's is unique under the anchor.
+    :param host_id: A step's host, from the run spec.
+    :param workspace: A step's canonical run worktree, from the run spec.
+    :param engine_slot_id: The engine slot a step serves.
+    :param slot_role: Decides whether the step may commit; required for steps.
+    :param generation: The slot's session generation, from 1.
+    """
+
+    workspace_id: int
+    run_id: str
+    effect_key: str
+    user_id: str | None
+    account_generation: str | None
+    role: SessionRole
+    title: str
+    agent_id: str | None = None
+    host_id: str | None = None
+    workspace: str | None = None
+    engine_slot_id: str | None = None
+    slot_role: SlotRoleName | None = None
+    node_id: str | None = None
+    generation: int = 1
+
+
+@dataclass(frozen=True)
+class SessionRef:
+    """A created or adopted session; ``created`` is ``False`` when an earlier try made it."""
+
+    session_id: str
+    role: SessionRole
+    created: bool
+
+
+@dataclass(frozen=True)
+class SessionState:
+    """
+    What drift checks read about one session.
+
+    :param exists: ``False`` once the session row is gone.
+    :param archived_at: The archive timestamp label, when archived.
+    :param closed: ``omnigent.closed`` is set.
+    """
+
+    session_id: str
+    exists: bool
+    archived: bool
+    archived_at: str | None
+    closed: bool
+    runner_id: str | None
+    host_id: str | None
+
+
+@dataclass(frozen=True)
+class LiveStatus:
+    """A session's live status, as a close or cancel reads it."""
+
+    status: str | None
+    response_id: str | None
+    blocked_on: str | None
+    pending_elicitations: int
+    background_work: bool
+
+
+@dataclass(frozen=True)
+class SendReceipt:
+    """How a message reached its session: sent now, or found already persisted."""
+
+    item_id: str | None
+    delivery: Literal["sent", "already_persisted"]
+    pending_id: str | None = None
+
+
+@dataclass(frozen=True)
+class StatusEdgeView:
+    """
+    The fields of a status edge a close or cancel waits on.
+
+    :param turn_response_id: The response ``turn_outcome`` reports on.
+    :param response_id: The response a ``running`` edge opens.
+    """
+
+    session_id: str
+    status: str
+    previous_status: str | None
+    origin: str
+    turn_outcome: str | None
+    turn_response_id: str | None
+    response_id: str | None
+    blocked_on: str | None
+    observed_at_ms: int
+
+
+@dataclass(frozen=True)
+class ObservedEdge:
+    """A watched session's status edge and the turn fact made from it."""
+
+    edge: StatusEdgeView
+    fact: TurnFact
+
+
+@dataclass(frozen=True)
+class PreSendRequest:
+    """An engine message about to be sent, checked by each ``PreSendHook``."""
+
+    workspace_id: int
+    run_id: str
+    session_id: str
+    user_id: str | None
+
+
+@runtime_checkable
+class SessionFacade(Protocol):
+    """Creates the run's anchor and step sessions without an HTTP request (K4 subset)."""
+
+    async def create_session(
+        self,
+        request: SessionCreateRequest,
+        *,
+        ensure_lease: Callable[[], Awaitable[None]],
+    ) -> SessionRef:
+        """
+        Create the session ``request`` names, or adopt the one an earlier try made.
+
+        A redelivery reuses one session; a deleted one is never created again.
+
+        :param ensure_lease: Called before every external side effect.
+        :raises CoralSessionError: With a ``session.*`` code and its retryability.
+        """
+        ...
+
+    async def session_state(self, *, workspace_id: int, session_id: str) -> SessionState:
+        """Read one session's state for drift checks."""
+        ...
+
+
+@runtime_checkable
+class SessionDispatch(Protocol):
+    """Sends engine input to a session and reads its live state (K4 subset)."""
+
+    async def send_message(
+        self,
+        *,
+        workspace_id: int,
+        run_id: str,
+        session_id: str,
+        user_id: str | None,
+        stable_id: str,
+        text: str,
+    ) -> SendReceipt: ...
+
+    async def interrupt(
+        self, *, session_id: str, user_id: str | None, response_id: str | None = None
+    ) -> bool: ...
+
+    async def stop(self, *, session_id: str, user_id: str | None) -> None: ...
+
+    async def set_closed(self, *, session_id: str) -> None: ...
+
+    async def live_status(self, *, session_id: str) -> LiveStatus: ...
+
+    async def queued_user_input(
+        self, *, session_id: str, engine_stable_ids: frozenset[str]
+    ) -> bool: ...
+
+
+class EdgeWatch(Protocol):
+    """Waits for a watched session's next matching status edge."""
+
+    async def wait_for(
+        self, predicate: Callable[[ObservedEdge], bool], *, timeout_s: float
+    ) -> ObservedEdge | None: ...
+
+
+class SessionEdgeWatcher(Protocol):
+    """Watches one session's status edges while a close or cancel waits on them."""
+
+    def watch(
+        self, session_id: str, *, slot_id: str = ""
+    ) -> AbstractAsyncContextManager[EdgeWatch]: ...
+
+
+# Receives each turn fact of a watched session; unset until signals persist them.
+TurnFactSink = Callable[[TurnFact], None]
+# Runs before an engine message is sent; raises CoralSessionError to refuse it.
+PreSendHook = Callable[[PreSendRequest], Awaitable[None]]
+
+
 __all__ = [
     "CoralSessionError",
+    "EdgeWatch",
     "HostAccessCode",
     "HostAccessRefused",
     "HostWorkspaceChannels",
+    "LiveStatus",
     "NoOpScopeRunner",
+    "ObservedEdge",
+    "PreSendHook",
+    "PreSendRequest",
     "RunScopeRunner",
+    "SendReceipt",
+    "SessionCreateRequest",
+    "SessionDispatch",
+    "SessionEdgeWatcher",
+    "SessionFacade",
+    "SessionRef",
+    "SessionRole",
+    "SessionState",
+    "SlotRoleName",
+    "StatusEdgeView",
+    "TurnFactSink",
 ]

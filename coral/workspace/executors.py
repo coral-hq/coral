@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import re
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -35,13 +35,11 @@ from typing import Any, Protocol
 from coral.db.enum_codecs import SlotRole, WorkspaceOpIntentOp
 from coral.model.ids import effect_op_key
 from coral.omni.protocols import (
-    CoralSessionError,
     HostAccessRefused,
     HostWorkspaceChannels,
     RunScopeRunner,
 )
 from coral.queue.executors import (
-    EffectCompleted,
     EffectExecutor,
     EffectFailed,
     EffectOutcome,
@@ -49,19 +47,17 @@ from coral.queue.executors import (
 )
 from coral.queue.run_effects import (
     MAX_FAILURE_MESSAGE_CHARS,
+    EffectBody,
     EffectRefused,
+    PayloadParser,
     echoed_text,
-    effect_payload,
     invalid_payload,
-    load_effect_run,
     optional_text,
     required_text,
-    run_effect_key,
-    run_scope,
+    run_effect,
     session_id_field,
     trim_message,
 )
-from coral.slots.results import ResultTooLarge, bound_result
 from coral.stores.protocols import RunState, RunStore
 from coral.stores.session_bindings import SessionBinding, SessionBindings
 from coral.stores.workspace_op_intents import OpIntentConflict, WorkspaceOpIntents
@@ -213,30 +209,16 @@ def reset_executor(
 # ── Shared steps ────────────────────────────────────────────────────────────
 
 
-# An executor's work inside the run's scopes, and its payload parser.
-_Body = Callable[[RunState, Mapping[str, Any]], Awaitable[dict[str, Any]]]
-_PayloadParser = Callable[[Mapping[str, Any]], Mapping[str, Any]]
-
-
 async def _run_effect(
     ctx: ExecutionContext,
     run_store: RunStore,
     scope_runner: RunScopeRunner,
-    parse: _PayloadParser,
-    body: _Body,
+    parse: PayloadParser,
+    body: EffectBody,
 ) -> EffectOutcome:
-    """Parse, load the run, enter its scopes, run ``body`` and map its typed failures."""
+    """The shared effect steps (:func:`run_effect`), with workspace failures mapped too."""
     try:
-        raw = effect_payload(ctx)
-        payload = {**parse(raw), "effect_key": run_effect_key(ctx, raw)}
-        state = await load_effect_run(run_store, ctx, raw)
-        async with run_scope(scope_runner, state):
-            result = await body(state, payload)
-        return EffectCompleted(result=bound_result(result))
-    except EffectRefused as exc:
-        return exc.outcome()
-    except CoralSessionError as exc:
-        return EffectRefused(exc.code, exc.message, retryable=exc.retryable).outcome()
+        return await run_effect(ctx, run_store, scope_runner, parse, body)
     except WorkspaceOpError as exc:
         return workspace_failure(exc)
     except HostAccessRefused as exc:
@@ -247,8 +229,6 @@ async def _run_effect(
         return EffectRefused("workspace.host_not_permitted", exc.message).outcome()
     except OpIntentConflict as exc:
         return EffectRefused("workspace.op_key_conflict", str(exc)).outcome()
-    except ResultTooLarge as exc:
-        return EffectRefused("effect.result_too_large", str(exc)).outcome()
 
 
 @contextmanager

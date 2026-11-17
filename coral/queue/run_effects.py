@@ -4,8 +4,9 @@ The drainer enters scopes from the payload's ``user_id`` and
 ``account_generation``, which the engine does not vouch for. So an executor
 loads its run, refuses a payload identity that differs from the run row or an
 effect key of another run, and runs its body inside scopes built from the run
-row (:func:`run_scope`). Payload fields an executor echoes into its result are
-bounded here, so an oversized value fails before any side effect.
+row (:func:`run_scope`); :func:`run_effect` chains these steps. Payload fields
+an executor echoes into its result are bounded here, so an oversized value
+fails before any side effect.
 """
 
 from __future__ import annotations
@@ -13,13 +14,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
-from coral.omni.protocols import RunScopeRunner
-from coral.queue.executors import EffectFailed, ExecutionContext
-from coral.slots.results import stored_text_bytes
+from coral.db.enum_codecs import RunStatus
+from coral.omni.protocols import CoralSessionError, RunScopeRunner
+from coral.queue.executors import EffectCompleted, EffectFailed, EffectOutcome, ExecutionContext
+from coral.slots.results import ResultTooLarge, bound_result, stored_text_bytes
 from coral.stores.protocols import RunNotFound, RunState, RunStore
 
 # Payload fields the drainer builds scopes from; the run row must agree with them.
@@ -181,6 +183,16 @@ async def load_effect_run(
     return state
 
 
+def refuse_paused_run(state: RunState) -> None:
+    """
+    Hold a session effect while its run is paused; the drainer retries it after a resume.
+
+    :raises EffectRefused: Retryable ``run.paused``.
+    """
+    if state.status == int(RunStatus.PAUSED):
+        raise EffectRefused("run.paused", f"run {state.run_id} is paused", retryable=True)
+
+
 def run_scope(scope_runner: RunScopeRunner, state: RunState) -> AbstractAsyncContextManager[None]:
     """The run's workspace, account-authority and host-owner scopes, from its row and spec."""
     return scope_runner.run_scope(
@@ -190,3 +202,39 @@ def run_scope(scope_runner: RunScopeRunner, state: RunState) -> AbstractAsyncCon
         account_generation=state.run.account_generation,
         host_id=state.spec.host_id,
     )
+
+
+# An executor's work inside the run's scopes, and its payload parser.
+EffectBody = Callable[[RunState, Mapping[str, Any]], Awaitable[dict[str, Any]]]
+PayloadParser = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+
+
+async def run_effect(
+    ctx: ExecutionContext,
+    run_store: RunStore,
+    scope_runner: RunScopeRunner,
+    parse: PayloadParser,
+    body: EffectBody,
+) -> EffectOutcome:
+    """
+    Parse the payload, load the run, run ``body`` inside the run's scopes and bound its result.
+
+    ``body`` gets the run and the parsed payload with its checked ``effect_key``.
+    ``EffectRefused`` and ``CoralSessionError`` become failures with their own
+    code and retryability, and an over-budget result a permanent
+    ``effect.result_too_large``; anything else, a lost lease included, reaches
+    the drainer.
+    """
+    try:
+        raw = effect_payload(ctx)
+        payload = {**parse(raw), "effect_key": run_effect_key(ctx, raw)}
+        state = await load_effect_run(run_store, ctx, raw)
+        async with run_scope(scope_runner, state):
+            result = await body(state, payload)
+        return EffectCompleted(result=bound_result(result))
+    except EffectRefused as exc:
+        return exc.outcome()
+    except CoralSessionError as exc:
+        return EffectRefused(exc.code, exc.message, retryable=exc.retryable).outcome()
+    except ResultTooLarge as exc:
+        return EffectRefused("effect.result_too_large", str(exc)).outcome()

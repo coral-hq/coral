@@ -80,3 +80,72 @@ def test_drift_pause_persists_on_every_lane(coral_db_uri: str) -> None:
         )
     _, unchanged_version = reopened.load_run_state(run.id, workspace_id=WORKSPACE)
     assert unchanged_version == version
+
+
+def test_drift_pauses_once_per_epoch_on_every_lane(coral_db_uri: str) -> None:
+    """The epoch in the pause entry's identity is what lets a resumed run pause again."""
+    from coral.model.ids import anchor_session_id
+    from coral.recovery.drift import DriftFinding, drift_log_checksum, pause_run_for_drift
+
+    store = SqlAlchemyCoralRunStore(coral_db_uri)
+    run = store.start_run(
+        RunStartSpec(
+            workflow_id="wf_drift",
+            version_id="ver_drift",
+            title="Drift run",
+            request_preview="Preview",
+            workspace_id=WORKSPACE,
+        )
+    )
+    store.apply_transition(
+        run.id, run.version, Transition(status=int(RunStatus.RUNNING)), workspace_id=WORKSPACE
+    )
+    finding = DriftFinding("anchor_archived", anchor_session_id(WORKSPACE, run.id), "1700000000")
+
+    def pause() -> bool:
+        return pause_run_for_drift(
+            store, workspace_id=WORKSPACE, run_id=run.id, finding=finding, now_us=1_700_000_000
+        ).applied
+
+    assert pause()
+    assert not pause()
+    _, paused_version = store.load_run_state(run.id, workspace_id=WORKSPACE)
+    # A resume without unarchiving the anchor, then the next detection.
+    store.apply_transition(
+        run.id,
+        paused_version,
+        Transition(status=int(RunStatus.RUNNING), clear_pause_reason=True),
+        workspace_id=WORKSPACE,
+    )
+    assert pause()
+
+    reopened = SqlAlchemyCoralRunStore(fresh_process(coral_db_uri))
+    state, version = reopened.load_run_state(run.id, workspace_id=WORKSPACE)
+    assert (state.run.status, state.run.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
+    pauses = [
+        entry
+        for entry in reopened.read_log(run.id, workspace_id=WORKSPACE)
+        if entry.kind == int(LogKind.PAUSED)
+    ]
+    assert len(pauses) == 2
+    assert [entry.idempotency_cksum for entry in pauses] == [
+        drift_log_checksum(run.id, finding, paused_version - 1),
+        drift_log_checksum(run.id, finding, paused_version + 1),
+    ]
+    # Without the epoch, the second pause would repeat the first entry's identity: refused.
+    with pytest.raises((IntegrityError, OperationalError)):
+        reopened.apply_transition(
+            run.id,
+            version,
+            Transition(
+                logs=(
+                    LogEntryDraft(
+                        kind=int(LogKind.PAUSED),
+                        actor_kind=int(ActorKind.ENGINE),
+                        body="{}",
+                        idempotency_cksum=pauses[0].idempotency_cksum,
+                    ),
+                )
+            ),
+            workspace_id=WORKSPACE,
+        )
