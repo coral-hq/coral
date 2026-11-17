@@ -1,5 +1,6 @@
 # CORAL(S41): the event handler stays reachable for in-process senders.
 # CORAL(S42): an engine context passes the same gates as an HTTP sender.
+# CORAL(S53): engine senders never ask the mutation guards.
 """An in-process engine sender posts session events with no HTTP request."""
 
 from __future__ import annotations
@@ -22,6 +23,12 @@ from omnigent.host.frames import HostHelloFrame
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.managed_hosts import parse_sandbox_config
+from omnigent.server.mutation_guards import (
+    SESSION_EVENT,
+    MutationAttempt,
+    Screen,
+    register_mutation_guard,
+)
 from omnigent.server.routes._sessions.helpers import _HostLaunchAttempt
 from omnigent.server.schemas import SessionEventInput
 from omnigent.server.startup_inputs import STARTUP_LABEL, EngineEventContext
@@ -298,3 +305,48 @@ async def test_engine_context_refuses_events_beyond_briefs_interrupts_and_stops(
     assert refused.value.code == expected
     assert _runner_events(forwarded) == []
     assert SqlAlchemyConversationStore(db_uri).list_items(session_id).data == []
+
+
+# CORAL(S53): engine contexts are server-internal, so no mutation guard is asked.
+async def test_engine_events_never_ask_the_mutation_guards(
+    app: FastAPI, client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A guard refusing every client event leaves engine briefs, interrupts and stops alone."""
+    asked: list[MutationAttempt] = []
+
+    class _RefuseEvents:
+        def screen(self, attempt: MutationAttempt) -> Screen | str:
+            asked.append(attempt)
+            return "no client events here"
+
+        def check(self, attempt: MutationAttempt) -> str | None:
+            return None
+
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+    agent = await create_test_agent(client)
+    session_id = await create_session_for_agent(client, agent["id"])
+    unregister = register_mutation_guard("refuse.events", _RefuseEvents())
+    try:
+        refused = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={"type": "message", "data": _brief("Client message.").data},
+        )
+        engine = EngineEventContext(app, None)
+        for event in (
+            _brief("Engine brief.", _STABLE_ID),
+            SessionEventInput(type="interrupt"),
+            SessionEventInput(type="stop_session"),
+        ):
+            await app.state.session_event_dispatch(engine, session_id, event, None)
+    finally:
+        unregister()
+        await runner.aclose()
+
+    assert refused.status_code == 409, refused.text
+    assert [(attempt.action, attempt.event_type) for attempt in asked] == [
+        (SESSION_EVENT, "message")
+    ]
+    events = _runner_events(forwarded)
+    assert [event["type"] for event in events] == ["message", "interrupt", "stop_session"]
+    assert events[0]["persisted_item_id"] == _STABLE_ID

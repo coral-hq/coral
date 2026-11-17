@@ -23,6 +23,7 @@ from omnigent.runtime.prompt import (
 )
 from omnigent.spec import AgentSpec
 from tests._image_fixtures import _TINY_PNG_BASE64
+from tests.tools.test_extensions import StubToolProvider, installed_tool_providers  # CORAL(S12)
 
 _SAMPLE_FRAMEWORK_INSTRUCTION = "Framework instruction for testing build_instructions_nullable."
 
@@ -262,6 +263,23 @@ def test_framework_instructions_append_after_custom_prompts() -> None:
     assert result == (
         "Agent prompt\n\nRequest prompt\n\n"
         f"{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}\n\nFramework prompt"
+    )
+
+
+def test_provider_instructions_follow_framework_entries() -> None:
+    """CORAL(S12): installed providers' text comes after the framework's own entries."""
+    spec = _spec("Agent prompt", spawn=True)
+    framework = f"{SUBAGENT_WAKE_NOTICE_INSTRUCTION}\n\n{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}"
+    with installed_tool_providers():
+        assert build_instructions(spec, None, []) == f"Agent prompt\n\n{framework}"
+
+    first = StubToolProvider(instructions=("Provider one.", "   "))
+    second = StubToolProvider(instructions=("Provider two.",))
+    with installed_tool_providers(first, second):
+        result = build_instructions(spec, None, [], framework_instructions=("Turn note",))
+
+    assert result == (
+        f"Agent prompt\n\n{framework}\n\nProvider one.\n\nProvider two.\n\nTurn note"
     )
 
 

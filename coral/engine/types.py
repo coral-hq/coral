@@ -90,6 +90,7 @@ class Slot(_Frozen):
     pending_input: bool = False
     drift: bool = False
     handoff: str | None = None
+    handoff_label: str | None = None
 
 
 class Decision(_Frozen):
@@ -241,6 +242,8 @@ class HandoffReceived(_Frozen):
     slot_id: str
     body: str
     session_generation: int = 1
+    # The arrow label a step routed by label chose. Checked when given; unused when blocked.
+    label: str | None = None
 
 
 class HandoffEvaluated(_Frozen):

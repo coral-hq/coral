@@ -38,6 +38,13 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.agent_config import agent_config_object, edit_agent_bundle
 from omnigent.server.auth import AuthProvider
 from omnigent.server.bundles import content_bundle_location, validate_agent_bundle
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    AGENT_INSTALL,
+    AGENT_REMOVE,
+    AGENT_UPDATE,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.routes._auth_helpers import require_user as _require_user
 from omnigent.server.routes._content_type import require_json_content_type
 from omnigent.server.routes._origin import require_trusted_origin
@@ -408,6 +415,8 @@ def create_builtin_agents_router(
     ) -> AgentConfigObject | JSONResponse:
         """Patch only supplied fields; optionally check the ETag from GET /agents/{id}/config."""
         agent = await editable_agent(request, agent_id)
+        # CORAL(S53): an extension may refuse edits to an agent it manages.
+        await check_mutation(MutationAttempt(AGENT_UPDATE, agent_name=agent.name))
         if if_match is not None:
             if len(request.headers.getlist("if-match")) != 1 or not (
                 len(if_match) == 66 and if_match.startswith('"') and if_match.endswith('"')
@@ -569,6 +578,8 @@ def create_builtin_agents_router(
         )
         if spec.name is None:  # validate_agent_bundle rejects this; narrows the type
             raise OmnigentError("agent spec has no name", code=ErrorCode.INVALID_INPUT)
+        # CORAL(S53): an extension may reserve agent names.
+        await check_mutation(MutationAttempt(AGENT_INSTALL, agent_name=spec.name))
         agent = await asyncio.to_thread(
             install_user_agent,
             agent_store,
@@ -602,6 +613,8 @@ def create_builtin_agents_router(
         agent = await asyncio.to_thread(agent_store.get, agent_id)
         if agent is None or agent.operator_authored or agent.created_by != user_id:
             raise OmnigentError(f"Agent not found: {agent_id!r}", code=ErrorCode.NOT_FOUND)
+        # CORAL(S53): an extension may refuse removing an agent it manages.
+        await check_mutation(MutationAttempt(AGENT_REMOVE, agent_name=agent.name, forced=force))
         if not force and conversation_store is not None:
             in_use = await asyncio.to_thread(
                 conversation_store.count_sessions_for_agent, agent.id, _IN_USE_COUNT_CAP + 1

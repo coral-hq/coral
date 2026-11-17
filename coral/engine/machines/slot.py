@@ -6,9 +6,11 @@ from pydantic import JsonValue
 
 from coral.engine.facts import turn_key_generation
 from coral.engine.machines.activation import (
+    choosable_labels,
     find_activation,
     finish_activation,
     replace_activation,
+    routes_by_label,
 )
 from coral.engine.machines.run import record_pause, refuse, refuse_unknown
 from coral.engine.types import (
@@ -32,7 +34,7 @@ from coral.signals.nudge import decide, turn_ended_snapshot
 def complete_effect(
     graph: CompiledGraph, state: RunState, effect: Effect, command: EffectCompleted
 ) -> ApplyResult:
-    """Apply a completed ``create_session``, ``send_input``, or ``close_slot``."""
+    """Apply a completed ``create_session``, ``send_input``, ``close_slot``, or ``nudge``."""
     slot = find_slot(state, effect.subject)
     if slot is None:
         return refuse_unknown(state)
@@ -42,6 +44,8 @@ def complete_effect(
         return _working(state, effect, slot, command.payload)
     if effect.kind == "close_slot" and slot.status == "closing":
         return _closed(graph, state, effect, slot, command.payload)
+    if effect.kind == "nudge":
+        return _nudged(state, effect, slot, command.payload)
     return refuse_unknown(state)
 
 
@@ -91,35 +95,53 @@ def note_turn_ended(state: RunState, command: TurnEnded) -> ApplyResult:
     )
 
 
-def receive_handoff(state: RunState, command: HandoffReceived) -> ApplyResult:
-    """Move a working slot to evaluating. A second handoff is in progress."""
+def receive_handoff(
+    graph: CompiledGraph, state: RunState, command: HandoffReceived
+) -> ApplyResult:
+    """Store the handoff and evaluate it. A second handoff is in progress.
+
+    A slot whose turn ended without a handoff is evaluating with no body and still
+    accepts one. A given label must be one of the step's arrow labels.
+    """
     found = guard_handoff(state, command.slot_id, command.session_generation)
     if isinstance(found, ApplyResult):
         return found
-    if found.status not in {"working", "evaluating"}:
-        return refuse_unknown(state)
+    if found.status in {"pending", "session_created", "briefed"}:
+        return refuse(state, "slot.not_ready")
+    if found.status == "closing":
+        return refuse(state, "slot.closed")
     if state.status != "running":
         return refuse(state, "run_paused")
-    if found.status == "evaluating":
+    if found.status == "evaluating" and found.handoff is not None:
         return _in_progress(state)
     slot = found
+    if command.label is not None:
+        labels = _step_labels(graph, state, slot)
+        if command.label not in labels:
+            return refuse(state, "handoff.invalid", labels)
     updated = _map_slot(
         state,
         slot.id,
         status="evaluating",
         handoff=command.body,
+        handoff_label=command.label,
     )
     updated = updated.model_copy(update={"seq": state.seq + 1})
     return ApplyResult(state=_rephase(updated, slot.activation_id))
 
 
-def evaluate_handoff(state: RunState, command: HandoffEvaluated) -> ApplyResult:
-    """Accept a handoff by closing the slot. Other outcomes are not handled."""
+def evaluate_handoff(
+    graph: CompiledGraph, state: RunState, command: HandoffEvaluated
+) -> ApplyResult:
+    """Accept a handoff by closing the slot. A step routed by label needs the label it chose."""
     found = require_evaluating(state, command.slot_id, command.session_generation)
     if isinstance(found, ApplyResult):
         return found
     if state.status != "running":
         return refuse(state, "run_paused")
+    owner = find_activation(state, found.activation_id)
+    if owner is not None and routes_by_label(graph, owner.node_id) and found.handoff_label is None:
+        return refuse(state, "handoff.invalid", choosable_labels(graph, owner.node_id))
     run_id = state.run_id
     if not isinstance(run_id, str):
         return refuse_unknown(state)
@@ -150,21 +172,27 @@ def guard_handoff(state: RunState, slot_id: str, generation: int) -> Slot | Appl
 
 
 def require_evaluating(state: RunState, slot_id: str, generation: int) -> Slot | ApplyResult:
-    """The slot must be evaluating, and still on its current session generation."""
+    """The slot must be evaluating a received handoff, on its current session generation.
+
+    An evaluating slot with no body ended its turn without a handoff, so there is nothing
+    to evaluate yet.
+    """
     found = guard_handoff(state, slot_id, generation)
     if isinstance(found, ApplyResult):
         return found
     if found.status != "evaluating":
         return refuse_unknown(state)
+    if found.handoff is None:
+        return refuse(state, "slot.not_ready")
     return found
 
 
 def return_to_working(state: RunState, slot_id: str) -> RunState:
-    """Put a slot back to work without closing it."""
+    """Put a slot back to work without closing it. Its handoff body and label are dropped."""
     slot = find_slot(state, slot_id)
     if slot is None:
         return state
-    updated = _map_slot(state, slot_id, status="working")
+    updated = _map_slot(state, slot_id, status="working", handoff=None, handoff_label=None)
     return _rephase(updated, slot.activation_id)
 
 
@@ -237,6 +265,32 @@ def _working(
         state=_rephase(updated, slot.activation_id),
         receipt_key=effect.effect_key,
     )
+
+
+def _nudged(
+    state: RunState,
+    effect: Effect,
+    slot: Slot,
+    payload: dict[str, JsonValue],
+) -> ApplyResult:
+    """The nudge started a turn. A slot still waiting for its handoff goes back to work.
+
+    A nudge for an older session generation only records its receipt.
+    """
+    fact_key = effect.payload.get("fact_key")
+    generation = turn_key_generation(fact_key) if isinstance(fact_key, str) else None
+    stale = generation is not None and generation < slot.session_generation
+    waiting = not stale and slot.status == "evaluating" and slot.handoff is None
+    updated = _commit(
+        state,
+        slot,
+        status="working" if waiting else slot.status,
+        receipt=Receipt(key=effect.effect_key, payload=dict(payload)),
+        seq=state.seq + 1,
+    )
+    if waiting:
+        updated = _rephase(updated, slot.activation_id)
+    return ApplyResult(state=updated, receipt_key=effect.effect_key)
 
 
 def _closed(
@@ -340,6 +394,14 @@ def _rephase(state: RunState, owner_id: str) -> RunState:
 
 def _in_progress(state: RunState) -> ApplyResult:
     return refuse(state, "evaluation_in_progress")
+
+
+def _step_labels(graph: CompiledGraph, state: RunState, slot: Slot) -> tuple[str, ...]:
+    """The arrow labels the slot's step can choose. An unlabelled step has none."""
+    owner = find_activation(state, slot.activation_id)
+    if owner is None:
+        return ()
+    return choosable_labels(graph, owner.node_id)
 
 
 def _text(payload: dict[str, JsonValue], key: str) -> str:

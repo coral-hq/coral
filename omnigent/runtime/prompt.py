@@ -75,9 +75,12 @@ def _framework_instructions_for(spec: AgentSpec) -> list[str]:
     agent unless the spec sets ``tool_groups.browser: false``, in which
     case the prompt must not steer the model toward tools it lacks.
 
+    CORAL(S12): installed tool providers' instructions for ``spec`` come last.
+
     :param spec: The parsed AgentSpec.
     :returns: The applicable spec-level framework instructions; empty for
-        an agent with no sub-agents and the browser group disabled.
+        an agent with no sub-agents, the browser group disabled and no
+        provider text.
     """
     instructions: list[str] = []
     dispatches_web_researcher = any(entry.name == "web_fetch" for entry in spec.tools.builtins)
@@ -85,6 +88,10 @@ def _framework_instructions_for(spec: AgentSpec) -> list[str]:
         instructions.append(SUBAGENT_WAKE_NOTICE_INSTRUCTION)
     if spec.tool_groups.browser:
         instructions.append(EMBEDDED_BROWSER_PRIORITY_INSTRUCTION)
+    # CORAL(S12): installed tool providers' text follows the framework's own entries.
+    from omnigent.tools.extensions import extension_framework_instructions
+
+    instructions.extend(extension_framework_instructions(spec))
     return instructions
 
 

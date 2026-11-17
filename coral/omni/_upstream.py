@@ -53,6 +53,19 @@ from omnigent.server.routes._session_create_validation import (
 # omnigent/server/routes/_session_harness_readiness.py: the host reports the harness set up.
 from omnigent.server.routes._session_harness_readiness import validate_create_harness_readiness
 
+# Event types, used by coral/omni/server/mutation_guard.py.
+from omnigent.server.routes._sessions.common import (
+    # omnigent/server/routes/_sessions/common.py: the event types only runners post.
+    _RUNNER_SESSION_EVENT_TYPES as RUNNER_SESSION_EVENT_TYPES,
+)
+from omnigent.server.routes._sessions.common import (
+    # omnigent/server/routes/_sessions/common.py: the event types clients post.
+    CLIENT_SESSION_EVENT_TYPES,
+)
+
+# omnigent/server/routes/_sessions/helpers.py: a label key as a collation compares it.
+from omnigent.server.routes._sessions.helpers import _label_key_skeleton as label_key_skeleton
+
 # omnigent/server/routes/_sessions/orchestration.py: the harness a create will run on.
 from omnigent.server.routes._sessions.orchestration import _create_resolved_harness
 
@@ -82,7 +95,9 @@ from omnigent.server.routes.sessions import (
 from omnigent.version import VERSION as OMNIGENT_VERSION
 
 __all__ = [
+    "CLIENT_SESSION_EVENT_TYPES",
     "OMNIGENT_VERSION",
+    "RUNNER_SESSION_EVENT_TYPES",
     "HostWorkspaceOpNotPermittedError",
     "HostWorkspaceOpUnavailableError",
     "HostWorkspaceOpsUnsupportedError",
@@ -102,6 +117,7 @@ __all__ = [
     "_tar_gz_dir",
     "attribution_user",
     "create_worktree_on_host",
+    "label_key_skeleton",
     "list_worktrees_on_host",
     "pending_elicitation_count",
     "request_workspace_op_on_host",

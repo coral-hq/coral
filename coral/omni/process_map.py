@@ -14,3 +14,10 @@ def host_entry_points_disabled(env: Mapping[str, str] | None = None) -> bool:
     source = os.environ if env is None else env
     raw = source.get(DISABLE_HOST_ENTRY_POINTS_ENV, "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def host_tokens(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """The tokens a Coral host adds to its hello; none while Coral's entry points are disabled."""
+    if host_entry_points_disabled(env):
+        return ()
+    return (CORAL_RUNNER_TOKEN,)

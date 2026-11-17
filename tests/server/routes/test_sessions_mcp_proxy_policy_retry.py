@@ -12,15 +12,22 @@ dependencies, following the pattern in ``test_sessions_mcp_proxy.py``.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from dataclasses import dataclass
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 import pytest
+from starlette.applications import Starlette
+from starlette.requests import Request
 
 from omnigent.entities.conversation import Conversation
 from omnigent.policies.types import EvaluationContext, PolicyResult
+from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
+from omnigent.runner.mcp_execution_registry import MCP_OPERATION_ID_PARAM
 from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.server.routes import sessions as sessions_mod
 from omnigent.server.routes._sessions import orchestration
@@ -29,8 +36,15 @@ from omnigent.server.routes.sessions import (
     _pending_policy_ask_writes,
     _PendingPolicyAskWrites,
 )
+
+# CORAL(S10): server tool registry and the test tool provider for the server tool cases.
+from omnigent.server.server_tools import ServerToolCall, ServerToolResult, register_server_tool
+from omnigent.spec import AgentSpec
 from omnigent.spec.types import LabelDef, Phase, PolicyAction, StateUpdate, StateUpdateAction
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from tests.budgets import budget
+from tests.server.test_server_tools import ECHO_TOOL, echo_provider, echo_spec
+from tests.tools.test_extensions import installed_tool_providers
 
 # ---------------------------------------------------------------------------
 # Stubs — real types, no MagicMock
@@ -886,3 +900,357 @@ async def test_retry_dispatches_policy_owned_arguments(
             assert "transformed_arguments" not in json.loads(initial["result"]["requestState"])
         finally:
             _pending_policy_ask_writes.pop(eid, None)
+
+
+# ---------------------------------------------------------------------------
+# CORAL(S10): registered server tools run after TOOL_CALL policy
+# ---------------------------------------------------------------------------
+
+
+_SERVER_TOOL_OPERATION_ID = "mcpop_server_tool"
+_SERVER_TOOL_RUNNER_TOKEN = "server-tool-runner-token"
+_SERVER_TOOL_ELICITATION = "elicit_server_tool"
+
+
+def _runner_request(token: str = _SERVER_TOOL_RUNNER_TOKEN) -> Request:
+    """A ``/mcp`` request carrying runner tunnel *token*; the server allow-lists none."""
+    app = Starlette()
+    app.state.runner_tunnel_tokens = None
+    headers = [(RUNNER_TUNNEL_TOKEN_HEADER.lower().encode(), token.encode())]
+    return Request({"type": "http", "method": "POST", "path": "/", "headers": headers, "app": app})
+
+
+@dataclass
+class _ServerToolHarness:
+    """One session whose runner is bound to the test tunnel token, with a server tool."""
+
+    store: SqlAlchemyConversationStore
+    tool_call_results: list[PolicyResult] = field(default_factory=list)
+    evaluations: list[EvaluationContext] = field(default_factory=list)
+    handled: list[ServerToolCall] = field(default_factory=list)
+    forwarded: list[dict[str, Any]] = field(default_factory=list)
+    result: ServerToolResult | Exception = field(
+        default_factory=lambda: ServerToolResult("echoed")
+    )
+    spec: AgentSpec = field(default_factory=echo_spec)
+
+    async def handle(self, call: ServerToolCall) -> ServerToolResult:
+        self.handled.append(call)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+    async def call(
+        self,
+        params: dict[str, Any],
+        *,
+        request: Request | None = None,
+        execute_tool: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        response = await _handle_mcp_tools_call(
+            rpc_id=1,
+            session_id=_SESSION_ID,
+            params={**params, MCP_OPERATION_ID_PARAM: _SERVER_TOOL_OPERATION_ID},
+            conversation_store=self.store,
+            agent_store=_StubAgentStore(),  # type: ignore[arg-type]
+            runner_router=None,
+            actor={"run_as": "alice@example.com"},
+            request=request,
+            execute_tool=execute_tool,
+        )
+        return json.loads(bytes(response.body))
+
+
+@pytest.fixture
+async def server_tool_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    approval_state: tuple[SqlAlchemyConversationStore, Conversation, PolicyEngine],
+) -> AsyncIterator[_ServerToolHarness]:
+    store, _conv, engine = approval_state
+    assert store.set_runner_id(_SESSION_ID, token_bound_runner_id(_SERVER_TOOL_RUNNER_TOKEN))
+    harness = _ServerToolHarness(store=store)
+
+    async def evaluate(session_id, spec, conversation_store, conv, ctx):
+        harness.evaluations.append(ctx)
+        if ctx.phase != Phase.TOOL_CALL:
+            return engine, PolicyResult(action=PolicyAction.ALLOW)
+        return engine, harness.tool_call_results.pop(0)
+
+    async def register(*args, **kwargs):
+        return _SERVER_TOOL_ELICITATION
+
+    def runner_execute(request: httpx.Request) -> httpx.Response:
+        harness.forwarded.append(json.loads(request.content))
+        return httpx.Response(200, json={"result": {"output": "runner output"}})
+
+    monkeypatch.setattr(sessions_mod, "_load_agent_spec_for_session", lambda *args: harness.spec)
+    monkeypatch.setattr(orchestration, "_evaluate_policy_with_fresh_engine", evaluate)
+    monkeypatch.setattr(orchestration, "_register_policy_elicitation", register)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(runner_execute), base_url="http://runner.test"
+    ) as runner:
+
+        async def get_runner(*args):
+            return runner
+
+        monkeypatch.setattr(sessions_mod, "_get_runner_client", get_runner)
+        unregister = register_server_tool(ECHO_TOOL, harness.handle)
+        try:
+            with installed_tool_providers(echo_provider()):
+                yield harness
+        finally:
+            unregister()
+            _pending_policy_ask_writes.pop(_SERVER_TOOL_ELICITATION, None)
+
+
+def _text(payload: dict[str, Any]) -> str:
+    assert "result" in payload, payload
+    return payload["result"]["content"][0]["text"]
+
+
+@pytest.mark.parametrize("name", [ECHO_TOOL, f"mcp__omnigent__{ECHO_TOOL}"])
+@pytest.mark.parametrize("decision", ["deny", "ask-accept", "allow-transform"])
+async def test_server_tool_runs_after_policy_with_policy_owned_arguments(
+    server_tool_harness: _ServerToolHarness, decision: str, name: str
+) -> None:
+    """The handler sees only what TOOL_CALL policy let through; the runner never runs it."""
+    harness = server_tool_harness
+    original = {"text": "original"}
+    if decision == "deny":
+        harness.tool_call_results = [PolicyResult(action=PolicyAction.DENY, reason="blocked")]
+        payload = await harness.call({"name": name, "arguments": original})
+        assert payload["error"] == {"code": -32000, "message": "Denied by policy: blocked"}
+        assert harness.handled == []
+    else:
+        if decision == "ask-accept":
+            expected = {"text": "reviewed"}
+            harness.tool_call_results = [
+                PolicyResult(action=PolicyAction.ASK, data=expected, deciding_policies=["review"]),
+                PolicyResult(action=PolicyAction.ASK, deciding_policies=["review"]),
+            ]
+            initial = await harness.call(
+                {"name": name, "arguments": original}, request=_runner_request()
+            )
+            assert harness.handled == []
+            payload = await harness.call(
+                {
+                    "name": name,
+                    "arguments": original,
+                    "requestState": initial["result"]["requestState"],
+                    "inputResponses": {_SERVER_TOOL_ELICITATION: {"action": "accept"}},
+                },
+                request=_runner_request(),
+            )
+        else:
+            expected = {"text": "redacted"}
+            harness.tool_call_results = [PolicyResult(action=PolicyAction.ALLOW, data=expected)]
+            payload = await harness.call(
+                {"name": name, "arguments": original}, request=_runner_request()
+            )
+        assert _text(payload) == "echoed"
+        assert harness.handled == [
+            ServerToolCall(
+                session_id=_SESSION_ID,
+                name=ECHO_TOOL,
+                arguments=expected,
+                operation_id=_SERVER_TOOL_OPERATION_ID,
+                runner_proven=True,
+                actor={"run_as": "alice@example.com"},
+            )
+        ]
+    assert harness.forwarded == []
+    assert {ctx.phase for ctx in harness.evaluations} == {Phase.TOOL_CALL}
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("declined", "Tool call denied by user"),
+        ("denied-on-retry", "Denied by policy: blocked"),
+        ("arguments-changed", "Retry arguments do not match the approved request"),
+    ],
+)
+async def test_server_tool_never_runs_without_an_accepted_approval(
+    server_tool_harness: _ServerToolHarness, case: str, message: str
+) -> None:
+    harness = server_tool_harness
+    ask = PolicyResult(action=PolicyAction.ASK, deciding_policies=["review"])
+    retry = PolicyResult(action=PolicyAction.DENY, reason="blocked")
+    harness.tool_call_results = [ask, retry if case == "denied-on-retry" else ask]
+    original = {"text": "original"}
+    initial = await harness.call(
+        {"name": ECHO_TOOL, "arguments": original}, request=_runner_request()
+    )
+
+    payload = await harness.call(
+        {
+            "name": ECHO_TOOL,
+            "arguments": {"text": "swapped"} if case == "arguments-changed" else original,
+            "requestState": initial["result"]["requestState"],
+            "inputResponses": {
+                _SERVER_TOOL_ELICITATION: {"action": "decline" if case == "declined" else "accept"}
+            },
+        },
+        request=_runner_request(),
+    )
+
+    assert payload["error"] == {"code": -32000, "message": message}
+    assert (harness.handled, harness.forwarded) == ([], [])
+
+
+async def test_unregister_during_a_call_finishes_it_and_forwards_the_next(
+    server_tool_harness: _ServerToolHarness,
+) -> None:
+    """A call already handed to a handler finishes; the next one takes the runner path."""
+    harness = server_tool_harness
+    harness.tool_call_results = [PolicyResult(action=PolicyAction.ALLOW)] * 2
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def gated(call: ServerToolCall) -> ServerToolResult:
+        started.set()
+        await release.wait()
+        return ServerToolResult("finished")
+
+    unregister = register_server_tool(ECHO_TOOL, gated)
+    in_flight = asyncio.create_task(harness.call({"name": ECHO_TOOL, "arguments": {}}))
+    await asyncio.wait_for(started.wait(), timeout=budget(5))
+    unregister()
+    release.set()
+
+    assert _text(await asyncio.wait_for(in_flight, timeout=budget(5))) == "finished"
+    assert _text(await harness.call({"name": ECHO_TOOL, "arguments": {"text": "x"}})) == (
+        "runner output"
+    )
+    assert [body["params"]["name"] for body in harness.forwarded] == [ECHO_TOOL]
+
+
+@pytest.mark.parametrize(
+    ("result", "message", "logged"),
+    [
+        (RuntimeError("handler bug"), "server tool failed; see the server log", True),
+        (ServerToolResult("[busy] retry shortly", is_error=True), "[busy] retry shortly", False),
+        ("plain text", "server tool failed; see the server log", True),
+    ],
+    ids=["raises", "is-error", "not-a-result"],
+)
+async def test_server_tool_failure_is_a_logged_32000(
+    server_tool_harness: _ServerToolHarness,
+    caplog: pytest.LogCaptureFixture,
+    result: ServerToolResult | Exception,
+    message: str,
+    logged: bool,
+) -> None:
+    harness = server_tool_harness
+    harness.result = result
+    harness.tool_call_results = [PolicyResult(action=PolicyAction.ALLOW)]
+    with caplog.at_level(logging.ERROR, logger="omnigent.server.server_tools"):
+        payload = await harness.call({"name": ECHO_TOOL, "arguments": {}})
+    assert payload["error"] == {"code": -32000, "message": message}
+    assert len(harness.handled) == 1
+    records = [
+        record for record in caplog.records if record.name == "omnigent.server.server_tools"
+    ]
+    assert [record.session_id for record in records] == ([_SESSION_ID] if logged else [])  # type: ignore[attr-defined]
+    assert harness.forwarded == []
+
+
+@pytest.mark.parametrize(
+    ("request_token", "proven"),
+    [(_SERVER_TOOL_RUNNER_TOKEN, True), ("another-runner-token", False), (None, False)],
+    ids=["session-runner", "another-runner", "no-request"],
+)
+async def test_server_tool_call_says_whether_the_runner_proved_itself(
+    server_tool_harness: _ServerToolHarness, request_token: str | None, proven: bool
+) -> None:
+    harness = server_tool_harness
+    harness.tool_call_results = [PolicyResult(action=PolicyAction.ALLOW)]
+    request = None if request_token is None else _runner_request(request_token)
+    payload = await harness.call({"name": ECHO_TOOL, "arguments": {}}, request=request)
+    assert _text(payload) == "echoed"
+    assert [call.runner_proven for call in harness.handled] == [proven]
+
+
+@pytest.mark.parametrize("case", ["not-given", "own-local-tool", "gateway-backend"])
+async def test_server_tool_runs_only_for_sessions_given_the_tool(
+    server_tool_harness: _ServerToolHarness, case: str
+) -> None:
+    """A same-named tool of a session the provider did not give it keeps its own path."""
+    harness = server_tool_harness
+    harness.tool_call_results = [PolicyResult(action=PolicyAction.ALLOW)]
+    executed: list[dict[str, Any]] = []
+
+    async def execute_tool(arguments: dict[str, Any]) -> dict[str, Any]:
+        executed.append(arguments)
+        return {"result": {"output": "backend output"}}
+
+    if case == "not-given":
+        harness.spec = echo_spec(given=False)
+    elif case == "own-local-tool":
+        harness.spec = echo_spec(ECHO_TOOL)
+    payload = await harness.call(
+        {"name": ECHO_TOOL, "arguments": {"text": "x"}},
+        request=_runner_request(),
+        execute_tool=execute_tool if case == "gateway-backend" else None,
+    )
+    assert harness.handled == []
+    if case == "gateway-backend":
+        assert _text(payload) == "backend output"
+        assert executed == [{"text": "x"}]
+        assert harness.forwarded == []
+    else:
+        assert _text(payload) == "runner output"
+        assert [body["params"]["name"] for body in harness.forwarded] == [ECHO_TOOL]
+    assert [ctx.phase for ctx in harness.evaluations] == [Phase.TOOL_CALL, Phase.TOOL_RESULT]
+
+
+@pytest.mark.parametrize("name", ["sys_advise_models", "mcp__omnigent__sys_advise_models"])
+async def test_advise_models_is_unchanged_beside_server_tools(
+    server_tool_harness: _ServerToolHarness, name: str
+) -> None:
+    harness = server_tool_harness
+    harness.tool_call_results = [PolicyResult(action=PolicyAction.ALLOW)]
+    payload = await harness.call({"name": name, "arguments": {}}, request=_runner_request())
+    assert _text(payload) == json.dumps({"error": "tasks must be a list", "router_on": False})
+    assert harness.handled == []
+    assert harness.forwarded == []
+
+
+@pytest.mark.parametrize("registered", [True, False], ids=["registered", "empty-registry"])
+@pytest.mark.parametrize("name", [123, ["x"], {"a": 1}], ids=["int", "list", "dict"])
+async def test_non_string_tool_name_gets_the_response_it_got_without_server_tools(
+    server_tool_harness: _ServerToolHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    name: object,
+    registered: bool,
+) -> None:
+    harness = server_tool_harness
+    if not registered:
+        register_server_tool(ECHO_TOOL, harness.handle)()  # replace, then remove: empty registry
+    harness.tool_call_results = [PolicyResult(action=PolicyAction.ALLOW)] * 2
+    payload = await harness.call({"name": name, "arguments": {}})
+
+    monkeypatch.setattr(orchestration, "granted_server_tool", lambda *args: None)  # no S10 lookup
+    assert await harness.call({"name": name, "arguments": {}}) == payload
+    assert _text(payload) == "runner output"
+    assert harness.handled == []
+    assert [body["params"]["name"] for body in harness.forwarded] == [name, name]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "transform"),
+    [([1, 2], None), ("text", None), ({"text": "x"}, ["x"])],
+    ids=["list", "string", "list-from-policy"],
+)
+async def test_server_tool_refuses_arguments_that_are_not_an_object(
+    server_tool_harness: _ServerToolHarness, arguments: object, transform: object
+) -> None:
+    harness = server_tool_harness
+    harness.tool_call_results = [PolicyResult(action=PolicyAction.ALLOW, data=transform)]
+    payload = await harness.call(
+        {"name": ECHO_TOOL, "arguments": arguments}, request=_runner_request()
+    )
+    assert payload["error"] == {
+        "code": -32000,
+        "message": "Invalid tool arguments: expected an object",
+    }
+    assert (harness.handled, harness.forwarded) == ([], [])

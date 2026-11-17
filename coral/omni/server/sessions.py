@@ -44,6 +44,7 @@ from coral.omni._upstream import (
     validate_session_agent,
     validate_session_model_metadata,
 )
+from coral.omni.process_map import CORAL_RUNNER_TOKEN
 from coral.omni.protocols import (
     CoralSessionError,
     SessionCreateRequest,
@@ -51,7 +52,7 @@ from coral.omni.protocols import (
     SessionRef,
     SessionState,
 )
-from coral.omni.server.bundles import pack_bundle
+from coral.omni.server.bundles import StepBundleRejected, check_hygiene, pack_bundle
 from coral.omni.server.host_access import HostAccessError, OwnerHost, authorize_owner_host
 from coral.omni.server.worktrees import connect_run_worktree_host
 from coral.profiles.bundle_spec import ENGINE_PREFIX, Stance, build_seed_bundle_yaml
@@ -62,15 +63,17 @@ from coral.stores.session_bindings import (
     SessionBindingDraft,
     SessionBindings,
 )
+from coral.tools.catalog import ORCHESTRATOR_STANCE, STEP_STANCES, generated_stance
 from coral.workspace.run_worktree import RunWorktreeError
 from omnigent.db.db_models import workspace_scope
 from omnigent.entities import Conversation
 from omnigent.entities.conversation import USER_SESSION_TITLE_MAX_CHARS
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.harness_aliases import is_native_harness
+from omnigent.harness_aliases import is_claude_sdk_harness_name, is_native_harness
 from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_LOCAL
 from omnigent.server.routes.sessions import announce_projects_changed, ensure_runner_connected
 from omnigent.server.server_plugins import ServerServices
+from omnigent.spec.types import AgentSpec
 from omnigent.stores.conversation_store import (
     ARCHIVED_AT_LABEL_KEY,
     ConversationAlreadyExistsError,
@@ -548,7 +551,9 @@ class OmnigentSessionFacade(SessionFacade):
                 f"agent {agent.id} runs on {harness or 'an unknown harness'}; "
                 "Coral steps need a headless harness",
             )
-        reasoning_effort = await self._spec_effort(agent)
+        spec = await self._loaded_spec(agent)
+        _require_coral_bundle(agent.id, spec, harness, request.slot_role)
+        reasoning_effort = _spec_effort(spec)
         with owner_host.owner_scope():
             workspace = await self._canonical_workspace(request, agent)
             await self._harness_ready(request, harness, anchor)
@@ -630,9 +635,16 @@ class OmnigentSessionFacade(SessionFacade):
                 user_id=request.user_id,
                 account_generation=request.account_generation,
             )
-            owner_host.connection()
+            conn = owner_host.connection()
         except HostAccessError as exc:
             raise _host_failure(exc) from exc
+        # Self-reported, so a compatibility gate only: the checks above decide who may use it.
+        if CORAL_RUNNER_TOKEN not in conn.hello.capabilities:
+            raise _refused(
+                "session.host_unsupported",
+                f"host {request.host_id!r} cannot run Coral steps: update Coral on that host, "
+                "or unset CORAL_DISABLE_HOST_ENTRY_POINTS",
+            )
         return owner_host
 
     async def _permitted_agent(self, request: SessionCreateRequest) -> Any:
@@ -668,8 +680,8 @@ class OmnigentSessionFacade(SessionFacade):
             raise _agent_not_permitted(agent_id) from None
         return agent
 
-    async def _spec_effort(self, agent: Any) -> str | None:
-        """The agent spec's reasoning effort, validated as POST /v1/sessions does."""
+    async def _loaded_spec(self, agent: Any) -> AgentSpec:
+        """The agent's stored spec, loaded as POST /v1/sessions loads it."""
         agent_cache = self._services.agent_cache
         try:
             loaded = await asyncio.to_thread(
@@ -688,16 +700,7 @@ class OmnigentSessionFacade(SessionFacade):
             ImportError,
         ):
             raise _bad_spec(agent.id) from None
-        effort = loaded.spec.executor.reasoning_effort
-        if effort is None:
-            return None
-        try:
-            _, validated = validate_session_model_metadata(
-                model_override=None, reasoning_effort=effort
-            )
-        except OmnigentError as exc:
-            raise _refused("session.invalid", str(exc)) from exc
-        return validated
+        return loaded.spec
 
     async def _canonical_workspace(self, request: SessionCreateRequest, agent: Any) -> str:
         services = self._services
@@ -966,6 +969,54 @@ def _bad_spec(agent_id: str) -> CoralSessionError:
         "session.harness_not_supported",
         f"agent {agent_id}'s stored spec no longer loads, so its harness is unknown",
     )
+
+
+def _require_coral_bundle(
+    agent_id: str, spec: AgentSpec, harness: str, slot_role: str | None
+) -> None:
+    """
+    Refuse an agent that is not a claude-sdk Coral bundle whose stance fits the slot role.
+
+    Such a bundle turns on claude-sdk's tool-policy hook, so the run's policies
+    see its native tool calls as well as its Omnigent ones.
+
+    :raises CoralSessionError: ``session.agent_not_supported``, naming the first broken rule.
+    """
+    # The stances the catalog offers this slot's engine tools to.
+    wanted = frozenset({ORCHESTRATOR_STANCE}) if slot_role == "orchestrator" else STEP_STANCES
+    stance = generated_stance(spec.params)
+    if not is_claude_sdk_harness_name(harness):
+        problem = f"it runs on {harness}, not claude-sdk"
+    elif stance is None:
+        problem = "it has no params.coral.generated.stance"
+    elif stance not in wanted:
+        problem = f"its stance is {stance[:64]!r}"
+    else:
+        try:
+            check_hygiene(spec, Stance(stance))
+        except StepBundleRejected as exc:
+            problem = str(exc)
+        else:
+            return
+    raise _refused(
+        "session.agent_not_supported",
+        f"agent {agent_id} is not a Coral {' or '.join(sorted(wanted))} bundle "
+        f"for slot role {slot_role}: {problem}",
+    )
+
+
+def _spec_effort(spec: AgentSpec) -> str | None:
+    """The spec's reasoning effort, validated as POST /v1/sessions does."""
+    effort = spec.executor.reasoning_effort
+    if effort is None:
+        return None
+    try:
+        _, validated = validate_session_model_metadata(
+            model_override=None, reasoning_effort=effort
+        )
+    except OmnigentError as exc:
+        raise _refused("session.invalid", str(exc)) from exc
+    return validated
 
 
 __all__ = [

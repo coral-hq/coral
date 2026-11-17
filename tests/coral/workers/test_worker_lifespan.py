@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
+import logging
 import threading
 import time
 import uuid
@@ -21,8 +23,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from coral.db import WorkRow
-from coral.db.enum_codecs import SessionBindingProgress, WorkStatus
+from coral.db.enum_codecs import RunPauseReason, RunStatus, SessionBindingProgress, WorkStatus
+from coral.model.ids import anchor_session_id
+from coral.omni.policies.cost_backstop import (
+    SESSION_CAP_CONFIG_KEY,
+    SESSION_CAP_ENV,
+    cost_backstop,
+)
+from coral.omni.policies.state import RunStatusCache
+from coral.omni.protocols import CoralSessionError
 from coral.omni.server import OmnigentRunScopeRunner, coral_lifespan
+from coral.omni.server.dispatch import OmnigentSessionDispatch
+from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
+from coral.omni.server.sessions import RUN_ID_LABEL_KEY
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue import executors as queue_executors
 from coral.queue.executors import (
@@ -35,21 +48,33 @@ from coral.queue.executors import (
 )
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.slots.executors import CANCEL_SESSIONS, CLOSE_SLOT, CREATE_SESSION, SEND_INPUT
-from coral.stores.protocols import RunStartSpec, WorkItemDraft
+from coral.stores.protocols import RunStartSpec, Transition, WorkItemDraft
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import SessionBindingDraft, SqlAlchemySessionBindingStore
+from coral.tools import catalog as tool_catalog
+from coral.tools.catalog import ENGINE_TOOLS, SUBMIT_HANDOFF
 from coral.workers.supervisor import WorkerSupervisor
 from coral.workspace.executors import WORKSPACE_COMMIT, WORKSPACE_RESET, WORKSPACE_SALVAGE
 from omnigent.db.account_authority import account_generation, current_account_user
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, current_workspace_id
 from omnigent.db.utils import _run_migrations as run_omni_migrations
 from omnigent.db.utils import create_db_engine, get_or_create_engine
+from omnigent.entities import Conversation
+from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.policies.schema import PolicyEvent
+from omnigent.policies.types import EvaluationContext, PolicyResult
 from omnigent.runtime.agent_cache import AgentCache
-from omnigent.server import session_live_state
+from omnigent.runtime.policies.builder import build_policy_engine
+from omnigent.runtime.policies.required_providers import required_policies_apply
+from omnigent.server import mutation_guards, session_live_state
 from omnigent.server.app import create_app
 from omnigent.server.host_registry import _expected_host_owner
+from omnigent.server.mutation_guards import SESSION_UPDATE, MutationAttempt, check_mutation
 from omnigent.server.routes._sessions import helpers as session_helpers
 from omnigent.server.server_plugins import ServerServices
+from omnigent.server.server_tools import ServerToolCall, ServerToolResult, server_tool
+from omnigent.spec import AgentSpec
+from omnigent.spec.types import Phase, PolicyAction
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -65,6 +90,7 @@ from tests.coral.workspace._executor_fakes import (
     start_run,
 )
 from tests.server.helpers import create_session_for_agent, create_test_agent
+from tests.tools.test_extensions import installed_tool_providers
 
 ENGINE_EFFECT_TYPES = frozenset(
     {
@@ -80,12 +106,28 @@ ENGINE_EFFECT_TYPES = frozenset(
 # The status-edge observer and the confirmed-stop record's observer.
 ENGINE_OBSERVERS = frozenset({"coral", "coral.confirmed_stops"})
 NOTHING: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
+ENGINE_TOOL_NAMES = frozenset(decl.name for decl in ENGINE_TOOLS)
 
 
 def _engine_registrations() -> tuple[frozenset[str], frozenset[str]]:
     """The session engine's effect executors and status-edge observers registered now."""
     observers = frozenset(session_live_state._status_edge_observers) & ENGINE_OBSERVERS
     return registered_executor_kinds() & ENGINE_EFFECT_TYPES, observers
+
+
+def _engine_tools() -> frozenset[str]:
+    """Coral's engine tools registered as server tools now."""
+    return frozenset(name for name in ENGINE_TOOL_NAMES if server_tool(name) is not None)
+
+
+def _coral_policies_registered() -> bool:
+    """Whether Coral's required-policy provider claims a Coral bundle's sessions now."""
+    return required_policies_apply(AgentSpec(spec_version=1, params={"coral": {}}), None)
+
+
+def _coral_mutation_guard() -> object | None:
+    """Coral's S53 mutation guard as registered now, if any."""
+    return dict(mutation_guards._registered()).get(MUTATION_GUARD)
 
 
 @dataclass
@@ -261,17 +303,421 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
 
 
 async def test_an_overlapping_lifespan_takes_over_and_outlives_the_earlier_exit(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
+    with installed_tool_providers():
+        async with AsyncExitStack() as later:
+            async with coral_lifespan(server.app, server.services):
+                # Entered while the first still runs: it replaces the registrations, no conflict.
+                await later.enter_async_context(coral_lifespan(server.app, server.services))
+                edges = server.app.state.coral_status_edges
+                handler = server_tool(SUBMIT_HANDOFF.name)
+            # The earlier exit removes only its own registrations.
+            assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
+            assert session_live_state._status_edge_observers["coral"] == edges.observe
+            assert _engine_tools() == ENGINE_TOOL_NAMES
+            assert server_tool(SUBMIT_HANDOFF.name) is handler
+            assert _coral_policies_registered()
+    assert _engine_registrations() == NOTHING
+    assert _engine_tools() == frozenset()
+    assert not _coral_policies_registered()
+    assert _coral_mutation_guard() is None
+
+
+@pytest.mark.parametrize("engine", ["wired", "unwired"])
+async def test_the_production_catalog_registers_no_engine_tool(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    assert tool_catalog.CATALOG == ()
+    if engine == "unwired":
+        monkeypatch.delattr(server.app.state, "session_event_dispatch")
+    async with coral_lifespan(server.app, server.services):
+        assert _engine_registrations() == (
+            (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS) if engine == "wired" else NOTHING
+        )
+        assert _engine_tools() == frozenset()
+        assert all(server_tool(f"mcp__omnigent__{name}") is None for name in ENGINE_TOOL_NAMES)
+
+
+@pytest.mark.parametrize("engine", ["wired", "unwired", "no_database"])
+async def test_engine_tools_are_wired_without_the_session_engine_and_removed_on_exit(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    # A catalog that lists the tools; without a decision port each answers "not running".
+    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
+    services: Any = server.services
+    if engine == "unwired":
+        monkeypatch.delattr(server.app.state, "session_event_dispatch")
+    elif engine == "no_database":
+        services = SimpleNamespace(
+            host_sharded=False,
+            conversation_store=SimpleNamespace(storage_location="sqlite:///:memory:"),
+        )
+    call = ServerToolCall(
+        session_id="session-1",
+        name=SUBMIT_HANDOFF.name,
+        arguments={},
+        operation_id="op-1",
+        runner_proven=True,
+        actor=None,
+    )
+
+    with installed_tool_providers():
+        async with coral_lifespan(server.app, cast(ServerServices, services)):
+            wired = engine == "wired"
+            assert _engine_registrations() == (
+                (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS) if wired else NOTHING
+            )
+            if engine == "no_database":
+                assert _engine_tools() == frozenset()
+            else:
+                assert _engine_tools() == ENGINE_TOOL_NAMES
+                handler = server_tool(SUBMIT_HANDOFF.name)
+                assert handler is not None
+                assert await handler(call) == ServerToolResult(
+                    "Coral's workflow engine is not running on this server", is_error=True
+                )
+    assert _engine_tools() == frozenset()
+
+
+@pytest.mark.parametrize("engine", ["wired", "unwired"])
+async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifespan(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    hooks: list[str] = []
+    register_post_commit = SqlAlchemyCoralRunStore.register_post_commit
+
+    def recording_register(
+        store: SqlAlchemyCoralRunStore, callback: Callable[[str, int], None]
+    ) -> Callable[[], None]:
+        unregister = register_post_commit(store, callback)
+        hooks.append("registered")
+
+        def recording_unregister() -> None:
+            hooks.append("unregistered")
+            unregister()
+
+        return recording_unregister
+
+    monkeypatch.setattr(SqlAlchemyCoralRunStore, "register_post_commit", recording_register)
+    if engine == "unwired":
+        monkeypatch.delattr(server.app.state, "session_event_dispatch")
+
+    assert not _coral_policies_registered()
+    assert _coral_mutation_guard() is None
+    async with coral_lifespan(server.app, server.services):
+        # Bound sessions are guarded whether or not the session engine is wired.
+        assert _coral_policies_registered()
+        assert isinstance(_coral_mutation_guard(), CoralMutationGuard)
+        assert hooks == ["registered"]
+    assert not _coral_policies_registered()
+    assert _coral_mutation_guard() is None
+    assert hooks == ["registered", "unregistered"]
+
+
+async def test_the_mutation_guard_refuses_changes_to_a_bound_session_while_the_lifespan_runs(
     server: _Server,
 ) -> None:
-    async with AsyncExitStack() as later:
-        async with coral_lifespan(server.app, server.services):
-            # Entered while the first still runs: it replaces the registrations, no conflict.
-            await later.enter_async_context(coral_lifespan(server.app, server.services))
-            edges = server.app.state.coral_status_edges
-        # The earlier exit removes only its own registrations.
-        assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
-        assert session_live_state._status_edge_observers["coral"] == edges.observe
+    """The registered guard reads the real binding store in the request's workspace."""
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    conversations = cast(SqlAlchemyConversationStore, server.services.conversation_store)
+    bound = conversations.create_conversation(labels={RUN_ID_LABEL_KEY: "run-1"})
+    unbound = conversations.create_conversation(labels={RUN_ID_LABEL_KEY: "run-1"})
+    bindings.reserve(
+        SessionBindingDraft(
+            workspace_id=DEFAULT_WORKSPACE_ID,
+            session_id=bound.id,
+            run_id="run-1",
+            role="step",
+            effect_key="run-1:2:create_session:work",
+            slot_id="work||:0",
+            slot_role="step_agent",
+        )
+    )
+
+    def model_change(row: Conversation) -> MutationAttempt:
+        return MutationAttempt(
+            SESSION_UPDATE,
+            session_id=row.id,
+            conversation=row,
+            fields=frozenset({"model_override"}),
+        )
+
+    async with coral_lifespan(server.app, server.services):
+        with pytest.raises(OmnigentError) as refused:
+            await check_mutation(model_change(bound))
+        await check_mutation(model_change(unbound))
+    assert refused.value.code == ErrorCode.CONFLICT
+    assert f"Session {bound.id} is part of a Coral workflow run" in refused.value.message
+    # Without the lifespan nothing is guarded.
+    await check_mutation(model_change(bound))
+
+
+async def test_the_lifespan_pauses_an_over_cap_sessions_run_at_the_configured_cap(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(SESSION_CAP_ENV, raising=False)
+    services = dataclasses.replace(server.services, server_config={SESSION_CAP_CONFIG_KEY: 2.0})
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    conversations = cast(SqlAlchemyConversationStore, server.services.conversation_store)
+    workspace = DEFAULT_WORKSPACE_ID
+
+    def over_cap_step(run_store: SqlAlchemyCoralRunStore) -> tuple[str, str]:
+        run = run_store.start_run(RunStartSpec("wf", "v1", "Run", "", workspace_id=workspace))
+        running = Transition(status=int(RunStatus.RUNNING))
+        run_store.apply_transition(run.id, run.version, running, workspace_id=workspace)
+        session_id = conversations.create_conversation().id
+        conversations.set_session_usage(session_id, {"total_cost_usd": 3.0})
+        bindings.reserve(
+            SessionBindingDraft(
+                workspace_id=workspace,
+                session_id=session_id,
+                run_id=run.id,
+                role="step",
+                effect_key=f"{run.id}:2:create_session:work",
+                slot_id="work||:0",
+                slot_role="step_agent",
+            )
+        )
+        return run.id, session_id
+
+    def stored(run_store: SqlAlchemyCoralRunStore, run_id: str) -> tuple[int, int | None]:
+        run = run_store.get_run(run_id, workspace_id=workspace)
+        assert run is not None
+        return run.status, run.pause_reason
+
+    async with coral_lifespan(server.app, services):
+        run_store: SqlAlchemyCoralRunStore = server.app.state.coral_run_store
+        run_id, session_id = over_cap_step(run_store)
+        engine = await asyncio.to_thread(
+            build_policy_engine,
+            spec=AgentSpec(spec_version=1, params={"coral": {}}),
+            conversation_id=session_id,
+            conversation_store=conversations,
+        )
+        call = EvaluationContext(
+            phase=Phase.TOOL_CALL, content={"name": "Bash", "arguments": {}}, tool_name="Bash"
+        )
+        denied = await engine.evaluate(call)
+        assert denied.deciding_policies == ["__coral_cost_backstop"]
+        assert "spent about $3.00 of its $2.00 cap" in (denied.reason or "")
+        assert stored(run_store, run_id) == (RunStatus.PAUSED, RunPauseReason.BUDGET)
+
+    # The exit uninstalled the pauser: a backstop deny now commits nothing.
+    run_id, session_id = over_cap_step(run_store)
+    backstop = cost_backstop(
+        cap_usd=2.0, spent_usd=3.0, workspace_id=workspace, run_id=run_id, session_id=session_id
+    )
+    assert backstop(cast(PolicyEvent, {"type": "tool_call", "target": "Bash"}))["result"] == "DENY"
+    assert stored(run_store, run_id) == (RunStatus.RUNNING, None)
+
+
+@pytest.mark.parametrize("source", ["server_config", "env"])
+async def test_an_invalid_session_cap_aborts_the_lifespan_before_anything_starts(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    services = server.services
+    if source == "server_config":
+        monkeypatch.delenv(SESSION_CAP_ENV, raising=False)
+        services = dataclasses.replace(services, server_config={SESSION_CAP_CONFIG_KEY: 0})
+    else:
+        # The environment wins over a valid server config.
+        services = dataclasses.replace(services, server_config={SESSION_CAP_CONFIG_KEY: 10})
+        monkeypatch.setenv(SESSION_CAP_ENV, "lots")
+
+    with pytest.raises(ValueError, match="session cost cap"):
+        async with coral_lifespan(server.app, services):
+            pass
+
+    assert not hasattr(server.app.state, "coral_worker_supervisor")
     assert _engine_registrations() == NOTHING
+    assert not _coral_policies_registered()
+
+
+def _bound_step_that_spent(
+    server: _Server, run_store: SqlAlchemyCoralRunStore, spent: float
+) -> str:
+    """A running run's step session whose own row records *spent* US dollars; its run id."""
+    conversations = cast(SqlAlchemyConversationStore, server.services.conversation_store)
+    run = run_store.start_run(
+        RunStartSpec("wf", "v1", "Run", "", workspace_id=DEFAULT_WORKSPACE_ID)
+    )
+    running = Transition(status=int(RunStatus.RUNNING))
+    run_store.apply_transition(run.id, run.version, running, workspace_id=DEFAULT_WORKSPACE_ID)
+    session_id = conversations.create_conversation().id
+    conversations.set_session_usage(session_id, {"total_cost_usd": spent})
+    SqlAlchemySessionBindingStore(server.db_uri).reserve(
+        SessionBindingDraft(
+            workspace_id=DEFAULT_WORKSPACE_ID,
+            session_id=session_id,
+            run_id=run.id,
+            role="step",
+            effect_key=f"{run.id}:2:create_session:work",
+            slot_id="work||:0",
+            slot_role="step_agent",
+        )
+    )
+    return session_id
+
+
+@pytest.mark.parametrize(
+    ("env", "server_config", "cap_text"),
+    [
+        ("1.5", {SESSION_CAP_CONFIG_KEY: 100.0}, "of its $1.50 cap"),
+        ("  ", {SESSION_CAP_CONFIG_KEY: 2}, "of its $2.00 cap"),
+        # Neither set: the $25 default lets a $3 session through.
+        (None, {}, None),
+    ],
+)
+async def test_the_lifespan_cap_is_the_env_else_the_server_config_else_the_default(
+    server: _Server,
+    monkeypatch: pytest.MonkeyPatch,
+    env: str | None,
+    server_config: dict[str, object],
+    cap_text: str | None,
+) -> None:
+    if env is None:
+        monkeypatch.delenv(SESSION_CAP_ENV, raising=False)
+    else:
+        monkeypatch.setenv(SESSION_CAP_ENV, env)
+    services = dataclasses.replace(server.services, server_config=server_config)
+
+    async with coral_lifespan(server.app, services):
+        run_store: SqlAlchemyCoralRunStore = server.app.state.coral_run_store
+        session_id = _bound_step_that_spent(server, run_store, 3.0)
+        engine = await asyncio.to_thread(
+            build_policy_engine,
+            spec=AgentSpec(spec_version=1, params={"coral": {}}),
+            conversation_id=session_id,
+            conversation_store=server.services.conversation_store,
+        )
+        result = await engine.evaluate(
+            EvaluationContext(
+                phase=Phase.TOOL_CALL, content={"name": "Bash", "arguments": {}}, tool_name="Bash"
+            )
+        )
+
+    if cap_text is None:
+        assert result.action == PolicyAction.ALLOW
+    else:
+        assert result.deciding_policies == ["__coral_cost_backstop"]
+        assert cap_text in (result.reason or "")
+
+
+@pytest.mark.parametrize(
+    ("env", "server_config"),
+    [
+        ("-1", {}),
+        ("1000000.5", {}),
+        ("abc", {}),
+        (None, {SESSION_CAP_CONFIG_KEY: -2.5}),
+        (None, {SESSION_CAP_CONFIG_KEY: 1_000_001}),
+        (None, {SESSION_CAP_CONFIG_KEY: "25"}),
+    ],
+)
+async def test_a_refused_session_cap_leaves_nothing_behind_for_the_next_start(
+    server: _Server,
+    monkeypatch: pytest.MonkeyPatch,
+    env: str | None,
+    server_config: dict[str, object],
+) -> None:
+    if env is None:
+        monkeypatch.delenv(SESSION_CAP_ENV, raising=False)
+    else:
+        monkeypatch.setenv(SESSION_CAP_ENV, env)
+    refused = dataclasses.replace(server.services, server_config=server_config)
+
+    with pytest.raises(ValueError, match="session cost cap") as raised:
+        async with coral_lifespan(server.app, refused):
+            pass
+    assert (SESSION_CAP_ENV if env is not None else SESSION_CAP_CONFIG_KEY) in str(raised.value)
+    assert not _coral_policies_registered()
+    assert _engine_registrations() == NOTHING
+
+    # Fixed, the next start wires the guards as usual.
+    monkeypatch.delenv(SESSION_CAP_ENV, raising=False)
+    async with coral_lifespan(server.app, server.services):
+        assert _coral_policies_registered()
+    assert not _coral_policies_registered()
+
+
+async def test_each_lifespan_guards_bound_sessions_through_its_own_run_store_only(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    heard: list[tuple[int, str]] = []
+    invalidate = RunStatusCache.invalidate
+
+    def recording_invalidate(cache: RunStatusCache, run_id: str, version: int) -> None:
+        heard.append((id(cache), run_id))
+        invalidate(cache, run_id, version)
+
+    monkeypatch.setattr(RunStatusCache, "invalidate", recording_invalidate)
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    conversations = cast(SqlAlchemyConversationStore, server.services.conversation_store)
+    spec = AgentSpec(spec_version=1, params={"coral": {}})
+
+    async def bash(session_id: str) -> PolicyResult:
+        engine = await asyncio.to_thread(
+            build_policy_engine,
+            spec=spec,
+            conversation_id=session_id,
+            conversation_store=conversations,
+        )
+        call = EvaluationContext(
+            phase=Phase.TOOL_CALL, content={"name": "Bash", "arguments": {}}, tool_name="Bash"
+        )
+        return await engine.evaluate(call)
+
+    def set_status(run_store: SqlAlchemyCoralRunStore, run_id: str, status: RunStatus) -> None:
+        _, version = run_store.load_run_state(run_id, workspace_id=DEFAULT_WORKSPACE_ID)
+        reason = int(RunPauseReason.USER) if status == RunStatus.PAUSED else None
+        transition = Transition(
+            status=int(status), pause_reason=reason, clear_pause_reason=reason is None
+        )
+        run_store.apply_transition(run_id, version, transition, workspace_id=DEFAULT_WORKSPACE_ID)
+
+    earlier: list[tuple[SqlAlchemyCoralRunStore, str]] = []
+    # Enter, exit and enter again: each lifespan's provider hears its own store's commits.
+    for _ in range(2):
+        async with coral_lifespan(server.app, server.services):
+            run_store: SqlAlchemyCoralRunStore = server.app.state.coral_run_store
+            run = run_store.start_run(
+                RunStartSpec("wf", "v1", "Run", "", workspace_id=DEFAULT_WORKSPACE_ID)
+            )
+            set_status(run_store, run.id, RunStatus.RUNNING)
+            session_id = conversations.create_conversation().id
+            bindings.reserve(
+                SessionBindingDraft(
+                    workspace_id=DEFAULT_WORKSPACE_ID,
+                    session_id=session_id,
+                    run_id=run.id,
+                    role="step",
+                    effect_key=f"{run.id}:2:create_session:work",
+                    slot_id="work||:0",
+                    slot_role="step_agent",
+                )
+            )
+            assert (await bash(session_id)).action == PolicyAction.ALLOW
+            heard.clear()
+            set_status(run_store, run.id, RunStatus.PAUSED)
+            # One cache heard the commit: no earlier lifespan's hook is still attached.
+            assert [run_id for _, run_id in heard] == [run.id]
+            denied = await bash(session_id)
+            assert denied.deciding_policies == ["__coral_run_guard"]
+            for old_store, old_run in earlier:
+                set_status(old_store, old_run, RunStatus.CANCELLED)
+            earlier.append((run_store, run.id))
+            assert [run_id for _, run_id in heard] == [run.id]
+
+        assert not _coral_policies_registered()
+        heard.clear()
+        set_status(run_store, run.id, RunStatus.RUNNING)
+        # After exit the commit reaches no cache and the session gets no Coral policy.
+        assert heard == []
+        set_status(run_store, run.id, RunStatus.PAUSED)
+        unguarded = await bash(session_id)
+        assert unguarded.action == PolicyAction.ALLOW
 
 
 @pytest.mark.parametrize("missing", ["session_event_dispatch", "project_store"])
@@ -294,6 +740,7 @@ async def test_a_server_without_an_engine_input_wires_nothing(
 async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
     server: _Server, monkeypatch: pytest.MonkeyPatch, failing: str
 ) -> None:
+    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
     if failing == "executor":
         register_executor = queue_executors.register_executor
         registered: list[str] = []
@@ -321,11 +768,14 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
 
         monkeypatch.setattr(WorkerSupervisor, "start", failing_start)
 
-    with pytest.raises(RuntimeError, match="failed"):
+    with installed_tool_providers(), pytest.raises(RuntimeError, match="failed"):
         async with coral_lifespan(server.app, server.services):
             pass
 
     assert _engine_registrations() == NOTHING
+    assert _engine_tools() == frozenset()
+    assert not _coral_policies_registered()
+    assert _coral_mutation_guard() is None
 
 
 async def test_item_claimed_during_exit_is_retried_not_failed(
@@ -487,3 +937,69 @@ async def test_a_close_and_a_commit_share_one_stop_record(
     assert host_ops.count("commit") == 2
     assert isinstance(after_rerun, EffectFailed)
     assert (after_rerun.error_code, after_rerun.retryable) == ("session.turn_state_unknown", True)
+
+
+async def test_an_anchor_bound_send_stops_the_anchor_runner_through_the_lifespans_dispatch(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The drift pause's stop reaches the dispatch the lifespan built, which holds the pauser."""
+    stops: list[tuple[str, str | None]] = []
+    real_stop = OmnigentSessionDispatch.stop
+
+    async def recording_stop(
+        dispatch: OmnigentSessionDispatch, *, session_id: str, user_id: str | None
+    ) -> None:
+        stops.append((session_id, user_id))
+        await real_stop(dispatch, session_id=session_id, user_id=user_id)
+
+    monkeypatch.setattr(OmnigentSessionDispatch, "stop", recording_stop)
+    workspace_id = DEFAULT_WORKSPACE_ID
+    run_store = SqlAlchemyCoralRunStore(server.db_uri)
+    run = start_run(
+        run_store,
+        workspace_id=workspace_id,
+        user_id=None,
+        account_generation=None,
+        host_id=None,
+        repo_path=None,
+        worktree_path=None,
+        run_branch=None,
+    )
+    # Someone attached a runner to the run's anchor.
+    anchor = anchor_session_id(workspace_id, run.id)
+    server.services.conversation_store.create_conversation(
+        conversation_id=anchor, runner_id="runner-on-anchor"
+    )
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    bindings.reserve(
+        SessionBindingDraft(
+            workspace_id=workspace_id,
+            session_id=anchor,
+            run_id=run.id,
+            role="anchor",
+            effect_key=f"{run.id}:0:create_session:anchor",
+        )
+    )
+    bindings.record_progress(workspace_id, anchor, SessionBindingProgress.ROW_CREATED)
+
+    with caplog.at_level(logging.WARNING, logger="coral.recovery.drift"):
+        async with coral_lifespan(server.app, server.services):
+            dispatch = server.app.state.coral_session_dispatch
+            for attempt in range(2):
+                with pytest.raises(CoralSessionError) as refused:
+                    await dispatch.send_message(
+                        workspace_id=workspace_id,
+                        run_id=run.id,
+                        session_id=uuid.uuid4().hex,
+                        user_id=None,
+                        stable_id=f"brief-{attempt}",
+                        text="Review the parser.",
+                    )
+                assert refused.value.code == "drift.anchor_bound"
+
+    # Each detection stopped the anchor, as the run owner, and the stop went through.
+    assert stops == [(anchor, None)] * 2
+    assert [r for r in caplog.records if r.name == "coral.recovery.drift"] == []
+    stored = run_store.get_run(run.id, workspace_id=workspace_id)
+    assert stored is not None
+    assert (stored.status, stored.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)

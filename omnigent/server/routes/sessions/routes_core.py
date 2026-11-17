@@ -89,6 +89,13 @@ from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, val
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
 from omnigent.server.feature_flags import Feature
 from omnigent.server.host_registry import HostLaunchResult, HostRegistry, RunnerExitReports
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    AGENT_INSTALL,
+    SESSION_CREATE_CHILD,
+    SESSION_UPDATE,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
     get_permission_level as _get_permission_level,
@@ -154,6 +161,7 @@ from omnigent.server.routes._sessions.helpers import (
     _get_runner_client,
     _grant_default_public,
     _is_codex_native_subagent,
+    _is_coral_label_key,  # CORAL(S46)
     _live_settings_change,
     _LiveSettingsChange,
     _multipart_missing_detail,
@@ -1049,6 +1057,12 @@ def register_core_routes(
             )
         return await create_session(request)
 
+    async def _check_new_family_member(source: Conversation) -> None:
+        """CORAL(S53): let extensions refuse a child or sibling of a session they manage."""
+        await check_mutation(
+            MutationAttempt(SESSION_CREATE_CHILD, session_id=source.id, conversation=source)
+        )
+
     @router.post(
         "/sessions",
         status_code=201,
@@ -1239,6 +1253,7 @@ def register_core_routes(
                 host_id=body.host_id,
                 host_type=body.host_type,
             )
+            await _check_new_family_member(sibling_source)  # CORAL(S53)
             if body.initial_items:
                 raise OmnigentError(
                     "Siblings start a fresh conversation", code=ErrorCode.INVALID_INPUT
@@ -1498,6 +1513,7 @@ def register_core_routes(
                 host_id=parsed_metadata.host_id,
                 host_type=parsed_metadata.host_type,
             )
+            await _check_new_family_member(sibling_source)  # CORAL(S53)
             if (
                 "project_id" in parsed_metadata.model_fields_set
                 and parsed_metadata.project_id != sibling_source.project_id
@@ -1546,6 +1562,8 @@ def register_core_routes(
                 conversation_store=conversation_store,
                 runner_router=runner_router,
             )
+            if parent_conv is not None:
+                await _check_new_family_member(parent_conv)  # CORAL(S53)
 
         sandbox_profile = await prepare_profile(
             request,
@@ -1579,6 +1597,8 @@ def register_core_routes(
             bundle_bytes,
             enforce_handler_allowlist=True,
         )
+        # CORAL(S53): the upload is stored as the caller's agent, so reserved names apply.
+        await check_mutation(MutationAttempt(AGENT_INSTALL, agent_name=spec.name))
 
         if parsed_metadata.mcp_registry_services:
             from omnigent.mcp_selection import registry_selection_labels, selected_mcp_spec
@@ -2909,6 +2929,18 @@ def register_core_routes(
 
     # ── PATCH /sessions/{session_id} ────────────────────────────
 
+    async def _check_title_change(conv: Conversation, title: str) -> None:
+        """CORAL(S53): let extensions refuse a new title for a session they manage."""
+        await check_mutation(
+            MutationAttempt(
+                SESSION_UPDATE,
+                session_id=conv.id,
+                conversation=conv,
+                fields=frozenset({"title"}),
+                title=title,
+            )
+        )
+
     @router.post(
         "/sessions/{session_id}/agent-title",
         response_model=AutomaticSessionRenameResponse,
@@ -2948,6 +2980,7 @@ def register_core_routes(
             )
             if title is None:
                 return AutomaticSessionRenameResponse(renamed=False, reason="generation_failed")
+        await _check_title_change(conv, title)  # CORAL(S53)
         updated = await asyncio.to_thread(
             conversation_store.rename_conversation_if_title_matches,
             session_id,
@@ -2988,6 +3021,7 @@ def register_core_routes(
                 "title must be a single non-empty line",
                 code=ErrorCode.INVALID_INPUT,
             )
+        await _check_title_change(conv, title)  # CORAL(S53)
 
         page = await asyncio.to_thread(
             conversation_store.list_items,
@@ -3163,6 +3197,19 @@ def register_core_routes(
                     f"To fork this session instead, run: omnigent run --fork {session_id}",
                     code=ErrorCode.FORBIDDEN,
                 )
+        # CORAL(S53): an extension may refuse changes to a session it manages.
+        await check_mutation(
+            MutationAttempt(
+                SESSION_UPDATE,
+                session_id=session_id,
+                fields=frozenset(body.model_fields_set),
+                label_keys=frozenset(body.labels or ()),
+                title=body.title,
+            ),
+            load_conversation=lambda: asyncio.to_thread(
+                conversation_store.get_conversation, session_id
+            ),
+        )
         if body.labels:
             _reject_server_reserved_label_seed(body.labels)
             # Advisor-owned cost_control.* labels are written only by the
@@ -4541,6 +4588,8 @@ def register_core_routes(
             dropped_label_keys_set.update(
                 key for key in source.labels if key.startswith(MCP_SELECTION_PREFIX)
             )
+        # CORAL(S46): a fork (and a /clear continuation) is a plain session, never in a Coral run.
+        dropped_label_keys_set.update(key for key in source.labels if _is_coral_label_key(key))
         dropped_label_keys: frozenset[str] = frozenset(dropped_label_keys_set)
 
         # DANGEROUS codex full-bypass. The source's bypass label is always

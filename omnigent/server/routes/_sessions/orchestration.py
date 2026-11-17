@@ -170,6 +170,11 @@ from omnigent.server.managed_hosts import (
     parse_repo_workspace,
     read_managed_repo_workspaces,
 )
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    SESSION_CREATE_CHILD,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
@@ -305,6 +310,7 @@ from omnigent.server.routes._sessions.helpers import (
     _mcp_error_response,
     _mcp_input_required_response,
     _mcp_ok_response,
+    _mcp_tool_result,  # CORAL(S10): server tool results
     _merge_pending_file_blocks,
     _message_text,
     _model_usage_bucket,
@@ -396,6 +402,14 @@ from omnigent.server.schemas import (
     SessionResponse,
     SessionStatusEvent,
     SessionUsageEvent,
+)
+
+# CORAL(S10): server tools registered by extensions run in the /mcp tools/call path.
+from omnigent.server.server_tools import (
+    ServerToolCall,
+    granted_server_tool,
+    run_server_tool,
+    server_tool_name,
 )
 from omnigent.server.startup_inputs import (
     STARTUP_LABEL,
@@ -12003,6 +12017,14 @@ async def _create_session_from_existing_agent(
         _parent_for_routing = await asyncio.to_thread(
             conversation_store.get_conversation, body.parent_session_id
         )
+        if _parent_for_routing is not None:  # CORAL(S53): a managed parent may refuse children
+            await check_mutation(
+                MutationAttempt(
+                    SESSION_CREATE_CHILD,
+                    session_id=_parent_for_routing.id,
+                    conversation=_parent_for_routing,
+                )
+            )
         if (
             _parent_for_routing is not None
             and subagent_routing_enabled(_parent_for_routing.subagent_routing_override)
@@ -13179,6 +13201,33 @@ async def _handle_mcp_tools_call(
             session_id=session_id,
             runner_router=runner_router,
         )
+
+    # CORAL(S10): a registered server tool the session's agent was given runs here,
+    # after TOOL_CALL policy; like advise, it skips TOOL_RESULT policy.
+    server_handler = (
+        None if execute_tool is not None else granted_server_tool(namespaced_name, spec)
+    )
+    if server_handler is not None:
+        if not isinstance(arguments, dict):
+            return _mcp_error_response(
+                rpc_id, -32000, "Invalid tool arguments: expected an object"
+            )
+        from omnigent.server.mcp_identity import runner_proven
+
+        server_result = await run_server_tool(
+            server_handler,
+            ServerToolCall(
+                session_id=session_id,
+                name=server_tool_name(namespaced_name),
+                arguments=arguments,
+                operation_id=operation_id,
+                runner_proven=request is not None and runner_proven(request, conv),
+                actor=actor,
+            ),
+        )
+        if server_result.is_error:
+            return _mcp_error_response(rpc_id, -32000, server_result.text)
+        return _mcp_tool_result(rpc_id, server_result.text)
 
     from omnigent.runner.tool_dispatch import MCP_PROXY_FORWARD_TIMEOUT_S
 

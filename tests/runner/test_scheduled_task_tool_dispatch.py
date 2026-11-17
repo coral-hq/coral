@@ -25,8 +25,10 @@ from omnigent.runner.tool_dispatch import (
     _SCHEDULED_TASK_TOOLS,
     _execute_scheduled_task_tool,
     execute_tool,
+    should_dispatch_locally,  # CORAL(S8)
 )
 from omnigent.tools.builtins.scheduled_tasks import SysScheduledTaskUpdateTool
+from tests.tools.test_extensions import StubToolProvider, installed_tool_providers  # CORAL(S8)
 
 _ALL_NAMES = {
     "sys_scheduled_task_create",
@@ -572,6 +574,21 @@ def test_tools_in_dispatch_and_relay_sets() -> None:
     assert _SCHEDULED_TASK_TOOLS == _ALL_NAMES
     assert _ALL_NAMES <= _ALL_LOCAL_TOOLS
     assert _ALL_NAMES <= _NATIVE_RELAY_BUILTIN_TOOLS
+
+
+def test_provider_server_tools_dispatch_locally() -> None:
+    """CORAL(S8): a provider's server-dispatched tools go through the runner's dispatch."""
+    provider = StubToolProvider(server_names=frozenset({"coral_test_echo"}))
+    with installed_tool_providers():
+        assert not should_dispatch_locally("coral_test_echo")
+        assert should_dispatch_locally("sys_scheduled_task_create")
+    with installed_tool_providers(provider):
+        assert should_dispatch_locally("coral_test_echo")
+        assert should_dispatch_locally("coral_test_echo")
+        assert not should_dispatch_locally("coral_test_other")
+        assert should_dispatch_locally("sys_scheduled_task_create")
+    # The providers' names are collected once, not per tool call.
+    assert provider.server_name_calls == 1
 
 
 @pytest.mark.asyncio

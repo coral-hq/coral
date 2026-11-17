@@ -1939,3 +1939,616 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S50
+    title: Extension tool providers from entry points; host token line
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `omnigent/tools/extensions.py` loads tool providers from installed
+      omnigent.tool_providers entry points. Each names a zero-argument
+      factory returning an object with tool_set(spec) (an ExtensionToolSet
+      of OpenAI-format schemas and framework instructions, or None; a cheap,
+      non-raising, pure function of the spec), server_dispatched_names() and
+      host_capabilities() (both read once per process). Entry points load in
+      (name, value) order, once per process on first use and never at
+      import, under a lock so racing first calls run each factory once; one
+      that fails to import, call or conform is skipped with a warning naming
+      its distribution, and each loaded provider is logged at info with its
+      distribution. tool_set(spec) and every check of its result run inside
+      a guard: a raising provider is skipped, and a set with any malformed
+      part is dropped whole (not an ExtensionToolSet, non-tuple fields, a
+      schema that is not plain JSON through a json round trip, including
+      sets, mapping proxies, non-finite numbers, cycles and recursion-limit
+      depth, a schema nested deeper than 64, not a function, an invalid
+      name by fullmatch, a name with `__`, no string description,
+      parameters not a dict, a duplicate name, a non-string instruction).
+      Accepted schemas are returned as fresh plain-JSON copies. A tool or
+      server-dispatched name that two providers offer is served by neither,
+      logged with both distributions. Server-dispatched names are validated
+      like tool names and collected once. Host tokens are non-empty strings
+      of at most 128 characters without whitespace and without the reserved
+      `os_sandbox:` prefix, at most 16 per provider, read once and
+      deduplicated in order; a provider that raises or breaks a name or
+      token rule contributes none of them. Every provider problem is logged
+      once per process. `host_capabilities()` in `omnigent/host/frames.py`
+      appends the providers' tokens that the host does not already send,
+      after `os_sandbox:<backend>`, importing the loader inside the function
+      so importing frames.py loads no entry point. With no provider
+      installed every result is empty and Omnigent behaves as before. The
+      module imports only the standard library and `omnigent.tools.base`, so
+      a host builds its hello without database modules. Installed metadata
+      changes only after uv sync, so tests pass entry points or patch
+      default_tool_providers and reset the caches with
+      clear_tool_provider_caches; the S102 exact-list hello tests serve no
+      providers. pyproject.toml declares Coral's own provider, coral =
+      coral.omni.runner.tool_provider:tool_provider, so hosts advertise
+      coral_runner:1 (none while CORAL_DISABLE_HOST_ENTRY_POINTS is set); its
+      production catalog is empty, so it adds no tools, server-dispatched
+      names or prompt text yet. The `_connect_host` helper in
+      tests/server/integration/test_session_host_launch.py takes optional
+      hello capabilities so Coral's facade tests can connect a host with the
+      token; existing callers send none. It also exposes
+      is_extension_tool_name(name) (a valid tool name without `__`) and
+      is_framework_tool_name(name) (any `sys_` name, a builtin registry name
+      or a skill tool; it imports the builtin registry only when called),
+      which S7 and S10 share.
+    files:
+      - omnigent/tools/extensions.py
+      - omnigent/host/frames.py
+      - pyproject.toml
+      - tests/tools/test_extensions.py
+      - tests/host/test_connect.py
+      - tests/host/test_startup_imports.py
+      - tests/server/integration/test_session_host_launch.py
+    tests:
+      - tests/tools/test_extensions.py
+      - tests/host/test_connect.py
+      - tests/host/test_startup_imports.py
+      - tests/coral/test_packaging.py
+      - tests/coral/omni/runner/test_tool_provider_imports.py
+    budget_lines: 40
+    budget_exception:
+      lines: 581
+      reason: >-
+        omnigent/tools/extensions.py (new, 490 lines) holds the provider
+        protocol and tool-set type, the single-shot loader, the guarded
+        tool-set normalisation and checks, the conflict rule, the name and
+        token checks, the shared tool-name and framework-name predicates, the
+        once-per-process problem log and the accessors, with docstrings. tests/tools/test_extensions.py (new, 581 lines)
+        covers the loader (broken entries named by distribution, discovery
+        order with the value tie-break, the cache, unreadable metadata),
+        eighteen malformed tool-set shapes checked through the tool manager and
+        the serialized tool list, a raising provider logged once, instruction
+        order, name and token validation, the reserved sandbox prefix, a
+        two-provider conflict, a concurrent first load, and a
+        fresh-interpreter check that importing the seam modules loads no
+        provider; it also holds the stub provider and the
+        installed_tool_providers helper that the S7, S8, S12 and host tests
+        reuse. tests/host/test_startup_imports.py (50) adds the
+        fresh-interpreter hello with a stub provider; tests/host/test_connect.py
+        (48) serves no providers to the two S102 exact-list tests and adds the
+        provider-token hello test. frames.py (12), pyproject.toml (4) and
+        tests/server/integration/test_session_host_launch.py (14) are within
+        budget.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S7
+    title: ToolManager registers provider tools
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `ToolManager.__init__` calls `_register_extension_tools()` after the
+      browser tools. It wraps each plain-JSON schema copy from S50's
+      extension_tool_sets(spec) in `_SchemaOnlyTool`. A provider tool is
+      skipped, with an error logged once per process, when its name belongs
+      to a framework tool whether or not the spec enables it (S50's
+      is_framework_tool_name: any `sys_` name, a name in the builtin registry
+      `BUILTIN_NAMES`, or a skill tool), so a provider cannot grant back a
+      tool the spec left out, or when the
+      name is already registered (the registered tool stays). It never
+      raises, because a raise leaves the runner's conversation without any
+      tools and other ToolManager builds do not all catch it. The runner's
+      granted-tool check derives from get_tool_names(), so a registered
+      extension tool is granted with no other change. No provider, or a
+      provider returning None for the spec, leaves the tool list unchanged.
+    files:
+      - omnigent/tools/manager.py
+      - tests/tools/test_manager.py
+    tests:
+      - tests/tools/test_manager.py
+    budget_lines: 40
+    budget_exception:
+      lines: 106
+      reason: >-
+        tests/tools/test_manager.py (106 lines) adds the registration test
+        (Coral specs only, last in order, schema-only, copied schema), the
+        clash test (a client tool kept, the error logged once over two
+        builds) and the framework-name test (every runner-dispatched builtin
+        and registry name refused for a spec without os_env, timers or the
+        browser group). omnigent/tools/manager.py (39) is within budget.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S8
+    title: Server-dispatched provider names dispatch locally
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `should_dispatch_locally(name)` in `omnigent/runner/tool_dispatch.py`
+      also returns True for a name in S50's static_server_dispatched_names(),
+      so the runner's direct-stream path forwards a provider's server-run
+      tool through its proxy to the server's /mcp route. The names are
+      collected once per process and imported lazily; built-in names are
+      checked first, unchanged. Residual: the set ignores the spec, so a
+      client-side or spec-local tool with the same name is forwarded too;
+      the server-side handler (S10) must check that the session was granted
+      the name before intercepting it.
+    files:
+      - omnigent/runner/tool_dispatch.py
+      - tests/runner/test_scheduled_task_tool_dispatch.py
+    tests:
+      - tests/runner/test_scheduled_task_tool_dispatch.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S12
+    title: Provider framework instructions appended
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `_framework_instructions_for(spec)` in `omnigent/runtime/prompt.py`
+      extends its list with S50's extension_framework_instructions(spec)
+      after the sub-agent wake notice and the browser guidance, so the
+      composed prompt is authored text, framework entries, provider text,
+      then per-turn framework text. An append-only list, not a typed
+      FrameworkInstructions value. No provider leaves the prompt unchanged.
+      Residual: OpenCode's AGENTS.md is composed through the same builder,
+      so provider text reaches it while extension tools do not reach native
+      relays; a provider returns None for specs that cannot receive its
+      tools.
+    files:
+      - omnigent/runtime/prompt.py
+      - tests/runtime/test_prompt.py
+    tests:
+      - tests/runtime/test_prompt.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S10
+    title: Server tool registry and its /mcp call site
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `omnigent/server/server_tools.py` holds a process-wide, lock-guarded
+      registry of server tools keyed by tool name. register_server_tool(name,
+      handler) refuses a name that is not a valid extension tool name
+      (S50's is_extension_tool_name: fullmatch, no `__`) or starts with
+      `sys_` (framework tools keep their own handling, such as
+      sys_advise_models); registering a name again replaces it, with a
+      warning when the handler changes; it returns an idempotent unregister
+      that removes only its own registration, so an older unregister never
+      removes a newer registration, even of the same handler.
+      server_tool(name) returns None for a name that is not a string, strips
+      one leading `mcp__omnigent__` and does an exact lookup.
+      granted_server_tool(name, spec) returns the handler only when an
+      installed tool provider (S50) offers that tool for the session's spec,
+      the name is not a framework tool's (S7's rule, shared as
+      is_framework_tool_name: any `sys_` name, a builtin registry name or a
+      skill tool), the spec declares no local tool of that name (the runner
+      keeps the spec's own tool, S7) and, for the `mcp__omnigent__` form, the
+      spec has no MCP server named `mcp` (whose tools share that prefix).
+      Providers are consulted only for a registered name. run_server_tool
+      awaits the handler; an exception (not cancellation) or a result that
+      is not a ServerToolResult with string text is logged with the session
+      id and answered "server tool failed; see the server log" as an error.
+      `_handle_mcp_tools_call` in orchestration.py runs the lookup right
+      after the sys_advise_models intercept, so after TOOL_CALL policy
+      (DENY, ASK and its approved retry, ALLOW transforms) and before the
+      runner forward, and only when no backend executor is passed (the MCP
+      gateway adapter's service tools never reach it). Arguments that are
+      not a dict (from the caller or a policy transform) get -32000 and
+      never reach the handler. It builds a ServerToolCall (session id, bare
+      name, the policy-owned arguments dict, the caller's operation id,
+      runner proof from S49, the policy actor), returns -32000 with the
+      text for an error result and an MCP text result otherwise, and skips
+      TOOL_RESULT policy, redaction policies included, as advise does. S10
+      authorizes nothing beyond the route's edit access: each handler checks
+      runner_proven and the operation id itself and treats both, and the
+      arguments, as untrusted. S10 sets no time limit, so handlers bound their
+      own work; the runner may resend an operation id while the first call
+      runs. No approved_after_ask flag. With nothing registered the proxy is
+      unchanged, malformed names included. Residuals: one registry per
+      process (the later lifespan's registration wins); on the runner's
+      direct-stream path a per-request client tool named like a tool granted
+      to the session is answered by the server tool (S8 already forwards
+      it); a Python tool file's `@tool` function named unlike the file but
+      like a granted tool is answered by the server tool (spec-local tools
+      are known by file stem, as in the runner's own check).
+    files:
+      - omnigent/server/server_tools.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - tests/server/test_server_tools.py
+      - tests/server/routes/test_sessions_mcp_proxy_policy_retry.py
+    tests:
+      - tests/server/test_server_tools.py
+      - tests/server/routes/test_sessions_mcp_proxy_policy_retry.py
+    budget_lines: 40
+    budget_exception:
+      lines: 370
+      reason: >-
+        tests/server/routes/test_sessions_mcp_proxy_policy_retry.py (370
+        changed lines) adds a server-tool harness (bound runner token,
+        recorded policy phases, a MockTransport runner, the test provider)
+        and thirty route cases: deny, ask-accept and allow-transform in both
+        name forms with the exact ServerToolCall and no runner or TOOL_RESULT
+        call; a declined, a denied-on-retry and a changed-arguments approval
+        that never reach the handler; an unregister during a call; a
+        raising, an is_error and a non-result handler; runner proof for the
+        session runner, another token and no request; a session not given
+        the tool, a same-named local tool and the gateway backend keeping
+        their old paths; sys_advise_models unchanged in both name forms;
+        non-string names answered as without server tools, with and without
+        a registration; non-object arguments refused.
+        omnigent/server/server_tools.py (new, 206 lines) holds the call and
+        result types, the registry, the grant check and the failure handling
+        with docstrings. tests/server/test_server_tools.py (new, 255 lines)
+        covers lookup (non-string names included), identity-checked
+        unregister (no warning for the same handler), eight invalid names,
+        handler failures, cancellation and the grant check (framework names,
+        the `mcp` server alias, a conflict), and exports the echo spec and
+        provider the route tests reuse. orchestration.py (36) is within
+        budget.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S49
+    title: runner_proven extracted from mcp_policy_actor
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `omnigent/server/mcp_identity.py` gains runner_proven(request,
+      conversation): true when the request's runner tunnel token (stripped,
+      non-empty) is bound to the session's runner_id or is in the server's
+      runner_tunnel_tokens allow-list. It is exactly the rule
+      mcp_policy_actor used inline; mcp_policy_actor now calls it, so the
+      policy actor is unchanged for every token case. S10 passes the result
+      to server tools as ServerToolCall.runner_proven. Proof is
+      runner-granular: anything holding the runner's token proves every
+      session that runner serves.
+    files:
+      - omnigent/server/mcp_identity.py
+      - tests/server/test_mcp_identity.py
+    tests:
+      - tests/server/test_mcp_identity.py
+    budget_lines: 40
+    budget_exception:
+      lines: 82
+      reason: >-
+        tests/server/test_mcp_identity.py (new, 82 lines) checks
+        runner_proven and the policy actor over eleven token cases (bound,
+        padded, another runner's, missing, blank, a session without a runner
+        or on a stable id, allow-listed with and without a runner, not
+        allow-listed, a blank allow-list entry). omnigent/server/mcp_identity.py
+        (22) is within budget.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S52
+    title: Required-policy providers ahead of every policy
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `omnigent/runtime/policies/required_providers.py` holds a process-wide,
+      lock-guarded registry of required-policy providers keyed by name.
+      register_required_policy_provider(name, provider) refuses a name that is
+      not 1-64 letters, digits, `_`, `.` or `-` starting with a letter or
+      digit (ValueError) and an object without callable applies and specs
+      (TypeError); registering a name again replaces it, with a warning when
+      the provider changes; it returns an idempotent unregister that removes
+      only its own registration. A provider has applies(spec, conversation),
+      which the policy fast path calls on the event loop, so it must be O(1)
+      with no I/O (conversation may be None), and specs(spec, conversation),
+      which every engine build calls in a worker thread with the refreshed
+      row. `spec` is the session's bound spec, the root bundle's spec for a
+      sub-agent session. required_policies_apply is true when any provider
+      applies; an applies that raises, or whose answer's truth test raises,
+      counts as applying. required_policy_specs returns nothing without a row
+      and otherwise the applying providers' specs in provider-name order; a
+      provider whose specs raises, or returns anything but FunctionPolicySpec
+      values that resolve (path imports, factory runs), contributes one
+      `__required_policy_unavailable:<name>` policy built from
+      deny_tool_calls, which denies that session's tool calls with a
+      stop-now reason that names the provider and allows every other event,
+      so a provider bug in specs never blocks requests or engine sends. A
+      failing provider logs one traceback per registration at error and one
+      line (with the session id) per failure after that. Provider factories
+      run twice per build, so they must be deterministic and cheap; provider
+      policies see a tool call's arguments before later policies rewrite
+      them, and must be limited to tool calls and never raise while
+      evaluating, because a policy that raises during evaluation is a DENY
+      for whatever phase it ran on. Two lines in
+      `omnigent/runtime/policies/builder.py`: any_policies_apply returns True
+      when required_policies_apply does (after the built-in approval-tool
+      check), and build_policy_engine sets all_policy_specs to the provider
+      specs for the refreshed row followed by the existing list right after
+      root session-policy inheritance, the last of its three assembly sites,
+      so the specs lead root, sub-agent and inheriting-child builds alike and
+      every engine build gets them: the /mcp proxy (the MCP gateway adapter
+      included), POST /policies/evaluate (so S21's claude-sdk hook) and the
+      relay tool-call and approval paths. Prepending lets a provider's DENY
+      decide first and keeps earlier policies' label and state writes from
+      being applied on that call. With no provider registered, or none that
+      applies, both functions behave as before. Residuals: one registry per
+      process (the later lifespan's registration wins); an applies that
+      always fails claims every session, so a provider whose specs also
+      fails denies tool calls server-wide; the input and output gates still
+      skip the build for a session with no guardrails, no default policies
+      and no policy store, so a provider's request or response policies do
+      not run there (Coral's providers act on tool calls only); when the
+      session's agent row is missing, POST /policies/evaluate answers
+      unspecified and the relay tool-call path allows before any policy is
+      built, so providers are not consulted there, and only /mcp fails
+      closed ("Agent not found"); an approval granted for an unrelated ASK
+      (a user or admin policy) is not re-checked on the native/S21 ASK gate
+      or the relay path, so a provider DENY that appears during the human
+      wait (for example a run paused meanwhile) does not stop that one
+      approved call, while /mcp re-evaluates on its retry and the provider
+      wins.
+    files:
+      - omnigent/runtime/policies/required_providers.py
+      - omnigent/runtime/policies/builder.py
+      - tests/runtime/policies/test_required_policy_provider.py
+    tests:
+      - tests/runtime/policies/test_required_policy_provider.py
+    budget_lines: 40
+    budget_exception:
+      lines: 428
+      reason: >-
+        tests/runtime/policies/test_required_policy_provider.py (new, 428
+        lines) builds real engines over a real conversation and policy store:
+        provider specs leading the root, inheriting-child and sub-agent
+        assembly paths with the unchanged policy list beside them (no provider
+        and a provider that does not apply); a provider DENY across two
+        rebuilds that stops a later ALLOW-and-write policy's label write, an
+        unclaimed session untouched and the baseline after unregister; four
+        provider failures (specs raises, a non-spec answer, an unbuildable
+        path, a raising factory) that deny only that session's tool calls,
+        including over the built-in sys_add_policy approval, allow its
+        requests, leave a healthy session alone and log one traceback then
+        one line; the fast path, including an applies that raises and one
+        whose answer cannot be tested for truth; no row; name order,
+        replacement, identity-checked unregister, invalid names and objects
+        without applies and specs.
+        omnigent/runtime/policies/required_providers.py (new, 228 lines)
+        holds the provider protocol and its contract, the registry, the
+        guarded spec collection, the failure log and the deny-tool-calls
+        factory with docstrings. omnigent/runtime/policies/builder.py (11) is
+        within budget.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S46
+    title: coral. labels reserved; forks drop them
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `_reject_server_reserved_label_seed` in
+      `omnigent/server/routes/_sessions/helpers.py` refuses a label key whose
+      skeleton starts with `coral.`, with 400 INVALID_INPUT, "label '<key>' is
+      managed by Coral workflow runs and cannot be set by clients". The
+      skeleton is the key NFKC-normalized, without format (Cf, zero-width)
+      characters and outer whitespace, casefolded, then without combining
+      marks after NFKD. So `Coral.Role`, `CORAL.run_id`, a zero-width-prefixed,
+      accented (`ćoral.`), fullwidth or space-prefixed key is refused too,
+      which closes the variants a case- and accent-insensitive collation
+      equates. That one check already runs for JSON create (`/v1/sessions` and
+      `/v1/sessions/orchestrated`), multipart create and PATCH, for every
+      session and with no lookup, before anything is written, so a refused
+      request stores nothing; a PATCH can neither set nor clear (empty value)
+      such a key. `_is_coral_label_key(key)` holds the rule; `_fork_session`
+      in `omnigent/server/routes/sessions/routes_core.py` uses it to add every
+      matching source key to the fork's dropped labels, so a fork, a side chat
+      and the claude-sdk /clear continuation (which forks) are plain sessions.
+      Other labels, `omnigent.closed` and `omnigent.parent_wake` included, are
+      copied as before. Coral's engine writes `coral.*` labels through the
+      conversation store (the session facade creates each row with them),
+      never through these routes, so it is unaffected; nothing in Omnigent or
+      the web UI sets them. Residuals: on MySQL, label keys compare by the
+      column's case- and accent-insensitive collation, and the skeleton does
+      not fold look-alike letters from other scripts (Cyrillic `с`) or
+      letters with no decomposition (`ø`), so such a key could still update
+      an engine label's value there; labels are hints (identity comes from
+      binding rows), an upsert never removes a key, and the facade fails
+      closed with `session.identity_conflict` when it redelivers or adopts a
+      row whose `coral.run_id` changed; the full fix is a binary collation on
+      the label key, an Omnigent schema change. Label writes that bypass these routes are
+      unchecked (agent-spec policy label writes, spec label seeding). Native
+      /clear copies the source's labels into a create, so any native session
+      carrying `coral.*` labels (from spec seeding or spec policies, or set
+      before this seam) now gets 400 on /clear.
+    files:
+      - omnigent/server/routes/_sessions/helpers.py
+      - omnigent/server/routes/sessions/routes_core.py
+      - tests/server/routes/test_sessions_crud.py
+      - tests/server/routes/test_sessions_fork.py
+    tests:
+      - tests/server/routes/test_sessions_crud.py
+      - tests/server/routes/test_sessions_fork.py
+    budget_lines: 40
+    budget_exception:
+      lines: 63
+      reason: >-
+        tests/server/routes/test_sessions_crud.py (63 changed lines) adds one
+        test over seven key spellings (three letter cases and zero-width,
+        accented, fullwidth and space-prefixed variants): JSON create,
+        multipart create and a PATCH, or an empty-value clear, of an
+        engine-labelled closed step are each refused with nothing stored, then
+        a PATCH with look-alike keys outside the prefix succeeds and keeps the
+        engine's `coral.run_id`; two import lines are added and one extended.
+        routes_core.py (3) and test_sessions_fork.py (28) are within budget.
+        helpers.py had 32 changed lines from S46; with S53's skeleton split it
+        totals 42, which S53's budget exception covers.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S53
+    title: Mutation-guard registry and its route call sites
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `omnigent/server/mutation_guards.py` holds a process-wide, lock-guarded
+      registry of mutation guards keyed by name. register_mutation_guard(name,
+      guard) refuses a name that is not 1-64 letters, digits, `_`, `.` or `-`
+      starting with a letter or digit (ValueError) and an object without
+      callable screen and check (TypeError); registering a name again replaces
+      it, with a warning when the guard changes; it returns an idempotent
+      unregister that removes only its own registration. A mutating route
+      describes its change as a MutationAttempt (action, session id and row,
+      PATCH fields, label keys and title, event type and whether the request's
+      tunnel token is bound to the row's runner_id, agent name, force) after
+      its own authorization, so a caller without access keeps its 401, 403 or
+      404, and before any side effect, and awaits check_mutation(attempt,
+      load_conversation=...). With no guard registered it returns at once.
+      Guards are asked in name order. screen runs inline (O(1), no I/O, never
+      raises) and answers ALLOW, a refusal string, NEEDS_ROW (the attempt has
+      no session row) or CHECK. For NEEDS_ROW the loader is awaited once and
+      those guards are screened again; a row that no longer exists allows (the
+      route answers 404); a guard needing a row the route gave neither as a
+      row nor a loader is a call-site bug (ValueError). Every guard that
+      answered CHECK runs check in one asyncio.to_thread hop (context copied,
+      so current_workspace_id() holds). A refusal is 409 CONFLICT with the
+      guard's message; a guard's own OmnigentError propagates; any other
+      failure, or an answer of the wrong type, is logged with the session id
+      and becomes 500 INTERNAL_ERROR "could not check whether this change is
+      allowed; retry" (fail closed). Call sites, each after the route's access
+      checks: PATCH /v1/sessions/{id} (SESSION_UPDATE with model_fields_set,
+      the label keys and the title, a row loader; after the runner owner
+      check, before the label checks and any write or runner forward);
+      /agent-title and /auto-title (SESSION_UPDATE with the new title);
+      POST /v1/sessions/{id}/events and its batched external_conversation_item
+      path (SESSION_EVENT with runner proof from _has_bound_runner_authority;
+      HTTP requests only: engine, startup and runner-tunnel senders never ask;
+      after _authorized_conversation); the elicitation resolve route
+      (SESSION_EVENT "approval", after the row is resolved); POST
+      /v1/hosts/{host_id}/runners (SESSION_LAUNCH_RUNNER, after
+      resolve_host_launch); PUT /v1/sessions/{id}/permissions (SESSION_GRANT,
+      a row loader, after the access check); JSON create (also
+      /v1/sessions/orchestrated) right after the parent row read, multipart
+      create after the parent is authorized, and both creates' sibling path
+      after authorize_sibling_source, against the family's root
+      (SESSION_CREATE_CHILD); multipart create once the uploaded bundle is
+      validated (AGENT_INSTALL with its name, since the upload is stored as the
+      caller's agent); PUT /v1/sessions/{id}/agent (SESSION_AGENT_REPLACE,
+      after the row is resolved); session MCP create, update, delete and
+      registry select through _bound_agent above LEVEL_READ
+      (SESSION_MCP_CHANGE); PATCH, DELETE and POST /v1/agents (AGENT_UPDATE
+      after editable_agent, AGENT_REMOVE with force after the owner check,
+      AGENT_INSTALL after bundle validation); scheduled-task create and PATCH
+      through _require_continuable once the picked session passes Omnigent's
+      own checks (SESSION_SCHEDULE). `_sessions/helpers.py` splits
+      `_label_key_skeleton` out of S46's `_is_coral_label_key` (same rule) so
+      Coral's guard matches `omnigent.*` labels on the same skeleton through
+      `coral/omni/_upstream.py`. Coral's guard
+      (`coral/omni/server/mutation_guard.py`) screens sessions on the
+      `coral.run_id` label only (a negative filter, sound after S46), so an
+      unlabelled session never reads Coral's store, never makes a thread hop
+      and never fails closed. Omnigent lets owners post runner-only event
+      types too (local forwarders report native settings that way), so
+      Coral allows them on bound sessions only with runner proof. Residuals:
+      one registry per process (the later lifespan's registration wins); new
+      upstream routes are caught by
+      `tests/coral/omni/test_mutation_guard_routes.py`'s route inventory
+      (every mutating route under /v1/sessions and the other session and agent
+      routes, and every WebSocket route), not by construction.
+    files:
+      - omnigent/server/mutation_guards.py
+      - omnigent/server/routes/_sessions/helpers.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - omnigent/server/routes/builtin_agents.py
+      - omnigent/server/routes/hosts.py
+      - omnigent/server/routes/scheduled_tasks.py
+      - omnigent/server/routes/session_mcp_servers.py
+      - omnigent/server/routes/sessions/routes_agent.py
+      - omnigent/server/routes/sessions/routes_core.py
+      - omnigent/server/routes/sessions/routes_elicitations.py
+      - omnigent/server/routes/sessions/routes_events.py
+      - omnigent/server/routes/sessions/routes_permissions.py
+      - tests/server/test_mutation_guards.py
+      - tests/server/integration/test_engine_event_dispatch.py
+      - tests/server/routes/test_agent_install.py
+    tests:
+      - tests/server/test_mutation_guards.py
+      - tests/server/integration/test_engine_event_dispatch.py
+      - tests/server/routes/test_agent_install.py
+    budget_lines: 40
+    budget_exception:
+      lines: 634
+      reason: >-
+        tests/server/test_mutation_guards.py (new, 634 lines) holds the
+        registry tests (no guard is a no-op; a refusal from screen is a 409
+        with no thread hop and no later guard asked; NEEDS_ROW loads the row
+        once and screens again, a missing row allows, a row nobody can give is
+        a ValueError; CHECK guards run in one worker hop in the request's
+        workspace and the first refusal wins; a guard's own error propagates
+        and any other failure is a logged, retryable 500; name validation,
+        replacement and identity-checked unregister), one request to each of
+        the nineteen guarded requests proving the guard is asked only after
+        the route's own authorization with the action and the row it acts on,
+        and that the attempt carries the fields, label keys, title, event
+        type, runner proof (the session's token, another runner's, none),
+        agent name and force sent. It also holds the shared app with every
+        optional store and the MCP registry and alice's targets (a session
+        with its own agent, a host, a session a task can continue, a task and
+        an installed agent), which Coral's HTTP matrix and route inventory
+        reuse. omnigent/server/mutation_guards.py (new, 293 lines) holds the
+        attempt and screen types, the guard protocol and its contract, the
+        registry and the two-phase check with its failure handling, with
+        docstrings. omnigent/server/routes/sessions/routes_core.py (46 changed
+        lines) carries seven call sites (PATCH, two renames, JSON and
+        multipart siblings, multipart parent and bundle name) behind two small
+        helpers. tests/server/integration/test_engine_event_dispatch.py (52)
+        adds one test: a guard refusing every event refuses the HTTP message
+        while the engine's brief, interrupt and stop pass unasked.
+        tests/server/routes/test_agent_install.py (42) adds one test of
+        Coral's engine-agent rules over the real agent routes.
+        omnigent/server/routes/_sessions/helpers.py is over the 40-line budget
+        with 42 changed lines against the base (42 added, none removed),
+        shared with S46: S46 added 32, and S53 replaced 11 of them with 21
+        (net 10) to split `_label_key_skeleton` out of `_is_coral_label_key`,
+        so Coral's guard reaches the same skeleton through
+        `coral/omni/_upstream.py` instead of copying it. The other route files
+        are within budget: routes_events.py 32, orchestration.py 13,
+        builtin_agents.py 13,
+        routes_elicitations.py 12, routes_permissions.py 12, hosts.py 11,
+        scheduled_tasks.py 9, session_mcp_servers.py 9, routes_agent.py 9.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

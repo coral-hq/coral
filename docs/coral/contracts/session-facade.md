@@ -29,7 +29,8 @@ engine effects are enqueued on such a server they fail permanently as
 `executor.missing`.
 
 1. It builds the three `coral_0002` stores, `OmnigentSessionFacade`,
-   `OmnigentSessionDispatch` with a `DriftPreSendHook`,
+   `OmnigentSessionDispatch` with a `DriftPreSendHook` (whose pauser stops a
+   runner attached to the anchor, see Anchor runner),
    `OmnigentHostWorkspaceChannels`, `CoralStatusEdges` on the server's event
    loop, and one `ConfirmedStops` record.
 2. It registers the seven executors (`cancel_sessions` with
@@ -103,6 +104,24 @@ finds sessions only through its bindings (ADR-05 rule 5).
   `git_failed` would repeat fails permanently, so it is never retried.
 - **One worker.** The torn-row repair assumes one drainer at a time (the
   `coral.worker.primary` lease).
+- **Step agents have a Coral bundle's shape.** The facade still accepts only
+  agents the server or the run owner authored (`session.agent_not_permitted`
+  otherwise). Their spec must then have the shape of a Coral step bundle:
+  the claude-sdk harness, `params.coral.generated.stance` fitting the slot
+  role (`orchestrator` for an orchestrator slot; `implementer` or `reviewer`
+  for the others), and the bundle hygiene rules (`check_hygiene`, which also
+  requires the `coral__` name). Any other spec is
+  `session.agent_not_supported`, for example the owner's ordinary agents.
+  The check is structural: a hand-written spec of that shape passes as well as
+  one from `build_step_bundle_yaml` and `materialize`, so no field that
+  hygiene does not check (other generator metadata, `executor.config`,
+  `mcp_servers`) is trusted to come from the generator. The shape matters
+  because `params.coral` on claude-sdk turns on the tool-policy hook that puts
+  every tool call of the session through the run's policies.
+- **Coral hosts.** The run owner's host must advertise `coral_runner:1`
+  (Coral's tool provider, [`plugin.md`](plugin.md)); an older or Coral-less
+  host, or one with `CORAL_DISABLE_HOST_ENTRY_POINTS` set, is
+  `session.host_unsupported`.
 
 ## Executors
 
@@ -178,8 +197,10 @@ text lands only in the run owner's work record.
 | `session.binding_conflict` | no | A redelivery would bind the session differently. |
 | `session.agent_not_permitted` | no | The agent is missing (an id no agent can have included), owned by another user, or is `coral__anchor`. |
 | `session.harness_not_supported` | no | The agent's harness is native, or its stored spec no longer loads. |
+| `session.agent_not_supported` | no | The agent's spec does not have a Coral step bundle's shape: claude-sdk, `params.coral.generated.stance` fitting the slot role (`orchestrator` for an orchestrator slot; `implementer` or `reviewer` for the others), and the bundle hygiene rules. A structural check, not a provenance one. Checked after the native refusal, before any row. |
 | `session.harness_not_configured`, `session.workspace_missing` | no | The host refused the step's launch, or dispatch's runner wake before a send, for these reasons. |
 | `session.host_not_permitted` | no | The host is unknown (an id no host can have included), another user's, another registration's or a managed sandbox. |
+| `session.host_unsupported` | no | The owner's live host connection does not advertise `coral_runner:1`: update Coral on that host, or unset `CORAL_DISABLE_HOST_ENTRY_POINTS` there. Checked before any row, and again before the launch. |
 | `session.owner_revoked` | no | The run owner's account was revoked or re-registered. |
 | `session.invalid` | no | An ownerless run on a server with auth; a step run with no worktree on a host; a server with no project store or no host access; another refusal. |
 | `dispatch.runner_unavailable` | yes | The runner did not take the event in 120 s, or the server answered `RUNNER_UNAVAILABLE` (a relaunch refusal included), `HOST_OFFLINE`, `WRONG_REPLICA` or `CONFLICT`. |
@@ -222,7 +243,8 @@ branch, or a branch other than `run_branch_name(run_id)`.
   is one entry per pause epoch. A paused or finished run is left as it is. A run
   resumed while the drift persists is paused again by the next engine action.
   The effect then fails as permanent `drift.<cause>`. `anchor_bound` is an
-  additive K2 cause.
+  additive K2 cause; after its pause Coral also stops the anchor's runner,
+  best effort (see Anchor runner).
 
 ## Engine messages
 
@@ -377,16 +399,274 @@ Also known before runs are enabled:
   production server always has (single-user mode acts as `"local"`), so the
   owner, grant and launch-permission paths are proven mostly with auth off.
 
+## Run protection
+
+`coral_lifespan` registers these on a usable operational database whether or
+not the session engine is wired (`_wire_guards` in
+`coral/omni/server/plugin.py`), and removes them on exit. They are live: they
+decide the tool calls of every session that has a binding row and refuse
+clients' changes to it.
+
+**Policy provider.** `CoralPolicyProvider` (`coral/omni/policies/provider.py`)
+is registered as the S52 required-policy provider `"coral"`, so its policies
+go ahead of every other policy in every policy build: `/mcp` (Omnigent tools,
+listed to claude-sdk as `mcp__omnigent__*`), `POST
+/v1/sessions/{id}/policies/evaluate` (claude-sdk's PreToolUse hook, S21, for
+native and connector tools) and the relay tool-call and approval paths.
+
+- It looks at a session whose spec has `params.coral` or whose row has a
+  `coral.run_id` label. That is only a hint to look (no read). It then reads
+  the session's binding row by session id in the request's workspace, through
+  a cache of found rows (4,096, least recently read evicted; a miss always
+  reads). Without a binding it adds nothing, so a fork or a session with
+  copied `coral.*` labels is an ordinary session.
+- **Anchor:** `__coral_anchor_deny_all` denies every tool call ("[anchor] The
+  Coral run anchor does not run tools."), engine tools and `ToolSearch`
+  included. Nothing else applies to the anchor.
+- Every other bound session gets `__coral_run_guard` first, then
+  `__coral_cost_backstop`, then its role guard:
+  - **Orchestrator** (slot role `orchestrator`): `__coral_orchestrator_guard`
+    allows only `coral_choose_arrow` (bare or `mcp__omnigent__`) and exactly
+    `ToolSearch`.
+  - **Other steps:** `__coral_step_roster` denies `sys_session_*`,
+    `search_conversations`, `Agent`, `Task` and `*spawn_agent` tools.
+
+Because the run guard and the backstop go first, on a stopped run or at the
+cap they decide every tool they do not exempt, so the agent always reads a
+stop text. A role guard's text (the roster's points the step at its handoff
+report) shows only while the run is starting or running and the session is
+under its cap. The verdicts are the same in any order, but this one also
+pauses the run on an over-cap call that the role guard would deny. The role
+guards are the ones each generated bundle carries
+(`coral/omni/policies/guards.py`). The provider's copy is keyed on the binding
+row, so it holds even when a session's agent lacks them.
+
+**Run guard** (`coral/omni/policies/run_guard.py`). It decides from the run's
+stored status, which also carries drift and budget pauses the engine never
+saw, and from the session row's `omnigent.closed` label. Only the label
+counts: the legacy `:closed:` title marker does not, so renaming a step never
+makes it inert. While the run is starting or running and the session is open
+it allows everything. Otherwise it denies every tool call except the exact
+engine tools (`coral_submit_handoff`, `coral_choose_arrow`, bare or
+`mcp__omnigent__`) and exactly `ToolSearch`, which loads them (bundle hygiene
+refuses a local tool with any of these names). An engine tool
+call then gets the engine's own answer, for example `run.paused` with a stop
+`next`. Every deny tells the agent to stop and end its turn and none mentions
+a handoff:
+
+| State | Reason |
+|---|---|
+| session labelled `omnigent.closed` | `[session.closed] Coral closed this step. Stop now and end your turn.` |
+| `paused` | `[run.paused] The Coral run is paused (<reason>). Stop now and end your turn; Coral resumes this step when the run resumes.` |
+| `cancelled` | `[run.cancelled] The Coral run was cancelled. Stop now and end your turn.` |
+| `completed`, `failed` | `[run.finished] The Coral run has finished. Stop now and end your turn.` |
+| no run row | `[run.missing] This step's Coral run no longer exists. Stop now and end your turn.` |
+
+An orchestrator is never called a step: its texts say "this session" and its
+paused text ends after "end your turn".
+
+**Cost backstop** (`coral/omni/policies/cost_backstop.py`). It reads the
+session's spend from its own row's `session_usage`: the larger of
+`policy_cost_usd` and `total_cost_usd`, each counted only when it is a finite
+number, so an enforcement figure a client posts (`external_session_usage`)
+can never hide what the server recorded. That is the session's own row only,
+never the run-wide usage other policies see, nor a child session's (steps
+cannot start sessions). Unpriced usage (neither figure a finite number)
+passes. At or over the cap it pauses the run and denies every tool call
+except the exact engine tools and exactly `ToolSearch`; it never asks. The
+deny says `[budget] This session has spent about $<spent> of its $<cap> cap
+(an estimate), so Coral paused the run. Stop now and end your turn.` when this
+call paused the run or found it paused for budget already, and otherwise (the
+pause failed, or the run was paused for another reason or finished meanwhile)
+`[budget] This session has reached its cost cap: it has spent about $<spent>
+of its $<cap> cap (an estimate). Stop now and end your turn.` Amounts show
+cents, or two significant digits below a cent. An orchestrator may call only
+the exempt tools, so over its cap every one of its tool calls pauses the run,
+the exempt ones included; those still pass, and the engine answers
+`coral_choose_arrow` with `run.paused`. The anchor gets no backstop (it is
+denied every tool already).
+
+The pause goes through the run store (`pause_run_for_session_cap`,
+`coral/recovery/pause.py`, the same store-only pause as drift): a starting or
+running run moves to `paused(budget)` (`pause_reason` 2) with one `PAUSED` log
+entry, body
+`{"kind": "pause_run", "reason": "budget", "cause": "session_cap", "session_id": <session>, "spent_usd": <spent>, "cap_usd": <cap>}`,
+whose idempotency checksum is
+`sha256("coral-budget\0<run_id>\0session_cap\0<session_id>\0<run version>")`,
+one entry per pause epoch. `budget` is also the engine's own activation-cap
+pause reason; only the entry's `cause: session_cap` tells this pause apart (see
+"Deferred work and owners"). A paused or finished run is left as it is. The
+pause's commit clears the status cache, so the next call meets the run guard.
+A pause that fails is logged; the call is still denied and the next one tries
+again.
+
+The cap is per session: server config `coral_session_cost_cap_usd`,
+overridden by the environment variable `CORAL_SESSION_COST_CAP_USD`, default
+25.0 US dollars (OQ-15, not yet signed off). A value that is not a finite
+number above 0 and at most 1,000,000 stops `coral_lifespan` with a
+`ValueError` before anything starts. Resuming the run is the bridge's job.
+Until a per-run cap exists (WEB-03/API-02), raising the cap means changing the
+server setting and restarting the server, and a resumed run whose session is
+still at or over the cap pauses again on that session's next tool call.
+
+**State reads** (`coral/omni/policies/state.py`). Run status is cached per
+workspace and run for 2 s (4,096 entries). The run store's post-commit hook
+drops a run's entries after every transition committed in this process, so a
+pause applies to the session's next tool call, and a read that began before
+the commit is not kept. A commit by another server process applies within
+the 2 s. Creating a run fires no commit hook, so a missing run is never kept:
+each build reads it again. When the store fails, a status read at most 30 s
+ago serves; after that, or when the binding read fails (bindings have no
+stale fallback), `__coral_state_unavailable` denies the session's tool calls
+("[run.state_unavailable] ..."). Coral's policies decide tool calls only, so
+engine messages and user prompts are never denied by them, and a store error
+never fails the policy build. Each failure logs one warning line; its
+traceback is logged once per process and error type.
+
+**Reserved labels** (S46, `omnigent/server/routes/_sessions/helpers.py`). No
+client can set a label whose key starts with `coral.`, compared as a case- and
+accent-insensitive collation would (so `Coral.Run_Id` or a zero-width-prefixed
+key too): JSON and multipart create and PATCH answer 400 `INVALID_INPUT` and
+store nothing, and a PATCH can neither change nor clear such a label. A fork,
+side chat or claude-sdk `/clear` continuation drops every `coral.*` label, so
+it is a plain session. Only the facade writes `coral.*` labels, in the same
+create as the row, and nothing removes them.
+
+**Mutation guard** (`coral/omni/server/mutation_guard.py`). `CoralMutationGuard`
+is registered as the S53 mutation guard `"coral"`
+(`omnigent/server/mutation_guards.py`). Mutating routes ask it after their own
+access checks, so a caller without access keeps its 403 or 404 and learns
+nothing about the run, and before any side effect. A refusal is 409
+`CONFLICT`: "Session <id> is part of a Coral workflow run, so <change> can't be
+done here. You can rename, archive, delete, fork or stop it." Owners and admins
+are refused alike.
+
+- A session is protected when it has a binding row, read by session id in the
+  request's workspace through the policy provider's cache of found rows. The
+  `coral.run_id` label is trusted only to say a session is *not* bound:
+  clients cannot write or remove it, and the facade writes it with the row. So
+  a change to an unlabelled session never reads Coral's store, never waits on a
+  worker thread and never fails because that store is down. A change no rule
+  could refuse (an ordinary title, an archive, a pin, `interrupt`, a runner-only
+  event from the session's own runner) reads nothing either.
+  When a labelled session's binding cannot be read, a change a rule could
+  refuse answers 500 `INTERNAL_ERROR` ("... retry"): it fails closed.
+- Agent rules decide on the name alone and read nothing.
+
+| Change to a bound session | Refused (409) | Allowed |
+|---|---|---|
+| `PATCH /v1/sessions/{id}` | every field but the allowed ones: `runner_id`, `model_override`, `reasoning_effort`, `collaboration_mode`, `permission_mode`, `approval_mode`, `cost_control_mode_override`, `subagent_routing_override`, `external_session_id`, `terminal_launch_args`, `project_id`, `share_workspace_files` (either value); every label whose key, as a case- and accent-insensitive collation compares it, starts with `omnigent.` (`omnigent.closed` with any value, `omnigent.parent_wake`, `omnigent.wrapper`, `omnigent.ui` and the rest), except exactly `omnigent.pinned`; a title containing `:closed:`, which Omnigent also reads as closed | `title`, `archived` (with `delete_worktree`), `family_pinned`, `silent`, `omnigent.pinned`, labels outside `omnigent.` |
+| Renames through `/agent-title` and `/auto-title` | a title containing `:closed:` | any other title |
+| Events to the anchor or a closed step (`omnigent.closed` = `true`) | every client event type but the allowed ones, items such as `reasoning` or `function_call`, an approval (also through `POST /v1/sessions/{id}/elicitations/{eid}/resolve`) and a peer `session_message` included, and any type Omnigent adds for clients later | `interrupt`, `stop_session` |
+| Events to an open step or the orchestrator | `clear` (claude-sdk would move the step into an unbound session), a peer agent's `session_message` | `message`, `slash_command`, `compact`, `retry_session`, items, approvals, `interrupt`, `stop_session` |
+| Runner-only event types (`external_*`, `subagent.status`), on any bound session, including the batched `external_conversation_item` path | from a client: Omnigent lets an owner post them, and some write the session (effort, launch args, mode labels, child rows) | from the session's own runner: a tunnel token bound to the row's `runner_id` |
+| Runner launch; a grant (public included); a child session (JSON, multipart or orchestrated create) or a sibling (`sibling_source_id`, checked against the family's root); `PUT /v1/sessions/{id}/agent`; a session MCP server create, update, delete or registry select; a scheduled task created or patched to continue it | always | none |
+| Revoke, delete, fork (a side chat too, see Residuals), read state, comments, session policies | never | always |
+
+| Change to an agent named `coral__*` (any case) | Refused (409) | Allowed |
+|---|---|---|
+| `PATCH /v1/agents/{id}` | always: "Agent '<name>' is managed by Coral's workflow engine and can't be edited." | none |
+| `DELETE /v1/agents/{id}` | without `force`: "Agent '<name>' is managed by Coral's workflow engine; delete with force=true to remove it anyway (runs that use it pause)." | `force=true`; SES-09 drift then pauses runs that use it |
+| `POST /v1/agents` (install), and a bundle uploaded through multipart `POST /v1/sessions` (stored as the caller's agent under its name) | always: "Names starting with coral__ are reserved for Coral's engine agents." | none |
+
+Engine sends (`EngineEventContext`), saved startup inputs and the runner tunnel
+(whose events are checked against the row's `runner_id`) are server-internal and
+never ask the guard, and the facade writes through stores, so Coral's own work
+is never refused. An HTTP event carries whether its tunnel token is bound to the
+session's runner. The event sets come from Omnigent (`CLIENT_SESSION_EVENT_TYPES`
+and `_RUNNER_SESSION_EVENT_TYPES` through `coral/omni/_upstream.py`): a client
+type Omnigent adds later is refused on the anchor and closed steps, and a
+runner-only type it adds later passes only from the session's own runner, with
+no Coral change. `tests/coral/omni/test_mutation_guard_routes.py` classifies
+every mutating route under `/v1/sessions` and every other one that names a
+session or an agent, and every WebSocket route; a new upstream route fails that
+test until someone classifies it.
+
+**Residuals.**
+
+- A missing agent row makes `POST /policies/evaluate` answer unspecified and
+  the relay tool-call path allow before any policy is built; only `/mcp` fails
+  closed (S52).
+- An approval granted for an unrelated ASK (a user's or admin's policy) is not
+  re-checked by the S21 hook's ASK gate or the relay path, so a run paused
+  during that human wait does not stop the one approved call. `/mcp`
+  re-evaluates on its retry.
+- A user's or admin's TOOL_CALL ASK policy that matches a `coral_*` tool parks
+  an unattended step on its approval, like the ASK limitation for engine
+  messages below.
+- The roadmap's RUL-01 says a paused step can still hand off. That holds only
+  at the policy layer: the run guard and the backstop let engine tools
+  through, but the reducer refuses the handoff while the run is paused, so the
+  step gets `run.paused` with a stop `next` and the handoff is not kept. The
+  bridge decides this with ENG-06 (see "Deferred work and owners").
+- One lifespan per process: a later lifespan's registration replaces the
+  provider and the budget pauser (see Wiring).
+- A session on a Coral bundle that no run binds (a user chatting with a
+  `coral__` agent, a fork of a step) pays one binding read per policy build,
+  because misses are never cached, and fails closed: while that read fails,
+  its tool calls are denied with the `[run.state_unavailable]` text.
+- A store error, or a status outage longer than 30 s, tells the affected
+  sessions to stop and end their turns. Until the engine bridge exists,
+  nothing prompts a step again when the store recovers.
+- While this process cannot read the store, a pause committed by another
+  process can go unseen for up to 30 s (the stale fallback), not 2 s.
+- Spend lands when a turn ends (claude-sdk reports usage per turn), and a step
+  usually works in one long turn. So a step is not stopped inside the turn in
+  which it overspends; the backstop fires on the first tool call of a later
+  turn, and the overshoot can be the whole step. The deny says "estimate".
+- Usage the server cannot price (a model its pricing catalog lacks; claude-sdk
+  reports no cost of its own) is never capped, so on such a deployment the
+  backstop never fires.
+- An orchestrator over its cap pauses the run at its next tool call, but its
+  spend lands per turn and each decision request the engine sends starts a
+  turn that spends before any tool call. Bounding that is the bridge's job
+  (see "Deferred work and owners").
+- A child session's spend is on its own row, not its parent's, and an unbound
+  child is never backstopped. Steps cannot reach this today: the roster denies
+  starting sessions and the mutation guard refuses child creates on bound
+  sessions.
+- The budget pause, like the drift pause, changes only the run row; the
+  engine's own state stays `running` until the bridge reconciles it.
+- The pause runs inside policy evaluation, including a read-only `POST
+  /policies/evaluate` by a viewer: Omnigent's read-only evaluation skips label
+  and state writes, not a policy's own side effects. It needs a viewer (bound
+  sessions are created private and the mutation guard refuses grants, so only
+  a grant made some other way) and a session at or over its cap that is not
+  closed; closed steps meet the run guard first. A step that went over its cap
+  in its last turn and handed off makes no further tool call, so such a viewer
+  could pause a run its own calls never would. A fix needs Omnigent to pass
+  `read_only` to policies.
+- The mutation guard leaves the workspace routes on a step's host unguarded:
+  `/resources/terminals`, `/resources/files`, `/resources/environments` and
+  terminal attach.
+- Session policies on a run session stay editable, so a user's ASK or DENY on
+  the anchor reaches every step.
+- Admins bypass Omnigent's access checks, not the mutation guard.
+- A split-database row read torn, without its labels, is not protected until
+  the facade repairs it: the `coral.run_id` label is the only pre-filter.
+- A scheduled task pointed at a session before it was bound is not checked
+  again when it fires or is run now. None can exist while the engine is dark.
+- One lifespan per process holds for the mutation guard too: a later
+  lifespan's registration replaces it.
+- A side chat forked from a step (`POST /v1/sessions/{id}/fork` with
+  `side_chat`) is an unbound session that uses the step's runner and workspace
+  outside the run's policies, like the workspace routes.
+
 ## Residuals and limitations
 
 - **ASK input policies** deny an engine message at once (permanent
   `dispatch.policy_denied`): the engine context has no client connection to
-  wait on. Owner: CRL-131 (RUL-01).
-- **Relaunch of a closed session.** Omnigent's closed check covers user
-  `message` events only, so a user's `retry_session` or slash command (for
-  example `/compact`) on a closed session can still relaunch it. The close's
-  commit gate catches one that starts a turn before the commit. Owner: CRL-131
-  (RUL-01).
+  wait on. Accepted and documented: Coral's own policies never ask, and
+  neutralising a user's or admin's ASK would override their policy. A
+  TOOL_CALL ASK that matches a `coral_*` tool parks a step the same way (see
+  Run protection).
+- **Relaunch of a closed session** is refused and inert. Omnigent's closed
+  check covers user `message` events only, but the mutation guard lets a
+  closed step take only `interrupt` and `stop_session` from clients (runner-only
+  events only from its own runner), so a client's `retry_session`, slash
+  command, `/compact`, item event or approval gets 409, and a title or label
+  that would reopen or reroute it is refused too (see Run protection). The close's commit gate catches a turn that started
+  before the commit, and the run guard denies a relaunched step's tool calls.
 - **Squatted ids.** A collaborator who posts under both engine ids (the stable
   id and its fallback) makes the send fail permanently and visibly
   (`dispatch.stable_id_taken`). Both ids are predictable.
@@ -417,22 +697,51 @@ Also known before runs are enabled:
   commit, and the commit runs after the writer's runner stopped.
 - **Native harnesses** are refused as steps until HRN-03 (CRL-138). Their
   `external_session_status` outcome pass-through is HRN-05 (CRL-146).
-- **Anchor runner.** If an owner attaches a runner to the anchor, the
-  `anchor_bound` drift pause refuses further engine work but does not stop that
-  runner. The anchor seed (`coral/profiles/seeds/anchor.yaml`, from CRL-132's
-  PRF-01) no longer sets `permission_mode: bypassPermissions`, so the
-  harness's default applies and its tool calls still ask for approval. Still
-  open, owner CRL-131 (RUL-01, the run guard): a deny-all tool policy for the
-  anchor, and stopping or unbinding an anchor runner on detection.
-- **Anchor sharing.** The anchor is private at create, but a later read-only or
-  public grant exposes every step's workspace files (ADR-05 rule 6). Detecting
-  it belongs to the full SES-09 drift (no live ticket).
+- **Anchor runner.** The mutation guard refuses a client attaching a runner
+  to the anchor (`PATCH runner_id`, runner launch; see Run protection). If a
+  runner is attached anyway (before the guard was registered, or by a path it
+  does not cover), the `anchor_bound` drift pause refuses further engine work,
+  and then `AnchorRunnerStopper` (`coral/omni/server/anchor_runner.py`) sends
+  the anchor `stop_session` through the engine dispatch, as the run owner from
+  the run row, on every detection. The stop is best effort and the primary
+  control stays the anchor's deny-all (every anchor tool call is denied, see
+  Run protection):
+  - What stops is Omnigent's choice. For a runner with no host (an anchor with
+    a `runner_id` and no `host_id`), only the anchor's session on that runner
+    is stopped and the runner process keeps running. When the anchor owns a
+    host runner (it has a `host_id` too), Omnigent ends that runner.
+  - A runner that any other session also uses is left running, with one
+    warning, because ending it would take that session down. This covers a
+    step of this run or another, a chat, and a child made before the guard.
+    One read of the sessions pinned to the runner decides, archived ones
+    included.
+  - A failed stop is logged and the pause stands; the next detection tries
+    again. The stop runs inside the effect that found the drift, bounded by
+    the dispatch's event timeout, and does not re-check the work lease first.
+    That is accepted: the pause has already committed and the stop is safe to
+    repeat.
+  - An anchor bound to a host only has no runner to stop.
+  - The runner stays bound (stop only, no unbind), so its owner can start it
+    again; the run stays paused until someone resumes it.
+
+  The anchor seed (`coral/profiles/seeds/anchor.yaml`, from CRL-132's PRF-01)
+  no longer sets `permission_mode: bypassPermissions`, so the harness's default
+  applies.
+- **Anchor sharing.** The anchor is private at create, and the mutation guard
+  refuses any later grant (public included) and `share_workspace_files` on a
+  bound session. A grant made some other way would still expose every step's
+  workspace files (ADR-05 rule 6); detecting it belongs to the full SES-09
+  drift (no live ticket).
 - **One lifespan per process.** See "Wiring": a second lifespan blinds the
   first on entry, and an inner exit leaves the outer unregistered. The bridge's
   ticket must fix this before it enables runs.
-- **No `coral_runner` token check.** Steps need a live connection to a host the
-  run owner owns, with a matching account registration, that is not a managed
-  sandbox. The token check is TLS-01 (CRL-131).
+- **`coral_runner:1` is self-reported.** The host token check is a
+  compatibility gate, not an authorization boundary: steps still need a live
+  connection to a host the run owner owns, with a matching account
+  registration, that is not a managed sandbox.
+- **The agent is checked at create.** After that the mutation guard keeps a
+  `coral__` agent as the engine wrote it: edits are refused, and a delete needs
+  `force=true`, after which SES-09 drift pauses the runs that use it.
 
 ## Deferred work and owners
 
@@ -440,9 +749,15 @@ Also known before runs are enabled:
 |---|---|
 | Engine-to-queue bridge and EffectCompleted feedback (ENG-04/DUR-04); turn-fact gathering and the `TurnFactSink` (SES-08) | no live ticket: ENG-04/DUR-04/SES-08 were labelled on Done tickets CRL-126/CRL-127 but not built; needs a new ticket |
 | Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)) | CRL-137 |
-| Anchor deny-all tool policy; stop or unbind an anchor runner on detection (RUL-01) | CRL-131 |
-| ASK input policies for engine sends; closed-session relaunch by `retry_session` or slash command (RUL-01) | CRL-131 |
-| `coral_runner` token check (TLS-01) | CRL-131 |
+| Reconcile store-only budget pauses (RUL-01): a `budget` run whose `PAUSED` entry has `cause: session_cap` is a session-spend pause, not the engine's activation-cap pause, so the activation-cap resume rule (raise `max_activations`) must not apply to it; give it its own engine cause and resume rule | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Bound an orchestrator's spend between tool calls (RUL-01), for example by checking its session cap before sending it a decision request | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Implement `RunDecisionPort` as [`engine-tools.md`](engine-tools.md) states it: a schema that stores each reply under its checksum (none exists; a migration), the graph pinned to the run's version, and the port's four rules (a retried slot's session bound with the slot's `session_generation`; one session per run, slot and generation; a version bump on every write to `status`, `pause_reason` or `orchestrator_session_id`; a byte-exact handoff body) | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Orchestrator bindings: choose a stable `slot_id` for them (the binding store requires one; the engine has no orchestrator slot), and write `CoralRun.orchestrator_session_id`, which nothing writes yet, so `coral_choose_arrow` answers `not_orchestrator` until then | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Prompt stopped steps again: every run-guard, `[run.state_unavailable]` and budget deny ends the turn with the slot `evaluating` and no handoff, and the paused text promises "Coral resumes this step when the run resumes", so nudge or re-brief such slots on resume and after the store recovers | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Lease `nudge` effects in reconcile (`_LEASED_KINDS` in `coral/engine/reconcile.py`), so a nudged turn's `TurnEnded` is not refused before the nudge's completion is folded | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Early submit: keep refusing a handoff sent before the brief's `send_input` completes (`evaluation_in_progress`, retry), or accept it by making a late `send_input` completion a receipt | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet) |
+| Handoffs while paused: RUL-01's "a paused step can still hand off" holds only at the policy layer, and the reducer refuses the handoff with `run.paused` (see Residuals under Run protection); decide whether the engine accepts and holds it | the engine bridge ticket, with ENG-06 |
+| One lifespan per process (see Wiring and Run protection) | the engine bridge ticket (ENG-04/DUR-04; no live ticket yet), before it enables runs |
 | Host channel `fingerprint(L2)`, `merge`, `check`, and the backend swap (WSP-02/WSP-07) | CRL-141 |
 | Native-harness steps (HRN-03) | CRL-138 |
 | `external_session_status` outcome pass-through (HRN-05) | CRL-146 |

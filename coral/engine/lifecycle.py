@@ -11,6 +11,7 @@ from coral.engine.machines.activation import (
     activation_id,
     find_activation,
     replace_activation,
+    route_closed_step,
     traverse_arrow,
 )
 from coral.engine.machines.run import record_pause, refuse, refuse_unknown
@@ -66,6 +67,8 @@ _RESUME_REASONS: frozenset[PauseReason] = frozenset(
 )
 _RETRY_REASONS: frozenset[PauseReason] = frozenset({"infra", "failure_path", "liveness"})
 _COUNTED_REJECTIONS = frozenset({"handoff.invalid", "tool.illegal"})
+# The counted rejection of a slot that pauses the run ``rejected_calls``.
+REJECTED_CALL_LIMIT = 3
 _RETRY_PHASES: tuple[str, ...] = (
     "fence_stop",
     "create_unbriefed",
@@ -176,7 +179,10 @@ def retry_step(graph: CompiledGraph, state: RunState, command: RetryStep) -> App
 
 
 def note_rejection(state: RunState, command: RejectionObserved) -> ApplyResult:
-    """Count ``handoff.invalid`` and ``tool.illegal``. The third pauses ``rejected_calls``."""
+    """Count ``handoff.invalid`` and ``tool.illegal``.
+
+    The ``REJECTED_CALL_LIMIT``-th in a row pauses ``rejected_calls``.
+    """
     slot = find_slot(state, command.slot_id)
     if slot is None:
         return refuse_unknown(state)
@@ -186,7 +192,7 @@ def note_rejection(state: RunState, command: RejectionObserved) -> ApplyResult:
         return ApplyResult(state=state)
     count = _streak(state, slot.id) + 1
     updated = _set_streak(state, slot.id, count)
-    if count >= 3:
+    if count >= REJECTED_CALL_LIMIT:
         updated = record_pause(updated, "rejected_calls", command.code, slot.id)
     return ApplyResult(state=updated.model_copy(update={"seq": state.seq + 1}))
 
@@ -320,12 +326,13 @@ def apply_timer_due(
 
 
 def _advance_closed(graph: CompiledGraph, state: RunState) -> tuple[RunState, tuple[Effect, ...]]:
-    """Open targets the cap refused, then unlabelled forwards of closed activations.
+    """Open targets the cap refused, then the forwards of closed activations.
 
     A choice, a gate answer, and a join arrival are already recorded when the cap
     pauses, so those opens are replayed from that receipt. Back arrows and failure
     arrows are left alone: a back arrow would bump its loop counter. A target that
-    already has an activation at this scope is not opened again.
+    already has an activation at this scope is not opened again. A step routed by
+    label that closed while paused follows its stored label once, back arrow included.
     """
     if state.status != "running":
         return state, ()
@@ -339,6 +346,8 @@ def _advance_closed(graph: CompiledGraph, state: RunState) -> tuple[RunState, tu
     for source in sources:
         if state.status != "running":
             break
+        state, routed = route_closed_step(state, graph, source)
+        effects.extend(routed)
         for arrow in graph.arrows:
             if arrow.source != source.node_id:
                 continue
@@ -458,8 +467,16 @@ def _retry_slots(state: RunState, owner_id: str, seq: int) -> tuple[RunState, tu
             slots.append(slot)
             continue
         generation = slot.session_generation + 1
+        # The new session starts without the previous generation's handoff.
         slots.append(
-            slot.model_copy(update={"status": "pending", "session_generation": generation})
+            slot.model_copy(
+                update={
+                    "status": "pending",
+                    "session_generation": generation,
+                    "handoff": None,
+                    "handoff_label": None,
+                }
+            )
         )
         effects.append(
             _effect(

@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pytest
 
 from coral.engine import fold, transition
+from coral.engine.lifecycle import REJECTED_CALL_LIMIT
 from coral.engine.types import (
     AnswerGate,
     CancelRun,
     ChooseArrow,
+    EffectCompleted,
     EngineConfig,
     HandoffEvaluated,
     HandoffReceived,
     InfraBackoffExhausted,
     Input,
+    LogEntry,
     PauseCause,
     PauseReason,
     PauseRun,
@@ -23,6 +28,7 @@ from coral.engine.types import (
     ResumeRun,
     RetryStep,
     RunnerLost,
+    RunState,
     SessionFailed,
     StartRun,
     TimerDue,
@@ -31,7 +37,7 @@ from coral.engine.types import (
     WaitingWithoutElicitation,
 )
 from coral.model.ir import CompiledGraph
-from tests.coral.engine.drive import NOW, drive
+from tests.coral.engine.drive import NOW, Driven, assert_handoff_bodies_settled, drive
 from tests.coral.workflow_builders import (
     arrow,
     compile_text,
@@ -262,6 +268,60 @@ def test_retry_bumps_generation_resets_attempts_and_does_not_open_successor() ->
         "phases": ["fence_stop", "create_unbriefed", "salvage_reset", "brief"],
     }
     assert fold(graph, driven.log) == driven.state
+
+
+def test_retried_slot_starts_without_a_handoff_body() -> None:
+    graph = _graph(
+        workflow_text(
+            [start(), step("work"), step("ship"), step("fix"), end()],
+            [
+                arrow("a1", "start", "work"),
+                arrow("a2", "work", "ship", label="ok"),
+                arrow("a3", "work", "fix", label="broken"),
+                arrow("a4", "ship", "end"),
+                arrow("a5", "fix", "end"),
+            ],
+        )
+    )
+    retried = drive(
+        graph,
+        [
+            RUN,
+            HandoffReceived(slot_id=SLOT, body="partial", label="ok"),
+            PauseRun(reason="failure_path", detail="blocked"),
+            RetryStep(node_id="work"),
+        ],
+    )
+    slot = retried.state.slots[0]
+    assert (slot.status, slot.session_generation) == ("pending", 2)
+    assert (slot.handoff, slot.handoff_label) == (None, None)
+
+    # Nothing in the reducer briefs a retried session yet, so stand in for its brief ack.
+    working = retried.state.model_copy(
+        update={"slots": (slot.model_copy(update={"status": "working"}),)}
+    )
+    ended = transition(
+        graph, working, TurnEnded(slot_id=SLOT, fact_key="turn:sess-2:2:resp-1"), NOW
+    )
+    assert ended.entry.rejection is None
+    assert ended.state.slots[0].status == "evaluating"
+    handoff = HandoffReceived(slot_id=SLOT, body="complete", label="broken", session_generation=2)
+    direct = transition(graph, ended.state, handoff, NOW)
+    assert direct.entry.rejection is None
+    assert (direct.state.slots[0].handoff, direct.state.slots[0].handoff_label) == (
+        "complete",
+        "broken",
+    )
+
+    nudge = next(effect for effect in ended.entry.effects if effect.kind == "nudge")
+    resumed = transition(graph, ended.state, EffectCompleted(effect_key=nudge.effect_key), NOW)
+    assert resumed.entry.rejection is None
+    assert resumed.state.slots[0].status == "working"
+    after_nudge = transition(graph, resumed.state, handoff, NOW)
+    assert after_nudge.entry.rejection is None
+    assert after_nudge.state.slots[0].status == "evaluating"
+    for state in (working, ended.state, direct.state, resumed.state, after_nudge.state):
+        assert_handoff_bodies_settled(state)
 
 
 def test_stale_generation_does_not_pause_nudge_or_keep_old_backoff() -> None:
@@ -516,6 +576,341 @@ def test_activation_cap_pauses_until_resume_raises_it() -> None:
     assert fold(graph, (*paused.log, resumed.entry), config) == resumed.state
 
 
+_FORKED = workflow_text(
+    [start(), step("work"), step("ship"), step("fix"), end()],
+    [
+        arrow("a1", "start", "work"),
+        arrow("a2", "work", "ship", label="ok"),
+        arrow("a3", "work", "fix", label="broken"),
+        arrow("a4", "ship", "end"),
+        arrow("a5", "fix", "end"),
+    ],
+)
+_LOOPED = workflow_text(
+    [start(), step("work"), end()],
+    [
+        arrow("a1", "start", "work"),
+        arrow("a2", "work", "end", label="done"),
+        arrow("a3", "work", "work", label="again", back=True, limit=2, at_limit="a4"),
+        arrow("a4", "work", "end"),
+    ],
+)
+_PLAIN = workflow_text(
+    [start(), step("work"), step("ship"), end()],
+    [arrow("a1", "start", "work"), arrow("a2", "work", "ship"), arrow("a3", "ship", "end")],
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "slot", "label", "opened"),
+    [
+        pytest.param(_FORKED, SLOT, "broken", "fix||", id="labelled"),
+        pytest.param(_LOOPED, "work||a3:1:0", "again", "work||a3:2", id="labelled_back"),
+        pytest.param(_PLAIN, SLOT, None, "ship||", id="unlabelled"),
+    ],
+)
+def test_resume_routes_a_step_that_closed_while_paused(
+    text: str, slot: str, label: str | None, opened: str
+) -> None:
+    graph = _graph(text)
+    paused = _closed_while_paused(graph, slot, label, after=drive(graph, [RUN]))
+    assert paused.state.slots[0].status == "closed"
+    assert all(item.id != opened for item in paused.state.activations)
+
+    resumed = drive(graph, [ResumeRun()], after=paused, auto_ack=False)
+    assert resumed.log[-1].rejection is None
+    assert resumed.state.status == "running"
+    assert [(effect.kind, effect.subject) for effect in resumed.log[-1].effects] == [
+        ("create_session", f"{opened}:0")
+    ]
+    started = [item.id for item in resumed.state.activations if item.status != "closed"]
+    assert started == [opened]
+
+    again = drive(
+        graph,
+        [PauseRun(reason="user", detail="again"), ResumeRun()],
+        after=resumed,
+        auto_ack=False,
+    )
+    assert again.log[-1].rejection is None
+    assert again.log[-1].effects == ()
+    assert again.state.activations == resumed.state.activations
+    assert again.state.loop_counters == resumed.state.loop_counters
+
+
+def test_resume_at_the_loop_limit_redirects_a_labelled_back_arrow_once() -> None:
+    graph = _graph(_LOOPED)
+    first_pass = drive(
+        graph,
+        [
+            RUN,
+            HandoffReceived(slot_id="work||a3:1:0", body="done", label="again"),
+            HandoffEvaluated(slot_id="work||a3:1:0", outcome="accepted"),
+        ],
+    )
+    paused = _closed_while_paused(graph, "work||a3:2:0", "again", after=first_pass)
+    assert paused.state.status == "paused"
+    assert all(item.key != "loop:a3||" for item in paused.state.receipts)
+
+    resumed = drive(graph, [ResumeRun()], after=paused, auto_ack=False)
+    assert resumed.log[-1].rejection is None
+    assert resumed.log[-1].effects == ()
+    assert resumed.state.status == "completed"
+    assert all(item.iteration_path != ("a3:3",) for item in resumed.state.activations)
+    receipts = [(item.key, item.payload) for item in resumed.state.receipts]
+    assert ("loop:a3||", {"code": "loop.limit_reached", "redirected": True}) in receipts
+    routes = [key for key, _payload in receipts if key.startswith("route:")]
+    assert routes == ["route:work||a3:1:1", "route:work||a3:2:1"]
+    assert [item.pass_index for item in resumed.state.loop_counters] == [2]
+
+
+def test_cancel_after_a_labelled_step_closed_while_paused_opens_nothing() -> None:
+    graph = _graph(_FORKED)
+    paused = _closed_while_paused(graph, SLOT, "broken", after=drive(graph, [RUN]))
+    cancelled = drive(graph, [CancelRun(), ResumeRun()], after=paused, auto_ack=False)
+    cancel, resume = cancelled.log[-2:]
+    assert cancel.rejection is None
+    assert [effect.kind for effect in cancel.effects] == ["notify"]
+    assert resume.rejection is not None
+    assert resume.rejection.code == "run_terminal"
+    assert cancelled.state.status == "cancelled"
+    assert {item.node_id for item in cancelled.state.activations} == {"start", "work"}
+    assert all(not item.key.startswith("route:") for item in cancelled.state.receipts)
+
+
+def test_activation_cap_on_a_label_route_opens_its_target_once_on_resume() -> None:
+    graph = _graph(_FORKED)
+    config = EngineConfig(max_activations=2)
+    paused = drive(
+        graph,
+        [
+            RUN,
+            HandoffReceived(slot_id=SLOT, body="done", label="broken"),
+            HandoffEvaluated(slot_id=SLOT, outcome="accepted"),
+        ],
+        config=config,
+    )
+    assert paused.state.causes == (
+        PauseCause(reason="budget", detail="activation_cap", subject="fix"),
+    )
+    keys = {item.key for item in paused.state.receipts}
+    assert {"pending:fix||", "route:work||:1", "skipped:work||:a2"} <= keys
+
+    resumed = drive(graph, [ResumeRun(cap=10)], config=config, after=paused, auto_ack=False)
+    assert [(effect.kind, effect.subject) for effect in resumed.log[-1].effects] == [
+        ("create_session", "fix||:0")
+    ]
+    again = drive(
+        graph,
+        [PauseRun(reason="user", detail="again"), ResumeRun()],
+        config=config,
+        after=resumed,
+        auto_ack=False,
+    )
+    assert again.log[-1].rejection is None
+    assert again.log[-1].effects == ()
+    assert again.state.activations == resumed.state.activations
+    assert all(item.node_id != "ship" for item in again.state.activations)
+
+
+def test_nudge_from_before_a_retry_leaves_the_retried_slot_pending() -> None:
+    graph = _step_graph()
+    ended = drive(graph, [RUN, TurnEnded(slot_id=SLOT, fact_key="turn:sess-1:1:resp-1")])
+    nudge = next(effect for effect in ended.log[-1].effects if effect.kind == "nudge")
+    retried = drive(
+        graph,
+        [PauseRun(reason="failure_path", detail="stuck"), RetryStep(node_id="work")],
+        after=ended,
+    )
+    late = drive(graph, [EffectCompleted(effect_key=nudge.effect_key)], after=retried)
+    assert late.log[-1].rejection is None
+    assert late.log[-1].receipt_key == nudge.effect_key
+    assert late.log[-1].effects == ()
+    slot = late.state.slots[0]
+    assert (slot.status, slot.session_generation, slot.handoff) == ("pending", 2, None)
+
+
+@pytest.mark.parametrize("paused", [False, True], ids=["closes_running", "closes_paused"])
+def test_retried_step_routes_again_when_its_new_generation_closes(paused: bool) -> None:
+    graph = _graph(_FORKED)
+    retried = drive(
+        graph,
+        [
+            RUN,
+            HandoffReceived(slot_id=SLOT, body="done", label="ok"),
+            HandoffEvaluated(slot_id=SLOT, outcome="accepted"),
+            PauseRun(reason="failure_path", detail="redo"),
+            RetryStep(node_id="work"),
+        ],
+    )
+    assert retried.state.slots[0].session_generation == 2
+    state, entries = _apply(
+        graph,
+        _briefed_retry(retried.state),
+        [
+            HandoffReceived(slot_id=SLOT, body="again", label="broken", session_generation=2),
+            HandoffEvaluated(slot_id=SLOT, outcome="accepted", session_generation=2),
+        ],
+    )
+    close = [effect for effect in state.effects if effect.kind == "close_slot"][-1]
+    closed = EffectCompleted(effect_key=close.effect_key, payload={"pending_input": False})
+    steps = [PauseRun(reason="user", detail="hold"), closed, ResumeRun()] if paused else [closed]
+    state, more = _apply(graph, state, steps)
+    assert all(entry.rejection is None for entry in (*entries, *more))
+    routes = [(item.key, item.payload) for item in state.receipts if item.key.startswith("route:")]
+    assert routes == [
+        ("route:work||:1", {"label": "ok"}),
+        ("route:work||:2", {"label": "broken"}),
+    ]
+    assert [item.id for item in state.activations if item.node_id == "fix"] == ["fix||"]
+
+    again, last = _apply(graph, state, [PauseRun(reason="user", detail="again"), ResumeRun()])
+    assert last[-1].effects == ()
+    assert again.activations == state.activations
+
+
+def test_nudge_from_an_older_generation_only_records_its_receipt() -> None:
+    graph = _step_graph()
+    ended = drive(graph, [RUN, TurnEnded(slot_id=SLOT, fact_key="turn:sess-1:1:resp-1")])
+    old = next(effect for effect in ended.log[-1].effects if effect.kind == "nudge")
+    retried = drive(
+        graph,
+        [PauseRun(reason="failure_path", detail="stuck"), RetryStep(node_id="work")],
+        after=ended,
+    )
+    waiting, entries = _apply(
+        graph,
+        _briefed_retry(retried.state),
+        [TurnEnded(slot_id=SLOT, fact_key="turn:sess-2:2:resp-1")],
+    )
+    new = next(effect for effect in entries[-1].effects if effect.kind == "nudge")
+    assert waiting.slots[0].status == "evaluating"
+
+    stale, receipted = _apply(graph, waiting, [EffectCompleted(effect_key=old.effect_key)])
+    assert receipted[-1].rejection is None
+    assert receipted[-1].receipt_key == old.effect_key
+    assert stale.slots == waiting.slots
+    assert stale.seq == waiting.seq + 1
+
+    current, _ = _apply(graph, stale, [EffectCompleted(effect_key=new.effect_key)])
+    assert current.slots[0].status == "working"
+
+
+_SIDE = workflow_text(
+    [start(), step("side"), step("work"), step("ship"), step("fix"), step("merge"), end()],
+    [
+        arrow("a1", "start", "side"),
+        arrow("a2", "start", "work"),
+        arrow("a3", "work", "ship", label="ok"),
+        arrow("a4", "work", "fix", label="broken"),
+        arrow("a5", "ship", "merge"),
+        arrow("a6", "fix", "merge"),
+        arrow("a7", "side", "end"),
+        arrow("a8", "merge", "end"),
+    ],
+)
+
+
+@pytest.mark.parametrize(
+    "pause",
+    [
+        PauseRun(reason="failure_path", detail="stuck"),
+        UsageLimited(slot_id="side||:0", fact_key="turn:sess-9:1:resp-1"),
+    ],
+    ids=["retry_step", "plan_probe"],
+)
+def test_retry_and_plan_probe_also_route_a_step_that_closed_while_paused(pause: Input) -> None:
+    graph = _graph(_SIDE)
+    closing = drive(
+        graph,
+        [
+            HandoffReceived(slot_id=SLOT, body="done", label="broken"),
+            HandoffEvaluated(slot_id=SLOT, outcome="accepted"),
+        ],
+        after=drive(graph, [RUN]),
+        auto_ack=False,
+    )
+    close = next(effect for effect in closing.state.effects if effect.kind == "close_slot")
+    paused = drive(
+        graph,
+        [pause, EffectCompleted(effect_key=close.effect_key, payload={"pending_input": False})],
+        after=closing,
+        auto_ack=False,
+    )
+    assert paused.state.status == "paused"
+    assert all(item.node_id != "fix" for item in paused.state.activations)
+
+    unpause: Input = RetryStep(node_id="side")
+    if isinstance(pause, UsageLimited):
+        probe = next(timer for timer in paused.state.timers if timer.kind == "plan_probe")
+        unpause = TimerDue(timer_key=probe.key)
+    resumed = drive(graph, [unpause], after=paused, auto_ack=False)
+    assert resumed.log[-1].rejection is None
+    assert resumed.state.status == "running"
+    created = [
+        (effect.kind, effect.subject)
+        for effect in resumed.log[-1].effects
+        if effect.kind == "create_session"
+    ]
+    assert created == [("create_session", "fix||:0")]
+    assert all(item.node_id != "ship" for item in resumed.state.activations)
+    assert any(item.key == "route:work||:1" for item in resumed.state.receipts)
+
+
+def _briefed_retry(state: RunState) -> RunState:
+    """Stand in for a retried session's brief ack, which the reducer does not model yet."""
+    return state.model_copy(
+        update={
+            "slots": tuple(
+                slot.model_copy(update={"status": "working"}) if slot.status == "pending" else slot
+                for slot in state.slots
+            )
+        }
+    )
+
+
+def _apply(
+    graph: CompiledGraph, state: RunState, commands: Sequence[Input]
+) -> tuple[RunState, tuple[LogEntry, ...]]:
+    """Apply ``commands`` without effect acks to a state that no log reaches."""
+    entries: list[LogEntry] = []
+    for command in commands:
+        result = transition(graph, state, command, NOW)
+        assert_handoff_bodies_settled(result.state)
+        entries.append(result.entry)
+        state = result.state
+    return state, tuple(entries)
+
+
+def _closed_while_paused(
+    graph: CompiledGraph, slot: str, label: str | None, *, after: Driven
+) -> Driven:
+    """Accept ``slot``'s handoff, pause the run, then complete the slot's close."""
+    closing = drive(
+        graph,
+        [
+            HandoffReceived(slot_id=slot, body="done", label=label),
+            HandoffEvaluated(slot_id=slot, outcome="accepted"),
+        ],
+        after=after,
+        auto_ack=False,
+    )
+    close = next(
+        effect
+        for effect in closing.state.effects
+        if effect.kind == "close_slot" and effect.subject == slot
+    )
+    return drive(
+        graph,
+        [
+            PauseRun(reason="user", detail="hold"),
+            EffectCompleted(effect_key=close.effect_key, payload={"pending_input": False}),
+        ],
+        after=closing,
+        auto_ack=False,
+    )
+
+
 def _finish(slot_id: str) -> list[HandoffReceived | HandoffEvaluated]:
     return [
         HandoffReceived(slot_id=slot_id, body="done"),
@@ -711,6 +1106,16 @@ def test_three_tool_illegal_observations_pause() -> None:
     assert resumed.state.causes == ()
     assert resumed.state.reject_streaks == (RejectStreak(slot_id=SLOT, count=0),)
     assert fold(graph, (*driven.log, resumed.entry)) == resumed.state
+
+
+def test_the_rejected_call_limit_is_the_count_that_pauses() -> None:
+    graph = _step_graph()
+    observed = RejectionObserved(slot_id=SLOT, code="handoff.invalid")
+    below = drive(graph, [RUN, *[observed] * (REJECTED_CALL_LIMIT - 1)])
+    assert below.state.status == "running"
+    at = transition(graph, below.state, observed, NOW)
+    assert at.state.status == "paused"
+    assert at.state.reject_streaks == (RejectStreak(slot_id=SLOT, count=REJECTED_CALL_LIMIT),)
 
 
 def test_evidence_missing_does_not_increment_and_accept_resets() -> None:

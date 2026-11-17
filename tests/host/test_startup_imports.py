@@ -153,3 +153,53 @@ def test_host_registers_without_database_imports(tmp_path: Path, entrypoint: str
 
     # Best-effort capability probes must not swallow a prohibited import either.
     assert "UNEXPECTED_DATABASE_IMPORT" not in host.log_path.read_text(errors="replace")
+
+
+def test_hello_with_a_tool_provider_imports_no_database(tmp_path: Path) -> None:
+    """CORAL(S50): building the hello loads installed tool providers without database modules."""
+    code = dedent("""\
+        import importlib.metadata
+
+        class StubProvider:
+            def tool_set(self, spec):
+                return None
+
+            def server_dispatched_names(self):
+                return frozenset()
+
+            def host_capabilities(self):
+                return ("stub_runner:1",)
+
+        def stub_provider():
+            return StubProvider()
+
+        discover = importlib.metadata.entry_points
+        group = "omnigent.tool_providers"
+
+        def installed(**params):
+            if params.get("group") != group:
+                return discover(**params)
+            return [
+                importlib.metadata.EntryPoint(
+                    name="stub", value="__main__:stub_provider", group=group
+                )
+            ]
+
+        importlib.metadata.entry_points = installed
+
+        import omnigent.host.connect
+        from omnigent.host.frames import (
+            HostHelloFrame,
+            decode_host_frame,
+            encode_host_frame,
+            host_capabilities,
+        )
+
+        hello = HostHelloFrame(
+            version="0", frame_protocol_version=1, name="import-test",
+            capabilities=host_capabilities(),
+        )
+        decoded = decode_host_frame(encode_host_frame(hello))
+        assert decoded.capabilities[-1] == "stub_runner:1", decoded.capabilities
+        """)
+    _run_without_database_imports(tmp_path, code)

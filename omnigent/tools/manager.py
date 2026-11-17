@@ -192,6 +192,45 @@ class ToolManager:
         self._register_policy_tools()
         self._register_scheduled_task_tools()
         self._register_browser_tools()
+        self._register_extension_tools()  # CORAL(S7): installed tool providers' tools, last
+
+    def _register_extension_tools(self) -> None:
+        """CORAL(S7): register the schema-only tools installed providers add for this spec.
+
+        A provider tool is skipped, with an error logged once per process, when
+        its name belongs to a framework tool (any ``sys_`` name, a reserved
+        builtin or a skill tool), enabled for this spec or not, or is already
+        registered. It never raises: a raise leaves the conversation without
+        any tools.
+        """
+        from omnigent.tools.extensions import (
+            extension_tool_name,
+            extension_tool_sets,
+            is_framework_tool_name,
+            log_extension_problem,
+        )
+
+        tool_sets = extension_tool_sets(self._spec)
+        if not tool_sets:
+            return
+        for tool_set in tool_sets:
+            for schema in tool_set.tools:
+                name = extension_tool_name(schema)
+                if name is None:  # extension_tool_sets drops malformed sets
+                    continue
+                existing = self._tools.get(name)
+                if is_framework_tool_name(name):
+                    log_extension_problem(
+                        f"Extension tool {name!r} has a framework tool's name; skipping it"
+                    )
+                elif existing is not None:
+                    log_extension_problem(
+                        f"Extension tool {name!r} clashes with the registered "
+                        f"{type(existing).__name__}; keeping the registered tool"
+                    )
+                else:
+                    # extension_tool_sets returns a fresh plain-JSON copy per call.
+                    self._tools[name] = _SchemaOnlyTool(name, dict(schema))
 
     def _register_policy_tools(self) -> None:
         """

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 
 import pytest
 
@@ -29,7 +31,7 @@ from coral.recovery.drift import (
     pause_run_for_drift,
 )
 from coral.stores.fakes import FakeRunStore
-from coral.stores.protocols import CoralRun, Transition
+from coral.stores.protocols import CoralRun, RunNotFound, Transition
 from coral.stores.session_bindings import SessionBinding, effect_checksum
 from tests.coral.omni.fakes import FakeSessionFacade, present
 from tests.coral.workspace._executor_fakes import FakeBindings, start_run, step_binding
@@ -71,6 +73,19 @@ def _archived_anchor(run: CoralRun) -> DriftFinding:
     )
     assert finding is not None
     return finding
+
+
+class _StopHook:
+    """An ``on_anchor_bound`` hook that records each call and then raises ``error``, if set."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.calls: list[tuple[int, str, str]] = []
+        self.error = error
+
+    async def __call__(self, workspace_id: int, run_id: str, session_id: str) -> None:
+        self.calls.append((workspace_id, run_id, session_id))
+        if self.error is not None:
+            raise self.error
 
 
 def _drift_logs(store: FakeRunStore, run: CoralRun) -> list[dict[str, object]]:
@@ -289,6 +304,134 @@ async def test_drift_pauser_pauses_with_its_clock() -> None:
     assert entry.created_at_us == NOW_US
 
 
+async def test_anchor_bound_pause_calls_the_stop_hook() -> None:
+    store = FakeRunStore(default_workspace_id=WORKSPACE)
+    run = _run(store)
+    anchor = anchor_session_id(WORKSPACE, run.id)
+    finding = classify_anchor(present(anchor, runner_id="runner-1"))
+    assert finding is not None
+    hook = _StopHook()
+    pauser = DriftPauser(store, now_us=lambda: NOW_US, on_anchor_bound=hook)
+
+    first = await pauser.pause(workspace_id=WORKSPACE, run_id=run.id, finding=finding)
+    # The run is paused already, but the runner may still be live: the hook runs again.
+    again = await pauser.pause(workspace_id=WORKSPACE, run_id=run.id, finding=finding)
+
+    assert first.applied and not again.applied
+    assert hook.calls == [(WORKSPACE, run.id, anchor)] * 2
+    state, _ = store.load_run_state(run.id, workspace_id=WORKSPACE)
+    assert (state.run.status, state.run.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
+    [logged] = _drift_logs(store, run)
+    assert (logged["cause"], logged["detail"]) == ("anchor_bound", "runner-1")
+
+
+@pytest.mark.parametrize(
+    "finding",
+    [
+        DriftFinding("anchor_archived", "a", ARCHIVED_AT),
+        DriftFinding("anchor_deleted", "a", "deleted"),
+        DriftFinding("session_archived", STEP, ARCHIVED_AT),
+        DriftFinding("session_deleted", STEP, "deleted"),
+    ],
+    ids=lambda finding: finding.cause,
+)
+async def test_other_drift_causes_pause_without_the_stop_hook(finding: DriftFinding) -> None:
+    store = FakeRunStore(default_workspace_id=WORKSPACE)
+    run = _run(store)
+    hook = _StopHook()
+
+    outcome = await DriftPauser(store, now_us=lambda: NOW_US, on_anchor_bound=hook).pause(
+        workspace_id=WORKSPACE, run_id=run.id, finding=finding
+    )
+
+    assert outcome.applied
+    assert hook.calls == []
+
+
+async def test_a_failing_stop_hook_is_logged_and_the_pause_stands(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = FakeRunStore(default_workspace_id=WORKSPACE)
+    run = _run(store)
+    anchor = anchor_session_id(WORKSPACE, run.id)
+    hook = _StopHook(CoralSessionError("dispatch.stop_unconfirmed", "no answer", retryable=True))
+    pauser = DriftPauser(store, now_us=lambda: NOW_US, on_anchor_bound=hook)
+
+    with caplog.at_level(logging.WARNING, logger="coral.recovery.drift"):
+        outcome = await pauser.pause(
+            workspace_id=WORKSPACE,
+            run_id=run.id,
+            finding=DriftFinding("anchor_bound", anchor, "runner-1"),
+        )
+
+    assert outcome.applied
+    assert hook.calls == [(WORKSPACE, run.id, anchor)]
+    state, _ = store.load_run_state(run.id, workspace_id=WORKSPACE)
+    assert (state.run.status, state.run.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
+    [record] = [r for r in caplog.records if r.name == "coral.recovery.drift"]
+    assert record.levelno == logging.WARNING
+    assert run.id in record.getMessage() and anchor in record.getMessage()
+    assert record.exc_info is not None and record.exc_info[1] is hook.error
+
+
+async def test_the_stop_hook_runs_once_the_pause_is_committed() -> None:
+    store = FakeRunStore(default_workspace_id=WORKSPACE)
+    run = _run(store)
+    anchor = anchor_session_id(WORKSPACE, run.id)
+    seen: list[tuple[RunStatus, RunPauseReason | None]] = []
+
+    async def hook(workspace_id: int, run_id: str, session_id: str) -> None:
+        state, _ = store.load_run_state(run_id, workspace_id=workspace_id)
+        seen.append((state.run.status, state.run.pause_reason))
+
+    await DriftPauser(store, now_us=lambda: NOW_US, on_anchor_bound=hook).pause(
+        workspace_id=WORKSPACE,
+        run_id=run.id,
+        finding=DriftFinding("anchor_bound", anchor, "runner-1"),
+    )
+
+    assert seen == [(RunStatus.PAUSED, RunPauseReason.DRIFT)]
+
+
+async def test_a_cancelled_stop_propagates_and_the_pause_stands(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = FakeRunStore(default_workspace_id=WORKSPACE)
+    run = _run(store)
+    anchor = anchor_session_id(WORKSPACE, run.id)
+    pauser = DriftPauser(
+        store, now_us=lambda: NOW_US, on_anchor_bound=_StopHook(asyncio.CancelledError())
+    )
+
+    with caplog.at_level(logging.WARNING, logger="coral.recovery.drift"):
+        with pytest.raises(asyncio.CancelledError):
+            await pauser.pause(
+                workspace_id=WORKSPACE,
+                run_id=run.id,
+                finding=DriftFinding("anchor_bound", anchor, "runner-1"),
+            )
+
+    state, _ = store.load_run_state(run.id, workspace_id=WORKSPACE)
+    assert (state.run.status, state.run.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
+    # Cancellation is not a failed stop: nothing is logged.
+    assert [r for r in caplog.records if r.name == "coral.recovery.drift"] == []
+
+
+async def test_a_failed_pause_raises_without_the_stop_hook() -> None:
+    store = FakeRunStore(default_workspace_id=WORKSPACE)
+    run_id = "f" * 32
+    hook = _StopHook()
+
+    with pytest.raises(RunNotFound):
+        await DriftPauser(store, now_us=lambda: NOW_US, on_anchor_bound=hook).pause(
+            workspace_id=WORKSPACE,
+            run_id=run_id,
+            finding=DriftFinding("anchor_bound", anchor_session_id(WORKSPACE, run_id), "r"),
+        )
+
+    assert hook.calls == []
+
+
 async def test_find_drift_checks_the_anchor_then_the_bound_target() -> None:
     run_id = "r" * 32
     anchor = anchor_session_id(WORKSPACE, run_id)
@@ -348,6 +491,7 @@ async def test_find_drift_checks_the_anchor_then_the_bound_target() -> None:
     ("anchor_state", "step_state", "cause"),
     [
         ({"archived": True, "archived_at": ARCHIVED_AT}, {}, "anchor_archived"),
+        ({"runner_id": "runner-1"}, {}, "anchor_bound"),
         ({}, {"archived": True, "archived_at": ARCHIVED_AT}, "session_archived"),
         ({}, {"exists": False}, "session_deleted"),
     ],
@@ -373,7 +517,10 @@ async def test_the_pre_send_hook_pauses_the_run_and_refuses_the_send(
             ),
         ]
     )
-    hook = DriftPreSendHook(facade, bindings, DriftPauser(store, now_us=lambda: NOW_US))
+    stop = _StopHook()
+    hook = DriftPreSendHook(
+        facade, bindings, DriftPauser(store, now_us=lambda: NOW_US, on_anchor_bound=stop)
+    )
     request = PreSendRequest(
         workspace_id=WORKSPACE, run_id=run.id, session_id=STEP, user_id="alice"
     )
@@ -386,6 +533,8 @@ async def test_the_pre_send_hook_pauses_the_run_and_refuses_the_send(
     assert (state.run.status, state.run.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
     [logged] = _drift_logs(store, run)
     assert logged["cause"] == cause
+    # Only a bound anchor has a runner to stop.
+    assert stop.calls == ([(WORKSPACE, run.id, anchor)] if cause == "anchor_bound" else [])
 
 
 async def test_the_pre_send_hook_lets_an_undrifted_send_through() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -21,6 +22,7 @@ from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.stores.protocols import RunStore
 from coral.stores.runs import SqlAlchemyCoralRunStore
+from coral.stores.session_bindings import FreshBindingLookup, SqlAlchemySessionBindingStore
 from coral.stores.workflows import SqlWorkflowDefinitionStore
 from coral.workers.supervisor import WorkerSupervisor
 from omnigent.process_logging import data_dir
@@ -34,6 +36,8 @@ _CORAL_DB_FILENAME = "coral.db"
 # Status-edge observer names: watched sessions' edges, and the confirmed-stop record.
 STATUS_EDGE_OBSERVER = "coral"
 CONFIRMED_STOPS_OBSERVER = "coral.confirmed_stops"
+# The name Coral's policies for bound sessions are registered under (S52).
+REQUIRED_POLICY_PROVIDER = "coral"
 # The server stores the session engine builds on; anchors need the project store.
 _ENGINE_SERVICES = (
     "agent_store",
@@ -82,12 +86,57 @@ def _missing_engine_input(app: Any, services: ServerServices) -> str | None:
     return None
 
 
+def _wire_guards(
+    *,
+    run_store: RunStore,
+    bindings: FreshBindingLookup,
+    session_cap_usd: float,
+    stack: AsyncExitStack,
+) -> None:
+    """
+    Register what protects bound sessions, whether or not the session engine is wired.
+
+    The engine tools register from the production catalog with no decision
+    port: nothing while the catalog is empty, and once it lists a tool each
+    call answers that the engine is not running. They read bindings fresh.
+    Coral's required-policy provider reads them through a cache of found rows
+    and reads run status through a cache each run-store commit clears. Its cost
+    backstop pauses a run through ``run_store`` once a session spends
+    ``session_cap_usd``. The S53 mutation guard reads the same cache of found
+    rows and refuses clients' changes to bound sessions and engine agents.
+    Every registration's undo goes on ``stack``.
+    """
+    from coral.omni.policies.bindings_cache import CachedBindingLookup
+    from coral.omni.policies.cost_backstop import install_budget_pauser
+    from coral.omni.policies.provider import CoralPolicyProvider
+    from coral.omni.policies.state import RunStatusCache
+    from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
+    from coral.omni.server.tool_bridge import register_engine_tools
+    from coral.recovery.pause import pause_run_for_session_cap
+    from coral.tools.catalog import CATALOG
+    from omnigent.runtime.policies.required_providers import register_required_policy_provider
+    from omnigent.server.mutation_guards import register_mutation_guard
+
+    register_engine_tools(catalog=CATALOG, port=None, bindings=bindings, stack=stack)
+    statuses = RunStatusCache(run_store)
+    stack.callback(run_store.register_post_commit(statuses.invalidate))
+    stack.callback(install_budget_pauser(functools.partial(pause_run_for_session_cap, run_store)))
+    # One cache of found bindings for every guard that classifies sessions.
+    found_bindings = CachedBindingLookup(bindings)
+    provider = CoralPolicyProvider(
+        bindings=found_bindings, statuses=statuses, session_cap_usd=session_cap_usd
+    )
+    stack.callback(register_required_policy_provider(REQUIRED_POLICY_PROVIDER, provider))
+    stack.callback(register_mutation_guard(MUTATION_GUARD, CoralMutationGuard(found_bindings)))
+
+
 def _wire_session_engine(
     app: Any,
     services: ServerServices,
     *,
     db_uri: str,
     run_store: RunStore,
+    bindings: SqlAlchemySessionBindingStore,
     scope_runner: RunScopeRunner,
     stack: AsyncExitStack,
 ) -> None:
@@ -101,6 +150,7 @@ def _wire_session_engine(
     first removes only its own registrations, so an inner exit leaves the outer
     lifespan with none.
     """
+    from coral.omni.server.anchor_runner import AnchorRunnerStopper
     from coral.omni.server.dispatch import OmnigentSessionDispatch
     from coral.omni.server.sessions import OmnigentSessionFacade
     from coral.omni.server.status_edges import CoralStatusEdges
@@ -118,7 +168,6 @@ def _wire_session_engine(
         create_session_executor,
         send_input_executor,
     )
-    from coral.stores.session_bindings import SqlAlchemySessionBindingStore
     from coral.stores.stable_ids import SqlAlchemyStableIdStore
     from coral.stores.workspace_op_intents import SqlAlchemyWorkspaceOpIntentStore
     from coral.workspace.executors import (
@@ -133,10 +182,15 @@ def _wire_session_engine(
 
     host_store = services.host_store
     assert host_store is not None  # checked by _missing_engine_input
-    bindings = SqlAlchemySessionBindingStore(db_uri)
     stable_ids = SqlAlchemyStableIdStore(db_uri)
     intents = SqlAlchemyWorkspaceOpIntentStore(db_uri)
-    pauser = DriftPauser(run_store)
+    # Resolved at stop time: the dispatch's pre-send hook holds the pauser that holds the stopper.
+    anchor_runner_stopper = AnchorRunnerStopper(
+        conversation_store=services.conversation_store,
+        run_store=run_store,
+        dispatch=lambda: dispatch,
+    )
+    pauser = DriftPauser(run_store, on_anchor_bound=anchor_runner_stopper)
     facade = OmnigentSessionFacade(app, services, bindings)
     dispatch = OmnigentSessionDispatch(
         app,
@@ -203,15 +257,20 @@ async def coral_lifespan(
     """
     Run Coral's startup migration check, worker supervisor, and reverse-order shutdown.
 
-    On a usable operational database with the server's stores present, the
-    session engine's executors and status-edge observers are registered before
-    the supervisor starts. Nothing enqueues their effects yet. Exit stops the
+    On a usable operational database the guards for bound sessions are
+    registered, and with the server's stores present also the session engine's
+    executors and status-edge observers, all before the supervisor starts. Both
+    share one binding store. Nothing enqueues engine effects yet. Exit stops the
     supervisor first, so no item is claimed while its executor is missing (an
     item in flight keeps its lease and is reclaimed), then unregisters in
-    reverse order, also after a failed start.
+    reverse order, also after a failed start. An invalid per-session cost cap
+    aborts startup before anything runs.
     """
+    from coral.omni.policies.cost_backstop import resolve_session_cap_usd
+
     if services.host_sharded:
         raise RuntimeError("Coral server plugin does not support host_sharded=True")
+    session_cap_usd = resolve_session_cap_usd(getattr(services, "server_config", None))
 
     conv_store = getattr(services, "conversation_store", None)
     storage_location: str | None = getattr(conv_store, "storage_location", None)
@@ -232,6 +291,13 @@ async def coral_lifespan(
                 app.state.coral_run_store = run_store
                 app.state.coral_queue_store = queue_store
                 app.state.coral_worker_supervisor = supervisor
+            bindings = SqlAlchemySessionBindingStore(storage_location)
+            _wire_guards(
+                run_store=run_store,
+                bindings=bindings,
+                session_cap_usd=session_cap_usd,
+                stack=stack,
+            )
             missing = _missing_engine_input(app, services)
             if missing is None:
                 _wire_session_engine(
@@ -239,6 +305,7 @@ async def coral_lifespan(
                     services,
                     db_uri=storage_location,
                     run_store=run_store,
+                    bindings=bindings,
                     scope_runner=scope_runner,
                     stack=stack,
                 )
@@ -277,5 +344,5 @@ def register(services: ServerServices) -> ServerPluginRegistration:
     return ServerPluginRegistration(
         routers=((info_router, "", ["coral"]), (workflows_router, "/v1/coral", ["coral"])),
         lifespan_hooks=(coral_lifespan, workflow_engine_lifespan),
-        policy_modules=("coral.omni.policies.hygiene",),
+        policy_modules=("coral.omni.policies.hygiene", "coral.omni.policies.guards"),
     )

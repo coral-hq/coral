@@ -126,7 +126,10 @@ _OS_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec
 
 
 def host_capabilities() -> list[str]:
-    """CORAL(S102): ``HOST_CAPABILITIES`` plus ``os_sandbox:<backend>``, or ``os_sandbox:none``."""
+    """CORAL(S102): ``HOST_CAPABILITIES`` plus ``os_sandbox:<backend>``, or ``os_sandbox:none``.
+
+    CORAL(S50): then the tokens of installed tool providers.
+    """
     try:
         backend = _default_sandbox_for_platform().type
     except OSError:
@@ -134,7 +137,12 @@ def host_capabilities() -> list[str]:
     binary = _OS_SANDBOX_BINARIES.get(backend)
     if binary is None or shutil.which(binary) is None:
         backend = "none"
-    return [*HOST_CAPABILITIES, f"{CAP_OS_SANDBOX_PREFIX}{backend}"]
+    # CORAL(S50): installed tool providers' new tokens come last; imported here so
+    # that importing this module (server and host) loads no entry point.
+    from omnigent.tools.extensions import extension_host_capabilities
+
+    base = [*HOST_CAPABILITIES, f"{CAP_OS_SANDBOX_PREFIX}{backend}"]
+    return [*base, *(token for token in extension_host_capabilities() if token not in base)]
 
 
 # Server capabilities, advertised on the tunnel's WebSocket upgrade response (the

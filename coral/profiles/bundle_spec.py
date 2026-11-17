@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Annotated
 
 import yaml
@@ -18,9 +19,10 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from coral.model.ids import MAX_SLUG_LENGTH, SLUG_PATTERN
 from coral.profiles.seeds import load_seed
 
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
 ENGINE_PREFIX = "coral__"
 DENY_VENDOR_ASK_HANDLER = "coral.omni.policies.hygiene.deny_vendor_ask"
+GUARDS_MODULE = "coral.omni.policies.guards"
 
 Slug = Annotated[
     str, StringConstraints(pattern=f"^{SLUG_PATTERN.pattern}$", max_length=MAX_SLUG_LENGTH)
@@ -34,6 +36,23 @@ class Stance(StrEnum):
     ORCHESTRATOR = "orchestrator"
     IMPLEMENTER = "implementer"
     REVIEWER = "reviewer"
+
+
+# The tool guard forced on each stance's bundle besides deny_vendor_ask: a handler
+# name in GUARDS_MODULE, also used as the policy's key.
+STANCE_GUARDS: Mapping[Stance, str] = MappingProxyType(
+    {
+        Stance.ANCHOR: "deny_all_tools",
+        Stance.ORCHESTRATOR: "orchestrator_guard",
+        Stance.IMPLEMENTER: "step_roster",
+        Stance.REVIEWER: "step_roster",
+    }
+)
+
+
+def stance_guard_handler(stance: Stance) -> str:
+    """The dotted path of *stance*'s guard, e.g. ``coral.omni.policies.guards.step_roster``."""
+    return f"{GUARDS_MODULE}.{STANCE_GUARDS[stance]}"
 
 
 class StepRef(BaseModel):
@@ -63,11 +82,9 @@ HYGIENE: Mapping[str, object] = {
     },
 }
 
-_DENY_VENDOR_ASK_POLICY: Mapping[str, object] = {
-    "type": "function",
-    "on": ["tool_call"],
-    "function": {"path": DENY_VENDOR_ASK_HANDLER},
-}
+
+def _tool_call_policy(handler: str) -> dict[str, object]:
+    return {"type": "function", "on": ["tool_call"], "function": {"path": handler}}
 
 
 def step_agent_name(ref: StepRef) -> str:
@@ -89,7 +106,7 @@ def _section(config: dict[str, object], key: str) -> dict[str, object]:
     return value
 
 
-def _merge_hygiene(config: dict[str, object]) -> None:
+def _merge_hygiene(config: dict[str, object], stance: Stance) -> None:
     for key, forced in HYGIENE.items():
         current = config.get(key)
         if isinstance(forced, Mapping) and isinstance(current, dict):
@@ -97,7 +114,8 @@ def _merge_hygiene(config: dict[str, object]) -> None:
         else:
             config[key] = copy.deepcopy(forced)
     policies = _section(_section(config, "guardrails"), "policies")
-    policies["deny_vendor_ask"] = copy.deepcopy(dict(_DENY_VENDOR_ASK_POLICY))
+    policies["deny_vendor_ask"] = _tool_call_policy(DENY_VENDOR_ASK_HANDLER)
+    policies[STANCE_GUARDS[stance]] = _tool_call_policy(stance_guard_handler(stance))
 
 
 def _bundle_yaml(
@@ -124,7 +142,7 @@ def _bundle_yaml(
         executor["model"] = model
     if provider is not None:
         executor["auth"] = {"type": "provider", "name": provider}
-    _merge_hygiene(config)
+    _merge_hygiene(config, stance)
     return yaml.safe_dump(config, sort_keys=True, allow_unicode=True).encode("utf-8")
 
 

@@ -28,8 +28,13 @@ from omnigent.spec.types import (
 from omnigent.tools import ToolManager
 from omnigent.tools.base import Tool, ToolContext
 from omnigent.tools.client_specified import ClientSideTool, ClientSideToolSpec
-from omnigent.tools.manager import _UCFunctionSchemaTool
+from omnigent.tools.manager import _SchemaOnlyTool, _UCFunctionSchemaTool  # CORAL(S7)
 from omnigent.tools.mcp import clear_discovery_cache
+from tests.tools.test_extensions import (  # CORAL(S7)
+    StubToolProvider,
+    installed_tool_providers,
+    tool_schema,
+)
 
 _TEST_CTX = ToolContext(task_id="task_test", agent_id="agent_test")
 
@@ -1772,3 +1777,102 @@ def test_tool_groups_all_false_keeps_the_load_bearing_tools() -> None:
         "sys_session_rename",
         "sys_cancel_task",
     } <= names
+
+
+# ─── CORAL(S7): tools from installed tool providers ──────────────
+
+
+def _coral_spec() -> AgentSpec:
+    """A spec that carries Coral's bundle parameters."""
+    return AgentSpec(
+        spec_version=1,
+        skills_filter="none",
+        params={"coral": {"generated": {"stance": "implementer"}}},
+    )
+
+
+def _extension_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "omnigent.tools.extensions" and record.levelno == logging.ERROR
+    ]
+
+
+def test_provider_tools_register_for_coral_specs_only() -> None:
+    """A provider's tool is a schema-only tool, registered last, for the specs it chooses."""
+    provider = StubToolProvider(
+        tools=(tool_schema("coral_test_echo"),), applies=lambda spec: "coral" in spec.params
+    )
+    with installed_tool_providers():
+        baseline = ToolManager(_make_spec()).get_tool_names()
+        coral_baseline = ToolManager(_coral_spec()).get_tool_names()
+    with installed_tool_providers(provider):
+        plain = ToolManager(_make_spec())
+        coral = ToolManager(_coral_spec())
+
+    assert plain.get_tool_names() == baseline
+    assert coral.get_tool_names() == [*coral_baseline, "coral_test_echo"]
+    echo = coral.get_tool("coral_test_echo")
+    assert isinstance(echo, _SchemaOnlyTool)
+    assert echo.description() == "Echo the text back."
+    assert echo.get_schema() == tool_schema("coral_test_echo")
+    # The manager keeps its own copy, so a provider's constant cannot be changed through it.
+    assert echo.get_schema()["function"] is not provider.tools[0]["function"]
+
+
+def test_provider_tool_name_collision_is_skipped_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A provider tool that clashes with a registered tool is skipped; the error logs once."""
+    provider = StubToolProvider(
+        tools=(tool_schema("get_weather", "Shadowing tool."), tool_schema("coral_test_echo"))
+    )
+    with (
+        installed_tool_providers(provider),
+        caplog.at_level(logging.ERROR, logger="omnigent.tools.extensions"),
+    ):
+        managers = [
+            ToolManager(_make_spec(), client_tool_specs=[_make_client_side_spec("get_weather")])
+            for _ in range(2)
+        ]
+
+    for mgr in managers:
+        assert isinstance(mgr.get_tool("get_weather"), ClientSideTool)
+        assert "coral_test_echo" in mgr.get_tool_names()
+    assert _extension_errors(caplog) == [
+        "Extension tool 'get_weather' clashes with the registered ClientSideTool; "
+        "keeping the registered tool",
+    ]
+
+
+def test_provider_cannot_add_framework_tools_the_spec_left_out(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No provider tool may take a framework tool's name, enabled for the spec or not.
+
+    The spec has no ``os_env`` (so no ``sys_os_shell``), no timers and no
+    browser group; a provider that offered those names would otherwise grant
+    them back, and the runner would run the real built-in.
+    """
+    from omnigent.runner.tool_dispatch import _ALL_LOCAL_TOOLS
+    from omnigent.tools.builtins import BUILTIN_NAMES
+
+    spec = _grouped_spec(browser=False)
+    framework_names = sorted(_ALL_LOCAL_TOOLS | BUILTIN_NAMES | {"sys_os_shell"})
+    provider = StubToolProvider(
+        tools=(*(tool_schema(name) for name in framework_names), tool_schema("coral_test_echo"))
+    )
+    with installed_tool_providers():
+        baseline = ToolManager(spec).get_tool_names()
+    with (
+        installed_tool_providers(provider),
+        caplog.at_level(logging.ERROR, logger="omnigent.tools.extensions"),
+    ):
+        mgr = ToolManager(spec)
+
+    assert "sys_os_shell" not in baseline
+    assert mgr.get_tool_names() == [*baseline, "coral_test_echo"]
+    errors = _extension_errors(caplog)
+    assert "Extension tool 'sys_os_shell' has a framework tool's name; skipping it" in errors
+    assert len(errors) == len(framework_names)

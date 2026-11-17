@@ -38,6 +38,11 @@ from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider, bind_host_is
 from omnigent.server.bundles import agent_for_user
 from omnigent.server.feature_flags import DeploymentGate, deployment_gate_enabled
 from omnigent.server.managed_hosts import is_repo_workspace, parse_repo_workspace
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    SESSION_SCHEDULE,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import resolve_host_owner
 from omnigent.server.routes._session_create_validation import (
@@ -584,6 +589,10 @@ def create_scheduled_tasks_router(
         )
         if problem is None:
             assert conv is not None
+            # CORAL(S53): an extension may refuse tasks that continue a session it manages.
+            await check_mutation(
+                MutationAttempt(SESSION_SCHEDULE, session_id=conv.id, conversation=conv)
+            )
             return conv
         reason, error_code = problem
         if error_code in ("continued_session_missing", "continued_session_forbidden"):

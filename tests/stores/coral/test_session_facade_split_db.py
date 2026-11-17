@@ -18,6 +18,7 @@ import pytest
 
 from coral.db.enum_codecs import SessionBindingProgress
 from coral.model.ids import anchor_session_id
+from coral.omni.process_map import CORAL_RUNNER_TOKEN
 from coral.omni.protocols import SessionCreateRequest
 from coral.omni.server.sessions import CORAL_RUNS_PROJECT_NAME, OmnigentSessionFacade
 from coral.stores.session_bindings import SqlAlchemySessionBindingStore
@@ -189,7 +190,7 @@ async def test_torn_step_row_is_repaired_once_on_redelivery(
     coral = _Coral(app, stores, operational, launcher=launcher)
     store = stores.conversation
     step_id = coral.step_id()
-    async with _Host(app, await _connect_host(app)):
+    async with _Host(app, await _connect_host(app, [CORAL_RUNNER_TOKEN])):
         await coral.anchor()
 
         # The step's metadata (host, workspace) never commits to the operational DB.

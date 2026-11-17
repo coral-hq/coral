@@ -1,4 +1,4 @@
-"""Skeleton replay: start, one step, end, and a duplicate effect completion."""
+"""Skeleton replay, a duplicate effect completion, and replaying a full log twice."""
 
 from __future__ import annotations
 
@@ -8,10 +8,21 @@ from coral.engine.types import (
     EngineConfig,
     HandoffEvaluated,
     HandoffReceived,
+    PauseRun,
+    ResumeRun,
     StartRun,
+    TurnEnded,
 )
 from tests.coral.engine.drive import NOW, drive
-from tests.coral.workflow_builders import compile_text, fixture_text
+from tests.coral.workflow_builders import (
+    arrow,
+    compile_text,
+    end,
+    fixture_text,
+    start,
+    step,
+    workflow_text,
+)
 
 CONFIG = EngineConfig()
 RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1")
@@ -63,6 +74,71 @@ def test_skeleton_reaches_completed_and_fold_matches() -> None:
     assert driven.state.slots[0].status == "closed"
     assert driven.log[0].patch
     assert all(op.path.startswith("/") for op in driven.log[0].patch)
+
+
+def test_replaying_a_nudged_labelled_run_repeats_every_entry() -> None:
+    graph = compile_text(
+        workflow_text(
+            [start(), step("work"), step("ship"), step("fix"), end()],
+            [
+                arrow("a1", "start", "work"),
+                arrow("a2", "work", "ship", label="ok"),
+                arrow("a3", "work", "fix", label="broken"),
+                arrow("a4", "ship", "end"),
+                arrow("a5", "fix", "end"),
+            ],
+        )
+    )[0]
+    ended = drive(graph, [RUN, TurnEnded(slot_id=SLOT, fact_key="turn:sess-1:1:r1")])
+    first_nudge = ended.log[-1].effects[0].effect_key
+    nudged = drive(
+        graph,
+        [
+            EffectCompleted(effect_key=first_nudge),
+            TurnEnded(slot_id=SLOT, fact_key="turn:sess-1:1:r2"),
+        ],
+        after=ended,
+    )
+    closing = drive(
+        graph,
+        [
+            EffectCompleted(effect_key=nudged.log[-1].effects[0].effect_key),
+            HandoffReceived(slot_id=SLOT, body="guess", label="nope"),
+            HandoffReceived(slot_id=SLOT, body="partial", label="broken"),
+            HandoffEvaluated(slot_id=SLOT, outcome="evidence_missing", missing=("tests",)),
+            HandoffReceived(slot_id=SLOT, body="done", label="ok"),
+            HandoffEvaluated(slot_id=SLOT, outcome="accepted"),
+        ],
+        after=nudged,
+        auto_ack=False,
+    )
+    close = closing.log[-1].effects[0].effect_key
+    finished = drive(
+        graph,
+        [
+            PauseRun(reason="user", detail="hold"),
+            EffectCompleted(effect_key=close, payload={"pending_input": False}),
+            ResumeRun(),
+            HandoffReceived(slot_id="ship||:0", body="shipped"),
+            HandoffEvaluated(slot_id="ship||:0", outcome="accepted"),
+        ],
+        after=closing,
+    )
+    assert finished.state.status == "completed"
+    assert [entry.rejection.code for entry in finished.log if entry.rejection] == [
+        "handoff.invalid"
+    ]
+
+    for _replay in range(2):
+        state = empty_state()
+        replayed = []
+        for entry in finished.log:
+            result = transition(graph, state, entry.input, NOW, CONFIG)
+            replayed.append(result.entry)
+            state = result.state
+        assert tuple(replayed) == finished.log
+        assert state == finished.state
+    assert fold(graph, finished.log, CONFIG) == fold(graph, finished.log, CONFIG)
 
 
 def test_duplicate_effect_completed_returns_receipt() -> None:

@@ -25,6 +25,12 @@ guardrails:
       'on':
       - tool_call
       type: function
+    step_roster:
+      function:
+        path: coral.omni.policies.guards.step_roster
+      'on':
+      - tool_call
+      type: function
 instructions: 'You are a Coral reviewer step. Read the workspace with your sys_os_*
   tools, check the work against your brief, and report findings with file and line
   evidence. You cannot change files: describe each fix in your report instead.'
@@ -37,7 +43,7 @@ os_env:
 params:
   coral:
     generated:
-      generator_version: 1
+      generator_version: 2
       node_id: review
       roster_index: 0
       seed:

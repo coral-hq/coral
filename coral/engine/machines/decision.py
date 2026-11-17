@@ -42,14 +42,11 @@ def open_decision(
 
 def choose_arrow(graph: CompiledGraph, state: RunState, command: ChooseArrow) -> ApplyResult:
     """Mark the open decision decided and open the chosen arrow's target."""
-    from coral.engine.control import note_skipped
     from coral.engine.machines.activation import (
-        arrow_by_label,
         choosable_labels,
         find_activation,
         find_node,
         replace_activation,
-        traverse_arrow,
     )
     from coral.engine.machines.run import refuse, refuse_unknown
 
@@ -57,6 +54,8 @@ def choose_arrow(graph: CompiledGraph, state: RunState, command: ChooseArrow) ->
     choice_key = f"choice:{owner_id}:{command.label}"
     if _has_receipt(state, choice_key):
         return ApplyResult(state=state, receipt_key=choice_key)
+    if _is_decided(state, owner_id):
+        return refuse(state, "decision_closed")
     node = find_node(graph, command.node_id)
     owner = find_activation(state, owner_id)
     decision = _open_decision(state, owner_id)
@@ -75,9 +74,6 @@ def choose_arrow(graph: CompiledGraph, state: RunState, command: ChooseArrow) ->
     labels = choosable_labels(graph, node.id)
     if command.label not in labels or not command.reason:
         return refuse(state, "tool.illegal", labels)
-    arrow = arrow_by_label(graph, node.id, command.label)
-    if arrow is None:
-        return refuse(state, "tool.illegal", labels)
     decided = tuple(
         item.model_copy(
             update={"status": "decided", "label": command.label, "reason": command.reason}
@@ -88,20 +84,15 @@ def choose_arrow(graph: CompiledGraph, state: RunState, command: ChooseArrow) ->
     )
     closed = replace_activation(state, owner_id, status="closed", outcome="completed")
     closed = closed.model_copy(update={"seq": state.seq + 1, "decisions": decided})
-    opened, effects, walked = traverse_arrow(
+    opened, effects, redirected = take_labelled_arrow(
         closed,
         graph,
-        arrow,
+        node_id=node.id,
+        owner_id=owner_id,
+        label=command.label,
         item_path=command.item_path,
         iteration_path=command.iteration_path,
     )
-    redirected = _receipt_redirected(opened, walked)
-    taken = {arrow.id}
-    if redirected:
-        limit_id = _at_limit_id(graph, arrow.id)
-        if limit_id is not None:
-            taken.add(limit_id)
-    opened = note_skipped(opened, graph, node.id, owner_id, frozenset(taken))
     payload: dict[str, JsonValue] = {
         "label": command.label,
         "reason": command.reason,
@@ -115,11 +106,55 @@ def choose_arrow(graph: CompiledGraph, state: RunState, command: ChooseArrow) ->
     return ApplyResult(state=opened, effects=effects, receipt_key=choice_key)
 
 
+def take_labelled_arrow(
+    state: RunState,
+    graph: CompiledGraph,
+    *,
+    node_id: str,
+    owner_id: str,
+    label: str,
+    item_path: tuple[str, ...],
+    iteration_path: tuple[str, ...],
+) -> tuple[RunState, tuple[Effect, ...], bool]:
+    """Walk the arrow ``label`` names and log the labelled arrows not taken.
+
+    ``label`` must be one of ``choosable_labels``. Returns whether a loop limit
+    redirected the walk onto its at-limit arrow.
+    """
+    from coral.engine.control import note_skipped
+    from coral.engine.machines.activation import arrow_by_label, traverse_arrow
+
+    arrow = arrow_by_label(graph, node_id, label)
+    if arrow is None:
+        return state, (), False
+    opened, effects, walked = traverse_arrow(
+        state,
+        graph,
+        arrow,
+        item_path=item_path,
+        iteration_path=iteration_path,
+    )
+    redirected = _receipt_redirected(opened, walked)
+    taken = {arrow.id}
+    if redirected:
+        limit_id = _at_limit_id(graph, arrow.id)
+        if limit_id is not None:
+            taken.add(limit_id)
+    opened = note_skipped(opened, graph, node_id, owner_id, frozenset(taken))
+    return opened, effects, redirected
+
+
 def _open_decision(state: RunState, owner_id: str) -> Decision | None:
     for item in state.decisions:
         if item.activation_id == owner_id and item.status != "decided":
             return item
     return None
+
+
+def _is_decided(state: RunState, owner_id: str) -> bool:
+    return any(
+        item.activation_id == owner_id and item.status == "decided" for item in state.decisions
+    )
 
 
 def _has_receipt(state: RunState, key: str) -> bool:

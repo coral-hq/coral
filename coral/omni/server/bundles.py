@@ -8,11 +8,18 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from coral.omni._upstream import _tar_gz_dir
-from coral.profiles.bundle_spec import DENY_VENDOR_ASK_HANDLER, ENGINE_PREFIX, Stance
+from coral.omni.policies.guards import is_engine_tool, is_tool_search
+from coral.profiles.bundle_spec import (
+    DENY_VENDOR_ASK_HANDLER,
+    ENGINE_PREFIX,
+    STANCE_GUARDS,
+    Stance,
+    stance_guard_handler,
+)
 from omnigent.errors import OmnigentError
 from omnigent.harness_aliases import is_claude_sdk_harness_name
 from omnigent.server.bundles import uploaded_agent_for, validate_agent_bundle
-from omnigent.spec.types import AgentSpec, FunctionPolicySpec, SharePolicy
+from omnigent.spec.types import AgentSpec, FunctionPolicySpec, Phase, SharePolicy
 from omnigent.stores.agent_store import AgentStore
 from omnigent.stores.artifact_store import ArtifactStore
 
@@ -41,18 +48,36 @@ def pack_bundle(config_yaml: bytes) -> bytes:
         return _tar_gz_dir(Path(tmpdir))
 
 
-def _function_policy_paths(spec: AgentSpec) -> set[str]:
+def _runs_on_every_tool_call(policy: FunctionPolicySpec) -> bool:
+    """Whether *policy* has the generator's forced shape: no label gate, tool filter or inputs."""
+    covers_tool_calls = policy.on is None or any(
+        selector.phase == Phase.TOOL_CALL and selector.tool_name is None for selector in policy.on
+    )
+    return (
+        covers_tool_calls
+        and policy.condition is None
+        and policy.config is None
+        and policy.function is not None
+        and policy.function.arguments is None
+    )
+
+
+def _enforced_handlers(spec: AgentSpec) -> set[str]:
+    """The handler paths of *spec*'s function policies that judge every tool call."""
     policies = spec.guardrails.policies if spec.guardrails else None
     return {
         policy.function.path
         for policy in policies or ()
-        if isinstance(policy, FunctionPolicySpec) and policy.function is not None
+        if isinstance(policy, FunctionPolicySpec)
+        and policy.function is not None
+        and _runs_on_every_tool_call(policy)
     }
 
 
 def _hygiene_violations(spec: AgentSpec, stance: Stance) -> list[str]:
     groups = spec.tool_groups
-    policy_paths = _function_policy_paths(spec)
+    enforced = _enforced_handlers(spec)
+    guard = STANCE_GUARDS[stance]
     rules = {
         f"name starts with {ENGINE_PREFIX}": (spec.name or "").startswith(ENGINE_PREFIX),
         "params.coral is set": "coral" in spec.params,
@@ -72,7 +97,19 @@ def _hygiene_violations(spec: AgentSpec, stance: Stance) -> list[str]:
                 groups.agent_discovery,
             )
         ),
-        "deny_vendor_ask is a policy": DENY_VENDOR_ASK_HANDLER in policy_paths,
+        "deny_vendor_ask is an unconditional tool-call policy": (
+            DENY_VENDOR_ASK_HANDLER in enforced
+        ),
+        f"{guard} is an unconditional tool-call policy": stance_guard_handler(stance) in enforced,
+        # Engine tools and ToolSearch are exempt by exact name, so no tool of the spec's own
+        # may share one.
+        "no local tool has an engine tool's name": not any(
+            is_engine_tool(tool.name) for tool in spec.local_tools
+        ),
+        "no local tool is named ToolSearch": not any(
+            is_tool_search(tool.name) for tool in spec.local_tools
+        ),
+        "no MCP server is named mcp": not any(server.name == "mcp" for server in spec.mcp_servers),
     }
     if spec.os_env is not None:
         sandbox = spec.os_env.sandbox
@@ -82,7 +119,17 @@ def _hygiene_violations(spec: AgentSpec, stance: Stance) -> list[str]:
         rules["reviewer sandbox has no write_paths"] = (
             sandbox is not None and sandbox.write_paths == []
         )
-        rules["reviewer has read_only_os"] = READ_ONLY_OS_HANDLER in policy_paths
+        rules["read_only_os is an unconditional tool-call policy"] = (
+            READ_ONLY_OS_HANDLER in enforced
+        )
+    if stance is Stance.ORCHESTRATOR:
+        # Beside its allowlist, an orchestrator carries nothing that can edit or add tools.
+        rules["orchestrator has no os_env"] = spec.os_env is None
+        rules["orchestrator has no mcp_servers"] = not spec.mcp_servers
+        rules["orchestrator has no local_tools"] = not spec.local_tools
+        rules["orchestrator has no bundled skills"] = not spec.skills
+        rules["orchestrator has no terminals"] = not spec.terminals
+        rules["orchestrator has no tools.builtins"] = not spec.tools.builtins
     return [rule for rule, holds in rules.items() if not holds]
 
 

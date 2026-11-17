@@ -1,4 +1,4 @@
-"""``deny_vendor_ask`` and its registration through the Coral server plugin."""
+"""``deny_vendor_ask`` and how the Coral server plugin registers Coral's policy handlers."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 
+from coral.omni.policies import guards, hygiene
 from coral.omni.policies.hygiene import deny_vendor_ask
 from omnigent.policies.registry import is_registered_handler, load_registry
 from omnigent.process_logging import DATA_DIR_ENV_VAR
@@ -32,16 +33,20 @@ def restore_registry() -> Iterator[None]:
 
 
 @pytest.mark.usefixtures("restore_registry")
-def test_plugin_registers_the_hygiene_policy_handler(
+def test_plugin_registers_every_coral_policy_handler(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
     services = cast(Any, SimpleNamespace(host_sharded=False, server_config={}))
     load_registry()
-    handler = "coral.omni.policies.hygiene.deny_vendor_ask"
-    assert not is_registered_handler(handler)
+    # Generated bundles name these handlers, and materialize accepts only registered ones.
+    handlers = [
+        str(entry["handler"]) for entry in (*hygiene.POLICY_REGISTRY, *guards.POLICY_REGISTRY)
+    ]
+    assert "coral.omni.policies.hygiene.deny_vendor_ask" in handlers
+    assert not any(is_registered_handler(handler) for handler in handlers)
 
     (registration,) = load_server_plugins(["coral.omni.server.plugin"], services)
     load_registry(extra_modules=list(registration.policy_modules))
 
-    assert is_registered_handler(handler)
+    assert all(is_registered_handler(handler) for handler in handlers), handlers

@@ -40,6 +40,11 @@ from omnigent.server.auth import (
 )
 from omnigent.server.bundles import bundle_location, validate_agent_bundle
 from omnigent.server.host_registry import HostRegistry
+from omnigent.server.mutation_guards import (  # CORAL(S53)
+    SESSION_AGENT_REPLACE,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
     can_mutate_session_agent as _can_mutate_session_agent,
@@ -323,6 +328,10 @@ def register_agent_routes(
                     f"Session not found: {session_id!r}",
                     code=ErrorCode.NOT_FOUND,
                 )
+        # CORAL(S53): an extension may refuse replacing the agent of a session it manages.
+        await check_mutation(
+            MutationAttempt(SESSION_AGENT_REPLACE, session_id=session_id, conversation=conv)
+        )
         if conv.agent_id is None:
             raise OmnigentError(
                 "Session has no agent binding",

@@ -22,6 +22,10 @@ GOLDEN = Path(__file__).with_name("golden") / "reviewer_demo-flow_review_m0.yaml
 REVIEW = StepRef(workflow_id="demo.flow", node_id="review", roster_index=0)
 
 
+def _tool_call_policy(path: str) -> dict[str, object]:
+    return {"type": "function", "on": ["tool_call"], "function": {"path": path}}
+
+
 def test_reviewer_bundle_matches_the_golden_file() -> None:
     built = build_step_bundle_yaml(REVIEW, Stance.REVIEWER, model="m", provider="p")
 
@@ -54,7 +58,7 @@ def test_builds_repeat_byte_for_byte_and_carry_no_run_identity(stance: Stance) -
     assert first == second
     generated = yaml.safe_load(first)["params"]["coral"]["generated"]
     assert generated == {
-        "generator_version": 1,
+        "generator_version": 2,
         "seed": {"name": stance.value, "sha256": load_seed(stance.value).sha256},
         "stance": stance.value,
         "workflow_id": "demo.flow",
@@ -64,6 +68,11 @@ def test_builds_repeat_byte_for_byte_and_carry_no_run_identity(stance: Stance) -
 
 
 def test_hygiene_overrides_a_seed_that_tries_to_loosen_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    request_only = {
+        "type": "function",
+        "on": ["request"],
+        "function": {"path": "omnigent.policies.builtins.safety.ask_on_os_tools"},
+    }
     loose = load_seed("implementer").model_copy(
         update={
             "config": {
@@ -72,6 +81,9 @@ def test_hygiene_overrides_a_seed_that_tries_to_loosen_it(monkeypatch: pytest.Mo
                 "tools": {"agents": ["helper"], "timeout": 30},
                 "skills": "all",
                 "tool_groups": {"browser": True},
+                "guardrails": {
+                    "policies": {"deny_vendor_ask": request_only, "step_roster": request_only},
+                },
             }
         }
     )
@@ -86,7 +98,61 @@ def test_hygiene_overrides_a_seed_that_tries_to_loosen_it(monkeypatch: pytest.Mo
             assert config["tools"] == {"agents": [], "timeout": 30}
         else:
             assert config[key] == forced
-    assert set(config["guardrails"]["policies"]) == {"deny_vendor_ask"}
+    assert config["guardrails"]["policies"] == {
+        "deny_vendor_ask": _tool_call_policy("coral.omni.policies.hygiene.deny_vendor_ask"),
+        "step_roster": _tool_call_policy("coral.omni.policies.guards.step_roster"),
+    }
+
+
+# The tool guard every bundle of a stance carries, besides deny_vendor_ask.
+_STANCE_GUARDS = {
+    Stance.ANCHOR: "deny_all_tools",
+    Stance.ORCHESTRATOR: "orchestrator_guard",
+    Stance.IMPLEMENTER: "step_roster",
+    Stance.REVIEWER: "step_roster",
+}
+
+
+@pytest.mark.parametrize("stance", list(Stance))
+def test_stance_guardrails_are_forced(stance: Stance) -> None:
+    guard = _STANCE_GUARDS[stance]
+
+    for config_yaml in (
+        build_seed_bundle_yaml(stance),
+        build_step_bundle_yaml(REVIEW, stance, model="m", provider="p"),
+    ):
+        policies = yaml.safe_load(config_yaml)["guardrails"]["policies"]
+        assert policies[guard] == _tool_call_policy(f"coral.omni.policies.guards.{guard}")
+        assert policies["deny_vendor_ask"] == _tool_call_policy(
+            "coral.omni.policies.hygiene.deny_vendor_ask"
+        )
+        # One guard per stance: no bundle carries another stance's guard.
+        assert set(policies) & set(_STANCE_GUARDS.values()) == {guard}
+
+
+@pytest.mark.parametrize("stance", list(Stance))
+def test_a_seed_cannot_gate_or_swap_its_stance_guard(
+    stance: Stance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard = _STANCE_GUARDS[stance]
+    seed = load_seed(stance.value)
+    # A label condition would keep the guard from firing; the parser ignores `on` here.
+    gated = {
+        "type": "function",
+        "condition": {"coral_guard": "on"},
+        "function": {"path": "coral.omni.policies.hygiene.deny_vendor_ask"},
+    }
+    loose = seed.model_copy(
+        update={"config": {**seed.config, "guardrails": {"policies": {guard: gated}}}}
+    )
+    monkeypatch.setattr("coral.profiles.bundle_spec.load_seed", lambda _name: loose)
+
+    for config_yaml in (
+        build_seed_bundle_yaml(stance),
+        build_step_bundle_yaml(REVIEW, stance, model=None, provider=None),
+    ):
+        policies = yaml.safe_load(config_yaml)["guardrails"]["policies"]
+        assert policies[guard] == _tool_call_policy(f"coral.omni.policies.guards.{guard}")
 
 
 def test_seed_bundles_are_named_for_their_stance() -> None:

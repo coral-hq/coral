@@ -422,6 +422,10 @@ coral = "coral.cli:main"
 [project.entry-points."omnigent.host_workspace_ops"]
 coral = "coral.omni.host.ops:workspace_op_handlers"
 
+# CORAL(S50): Coral's engine tools and the coral_runner:1 host token
+[project.entry-points."omnigent.tool_providers"]
+coral = "coral.omni.runner.tool_provider:tool_provider"
+
 [tool.uv]
 # Keep plain `uv sync` aligned with the published base package. Repository
 # workflows opt into the smallest dependency group they need.
