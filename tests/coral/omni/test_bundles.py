@@ -339,7 +339,7 @@ def test_a_required_policy_counts_only_when_it_judges_every_tool_call(
             "no local tool has an engine tool's name",
         ),
         (
-            # The run guard and the backstop let ToolSearch through on a stopped run.
+            # The run guard lets ToolSearch through on a stopped run.
             lambda spec: dataclasses.replace(
                 spec,
                 local_tools=[

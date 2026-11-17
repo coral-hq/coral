@@ -45,7 +45,7 @@ seams:
         NOTICE gains the append-only Coral addendum; MODIFICATIONS.md (one row
         per changed file, about 380 rows once S95 lands) and the verbatim OFL
         licence texts are new Coral files outside allowed_roots.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt:
       - web/public/licenses/geist-mono-OFL-1.1.txt
       - web/public/licenses/newsreader-OFL-1.1.txt
@@ -71,7 +71,7 @@ seams:
         The whole README is rewritten as Coral's: what Coral is, its status,
         running it from source, documentation, contributing, and the credit and
         attribution to Omnigent.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -135,7 +135,7 @@ seams:
         The omni entry's token data is rewritten in place (id and
         DEFAULT_PALETTE unchanged), its two generated CSS blocks follow, and
         the Omnigent-only palette pins in the tests are rebaselined.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt:
       - web/src/themePalettes.generated.css
     upstream_first: false
@@ -172,7 +172,7 @@ seams:
         BrandLogo's fallback drops both Otto imports and branches, its test
         swaps the two Otto mocks for the Coral mark, and the browser lane's
         working-indicator test trades the Otto blink check for the Coral pulse.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -340,7 +340,7 @@ seams:
         legal-file block, about 20 main.js literals moved to brand.js, and the
         About window's attribution, Licence and Notices buttons with their
         IPC handler and tests.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt:
       - web/electron/package.json
       - web/electron/dmg/coral-background.tiff
@@ -393,7 +393,7 @@ seams:
         Every deep-link fixture in the Electron, web, Python and iOS tests moves
         from omnigent:// to coral://, and conversation_browser.py's docstrings
         follow its coral:// link (11 lines).
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt:
       - web/electron/package.json
     upstream_first: false
@@ -477,7 +477,7 @@ seams:
       reason: >-
         The Coral Icon Composer bundle's icon.json mirrors the upstream
         bundle's schema in full.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt:
       - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/Contents.json
       - web/ios/Omnigent/Assets.xcassets/CoralLogo.imageset/coral-logo.png
@@ -562,7 +562,7 @@ seams:
         The Electron setup page takes Coral's tokens, washes, brand row and
         accent rail (UI§7), and the onboarding tests' button and heading
         queries follow the Coral copy.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -878,7 +878,7 @@ seams:
       reason: >-
         Mechanical rewrite by a committed script that every upstream sync
         re-applies; the size does not add merge cost.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt:
       - openapi.json
     upstream_first: false
@@ -1024,7 +1024,7 @@ seams:
         five guarded frame types. tests/host/test_connect.py (97): the
         cancellation matrix and the host reader check. tests/test_workspace_fs.py
         (71): the start_registry matrix and the FIFO refusal test.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
@@ -1078,7 +1078,7 @@ seams:
         the unlabelled one of two blocked children wakes the anchor, checked
         after the labelled handlers returned cleanly. Two helpers and one
         import are included.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
@@ -1144,7 +1144,7 @@ seams:
         no registered reply at once, and the relay test bounds its wait; this
         is the only layer that exercises the real tunnel relay of a create
         result.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: true
     upstream_candidate: true
@@ -1314,7 +1314,7 @@ seams:
         lines, including the host-side sandbox refusal), and its test file
         carries the refusal matrix with the non-Coral regression (about 160
         lines).
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -1412,7 +1412,7 @@ seams:
         to `can_use_tool` and the two corrected comments (about 110 changed
         lines), and its test file carries the hook decision matrix (about 160
         lines).
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
@@ -1449,7 +1449,7 @@ seams:
         tests/host/test_connect.py carries the platform and binary matrix for
         `host_capabilities()`, a hello-frame test and an unknown-token decode
         test (about 70 lines).
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
@@ -1491,7 +1491,7 @@ seams:
         web/src/hooks/useAvailableAgents.test.tsx carries the two hook
         scenarios for the catalog, the caller's agents, session discovery and
         Custom agents (about 85 lines).
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
@@ -1626,7 +1626,7 @@ seams:
         tests/server/routes/test_disconnect_outcome_recovery.py (54): the probe
         cases, and the sweep failure with a known, unknown or already-reported
         turn.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -1686,7 +1686,7 @@ seams:
         tests/server/routes/test_sessions_runner_relay.py (81 of the file's
         155): relayed outcomes reach observers but never the stream payload,
         and an id without a known outcome is dropped.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -1716,7 +1716,7 @@ seams:
         gains SessionEventDispatch. The new test file (300) is shared with S42;
         its S41 part is the registration check with and without managed
         sandboxes.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -1768,7 +1768,7 @@ seams:
         closed check through the real handler; the context's own user, allowed
         and refused; empty headers; the refused event types and command-shaped
         briefs; the managed startup queue skipped; the typed relaunch refusal.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -1878,7 +1878,7 @@ seams:
         immediate failure on deregister and replace, the timeout plus grace,
         and through the real host tunnel the six relayed fields, bounded host
         text and stray results.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -1935,7 +1935,7 @@ seams:
         load and the fresh-interpreter check that importing the host loads
         nothing. pyproject.toml (4) declares Coral's contribution and is
         within budget.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -2032,7 +2032,7 @@ seams:
         provider-token hello test. frames.py (12), pyproject.toml (4) and
         tests/server/integration/test_session_host_launch.py (14) are within
         budget.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -2072,7 +2072,7 @@ seams:
         builds) and the framework-name test (every runner-dispatched builtin
         and registry name refused for a spec without os_env, timers or the
         browser group). omnigent/tools/manager.py (39) is within budget.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -2213,7 +2213,7 @@ seams:
         the `mcp` server alias, a conflict), and exports the echo spec and
         provider the route tests reuse. orchestration.py (36) is within
         budget.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -2248,7 +2248,7 @@ seams:
         or on a stable id, allow-listed with and without a runner, not
         allow-listed, a blank allow-list entry). omnigent/server/mcp_identity.py
         (22) is within budget.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -2345,7 +2345,7 @@ seams:
         guarded spec collection, the failure log and the deny-tool-calls
         factory with docstrings. omnigent/runtime/policies/builder.py (11) is
         within budget.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -2412,7 +2412,7 @@ seams:
         routes_core.py (3) and test_sessions_fork.py (28) are within budget.
         helpers.py had 32 changed lines from S46; with S53's skeleton split it
         totals 42, which S53's budget exception covers.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
@@ -2548,7 +2548,7 @@ seams:
         builtin_agents.py 13,
         routes_elicitations.py 12, routes_permissions.py 12, hosts.py 11,
         scheduled_tasks.py 9, session_mcp_servers.py 9, routes_agent.py 9.
-      approver: pending
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

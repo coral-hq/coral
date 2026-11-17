@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -87,11 +86,7 @@ def _missing_engine_input(app: Any, services: ServerServices) -> str | None:
 
 
 def _wire_guards(
-    *,
-    run_store: RunStore,
-    bindings: FreshBindingLookup,
-    session_cap_usd: float,
-    stack: AsyncExitStack,
+    *, run_store: RunStore, bindings: FreshBindingLookup, stack: AsyncExitStack
 ) -> None:
     """
     Register what protects bound sessions, whether or not the session engine is wired.
@@ -100,19 +95,16 @@ def _wire_guards(
     port: nothing while the catalog is empty, and once it lists a tool each
     call answers that the engine is not running. They read bindings fresh.
     Coral's required-policy provider reads them through a cache of found rows
-    and reads run status through a cache each run-store commit clears. Its cost
-    backstop pauses a run through ``run_store`` once a session spends
-    ``session_cap_usd``. The S53 mutation guard reads the same cache of found
-    rows and refuses clients' changes to bound sessions and engine agents.
-    Every registration's undo goes on ``stack``.
+    and reads run status through a cache each run-store commit clears. The S53
+    mutation guard reads the same cache of found rows and refuses clients'
+    changes to bound sessions and engine agents. Every registration's undo goes
+    on ``stack``.
     """
     from coral.omni.policies.bindings_cache import CachedBindingLookup
-    from coral.omni.policies.cost_backstop import install_budget_pauser
     from coral.omni.policies.provider import CoralPolicyProvider
     from coral.omni.policies.state import RunStatusCache
     from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
     from coral.omni.server.tool_bridge import register_engine_tools
-    from coral.recovery.pause import pause_run_for_session_cap
     from coral.tools.catalog import CATALOG
     from omnigent.runtime.policies.required_providers import register_required_policy_provider
     from omnigent.server.mutation_guards import register_mutation_guard
@@ -120,12 +112,9 @@ def _wire_guards(
     register_engine_tools(catalog=CATALOG, port=None, bindings=bindings, stack=stack)
     statuses = RunStatusCache(run_store)
     stack.callback(run_store.register_post_commit(statuses.invalidate))
-    stack.callback(install_budget_pauser(functools.partial(pause_run_for_session_cap, run_store)))
     # One cache of found bindings for every guard that classifies sessions.
     found_bindings = CachedBindingLookup(bindings)
-    provider = CoralPolicyProvider(
-        bindings=found_bindings, statuses=statuses, session_cap_usd=session_cap_usd
-    )
+    provider = CoralPolicyProvider(bindings=found_bindings, statuses=statuses)
     stack.callback(register_required_policy_provider(REQUIRED_POLICY_PROVIDER, provider))
     stack.callback(register_mutation_guard(MUTATION_GUARD, CoralMutationGuard(found_bindings)))
 
@@ -263,14 +252,10 @@ async def coral_lifespan(
     share one binding store. Nothing enqueues engine effects yet. Exit stops the
     supervisor first, so no item is claimed while its executor is missing (an
     item in flight keeps its lease and is reclaimed), then unregisters in
-    reverse order, also after a failed start. An invalid per-session cost cap
-    aborts startup before anything runs.
+    reverse order, also after a failed start.
     """
-    from coral.omni.policies.cost_backstop import resolve_session_cap_usd
-
     if services.host_sharded:
         raise RuntimeError("Coral server plugin does not support host_sharded=True")
-    session_cap_usd = resolve_session_cap_usd(getattr(services, "server_config", None))
 
     conv_store = getattr(services, "conversation_store", None)
     storage_location: str | None = getattr(conv_store, "storage_location", None)
@@ -292,12 +277,7 @@ async def coral_lifespan(
                 app.state.coral_queue_store = queue_store
                 app.state.coral_worker_supervisor = supervisor
             bindings = SqlAlchemySessionBindingStore(storage_location)
-            _wire_guards(
-                run_store=run_store,
-                bindings=bindings,
-                session_cap_usd=session_cap_usd,
-                stack=stack,
-            )
+            _wire_guards(run_store=run_store, bindings=bindings, stack=stack)
             missing = _missing_engine_input(app, services)
             if missing is None:
                 _wire_session_engine(

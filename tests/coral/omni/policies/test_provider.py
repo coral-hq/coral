@@ -65,9 +65,8 @@ async def test_orchestrator_binding_gets_the_allowlist_from_the_binding(
         assert verdicts[name][0] == PolicyAction.ALLOW, name
     for name in denied:
         assert verdicts[name] == (PolicyAction.DENY, ["__coral_orchestrator_guard"]), name
-    assert coral_policies.names(coral_spec(), orchestrator)[:3] == [
+    assert coral_policies.names(coral_spec(), orchestrator)[:2] == [
         "__coral_run_guard",
-        "__coral_cost_backstop",
         "__coral_orchestrator_guard",
     ]
 
@@ -83,7 +82,6 @@ async def test_a_step_binding_gets_the_run_guard_then_the_roster(
     baseline = coral_policies.names(coral_spec(), plain)
     assert coral_policies.names(coral_spec(), step) == [
         "__coral_run_guard",
-        "__coral_cost_backstop",
         "__coral_step_roster",
         *baseline,
     ]
@@ -208,11 +206,7 @@ async def test_a_run_status_error_keeps_the_role_guard_and_denies_tool_calls(
     monkeypatch.setattr(coral_policies.run_store, "get_run", unavailable)
 
     names = coral_policies.names(coral_spec(), orchestrator)
-    assert names[:3] == [
-        "__coral_state_unavailable",
-        "__coral_cost_backstop",
-        "__coral_orchestrator_guard",
-    ]
+    assert names[:2] == ["__coral_state_unavailable", "__coral_orchestrator_guard"]
     choice = await coral_policies.call(coral_spec(), orchestrator, "coral_choose_arrow")
     assert choice.deciding_policies == ["__coral_state_unavailable"]
     assert (choice.reason or "").startswith("[run.state_unavailable]")

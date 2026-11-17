@@ -21,7 +21,7 @@ _PLAIN_NAME = re.compile(r"[A-Za-z0-9_]{1,32}")
 def run_stop(snapshot: RunSnapshot) -> RunStop | None:
     """Why the run takes no tool call, by its store row or its engine state; ``None`` if live.
 
-    Drift and budget pauses change only the store row, so both are read.
+    Drift pauses change only the store row, so both are read.
     """
     stored, engine = snapshot.run.status, snapshot.state.status
     if stored == RunStatus.CANCELLED or engine == "cancelled":
@@ -34,7 +34,7 @@ def run_stop(snapshot: RunSnapshot) -> RunStop | None:
 
 
 def pause_reason(snapshot: RunSnapshot) -> str | None:
-    """The store's pause reason (drift and budget pauses live only there), else the engine's."""
+    """The store's pause reason (drift pauses live only there), else the engine's."""
     code = snapshot.run.pause_reason
     if snapshot.run.status == RunStatus.PAUSED and code is not None:
         try:
