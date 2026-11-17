@@ -84,6 +84,8 @@ CHOOSE_ARROW = EngineToolDecl(
 )
 
 ENGINE_TOOLS: tuple[EngineToolDecl, ...] = (SUBMIT_HANDOFF, CHOOSE_ARROW)
+# Every engine tool's exact name, for policy exemptions that must not match look-alikes.
+ENGINE_TOOL_NAMES: frozenset[str] = frozenset(decl.name for decl in ENGINE_TOOLS)
 # What runners advertise: nothing until the engine can answer the tools.
 CATALOG: tuple[EngineToolDecl, ...] = ()
 

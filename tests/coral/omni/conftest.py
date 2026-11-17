@@ -8,12 +8,12 @@ import pytest
 
 from omnigent.policies.registry import load_registry
 
-CORAL_POLICY_MODULE = "coral.omni.policies.hygiene"
+CORAL_POLICY_MODULES = ("coral.omni.policies.hygiene", "coral.omni.policies.guards")
 
 
 @pytest.fixture
 def coral_policy_registry() -> Iterator[None]:
     """Load the policy registry as the Coral server plugin does, then restore the built-ins."""
-    load_registry(extra_modules=[CORAL_POLICY_MODULE])
+    load_registry(extra_modules=list(CORAL_POLICY_MODULES))
     yield
     load_registry()

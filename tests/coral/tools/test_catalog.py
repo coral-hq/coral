@@ -19,6 +19,7 @@ from coral.profiles.bundle_spec import (
 from coral.tools.catalog import (
     CATALOG,
     CHOOSE_ARROW,
+    ENGINE_TOOL_NAMES,
     ENGINE_TOOLS,
     SUBMIT_HANDOFF,
     orchestrator_tool_names,
@@ -61,8 +62,10 @@ def test_production_catalog_is_empty() -> None:
         (SUBMIT_HANDOFF,),
     ]
     assert [tools_for_stance(CATALOG, stance.value) for stance in Stance] == [()] * len(Stance)
-    # The orchestrator allowlist does not depend on what production advertises.
+    # The orchestrator allowlist and the exact-name exemptions do not depend on
+    # what production advertises.
     assert orchestrator_tool_names() == frozenset({"coral_choose_arrow"})
+    assert sorted(ENGINE_TOOL_NAMES) == ["coral_choose_arrow", "coral_submit_handoff"]
 
 
 def test_a_schema_is_a_fresh_openai_tool_schema() -> None:

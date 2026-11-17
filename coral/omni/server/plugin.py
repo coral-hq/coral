@@ -295,5 +295,5 @@ def register(services: ServerServices) -> ServerPluginRegistration:
     return ServerPluginRegistration(
         routers=((info_router, "", ["coral"]), (workflows_router, "/v1/coral", ["coral"])),
         lifespan_hooks=(coral_lifespan, workflow_engine_lifespan),
-        policy_modules=("coral.omni.policies.hygiene",),
+        policy_modules=("coral.omni.policies.hygiene", "coral.omni.policies.guards"),
     )
