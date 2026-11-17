@@ -111,6 +111,12 @@ def test_list_for_session_returns_exactly_that_sessions_ids(coral_db_uri: str) -
     assert store.list_for_session(WORKSPACE, SESSION, run_id=RUN) == frozenset(
         {BRIEF_ID, STEER_ID}
     )
+    # The queued-input check reads each id with the checksum of the text sent under it.
+    assert store.checksums_for_session(WORKSPACE, SESSION, run_id=RUN) == {
+        BRIEF_ID: content_checksum("Implement the plan."),
+        STEER_ID: content_checksum("Implement the plan."),
+    }
+    assert store.checksums_for_session(WORKSPACE, SESSION, run_id=OTHER_RUN) == {}
     steer = store.lookup(WORKSPACE, STEER_ID, run_id=RUN)
     assert steer is not None
     assert steer.kind is StableIdKind.STEER

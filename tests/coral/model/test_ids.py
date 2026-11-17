@@ -12,6 +12,7 @@ from coral.model.ids import (
     effect_message_id,
     effect_op_key,
     effect_session_id,
+    fallback_message_id,
 )
 from coral.workspace.ops import validate_op_key, validate_record_id
 
@@ -70,3 +71,12 @@ def test_an_op_key_qualifier_names_another_op_of_the_same_effect() -> None:
 def test_the_anchor_id_differs_from_a_step_session_of_the_same_text() -> None:
     run_id = "b" * 32
     assert anchor_session_id(WORKSPACE, run_id) != effect_session_id(WORKSPACE, run_id)
+
+
+def test_a_messages_fallback_id_is_its_own_stored_id() -> None:
+    stable_id = effect_message_id(WORKSPACE, EFFECT_KEY)
+    fallback = fallback_message_id(stable_id)
+
+    assert fallback == "d0cfd6e2f827ac94b422e65b23b22a4b"
+    assert fallback == derived_id("coral-message-fallback", stable_id)
+    assert fallback != stable_id

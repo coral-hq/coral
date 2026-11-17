@@ -1,28 +1,48 @@
-"""K21 executor for ``create_session``: the run's anchor and its step sessions.
+"""K21 executors for a run's sessions: create, send input, close and cancel.
 
-The executor acts as the stored run's owner and account registration, takes a
-step's host and run worktree from the run spec (never from the payload), and
-asks the session facade inside the run's own scopes, which makes a
-redelivered effect reuse one session. Drift the facade finds (the anchor
-archived, deleted or bound, or this step deleted) pauses the run, and the
-effect fails permanently as ``drift.<cause>``. The result holds only what a
-repeat reproduces; whether this try created the session is logged instead.
-A paused run holds the effect (retryable ``run.paused``).
+Each executor acts as the stored run's owner and account registration, takes
+hosts and worktrees from the run spec (never from the payload), and runs
+inside the run's own scopes. Results hold only what a repeat reproduces;
+whether a try created a session, sent a message or forced a stop is logged.
+
+``create_session`` asks the session facade, so a redelivered effect reuses one
+session. Drift the facade finds (the anchor archived, deleted or bound, or
+this step deleted) pauses the run, and the effect fails permanently as
+``drift.<cause>``. ``send_input`` records the message's stable id before
+sending, so a redelivery never sends twice; the dispatch's drift hook pauses a
+drifted run the same way. ``close_slot`` and ``cancel_sessions`` act only on a
+step session this run bound; a send or close waits (retryable
+``session.not_ready``) until the session's row exists. A close commits only
+for its slot's current writer session, and a writer's close must set the
+closed label.
+
+A paused run holds ``create_session`` and ``send_input`` (retryable
+``run.paused``); a close still finishes an accepted handoff, and a cancel is
+how a paused run ends.
 """
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import re
 from collections.abc import Mapping
 from typing import Any, get_args
 
+from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole
+from coral.model.ids import derived_id, effect_message_id, effect_op_key
 from coral.omni.protocols import (
+    MAX_ENGINE_MESSAGE_BYTES,
+    CoralSessionError,
+    HostWorkspaceChannels,
     RunScopeRunner,
     SessionCreateRequest,
+    SessionDispatch,
+    SessionEdgeWatcher,
     SessionFacade,
     SlotRoleName,
+    engine_message_text,
 )
 from coral.queue.executors import EffectExecutor, EffectOutcome, ExecutionContext
 from coral.queue.run_effects import (
@@ -32,13 +52,40 @@ from coral.queue.run_effects import (
     refuse_paused_run,
     required_text,
     run_effect,
+    session_id_field,
 )
 from coral.recovery.drift import DriftDetected, DriftPauser
+from coral.slots.close import (
+    DEFAULT_BOUNDS,
+    CloseBounds,
+    CommitSpec,
+    ConfirmedStops,
+    cancel_session,
+    close_session,
+)
 from coral.stores.protocols import RunState, RunStore
+from coral.stores.session_bindings import SessionBinding, SessionBindings
+from coral.stores.stable_ids import StableIdConflict, StableIds
+from coral.stores.workspace_op_intents import WorkspaceOpIntents
+from coral.workspace.executors import (
+    WRITER_SLOT_ROLES,
+    attempt_id_field,
+    commit_id_field,
+    commit_message_field,
+    diff_stat_result,
+    run_target,
+    run_workspace_effect,
+    workspace_for,
+    writer_refusal,
+)
 
 _logger = logging.getLogger(__name__)
 
 CREATE_SESSION = "create_session"
+SEND_INPUT = "send_input"
+CLOSE_SLOT = "close_slot"
+CANCEL_SESSIONS = "cancel_sessions"
+MESSAGE_KINDS: frozenset[str] = frozenset({"brief", "steer", "nudge"})
 SLOT_ROLE_NAMES: frozenset[str] = frozenset(get_args(SlotRoleName))
 # The bindings table keeps 512 characters of an engine slot id.
 MAX_ENGINE_SLOT_ID_CHARS = 512
@@ -179,4 +226,346 @@ def _generation(payload: Mapping[str, Any]) -> int:
     return value
 
 
-__all__ = ["CREATE_SESSION", "create_session_executor"]
+# ── send_input, close_slot, cancel_sessions ─────────────────────────────────
+
+
+def send_input_executor(
+    dispatch: SessionDispatch,
+    stable_ids: StableIds,
+    bindings: SessionBindings,
+    run_store: RunStore,
+    scope_runner: RunScopeRunner,
+) -> EffectExecutor:
+    """
+    The ``send_input`` executor.
+
+    Payload: ``effect_key``, ``session_id``, ``text``, ``kind`` (``brief``,
+    ``steer`` or ``nudge``). Result: ``{session_id, stable_id}``.
+    """
+
+    async def execute(ctx: ExecutionContext) -> EffectOutcome:
+        body = functools.partial(
+            _send, ctx, dispatch=dispatch, stable_ids=stable_ids, bindings=bindings
+        )
+        return await run_effect(ctx, run_store, scope_runner, _send_payload, body)
+
+    return execute
+
+
+def close_slot_executor(
+    dispatch: SessionDispatch,
+    edges: SessionEdgeWatcher,
+    channels: HostWorkspaceChannels,
+    intents: WorkspaceOpIntents,
+    stable_ids: StableIds,
+    bindings: SessionBindings,
+    run_store: RunStore,
+    scope_runner: RunScopeRunner,
+    *,
+    bounds: CloseBounds = DEFAULT_BOUNDS,
+    stops: ConfirmedStops | None = None,
+) -> EffectExecutor:
+    """
+    The ``close_slot`` executor (:func:`coral.slots.close.close_session`).
+
+    Payload: ``effect_key``, ``session_id``; optional ``interrupt`` and
+    ``closed_label`` (default ``true``), ``message``, ``attempt_id`` and
+    ``diff_from``. Result: ``{pending_input, queued_input, post_accept_edits,
+    commit, empty, diff_stat}``; the last three are ``null`` for a reader.
+
+    :param stops: Records each confirmed stop for ``workspace.commit``'s turn-end check.
+    """
+
+    async def execute(ctx: ExecutionContext) -> EffectOutcome:
+        body = functools.partial(
+            _close,
+            ctx,
+            dispatch=dispatch,
+            edges=edges,
+            channels=channels,
+            intents=intents,
+            stable_ids=stable_ids,
+            bindings=bindings,
+            bounds=bounds,
+            stops=stops,
+        )
+        return await run_workspace_effect(ctx, run_store, scope_runner, _close_payload, body)
+
+    return execute
+
+
+def cancel_sessions_executor(
+    dispatch: SessionDispatch,
+    edges: SessionEdgeWatcher,
+    bindings: SessionBindings,
+    run_store: RunStore,
+    scope_runner: RunScopeRunner,
+    *,
+    bounds: CloseBounds = DEFAULT_BOUNDS,
+) -> EffectExecutor:
+    """
+    The ``cancel_sessions`` executor (:func:`coral.slots.close.cancel_session`).
+
+    Payload: ``effect_key``, ``session_id`` (``null`` for a slot with no session
+    yet), optional ``closed_label`` (default ``true``). Result: ``{session_id}``.
+    A session already deleted counts as cancelled.
+    """
+
+    async def execute(ctx: ExecutionContext) -> EffectOutcome:
+        body = functools.partial(
+            _cancel, ctx, dispatch=dispatch, edges=edges, bindings=bindings, bounds=bounds
+        )
+        return await run_effect(ctx, run_store, scope_runner, _cancel_payload, body)
+
+    return execute
+
+
+async def _send(
+    ctx: ExecutionContext,
+    state: RunState,
+    payload: Mapping[str, Any],
+    *,
+    dispatch: SessionDispatch,
+    stable_ids: StableIds,
+    bindings: SessionBindings,
+) -> dict[str, Any]:
+    refuse_paused_run(state)
+    session_id = payload["session_id"]
+    binding = await _bound_step(bindings, state, session_id, created=True)
+    stable_id = effect_message_id(ctx.workspace_id, payload["effect_key"])
+    try:
+        # Recorded before the send, so a crash after it still names the engine's item.
+        await asyncio.to_thread(
+            stable_ids.record_send,
+            ctx.workspace_id,
+            stable_id=stable_id,
+            run_id=state.run_id,
+            session_id=session_id,
+            effect_key=payload["effect_key"],
+            kind=payload["kind"],
+            generation=binding.session_generation,
+            content=engine_message_text(payload["text"]),
+        )
+    except StableIdConflict as exc:
+        raise EffectRefused(
+            "effect.identity_mismatch",
+            f"engine message {stable_id} is recorded for another send of this effect",
+        ) from exc
+    await ctx.ensure_lease()
+    receipt = await dispatch.send_message(
+        workspace_id=ctx.workspace_id,
+        run_id=state.run_id,
+        session_id=session_id,
+        user_id=state.run.user_id,
+        stable_id=stable_id,
+        text=payload["text"],
+    )
+    _logger.info(
+        "send_input for run %s: message %s %s to session %s",
+        state.run_id,
+        receipt.item_id or receipt.pending_id,
+        receipt.delivery,
+        session_id,
+    )
+    return {"session_id": session_id, "stable_id": stable_id}
+
+
+async def _close(
+    ctx: ExecutionContext,
+    state: RunState,
+    payload: Mapping[str, Any],
+    *,
+    dispatch: SessionDispatch,
+    edges: SessionEdgeWatcher,
+    channels: HostWorkspaceChannels,
+    intents: WorkspaceOpIntents,
+    stable_ids: StableIds,
+    bindings: SessionBindings,
+    bounds: CloseBounds,
+    stops: ConfirmedStops | None,
+) -> dict[str, Any]:
+    session_id = payload["session_id"]
+    binding = await _bound_step(bindings, state, session_id, created=True)
+    commit = await _commit_spec(ctx, state, payload, binding, channels, intents)
+    if commit is not None and not payload["closed_label"]:
+        # Without the label a user message could relaunch the writer before its commit.
+        raise invalid_payload("a writer's close must set closed_label")
+    engine_messages = await asyncio.to_thread(
+        stable_ids.checksums_for_session, ctx.workspace_id, session_id, run_id=state.run_id
+    )
+    outcome = await close_session(
+        workspace_id=ctx.workspace_id,
+        session_id=session_id,
+        user_id=state.run.user_id,
+        slot_id=binding.slot_id or "",
+        interrupt=payload["interrupt"],
+        closed_label=payload["closed_label"],
+        commit=commit,
+        engine_messages=engine_messages,
+        dispatch=dispatch,
+        edges=edges,
+        ensure_lease=ctx.ensure_lease,
+        bounds=bounds,
+        stops=stops,
+    )
+    if outcome.forced_stop:
+        _logger.info(
+            "close_slot for run %s: the stop ended session %s's turn", state.run_id, session_id
+        )
+    return {
+        "pending_input": outcome.pending_input,
+        "queued_input": outcome.queued_input,
+        "post_accept_edits": outcome.post_accept_edits,
+        "commit": outcome.commit,
+        "empty": outcome.empty,
+        "diff_stat": None if outcome.diff_stat is None else diff_stat_result(outcome.diff_stat),
+    }
+
+
+async def _commit_spec(
+    ctx: ExecutionContext,
+    state: RunState,
+    payload: Mapping[str, Any],
+    binding: SessionBinding,
+    channels: HostWorkspaceChannels,
+    intents: WorkspaceOpIntents,
+) -> CommitSpec | None:
+    """The close's commit, only for its slot's current writer session; readers never commit."""
+    if binding.slot_role not in WRITER_SLOT_ROLES:
+        return None
+    target = run_target(state)
+    reason = writer_refusal(binding, state, target, binding.session_id)
+    if reason is not None:
+        _logger.info(
+            "close_slot for run %s: session %s %s; closing without a commit",
+            state.run_id,
+            binding.session_id,
+            reason,
+        )
+        return None
+    slot_id = binding.slot_id or ""
+    return CommitSpec(
+        workspace=await workspace_for(channels, state, target),
+        ref=target.ref,
+        intents=intents,
+        workspace_id=ctx.workspace_id,
+        run_id=state.run_id,
+        op_key=effect_op_key(ctx.workspace_id, payload["effect_key"], "commit"),
+        message=payload["message"] or f"Coral: {slot_id}",
+        attempt_id=payload["attempt_id"]
+        or derived_id("coral-attempt", state.run_id, slot_id, str(binding.session_generation)),
+        diff_from=payload["diff_from"],
+    )
+
+
+async def _cancel(
+    ctx: ExecutionContext,
+    state: RunState,
+    payload: Mapping[str, Any],
+    *,
+    dispatch: SessionDispatch,
+    edges: SessionEdgeWatcher,
+    bindings: SessionBindings,
+    bounds: CloseBounds,
+) -> dict[str, Any]:
+    session_id = payload["session_id"]
+    if session_id is None:
+        return {"session_id": None}
+    binding = await _bound_step(bindings, state, session_id)
+    try:
+        await cancel_session(
+            workspace_id=ctx.workspace_id,
+            session_id=session_id,
+            user_id=state.run.user_id,
+            slot_id=binding.slot_id or "",
+            closed_label=payload["closed_label"],
+            dispatch=dispatch,
+            edges=edges,
+            ensure_lease=ctx.ensure_lease,
+            bounds=bounds,
+        )
+    except CoralSessionError as exc:
+        if exc.code != "session.deleted":
+            raise
+        _logger.info("cancel_sessions for run %s: session %s is gone", state.run_id, session_id)
+    return {"session_id": session_id}
+
+
+async def _bound_step(
+    bindings: SessionBindings, state: RunState, session_id: str, *, created: bool = False
+) -> SessionBinding:
+    """
+    The binding of a step session this run created.
+
+    :param created: Also require the session's row: its create got past ``reserved``.
+    :raises EffectRefused: Permanent ``session.identity_conflict`` for any other
+        session; retryable ``session.not_ready`` while its create is unfinished.
+    """
+    binding = await asyncio.to_thread(
+        bindings.get, state.workspace_id, session_id, run_id=state.run_id
+    )
+    if binding is None or binding.role is not SessionBindingRole.STEP:
+        raise EffectRefused(
+            "session.identity_conflict",
+            f"session {session_id} is not a step session of run {state.run_id}",
+        )
+    if created and binding.progress < SessionBindingProgress.ROW_CREATED:
+        raise EffectRefused(
+            "session.not_ready",
+            f"step session {session_id} is still being created",
+            retryable=True,
+        )
+    return binding
+
+
+def _send_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    kind = payload.get("kind")
+    if kind not in MESSAGE_KINDS:
+        raise invalid_payload(f"kind must be one of {', '.join(sorted(MESSAGE_KINDS))}")
+    text = required_text(payload, "text")
+    try:
+        size = len(engine_message_text(text).encode())
+    except UnicodeEncodeError:
+        raise invalid_payload("text must be valid Unicode text") from None
+    if "\0" in text or size > MAX_ENGINE_MESSAGE_BYTES:
+        raise invalid_payload(
+            f"text must be at most {MAX_ENGINE_MESSAGE_BYTES} bytes as sent, without NUL"
+        )
+    return {"session_id": session_id_field(payload), "text": text, "kind": kind}
+
+
+def _close_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    return {
+        "session_id": session_id_field(payload),
+        "interrupt": _flag(payload, "interrupt"),
+        "closed_label": _flag(payload, "closed_label"),
+        "message": commit_message_field(payload, required=False),
+        "attempt_id": attempt_id_field(payload, required=False),
+        "diff_from": commit_id_field(payload, "diff_from"),
+    }
+
+
+def _cancel_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    session_id = None if payload.get("session_id") is None else session_id_field(payload)
+    return {"session_id": session_id, "closed_label": _flag(payload, "closed_label")}
+
+
+def _flag(payload: Mapping[str, Any], name: str) -> bool:
+    """A boolean field that defaults to ``true``, as the engine emits it."""
+    value = payload.get(name, True)
+    if not isinstance(value, bool):
+        raise invalid_payload(f"{name} must be true or false")
+    return value
+
+
+__all__ = [
+    "CANCEL_SESSIONS",
+    "CLOSE_SLOT",
+    "CREATE_SESSION",
+    "MESSAGE_KINDS",
+    "SEND_INPUT",
+    "cancel_sessions_executor",
+    "close_slot_executor",
+    "create_session_executor",
+    "send_input_executor",
+]

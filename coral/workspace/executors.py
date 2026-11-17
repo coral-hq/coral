@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -63,9 +63,12 @@ from coral.stores.session_bindings import SessionBinding, SessionBindings
 from coral.stores.workspace_op_intents import OpIntentConflict, WorkspaceOpIntents
 from coral.workspace.host_backend import ALWAYS_PERMANENT_CODES, HostWorkspaceOps
 from coral.workspace.ops import (
+    CommitResult,
+    DiffStat,
     HostChannel,
     StepSession,
     WorkspaceOpError,
+    WorkspaceOps,
     WorkspaceRef,
     check_op_host,
     validate_commit_id,
@@ -105,7 +108,7 @@ class TurnEndCheck(Protocol):
 
 
 @dataclass(frozen=True)
-class _RunTarget:
+class RunTarget:
     """The run worktree an op acts on, from the run's spec."""
 
     host_id: str
@@ -177,7 +180,7 @@ def commit_executor(
             turn_ended=turn_ended,
             turn_end_timeout_s=turn_end_timeout_s,
         )
-        return await _run_effect(ctx, run_store, scope_runner, _commit_payload, body)
+        return await run_workspace_effect(ctx, run_store, scope_runner, _commit_payload, body)
 
     return execute
 
@@ -189,7 +192,7 @@ def salvage_executor(
 
     async def execute(ctx: ExecutionContext) -> EffectOutcome:
         body = functools.partial(_salvage, ctx, channels=channels)
-        return await _run_effect(ctx, run_store, scope_runner, _no_params, body)
+        return await run_workspace_effect(ctx, run_store, scope_runner, _no_params, body)
 
     return execute
 
@@ -201,7 +204,7 @@ def reset_executor(
 
     async def execute(ctx: ExecutionContext) -> EffectOutcome:
         body = functools.partial(_reset, ctx, channels=channels)
-        return await _run_effect(ctx, run_store, scope_runner, _reset_payload, body)
+        return await run_workspace_effect(ctx, run_store, scope_runner, _reset_payload, body)
 
     return execute
 
@@ -209,14 +212,14 @@ def reset_executor(
 # ── Shared steps ────────────────────────────────────────────────────────────
 
 
-async def _run_effect(
+async def run_workspace_effect(
     ctx: ExecutionContext,
     run_store: RunStore,
     scope_runner: RunScopeRunner,
     parse: PayloadParser,
     body: EffectBody,
 ) -> EffectOutcome:
-    """The shared effect steps (:func:`run_effect`), with workspace failures mapped too."""
+    """The shared effect steps (:func:`run_effect`), with workspace and host failures mapped."""
     try:
         return await run_effect(ctx, run_store, scope_runner, parse, body)
     except WorkspaceOpError as exc:
@@ -240,7 +243,13 @@ def _refused_params() -> Iterator[None]:
         raise EffectRefused("workspace.invalid_params", str(exc)) from exc
 
 
-def _run_target(state: RunState) -> _RunTarget:
+def run_target(state: RunState) -> RunTarget:
+    """
+    The run worktree from the run's spec, on the run's own branch.
+
+    :raises EffectRefused: Permanent ``workspace.target_mismatch`` when the spec
+        names no host, repository, worktree or branch, or another run's branch.
+    """
     spec = state.spec
     host_id, repo_root, root, branch = (
         spec.host_id,
@@ -256,16 +265,17 @@ def _run_target(state: RunState) -> _RunTarget:
         raise EffectRefused(
             "workspace.target_mismatch", f"run {state.run_id}'s spec names another run's branch"
         )
-    return _RunTarget(
+    return RunTarget(
         host_id=host_id,
         repo_root=repo_root,
         ref=WorkspaceRef(host_id=host_id, root=root, branch=branch),
     )
 
 
-async def _workspace(
-    channels: HostWorkspaceChannels, state: RunState, target: _RunTarget
+async def workspace_for(
+    channels: HostWorkspaceChannels, state: RunState, target: RunTarget
 ) -> HostWorkspaceOps:
+    """The K13 host backend for the run worktree, authorized for the run's owner."""
     channel = await channels.channel(
         workspace_id=state.workspace_id,
         user_id=state.run.user_id,
@@ -280,35 +290,64 @@ def _no_params(_payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _reset_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    return {"commit": _commit_id(payload, "commit", required=True)}
+    return {"commit": commit_id_field(payload, "commit", required=True)}
+
+
+def commit_message_field(payload: Mapping[str, Any], *, required: bool) -> str | None:
+    """
+    The payload's commit ``message``.
+
+    :raises EffectRefused: ``effect.invalid_payload`` unless it is a valid commit message.
+    """
+    message = required_text(payload, "message") if required else optional_text(payload, "message")
+    if message is not None:
+        try:
+            validate_commit_message(message)
+        except ValueError:
+            raise invalid_payload(
+                "message must be non-blank text without control characters other than tabs "
+                "and newlines"
+            ) from None
+    return message
+
+
+def attempt_id_field(payload: Mapping[str, Any], *, required: bool) -> str | None:
+    """
+    The payload's ``attempt_id``, written as the ``Coral-Attempt`` trailer.
+
+    :raises EffectRefused: ``effect.invalid_payload`` unless it is a valid record id.
+    """
+    attempt_id = (
+        required_text(payload, "attempt_id") if required else optional_text(payload, "attempt_id")
+    )
+    if attempt_id is not None:
+        try:
+            validate_record_id(attempt_id)
+        except ValueError:
+            raise invalid_payload("attempt_id must be 1-128 of a-z, 0-9, '_' or '-'") from None
+    return attempt_id
 
 
 def _commit_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    message = required_text(payload, "message")
-    try:
-        validate_commit_message(message)
-    except ValueError:
-        raise invalid_payload(
-            "message must be non-blank text without control characters other than tabs "
-            "and newlines"
-        ) from None
-    attempt_id = required_text(payload, "attempt_id")
-    try:
-        validate_record_id(attempt_id)
-    except ValueError:
-        raise invalid_payload("attempt_id must be 1-128 of a-z, 0-9, '_' or '-'") from None
     return {
         "session_id": session_id_field(payload),
-        "message": message,
-        "attempt_id": attempt_id,
-        "expected_head": _commit_id(payload, "expected_head"),
-        "diff_from": _commit_id(payload, "diff_from"),
+        "message": commit_message_field(payload, required=True),
+        "attempt_id": attempt_id_field(payload, required=True),
+        "expected_head": commit_id_field(payload, "expected_head"),
+        "diff_from": commit_id_field(payload, "diff_from"),
         "node_id": echoed_text(payload, "node_id", max_stored_bytes=NODE_ID_MAX_BYTES),
         "item_path": echoed_text(payload, "item_path", max_stored_bytes=ITEM_PATH_MAX_BYTES),
     }
 
 
-def _commit_id(payload: Mapping[str, Any], name: str, *, required: bool = False) -> str | None:
+def commit_id_field(
+    payload: Mapping[str, Any], name: str, *, required: bool = False
+) -> str | None:
+    """
+    A full lowercase hex commit id field.
+
+    :raises EffectRefused: ``effect.invalid_payload`` for anything else.
+    """
     value = required_text(payload, name) if required else optional_text(payload, name)
     if value is not None:
         try:
@@ -333,8 +372,8 @@ async def _salvage(
     *,
     channels: HostWorkspaceChannels,
 ) -> dict[str, Any]:
-    target = _run_target(state)
-    workspace = await _workspace(channels, state, target)
+    target = run_target(state)
+    workspace = await workspace_for(channels, state, target)
     await ctx.ensure_lease()
     with _refused_params():
         result = await workspace.salvage(
@@ -352,8 +391,8 @@ async def _reset(
     *,
     channels: HostWorkspaceChannels,
 ) -> dict[str, Any]:
-    target = _run_target(state)
-    workspace = await _workspace(channels, state, target)
+    target = run_target(state)
+    workspace = await workspace_for(channels, state, target)
     await ctx.ensure_lease()
     with _refused_params():
         result = await workspace.reset(
@@ -376,7 +415,7 @@ async def _commit(
     turn_ended: TurnEndCheck,
     turn_end_timeout_s: float,
 ) -> dict[str, Any]:
-    target = _run_target(state)
+    target = run_target(state)
     binding = await _writer_binding(ctx, state, target, payload["session_id"], bindings)
     session = StepSession(
         session_id=binding.session_id,
@@ -386,81 +425,89 @@ async def _commit(
         ),
     )
     check_op_host("commit", session)
-    workspace = await _workspace(channels, state, target)
+    workspace = await workspace_for(channels, state, target)
     op_key = effect_op_key(ctx.workspace_id, payload["effect_key"])
-    expected_head = await _recorded_head(
-        ctx, state, target, workspace, session, op_key, payload["expected_head"], intents
+
+    async def read_head() -> str:
+        return (await workspace.head(target.ref, session)).head
+
+    expected_head = await recorded_head(
+        intents,
+        workspace_id=ctx.workspace_id,
+        run_id=state.run_id,
+        op_key=op_key,
+        ref=target.ref,
+        payload_head=payload["expected_head"],
+        read_head=read_head,
+        ensure_lease=ctx.ensure_lease,
     )
-    await ctx.ensure_lease()
-    with _refused_params():
-        result = await workspace.commit(
-            target.ref,
-            session,
-            op_key=op_key,
-            expected_head=expected_head,
-            message=payload["message"],
-            run_id=state.run_id,
-            attempt_id=payload["attempt_id"],
-        )
-    try:
-        with _refused_params():
-            stat = await workspace.diff_stat(
-                target.ref,
-                session,
-                from_commit=payload["diff_from"] or expected_head,
-                to_commit=result.commit,
-            )
-    except WorkspaceOpError as exc:
-        retryable = _retryable(exc, read_after_commit=True)
-        raise EffectRefused(exc.code, exc.message, retryable=retryable) from exc
+    result, stat = await commit_and_diff(
+        workspace,
+        target.ref,
+        session,
+        op_key=op_key,
+        expected_head=expected_head,
+        message=payload["message"],
+        run_id=state.run_id,
+        attempt_id=payload["attempt_id"],
+        diff_from=payload["diff_from"],
+        ensure_lease=ctx.ensure_lease,
+    )
     return {
         "commit": result.commit,
         "empty": result.empty,
         "subject": payload["message"].strip().splitlines()[0],
-        "diff_stat": {
-            "files_changed": stat.files_changed,
-            "insertions": stat.insertions,
-            "deletions": stat.deletions,
-            "paths": [_printable(path) for path in stat.paths],
-        },
+        "diff_stat": diff_stat_result(stat),
         "node_id": payload["node_id"],
         "item_path": payload["item_path"],
     }
 
 
+def writer_refusal(
+    binding: SessionBinding | None, state: RunState, target: RunTarget, session_id: str
+) -> str | None:
+    """
+    Why the session may not write the run worktree, or ``None`` when it may.
+
+    Only its slot's current session, bound on the run worktree's host, in a
+    writer slot role, writes; a missing binding never does.
+    """
+    if binding is None:
+        return "is not bound to this run"
+    if binding.host_id != target.host_id:
+        return "is bound on another host than the run worktree's"
+    if not any(
+        slot.session_id == session_id and slot.session_generation == binding.session_generation
+        for slot in state.agent_slots
+    ):
+        return "is not its slot's current session"
+    if binding.slot_role not in WRITER_SLOT_ROLES:
+        return "is read-only: its slot role never commits"
+    return None
+
+
 async def _writer_binding(
     ctx: ExecutionContext,
     state: RunState,
-    target: _RunTarget,
+    target: RunTarget,
     session_id: str,
     bindings: SessionBindings,
 ) -> SessionBinding:
     """
     The binding of the session the commit acts for, if it may write the run worktree.
 
-    :raises WorkspaceOpError: ``workspace.op_host_violation`` for a session with
-        no binding in this run, one bound on another host, one that is not its
-        slot's current session generation, or a reviewer slot's session.
+    :raises WorkspaceOpError: ``workspace.op_host_violation`` when :func:`writer_refusal` refuses.
     """
     binding = await asyncio.to_thread(
         bindings.get, ctx.workspace_id, session_id, run_id=state.run_id
     )
-    if binding is None:
-        reason = "is not bound to this run"
-    elif binding.host_id != target.host_id:
-        reason = "is bound on another host than the run worktree's"
-    elif not any(
-        slot.session_id == session_id and slot.session_generation == binding.session_generation
-        for slot in state.agent_slots
-    ):
-        reason = "is not its slot's current session"
-    elif binding.slot_role not in WRITER_SLOT_ROLES:
-        reason = "is read-only: its slot role never commits"
-    else:
-        return binding
-    raise WorkspaceOpError(
-        "workspace.op_host_violation", f"step session {session_id} {reason}, so it may not commit"
-    )
+    reason = writer_refusal(binding, state, target, session_id)
+    if binding is None or reason is not None:
+        raise WorkspaceOpError(
+            "workspace.op_host_violation",
+            f"step session {session_id} {reason}, so it may not commit",
+        )
+    return binding
 
 
 async def _turn_has_ended(
@@ -485,34 +532,41 @@ async def _turn_has_ended(
     return answer is True
 
 
-async def _recorded_head(
-    ctx: ExecutionContext,
-    state: RunState,
-    target: _RunTarget,
-    workspace: HostWorkspaceOps,
-    session: StepSession,
-    op_key: str,
-    payload_head: str | None,
+async def recorded_head(
     intents: WorkspaceOpIntents,
+    *,
+    workspace_id: int,
+    run_id: str,
+    op_key: str,
+    ref: WorkspaceRef,
+    payload_head: str | None,
+    read_head: Callable[[], Awaitable[str]],
+    ensure_lease: Callable[[], Awaitable[None]],
 ) -> str:
-    """The HEAD the commit must sit on: the first try's, recorded before anything writes."""
-    stored = await asyncio.to_thread(intents.get, ctx.workspace_id, op_key, run_id=state.run_id)
+    """
+    The HEAD a commit must sit on: the first try's, recorded before anything writes.
+
+    The stored intent wins over ``payload_head``, which wins over ``read_head()``.
+
+    :raises EffectRefused: ``workspace.op_key_conflict`` for an intent without a HEAD.
+    """
+    stored = await asyncio.to_thread(intents.get, workspace_id, op_key, run_id=run_id)
     if stored is not None and stored.expected_head is not None:
         head = stored.expected_head
     elif payload_head is not None:
         head = payload_head
     else:
         with _refused_params():
-            head = (await workspace.head(target.ref, session)).head
-    await ctx.ensure_lease()
+            head = await read_head()
+    await ensure_lease()
     intent = await asyncio.to_thread(
         intents.reserve,
-        ctx.workspace_id,
+        workspace_id,
         op_key=op_key,
-        run_id=state.run_id,
+        run_id=run_id,
         op=WorkspaceOpIntentOp.COMMIT,
-        host_id=target.host_id,
-        root=target.ref.root,
+        host_id=ref.host_id,
+        root=ref.root,
         expected_head=head,
     )
     if intent.expected_head is None:
@@ -520,3 +574,57 @@ async def _recorded_head(
             "workspace.op_key_conflict", f"op key {op_key} is recorded without a HEAD"
         )
     return intent.expected_head
+
+
+async def commit_and_diff(
+    workspace: WorkspaceOps,
+    ref: WorkspaceRef,
+    session: StepSession,
+    *,
+    op_key: str,
+    expected_head: str,
+    message: str,
+    run_id: str,
+    attempt_id: str,
+    diff_from: str | None,
+    ensure_lease: Callable[[], Awaitable[None]],
+) -> tuple[CommitResult, DiffStat]:
+    """
+    Commit at ``expected_head`` for ``session``, then measure it from ``diff_from`` or that HEAD.
+
+    A retry after this op's own commit landed returns that commit.
+
+    :raises EffectRefused: ``workspace.invalid_params`` for refused params; a
+        ``diff_stat`` failure keeps its code and is retryable unless permanent.
+    :raises WorkspaceOpError: The commit's own K13 failure.
+    """
+    await ensure_lease()
+    with _refused_params():
+        result = await workspace.commit(
+            ref,
+            session,
+            op_key=op_key,
+            expected_head=expected_head,
+            message=message,
+            run_id=run_id,
+            attempt_id=attempt_id,
+        )
+    try:
+        with _refused_params():
+            stat = await workspace.diff_stat(
+                ref, session, from_commit=diff_from or expected_head, to_commit=result.commit
+            )
+    except WorkspaceOpError as exc:
+        retryable = _retryable(exc, read_after_commit=True)
+        raise EffectRefused(exc.code, exc.message, retryable=retryable) from exc
+    return result, stat
+
+
+def diff_stat_result(stat: DiffStat) -> dict[str, Any]:
+    """A ``diff_stat`` as an effect result holds it, with paths that cannot drive a terminal."""
+    return {
+        "files_changed": stat.files_changed,
+        "insertions": stat.insertions,
+        "deletions": stat.deletions,
+        "paths": [_printable(path) for path in stat.paths],
+    }

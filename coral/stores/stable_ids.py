@@ -90,6 +90,10 @@ class StableIds(Protocol):
         self, workspace_id: int, session_id: str, *, run_id: str
     ) -> frozenset[str]: ...
 
+    def checksums_for_session(
+        self, workspace_id: int, session_id: str, *, run_id: str
+    ) -> dict[str, bytes]: ...
+
 
 # Every field a repeat record must match.
 _MATCHED_FIELDS = (
@@ -232,6 +236,21 @@ class SqlAlchemyStableIdStore:
                     )
                 ).all()
             )
+
+    def checksums_for_session(
+        self, workspace_id: int, session_id: str, *, run_id: str
+    ) -> dict[str, bytes]:
+        """Map every stable id the engine recorded for the session within ``run_id`` to the
+        checksum of the text it sent under it."""
+        with shared_read_scope(), self._session("checksums_for_session") as session:
+            rows = session.execute(
+                select(StableIdRow.stable_id, StableIdRow.content_cksum).where(
+                    StableIdRow.workspace_id == workspace_id,
+                    StableIdRow.session_id == session_id,
+                    StableIdRow.run_id == run_id,
+                )
+            ).all()
+            return {stable_id: bytes(content_cksum) for stable_id, content_cksum in rows}
 
 
 __all__ = [

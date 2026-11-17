@@ -17,11 +17,12 @@ from coral.db.enum_codecs import (
     SlotRole,
 )
 from coral.model.ids import anchor_session_id
-from coral.omni.protocols import SessionState
+from coral.omni.protocols import CoralSessionError, PreSendRequest, SessionState
 from coral.recovery.drift import (
     DriftDetected,
     DriftFinding,
     DriftPauser,
+    DriftPreSendHook,
     classify_anchor,
     classify_step,
     find_drift,
@@ -341,3 +342,63 @@ async def test_find_drift_checks_the_anchor_then_the_bound_target() -> None:
     finding = await drift()
     assert finding is not None
     assert (finding.cause, finding.occurrence) == ("anchor_bound", "runner-9")
+
+
+@pytest.mark.parametrize(
+    ("anchor_state", "step_state", "cause"),
+    [
+        ({"archived": True, "archived_at": ARCHIVED_AT}, {}, "anchor_archived"),
+        ({}, {"archived": True, "archived_at": ARCHIVED_AT}, "session_archived"),
+        ({}, {"exists": False}, "session_deleted"),
+    ],
+)
+async def test_the_pre_send_hook_pauses_the_run_and_refuses_the_send(
+    anchor_state: dict[str, object], step_state: dict[str, object], cause: str
+) -> None:
+    store = FakeRunStore(default_workspace_id=WORKSPACE)
+    run = _run(store)
+    anchor = anchor_session_id(WORKSPACE, run.id)
+    facade = FakeSessionFacade()
+    facade.states[(WORKSPACE, anchor)] = present(anchor, **anchor_state)
+    facade.states[(WORKSPACE, STEP)] = present(STEP, **step_state)
+    bindings = FakeBindings(
+        [
+            _anchor_binding(run.id, SessionBindingProgress.INITIALIZED),
+            step_binding(
+                workspace_id=WORKSPACE,
+                run_id=run.id,
+                session_id=STEP,
+                slot_role=SlotRole.STEP_AGENT,
+                host_id="host-1",
+            ),
+        ]
+    )
+    hook = DriftPreSendHook(facade, bindings, DriftPauser(store, now_us=lambda: NOW_US))
+    request = PreSendRequest(
+        workspace_id=WORKSPACE, run_id=run.id, session_id=STEP, user_id="alice"
+    )
+
+    with pytest.raises(CoralSessionError) as refused:
+        await hook(request)
+
+    assert (refused.value.code, refused.value.retryable) == (f"drift.{cause}", False)
+    state, _ = store.load_run_state(run.id, workspace_id=WORKSPACE)
+    assert (state.run.status, state.run.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
+    [logged] = _drift_logs(store, run)
+    assert logged["cause"] == cause
+
+
+async def test_the_pre_send_hook_lets_an_undrifted_send_through() -> None:
+    store = FakeRunStore(default_workspace_id=WORKSPACE)
+    run = _run(store)
+    facade = FakeSessionFacade()
+    bindings = FakeBindings([_anchor_binding(run.id, SessionBindingProgress.INITIALIZED)])
+    hook = DriftPreSendHook(facade, bindings, DriftPauser(store, now_us=lambda: NOW_US))
+
+    await hook(
+        PreSendRequest(workspace_id=WORKSPACE, run_id=run.id, session_id=STEP, user_id=None)
+    )
+
+    state, _ = store.load_run_state(run.id, workspace_id=WORKSPACE)
+    assert state.run.status == RunStatus.RUNNING
+    assert _drift_logs(store, run) == []

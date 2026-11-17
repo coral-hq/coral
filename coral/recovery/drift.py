@@ -8,7 +8,8 @@ receipt: a starting or running run pauses with one ``PAUSED`` log entry; a
 paused or finished run is left as it is. The entry's identity includes the
 run version, so it is unique per pause epoch: a run resumed while the drift
 remains pauses again on the next detection, and compare-and-swap keeps
-concurrent detectors to one pause.
+concurrent detectors to one pause. Drift is detected when a step session is
+created and, through :class:`DriftPreSendHook`, before each engine message.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from coral.db.enum_codecs import (
     SessionBindingProgress,
 )
 from coral.model.ids import anchor_session_id
-from coral.omni.protocols import CoralSessionError, SessionFacade, SessionState
+from coral.omni.protocols import CoralSessionError, PreSendRequest, SessionFacade, SessionState
 from coral.stores.protocols import CommitOutcome, LogEntryDraft, RunState, RunStore, Transition
 from coral.stores.run_commit import commit_with_retry
 from coral.stores.session_bindings import SessionBindings
@@ -209,12 +210,47 @@ class DriftPauser:
         )
 
 
+class DriftPreSendHook:
+    """
+    Refuses an engine message to a drifted run: its anchor, or the target step, archived,
+    deleted or (the anchor) bound. The run pauses first, then the send fails as ``drift.<cause>``.
+    """
+
+    def __init__(
+        self, facade: SessionFacade, bindings: SessionBindings, pauser: DriftPauser
+    ) -> None:
+        self._facade = facade
+        self._bindings = bindings
+        self._pauser = pauser
+
+    async def __call__(self, request: PreSendRequest) -> None:
+        """:raises CoralSessionError: Permanent ``drift.<cause>`` after pausing the run."""
+        finding = await find_drift(
+            self._facade,
+            self._bindings,
+            workspace_id=request.workspace_id,
+            run_id=request.run_id,
+            session_id=request.session_id,
+        )
+        if finding is None:
+            return
+        await self._pauser.pause(
+            workspace_id=request.workspace_id, run_id=request.run_id, finding=finding
+        )
+        raise CoralSessionError(
+            finding.effect_code,
+            f"session {finding.session_id} drifted ({finding.cause.replace('_', ' ')}); "
+            "the run is paused",
+        )
+
+
 __all__ = [
     "SESSION_CODES",
     "DriftCause",
     "DriftDetected",
     "DriftFinding",
     "DriftPauser",
+    "DriftPreSendHook",
     "classify_anchor",
     "classify_step",
     "drift_log_checksum",

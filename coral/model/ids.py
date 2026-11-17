@@ -67,6 +67,11 @@ def effect_message_id(workspace_id: int, effect_key: str) -> str:
     return derived_id("coral-message", str(workspace_id), effect_key)
 
 
+def fallback_message_id(stable_id: str) -> str:
+    """Return the id an engine message is sent under when another item took ``stable_id``."""
+    return derived_id("coral-message-fallback", stable_id)
+
+
 def effect_op_key(workspace_id: int, effect_key: str, *qualifiers: str) -> str:
     """
     Return the K13 op key of a workspace write an effect makes.

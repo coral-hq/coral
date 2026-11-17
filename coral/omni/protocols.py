@@ -6,7 +6,7 @@ imports nothing but the standard library and pure Coral modules.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
@@ -18,6 +18,49 @@ HostAccessCode = Literal["not_permitted", "host_offline"]
 # K4 session roles: the run's one anchor, or a step of an engine slot.
 SessionRole = Literal["anchor", "step"]
 SlotRoleName = Literal["step_agent", "orchestrator", "verifier", "merge_resolver"]
+# The first line of every engine message, so a harness never reads it as a command.
+ENGINE_MESSAGE_FIRST_LINE = "Message from the Coral engine:"
+# An engine message's UTF-8 size, first line included: far above a brief, below the HTTP cap.
+MAX_ENGINE_MESSAGE_BYTES = 1_048_576
+
+
+def engine_message_text(text: str) -> str:
+    """The exact text an engine message carries: the fixed first line, then ``text``."""
+    return f"{ENGINE_MESSAGE_FIRST_LINE}\n{text}"
+
+
+@dataclass(frozen=True)
+class TranscriptItem:
+    """
+    One transcript item, as the queued-input check reads it.
+
+    :param engine: The engine's own message: an id it recorded, by the run
+        owner, with the exact text it recorded.
+    :param client_input: Anything a client created: a user message (meta
+        ones too), a slash or terminal command, or any item a person authored.
+        Runner and server items, the interrupt marker among them, are not.
+    """
+
+    item_id: str
+    engine: bool
+    client_input: bool
+
+
+def queued_input_decision(newest_first: Iterable[TranscriptItem]) -> bool | None:
+    """
+    Whether client input follows the engine's last message, reading items newest first.
+
+    The first item that is the engine's or client input decides: client input
+    → ``True``, the engine's → ``False``.
+
+    :returns: ``None`` when no item here decides.
+    """
+    for item in newest_first:
+        if item.engine:
+            return False
+        if item.client_input:
+            return True
+    return None
 
 
 @runtime_checkable
@@ -251,7 +294,12 @@ class SessionFacade(Protocol):
 
 @runtime_checkable
 class SessionDispatch(Protocol):
-    """Sends engine input to a session and reads its live state (K4 subset)."""
+    """
+    Sends engine input to a session and reads its live state (K4 subset).
+
+    Every method runs inside the caller's run scope and acts as the run owner
+    (``user_id``); failures raise ``CoralSessionError`` with a typed code.
+    """
 
     async def send_message(
         self,
@@ -262,28 +310,53 @@ class SessionDispatch(Protocol):
         user_id: str | None,
         stable_id: str,
         text: str,
-    ) -> SendReceipt: ...
+    ) -> SendReceipt:
+        """
+        Send ``engine_message_text(text)`` once under ``stable_id``, recorded beforehand.
+
+        The engine's message saved under the id counts as sent once the runner
+        took it (the session is ``running`` or ``waiting``, or anything follows
+        it); until then it is sent again under the same id.
+        """
+        ...
 
     async def interrupt(
         self, *, session_id: str, user_id: str | None, response_id: str | None = None
-    ) -> bool: ...
+    ) -> bool:
+        """Interrupt the running turn (``response_id``'s, when given); ``False`` if none runs."""
+        ...
 
-    async def stop(self, *, session_id: str, user_id: str | None) -> None: ...
+    async def stop(self, *, session_id: str, user_id: str | None) -> None:
+        """Stop the session's runner; returns only once no runner of it is alive."""
+        ...
 
-    async def set_closed(self, *, session_id: str) -> None: ...
+    async def set_closed(self, *, session_id: str) -> None:
+        """Close the session to new user messages."""
+        ...
 
     async def live_status(self, *, session_id: str) -> LiveStatus: ...
 
     async def queued_user_input(
-        self, *, session_id: str, engine_stable_ids: frozenset[str]
-    ) -> bool: ...
+        self, *, session_id: str, user_id: str | None, engine_messages: Mapping[str, bytes]
+    ) -> bool:
+        """
+        Whether client input follows the engine's last message (:func:`queued_input_decision`).
+
+        :param engine_messages: Each stable id the engine recorded for the session
+            and the sha256 of the exact text it sent under it.
+        """
+        ...
+
+
+# Matches a watched session's edge, e.g. the end of one turn.
+EdgePredicate = Callable[[ObservedEdge], bool]
 
 
 class EdgeWatch(Protocol):
     """Waits for a watched session's next matching status edge."""
 
     async def wait_for(
-        self, predicate: Callable[[ObservedEdge], bool], *, timeout_s: float
+        self, predicate: EdgePredicate, *, timeout_s: float
     ) -> ObservedEdge | None: ...
 
 
@@ -291,8 +364,10 @@ class SessionEdgeWatcher(Protocol):
     """Watches one session's status edges while a close or cancel waits on them."""
 
     def watch(
-        self, session_id: str, *, slot_id: str = ""
-    ) -> AbstractAsyncContextManager[EdgeWatch]: ...
+        self, session_id: str, *, workspace_id: int, slot_id: str = ""
+    ) -> AbstractAsyncContextManager[EdgeWatch]:
+        """Watch ``session_id`` of ``workspace_id``; session ids repeat across workspaces."""
+        ...
 
 
 # Receives each turn fact of a watched session; unset until signals persist them.
@@ -302,7 +377,10 @@ PreSendHook = Callable[[PreSendRequest], Awaitable[None]]
 
 
 __all__ = [
+    "ENGINE_MESSAGE_FIRST_LINE",
+    "MAX_ENGINE_MESSAGE_BYTES",
     "CoralSessionError",
+    "EdgePredicate",
     "EdgeWatch",
     "HostAccessCode",
     "HostAccessRefused",
@@ -323,5 +401,8 @@ __all__ = [
     "SessionState",
     "SlotRoleName",
     "StatusEdgeView",
+    "TranscriptItem",
     "TurnFactSink",
+    "engine_message_text",
+    "queued_input_decision",
 ]

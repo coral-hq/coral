@@ -13,6 +13,7 @@ import inspect
 import pytest
 
 import coral.omni._upstream as upstream
+from omnigent.db.workspace_cache import WorkspaceScopedCache
 
 # name -> (the module that defines it, its signature as Coral calls it)
 PINNED: dict[str, tuple[str, str]] = {
@@ -68,7 +69,14 @@ PINNED: dict[str, tuple[str, str]] = {
         "(*, agent: 'Agent', agent_cache: 'AgentCache | None', harness_override: 'str | None')"
         " -> 'dict[str, str]'",
     ),
+    "_session_active_response_cache": ("omnigent.server.routes._sessions.common", ""),
+    "_session_blocked_on_cache": ("omnigent.server.routes._sessions.common", ""),
+    "_session_status_cache": ("omnigent.server.routes._sessions.common", ""),
     "_tar_gz_dir": ("omnigent.server.app", "(bundle_dir: pathlib.Path) -> bytes"),
+    "attribution_user": (
+        "omnigent.server.routes._auth_helpers",
+        "(user_id: 'str | None') -> 'str | None'",
+    ),
     "create_worktree_on_host": (
         "omnigent.server.routes._host_worktree",
         "(*, host_registry: 'HostRegistry', host_conn: 'HostConnection', repo_path: 'str',"
@@ -79,6 +87,10 @@ PINNED: dict[str, tuple[str, str]] = {
         "omnigent.server.routes._host_worktree",
         "(*, host_registry: 'HostRegistry', host_conn: 'HostConnection', repo_path: 'str',"
         " for_cleanup: 'bool' = False) -> 'list[dict[str, object]]'",
+    ),
+    "pending_elicitation_count": (
+        "omnigent.runtime.pending_elicitations",
+        "(conversation_id: 'str') -> 'int'",
     ),
     "request_workspace_op_on_host": (
         "omnigent.server.routes._host_workspace_ops",
@@ -119,6 +131,12 @@ PINNED: dict[str, tuple[str, str]] = {
 }
 # Pins wrapped so importing _upstream never loads the server app module.
 LAZY = frozenset({"_ensure_builtin_agent", "_tar_gz_dir"})
+# Status caches Coral reads by key in the run's workspace scope.
+CACHES = frozenset(
+    {"_session_active_response_cache", "_session_blocked_on_cache", "_session_status_cache"}
+)
+# Pins whose name differs from their source's: pin name -> source attribute.
+ALIASES = {"pending_elicitation_count": "count_for"}
 # Exceptions Coral raises or catches by type alone; they keep their base.
 BASES: dict[str, type[BaseException]] = {
     "HostWorkspaceOpNotPermittedError": PermissionError,
@@ -138,7 +156,7 @@ def test_every_pin_has_a_snapshot() -> None:
 @pytest.mark.parametrize("name", sorted(PINNED))
 def test_pin_keeps_its_upstream_source_and_signature(name: str) -> None:
     module_name, expected = PINNED[name]
-    source = getattr(importlib.import_module(module_name), name)
+    source = getattr(importlib.import_module(module_name), ALIASES.get(name, name))
     pinned = getattr(upstream, name)
     if name in LAZY:
         # The wrapper forwards every parameter to the server function it imports.
@@ -149,5 +167,7 @@ def test_pin_keeps_its_upstream_source_and_signature(name: str) -> None:
         assert pinned is source
     if name in BASES:
         assert issubclass(source, BASES[name])
+    elif name in CACHES:
+        assert isinstance(source, WorkspaceScopedCache)
     else:
         assert _signature(source) == expected
