@@ -67,6 +67,8 @@ _RESUME_REASONS: frozenset[PauseReason] = frozenset(
 )
 _RETRY_REASONS: frozenset[PauseReason] = frozenset({"infra", "failure_path", "liveness"})
 _COUNTED_REJECTIONS = frozenset({"handoff.invalid", "tool.illegal"})
+# The counted rejection of a slot that pauses the run ``rejected_calls``.
+REJECTED_CALL_LIMIT = 3
 _RETRY_PHASES: tuple[str, ...] = (
     "fence_stop",
     "create_unbriefed",
@@ -177,7 +179,10 @@ def retry_step(graph: CompiledGraph, state: RunState, command: RetryStep) -> App
 
 
 def note_rejection(state: RunState, command: RejectionObserved) -> ApplyResult:
-    """Count ``handoff.invalid`` and ``tool.illegal``. The third pauses ``rejected_calls``."""
+    """Count ``handoff.invalid`` and ``tool.illegal``.
+
+    The ``REJECTED_CALL_LIMIT``-th in a row pauses ``rejected_calls``.
+    """
     slot = find_slot(state, command.slot_id)
     if slot is None:
         return refuse_unknown(state)
@@ -187,7 +192,7 @@ def note_rejection(state: RunState, command: RejectionObserved) -> ApplyResult:
         return ApplyResult(state=state)
     count = _streak(state, slot.id) + 1
     updated = _set_streak(state, slot.id, count)
-    if count >= 3:
+    if count >= REJECTED_CALL_LIMIT:
         updated = record_pause(updated, "rejected_calls", command.code, slot.id)
     return ApplyResult(state=updated.model_copy(update={"seq": state.seq + 1}))
 

@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import pytest
 
 from coral.engine import fold, transition
+from coral.engine.lifecycle import REJECTED_CALL_LIMIT
 from coral.engine.types import (
     AnswerGate,
     CancelRun,
@@ -1105,6 +1106,16 @@ def test_three_tool_illegal_observations_pause() -> None:
     assert resumed.state.causes == ()
     assert resumed.state.reject_streaks == (RejectStreak(slot_id=SLOT, count=0),)
     assert fold(graph, (*driven.log, resumed.entry)) == resumed.state
+
+
+def test_the_rejected_call_limit_is_the_count_that_pauses() -> None:
+    graph = _step_graph()
+    observed = RejectionObserved(slot_id=SLOT, code="handoff.invalid")
+    below = drive(graph, [RUN, *[observed] * (REJECTED_CALL_LIMIT - 1)])
+    assert below.state.status == "running"
+    at = transition(graph, below.state, observed, NOW)
+    assert at.state.status == "paused"
+    assert at.state.reject_streaks == (RejectStreak(slot_id=SLOT, count=REJECTED_CALL_LIMIT),)
 
 
 def test_evidence_missing_does_not_increment_and_accept_resets() -> None:
