@@ -18,7 +18,7 @@ from coral.bridge import fold as fold_module
 from coral.bridge.commit import build_commit
 from coral.bridge.config import PAUSED_RESYNC_DELAY_S, ceil_epoch_seconds
 from coral.bridge.keys import anchor_effect_key, effect_work_id
-from coral.bridge.mapping import resync_draft, timer_draft
+from coral.bridge.mapping import resync_draft, timer_draft, turn_signal_draft
 from coral.bridge.service import EngineBridge, EngineLoadFailed, ResyncReport
 from coral.db.enum_codecs import (
     LogKind,
@@ -246,6 +246,35 @@ def test_held_rows_of_a_running_run_are_released(world: World) -> None:
     report = _resync(world, run.id)
     assert report.released
     (row,) = world.queue.get_work([create.id], workspace_id=WORKSPACE)
+    assert (row.available_at, row.held_since) == (world.clock.epoch, None)
+    _quiet(world, run.id)
+
+
+def test_a_held_turn_signal_of_a_running_run_is_released(world: World) -> None:
+    # A signal claimed while the resume committed, then held for the pause it saw.
+    run = start(world)
+    signal = turn_signal_draft(
+        run_id=run.id,
+        session_id="session-1",
+        engine_slot_id=IMPLEMENT,
+        generation=1,
+        idempotency_key="sig:held",
+        edge=None,
+        available_at=world.clock.epoch,
+    )
+    world.queue.enqueue_work([signal], workspace_id=WORKSPACE, now=world.clock.epoch)
+    (row,) = world.queue.get_work([signal.id], workspace_id=WORKSPACE)
+    settle(
+        world,
+        row,
+        WorkStatus.PENDING,
+        error_code="run.paused",
+        held_since=world.clock.epoch - 10,
+        available_at=world.clock.epoch + 300,
+    )
+    report = _resync(world, run.id)
+    assert report.released
+    (row,) = world.queue.get_work([signal.id], workspace_id=WORKSPACE)
     assert (row.available_at, row.held_since) == (world.clock.epoch, None)
     _quiet(world, run.id)
 

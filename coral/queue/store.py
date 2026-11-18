@@ -291,6 +291,24 @@ class SqlAlchemyCoralQueueStore:
             ).all()
             return [_to_work_item(row) for row in rows]
 
+    def has_held_work(self, run_id: str, codes: Sequence[str], *, workspace_id: int) -> bool:
+        """Whether a PENDING row of the run is held (``held_since`` set) with one of ``codes``."""
+        if not codes:
+            return False
+        with shared_read_scope(), self._session("has_held_work") as session:
+            found = session.execute(
+                select(WorkRow.id)
+                .where(
+                    WorkRow.workspace_id == workspace_id,
+                    WorkRow.run_id == run_id,
+                    WorkRow.status == int(WorkStatus.PENDING),
+                    WorkRow.held_since.is_not(None),
+                    WorkRow.error_code.in_(list(codes)),
+                )
+                .limit(1)
+            ).first()
+            return found is not None
+
     def reschedule_work(
         self, draft: WorkItemDraft, *, workspace_id: int, available_at: int
     ) -> None:

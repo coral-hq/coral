@@ -891,6 +891,10 @@ class QueueStore(Protocol):
         """Return the workspace's items among ``work_ids``, ordered by id."""
         ...
 
+    def has_held_work(self, run_id: str, codes: Sequence[str], *, workspace_id: int) -> bool:
+        """Whether a PENDING row of the run is held (``held_since`` set) with one of ``codes``."""
+        ...
+
     def reschedule_work(
         self, draft: WorkItemDraft, *, workspace_id: int, available_at: int
     ) -> None:

@@ -857,6 +857,18 @@ class FakeQueueStore:
             ]
         return sorted(found, key=lambda item: item.id)
 
+    def has_held_work(self, run_id: str, codes: Sequence[str], *, workspace_id: int) -> bool:
+        wanted = set(codes)
+        with self._lock:
+            return any(
+                ws == workspace_id
+                and item.run_id == run_id
+                and item.status == int(WorkStatus.PENDING)
+                and item.held_since is not None
+                and item.error_code in wanted
+                for (ws, _), item in self.work.items()
+            )
+
     def reschedule_work(
         self, draft: WorkItemDraft, *, workspace_id: int, available_at: int
     ) -> None:

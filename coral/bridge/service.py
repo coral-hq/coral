@@ -696,6 +696,12 @@ class EngineBridge:
             and row.held_since is not None
             and row.error_code in RESUME_RELEASE_CODES
             for row in rows
+        ) or (
+            # Signals, which the effect rows above do not cover, held for a pause that
+            # ended while they were claimed.
+            snapshot.state.status == "running"
+            and snapshot.store.status == int(RunStatus.RUNNING)
+            and self._queue.has_held_work(run_id, RESUME_RELEASE_CODES, workspace_id=workspace_id)
         )
 
         def release(snapshot: EngineSnapshot, _applied: Sequence[Applied]) -> CommitExtras:

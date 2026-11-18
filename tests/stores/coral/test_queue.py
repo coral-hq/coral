@@ -797,6 +797,37 @@ def test_effect_rows_are_never_rescheduled_or_purged(queue: QueueStore) -> None:
     assert _one(queue, effect) == before
 
 
+def test_held_work_is_found_by_its_run_workspace_and_code(queue: QueueStore) -> None:
+    draft = _signal("run-1", "held")
+    queue.enqueue_work([draft], workspace_id=_WS, now=_NOW)
+    codes = ("drift.anchor_deleted", "run.paused")
+    assert not queue.has_held_work("run-1", codes, workspace_id=_WS)
+    # A retry that carries the code is not a hold.
+    _finish(
+        queue,
+        _claim(queue, _NOW),
+        WorkStatus.PENDING,
+        _NOW,
+        error_code="run.paused",
+        next_available_at=_NOW + 1,
+    )
+    assert not queue.has_held_work("run-1", codes, workspace_id=_WS)
+    _finish(
+        queue,
+        _claim(queue, _NOW + 1),
+        WorkStatus.PENDING,
+        _NOW + 1,
+        error_code="run.paused",
+        hold=True,
+    )
+
+    assert queue.has_held_work("run-1", codes, workspace_id=_WS)
+    assert not queue.has_held_work("run-1", ("drift.anchor_deleted",), workspace_id=_WS)
+    assert not queue.has_held_work("run-1", (), workspace_id=_WS)
+    assert not queue.has_held_work("run-2", codes, workspace_id=_WS)
+    assert not queue.has_held_work("run-1", codes, workspace_id=_WS + 1)
+
+
 def test_claim_breaks_ties_by_id(queue: QueueStore) -> None:
     drafts = [_signal("run-1", key) for key in ("one", "two", "three", "four")]
     queue.enqueue_work(drafts, workspace_id=_WS, now=_NOW)

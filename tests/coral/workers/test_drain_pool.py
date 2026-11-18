@@ -17,6 +17,7 @@ from coral.queue import (
     EffectCompleted,
     ExecutionContext,
     FinishedWork,
+    WorkDrainer,
     register_executor,
     unregister_executor,
 )
@@ -51,6 +52,9 @@ class VirtualTime:
         """Whether at least ``count`` waits of ``timeout`` seconds are pending."""
         pending = [length for _, length, timer in self._timers if not timer.done()]
         return pending.count(timeout) >= count
+
+    async def sleep(self, seconds: float) -> None:
+        await self.wait((), seconds)
 
     async def wait(self, events: Sequence[asyncio.Event], timeout: float | None) -> bool:
         if any(event.is_set() for event in events):
@@ -121,7 +125,16 @@ class FlakyQueue(FakeQueueStore):
         self._lease_store_call()
         return super().acquire_worker_lease(name, worker_id, **kwargs)
 
+    def reclaim_expired_work(self, **kwargs: Any) -> int:
+        if self.lease_store == "hung":
+            self.unhung.wait()
+        return super().reclaim_expired_work(**kwargs)
+
     def renew_worker_lease(self, name: str, worker_id: str, **kwargs: Any) -> bool:
+        if self.lease_store == "stalls":
+            # This renewal still lands; every lease call and reclaim after it hangs.
+            self.lease_store = "hung"
+            return super().renew_worker_lease(name, worker_id, **kwargs)
         self._lease_store_call()
         if self.failing_renewals:
             self.failing_renewals -= 1
@@ -440,6 +453,8 @@ async def test_an_item_in_flight_outlives_an_hour_of_leadership() -> None:
             lease_seconds=7200,
             work_lease_seconds=7200,
             renew_interval_s=30.0,
+            # Above the hour, so only the epoch could cancel the item.
+            execution_limit_s=7200.0,
         ) as supervisor:
             await _leading(supervisor)
             await poll_until_async(lambda: started == [draft.id], timeout_s=budget(10))
@@ -653,16 +668,23 @@ async def test_a_failed_lease_renewal_is_retried_and_leadership_continues(
 
 
 @pytest.mark.parametrize(
-    ("lease_store", "waits"),
+    ("lease_store", "waits", "stepped_down", "other_leads"),
     [
         # Renewals fail and are retried until a quarter of the lease is left (+90 s).
-        ("down", (30.0, 1.0, 2.0, 4.0, 8.0, 16.0, 29.0)),
+        ("down", (30.0, 1.0, 2.0, 4.0, 8.0, 16.0, 29.0), 90, 155),
         # A renewal that never returns is given up at the same point.
-        ("hung", (30.0, 60.0)),
+        ("hung", (30.0, 60.0), 90, 155),
+        # The renewal at +30 s lands, then the reclaim after it never returns: the
+        # replica steps down a quarter of the renewed lease before its end (+120 s).
+        ("stalls", (30.0, 90.0), 120, 185),
     ],
 )
 async def test_a_replica_that_cannot_renew_steps_down_before_another_can_lead(
-    lease_store: str, waits: tuple[float, ...], caplog: pytest.LogCaptureFixture
+    lease_store: str,
+    waits: tuple[float, ...],
+    stepped_down: int,
+    other_leads: int,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     run_store = FakeRunStore()
     first_queue = FlakyQueue(run_store=run_store)
@@ -706,8 +728,9 @@ async def test_a_replica_that_cannot_renew_steps_down_before_another_can_lead(
                 )
                 assert not first.is_leader
 
-                # The other replica leads only once the lease has expired, and re-runs the item.
-                time.advance(35)
+                # The other replica leads only once the replica lease and the item's
+                # heartbeat-renewed lease have expired, and re-runs the item.
+                time.advance(65)
                 await poll_until_async(
                     lambda: _statuses(first_queue, [draft.id]) == {int(WorkStatus.SUCCEEDED)},
                     timeout_s=budget(10),
@@ -719,8 +742,8 @@ async def test_a_replica_that_cannot_renew_steps_down_before_another_can_lead(
 
     assert seen == [
         ("worker-1", "started", _START),
-        ("worker-1", "cancelled", _START + 90),
-        ("worker-2", "started", _START + 125),
+        ("worker-1", "cancelled", _START + stepped_down),
+        ("worker-2", "started", _START + other_leads),
     ]
     assert "stepping down" in caplog.text
     assert _SENTINEL not in caplog.text
@@ -865,3 +888,155 @@ async def test_a_failing_purge_and_a_purge_backlog_wait_for_later_ticks(
         "Coral retention purge failed (1 in a row): OperationalError (orig Exception)"
     ]
     assert "resync task failed" not in caplog.text
+
+
+async def test_an_item_past_its_execution_limit_is_cancelled_and_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_store = FakeRunStore()
+    queue = FakeQueueStore(run_store=run_store)
+    draft = _effect("run-a", "a1")
+    queue.enqueue_work([draft], workspace_id=1, now=int(_START))
+    renewed: list[bool] = []
+    renew_lease = queue.renew_lease
+
+    def recorded_renew(work_id: str, **kwargs: Any) -> bool:
+        renewed.append(renew_lease(work_id, **kwargs))
+        return renewed[-1]
+
+    cancelled: list[float] = []
+
+    async def _step(ctx: ExecutionContext) -> EffectCompleted:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(time.now)
+            raise
+        return EffectCompleted()
+
+    monkeypatch.setattr(queue, "renew_lease", recorded_renew)
+    time = VirtualTime(_START)
+    drainer = WorkDrainer(
+        queue,
+        worker_id="worker-1",
+        clock=time,
+        sleep=time.sleep,
+        rng=lambda: 0.5,
+        execution_limit_s=900.0,
+    )
+    register_executor(_STEP, _step)
+    try:
+        drain = asyncio.create_task(drainer.drain_once())
+        # The heartbeat keeps the lease every 30 s until the limit ends the attempt.
+        for _ in range(30):
+            await poll_until_async(lambda: time.waiting(30.0), timeout_s=budget(10))
+            time.advance(30)
+        await asyncio.wait_for(drain, timeout=budget(10))
+    finally:
+        unregister_executor(_STEP, _step)
+
+    [retried] = queue.get_work([draft.id], workspace_id=1)
+    assert (retried.status, retried.attempts, retried.error_code) == (
+        int(WorkStatus.PENDING),
+        1,
+        "executor.timeout",
+    )
+    assert retried.available_at == int(_START) + 900 + 1
+    assert cancelled == [_START + 900]
+    assert len(renewed) >= 29 and all(renewed)
+
+
+async def test_a_renewal_in_flight_when_the_executor_returns_is_kept_for_the_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_store = FakeRunStore()
+    queue = FakeQueueStore(run_store=run_store)
+    draft = _effect("run-a", "a1")
+    queue.enqueue_work([draft], workspace_id=1, now=int(_START))
+    loop = asyncio.get_running_loop()
+    renewing = asyncio.Event()
+    release = threading.Event()
+    renew_lease = queue.renew_lease
+
+    def renew_then_block(work_id: str, **kwargs: Any) -> bool:
+        # The new expiry is committed before the call returns.
+        renewed = renew_lease(work_id, **kwargs)
+        loop.call_soon_threadsafe(renewing.set)
+        release.wait(budget(10))
+        return renewed
+
+    returned: list[str] = []
+
+    async def _step(ctx: ExecutionContext) -> EffectCompleted:
+        await renewing.wait()
+        returned.append(ctx.work.id)
+        return EffectCompleted()
+
+    finished: list[str] = []
+
+    async def _on_finished(work: FinishedWork) -> None:
+        finished.append(work.item.id)
+
+    monkeypatch.setattr(queue, "renew_lease", renew_then_block)
+    time = VirtualTime(_START)
+    drainer = WorkDrainer(
+        queue, worker_id="worker-1", clock=time, sleep=time.sleep, on_finished=_on_finished
+    )
+    register_executor(_STEP, _step)
+    try:
+        drain = asyncio.create_task(drainer.drain_once())
+        await poll_until_async(lambda: time.waiting(30.0), timeout_s=budget(10))
+        time.advance(30)
+        # The executor returns while the heartbeat's renewal is still in its thread.
+        await poll_until_async(lambda: returned == [draft.id], timeout_s=budget(10))
+        release.set()
+        await asyncio.wait_for(drain, timeout=budget(10))
+    finally:
+        release.set()
+        unregister_executor(_STEP, _step)
+
+    assert _statuses(queue, [draft.id]) == {int(WorkStatus.SUCCEEDED)}
+    assert finished == [draft.id]
+
+
+async def test_workers_claim_nothing_once_the_lease_is_unconfirmed_past_its_step_down_time() -> (
+    None
+):
+    run_store = FakeRunStore()
+    queue = FakeQueueStore(run_store=run_store)
+    finished: list[str] = []
+
+    async def _step(ctx: ExecutionContext) -> EffectCompleted:
+        return EffectCompleted()
+
+    async def _on_finished(work: FinishedWork) -> None:
+        finished.append(work.item.id)
+
+    time = VirtualTime(_START)
+    register_executor(_STEP, _step)
+    try:
+        async with _supervisor(
+            run_store,
+            queue,
+            time,
+            drain_concurrency=1,
+            lease_seconds=120,
+            renew_interval_s=30.0,
+            on_finished=_on_finished,
+        ) as supervisor:
+            await _leading(supervisor)
+            await poll_until_async(lambda: time.waiting(0.1), timeout_s=budget(10))
+            # As if the last renewal were three quarters of the lease ago and the
+            # renewal loop had not noticed yet (a stalled event loop).
+            supervisor.lease_manager._confirmed_at = _START - 90
+            draft = _effect("run-a", "a1")
+            queue.enqueue_work([draft], workspace_id=1, now=int(_START))
+            time.advance(0.1)
+            await poll_until_async(lambda: time.waiting(0.1), timeout_s=budget(10))
+            assert _statuses(queue, [draft.id]) == {int(WorkStatus.PENDING)}
+
+            supervisor.lease_manager._confirmed_at = time.now
+            time.advance(0.1)
+            await poll_until_async(lambda: finished == [draft.id], timeout_s=budget(10))
+    finally:
+        unregister_executor(_STEP, _step)

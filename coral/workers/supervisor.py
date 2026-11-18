@@ -11,7 +11,12 @@ from typing import Any
 
 from coral.db.enum_codecs import WorkKind
 from coral.omni.protocols import RunScopeRunner
-from coral.queue.drainer import HoldPolicy, WorkDrainer, WorkFinishedHook
+from coral.queue.drainer import (
+    DEFAULT_EXECUTION_LIMIT_S,
+    HoldPolicy,
+    WorkDrainer,
+    WorkFinishedHook,
+)
 from coral.queue.run_effects import describe_exception, raise_if_cancelling
 from coral.reconcile.startup import (
     GateRepublisher,
@@ -49,6 +54,11 @@ _PURGED_KINDS = (int(WorkKind.SIGNAL), int(WorkKind.TIMER))
 async def _wait_any_event(events: Sequence[asyncio.Event], timeout: float | None) -> bool:
     if any(ev.is_set() for ev in events):
         return True
+    if not events:
+        if timeout is None:
+            await asyncio.get_running_loop().create_future()
+        await asyncio.sleep(timeout or 0)
+        return False
     waiters = [asyncio.create_task(ev.wait()) for ev in events]
     try:
         done, _ = await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
@@ -57,6 +67,15 @@ async def _wait_any_event(events: Sequence[asyncio.Event], timeout: float | None
         for w in waiters:
             w.cancel()
         await asyncio.gather(*waiters, return_exceptions=True)
+
+
+def _sleep_with(wait: EventWait) -> Callable[[float], Awaitable[None]]:
+    """A sleep on ``wait``'s clock."""
+
+    async def sleep(seconds: float) -> None:
+        await wait((), seconds)
+
+    return sleep
 
 
 def _retry_delay(failures: int) -> float:
@@ -73,11 +92,13 @@ class WorkerSupervisor:
     resync task passes each active run to ``run_reconciler`` and, hourly, purges
     finished signal and timer rows older than ``retention_s``. Workers, the task
     and the lease renewal log their errors and retry after a growing delay. The
-    replica steps down when it cannot confirm its lease before the last quarter
-    of the lease, and restarts its leadership when one of its tasks ends.
+    replica steps down when it cannot confirm its lease (a renewal or the reclaim
+    after it fails or hangs) before the last quarter of the lease, and restarts its
+    leadership when one of its tasks ends.
 
     :param poll_interval_s: How often the pool as a whole polls an empty queue.
     :param resync_interval_s: ``None`` turns off the resync task and the purge.
+    :param execution_limit_s: How long one attempt of an item may run; ``None``: no limit.
     :param wait: The timed wait every loop uses; tests pass a virtual clock's.
     """
 
@@ -107,6 +128,7 @@ class WorkerSupervisor:
         hold_policy: HoldPolicy | None = None,
         resync_interval_s: float | None = 60.0,
         retention_s: int = 86_400,
+        execution_limit_s: float | None = DEFAULT_EXECUTION_LIMIT_S,
         wait: EventWait = _wait_any_event,
     ) -> None:
         if not 1 <= drain_concurrency <= MAX_DRAIN_CONCURRENCY:
@@ -139,6 +161,8 @@ class WorkerSupervisor:
             clock=clock,
             on_finished=on_finished,
             hold_policy=hold_policy,
+            execution_limit_s=execution_limit_s,
+            sleep=_sleep_with(wait),
         )
         self._poll_interval_s = poll_interval_s
         self._standby_retry_s = standby_retry_s
@@ -294,8 +318,8 @@ class WorkerSupervisor:
             if await self._wait((self._stop_event, loss_ev), delay):
                 return
             try:
-                renewed = await self._renew_before(self._step_down_at())
-            except _RenewalOverdue:
+                renewed = bool(await self._by_step_down(manager.renew_once()))
+            except _LeaseOverdue:
                 _logger.error("Coral worker lease renewal did not return in time; stepping down")
                 manager.mark_lost()
                 return
@@ -316,39 +340,48 @@ class WorkerSupervisor:
                 return
             failures = 0
             try:
-                await asyncio.to_thread(self._queue_store.reclaim_expired_work, now_fn=self._clock)
+                await self._by_step_down(
+                    asyncio.to_thread(self._queue_store.reclaim_expired_work, now_fn=self._clock)
+                )
+            except _LeaseOverdue:
+                # Until this returns no renewal can run, so the lease would lapse unseen.
+                _logger.error(
+                    "Coral reclaim of expired work did not return in time; stepping down"
+                )
+                manager.mark_lost()
+                return
             except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- logged
                 raise_if_cancelling(exc)
                 _logger.error("Coral reclaim of expired work failed: %s", describe_exception(exc))
 
-    async def _renew_before(self, deadline: float) -> bool:
+    async def _by_step_down[T](self, work: Awaitable[T]) -> T | None:
         """
-        Renew the lease, giving up once ``deadline`` passes on this replica's clock.
+        ``work``'s result, given up once the step-down time passes on this replica's clock.
 
-        A renewal stuck in the store (a lock wait, a half-open connection) cannot hold
-        leadership past the deadline; its thread may still finish, extending only this
-        replica's own row. ``False`` also when a stop or a lost lease comes first.
+        A store call stuck in a lock wait or on a half-open connection cannot hold
+        leadership past that time; its thread may still finish. ``None`` when a stop or
+        a lost lease comes first.
 
-        :raises _RenewalOverdue: when the deadline passed first.
+        :raises _LeaseOverdue: when the step-down time passed first.
         """
         loss_ev = self._lease_manager.lease_lost_event
-        renewal = asyncio.ensure_future(self._lease_manager.renew_once())
+        call = asyncio.ensure_future(work)
         timer = asyncio.ensure_future(
-            self._wait((self._stop_event, loss_ev), max(0.0, deadline - self._clock()))
+            self._wait((self._stop_event, loss_ev), max(0.0, self._step_down_at() - self._clock()))
         )
         returned = False
         try:
-            await asyncio.wait({renewal, timer}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({call, timer}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            returned = renewal.done()
-            renewal.cancel()
+            returned = call.done()
+            call.cancel()
             timer.cancel()
-            await asyncio.gather(renewal, timer, return_exceptions=True)
+            await asyncio.gather(call, timer, return_exceptions=True)
         if returned:
-            return renewal.result()
+            return call.result()
         if timer.result():
-            return False
-        raise _RenewalOverdue
+            return None
+        raise _LeaseOverdue
 
     def _step_down_at(self) -> float:
         """When to stop leading without a renewal: a quarter of the lease before it ends."""
@@ -382,6 +415,9 @@ class WorkerSupervisor:
 
     async def _drain_next(self) -> bool:
         """Claim and run one item of a run no other worker has in flight."""
+        if self._clock() >= self._step_down_at():
+            # The lease is unconfirmed this late: claim nothing until a renewal lands.
+            return False
         async with self._claim_lock:
             claimed = await self._drainer.claim(exclude_run_ids=frozenset(self._busy_runs))
             if claimed is None:
@@ -452,8 +488,8 @@ class WorkerSupervisor:
         return False
 
 
-class _RenewalOverdue(Exception):
-    """A lease renewal did not return before the replica had to step down."""
+class _LeaseOverdue(Exception):
+    """A renewal-loop store call did not return before the replica had to step down."""
 
 
 def _task_end(task: asyncio.Task[None]) -> str:

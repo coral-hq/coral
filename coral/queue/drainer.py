@@ -9,7 +9,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Coroutine, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,6 +60,9 @@ _MISSING_EXECUTOR = EffectFailed(
 )
 # The longest hold, so the fences see a held item at least hourly.
 MAX_HOLD_DELAY_S = 3600
+# How long one attempt may run before it is cancelled and retried: far above the
+# longest wait an executor makes (a close's 150 s, a send's 120 s).
+DEFAULT_EXECUTION_LIMIT_S = 900.0
 # An item claimed this many times the attempt limit without settling (each crash,
 # lost lease or error after the claim spends an attempt) fails without running again.
 _CLAIMS_PER_ATTEMPT_LIMIT = 2
@@ -163,6 +166,9 @@ class WorkDrainer:
 
     :param on_finished: Called after each finish to SUCCEEDED or FAILED; its errors are logged.
     :param hold_policy: Asked first for every failure, a missing executor included.
+    :param execution_limit_s: An attempt still running after this long is cancelled
+        and ends as a retryable ``executor.timeout``; ``None`` sets no limit.
+    :param sleep: The timed sleep of the heartbeat and the limit; tests pass a virtual one.
     """
 
     def __init__(
@@ -182,7 +188,11 @@ class WorkDrainer:
         max_backoff_s: float = 300.0,
         on_finished: WorkFinishedHook | None = None,
         hold_policy: HoldPolicy | None = None,
+        execution_limit_s: float | None = DEFAULT_EXECUTION_LIMIT_S,
+        sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     ) -> None:
+        if execution_limit_s is not None and execution_limit_s <= 0:
+            raise ValueError("execution_limit_s must be positive")
         self._queue_store = queue_store
         self._worker_id = worker_id
         self._kinds = tuple(int(k) for k in kinds)
@@ -201,6 +211,8 @@ class WorkDrainer:
         self._max_backoff_s = max_backoff_s
         self._on_finished = on_finished
         self._hold_policy = hold_policy
+        self._execution_limit_s = execution_limit_s
+        self._sleep = sleep
 
     async def drain_once(self, *, exclude_run_ids: Collection[str] = ()) -> WorkItem | None:
         """Claim and execute at most one ready work item of a run not in ``exclude_run_ids``."""
@@ -302,9 +314,15 @@ class WorkDrainer:
         payload_dict: dict[str, Any],
         lease_expires_at: int,
     ) -> tuple[EffectOutcome, int] | None:
-        """Run the executor under a lease heartbeat; ``None`` when the lease was lost."""
+        """
+        Run the executor under a lease heartbeat and the execution limit.
+
+        :returns: The outcome and the lease the finish must name; ``None`` when the
+            lease was lost.
+        """
         current_lease_expires_at = lease_expires_at
         lease_lock = asyncio.Lock()
+        renewals_stopped = False
         ctx = ExecutionContext(
             work=claimed,
             workspace_id=claimed.workspace_id,
@@ -314,9 +332,11 @@ class WorkDrainer:
             _lease_expires_at=current_lease_expires_at,
         )
 
-        async def _renew_lease() -> bool:
+        async def _renew_and_record() -> bool:
             nonlocal current_lease_expires_at
             async with lease_lock:
+                if renewals_stopped:
+                    return False
                 renew_now = int(self._clock())
                 ok = await asyncio.to_thread(
                     self._queue_store.renew_lease,
@@ -331,11 +351,16 @@ class WorkDrainer:
                     ctx._lease_expires_at = current_lease_expires_at
                 return ok
 
+        async def _renew_lease() -> bool:
+            # Shielded: a renewal whose caller is cancelled still records the lease its
+            # thread committed, so the finish names it.
+            return await asyncio.shield(_renew_and_record())
+
         ctx._ensure_lease_fn = _renew_lease
 
         async def _heartbeat_loop() -> None:
             while True:
-                await asyncio.sleep(self._heartbeat_interval_s)
+                await self._sleep(self._heartbeat_interval_s)
                 try:
                     ok = await _renew_lease()
                 except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- fenced finish
@@ -349,8 +374,7 @@ class WorkDrainer:
                 if not ok:
                     return
 
-        heartbeat_task = asyncio.create_task(_heartbeat_loop())
-        try:
+        async def _run() -> EffectOutcome:
             async with contextlib.AsyncExitStack() as stack:
                 if self._scope_runner is not None:
                     await stack.enter_async_context(
@@ -364,7 +388,11 @@ class WorkDrainer:
                         )
                     )
                 returned = await registration.fn(ctx)
-            outcome = _checked_outcome(returned)
+            return _checked_outcome(returned)
+
+        heartbeat_task = asyncio.create_task(_heartbeat_loop())
+        try:
+            outcome = await self._within_limit(claimed, _run())
         except StartupLeaseLost:
             _logger.info(
                 "Work item %s lost lease during execution on worker %s",
@@ -391,9 +419,48 @@ class WorkDrainer:
                 retryable=True,
             )
         finally:
-            heartbeat_task.cancel()
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                heartbeat_task.cancel()
+            else:
+                # A renewal in flight finishes and is recorded before the finish reads
+                # the lease; none starts after.
+                async with lease_lock:
+                    renewals_stopped = True
+                    heartbeat_task.cancel()
             await asyncio.gather(heartbeat_task, return_exceptions=True)
         return outcome, current_lease_expires_at
+
+    async def _within_limit(
+        self, claimed: WorkItem, run: Coroutine[Any, Any, EffectOutcome]
+    ) -> EffectOutcome:
+        """``run``'s outcome, or a retryable ``executor.timeout`` once the limit passes."""
+        limit_s = self._execution_limit_s
+        if limit_s is None:
+            return await run
+        execution = asyncio.ensure_future(run)
+        timer = asyncio.ensure_future(self._sleep(limit_s))
+        returned = False
+        try:
+            await asyncio.wait({execution, timer}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            returned = execution.done()
+            execution.cancel()
+            timer.cancel()
+            await asyncio.gather(execution, timer, return_exceptions=True)
+        if returned:
+            # The executor's own exception, a stray cancellation included, reaches the caller.
+            return execution.result()
+        _logger.warning(
+            "Effect executor for work_id=%s ran longer than %d s; cancelled it",
+            claimed.id,
+            limit_s,
+        )
+        return EffectFailed(
+            error_code="executor.timeout",
+            message=f"the executor ran longer than {limit_s:g} s",
+            retryable=True,
+        )
 
     async def _settle(
         self,
@@ -497,7 +564,7 @@ class WorkDrainer:
         now_s: int | None = None,
     ) -> bool:
         """Finish the claimed item; ``False`` when its lease was fenced off."""
-        return await asyncio.to_thread(
+        finished = await asyncio.to_thread(
             self._queue_store.finish_work,
             claimed.id,
             worker_id=self._worker_id,
@@ -510,6 +577,12 @@ class WorkDrainer:
             now_fn=self._clock if now_s is None else functools.partial(float, now_s),
             hold=hold,
         )
+        if not finished:
+            _logger.warning(
+                "Finish of work_id=%s was fenced off: a reclaim or another worker has it",
+                claimed.id,
+            )
+        return finished
 
     async def _finish_terminal(
         self,
@@ -569,4 +642,10 @@ class WorkDrainer:
         return processed
 
 
-__all__ = ["FinishedWork", "HoldPolicy", "WorkDrainer", "WorkFinishedHook"]
+__all__ = [
+    "DEFAULT_EXECUTION_LIMIT_S",
+    "FinishedWork",
+    "HoldPolicy",
+    "WorkDrainer",
+    "WorkFinishedHook",
+]

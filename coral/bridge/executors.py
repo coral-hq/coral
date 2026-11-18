@@ -30,6 +30,7 @@ from coral.bridge.service import LOAD_FAILED_DETAIL, EngineBridge, EngineLoadFai
 from coral.db.enum_codecs import RunStatus
 from coral.engine import types as engine
 from coral.engine.facts import TurnFact
+from coral.engine.lifecycle import _HANDED_OFF
 from coral.engine.machines.slot import find_slot
 from coral.engine.reconcile import awaiting_effect
 from coral.omni.protocols import (
@@ -58,8 +59,6 @@ from coral.stores.stable_ids import StableIds
 
 _logger = logging.getLogger(__name__)
 
-# Slots that handed off: no turn fact or session state of theirs reaches the engine.
-_HANDED_OFF = frozenset({"closing", "closed"})
 # Why a signal is the run's orchestrator's, whose turns the step rules do not read.
 _ORCHESTRATOR = "orchestrator"
 # Bridge calls in flight at once in one process.
