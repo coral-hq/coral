@@ -473,7 +473,8 @@ def test_lock_timeout_issues_set_local_timeouts_on_the_postgresql_family(
             run.id, 2, Transition(logs=(_log("e2"),)), workspace_id=WORKSPACE
         )
     )
-    # Under a millisecond rounds up: 0 would turn both timeouts off.
+    # Under a millisecond rounds up (0 would turn both timeouts off), and a
+    # statement keeps at least 1 s so the commit itself can still run.
     tiny = set_local_statements(
         lambda: store.apply_transition(
             run.id,
@@ -492,7 +493,7 @@ def test_lock_timeout_issues_set_local_timeouts_on_the_postgresql_family(
         else []
     )
     assert tiny == (
-        ["SET LOCAL lock_timeout = 1", "SET LOCAL statement_timeout = 1"]
+        ["SET LOCAL lock_timeout = 1", "SET LOCAL statement_timeout = 1000"]
         if postgresql_family
         else []
     )

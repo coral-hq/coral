@@ -345,15 +345,18 @@ def _to_run_spec(row: RunSpecRow, run: RunRow) -> RunStartSpec:
 
 # Dialects whose transactions take SET LOCAL lock and statement timeouts.
 _LOCK_TIMEOUT_DIALECTS = frozenset({"postgresql", "cockroachdb"})
+_MIN_STATEMENT_TIMEOUT_MS = 1000
 
 
 def _bound_lock_waits(session: Session, lock_timeout_s: float) -> None:
-    """Bound this transaction's row-lock waits, and each statement at 1.5 times that."""
+    """Bound this transaction's row-lock waits, and each statement at 1.5 times that (min 1 s)."""
     # At least 1 ms: 0 would turn both timeouts off.
     lock_ms = max(1, math.ceil(lock_timeout_s * 1000))
+    # A statement needs real time to run even when lock waits are tiny.
+    statement_ms = max(_MIN_STATEMENT_TIMEOUT_MS, lock_ms * 3 // 2)
     # SET takes no bind parameters; both values are ints computed here (milliseconds).
     session.execute(text(f"SET LOCAL lock_timeout = {lock_ms}"))
-    session.execute(text(f"SET LOCAL statement_timeout = {lock_ms * 3 // 2}"))
+    session.execute(text(f"SET LOCAL statement_timeout = {statement_ms}"))
 
 
 @dataclass(eq=False)
