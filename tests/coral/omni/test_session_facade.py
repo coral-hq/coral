@@ -111,7 +111,7 @@ from tests.server.integration.test_session_host_launch import (
     _runner_hello,
 )
 from tests.server.routes.test_host_worktree import _FakeWebSocket
-from tests.stores.coral._faults import SimulatedCrash, crash_around
+from tests.stores.coral._faults import SimulatedCrash, crash_around, crash_around_async
 from tests.tools.test_extensions import installed_tool_providers
 
 WORKSPACE = DEFAULT_WORKSPACE_ID
@@ -1269,17 +1269,6 @@ async def test_launch_failures_are_typed_and_resume_from_the_written_row(
     assert coral.children() == [coral.step_id()]
 
 
-def _crash_after_async(patched: pytest.MonkeyPatch, owner: object, attr: str) -> None:
-    """Make the coroutine ``owner.attr`` finish its real work, then die."""
-    real = getattr(owner, attr)
-
-    async def crashing(*args: Any, **kwargs: Any) -> Any:
-        await real(*args, **kwargs)
-        raise SimulatedCrash(f"crash after {attr}")
-
-    patched.setattr(owner, attr, crashing)
-
-
 def _crash_after_progress(
     patched: pytest.MonkeyPatch, coral: _Coral, progress: SessionBindingProgress
 ) -> None:
@@ -1303,9 +1292,11 @@ def _install_crash(phase: str, patched: pytest.MonkeyPatch, coral: _Coral) -> No
     elif phase == "announce":
         crash_around(patched, facade_module, "_announce_session_added", when="after")
     elif phase == "launch":
-        _crash_after_async(patched, facade_module, "ensure_runner_connected")
+        crash_around_async(patched, facade_module, "ensure_runner_connected", when="after")
     elif phase == "init":
-        _crash_after_async(patched, facade_module, "_ensure_runner_session_initialized")
+        crash_around_async(
+            patched, facade_module, "_ensure_runner_session_initialized", when="after"
+        )
     else:
         _crash_after_progress(patched, coral, SessionBindingProgress.INITIALIZED)
 
@@ -1499,7 +1490,7 @@ async def test_a_crash_inside_the_torn_row_repair_recreates_the_row_once(
 
     # The repair deletes the torn row, then dies before writing it again.
     with monkeypatch.context() as crash:
-        _crash_after_async(crash, store, "delete_conversation")
+        crash_around_async(crash, store, "delete_conversation", when="after")
         with pytest.raises(SimulatedCrash):
             await coral.deliver(coral.step_payload())
     assert coral.conversation(step_id) is None

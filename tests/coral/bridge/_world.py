@@ -626,25 +626,33 @@ class Sessions:
 
 
 @asynccontextmanager
-async def serving(world: World) -> AsyncIterator[Sessions]:
+async def serving(world: World, *, after: Sessions | None = None) -> AsyncIterator[Sessions]:
     """
     The world's session side, its executors registered until the block ends.
 
     A SQL world keeps bindings, stable ids and op intents in its database; a fake one
     in memory.
+
+    :param after: The session side of a process that died: the new one keeps its
+        sessions and host, which outlive a server process, and on the in-memory
+        stores its bindings, stable ids and op intents; its edge watchers are new.
     """
-    events: list[str] = []
-    if world.db_uri is None:
-        bindings: FakeBindings | SqlAlchemySessionBindingStore = FakeBindings(
+    events: list[str] = [] if after is None else after.events
+    if after is not None and world.db_uri is None:
+        bindings: FakeBindings | SqlAlchemySessionBindingStore = after.bindings
+        stable_ids: StableIds = after.stable_ids
+        intents: WorkspaceOpIntents = after.intents
+    elif world.db_uri is None:
+        bindings = FakeBindings(
             run_store=world.runs, clock=lambda: world.clock.epoch, reservable=True
         )
-        stable_ids: StableIds = FakeStableIds(events, clock=lambda: world.clock.epoch)
-        intents: WorkspaceOpIntents = FakeIntents(events)
+        stable_ids = FakeStableIds(events, clock=lambda: world.clock.epoch)
+        intents = FakeIntents(events)
     else:
         bindings = SqlAlchemySessionBindingStore(world.db_uri)
         stable_ids = SqlAlchemyStableIdStore(world.db_uri, clock=lambda: world.clock.epoch)
         intents = SqlAlchemyWorkspaceOpIntentStore(world.db_uri)
-    dispatch = FakeDispatch(events, owner=USER)
+    dispatch = FakeDispatch(events, owner=USER) if after is None else after.dispatch
     threads = BridgeThreads(world.bridge)
     recorder = TurnFactRecorder(world.bound, world.queue, clock=lambda: world.clock.epoch)
     sessions = Sessions(
@@ -655,9 +663,13 @@ async def serving(world: World) -> AsyncIterator[Sessions]:
         intents=intents,
         dispatch=dispatch,
         edges=FakeEdgeWatcher(events),
-        host=FakeHostChannel(events, dict(HOST_REPLIES)),
-        facade=BindingFacade(bindings=bindings, dispatch=dispatch),
-        agents=StanceAgents(),
+        host=FakeHostChannel(events, dict(HOST_REPLIES)) if after is None else after.host,
+        facade=BindingFacade(
+            bindings=bindings,
+            dispatch=dispatch,
+            sessions=FakeSessionFacade() if after is None else after.facade.sessions,
+        ),
+        agents=StanceAgents() if after is None else after.agents,
         threads=threads,
         dispatcher=ToolDispatcher(StoreDecisionPort(world.bridge), PLANNERS),
         recorder=recorder,
@@ -685,6 +697,8 @@ class Actor(Protocol):
 
     async def act(self) -> int: ...
 
+    def reconnect(self, sessions: Sessions) -> None: ...
+
 
 def is_orchestrator(world: World, run_id: str, session_id: str) -> bool:
     """Whether the session is the orchestrator the run's row names."""
@@ -708,7 +722,8 @@ class Agent:
     It reads the activation id from each message and calls ``coral_submit_handoff``
     through the dispatcher with a fresh operation id, as the session's runner would;
     its sessions call at once. A call told to retry is made again on its next turn;
-    any other reply ends it.
+    any other reply ends it. A call whose reply was lost (the server died) is resent
+    under its operation id.
 
     :param reports: Each step's report by node id; a default names the node and the run.
     :param copies: How many times each call is sent at once under its operation id,
@@ -728,7 +743,12 @@ class Agent:
         self._read = 0
         self._pending: dict[str, str] = {}
         self._operations = itertools.count(1)
+        self._unanswered: dict[tuple[str, str], str] = {}
         self.calls: list[Call] = []
+
+    def reconnect(self, sessions: Sessions) -> None:
+        """Call through a restarted server's session side from now on."""
+        self._sessions = sessions
 
     async def act(self) -> int:
         """Answer every message that arrived and retry calls told to; returns calls made."""
@@ -760,16 +780,21 @@ class Agent:
             "status": "done",
             "report": self._reports.get(node_id, f"Finished {node_id} in run {binding.run_id}."),
         }
-        operation_id = f"op-{next(self._operations)}"
+        key = (session_id, activation_id)
+        operation_id = self._unanswered.pop(key, None) or f"op-{next(self._operations)}"
         call = EngineToolCall(
             binding=binding,
             tool=SUBMIT_HANDOFF.name,
             arguments=arguments,
             operation_id=operation_id,
         )
-        replies = await asyncio.gather(
-            *(self._sessions.dispatcher.dispatch(call) for _ in range(self._copies))
-        )
+        try:
+            replies = await asyncio.gather(
+                *(self._sessions.dispatcher.dispatch(call) for _ in range(self._copies))
+            )
+        except BaseException:
+            self._unanswered[key] = operation_id
+            raise
         self.calls.extend(
             Call(
                 session_id=session_id, operation_id=operation_id, arguments=arguments, reply=reply
@@ -787,7 +812,8 @@ class Orchestrator:
     run's orchestrator session and calls ``coral_choose_arrow`` through the
     dispatcher with the next scripted label and reason, as the session's runner
     would. Each decision is answered once, however often it is asked; a call told
-    to retry is made again on its next turn. Past its script it answers nothing.
+    to retry is made again on its next turn, and one whose reply was lost is resent
+    under its operation id. Past its script it answers nothing.
 
     :param choices: ``(label, reason)`` for each decision, in the order they are asked.
     """
@@ -799,7 +825,12 @@ class Orchestrator:
         self._asked: set[str] = set()
         self._pending: dict[tuple[str, str], tuple[str, str]] = {}
         self._operations = itertools.count(1)
+        self._unanswered: dict[tuple[str, str], str] = {}
         self.calls: list[Call] = []
+
+    def reconnect(self, sessions: Sessions) -> None:
+        """Call through a restarted server's session side from now on."""
+        self._sessions = sessions
 
     async def act(self) -> int:
         """Answer every decision newly asked about and retry calls told to; returns calls made."""
@@ -830,14 +861,19 @@ class Orchestrator:
         )
         assert binding is not None, f"session {session_id} is not bound"
         arguments = {"decision_id": decision_id, "label": label, "reason": reason}
-        operation_id = f"choice-{next(self._operations)}"
+        key = (session_id, decision_id)
+        operation_id = self._unanswered.pop(key, None) or f"choice-{next(self._operations)}"
         call = EngineToolCall(
             binding=binding,
             tool=CHOOSE_ARROW.name,
             arguments=arguments,
             operation_id=operation_id,
         )
-        reply = await self._sessions.dispatcher.dispatch(call)
+        try:
+            reply = await self._sessions.dispatcher.dispatch(call)
+        except BaseException:
+            self._unanswered[key] = operation_id
+            raise
         self.calls.append(
             Call(
                 session_id=session_id, operation_id=operation_id, arguments=arguments, reply=reply

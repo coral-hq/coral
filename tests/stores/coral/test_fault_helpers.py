@@ -22,6 +22,7 @@ from omnigent.db.utils import (
 from tests.stores.coral._faults import (
     SimulatedCrash,
     crash_around,
+    crash_around_async,
     fresh_process,
     hold_sqlite_write_lock,
     run_racing,
@@ -79,6 +80,42 @@ def test_crash_between_two_writes_in_one_named_session_leaves_no_rows(
         _write_pair(get_or_create_engine(coral_db_uri))
 
     assert _probe_count(fresh_process(coral_db_uri)) == 0
+
+
+class _Doubler:
+    """A sync and a coroutine method that record each call and double its value."""
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def double(self, value: int) -> int:
+        self.calls.append(value)
+        return value * 2
+
+    async def double_async(self, value: int) -> int:
+        return self.double(value)
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+@pytest.mark.parametrize("coroutine", [False, True], ids=["sync", "async"])
+async def test_a_crash_with_matching_hits_only_the_calls_it_accepts(
+    monkeypatch: pytest.MonkeyPatch, when: Literal["before", "after"], coroutine: bool
+) -> None:
+    doubler = _Doubler()
+    if coroutine:
+        crash_around_async(
+            monkeypatch, doubler, "double_async", when=when, matching=lambda value: value == 2
+        )
+    else:
+        crash_around(monkeypatch, doubler, "double", when=when, matching=lambda value: value == 2)
+
+    async def call(value: int) -> int:
+        return await doubler.double_async(value) if coroutine else doubler.double(value)
+
+    assert await call(1) == 2
+    with pytest.raises(SimulatedCrash):
+        await call(2)
+    assert doubler.calls == ([1] if when == "before" else [1, 2])
 
 
 def test_racing_inserts_on_one_key_have_one_winner(coral_db_uri: str) -> None:
