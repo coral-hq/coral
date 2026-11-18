@@ -1,9 +1,9 @@
 """The one commit path: engine entries and everything they imply as one run-store transition.
 
 The transition carries the entries as ENGINE log rows, the work their effects
-queue (transactional outbox), timer rows for new armings, the run and slot
-projections, and on a return to running the release of held rows and the
-revival of exhausted effects.
+queue (transactional outbox), the orchestrator's rows, timer rows for new
+armings, the run and slot projections, and on a return to running the release
+of held rows and the revival of exhausted effects.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from coral.bridge.mapping import (
     map_effect,
     timer_draft,
 )
+from coral.bridge.orchestrator import is_decision_reminder, orchestrator_rows, revivable_work_ids
 from coral.bridge.projection import project_run, project_slots
 from coral.db.enum_codecs import RUN_PAUSE_REASON, RunStatus
 from coral.engine import types as engine
@@ -105,10 +106,12 @@ def build_commit(
     A run row paused while its engine ran keeps that pause and its reason, also when the
     engine then pauses, unless ``lift_store_pause``, which only a resume passes. A row
     that shows the engine's own pause follows the engine: a resume, a retry or a plan
-    probe that clears it also lifts the row's.
+    probe that clears it also lifts the row's. The commit that opens the run's first
+    decision also names its orchestrator session and queues its create (see
+    :mod:`coral.bridge.orchestrator`).
 
     :raises TransitionTooLarge: when the rows exceed the store's cap after timer
-        rows, which the resync adds again, were dropped.
+        rows (which the resync adds again) and the orchestrator's re-asks were dropped.
     :raises UnsupportedStance: for a create whose profile has no step stance.
     """
     run = snapshot.store.run
@@ -123,22 +126,6 @@ def build_commit(
         ),
         *extra_logs,
     ]
-    outbox = _dedupe([*_effect_rows(snapshot, accepted, now), *extra_outbox])
-    timers = _new_timer_rows(run.id, first, final)
-    room = MAX_COMMIT_ROWS - len(outbox)
-    if len(timers) > room:
-        _logger.info(
-            "Coral run %s defers %d timer rows to its resync: the commit is full",
-            run.id,
-            len(timers) - max(room, 0),
-        )
-        timers = timers[: max(room, 0)]
-    outbox.extend(timers)
-    if len(outbox) > MAX_COMMIT_ROWS or len(logs) > MAX_COMMIT_ROWS:
-        raise store.TransitionTooLarge(
-            f"run {run.id} commit has {len(logs)} log rows and {len(outbox)} work rows"
-        )
-
     now_s = epoch_seconds(now)
     projected = project_run(run, final, now=now_s)
     row_paused = run.status == int(RunStatus.PAUSED)
@@ -159,6 +146,24 @@ def build_commit(
     if row_only and final.status not in engine.TERMINAL_STATUSES:
         projected = replace(projected, status=None, pause_reason=None, clear_pause_reason=False)
     resumed = not row_only and final.status == "running" and (first.status == "paused" or lifted)
+    orchestrator = orchestrator_rows(
+        _map_context(snapshot, final, now),
+        run,
+        first=first,
+        effects=(effect for item in accepted for effect in item.entry.effects),
+        resumed=resumed,
+        run_version=snapshot.version + 1,
+    )
+    outbox = _dedupe([*_effect_rows(snapshot, accepted, now), *orchestrator.outbox, *extra_outbox])
+    # A full commit drops timer rows first (the resync adds them again), then re-asks
+    # (each decision already had its request).
+    outbox.extend(_fitting(run.id, "orchestrator re-asks", orchestrator.asks, len(outbox)))
+    timers = _new_timer_rows(run.id, first, final)
+    outbox.extend(_fitting(run.id, "timer rows for the resync", timers, len(outbox)))
+    if len(outbox) > MAX_COMMIT_ROWS or len(logs) > MAX_COMMIT_ROWS:
+        raise store.TransitionTooLarge(
+            f"run {run.id} commit has {len(logs)} log rows and {len(outbox)} work rows"
+        )
     release = tuple(
         dict.fromkeys((*(RESUME_RELEASE_CODES if resumed else ()), *release_held_codes))
     )
@@ -166,13 +171,14 @@ def build_commit(
         status=projected.status,
         pause_reason=projected.pause_reason,
         clear_pause_reason=projected.clear_pause_reason,
+        orchestrator_session_id=orchestrator.session_id,
         activation_count_delta=projected.activation_count_delta,
         finished_at=projected.finished_at,
         agent_slots=project_slots(run.id, final, snapshot.store.agent_slots, now=now_s),
         logs=tuple(extra_logs),
         outbox_work=tuple(outbox),
         tool_reply=tool_reply,
-        revive_work_ids=_revivable(run.id, final) if resumed else (),
+        revive_work_ids=_revivable(run, final) if resumed else (),
         release_held_codes=release,
     )
     if not accepted and changes.is_empty:
@@ -186,21 +192,16 @@ def _effect_rows(
     run = snapshot.store.run
     rows: list[store.WorkItemDraft] = []
     for item in accepted:
-        ctx = MapContext(
-            workspace_id=run.workspace_id,
-            run_id=run.id,
-            graph=snapshot.graph,
-            state=item.after,
-            request_preview=snapshot.store.spec.request_preview,
-            title=run.title,
-            now=now,
-        )
+        ctx = _map_context(snapshot, item.after, now)
         if isinstance(item.entry.input, engine.StartRun):
             rows.append(anchor_create_draft(ctx))
         for effect in item.entry.effects:
             draft = map_effect(ctx, effect)
             if draft is not None:
                 rows.append(draft)
+                continue
+            if is_decision_reminder(item.after, effect):
+                # The orchestrator's rules queue it as a reminder.
                 continue
             _logger.info(
                 "Coral run %s committed %s effect %s without work: %s",
@@ -210,6 +211,31 @@ def _effect_rows(
                 UNMAPPED_KINDS.get(effect.kind, "no executor handles it"),
             )
     return rows
+
+
+def _fitting(
+    run_id: str, what: str, rows: Sequence[store.WorkItemDraft], used: int
+) -> Sequence[store.WorkItemDraft]:
+    """The leading ``rows`` that still fit beside ``used`` rows; the rest are logged."""
+    room = max(MAX_COMMIT_ROWS - used, 0)
+    if len(rows) > room:
+        _logger.info(
+            "Coral run %s defers %d %s: the commit is full", run_id, len(rows) - room, what
+        )
+    return rows[:room]
+
+
+def _map_context(snapshot: EngineSnapshot, state: engine.RunState, now: datetime) -> MapContext:
+    run = snapshot.store.run
+    return MapContext(
+        workspace_id=run.workspace_id,
+        run_id=run.id,
+        graph=snapshot.graph,
+        state=state,
+        request_preview=snapshot.store.spec.request_preview,
+        title=run.title,
+        now=now,
+    )
 
 
 def _new_timer_rows(
@@ -228,16 +254,17 @@ def _new_timer_rows(
     return [timer_draft(run_id, timer) for timer in armed]
 
 
-def _revivable(run_id: str, state: engine.RunState) -> tuple[str, ...]:
-    """Rows a resume may revive: every unreceipted fed effect's, and the anchor's."""
+def _revivable(run: store.CoralRun, state: engine.RunState) -> tuple[str, ...]:
+    """Rows a resume may revive: unreceipted fed effects', the anchor's and the orchestrator's."""
     receipted = {receipt.key for receipt in state.receipts}
     keys = [
         effect.effect_key
         for effect in state.effects
         if effect.kind in FED_KINDS and effect.effect_key not in receipted
     ]
-    keys.append(anchor_effect_key(run_id))
-    return tuple(dict.fromkeys(effect_work_id(run_id, key) for key in keys))
+    keys.append(anchor_effect_key(run.id))
+    ids = (effect_work_id(run.id, key) for key in keys)
+    return tuple(dict.fromkeys((*ids, *revivable_work_ids(run, state))))
 
 
 def _dedupe(rows: Sequence[store.WorkItemDraft]) -> list[store.WorkItemDraft]:

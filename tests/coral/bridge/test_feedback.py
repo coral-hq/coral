@@ -287,6 +287,14 @@ def test_feedback_maps_outcomes_to_engine_inputs() -> None:
     assert feedback_input(
         FinishedWork(orchestrator, int(WorkStatus.FAILED), "session.agent_not_supported", None)
     ) == PauseRun(reason="failure_path", detail="orchestrator:session.agent_not_supported")
+    # A decision request, reminder or re-request to the orchestrator is a bridge row too.
+    request = item({"effect_type": "send_input", "bridge_item": "decision", "effect_key": "k3"})
+    assert feedback_input(FinishedWork(request, int(WorkStatus.SUCCEEDED), None, None)) is None
+    assert feedback_input(
+        FinishedWork(
+            request, int(WorkStatus.FAILED), "infra.transient", {"last_error_code": "c.x"}
+        )
+    ) == PauseRun(reason="infra", detail="decision:c.x")
     assert fed_payload(
         "close_slot", {"pending_input": True, "diff_stat": {"files": 3}, "commit": "c"}
     ) == {

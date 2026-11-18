@@ -17,7 +17,7 @@ from coral.bridge.config import (
     freeze_engine_config,
 )
 from coral.bridge.service import EngineBridge
-from coral.bridge.start import RunNotRunnable
+from coral.bridge.start import RunNotRunnable, live_slot_bound, worst_effect_key_length
 from coral.db.enum_codecs import ActorKind, LogKind, RunStatus, SlotStatus, WorkKind
 from coral.engine.types import EngineConfig
 from coral.model.canonical import canonical_bytes, content_hash
@@ -41,6 +41,7 @@ from tests.coral.bridge._world import (
 from tests.coral.workflow_builders import (
     arrow,
     compile_text,
+    decision,
     end,
     fixture_text,
     step,
@@ -335,6 +336,43 @@ def test_a_slot_whose_worst_case_effect_key_exceeds_512_characters_is_refused(
     start(world, yaml_text)
     _checked_as(monkeypatch, nested(6))
     assert _refusal(world, yaml_text, start_key="second") == "graph.ids_too_long"
+
+
+def _decisions_after_one_step(count: int) -> str:
+    names = [f"d{index}" for index in range(count)]
+    return workflow_text(
+        [start_node(), step("plan"), *(decision(name) for name in names), end()],
+        [
+            arrow("a0", "start", "plan"),
+            *(arrow(f"s{index}", "plan", name) for index, name in enumerate(names)),
+            *(arrow(f"e{index}", name, "end", label="ok") for index, name in enumerate(names)),
+        ],
+    )
+
+
+@pytest.mark.parametrize(("count", "refused"), [(48, False), (49, True), (64, True)])
+def test_decisions_open_at_once_count_toward_the_width_bound(
+    world: World, count: int, refused: bool
+) -> None:
+    # Each open decision adds a request, and on a resume a re-request, to one commit.
+    yaml_text = _decisions_after_one_step(count)
+    assert live_slot_bound(compile_text(yaml_text)[0]) == 1
+
+    if refused:
+        assert _refusal(world, yaml_text) == "graph.too_wide"
+    else:
+        assert start(world, yaml_text).status == int(RunStatus.RUNNING)
+
+
+def test_a_decision_re_request_key_counts_toward_the_worst_effect_key() -> None:
+    # The decision's pass digits come from the loop's limit (3, so at most pass 4).
+    graph = compile_text(fixture_text("loop"))[0]
+    run_id = run_id_for()
+    step_key = f"{run_id}:{'9' * 10}:{'k' * len('cancel_sessions')}:work||a4:9:0"
+    rerequest_key = f"{run_id}:decision_rerequest:review||a4:9:{'9' * 10}"
+    assert len(rerequest_key) > len(step_key)
+
+    assert worst_effect_key_length(graph, run_id) == len(rerequest_key)
 
 
 def _reanalyzed(monkeypatch: pytest.MonkeyPatch) -> CompiledGraph:

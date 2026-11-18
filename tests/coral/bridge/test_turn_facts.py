@@ -636,8 +636,8 @@ async def test_a_signal_of_a_session_the_slot_does_not_hold_changes_nothing(
 
     [row] = world.queue.get_work([draft.id], workspace_id=WORKSPACE)
     assert row.status == int(WorkStatus.SUCCEEDED)
-    expected = "orchestrator" if binding == "orchestrator" else "unbound"
-    assert json.loads(row.result or "{}") == {"turn_fact": expected}
+    # An orchestrator binding the run's row does not name is not its orchestrator.
+    assert json.loads(row.result or "{}") == {"turn_fact": "unbound"}
     assert world.run(run_id).version == version
 
 

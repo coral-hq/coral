@@ -273,11 +273,11 @@ def _status_edge(
 ) -> SessionStatusEdge:
     if status in {"idle", "failed"}:
         fields.setdefault("turn_outcome", "completed" if status == "idle" else "failed")
+    fields.setdefault("origin", "relayed_runner_status")
     return SessionStatusEdge(
         session_id=session_id,
         status=status,
         previous_status="running",
-        origin="relayed_runner_status",
         workspace_id=workspace_id,
         observed_at_ms=observed_at_ms,
         **fields,
@@ -392,17 +392,27 @@ def test_a_running_edge_that_reports_the_previous_turns_outcome_is_kept(
     assert len(_signals(queue)) == 1
 
 
-def test_only_failed_edges_of_an_orchestrator_are_recorded(
+def test_only_failed_and_archive_edges_of_an_orchestrator_are_recorded(
     recorder: TurnFactRecorder, queue: _ThreadRecordingQueue
 ) -> None:
     recorder.observe(_status_edge(session_id=ORCHESTRATOR_SESSION))
     recorder.observe(_status_edge("idle", session_id=ORCHESTRATOR_SESSION, turn_outcome=None))
     recorder.observe(_status_edge("failed", session_id=ORCHESTRATOR_SESSION))
+    recorder.observe(
+        _status_edge(
+            "idle", session_id=ORCHESTRATOR_SESSION, turn_outcome=None, origin="archive_idle"
+        )
+    )
     recorder.wait_idle()
 
-    [row] = _signals(queue)
-    payload = json.loads(row.payload)
-    assert (payload["engine_slot_id"], payload["edge"]["status"]) == ("orchestrator", "failed")
+    payloads = [json.loads(row.payload) for row in _signals(queue)]
+    assert [
+        (payload["engine_slot_id"], payload["edge"]["status"], payload["edge"]["origin"])
+        for payload in payloads
+    ] == [
+        ("orchestrator", "failed", "relayed_runner_status"),
+        ("orchestrator", "idle", "archive_idle"),
+    ]
 
 
 def test_a_long_astral_error_message_is_cut_so_the_signal_fits(

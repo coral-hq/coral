@@ -127,7 +127,10 @@ def test_instructions_name_the_tool_and_never_say_keep_working() -> None:
     for decl in ENGINE_TOOLS:
         assert decl.name in decl.instructions
         assert "keep working" not in decl.instructions.casefold()
-    assert "ToolSearch" in SUBMIT_HANDOFF.instructions
+    # claude-sdk may list a tool under its MCP name and defer it behind ToolSearch.
+    for decl in ENGINE_TOOLS:
+        assert f"mcp__omnigent__{decl.name}" in decl.instructions
+        assert "ToolSearch" in decl.instructions
     assert "stop" in SUBMIT_HANDOFF.instructions.casefold()
 
 

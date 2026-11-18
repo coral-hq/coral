@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import JsonValue
 
-from coral.bridge.mapping import FED_KINDS
+from coral.bridge.mapping import DECISION_ITEM, FED_KINDS
 from coral.db.enum_codecs import WorkKind, WorkStatus
 from coral.engine import types as engine
 from coral.queue.drainer import FinishedWork
@@ -23,7 +23,7 @@ from coral.stores.protocols import WorkItem
 # The drainer's code for an item whose retries ran out; its result names the last code.
 EXHAUSTED = "infra.transient"
 # Bridge rows that are not engine effects; a failure pauses the run with this prefix.
-BRIDGE_ITEMS = frozenset({"anchor", "orchestrator"})
+BRIDGE_ITEMS = frozenset({"anchor", "orchestrator", DECISION_ITEM})
 # The completion fields each fed kind's engine machine reads, with their JSON types.
 _FED_FIELDS: Mapping[str, Mapping[str, tuple[type, ...]]] = {
     "create_session": {"session_id": (str,), "role": (str,), "generation": (int,)},
@@ -90,6 +90,15 @@ def feedback_input(finished: FinishedWork) -> engine.Input | None:
     )
 
 
+def decision_of(item: WorkItem) -> str | None:
+    """The decision a message to the orchestrator is about; ``None`` for any other row."""
+    payload = _payload(item)
+    decision_id = payload.get("decision_id")
+    if payload.get("bridge_item") != DECISION_ITEM or not isinstance(decision_id, str):
+        return None
+    return decision_id
+
+
 def finished_from_row(item: WorkItem) -> FinishedWork:
     """A stored row's outcome as the drainer handed it to the finished hook."""
     result = _json_object(item.result)
@@ -122,6 +131,7 @@ def _json_object(text: str | None) -> dict[str, Any] | None:
 __all__ = [
     "BRIDGE_ITEMS",
     "EXHAUSTED",
+    "decision_of",
     "fed_payload",
     "feedback_input",
     "finished_from_row",

@@ -1070,6 +1070,23 @@ async def test_a_send_or_close_before_the_sessions_row_exists_waits() -> None:
     assert env.events == []
 
 
+async def test_a_send_to_the_runs_orchestrator_waits_until_its_create_binds_it() -> None:
+    # The bridge names the orchestrator on the run before its create has run.
+    env = _Sessions(bound=False)
+    _, version = env.run_store.load_run_state(env.run.id, workspace_id=WORKSPACE)
+    env.run_store.apply_transition(
+        env.run.id, version, Transition(orchestrator_session_id=SESSION), workspace_id=WORKSPACE
+    )
+    other = _Sessions(bound=False)
+
+    waiting = _failed(await env.deliver(env.send, env.send_payload()))
+    refused = _failed(await other.deliver(other.send, other.send_payload()))
+
+    assert (waiting.error_code, waiting.retryable) == ("session.not_ready", True)
+    assert (refused.error_code, refused.retryable) == ("session.identity_conflict", False)
+    assert env.events == [] and env.dispatch.sends == []
+
+
 async def test_a_writers_close_without_the_closed_label_is_refused_before_anything_runs() -> None:
     writer = _Sessions()
     reader = _Sessions(slot_role=SlotRole.VERIFIER)

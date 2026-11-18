@@ -9,18 +9,19 @@ from datetime import timedelta
 import pytest
 
 from coral.bridge.config import epoch_seconds, epoch_us
-from coral.bridge.keys import store_slot_id
+from coral.bridge.keys import decision_request_key, decision_rerequest_key, store_slot_id
 from coral.bridge.mapping import (
     FED_KINDS,
     UNMAPPED_KINDS,
     MapContext,
     UnsupportedStance,
     anchor_create_draft,
+    decision_message_draft,
     map_effect,
     orchestrator_create_draft,
     timer_draft,
 )
-from coral.bridge.messages import nudge_text
+from coral.bridge.messages import DecisionMessage, decision_request_text, nudge_text
 from coral.db.enum_codecs import WorkKind
 from coral.engine.machines.slot import find_slot
 from coral.engine.types import (
@@ -59,6 +60,7 @@ GRAPH = fixture_graph("two_steps")
 TITLE = "Ship the bridge"
 REQUEST = "Make runs advance on their own."
 LATER = NOW + timedelta(minutes=3, microseconds=250)
+DECISION = "review||a4:1"
 
 
 def _ctx(state: RunState, *, graph: CompiledGraph = GRAPH, title: str = TITLE) -> MapContext:
@@ -393,7 +395,8 @@ def test_the_orchestrator_create_is_a_step_create_titled_from_the_run() -> None:
     draft = orchestrator_create_draft(_ctx(_started().state, title="t" * 256))
     key = f"{RUN_ID}:orchestrator:1:create_session"
     _assert_effect_row(draft, key)
-    assert draft.available_at == epoch_seconds(LATER)
+    # Due at once, so it runs before the request queued beside it.
+    assert draft.available_at == 0
     assert (draft.scope_key, draft.slot_generation, draft.owner_key) == (
         "orchestrator",
         1,
@@ -418,6 +421,62 @@ def test_the_orchestrator_create_is_a_step_create_titled_from_the_run() -> None:
         "orchestrator",
         "orchestrator",
         title,
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "key", "kind", "opening"),
+    [
+        ("request", decision_request_key(RUN_ID, DECISION), "brief", "Coral decision request."),
+        ("reminder", f"{RUN_ID}:12:notify:{DECISION}", "nudge", "Reminder: "),
+        (
+            "rerequest",
+            decision_rerequest_key(RUN_ID, DECISION, 9),
+            "nudge",
+            "The run is running again",
+        ),
+    ],
+)
+def test_a_decision_message_is_send_input_to_the_orchestrator(
+    message: DecisionMessage, key: str, kind: str, opening: str
+) -> None:
+    graph = fixture_graph("loop")
+    started = drive(graph, [start_run(graph)])
+    asked = drive(graph, accept("work||a4:1:0", "Changed the parser."), after=started)
+    ctx = _ctx(asked.state, graph=graph)
+    session_id = "o" * 32
+
+    draft = decision_message_draft(
+        ctx, session_id=session_id, decision_id=DECISION, message=message, key=key
+    )
+
+    _assert_effect_row(draft, key)
+    assert (draft.node_id, draft.scope_key, draft.owner_key, draft.available_at) == (
+        "review",
+        DECISION,
+        "slot:orchestrator",
+        epoch_seconds(LATER),
+    )
+    payload = _payload(draft)
+    text = decision_request_text(graph, asked.state, DECISION, kind=message)
+    assert payload == {
+        "effect_type": "send_input",
+        "effect_key": key,
+        "bridge_item": "decision",
+        "decision_id": DECISION,
+        "session_id": session_id,
+        "text": text,
+        "kind": kind,
+    }
+    assert text.startswith(opening)
+    assert _send_payload(payload)["kind"] == kind
+
+
+def test_decision_keys_name_the_decision_and_a_re_request_the_run_version() -> None:
+    assert decision_request_key(RUN_ID, DECISION) == f"{RUN_ID}:decision_request:{DECISION}"
+    assert (
+        decision_rerequest_key(RUN_ID, DECISION, 42)
+        == f"{RUN_ID}:decision_rerequest:{DECISION}:42"
     )
 
 

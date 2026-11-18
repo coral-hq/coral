@@ -6,7 +6,8 @@ run it on a dedicated bounded thread pool instead of the event loop's default
 executor; engine tool decisions get a smaller pool of their own. A call keeps
 running in its thread when its task is cancelled; bridge commits are idempotent,
 so a repeat is safe. The ``turn_fact`` executor turns a status edge, or a
-re-gather, into the turn fact the engine reconciles.
+re-gather, into the turn fact the engine reconciles, and a failed turn of the
+run's orchestrator into a pause.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from typing import Any, ParamSpec, TypeVar
 from coral.bridge.commit import DRIFT_EFFECT_CODES, EngineSnapshot
 from coral.bridge.config import DRIFT_HOLD, HOLD_RULES
 from coral.bridge.keys import ORCHESTRATOR_SLOT_ID, slot_message_id
+from coral.bridge.orchestrator import failure_inputs, failure_pause, open_decisions
 from coral.bridge.service import LOAD_FAILED_DETAIL, EngineBridge, EngineLoadFailed
 from coral.db.enum_codecs import RunStatus
 from coral.engine import types as engine
@@ -58,6 +60,8 @@ _logger = logging.getLogger(__name__)
 
 # Slots that handed off: no turn fact or session state of theirs reaches the engine.
 _HANDED_OFF = frozenset({"closing", "closed"})
+# Why a signal is the run's orchestrator's, whose turns the step rules do not read.
+_ORCHESTRATOR = "orchestrator"
 # Bridge calls in flight at once in one process.
 BRIDGE_THREADS = 8
 BRIDGE_THREAD_NAME = "coral-bridge"
@@ -300,7 +304,9 @@ def turn_fact_executor(
     its leased effect holds the item (``signal.awaiting_effect``, or ``run.paused`` while
     its run is paused), so the edge applies after the receipt. An archived or deleted
     session pauses the run ``drift`` instead of being read; a closed one is not read.
-    Orchestrator signals are left to the orchestrator's rules.
+    While a decision waits on the run's orchestrator, an archived or deleted
+    orchestrator pauses the run ``drift`` and a failed turn of it pauses the run
+    (``orchestrator_paused``); its other turns change nothing (``orchestrator_turn``).
     """
     sources = _Sources(
         bindings=bindings,
@@ -323,6 +329,8 @@ def turn_fact_executor(
                 bridge.load, workspace_id=ctx.workspace_id, run_id=ctx.run_id
             )
             why = await _unheld_reason(snapshot, signal, bindings)
+            if why == _ORCHESTRATOR:
+                return _turn_result(await _orchestrator_turn(threads, snapshot, signal, sources))
             if why is not None:
                 return _turn_result(why)
             if awaiting_effect(snapshot.state, signal.engine_slot_id):
@@ -383,7 +391,9 @@ async def _unheld_reason(
     ):
         return "unbound"
     if signal.engine_slot_id == ORCHESTRATOR_SLOT_ID:
-        return "orchestrator"
+        # Only the orchestrator the run's row names speaks for the run.
+        named = store.run.orchestrator_session_id == signal.session_id
+        return _ORCHESTRATOR if named else "unbound"
     slot = find_slot(snapshot.state, signal.engine_slot_id)
     if slot is None or slot.session_generation != signal.generation:
         return "stale"
@@ -391,6 +401,36 @@ async def _unheld_reason(
         # Its turns change nothing now, and archiving a finished step is no drift.
         return "slot_closed"
     return None
+
+
+async def _orchestrator_turn(
+    threads: BridgeThreads, snapshot: EngineSnapshot, signal: _TurnSignal, sources: _Sources
+) -> str:
+    """
+    Pause the run for its orchestrator, while a decision waits on it.
+
+    An archived or deleted orchestrator pauses ``drift``, as a step does; a failed turn
+    is classified as a step's is, and its pause is re-checked in the commit.
+    """
+    if not open_decisions(snapshot.state):
+        return "no_input"
+    async with run_scope(sources.scope_runner, snapshot.store):
+        gone = await _session_gone(snapshot, signal, sources)
+    if gone is not None:
+        return gone
+    pause = failure_pause(signal.edge)
+    if pause is None:
+        return "orchestrator_turn"
+    store = snapshot.store
+    commit = await threads.run(
+        threads.bridge.commit_inputs,
+        workspace_id=store.workspace_id,
+        run_id=store.run_id,
+        inputs=lambda current: failure_inputs(
+            current.state, current.store.run, signal.session_id, pause
+        ),
+    )
+    return "orchestrator_paused" if commit.outcome.applied else "no_input"
 
 
 async def _session_gone(

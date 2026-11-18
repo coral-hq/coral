@@ -4,7 +4,7 @@
 Both pin workflow versions in SQL, the only version store there is.
 :func:`serving` adds the session side: the real executors over fake sessions,
 a drainer with the bridge's hook and hold policy, and the engine tools, which a
-scripted :class:`Agent` calls.
+scripted :class:`Agent` and :class:`Orchestrator` call.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy import create_engine
 
@@ -44,7 +44,12 @@ from coral.engine import fold
 from coral.engine.machines.slot import find_slot
 from coral.engine.types import RunState, TurnEnded
 from coral.model.ids import derived_id
-from coral.omni.protocols import SessionCreateRequest, SessionRef, SessionState
+from coral.omni.protocols import (
+    CoralSessionError,
+    SessionCreateRequest,
+    SessionRef,
+    SessionState,
+)
 from coral.omni.server.turn_facts import TurnFactRecorder
 from coral.queue import FinishedWork, SqlAlchemyCoralQueueStore
 from coral.queue.drainer import WorkDrainer
@@ -75,7 +80,7 @@ from coral.stores.session_bindings import SessionBindingDraft, SqlAlchemySession
 from coral.stores.stable_ids import SqlAlchemyStableIdStore, StableIds
 from coral.stores.workflow_versions import SqlAlchemyWorkflowVersionStore
 from coral.stores.workspace_op_intents import SqlAlchemyWorkspaceOpIntentStore, WorkspaceOpIntents
-from coral.tools.catalog import SUBMIT_HANDOFF
+from coral.tools.catalog import CHOOSE_ARROW, SUBMIT_HANDOFF
 from coral.tools.dispatch import EngineToolCall, ToolDispatcher
 from coral.tools.handlers import PLANNERS
 from coral.tools.schemas import ToolReply
@@ -346,6 +351,7 @@ HOST_REPLIES: dict[str, Mapping[str, object]] = {
     "diff_stat": {"files_changed": 1, "insertions": 1, "deletions": 0, "paths": ["a"]},
 }
 _ACTIVATION_ID = re.compile(r'activation_id ("(?:[^"\\]|\\.)*")')
+_DECISION_ID = re.compile(r'decision_id ("(?:[^"\\]|\\.)*")')
 # Replies an agent told to retry gets; it calls again on its next turn.
 _RETRY_REASONS = frozenset({"evaluation_in_progress"})
 
@@ -357,14 +363,29 @@ def activation_in(text: str) -> str:
     return json.loads(found[-1])
 
 
+def decision_in(text: str) -> str:
+    """The decision id a decision message asks the orchestrator to choose at."""
+    found = _DECISION_ID.findall(text)
+    assert found, "the decision message names no decision id"
+    return json.loads(found[0])
+
+
 class StanceAgents:
-    """A ``StepAgentResolver`` that answers one agent per stance and records each step."""
+    """
+    A ``StepAgentResolver`` that answers one agent per stance and records each step.
+
+    :ivar refusals: Raised for every resolve of that stance while it is set.
+    """
 
     def __init__(self) -> None:
         self.resolved: list[dict[str, Any]] = []
+        self.refusals: dict[str, CoralSessionError] = {}
 
     async def resolve(self, **step: Any) -> str:
         self.resolved.append(step)
+        refusal = self.refusals.get(step["stance"])
+        if refusal is not None:
+            raise refusal
         return f"{step['stance']}-agent"
 
 
@@ -507,11 +528,13 @@ class Sessions:
             ran += 1
         return ran
 
-    async def run(self, agent: Agent | None = None, *, rounds: int = 50) -> None:
-        """Drain and let ``agent`` act until neither has anything left to do."""
+    async def run(self, *actors: Actor, rounds: int = 50) -> None:
+        """Drain and let each actor act until none has anything left to do."""
         for _ in range(rounds):
             drained = await self.drain()
-            acted = 0 if agent is None else await agent.act()
+            acted = 0
+            for actor in actors:
+                acted += await actor.act()
             if not drained and not acted:
                 return
         raise AssertionError(f"the run was still busy after {rounds} rounds")
@@ -530,13 +553,22 @@ class Sessions:
         assert session_id is not None, f"slot {engine_slot_id} has no session"
         return session_id
 
+    def orchestrator_of(self, run_id: str) -> str:
+        """The orchestrator session the run's row names."""
+        session_id = self.world.run(run_id).orchestrator_session_id
+        assert session_id is not None, f"run {run_id} has no orchestrator"
+        return session_id
+
     def publish(self, run_id: str, engine_slot_id: str, status: str, **fields: Any) -> None:
+        """Publish one status edge of the slot's session; see :meth:`publish_to`."""
+        self.publish_to(self.session_of(run_id, engine_slot_id), status, **fields)
+
+    def publish_to(self, session_id: str, status: str, **fields: Any) -> None:
         """
-        Publish one status edge of the slot's session, as the server does, and wait for its row.
+        Publish one status edge of a session, as the server does, and wait for its row.
 
         The session's live status follows the edge; the edge's time is the world's clock.
         """
-        session_id = self.session_of(run_id, engine_slot_id)
         fields.setdefault("observed_at_ms", int(self.world.clock.now.timestamp() * 1000))
         fields.setdefault("origin", "relayed_runner_status")
         self.dispatch.sessions[session_id].status = status
@@ -561,9 +593,12 @@ class Sessions:
         self, run_id: str, engine_slot_id: str, message: str, *, code: str = "RuntimeError"
     ) -> None:
         """The slot's turn fails as claude-sdk reports it: a code and the error text."""
-        self.publish(
-            run_id,
-            engine_slot_id,
+        self.fail_session(self.session_of(run_id, engine_slot_id), message, code=code)
+
+    def fail_session(self, session_id: str, message: str, *, code: str = "RuntimeError") -> None:
+        """The session's turn fails as claude-sdk reports it: a code and the error text."""
+        self.publish_to(
+            session_id,
             "failed",
             turn_outcome="failed",
             error_code=code,
@@ -645,6 +680,17 @@ async def serving(world: World) -> AsyncIterator[Sessions]:
         threads.close()
 
 
+class Actor(Protocol):
+    """A scripted session side that acts on the engine messages it got."""
+
+    async def act(self) -> int: ...
+
+
+def is_orchestrator(world: World, run_id: str, session_id: str) -> bool:
+    """Whether the session is the orchestrator the run's row names."""
+    return world.run(run_id).orchestrator_session_id == session_id
+
+
 @dataclass(frozen=True)
 class Call:
     """One engine tool call the agent made and the reply it got."""
@@ -688,7 +734,10 @@ class Agent:
         """Answer every message that arrived and retry calls told to; returns calls made."""
         sends = self._sessions.dispatch.sends
         for message in sends[self._read :]:
-            self._pending[str(message["session_id"])] = activation_in(str(message["text"]))
+            session_id, run_id = str(message["session_id"]), str(message["run_id"])
+            if is_orchestrator(self._sessions.world, run_id, session_id):
+                continue
+            self._pending[session_id] = activation_in(str(message["text"]))
         self._read = len(sends)
         pending = list(self._pending.items())
         replies = await asyncio.gather(
@@ -728,3 +777,70 @@ class Agent:
             for reply in replies
         )
         return replies[0]
+
+
+class Orchestrator:
+    """
+    A scripted orchestrator: chooses at each decision its run's messages ask about.
+
+    It reads the decision id from each request, reminder or re-request sent to a
+    run's orchestrator session and calls ``coral_choose_arrow`` through the
+    dispatcher with the next scripted label and reason, as the session's runner
+    would. Each decision is answered once, however often it is asked; a call told
+    to retry is made again on its next turn. Past its script it answers nothing.
+
+    :param choices: ``(label, reason)`` for each decision, in the order they are asked.
+    """
+
+    def __init__(self, sessions: Sessions, choices: Sequence[tuple[str, str]] = ()) -> None:
+        self._sessions = sessions
+        self._choices = list(choices)
+        self._read = 0
+        self._asked: set[str] = set()
+        self._pending: dict[tuple[str, str], tuple[str, str]] = {}
+        self._operations = itertools.count(1)
+        self.calls: list[Call] = []
+
+    async def act(self) -> int:
+        """Answer every decision newly asked about and retry calls told to; returns calls made."""
+        sends = self._sessions.dispatch.sends
+        for message in sends[self._read :]:
+            session_id, run_id = str(message["session_id"]), str(message["run_id"])
+            if not is_orchestrator(self._sessions.world, run_id, session_id):
+                continue
+            decision_id = decision_in(str(message["text"]))
+            if decision_id in self._asked or not self._choices:
+                continue
+            self._asked.add(decision_id)
+            self._pending[(session_id, decision_id)] = self._choices.pop(0)
+        self._read = len(sends)
+        pending = list(self._pending.items())
+        for (session_id, decision_id), (label, reason) in pending:
+            reply = await self.choose(session_id, decision_id, label, reason)
+            if reply.reason not in _RETRY_REASONS:
+                del self._pending[(session_id, decision_id)]
+        return len(pending)
+
+    async def choose(
+        self, session_id: str, decision_id: str, label: str, reason: str
+    ) -> ToolReply:
+        """One ``coral_choose_arrow`` call from ``session_id``."""
+        binding = await asyncio.to_thread(
+            self._sessions.bindings.find_by_session, WORKSPACE, session_id
+        )
+        assert binding is not None, f"session {session_id} is not bound"
+        arguments = {"decision_id": decision_id, "label": label, "reason": reason}
+        operation_id = f"choice-{next(self._operations)}"
+        call = EngineToolCall(
+            binding=binding,
+            tool=CHOOSE_ARROW.name,
+            arguments=arguments,
+            operation_id=operation_id,
+        )
+        reply = await self._sessions.dispatcher.dispatch(call)
+        self.calls.append(
+            Call(
+                session_id=session_id, operation_id=operation_id, arguments=arguments, reply=reply
+            )
+        )
+        return reply

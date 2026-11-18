@@ -78,8 +78,9 @@ CHOOSE_ARROW = EngineToolDecl(
     stances=frozenset({ORCHESTRATOR_STANCE}),
     instructions=(
         "Coral orchestrator: answer each decision request by calling coral_choose_arrow "
-        "with the decision id, one of the listed labels and a short reason. You cannot "
-        "edit files, run commands or start agents."
+        "with the decision id, one of the listed labels and a short reason (it may be listed "
+        "as mcp__omnigent__coral_choose_arrow; load it with ToolSearch if it is not listed). "
+        "You cannot edit files, run commands or start agents."
     ),
 )
 

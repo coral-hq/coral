@@ -24,6 +24,7 @@ from coral.bridge.config import (
     ENGINE_VERSION,
     LOG_VERSION,
     MAX_LIVE_SLOTS,
+    MAX_LIVE_WORK,
     MAX_REJECTED_CALL_LIMIT,
     MAX_RUN_ACTIVATIONS,
     STATE_VERSION,
@@ -31,6 +32,7 @@ from coral.bridge.config import (
     freeze_engine_config,
 )
 from coral.bridge.graphs import PinnedGraphMismatch, verified_content_hash
+from coral.bridge.keys import decision_rerequest_key
 from coral.bridge.mapping import FED_KINDS, UNMAPPED_KINDS
 from coral.bridge.messages import sanitize
 from coral.bridge.service import EngineBridge, RunNotRunnable
@@ -321,6 +323,12 @@ def _shape_refusals(graph: CompiledGraph, run_id: str) -> Iterator[RunNotRunnabl
             "graph.too_wide",
             f"up to {live} slots can be live at once; the limit is {MAX_LIVE_SLOTS}",
         )
+    work = live_work_bound(graph)
+    if work > MAX_LIVE_WORK:
+        yield RunNotRunnable(
+            "graph.too_wide",
+            f"up to {work} slots and decisions can be open at once; the limit is {MAX_LIVE_WORK}",
+        )
     longest = worst_effect_key_length(graph, run_id)
     if longest > MAX_EFFECT_KEY_CHARS:
         yield RunNotRunnable(
@@ -331,32 +339,54 @@ def _shape_refusals(graph: CompiledGraph, run_id: str) -> Iterator[RunNotRunnabl
 
 def live_slot_bound(graph: CompiledGraph) -> int:
     """The most slots live at once: a parallel region's rosters together, or one node's."""
-    rosters = {node.id: len(node.roster) for node in _steps(graph)}
+    return _widest(graph, {node.id: len(node.roster) for node in _steps(graph)})
+
+
+def live_work_bound(graph: CompiledGraph) -> int:
+    """The most slots and open decisions at once: a parallel region's together, or one node's."""
+    weights = {node.id: len(node.roster) for node in _steps(graph)}
+    weights.update((node.id, 1) for node in graph.nodes if node.kind == "decision")
+    return _widest(graph, weights)
+
+
+def _widest(graph: CompiledGraph, weights: dict[str, int]) -> int:
     regions = graph.analysis.regions
     in_regions = {node_id for region in regions for node_id in region.node_ids}
-    sizes = [sum(rosters.get(node_id, 0) for node_id in region.node_ids) for region in regions]
-    sizes.extend(size for node_id, size in rosters.items() if node_id not in in_regions)
+    sizes = [sum(weights.get(node_id, 0) for node_id in region.node_ids) for region in regions]
+    sizes.extend(size for node_id, size in weights.items() if node_id not in in_regions)
     return max(sizes, default=0)
 
 
 def worst_effect_key_length(graph: CompiledGraph, run_id: str) -> int:
     """
-    The longest ``{run_id}:{seq}:{kind}:{slot}`` key a step's slot effect can have.
+    The longest key a step's slot effect or a decision's message to the orchestrator can have.
 
-    A slot id is ``{node}|{items}|{iterations}:{index}``, with one ``{back arrow}:{pass}``
-    per enclosing loop. Item paths stay empty until the engine fans items out.
+    A slot effect's key is ``{run_id}:{seq}:{kind}:{slot}`` and a slot id
+    ``{activation}:{index}``; a decision's re-request key ends with its activation and
+    a run version. An activation id is ``{node}|{items}|{iterations}``, with one
+    ``{back arrow}:{pass}`` per enclosing loop. Item paths stay empty until the engine
+    fans items out.
     """
     kind = max(len(name) for name in _SLOT_KINDS)
     longest = 0
     for node in _steps(graph):
-        passes = [
-            f"{loop.back_arrow_id}:{'9' * _pass_digits(loop.limit)}"
-            for loop in graph.analysis.loops
-            if node.id in loop.body
-        ]
-        slot = f"{node.id}||{'/'.join(passes)}:{max(len(node.roster) - 1, 0)}"
+        slot = f"{_worst_activation(graph, node.id)}:{max(len(node.roster) - 1, 0)}"
         longest = max(longest, len(f"{run_id}:{'9' * _SEQ_DIGITS}:{'k' * kind}:{slot}"))
+    for node in graph.nodes:
+        if node.kind == "decision":
+            activation = _worst_activation(graph, node.id)
+            key = decision_rerequest_key(run_id, activation, int("9" * _SEQ_DIGITS))
+            longest = max(longest, len(key))
     return longest
+
+
+def _worst_activation(graph: CompiledGraph, node_id: str) -> str:
+    passes = [
+        f"{loop.back_arrow_id}:{'9' * _pass_digits(loop.limit)}"
+        for loop in graph.analysis.loops
+        if node_id in loop.body
+    ]
+    return f"{node_id}||{'/'.join(passes)}"
 
 
 def _pass_digits(limit: int | None) -> int:
@@ -367,6 +397,7 @@ def _pass_digits(limit: int | None) -> int:
 __all__ = [
     "RunNotRunnable",
     "live_slot_bound",
+    "live_work_bound",
     "start_engine_run",
     "worst_effect_key_length",
 ]

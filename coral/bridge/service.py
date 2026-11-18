@@ -43,10 +43,16 @@ from coral.bridge.config import (
     epoch_us,
     utc_now,
 )
-from coral.bridge.feedback import feedback_input, finished_from_row
+from coral.bridge.feedback import decision_of, feedback_input, finished_from_row
 from coral.bridge.fold import EngineStateCache
 from coral.bridge.graphs import PinnedGraphError, PinnedGraphs
-from coral.bridge.keys import anchor_effect_key, effect_work_id, slot_session_id
+from coral.bridge.keys import (
+    ORCHESTRATOR_GENERATION,
+    ORCHESTRATOR_SLOT_ID,
+    anchor_effect_key,
+    effect_work_id,
+    slot_session_id,
+)
 from coral.bridge.mapping import (
     FED_KINDS,
     MapContext,
@@ -59,6 +65,7 @@ from coral.bridge.mapping import (
     timer_draft,
     turn_signal_draft,
 )
+from coral.bridge.orchestrator import open_decisions, regather_session, repair_drafts
 from coral.db.enum_codecs import ActorKind, LogKind, RunPauseReason, RunStatus, WorkStatus
 from coral.engine import transition
 from coral.engine import types as engine
@@ -150,11 +157,16 @@ class BridgeCommit:
 
 @dataclass(frozen=True)
 class _Fed:
-    """An outcome to feed, and whether it reports a failure of its row."""
+    """
+    An outcome to feed, and whether it reports a failure of its row.
+
+    :param decision_id: For a message to the orchestrator, the decision it is about.
+    """
 
     work_id: str
     failed: bool
     command: engine.Input
+    decision_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -577,12 +589,13 @@ class EngineBridge:
         if command is None:
             return
         item = finished.item
-        pending = (_Fed(item.id, finished.status == int(WorkStatus.FAILED), command),)
+        failed = finished.status == int(WorkStatus.FAILED)
+        pending = (_Fed(item.id, failed, command, decision_of(item)),)
         try:
             self.commit_inputs(
                 workspace_id=item.workspace_id,
                 run_id=item.run_id,
-                inputs=lambda _snapshot: self._current(item.workspace_id, pending),
+                inputs=lambda snapshot: self._current(item.workspace_id, pending, snapshot),
             )
         except RunContended:
             _logger.warning(
@@ -647,10 +660,11 @@ class EngineBridge:
         Repair the run level-triggered; every rule is safe to repeat.
 
         Starts a run whose ``StartRun`` was lost; feeds finished rows of unreceipted
-        effects and queues missing ones (never reviving one: only a resume does);
-        restores and revives timer rows of armed timers; releases holds of a running
-        run; re-gathers the turn facts of its working slots, so a lost status edge is
-        recovered; and writes the projection when the rows differ from it.
+        effects, the anchor and the orchestrator's create and requests, and queues
+        missing ones (never reviving one: only a resume does); restores and revives
+        timer rows of armed timers; releases holds of a running run; re-gathers the
+        turn facts of its working slots, so a lost status edge is recovered; and
+        writes the projection, and names a missing orchestrator, when the rows differ.
 
         :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
         """
@@ -706,8 +720,10 @@ class EngineBridge:
         """
         Queue a re-gather signal for each working slot of a running run, once per bucket.
 
-        A slot waiting on its leased effect is skipped: its receipt comes first. A
-        paused run is not re-gathered; its resume re-prompts what failed.
+        A slot waiting on its leased effect is skipped: its receipt comes first. The
+        orchestrator a decision waits on is re-gathered too, so an archived or deleted
+        one is found without another message to it. A paused run is not re-gathered;
+        its resume re-prompts what failed.
         """
         state, run = snapshot.state, snapshot.store.run
         if state.status != "running" or snapshot.store.status != int(RunStatus.RUNNING):
@@ -731,23 +747,30 @@ class EngineBridge:
                     available_at=now_s,
                 )
             )
+        orchestrator = regather_session(run, state)
+        if orchestrator is not None:
+            drafts.append(
+                turn_signal_draft(
+                    run_id=run.id,
+                    session_id=orchestrator,
+                    engine_slot_id=ORCHESTRATOR_SLOT_ID,
+                    generation=ORCHESTRATOR_GENERATION,
+                    idempotency_key=regather_key(orchestrator, now_s),
+                    edge=None,
+                    available_at=now_s,
+                )
+            )
         if drafts:
             self._queue.enqueue_work(drafts, workspace_id=run.workspace_id, now=now_s)
         return len(drafts)
 
     def _repair_effects(self, snapshot: EngineSnapshot) -> tuple[int, int, list[WorkItem]]:
-        """Queue missing rows of unreceipted effects and the anchor; feed finished ones."""
+        """
+        Queue missing rows of unreceipted effects, the anchor and the orchestrator's
+        create and requests; feed finished ones.
+        """
         run = snapshot.store.run
         now = self._clock()
-        receipted = {receipt.key for receipt in snapshot.state.receipts}
-        effects = {
-            effect_work_id(run.id, effect.effect_key): effect
-            for effect in snapshot.state.effects
-            if effect.kind in FED_KINDS and effect.effect_key not in receipted
-        }
-        anchor_id = effect_work_id(run.id, anchor_effect_key(run.id))
-        found = self._queue.get_work([*effects, anchor_id], workspace_id=run.workspace_id)
-        rows = {row.id: row for row in found}
         ctx = MapContext(
             workspace_id=run.workspace_id,
             run_id=run.id,
@@ -757,6 +780,19 @@ class EngineBridge:
             title=run.title,
             now=now,
         )
+        receipted = {receipt.key for receipt in snapshot.state.receipts}
+        effects = {
+            effect_work_id(run.id, effect.effect_key): effect
+            for effect in snapshot.state.effects
+            if effect.kind in FED_KINDS and effect.effect_key not in receipted
+        }
+        anchor_id = effect_work_id(run.id, anchor_effect_key(run.id))
+        # Their keys are recomputed from the run and its open decisions.
+        orchestrator = {draft.id: draft for draft in repair_drafts(ctx, run)}
+        found = self._queue.get_work(
+            [*effects, anchor_id, *orchestrator], workspace_id=run.workspace_id
+        )
+        rows = {row.id: row for row in found}
         missing: list[WorkItemDraft] = []
         for work_id, effect in effects.items():
             if work_id in rows:
@@ -770,6 +806,7 @@ class EngineBridge:
                 missing.append(draft)
         if anchor_id not in rows:
             missing.append(anchor_create_draft(ctx))
+        missing.extend(draft for work_id, draft in orchestrator.items() if work_id not in rows)
         if missing:
             self._queue.enqueue_work(
                 missing, workspace_id=run.workspace_id, now=epoch_seconds(now)
@@ -783,14 +820,17 @@ class EngineBridge:
             self._index_created(outcome)
             command = feedback_input(outcome)
             if command is not None:
-                fed.append(_Fed(row.id, row.status == int(WorkStatus.FAILED), command))
+                failed = row.status == int(WorkStatus.FAILED)
+                fed.append(_Fed(row.id, failed, command, decision_of(row)))
         for start in range(0, len(fed), FEED_BATCH):
             batch = tuple(fed[start : start + FEED_BATCH])
             try:
                 self.commit_inputs(
                     workspace_id=run.workspace_id,
                     run_id=run.id,
-                    inputs=lambda _snapshot, batch=batch: self._current(run.workspace_id, batch),
+                    inputs=lambda snapshot, batch=batch: self._current(
+                        run.workspace_id, batch, snapshot
+                    ),
                 )
             except RunContended:
                 _logger.warning(
@@ -799,12 +839,15 @@ class EngineBridge:
                 )
         return len(fed), len(missing), list(rows.values())
 
-    def _current(self, workspace_id: int, fed: Sequence[_Fed]) -> tuple[engine.Input, ...]:
+    def _current(
+        self, workspace_id: int, fed: Sequence[_Fed], snapshot: EngineSnapshot
+    ) -> tuple[engine.Input, ...]:
         """
         The inputs whose outcome still stands: a failure's row must still be FAILED.
 
         A resume revives exhausted rows in its own commit; read inside the commit's
         attempt, a stale failure is dropped instead of pausing the resumed run again.
+        A failed message to the orchestrator counts only while its decision is open.
         """
         failed = [item.work_id for item in fed if item.failed]
         standing = {
@@ -812,7 +855,13 @@ class EngineBridge:
             for row in (self._queue.get_work(failed, workspace_id=workspace_id) if failed else ())
             if row.status == int(WorkStatus.FAILED)
         }
-        return tuple(item.command for item in fed if not item.failed or item.work_id in standing)
+        waiting = {item.activation_id for item in open_decisions(snapshot.state)}
+        return tuple(
+            item.command
+            for item in fed
+            if (not item.failed or item.work_id in standing)
+            and (item.decision_id is None or item.decision_id in waiting)
+        )
 
     def _repair_timers(self, snapshot: EngineSnapshot) -> int:
         """Put back a lost row of an armed timer, and revive a failed one."""

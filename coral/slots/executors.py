@@ -604,7 +604,8 @@ async def _bound_step(
 
     :param created: Also require the session's row: its create got past ``reserved``.
     :raises EffectRefused: Permanent ``session.identity_conflict`` for any other
-        session; retryable ``session.not_ready`` while its create is unfinished.
+        session; retryable ``session.not_ready`` while its create is unfinished,
+        including the run's orchestrator before its create bound it.
     """
     binding = await asyncio.to_thread(
         bindings.get, state.workspace_id, session_id, run_id=state.run_id
@@ -616,6 +617,13 @@ def _step_binding(
     binding: SessionBinding | None, state: RunState, session_id: str, *, created: bool = False
 ) -> SessionBinding:
     """``binding`` when it is a step session of the run, past ``reserved`` if ``created``."""
+    if binding is None and session_id == state.run.orchestrator_session_id:
+        # The bridge names the run's orchestrator before its create binds the session.
+        raise EffectRefused(
+            "session.not_ready",
+            f"orchestrator session {session_id} is still being created",
+            retryable=True,
+        )
     if binding is None or binding.role is not SessionBindingRole.STEP:
         raise EffectRefused(
             "session.identity_conflict",

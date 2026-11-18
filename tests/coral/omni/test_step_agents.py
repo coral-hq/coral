@@ -22,6 +22,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConver
 OWNER = "alice@example.com"
 WORKSPACE = 5
 STEP = {"workflow_slug": "two-steps", "node_id": "implement", "roster_index": 0}
+ORCHESTRATOR_STEP: dict[str, Any] = {"workflow_slug": None, "node_id": None, "roster_index": None}
 
 pytestmark = pytest.mark.usefixtures("coral_policy_registry")
 
@@ -266,20 +267,28 @@ async def test_a_cached_agent_deleted_since_is_materialized_again(
 
 
 def _changed_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An upgrade that changes the step seed: the same step gets a new bundle digest."""
-    build = step_agents_module.build_step_bundle_yaml
+    """An upgrade that changes the seeds: a step or the orchestrator gets a new bundle digest."""
+    for name in ("build_step_bundle_yaml", "build_seed_bundle_yaml"):
+        build = getattr(step_agents_module, name)
 
-    def changed(*args: Any, **kwargs: Any) -> bytes:
-        return build(*args, **kwargs) + b"description: the next release's seed\n"
+        def changed(*args: Any, build: Any = build, **kwargs: Any) -> bytes:
+            return build(*args, **kwargs) + b"description: the next release's seed\n"
 
-    monkeypatch.setattr(step_agents_module, "build_step_bundle_yaml", changed)
+        monkeypatch.setattr(step_agents_module, name, changed)
 
 
+@pytest.mark.parametrize(
+    ("stance", "step"),
+    [("implementer", STEP), ("orchestrator", ORCHESTRATOR_STEP)],
+    ids=["step", "orchestrator"],
+)
 async def test_a_retry_across_a_bundle_change_keeps_the_agent_its_session_runs(
     agent_store: SqlAlchemyAgentStore,
     tmp_path: Path,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    stance: str,
+    step: dict[str, Any],
 ) -> None:
     artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
     conversations = SqlAlchemyConversationStore(db_uri)
@@ -287,19 +296,17 @@ async def test_a_retry_across_a_bundle_change_keeps_the_agent_its_session_runs(
     def resolver() -> OmnigentStepAgents:
         return OmnigentStepAgents(agent_store, artifacts, conversation_store=conversations)
 
-    first = await resolver().resolve(
-        workspace_id=WORKSPACE, owner=OWNER, stance="implementer", **STEP
-    )
+    first = await resolver().resolve(workspace_id=WORKSPACE, owner=OWNER, stance=stance, **step)
     with workspace_scope(WORKSPACE):
         written = conversations.create_conversation(agent_id=first).id
     _changed_bundle(monkeypatch)
     upgraded = resolver()
 
     kept = await upgraded.resolve(
-        workspace_id=WORKSPACE, owner=OWNER, stance="implementer", session_id=written, **STEP
+        workspace_id=WORKSPACE, owner=OWNER, stance=stance, session_id=written, **step
     )
     fresh = await upgraded.resolve(
-        workspace_id=WORKSPACE, owner=OWNER, stance="implementer", session_id="f" * 32, **STEP
+        workspace_id=WORKSPACE, owner=OWNER, stance=stance, session_id="f" * 32, **step
     )
 
     assert kept == first

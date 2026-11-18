@@ -31,7 +31,13 @@ from coral.bridge.keys import (
     store_slot_id,
     timer_work_key,
 )
-from coral.bridge.messages import brief_text, nudge_text, orchestrator_title
+from coral.bridge.messages import (
+    DecisionMessage,
+    brief_text,
+    decision_request_text,
+    nudge_text,
+    orchestrator_title,
+)
 from coral.bridge.projection import slot_role
 from coral.db.enum_codecs import SlotRole
 from coral.engine import types as engine
@@ -59,9 +65,12 @@ UNMAPPED_KINDS: Mapping[str, str] = MappingProxyType(
 TIMER = "timer"
 RUN_RESYNC = "run_resync"
 TURN_FACT = "turn_fact"
+# The bridge row of a message to the orchestrator about a decision.
+DECISION_ITEM = "decision"
 # The idempotency key of a run's one recurring resync row.
 _RESYNC_KEY = "resync"
 _SCOPE_KEY_CHARS = 512
+_ORCHESTRATOR_OWNER = f"slot:{ORCHESTRATOR_SLOT_ID}"
 
 
 class MappedPayloadTooLarge(ValueError):
@@ -133,7 +142,11 @@ def anchor_create_draft(ctx: MapContext) -> WorkItemDraft:
 
 
 def orchestrator_create_draft(ctx: MapContext) -> WorkItemDraft:
-    """The create of the run's orchestrator session, titled after the run."""
+    """
+    The create of the run's orchestrator session, titled after the run.
+
+    It is due at once, so it runs before the request queued beside it.
+    """
     key = orchestrator_effect_key(ctx.run_id)
     payload = {
         "effect_type": CREATE_SESSION,
@@ -152,7 +165,40 @@ def orchestrator_create_draft(ctx: MapContext) -> WorkItemDraft:
         payload=payload,
         scope_key=ORCHESTRATOR_SLOT_ID,
         slot_generation=ORCHESTRATOR_GENERATION,
-        owner_key=f"slot:{ORCHESTRATOR_SLOT_ID}",
+        owner_key=_ORCHESTRATOR_OWNER,
+        available_at=0,
+    )
+    return _checked(draft)
+
+
+def decision_message_draft(
+    ctx: MapContext,
+    *,
+    session_id: str,
+    decision_id: str,
+    message: DecisionMessage,
+    key: str,
+) -> WorkItemDraft:
+    """A request, reminder or re-request of an open decision, sent to the orchestrator."""
+    text = decision_request_text(ctx.graph, ctx.state, decision_id, kind=message)
+    payload = {
+        "effect_type": SEND_INPUT,
+        "effect_key": key,
+        "bridge_item": DECISION_ITEM,
+        "decision_id": decision_id,
+        "session_id": session_id,
+        "text": text,
+        "kind": "brief" if message == "request" else "nudge",
+    }
+    owner = find_activation(ctx.state, decision_id)
+    draft = WorkItemDraft.effect(
+        run_id=ctx.run_id,
+        idempotency_key=key,
+        payload=payload,
+        node_id=owner.node_id if owner is not None else None,
+        scope_key=decision_id if len(decision_id) <= _SCOPE_KEY_CHARS else None,
+        slot_generation=ORCHESTRATOR_GENERATION,
+        owner_key=_ORCHESTRATOR_OWNER,
         available_at=epoch_seconds(ctx.now),
     )
     return _checked(draft)
@@ -301,6 +347,7 @@ def _checked(draft: WorkItemDraft) -> WorkItemDraft:
 
 
 __all__ = [
+    "DECISION_ITEM",
     "FED_KINDS",
     "RUN_RESYNC",
     "TIMER",
@@ -310,6 +357,7 @@ __all__ = [
     "MappedPayloadTooLarge",
     "UnsupportedStance",
     "anchor_create_draft",
+    "decision_message_draft",
     "edge_signal_key",
     "map_effect",
     "orchestrator_create_draft",

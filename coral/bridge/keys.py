@@ -42,6 +42,16 @@ def orchestrator_effect_key(run_id: str, generation: int = ORCHESTRATOR_GENERATI
     return f"{run_id}:{ORCHESTRATOR_SLOT_ID}:{generation}:create_session"
 
 
+def decision_request_key(run_id: str, decision_id: str) -> str:
+    """The key of an open decision's request, which a resync recomputes from the decision."""
+    return f"{run_id}:decision_request:{decision_id}"
+
+
+def decision_rerequest_key(run_id: str, decision_id: str, run_version: int) -> str:
+    """The key of a decision's re-request, one per return to running (its run version)."""
+    return f"{run_id}:decision_rerequest:{decision_id}:{run_version}"
+
+
 def effect_work_id(run_id: str, effect_key: str) -> str:
     """The ``coral_work`` id of the row an effect (or a bridge item) queues."""
     return WorkItemDraft.effect(run_id=run_id, idempotency_key=effect_key, payload="").id
@@ -90,6 +100,8 @@ __all__ = [
     "ORCHESTRATOR_GENERATION",
     "ORCHESTRATOR_SLOT_ID",
     "anchor_effect_key",
+    "decision_request_key",
+    "decision_rerequest_key",
     "effect_work_id",
     "orchestrator_effect_key",
     "roster_index",

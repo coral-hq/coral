@@ -28,7 +28,7 @@ from coral.bridge.bound_sessions import (
 from coral.bridge.config import BOUND_SESSIONS_REFRESH_S
 from coral.bridge.mapping import edge_signal_key, turn_signal_draft
 from coral.queue.run_effects import describe_exception
-from coral.signals.turn_facts import EdgeFacts
+from coral.signals.turn_facts import EdgeFacts, is_archive_origin
 from coral.stores.protocols import QueueStore
 from omnigent.server.session_live_state import SessionStatusEdge
 
@@ -52,9 +52,14 @@ _Pending = tuple[SessionStatusEdge, BoundSession] | None
 
 
 def ends_turn(edge: SessionStatusEdge, bound: BoundSession) -> bool:
-    """Whether the edge can end the bound session's turn; an orchestrator's only by failing."""
+    """
+    Whether the edge can end the bound session's turn.
+
+    An orchestrator's counts only when it failed, or when an archive published it.
+    """
     if bound.orchestrator:
-        return edge.status == "failed" or edge.turn_outcome == "failed"
+        failed = edge.status == "failed" or edge.turn_outcome == "failed"
+        return failed or is_archive_origin(edge.origin)
     return edge.turn_outcome is not None or edge.status in _TURN_END_STATUSES
 
 

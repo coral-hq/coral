@@ -37,6 +37,10 @@ FEED_BATCH = 32
 MAX_RUN_ACTIVATIONS = 1_000
 MAX_REJECTED_CALL_LIMIT = 10
 MAX_LIVE_SLOTS = 32
+# Live slots and open decisions together: each can add a row to one commit (a create,
+# a nudge, a request or a re-request), beside the orchestrator create, the anchor and
+# timer rows, within the commit's cap.
+MAX_LIVE_WORK = 48
 # The engine, state and log formats a new run is written in; the upgrade gate reads them.
 ENGINE_VERSION = 1
 STATE_VERSION = 1
@@ -130,6 +134,7 @@ __all__ = [
     "MAX_ACTOR_REF_CHARS",
     "MAX_COMMIT_ROWS",
     "MAX_LIVE_SLOTS",
+    "MAX_LIVE_WORK",
     "MAX_PAYLOAD_BYTES",
     "MAX_REJECTED_CALL_LIMIT",
     "MAX_RUN_ACTIVATIONS",
