@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 
 from pydantic import JsonValue
@@ -180,8 +181,19 @@ def retry_step(graph: CompiledGraph, state: RunState, command: RetryStep) -> App
         return refuse_unknown(state)
     if not any(cause.reason in _RETRY_REASONS for cause in state.causes):
         return refuse(state, "resume_not_allowed")
-    cleared = _drop_causes(state, _RETRY_REASONS)
     slot_ids = {slot.id for slot in state.slots if slot.activation_id == owner_id}
+    # A retried slot's pending input goes with its session, and so does its drift cause.
+    cleared = _without_causes(
+        state,
+        lambda cause: (
+            cause.reason in _RETRY_REASONS
+            or (
+                cause.reason == "drift"
+                and cause.detail == "pending_input"
+                and cause.subject in slot_ids
+            )
+        ),
+    )
     cleared = drop_slot_backoff(cleared, slot_ids)
     seq = state.seq + 1
     retried, effects = _retry_slots(cleared, owner_id, seq)
@@ -516,7 +528,12 @@ def _mark_decision(state: RunState, subject: str, stage: int) -> tuple[Decision,
 def _drop_causes(
     state: RunState, reasons: frozenset[PauseReason] | set[PauseReason] | frozenset[str] | set[str]
 ) -> RunState:
-    remaining = tuple(cause for cause in state.causes if cause.reason not in reasons)
+    return _without_causes(state, lambda cause: cause.reason in reasons)
+
+
+def _without_causes(state: RunState, dropped: Callable[[PauseCause], bool]) -> RunState:
+    """Drop the causes ``dropped`` selects; a paused run with none left runs again."""
+    remaining = tuple(cause for cause in state.causes if not dropped(cause))
     status = "running" if not remaining and state.status == "paused" else state.status
     if remaining == state.causes and status == state.status:
         return state

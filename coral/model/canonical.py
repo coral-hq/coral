@@ -39,3 +39,15 @@ def canonical_bytes(subject: Workflow | CompiledGraph) -> bytes:
 def content_hash(canonical: bytes) -> str:
     """SHA-256 hex digest of canonical bytes."""
     return hashlib.sha256(canonical).hexdigest()
+
+
+def analysis_digest(graph: CompiledGraph) -> str:
+    """
+    SHA-256 hex digest of the graph's stored analysis.
+
+    Fields at their default are left out, so adding an optional analysis field later
+    keeps the digest of every analysis already pinned.
+    """
+    return content_hash(
+        canonical_json(graph.analysis.model_dump(mode="json", exclude_defaults=True))
+    )

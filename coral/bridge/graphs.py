@@ -1,7 +1,8 @@
 """The graph a run folds with: its pinned version, checked against its own content hash.
 
 The version store keeps whatever hash a caller pins under, so the hash is
-recomputed here from the graph before a run may use it.
+recomputed here from the graph before a run may use it, and the version id,
+which names the content and the analysis, is derived again.
 """
 
 from __future__ import annotations
@@ -10,11 +11,12 @@ import threading
 from collections import OrderedDict
 from typing import Protocol
 
+import zstandard
+
 from coral.bridge.config import FOLD_CACHE_RUNS
 from coral.model.canonical import canonical_bytes, content_hash
-from coral.model.ids import derived_id
 from coral.model.ir import CompiledGraph
-from coral.stores.workflow_versions import PinnedVersion
+from coral.stores.workflow_versions import PinnedVersion, pinned_version_id
 
 
 class WorkflowVersions(Protocol):
@@ -61,12 +63,13 @@ class PinnedGraphs:
         self._graphs: OrderedDict[tuple[int, str], CompiledGraph] = OrderedDict()
 
     def load(
-        self, *, workspace_id: int, version_id: str, expected_hash: str | None = None
+        self, *, workspace_id: int, version_id: str, expected_hash: str | None
     ) -> CompiledGraph:
         """
         The graph of a pinned version.
 
-        :param expected_hash: The hash the run started with, when it must match.
+        :param expected_hash: The hash the run started with; ``None`` only for a run
+            whose engine has not started, which takes the graph's own hash.
         :raises PinnedGraphMissing: when the workspace has no such version.
         :raises PinnedGraphUnreadable: when the row stores no inline graph.
         :raises PinnedGraphMismatch: when the stored hash is not the graph's own, the id
@@ -93,7 +96,8 @@ class PinnedGraphs:
     def _read(self, workspace_id: int, version_id: str) -> CompiledGraph:
         try:
             pinned = self._versions.load(workspace_id=workspace_id, version_id=version_id)
-        except ValueError:
+        except (ValueError, zstandard.ZstdError):
+            # A blob-ref row, JSON that is not a graph, or stored text that does not decode.
             raise PinnedGraphUnreadable(
                 f"workflow version {version_id} holds no readable inline graph"
             ) from None
@@ -105,8 +109,10 @@ class PinnedGraphs:
             raise PinnedGraphMismatch(
                 f"workflow version {version_id} holds a graph its stored hash does not name"
             ) from None
-        derived = derived_id("coral-workflow-version", pinned.workflow_id, recomputed)
-        if pinned.content_hash != recomputed or pinned.id != derived:
+        # The id names the content and the analysis, so a changed analysis is caught too.
+        if pinned.content_hash != recomputed or pinned.id != pinned_version_id(
+            pinned.workflow_id, pinned.graph
+        ):
             raise PinnedGraphMismatch(
                 f"workflow version {version_id} holds a graph its stored hash does not name"
             )

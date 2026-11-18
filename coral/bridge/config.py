@@ -16,8 +16,10 @@ _MICROSECOND = timedelta(microseconds=1)
 
 # Every bridge and port commit waits at most this long for the run row's lock.
 LOCK_TIMEOUT_S = 10.0
-# One process keeps the folded state of this many runs.
+# One process keeps the folded state of this many runs, and of at most this many
+# stored engine-log bytes.
 FOLD_CACHE_RUNS = 256
+FOLD_CACHE_BYTES = 64 * 1024 * 1024
 # Engine log rows read per page while folding.
 ENGINE_LOG_PAGE = 500
 # The run-log actor column.
@@ -27,6 +29,18 @@ MAX_TEXT_JSON_CHARS = 12_288
 MAX_PAYLOAD_BYTES = 15_000
 # The run title's share of the orchestrator session title.
 ORCHESTRATOR_TITLE_CHARS = 180
+# Rows and outbox items one commit may carry (the run store's cap).
+MAX_COMMIT_ROWS = 64
+# Engine inputs one feedback or repair commit carries.
+FEED_BATCH = 32
+# Start bounds: activations per run, rejected calls before a pause, live slots.
+MAX_RUN_ACTIVATIONS = 1_000
+MAX_REJECTED_CALL_LIMIT = 10
+MAX_LIVE_SLOTS = 32
+# The engine, state and log formats a new run is written in; the upgrade gate reads them.
+ENGINE_VERSION = 1
+STATE_VERSION = 1
+LOG_VERSION = 1
 
 # Holds, in seconds: how long a refused item waits, and how long a hold may last
 # from its first refusal (None: until a resume or a person ends it).
@@ -107,17 +121,26 @@ __all__ = [
     "DRIFT_HOLD",
     "DRIFT_HOLD_PREFIX",
     "ENGINE_LOG_PAGE",
+    "ENGINE_VERSION",
+    "FEED_BATCH",
     "FINISHED_WORK_RETENTION_S",
+    "FOLD_CACHE_BYTES",
     "FOLD_CACHE_RUNS",
     "HOLD_RULES",
     "LOCK_TIMEOUT_S",
+    "LOG_VERSION",
     "MAX_ACTOR_REF_CHARS",
+    "MAX_COMMIT_ROWS",
+    "MAX_LIVE_SLOTS",
     "MAX_PAYLOAD_BYTES",
+    "MAX_REJECTED_CALL_LIMIT",
+    "MAX_RUN_ACTIVATIONS",
     "MAX_TEXT_JSON_CHARS",
     "ORCHESTRATOR_TITLE_CHARS",
     "PAUSED_RESYNC_DELAY_S",
     "REGATHER_BUCKET_S",
     "RESYNC_INTERVAL_S",
+    "STATE_VERSION",
     "FrozenConfigMissing",
     "ceil_epoch_seconds",
     "engine_config_for",

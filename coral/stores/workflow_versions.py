@@ -19,7 +19,7 @@ from coral.db import (
     shared_read_scope,
 )
 from coral.db.enum_codecs import WorkflowVersionOrigin, WorkflowVersionStatus
-from coral.model import IR_VERSION, CompiledGraph
+from coral.model import IR_VERSION, CompiledGraph, analysis_digest
 from coral.model.ids import derived_id
 from coral.model.loader import MAX_DOCUMENT_BYTES
 from coral.stores.workflows import WorkflowTooLargeError, check_stored_size
@@ -39,12 +39,24 @@ def _check_yaml_text(yaml_text: str) -> None:
     check_stored_size("yaml_text", yaml_text)
 
 
+def pinned_version_id(workflow_id: str, graph: CompiledGraph) -> str:
+    """
+    The id of the version that pins ``graph``: its content and its analysis.
+
+    A compiler or analyzer change pins a new version for new runs, and running ones keep
+    theirs.
+    """
+    return derived_id(
+        "coral-workflow-version", workflow_id, graph.content_hash, analysis_digest(graph)
+    )
+
+
 @dataclass(frozen=True)
 class PinnedVersion:
     """A pinned workflow version and its compiled graph, analysis included."""
 
     workspace_id: int
-    # derived_id("coral-workflow-version", workflow_id, content_hash)
+    # pinned_version_id(workflow_id, graph)
     id: str
     # The definition's 32-hex id.
     workflow_id: str
@@ -101,8 +113,8 @@ class SqlAlchemyWorkflowVersionStore:
     ) -> PinnedVersion:
         """Store ``graph`` as an immutable version unless pinned already; return the version.
 
-        A graph pinned before, under any YAML that compiles to it, returns the stored
-        version unchanged.
+        A graph pinned before with the same analysis, under any YAML that compiles to
+        it, returns the stored version unchanged.
 
         :raises WorkflowTooLargeError: when the YAML exceeds the loader's document
             limit, or the YAML or compiled JSON, compressed, the inline cap.
@@ -119,7 +131,7 @@ class SqlAlchemyWorkflowVersionStore:
         compiled_json = graph.model_dump_json()
         _check_yaml_text(yaml_text)
         check_stored_size("compiled_json", compiled_json)
-        version_id = derived_id("coral-workflow-version", workflow_id, graph.content_hash)
+        version_id = pinned_version_id(workflow_id, graph)
         key = (workspace_id, version_id)
         created_at = int(self._clock()) if now is None else now
 
@@ -166,4 +178,4 @@ class SqlAlchemyWorkflowVersionStore:
             return None if row is None else _to_pinned(row)
 
 
-__all__ = ["PinnedVersion", "SqlAlchemyWorkflowVersionStore"]
+__all__ = ["PinnedVersion", "SqlAlchemyWorkflowVersionStore", "pinned_version_id"]

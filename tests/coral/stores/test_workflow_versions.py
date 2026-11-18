@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from coral.db import CoralBase, WorkflowVersionRow
 from coral.db.enum_codecs import WorkflowVersionOrigin, WorkflowVersionStatus
-from coral.model import IR_VERSION
+from coral.model import IR_VERSION, analysis_digest
 from coral.model.ids import derived_id
 from coral.model.loader import MAX_DOCUMENT_BYTES
 from coral.stores.workflow_versions import PinnedVersion, SqlAlchemyWorkflowVersionStore
@@ -93,7 +93,9 @@ def test_pin_twice_stores_one_version_and_load_returns_the_graph_with_its_analys
 
     assert pinned == PinnedVersion(
         workspace_id=WORKSPACE,
-        id=derived_id("coral-workflow-version", DEFINITION, graph.content_hash),
+        id=derived_id(
+            "coral-workflow-version", DEFINITION, graph.content_hash, analysis_digest(graph)
+        ),
         workflow_id=DEFINITION,
         content_hash=graph.content_hash,
         graph=graph,

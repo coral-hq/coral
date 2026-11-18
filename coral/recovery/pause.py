@@ -15,8 +15,8 @@ import json
 from collections.abc import Sequence
 
 from coral.db.enum_codecs import ActorKind, LogKind, RunPauseReason, RunStatus
-from coral.stores.protocols import CommitOutcome, LogEntryDraft, RunState, RunStore, Transition
-from coral.stores.run_commit import commit_with_retry
+from coral.stores.protocols import CommitOutcome, CoralRun, LogEntryDraft, RunStore, Transition
+from coral.stores.run_commit import commit_on_run_row
 
 _PAUSABLE_STATUSES = frozenset({int(RunStatus.STARTING), int(RunStatus.RUNNING)})
 
@@ -35,6 +35,7 @@ def pause_run_once(
     body: dict[str, object],
     checksum_parts: Sequence[str],
     now_us: int,
+    lock_timeout_s: float | None = None,
 ) -> CommitOutcome:
     """
     Pause a starting or running run for *reason*; leave a paused or finished run as is.
@@ -43,27 +44,30 @@ def pause_run_once(
     :param checksum_parts: What names the cause in the entry's identity; the
         run version is appended.
     :param now_us: The entry's timestamp, in microseconds.
+    :param lock_timeout_s: Bounds the wait for the run row's lock, where supported.
     :returns: The commit; ``applied`` is false when the run was not live.
     """
 
-    def reduce(state: RunState) -> Transition:
-        if state.status not in _PAUSABLE_STATUSES:
+    # Only the run row is read, so a run whose other rows cannot be read still pauses.
+    def reduce(run: CoralRun) -> Transition:
+        if run.status not in _PAUSABLE_STATUSES:
             return Transition.empty()
         entry = LogEntryDraft(
             kind=int(LogKind.PAUSED),
             actor_kind=int(ActorKind.ENGINE),
             body=json.dumps(body, sort_keys=True),
-            idempotency_cksum=pause_log_checksum(checksum_parts, state.version),
+            idempotency_cksum=pause_log_checksum(checksum_parts, run.version),
             created_at_us=now_us,
         )
         return Transition(status=int(RunStatus.PAUSED), pause_reason=int(reason), logs=(entry,))
 
-    return commit_with_retry(
+    return commit_on_run_row(
         run_store=run_store,
         workspace_id=workspace_id,
         run_id=run_id,
         reduce_fn=reduce,
         now=now_us // 1_000_000,
+        lock_timeout_s=lock_timeout_s,
     )
 
 

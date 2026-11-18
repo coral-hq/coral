@@ -6,6 +6,7 @@ from coral.bridge.config import epoch_us
 from coral.engine import types as engine
 from coral.engine.machines.slot import effect_seq
 from coral.model.ids import derived_id, effect_session_id
+from coral.stores.protocols import WorkItemDraft
 
 # The orchestrator's binding slot; engine slot ids always contain ``|``, so it cannot collide.
 ORCHESTRATOR_SLOT_ID = "orchestrator"
@@ -41,6 +42,11 @@ def orchestrator_effect_key(run_id: str, generation: int = ORCHESTRATOR_GENERATI
     return f"{run_id}:{ORCHESTRATOR_SLOT_ID}:{generation}:create_session"
 
 
+def effect_work_id(run_id: str, effect_key: str) -> str:
+    """The ``coral_work`` id of the row an effect (or a bridge item) queues."""
+    return WorkItemDraft.effect(run_id=run_id, idempotency_key=effect_key, payload="").id
+
+
 def timer_work_key(timer: engine.Timer) -> str:
     """One work row per arming: a re-armed timer with a new due time gets a new row."""
     return f"timer:{timer.key}:{timer.generation}:{epoch_us(timer.due_at)}"
@@ -74,6 +80,7 @@ __all__ = [
     "ORCHESTRATOR_GENERATION",
     "ORCHESTRATOR_SLOT_ID",
     "anchor_effect_key",
+    "effect_work_id",
     "orchestrator_effect_key",
     "roster_index",
     "slot_create_key",

@@ -50,6 +50,9 @@ UNMAPPED_KINDS: Mapping[str, str] = MappingProxyType(
     }
 )
 TIMER = "timer"
+RUN_RESYNC = "run_resync"
+# The idempotency key of a run's one recurring resync row.
+_RESYNC_KEY = "resync"
 _SCOPE_KEY_CHARS = 512
 
 
@@ -160,6 +163,16 @@ def timer_draft(run_id: str, timer: engine.Timer) -> WorkItemDraft:
     return _checked(draft)
 
 
+def resync_draft(run_id: str, *, available_at: int = 0) -> WorkItemDraft:
+    """The run's one ``run_resync`` row; rescheduling it never queues a second one."""
+    return WorkItemDraft.signal(
+        run_id=run_id,
+        idempotency_key=_RESYNC_KEY,
+        payload={"effect_type": RUN_RESYNC},
+        available_at=available_at,
+    )
+
+
 def _create(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft:
     slot = find_slot(ctx.state, effect.subject)
     profile = slot.profile if slot is not None else str(effect.payload.get("profile", ""))
@@ -228,6 +241,7 @@ def _checked(draft: WorkItemDraft) -> WorkItemDraft:
 
 __all__ = [
     "FED_KINDS",
+    "RUN_RESYNC",
     "TIMER",
     "UNMAPPED_KINDS",
     "MapContext",
@@ -236,5 +250,6 @@ __all__ = [
     "anchor_create_draft",
     "map_effect",
     "orchestrator_create_draft",
+    "resync_draft",
     "timer_draft",
 ]

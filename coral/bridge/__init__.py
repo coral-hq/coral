@@ -13,6 +13,10 @@ if TYPE_CHECKING:
     from coral.bridge.codec import EngineLogDecodeError as EngineLogDecodeError
     from coral.bridge.codec import decode_entries as decode_entries
     from coral.bridge.codec import entry_draft as entry_draft
+    from coral.bridge.commit import Applied as Applied
+    from coral.bridge.commit import CommitExtras as CommitExtras
+    from coral.bridge.commit import EngineSnapshot as EngineSnapshot
+    from coral.bridge.commit import build_commit as build_commit
     from coral.bridge.config import FrozenConfigMissing as FrozenConfigMissing
     from coral.bridge.config import engine_config_for as engine_config_for
     from coral.bridge.config import freeze_engine_config as freeze_engine_config
@@ -28,9 +32,19 @@ if TYPE_CHECKING:
     from coral.bridge.mapping import map_effect as map_effect
     from coral.bridge.projection import project_run as project_run
     from coral.bridge.projection import project_slots as project_slots
+    from coral.bridge.service import BridgeCommit as BridgeCommit
+    from coral.bridge.service import EngineBridge as EngineBridge
+    from coral.bridge.service import EngineLoadFailed as EngineLoadFailed
+    from coral.bridge.service import ResyncReport as ResyncReport
+    from coral.bridge.start import RunNotRunnable as RunNotRunnable
+    from coral.bridge.start import start_engine_run as start_engine_run
 
 _MODULES: dict[str, str] = {
     "EngineLogDecodeError": "coral.bridge.codec",
+    "Applied": "coral.bridge.commit",
+    "CommitExtras": "coral.bridge.commit",
+    "EngineSnapshot": "coral.bridge.commit",
+    "build_commit": "coral.bridge.commit",
     "decode_entries": "coral.bridge.codec",
     "entry_draft": "coral.bridge.codec",
     "FrozenConfigMissing": "coral.bridge.config",
@@ -48,6 +62,12 @@ _MODULES: dict[str, str] = {
     "map_effect": "coral.bridge.mapping",
     "project_run": "coral.bridge.projection",
     "project_slots": "coral.bridge.projection",
+    "BridgeCommit": "coral.bridge.service",
+    "EngineBridge": "coral.bridge.service",
+    "EngineLoadFailed": "coral.bridge.service",
+    "ResyncReport": "coral.bridge.service",
+    "RunNotRunnable": "coral.bridge.start",
+    "start_engine_run": "coral.bridge.start",
 }
 
 __all__ = sorted(_MODULES)

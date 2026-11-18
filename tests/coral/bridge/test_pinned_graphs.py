@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, create_engine, update
+from sqlalchemy import Engine, create_engine, text, update
 
 from coral.bridge.graphs import (
     PinnedGraphError,
@@ -19,7 +19,7 @@ from coral.bridge.graphs import (
 from coral.db import CoralBase, WorkflowVersionRow
 from coral.db.enum_codecs import WorkflowVersionOrigin, WorkflowVersionStatus
 from coral.model import IR_VERSION
-from coral.model.ir import CompiledGraph
+from coral.model.ir import Analysis, CompiledGraph
 from coral.stores.workflow_versions import PinnedVersion, SqlAlchemyWorkflowVersionStore
 from tests.coral.bridge._scripted_runs import WORKSPACE, fixture_graph
 from tests.coral.workflow_builders import fixture_text
@@ -73,7 +73,7 @@ def test_a_pinned_graph_loads_with_its_hash_and_is_read_once(
         )
         assert loaded == GRAPH
     assert counting.loads == 1
-    assert graphs.load(workspace_id=WORKSPACE, version_id=pinned.id) == GRAPH
+    assert graphs.load(workspace_id=WORKSPACE, version_id=pinned.id, expected_hash=None) == GRAPH
 
 
 def test_the_hash_is_recomputed_from_the_graph() -> None:
@@ -93,7 +93,9 @@ def test_a_graph_pinned_under_a_hash_it_does_not_have_is_refused(
     forged = GRAPH.model_copy(update={"content_hash": "a" * 64})
     pinned = _pin(versions, forged)
     with pytest.raises(PinnedGraphMismatch, match=pinned.id):
-        PinnedGraphs(versions).load(workspace_id=WORKSPACE, version_id=pinned.id)
+        PinnedGraphs(versions).load(
+            workspace_id=WORKSPACE, version_id=pinned.id, expected_hash=None
+        )
 
 
 def test_a_row_whose_graph_changed_after_it_was_pinned_is_refused(
@@ -117,7 +119,9 @@ def test_a_row_whose_graph_changed_after_it_was_pinned_is_refused(
             .values(compiled_json=tampered.model_dump_json())
         )
     with pytest.raises(PinnedGraphMismatch):
-        PinnedGraphs(versions).load(workspace_id=WORKSPACE, version_id=pinned.id)
+        PinnedGraphs(versions).load(
+            workspace_id=WORKSPACE, version_id=pinned.id, expected_hash=None
+        )
 
 
 def test_a_row_whose_hash_or_id_is_not_its_graphs_is_refused(
@@ -145,7 +149,7 @@ def test_a_row_whose_hash_or_id_is_not_its_graphs_is_refused(
     graphs = PinnedGraphs(versions)
     for version_id in (pinned.id, "2" * 32):
         with pytest.raises(PinnedGraphMismatch, match=version_id):
-            graphs.load(workspace_id=WORKSPACE, version_id=version_id)
+            graphs.load(workspace_id=WORKSPACE, version_id=version_id, expected_hash=None)
 
 
 def test_the_run_must_name_the_hash_it_was_started_with(
@@ -155,7 +159,7 @@ def test_the_run_must_name_the_hash_it_was_started_with(
     graphs = PinnedGraphs(versions)
     with pytest.raises(PinnedGraphMismatch):
         graphs.load(workspace_id=WORKSPACE, version_id=pinned.id, expected_hash="b" * 64)
-    graphs.load(workspace_id=WORKSPACE, version_id=pinned.id)
+    graphs.load(workspace_id=WORKSPACE, version_id=pinned.id, expected_hash=None)
     with pytest.raises(PinnedGraphMismatch):
         graphs.load(workspace_id=WORKSPACE, version_id=pinned.id, expected_hash="b" * 64)
 
@@ -166,9 +170,9 @@ def test_a_missing_or_blob_only_version_does_not_load(
     pinned = _pin(versions)
     graphs = PinnedGraphs(versions)
     with pytest.raises(PinnedGraphMissing):
-        graphs.load(workspace_id=WORKSPACE, version_id="0" * 32)
+        graphs.load(workspace_id=WORKSPACE, version_id="0" * 32, expected_hash=None)
     with pytest.raises(PinnedGraphMissing):
-        graphs.load(workspace_id=WORKSPACE + 1, version_id=pinned.id)
+        graphs.load(workspace_id=WORKSPACE + 1, version_id=pinned.id, expected_hash=None)
     with engine.begin() as connection:
         connection.execute(
             WorkflowVersionRow.__table__.insert().values(
@@ -186,7 +190,7 @@ def test_a_missing_or_blob_only_version_does_not_load(
             )
         )
     with pytest.raises(PinnedGraphUnreadable):
-        graphs.load(workspace_id=WORKSPACE, version_id="1" * 32)
+        graphs.load(workspace_id=WORKSPACE, version_id="1" * 32, expected_hash=None)
     for error in (PinnedGraphMissing, PinnedGraphMismatch, PinnedGraphUnreadable):
         assert issubclass(error, PinnedGraphError)
 
@@ -210,7 +214,7 @@ def test_the_loaded_graph_keeps_its_analysis_and_its_workspace(
     assert loaded.analysis == loop.analysis
     # The cached graph is this workspace's; another workspace reads its own rows.
     with pytest.raises(PinnedGraphMissing):
-        graphs.load(workspace_id=WORKSPACE + 1, version_id=pinned.id)
+        graphs.load(workspace_id=WORKSPACE + 1, version_id=pinned.id, expected_hash=None)
 
 
 @pytest.mark.parametrize("compiled_json", ['{"nodes": [', '{"workflow_id": "x"}', "[]"])
@@ -225,4 +229,50 @@ def test_a_row_whose_graph_does_not_parse_is_unreadable(
             .values(compiled_json=compiled_json)
         )
     with pytest.raises(PinnedGraphUnreadable, match=pinned.id):
-        PinnedGraphs(versions).load(workspace_id=WORKSPACE, version_id=pinned.id)
+        PinnedGraphs(versions).load(
+            workspace_id=WORKSPACE, version_id=pinned.id, expected_hash=None
+        )
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [b"\x00\x01not a zstd frame", b"\x00\x00\xff\xfe invalid utf-8"],
+    ids=["bad_frame", "bad_utf8"],
+)
+def test_a_row_whose_stored_text_does_not_decode_is_unreadable(
+    versions: SqlAlchemyWorkflowVersionStore, engine: Engine, stored: bytes
+) -> None:
+    pinned = _pin(versions)
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE coral_workflow_versions SET compiled_json = :stored WHERE id = :id"),
+            {"stored": stored, "id": pinned.id},
+        )
+    with pytest.raises(PinnedGraphUnreadable, match=pinned.id):
+        PinnedGraphs(versions).load(
+            workspace_id=WORKSPACE, version_id=pinned.id, expected_hash=None
+        )
+
+
+def test_the_expected_hash_is_always_passed(versions: SqlAlchemyWorkflowVersionStore) -> None:
+    pinned = _pin(versions)
+    load = PinnedGraphs(versions).load
+    with pytest.raises(TypeError, match="expected_hash"):
+        load(workspace_id=WORKSPACE, version_id=pinned.id)  # type: ignore[call-arg]
+
+
+def test_a_row_whose_stored_analysis_changed_is_refused(
+    versions: SqlAlchemyWorkflowVersionStore, engine: Engine
+) -> None:
+    pinned = _pin(versions)
+    tampered = GRAPH.model_copy(update={"analysis": Analysis()})
+    with engine.begin() as connection:
+        connection.execute(
+            update(WorkflowVersionRow)
+            .where(WorkflowVersionRow.id == pinned.id)
+            .values(compiled_json=tampered.model_dump_json())
+        )
+    with pytest.raises(PinnedGraphMismatch, match=pinned.id):
+        PinnedGraphs(versions).load(
+            workspace_id=WORKSPACE, version_id=pinned.id, expected_hash=GRAPH.content_hash
+        )

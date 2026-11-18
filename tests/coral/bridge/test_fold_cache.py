@@ -279,6 +279,35 @@ def test_another_graph_or_config_and_an_evicted_run_fold_from_the_start() -> Non
     assert reader.take()[0].after_seq == 0
 
 
+def _engine_bytes(committed: CommittedRun) -> int:
+    rows = committed.store.logs[(committed.workspace_id, committed.run_id)]
+    return sum(len(row.body) for row in rows if row.kind == int(LogKind.ENGINE))
+
+
+def test_the_cache_keeps_runs_only_up_to_its_byte_bound() -> None:
+    first = _committed()
+    other_id = derived_id("coral-run", "bob", START_KEY)
+    other = _committed(first.store, user="bob", log=_cancelled(other_id))
+    reader = CountingReader(first.store)
+    # Room for the larger run alone: a second run pushes the older one out.
+    bound = max(_engine_bytes(first), _engine_bytes(other))
+    cache = EngineStateCache(reader, max_bytes=bound)
+    _fold(cache, first.final)
+    cache.fold(
+        workspace_id=WORKSPACE, run_id=other_id, version=other.final, graph=GRAPH, config=CONFIG
+    )
+    reader.take()
+    _fold(cache, first.final)
+    assert reader.take()[0].after_seq == 0
+    # A run over the bound on its own is folded but not kept.
+    tiny = EngineStateCache(reader, max_bytes=10)
+    for _ in range(2):
+        assert _fold(tiny, first.final) == first.states[first.final]
+        assert reader.take()[0].after_seq == 0
+    with pytest.raises(ValueError, match="max_bytes"):
+        EngineStateCache(reader, max_bytes=0)
+
+
 def _cancelled(run_id: str) -> tuple[LogEntry, ...]:
     """Another history from its first entry: the run is cancelled while the review runs."""
     start = StartRun(run_id=run_id, start_key="cancelled", version_hash=GRAPH.content_hash)
@@ -439,3 +468,30 @@ def test_the_frozen_config_keeps_the_run_limits_and_every_default() -> None:
         engine_config_for(dataclasses.replace(_spec(), engine_config=config.model_dump_json()))
         == config
     )
+
+
+def test_a_run_over_the_byte_bound_leaves_the_cached_runs_in_place() -> None:
+    first = _committed()
+    other_id = derived_id("coral-run", "bob", START_KEY)
+    other = _committed(first.store, user="bob", log=_cancelled(other_id))
+    small, large = sorted((first, other), key=_engine_bytes)
+    assert _engine_bytes(small) < _engine_bytes(large)
+    reader = CountingReader(first.store)
+    cache = EngineStateCache(reader, max_bytes=_engine_bytes(small))
+
+    def fold(run: CommittedRun) -> None:
+        cache.fold(
+            workspace_id=WORKSPACE,
+            run_id=run.run_id,
+            version=run.final,
+            graph=GRAPH,
+            config=CONFIG,
+        )
+
+    fold(small)
+    fold(large)
+    reader.take()
+    fold(small)
+    assert reader.take() == []
+    fold(large)
+    assert reader.take()[0].after_seq == 0

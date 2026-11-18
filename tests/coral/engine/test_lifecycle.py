@@ -1578,6 +1578,44 @@ def test_a_retry_clears_the_pending_input_of_the_slot_it_replaces() -> None:
     assert all(item.node_id != "ship" for item in resumed.state.activations)
 
 
+def test_a_retry_drops_the_pending_input_pause_of_the_slot_it_replaces() -> None:
+    graph = _graph(_PLAIN)
+    closing = drive(graph, _finish(SLOT), after=drive(graph, [RUN]), auto_ack=False)
+    close = next(effect for effect in closing.state.effects if effect.kind == "close_slot")
+    held = drive(
+        graph,
+        [
+            PauseRun(reason="failure_path", detail="stuck"),
+            EffectCompleted(effect_key=close.effect_key, payload={"pending_input": True}),
+        ],
+        after=closing,
+        auto_ack=False,
+    )
+    assert {cause.reason for cause in held.state.causes} == {"failure_path", "drift"}
+    retried = drive(graph, [RetryStep(node_id="work")], after=held, auto_ack=False)
+    # The retried slot's pending input is gone, so its drift cause goes with it.
+    assert (retried.state.status, retried.state.causes) == ("running", ())
+
+
+def test_a_retry_keeps_the_pending_input_pause_of_another_slot() -> None:
+    graph = _graph(_PLAIN)
+    closing = drive(graph, _finish(SLOT), after=drive(graph, [RUN]), auto_ack=False)
+    close = next(effect for effect in closing.state.effects if effect.kind == "close_slot")
+    other = PauseCause(reason="drift", detail="pending_input", subject="elsewhere||:0")
+    held = drive(
+        graph,
+        [
+            PauseRun(reason="failure_path", detail="stuck"),
+            EffectCompleted(effect_key=close.effect_key, payload={"pending_input": True}),
+        ],
+        after=closing,
+        auto_ack=False,
+    )
+    with_other = held.state.model_copy(update={"causes": (*held.state.causes, other)})
+    retried = transition(graph, with_other, RetryStep(node_id="work"), NOW)
+    assert (retried.state.status, retried.state.causes) == ("paused", (other,))
+
+
 @pytest.mark.parametrize("failure_class", ["infra.transient", "infra.runner_lost"])
 def test_a_failure_receipted_before_the_handoff_answers_with_its_receipt(
     failure_class: str,
