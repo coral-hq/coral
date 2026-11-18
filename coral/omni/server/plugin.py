@@ -290,7 +290,7 @@ async def coral_lifespan(
                     stack=stack,
                 )
             else:
-                # Engine effects would then fail permanently as ``executor.missing``.
+                # Engine effects would then be retried as ``executor.missing`` until they fail.
                 _logger.warning("Coral session engine not wired: %s is missing", missing)
             # Pushed last, so it runs first on exit.
             stack.push_async_callback(supervisor.stop)

@@ -1,14 +1,19 @@
-"""Unified async work queue drainer with lease heartbeat, fencing, and backoff."""
+"""Unified async work queue drainer with lease heartbeat, fencing, holds, and backoff."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
+import math
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
+from dataclasses import dataclass
 from typing import Any
+
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError, StatementError
 
 from coral.db.enum_codecs import RunStatus, WorkKind, WorkStatus
 from coral.omni.protocols import RunScopeRunner
@@ -21,6 +26,13 @@ from coral.queue.executors import (
     ExecutorRegistration,
     StartupLeaseLost,
     get_registration,
+)
+from coral.queue.run_effects import (
+    MAX_ERROR_CODE_CHARS,
+    MAX_FAILURE_MESSAGE_CHARS,
+    describe_exception,
+    raise_if_cancelling,
+    trim_message,
 )
 from coral.stores.protocols import QueueStore, WorkItem
 
@@ -39,6 +51,74 @@ _KIND_NAMES: dict[int, str] = {
     int(WorkKind.TIMER): "timer",
     int(WorkKind.EFFECT): "effect",
 }
+
+# Held and retried like any domain wait: a leader can lack executors during an upgrade.
+_MISSING_EXECUTOR = EffectFailed(
+    error_code="executor.missing",
+    message="no executor is registered for this item",
+    retryable=True,
+)
+# The longest hold, so the fences see a held item at least hourly.
+MAX_HOLD_DELAY_S = 3600
+# An item claimed this many times the attempt limit without settling (each crash,
+# lost lease or error after the claim spends an attempt) fails without running again.
+_CLAIMS_PER_ATTEMPT_LIMIT = 2
+
+
+@dataclass(frozen=True)
+class FinishedWork:
+    """
+    An item the drainer finished SUCCEEDED or FAILED, as the outcome hook sees it.
+
+    :param item: The item as claimed.
+    :param status: ``WorkStatus.SUCCEEDED`` or ``WorkStatus.FAILED``.
+    :param error_code: The stored code: ``None`` on success, ``infra.transient``
+        once retries are exhausted (``result["last_error_code"]`` names the cause).
+    :param result: The stored result.
+    """
+
+    item: WorkItem
+    status: int
+    error_code: str | None
+    result: dict[str, Any] | None
+
+
+# Runs after a finish to SUCCEEDED or FAILED committed; never for a hold, a retry or an
+# abandon. It is awaited while its run is busy, so it must finish in bounded time.
+WorkFinishedHook = Callable[[FinishedWork], Awaitable[None]]
+# ``(item, failure, now_s)``: seconds to hold a failed item without spending its
+# attempt, or ``None`` for the normal retry. ``item.held_since`` starts a horizon. It
+# runs on the event loop, so it must not block (no store reads).
+HoldPolicy = Callable[[WorkItem, EffectFailed, int], int | None]
+
+
+def _bounded(failure: EffectFailed) -> EffectFailed:
+    """``failure`` with its code and message cut to what the work row stores."""
+    return EffectFailed(
+        error_code=failure.error_code[:MAX_ERROR_CODE_CHARS],
+        message=trim_message(failure.message, MAX_FAILURE_MESSAGE_CHARS),
+        retryable=failure.retryable,
+    )
+
+
+def _result_refused(exc: Exception) -> bool:
+    """Whether a finish failed on its result itself: not serializable, or over the column cap."""
+    if isinstance(exc, DBAPIError):
+        return False
+    if isinstance(exc, StatementError):
+        # A bind-time refusal, such as the compressed column's size check.
+        return isinstance(exc.orig, (TypeError, ValueError))
+    return isinstance(exc, (TypeError, ValueError)) and not isinstance(exc, SQLAlchemyError)
+
+
+def _checked_outcome(returned: object) -> EffectOutcome:
+    """The executor's outcome; anything else is its bug, a permanent failure."""
+    if isinstance(returned, (EffectCompleted, EffectFailed)):
+        return returned
+    return EffectFailed(
+        error_code="executor.invalid_outcome",
+        message=f"the executor returned {type(returned).__name__}, not an outcome",
+    )
 
 
 def _parse_payload_dict(payload: str) -> dict[str, Any]:
@@ -78,7 +158,12 @@ def _resolve_executor(item: WorkItem, payload_dict: dict[str, Any]) -> ExecutorR
 
 
 class WorkDrainer:
-    """Drains ready work items from QueueStore with lease fencing and retry backoff."""
+    """
+    Drains ready work items from QueueStore with lease fencing, holds and retry backoff.
+
+    :param on_finished: Called after each finish to SUCCEEDED or FAILED; its errors are logged.
+    :param hold_policy: Asked first for every failure, a missing executor included.
+    """
 
     def __init__(
         self,
@@ -95,6 +180,8 @@ class WorkDrainer:
         max_attempts: int = 8,
         base_backoff_s: float = 1.0,
         max_backoff_s: float = 300.0,
+        on_finished: WorkFinishedHook | None = None,
+        hold_policy: HoldPolicy | None = None,
     ) -> None:
         self._queue_store = queue_store
         self._worker_id = worker_id
@@ -112,24 +199,33 @@ class WorkDrainer:
         self._max_attempts = max_attempts
         self._base_backoff_s = base_backoff_s
         self._max_backoff_s = max_backoff_s
+        self._on_finished = on_finished
+        self._hold_policy = hold_policy
 
-    async def drain_once(self) -> WorkItem | None:
-        """Claim and execute at most one ready work item."""
+    async def drain_once(self, *, exclude_run_ids: Collection[str] = ()) -> WorkItem | None:
+        """Claim and execute at most one ready work item of a run not in ``exclude_run_ids``."""
+        claimed = await self.claim(exclude_run_ids=exclude_run_ids)
+        if claimed is not None:
+            await self.run_claimed(claimed)
+        return claimed
+
+    async def claim(self, *, exclude_run_ids: Collection[str] = ()) -> WorkItem | None:
+        """Claim the next ready item of a run not in ``exclude_run_ids``."""
         if not self._kinds:
             return None
-
-        claimed = await asyncio.to_thread(
+        return await asyncio.to_thread(
             self._queue_store.claim_work,
             self._worker_id,
             kinds=self._kinds,
             lease_seconds=self._lease_seconds,
             workspace_id=self._workspace_id,
             now_fn=self._clock,
+            exclude_run_ids=tuple(exclude_run_ids),
         )
-        if claimed is None:
-            return None
 
-        current_lease_expires_at = (
+    async def run_claimed(self, claimed: WorkItem) -> None:
+        """Fence, execute and finish one claimed item, then run the outcome hook."""
+        lease_expires_at = (
             claimed.lease_expires_at
             if claimed.lease_expires_at is not None
             else int(self._clock()) + self._lease_seconds
@@ -145,17 +241,10 @@ class WorkDrainer:
         if run_status in _TERMINAL_RUN_STATUSES and not (
             registration is not None and registration.runs_after_terminal
         ):
-            await asyncio.to_thread(
-                self._queue_store.finish_work,
-                claimed.id,
-                worker_id=self._worker_id,
-                expected_lease_expires_at=current_lease_expires_at,
-                status=int(WorkStatus.ABANDONED),
-                error_code="run.terminal",
-                workspace_id=claimed.workspace_id,
-                now_fn=self._clock,
+            await self._finish(
+                claimed, lease_expires_at, WorkStatus.ABANDONED, error_code="run.terminal"
             )
-            return claimed
+            return
 
         if claimed.slot_generation is not None:
             slot_id = _extract_slot_id(claimed, payload_dict)
@@ -167,32 +256,54 @@ class WorkDrainer:
                     workspace_id=claimed.workspace_id,
                 )
                 if current_gen is not None and current_gen != claimed.slot_generation:
-                    await asyncio.to_thread(
-                        self._queue_store.finish_work,
-                        claimed.id,
-                        worker_id=self._worker_id,
-                        expected_lease_expires_at=current_lease_expires_at,
-                        status=int(WorkStatus.ABANDONED),
+                    await self._finish(
+                        claimed,
+                        lease_expires_at,
+                        WorkStatus.ABANDONED,
                         error_code="slot.generation_mismatch",
-                        workspace_id=claimed.workspace_id,
-                        now_fn=self._clock,
                     )
-                    return claimed
+                    return
 
-        if registration is None:
-            await asyncio.to_thread(
-                self._queue_store.finish_work,
+        if claimed.attempts > _CLAIMS_PER_ATTEMPT_LIMIT * self._max_attempts:
+            _logger.warning(
+                "Work item %s was claimed %d times without settling; failing it",
                 claimed.id,
-                worker_id=self._worker_id,
-                expected_lease_expires_at=current_lease_expires_at,
-                status=int(WorkStatus.FAILED),
-                error_code="executor.missing",
-                workspace_id=claimed.workspace_id,
-                now_fn=self._clock,
+                claimed.attempts,
             )
-            return claimed
-        executor = registration.fn
+            await self._finish_terminal(
+                claimed,
+                lease_expires_at,
+                WorkStatus.FAILED,
+                error_code="infra.transient",
+                result={
+                    "last_error_code": "work.attempts_exceeded",
+                    "message": f"claimed {claimed.attempts} times without settling",
+                },
+            )
+            return
+        if registration is None:
+            outcome: EffectOutcome = _MISSING_EXECUTOR
+        else:
+            executed = await self._execute(claimed, registration, payload_dict, lease_expires_at)
+            if executed is None:
+                return
+            outcome, lease_expires_at = executed
+        await self._settle(
+            claimed,
+            outcome,
+            lease_expires_at,
+            paused_at_claim=run_status == int(RunStatus.PAUSED),
+        )
 
+    async def _execute(
+        self,
+        claimed: WorkItem,
+        registration: ExecutorRegistration,
+        payload_dict: dict[str, Any],
+        lease_expires_at: int,
+    ) -> tuple[EffectOutcome, int] | None:
+        """Run the executor under a lease heartbeat; ``None`` when the lease was lost."""
+        current_lease_expires_at = lease_expires_at
         lease_lock = asyncio.Lock()
         ctx = ExecutionContext(
             work=claimed,
@@ -225,7 +336,16 @@ class WorkDrainer:
         async def _heartbeat_loop() -> None:
             while True:
                 await asyncio.sleep(self._heartbeat_interval_s)
-                ok = await _renew_lease()
+                try:
+                    ok = await _renew_lease()
+                except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- fenced finish
+                    raise_if_cancelling(exc)
+                    _logger.warning(
+                        "Lease heartbeat failed for work_id=%s: %s",
+                        claimed.id,
+                        describe_exception(exc),
+                    )
+                    continue
                 if not ok:
                     return
 
@@ -243,92 +363,200 @@ class WorkDrainer:
                             owner_key=claimed.owner_key,
                         )
                     )
-                outcome: EffectOutcome = await executor(ctx)
+                returned = await registration.fn(ctx)
+            outcome = _checked_outcome(returned)
         except StartupLeaseLost:
             _logger.info(
                 "Work item %s lost lease during execution on worker %s",
                 claimed.id,
                 self._worker_id,
             )
-            return claimed
-        except Exception as exc:
+            return None
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- a retryable failure
+            # A stray cancellation (the executor awaited something cancelled) is one too.
+            raise_if_cancelling(exc)
+            description = describe_exception(exc)
             _logger.warning(
                 "Unhandled exception in effect executor for work_id=%s: %s",
                 claimed.id,
-                exc,
-                exc_info=True,
+                description,
             )
             outcome = EffectFailed(
-                error_code="executor.unhandled_exception",
-                message=str(exc),
+                error_code=(
+                    "executor.cancelled"
+                    if isinstance(exc, asyncio.CancelledError)
+                    else "executor.unhandled_exception"
+                ),
+                message=description,
                 retryable=True,
             )
         finally:
             heartbeat_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await heartbeat_task
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        return outcome, current_lease_expires_at
 
+    async def _settle(
+        self,
+        claimed: WorkItem,
+        outcome: EffectOutcome,
+        lease_expires_at: int,
+        *,
+        paused_at_claim: bool,
+    ) -> None:
+        """Finish the item by its outcome: success, hold, retry, or failure."""
         if isinstance(outcome, EffectCompleted):
-            await asyncio.to_thread(
-                self._queue_store.finish_work,
-                claimed.id,
-                worker_id=self._worker_id,
-                expected_lease_expires_at=current_lease_expires_at,
-                status=int(WorkStatus.SUCCEEDED),
-                result=outcome.result,
-                workspace_id=claimed.workspace_id,
-                now_fn=self._clock,
+            await self._finish_terminal(
+                claimed, lease_expires_at, WorkStatus.SUCCEEDED, result=outcome.result
             )
-        elif outcome.retryable:
-            backoff_s = compute_effect_backoff(
-                claimed.attempts,
-                base_s=self._base_backoff_s,
-                max_s=self._max_backoff_s,
-                max_attempts=self._max_attempts,
-                rng=self._rng,
+            return
+        failure = _bounded(outcome)
+        finish_now = int(self._clock())
+        hold_s = self._hold_delay(claimed, failure, finish_now)
+        if hold_s is not None:
+            if paused_at_claim and await self._left_pause(claimed):
+                # The resume's release ran while this item was claimed and could not
+                # see it, so it comes back at the store's minimum hold delay.
+                hold_s = 0
+            await self._finish(
+                claimed,
+                lease_expires_at,
+                WorkStatus.PENDING,
+                error_code=failure.error_code,
+                next_available_at=finish_now + hold_s,
+                hold=True,
+                now_s=finish_now,
             )
-            finish_now = int(self._clock())
-            if backoff_s is not None:
-                await asyncio.to_thread(
-                    self._queue_store.finish_work,
-                    claimed.id,
-                    worker_id=self._worker_id,
-                    expected_lease_expires_at=current_lease_expires_at,
-                    status=int(WorkStatus.PENDING),
-                    error_code=outcome.error_code,
-                    next_available_at=finish_now + backoff_s,
-                    workspace_id=claimed.workspace_id,
-                    now_fn=lambda: float(finish_now),
-                )
-            else:
-                await asyncio.to_thread(
-                    self._queue_store.finish_work,
-                    claimed.id,
-                    worker_id=self._worker_id,
-                    expected_lease_expires_at=current_lease_expires_at,
-                    status=int(WorkStatus.FAILED),
-                    error_code="infra.transient",
-                    result={
-                        "last_error_code": outcome.error_code,
-                        "message": outcome.message,
-                    },
-                    workspace_id=claimed.workspace_id,
-                    now_fn=lambda: float(finish_now),
-                )
-        else:
-            await asyncio.to_thread(
-                self._queue_store.finish_work,
-                claimed.id,
-                worker_id=self._worker_id,
-                expected_lease_expires_at=current_lease_expires_at,
-                status=int(WorkStatus.FAILED),
-                error_code=outcome.error_code,
-                result={"message": outcome.message} if outcome.message else None,
-                workspace_id=claimed.workspace_id,
-                now_fn=self._clock,
+            return
+        if not failure.retryable:
+            await self._finish_terminal(
+                claimed,
+                lease_expires_at,
+                WorkStatus.FAILED,
+                error_code=failure.error_code,
+                result={"message": failure.message} if failure.message else None,
             )
+            return
+        backoff_s = compute_effect_backoff(
+            claimed.attempts,
+            base_s=self._base_backoff_s,
+            max_s=self._max_backoff_s,
+            max_attempts=self._max_attempts,
+            rng=self._rng,
+        )
+        if backoff_s is not None:
+            await self._finish(
+                claimed,
+                lease_expires_at,
+                WorkStatus.PENDING,
+                error_code=failure.error_code,
+                next_available_at=finish_now + backoff_s,
+                now_s=finish_now,
+            )
+            return
+        await self._finish_terminal(
+            claimed,
+            lease_expires_at,
+            WorkStatus.FAILED,
+            error_code="infra.transient",
+            result={"last_error_code": failure.error_code, "message": failure.message},
+            now_s=finish_now,
+        )
 
-        return claimed
+    def _hold_delay(self, claimed: WorkItem, failure: EffectFailed, now_s: int) -> int | None:
+        if self._hold_policy is None:
+            return None
+        try:
+            delay = self._hold_policy(claimed, failure, now_s)
+            if delay is None:
+                return None
+            if not math.isfinite(delay):
+                raise ValueError(f"hold delay {delay!r} is not finite")
+            return min(max(0, int(delay)), MAX_HOLD_DELAY_S)
+        except Exception as exc:  # noqa: BLE001 -- logged; the item falls back to retries
+            _logger.warning(
+                "Hold policy failed for work_id=%s: %s", claimed.id, describe_exception(exc)
+            )
+            return None
+
+    async def _left_pause(self, claimed: WorkItem) -> bool:
+        status = await asyncio.to_thread(
+            self._queue_store.get_run_status, claimed.run_id, workspace_id=claimed.workspace_id
+        )
+        return status != int(RunStatus.PAUSED)
+
+    async def _finish(
+        self,
+        claimed: WorkItem,
+        lease_expires_at: int,
+        status: WorkStatus,
+        *,
+        error_code: str | None = None,
+        result: dict[str, Any] | None = None,
+        next_available_at: int | None = None,
+        hold: bool = False,
+        now_s: int | None = None,
+    ) -> bool:
+        """Finish the claimed item; ``False`` when its lease was fenced off."""
+        return await asyncio.to_thread(
+            self._queue_store.finish_work,
+            claimed.id,
+            worker_id=self._worker_id,
+            expected_lease_expires_at=lease_expires_at,
+            status=int(status),
+            result=result,
+            error_code=error_code,
+            next_available_at=next_available_at,
+            workspace_id=claimed.workspace_id,
+            now_fn=self._clock if now_s is None else functools.partial(float, now_s),
+            hold=hold,
+        )
+
+    async def _finish_terminal(
+        self,
+        claimed: WorkItem,
+        lease_expires_at: int,
+        status: WorkStatus,
+        *,
+        error_code: str | None = None,
+        result: dict[str, Any] | None = None,
+        now_s: int | None = None,
+    ) -> None:
+        """Finish SUCCEEDED or FAILED, then tell the hook if this worker's finish committed."""
+        try:
+            finished = await self._finish(
+                claimed,
+                lease_expires_at,
+                status,
+                error_code=error_code,
+                result=result,
+                now_s=now_s,
+            )
+        except Exception as exc:
+            # Only a result the store refuses is a permanent failure; a store error is retried.
+            if result is None or not _result_refused(exc):
+                raise
+            _logger.warning(
+                "Work item %s has a result that cannot be stored: %s",
+                claimed.id,
+                describe_exception(exc),
+            )
+            if status == WorkStatus.SUCCEEDED:
+                status, error_code = WorkStatus.FAILED, "effect.result_unstorable"
+            result = None
+            finished = await self._finish(
+                claimed, lease_expires_at, status, error_code=error_code, now_s=now_s
+            )
+        if not finished or self._on_finished is None:
+            return
+        try:
+            await self._on_finished(FinishedWork(claimed, int(status), error_code, result))
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- logged; item finished
+            raise_if_cancelling(exc)
+            _logger.warning(
+                "Work finished hook failed for work_id=%s: %s",
+                claimed.id,
+                describe_exception(exc),
+            )
 
     async def drain_until_empty(self, *, max_items: int = 100) -> int:
         """Drain ready work items sequentially up to max_items."""
@@ -341,4 +569,4 @@ class WorkDrainer:
         return processed
 
 
-__all__ = ["WorkDrainer"]
+__all__ = ["FinishedWork", "HoldPolicy", "WorkDrainer", "WorkFinishedHook"]
