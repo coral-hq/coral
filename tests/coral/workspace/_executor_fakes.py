@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from coral.db.enum_codecs import (
@@ -16,6 +17,7 @@ from coral.db.enum_codecs import (
     WorkKind,
     WorkspaceOpIntentOp,
     WorkStatus,
+    encode_session_binding_progress,
     encode_workspace_op_intent_op,
 )
 from coral.model.ids import derived_id
@@ -29,7 +31,17 @@ from coral.stores.protocols import (
     Transition,
     WorkItem,
 )
-from coral.stores.session_bindings import SessionBinding, SessionBindingDraft, effect_checksum
+from coral.stores.session_bindings import (
+    BindingNotFound,
+    SessionBinding,
+    SessionBindingDraft,
+    adopt_binding,
+    binding_from_draft,
+    effect_checksum,
+    effect_taken,
+    is_listed_bound_session,
+    slot_generation_taken,
+)
 from coral.stores.workspace_op_intents import OpIntentConflict, WorkspaceOpIntent
 from coral.workspace.ops import HostChannelBackend, OpName
 from coral.workspace.run_worktree import run_branch_name
@@ -172,29 +184,105 @@ def step_binding(
 
 
 class FakeBindings:
-    """``SessionBindings`` reads; the workspace executors never reserve."""
+    """
+    The session binding store over a dict, with its reserve rules.
 
-    def __init__(self, bindings: Iterable[SessionBinding] = ()) -> None:
+    A run binds one session per effect and one per step slot and generation.
+
+    :param run_store: Run statuses for ``list_bound_sessions``.
+    :param reservable: Allow ``reserve`` and ``record_progress``; executor tests
+        leave it off, so an executor that writes a binding fails its test.
+    """
+
+    # Every lookup reads the dict: nothing is cached.
+    reads_fresh = True
+
+    def __init__(
+        self,
+        bindings: Iterable[SessionBinding] = (),
+        *,
+        run_store: RunStore | None = None,
+        clock: Callable[[], float] = time.time,
+        reservable: bool = False,
+    ) -> None:
         self.rows = {(binding.workspace_id, binding.session_id): binding for binding in bindings}
+        self._run_store = run_store
+        self._clock = clock
+        self._reservable = reservable
+
+    def _require_reservable(self) -> None:
+        if not self._reservable:
+            raise AssertionError("this test's executors never write a binding")
 
     def get(self, workspace_id: int, session_id: str, *, run_id: str) -> SessionBinding | None:
         binding = self.rows.get((workspace_id, session_id))
         return binding if binding is not None and binding.run_id == run_id else None
 
+    def find_by_session(self, workspace_id: int, session_id: str) -> SessionBinding | None:
+        return self.rows.get((workspace_id, session_id))
+
     def list_for_run(self, workspace_id: int, run_id: str) -> list[SessionBinding]:
-        return [
-            binding
-            for (ws, _), binding in self.rows.items()
-            if ws == workspace_id and binding.run_id == run_id
-        ]
+        return sorted(
+            (
+                binding
+                for (ws, _), binding in self.rows.items()
+                if ws == workspace_id and binding.run_id == run_id
+            ),
+            key=lambda binding: (binding.role, binding.session_id),
+        )
 
     def reserve(self, draft: SessionBindingDraft) -> SessionBinding:
-        raise AssertionError("workspace executors never reserve a binding")
+        self._require_reservable()
+        wanted = binding_from_draft(draft, int(self._clock()))
+        stored = self.rows.get((wanted.workspace_id, wanted.session_id))
+        if stored is not None:
+            return adopt_binding(stored, wanted)
+        same_run = [
+            binding
+            for binding in self.rows.values()
+            if binding.workspace_id == wanted.workspace_id and binding.run_id == wanted.run_id
+        ]
+        if any(binding.effect_cksum == wanted.effect_cksum for binding in same_run):
+            raise effect_taken(wanted)
+        if wanted.slot_id is not None and any(
+            (binding.slot_id, binding.session_generation)
+            == (wanted.slot_id, wanted.session_generation)
+            for binding in same_run
+        ):
+            raise slot_generation_taken(wanted)
+        self.rows[(wanted.workspace_id, wanted.session_id)] = wanted
+        return wanted
 
     def record_progress(
         self, workspace_id: int, session_id: str, progress: SessionBindingProgress | str
     ) -> SessionBinding:
-        raise AssertionError("workspace executors never record progress")
+        self._require_reservable()
+        stored = self.rows.get((workspace_id, session_id))
+        if stored is None:
+            raise BindingNotFound(f"no binding for session {session_id}")
+        target = SessionBindingProgress(encode_session_binding_progress(progress))
+        if target > stored.progress:
+            stored = replace(stored, progress=target, updated_at=int(self._clock()))
+            self.rows[(workspace_id, session_id)] = stored
+        return stored
+
+    def list_bound_sessions(
+        self, *, cursor: tuple[int, str] | None = None, limit: int = 500
+    ) -> list[SessionBinding]:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        if self._run_store is None:
+            raise AssertionError("list_bound_sessions reads run statuses: pass run_store")
+        found: list[SessionBinding] = []
+        for key, binding in sorted(self.rows.items()):
+            if cursor is not None and key <= cursor:
+                continue
+            run = self._run_store.get_run(binding.run_id, workspace_id=binding.workspace_id)
+            if is_listed_bound_session(binding, None if run is None else run.status):
+                found.append(binding)
+            if len(found) == limit:
+                break
+        return found
 
 
 class FakeIntents:

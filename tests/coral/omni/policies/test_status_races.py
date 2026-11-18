@@ -104,7 +104,7 @@ async def sql_coral(db_uri: str) -> AsyncIterator[_SqlCoral]:
         bindings=SqlAlchemySessionBindingStore(db_uri),
     )
     async with AsyncExitStack() as stack:
-        _wire_guards(run_store=coral.runs, bindings=coral.bindings, stack=stack)
+        _wire_guards(run_store=coral.runs, bindings=coral.bindings, port=None, stack=stack)
         yield coral
 
 

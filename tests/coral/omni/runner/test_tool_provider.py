@@ -25,6 +25,7 @@ STEP_SET = ExtensionToolSet(
 ORCHESTRATOR_SET = ExtensionToolSet(
     tools=(CHOOSE_ARROW.schema(),), framework_instructions=(CHOOSE_ARROW.instructions,)
 )
+STANCES = ("anchor", "orchestrator", "implementer", "reviewer")
 
 
 def _spec(stance: object, harness: str = "claude-sdk") -> AgentSpec:
@@ -60,13 +61,19 @@ def test_a_returned_tool_set_is_the_callers_own_copy() -> None:
     assert provider.tool_set(_spec("reviewer")) == STEP_SET
 
 
-def test_production_provider_offers_no_tools() -> None:
+def test_production_provider_offers_each_stance_its_engine_tools() -> None:
     provider = tool_provider()
 
     assert isinstance(provider, ToolProvider)
-    for stance in ("anchor", "orchestrator", "implementer", "reviewer"):
-        assert provider.tool_set(_spec(stance)) is None
-    assert provider.server_dispatched_names() == frozenset()
+    assert [provider.tool_set(_spec(stance)) for stance in STANCES] == [
+        None,
+        ORCHESTRATOR_SET,
+        STEP_SET,
+        STEP_SET,
+    ]
+    assert provider.server_dispatched_names() == frozenset(
+        {"coral_submit_handoff", "coral_choose_arrow"}
+    )
 
 
 @pytest.mark.parametrize(
@@ -110,7 +117,7 @@ def test_tool_sets_pass_the_extension_checks() -> None:
 def test_host_capabilities_follow_the_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = tool_provider()
     monkeypatch.delenv("CORAL_DISABLE_HOST_ENTRY_POINTS", raising=False)
-    assert provider.host_capabilities() == ("coral_runner:1",)
+    assert provider.host_capabilities() == ("coral_runner:2",)
 
     monkeypatch.setenv("CORAL_DISABLE_HOST_ENTRY_POINTS", "1")
     assert provider.host_capabilities() == ()

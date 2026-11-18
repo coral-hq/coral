@@ -51,7 +51,7 @@ def choose_arrow(graph: CompiledGraph, state: RunState, command: ChooseArrow) ->
     from coral.engine.machines.run import refuse, refuse_unknown
 
     owner_id = activation_id(command.node_id, command.item_path, command.iteration_path)
-    choice_key = f"choice:{owner_id}:{command.label}"
+    choice_key = choice_receipt_key(owner_id, command.label)
     if _has_receipt(state, choice_key):
         return ApplyResult(state=state, receipt_key=choice_key)
     if _is_decided(state, owner_id):
@@ -104,6 +104,25 @@ def choose_arrow(graph: CompiledGraph, state: RunState, command: ChooseArrow) ->
     receipt = Receipt(key=choice_key, payload=payload)
     opened = opened.model_copy(update={"receipts": (*opened.receipts, receipt)})
     return ApplyResult(state=opened, effects=effects, receipt_key=choice_key)
+
+
+def choice_receipt_key(owner_id: str, label: str) -> str:
+    """The receipt key of a decision activation's choice of ``label``."""
+    return f"choice:{owner_id}:{label}"
+
+
+def walked_arrow_id(
+    graph: CompiledGraph, state: RunState, node_id: str, owner_id: str, label: str
+) -> str | None:
+    """The arrow a choice walked: its labelled arrow, or the at-limit arrow after a loop limit."""
+    from coral.engine.machines.activation import arrow_by_label
+
+    arrow = arrow_by_label(graph, node_id, label)
+    if arrow is None:
+        return None
+    if not _receipt_redirected(state, choice_receipt_key(owner_id, label)):
+        return arrow.id
+    return _at_limit_id(graph, arrow.id)
 
 
 def take_labelled_arrow(

@@ -18,6 +18,9 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
+from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError, StatementError
+
 from coral.db.enum_codecs import RunStatus
 from coral.omni.protocols import CoralSessionError, RunScopeRunner
 from coral.queue.executors import EffectCompleted, EffectFailed, EffectOutcome, ExecutionContext
@@ -28,6 +31,8 @@ from coral.stores.protocols import RunNotFound, RunState, RunStore
 _IDENTITY_FIELDS = ("user_id", "account_generation")
 MAX_EFFECT_KEY_CHARS = 512
 MAX_FAILURE_MESSAGE_CHARS = 2000
+# The work row's error-code column.
+MAX_ERROR_CODE_CHARS = 64
 MAX_INVALID_PAYLOAD_MESSAGE_CHARS = 500
 # Session ids are derived ids, and the bindings table keeps 64 characters.
 _SESSION_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
@@ -54,6 +59,92 @@ def trim_message(message: str, limit: int) -> str:
     if len(message) <= limit:
         return message
     return "…" + message[-(limit - 1) :]
+
+
+# Database drivers whose errors quote values (key values, MySQL's duplicate entry).
+_DRIVER_MODULES = frozenset({"asyncpg", "MySQLdb", "psycopg", "psycopg2", "pymysql", "sqlite3"})
+# Where quoted statement-error text starts: SQLAlchemy's ``(<module>.<Class>) `` prefix, the SQL
+# and the parameters.
+_QUOTED_DATABASE_TEXT = re.compile(r"\((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*\) |\[SQL: |\[parameters: ")
+
+
+def _driver_code(error: BaseException) -> str | None:
+    """A driver error's SQLSTATE (psycopg, psycopg2), SQLite error name or MySQL error number."""
+    for name in ("sqlstate", "pgcode", "sqlite_errorname"):
+        value = getattr(error, name, None)
+        if isinstance(value, str) and value:
+            return value
+    number = error.args[0] if error.args else None
+    return str(number) if type(number) is int else None
+
+
+def _is_driver_error(error: BaseException) -> bool:
+    if hasattr(error, "sqlstate") or hasattr(error, "pgcode"):
+        return True
+    return type(error).__module__.partition(".")[0] in _DRIVER_MODULES
+
+
+def _validation_summary(exc: ValidationError) -> str:
+    """Where and how validation failed; pydantic's own text repeats the input."""
+    errors = exc.errors(include_input=False, include_url=False)
+    places = "; ".join(
+        f"{'.'.join(str(part) for part in error['loc']) or '<root>'} {error['type']}"
+        for error in errors[:10]
+    )
+    return f"{len(errors)} errors: {places}" if len(errors) != 1 else f"1 error: {places}"
+
+
+def describe_exception(exc: BaseException) -> str:
+    """
+    ``exc`` described for logs and stored messages, in at most
+    :data:`MAX_FAILURE_MESSAGE_CHARS` characters, without control characters.
+
+    SQLAlchemy puts a statement's bound parameters (payloads, briefs, handoff
+    bodies) into ``str()``, drivers quote key values and pydantic repeats its
+    input, so a database error is named by its type, its driver error's class
+    and its code, and a validation error by its error locations. Other errors
+    keep their text, cut where quoted database text starts. Never raises.
+    """
+    name = type(exc).__name__
+    if isinstance(exc, StatementError):
+        if exc.orig is None:
+            return name
+        code = _driver_code(exc.orig)
+        detail = f"orig {type(exc.orig).__name__}" + (f", code {code}" if code else "")
+        described = f"{name} ({detail})"
+    elif isinstance(exc, SQLAlchemyError):
+        described = name
+    elif _is_driver_error(exc):
+        code = _driver_code(exc)
+        described = f"{name} (code {code})" if code else name
+    elif isinstance(exc, ValidationError):
+        described = f"{name} ({_validation_summary(exc)})"
+    else:
+        try:
+            text = str(exc)
+        except Exception:  # noqa: BLE001 -- an unprintable error is named by its type
+            text = ""
+        quoted = _QUOTED_DATABASE_TEXT.search(text)
+        if quoted is not None:
+            text = text[: quoted.start()].rstrip()
+        described = f"{name}: {text}" if text else name
+    described = CONTROL_CHARACTERS.sub(" ", described)
+    if len(described) <= MAX_FAILURE_MESSAGE_CHARS:
+        return described
+    return described[: MAX_FAILURE_MESSAGE_CHARS - 1] + "…"
+
+
+def raise_if_cancelling(exc: BaseException) -> None:
+    """
+    Re-raise ``exc`` when it is the running task's own cancellation.
+
+    A ``CancelledError`` caught while the task is not being cancelled came from
+    awaiting something another task cancelled; callers handle it as a failure.
+    """
+    if isinstance(exc, asyncio.CancelledError):
+        task = asyncio.current_task()
+        if task is None or task.cancelling():
+            raise exc
 
 
 def invalid_payload(message: str) -> EffectRefused:

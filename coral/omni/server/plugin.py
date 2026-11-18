@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+import threading
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 from sqlalchemy import Engine, create_engine
@@ -14,18 +15,37 @@ from sqlalchemy import Engine, create_engine
 from coral.api.info import create_info_router
 from coral.api.sub_features import resolve_sub_features
 from coral.api.workflows import create_workflows_router
+from coral.bridge.bound_sessions import BoundSessions
+from coral.bridge.config import RESYNC_INTERVAL_S
+from coral.bridge.executors import (
+    BRIDGE_THREADS,
+    DECISION_THREAD_NAME,
+    DECISION_THREADS,
+    BoundedThreads,
+    BridgeThreads,
+    bridge_hold_policy,
+)
+from coral.bridge.port import StoreDecisionPort
+from coral.bridge.service import EngineBridge
 from coral.db.migrate import ensure_coral_schema
 from coral.db.models_workflows import CoralBase
 from coral.omni.protocols import RunScopeRunner
 from coral.omni.server.scopes import OmnigentRunScopeRunner
+from coral.queue.executors import EffectExecutor
 from coral.queue.store import SqlAlchemyCoralQueueStore
-from coral.stores.protocols import RunStore
+from coral.stores.protocols import QueueStore, RunStore
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import FreshBindingLookup, SqlAlchemySessionBindingStore
+from coral.stores.workflow_versions import SqlAlchemyWorkflowVersionStore
 from coral.stores.workflows import SqlWorkflowDefinitionStore
-from coral.workers.supervisor import WorkerSupervisor
+from coral.tools.dispatch import ThreadRunner
+from coral.tools.port import RunDecisionPort
+from coral.workers.supervisor import MAX_DRAIN_CONCURRENCY, WorkerSupervisor
 from omnigent.process_logging import data_dir
 from omnigent.server.server_plugins import ServerPluginRegistration, ServerServices
+
+if TYPE_CHECKING:
+    from coral.omni.server.turn_facts import BoundSessionRefresher
 
 _logger = logging.getLogger(__name__)
 
@@ -37,6 +57,10 @@ STATUS_EDGE_OBSERVER = "coral"
 CONFIRMED_STOPS_OBSERVER = "coral.confirmed_stops"
 # The name Coral's policies for bound sessions are registered under (S52).
 REQUIRED_POLICY_PROVIDER = "coral"
+# Server config: drain workers, at most one item per run in flight each, so this many
+# runs advance at once (1 to MAX_DRAIN_CONCURRENCY).
+DRAIN_CONCURRENCY_CONFIG_KEY = "coral_drain_concurrency"
+DEFAULT_DRAIN_CONCURRENCY = 4
 # The server stores the session engine builds on; anchors need the project store.
 _ENGINE_SERVICES = (
     "agent_store",
@@ -49,8 +73,56 @@ _ENGINE_SERVICES = (
 )
 
 
+class _ProcessLifespan:
+    """Admits one Coral lifespan per process: its executors and observers are process-wide."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = False
+
+    def claim(self) -> Callable[[], None]:
+        """
+        Claim the process for a lifespan; the returned callable releases it.
+
+        :raises RuntimeError: when another lifespan holds it.
+        """
+        with self._lock:
+            if self._active:
+                raise RuntimeError(
+                    "Coral's lifespan is already running in this process; "
+                    "a second one would share its executors and observers"
+                )
+            self._active = True
+        return self._release
+
+    def _release(self) -> None:
+        with self._lock:
+            self._active = False
+
+
+_PROCESS_LIFESPAN = _ProcessLifespan()
+
+
 def _single_workspace_id() -> int:
     return _SINGLE_WORKSPACE_ID
+
+
+def drain_concurrency(server_config: Mapping[str, Any] | None) -> int:
+    """
+    The drain pool's size from ``coral_drain_concurrency``, or the default when unset.
+
+    :raises ValueError: for a value that is not an integer from 1 to the pool's maximum.
+    """
+    value = (server_config or {}).get(DRAIN_CONCURRENCY_CONFIG_KEY)
+    if value is None:
+        return DEFAULT_DRAIN_CONCURRENCY
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{DRAIN_CONCURRENCY_CONFIG_KEY} must be an integer")
+    if not 1 <= value <= MAX_DRAIN_CONCURRENCY:
+        raise ValueError(
+            f"{DRAIN_CONCURRENCY_CONFIG_KEY} must be from 1 to {MAX_DRAIN_CONCURRENCY}"
+        )
+    return value
 
 
 def _create_workflow_engine() -> Engine:
@@ -86,19 +158,23 @@ def _missing_engine_input(app: Any, services: ServerServices) -> str | None:
 
 
 def _wire_guards(
-    *, run_store: RunStore, bindings: FreshBindingLookup, stack: AsyncExitStack
+    *,
+    run_store: RunStore,
+    bindings: FreshBindingLookup,
+    port: RunDecisionPort | None,
+    stack: AsyncExitStack,
+    run_in_thread: ThreadRunner = asyncio.to_thread,
 ) -> None:
     """
     Register what protects bound sessions, whether or not the session engine is wired.
 
-    The engine tools register from the production catalog with no decision
-    port: nothing while the catalog is empty, and once it lists a tool each
-    call answers that the engine is not running. They read bindings fresh.
-    Coral's required-policy provider reads them through a cache of found rows
-    and reads run status through a cache each run-store commit clears. The S53
-    mutation guard reads the same cache of found rows and refuses clients'
-    changes to bound sessions and engine agents. Every registration's undo goes
-    on ``stack``.
+    The engine tools register from the production catalog, answered by
+    ``port`` (``None`` answers that the engine is not running); they read
+    bindings fresh and decide on ``run_in_thread``. Coral's required-policy
+    provider reads bindings through a cache of found rows and reads run status
+    through a cache each run-store commit clears. The S53 mutation guard reads
+    the same cache of found rows and refuses clients' changes to bound sessions
+    and engine agents. Every registration's undo goes on ``stack``.
     """
     from coral.omni.policies.bindings_cache import CachedBindingLookup
     from coral.omni.policies.provider import CoralPolicyProvider
@@ -109,7 +185,9 @@ def _wire_guards(
     from omnigent.runtime.policies.required_providers import register_required_policy_provider
     from omnigent.server.mutation_guards import register_mutation_guard
 
-    register_engine_tools(catalog=CATALOG, port=None, bindings=bindings, stack=stack)
+    register_engine_tools(
+        catalog=CATALOG, port=port, bindings=bindings, stack=stack, run_in_thread=run_in_thread
+    )
     statuses = RunStatusCache(run_store)
     stack.callback(run_store.register_post_commit(statuses.invalidate))
     # One cache of found bindings for every guard that classifies sessions.
@@ -119,32 +197,70 @@ def _wire_guards(
     stack.callback(register_mutation_guard(MUTATION_GUARD, CoralMutationGuard(found_bindings)))
 
 
+def _register_executors(
+    executors: dict[str, EffectExecutor],
+    stack: AsyncExitStack,
+    *,
+    runs_after_terminal: frozenset[str] = frozenset(),
+) -> None:
+    """Register each executor, pushing its unregister onto ``stack`` at once."""
+    from coral.queue.executors import register_executor, unregister_executor
+
+    for effect_type, executor in executors.items():
+        register_executor(
+            effect_type,
+            executor,
+            replace=True,
+            runs_after_terminal=effect_type in runs_after_terminal,
+        )
+        stack.callback(unregister_executor, effect_type, executor)
+
+
+def _wire_bridge(threads: BridgeThreads, stack: AsyncExitStack) -> None:
+    """Register the bridge's own executors: its timers and its per-run resync."""
+    from coral.bridge.executors import run_resync_executor, timer_executor
+    from coral.bridge.mapping import RUN_RESYNC, TIMER
+
+    _register_executors(
+        {TIMER: timer_executor(threads), RUN_RESYNC: run_resync_executor(threads)}, stack
+    )
+
+
 def _wire_session_engine(
     app: Any,
     services: ServerServices,
     *,
     db_uri: str,
     run_store: RunStore,
+    queue_store: QueueStore,
     bindings: SqlAlchemySessionBindingStore,
+    bound: BoundSessions,
     scope_runner: RunScopeRunner,
+    threads: BridgeThreads,
     stack: AsyncExitStack,
-) -> None:
+) -> BoundSessionRefresher:
     """
-    Build the session engine and register its seven executors, then its status-edge observers.
+    Build the session engine and register its executors, then its status-edge observers.
 
     Each registration pushes its own unregister onto ``stack`` at once, so a
-    failure part-way leaves nothing behind. One lifespan per process: a second
-    one entered while the first runs takes the registrations over at once (the
-    first's watches and stop record stop seeing edges), and whichever exits
-    first removes only its own registrations, so an inner exit leaves the outer
-    lifespan with none.
+    failure part-way leaves nothing behind. Step creates resolve their agent
+    from the stance, and drift pauses go through the engine on ``threads``.
+    The turn-fact recorder writes a signal for each turn end of a session in
+    ``bound``; the returned refresher, which the caller starts, rebuilds it.
     """
+    from coral.bridge.executors import turn_fact_executor
+    from coral.bridge.mapping import TURN_FACT
     from coral.omni.server.anchor_runner import AnchorRunnerStopper
     from coral.omni.server.dispatch import OmnigentSessionDispatch
     from coral.omni.server.sessions import OmnigentSessionFacade
     from coral.omni.server.status_edges import CoralStatusEdges
+    from coral.omni.server.step_agents import OmnigentStepAgents
+    from coral.omni.server.turn_facts import (
+        TURN_FACTS_OBSERVER,
+        BoundSessionRefresher,
+        TurnFactRecorder,
+    )
     from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
-    from coral.queue.executors import EffectExecutor, register_executor, unregister_executor
     from coral.recovery.drift import DriftPauser, DriftPreSendHook
     from coral.slots.close import ConfirmedStops, StopConfirmedTurnEnd
     from coral.slots.executors import (
@@ -179,7 +295,7 @@ def _wire_session_engine(
         run_store=run_store,
         dispatch=lambda: dispatch,
     )
-    pauser = DriftPauser(run_store, on_anchor_bound=anchor_runner_stopper)
+    pauser = DriftPauser(run_store, engine=threads, on_anchor_bound=anchor_runner_stopper)
     facade = OmnigentSessionFacade(app, services, bindings)
     dispatch = OmnigentSessionDispatch(
         app,
@@ -193,8 +309,15 @@ def _wire_session_engine(
     edges = CoralStatusEdges(asyncio.get_running_loop())
     # One record: the close writes each confirmed stop, workspace.commit reads it.
     stops = ConfirmedStops()
+    agents = OmnigentStepAgents(
+        services.agent_store,
+        services.artifact_store,
+        conversation_store=services.conversation_store,
+    )
     executors: dict[str, EffectExecutor] = {
-        CREATE_SESSION: create_session_executor(facade, run_store, pauser, scope_runner),
+        CREATE_SESSION: create_session_executor(
+            facade, run_store, pauser, scope_runner, agents=agents
+        ),
         SEND_INPUT: send_input_executor(dispatch, stable_ids, bindings, run_store, scope_runner),
         CLOSE_SLOT: close_slot_executor(
             dispatch,
@@ -220,22 +343,34 @@ def _wire_session_engine(
         ),
         WORKSPACE_SALVAGE: salvage_executor(channels, run_store, scope_runner),
         WORKSPACE_RESET: reset_executor(channels, run_store, scope_runner),
+        TURN_FACT: turn_fact_executor(
+            threads,
+            bindings=bindings,
+            dispatch=dispatch,
+            transcripts=dispatch,
+            stable_ids=stable_ids,
+            facade=facade,
+            drift=pauser,
+            scope_runner=scope_runner,
+        ),
     }
-    for effect_type, executor in executors.items():
-        # A cancelled run is finished when its cancel_sessions items are claimed.
-        register_executor(
-            effect_type,
-            executor,
-            replace=True,
-            runs_after_terminal=effect_type == CANCEL_SESSIONS,
-        )
-        stack.callback(unregister_executor, effect_type, executor)
+    # A cancelled run is finished when its cancel_sessions items are claimed.
+    _register_executors(executors, stack, runs_after_terminal=frozenset({CANCEL_SESSIONS}))
+    recorder = TurnFactRecorder(bound, queue_store)
+    recorder.start()
+    # Pushed before the observer registers, so it closes after the observer is removed.
+    stack.callback(recorder.close)
     stack.callback(register_status_edge_observer(STATUS_EDGE_OBSERVER, edges.observe))
     stack.callback(register_status_edge_observer(CONFIRMED_STOPS_OBSERVER, stops.observe))
+    stack.callback(register_status_edge_observer(TURN_FACTS_OBSERVER, recorder.observe))
+    refresher = BoundSessionRefresher(bindings, bound)
     app.state.coral_session_facade = facade
     app.state.coral_session_dispatch = dispatch
     app.state.coral_status_edges = edges
     app.state.coral_confirmed_stops = stops
+    app.state.coral_turn_fact_recorder = recorder
+    app.state.coral_bound_session_refresher = refresher
+    return refresher
 
 
 @asynccontextmanager
@@ -246,13 +381,19 @@ async def coral_lifespan(
     """
     Run Coral's startup migration check, worker supervisor, and reverse-order shutdown.
 
-    On a usable operational database the guards for bound sessions are
-    registered, and with the server's stores present also the session engine's
-    executors and status-edge observers, all before the supervisor starts. Both
-    share one binding store. Nothing enqueues engine effects yet. Exit stops the
-    supervisor first, so no item is claimed while its executor is missing (an
-    item in flight keeps its lease and is reclaimed), then unregisters in
-    reverse order, also after a failed start.
+    One lifespan per process: on a usable operational database it first claims
+    the process, and a second one entered meanwhile raises before registering
+    anything. Then the guards for bound sessions, the engine tools with the
+    decision port and the engine bridge's executors are registered, and with
+    the server's stores present also the session engine's executors, its
+    status-edge observers and the bound-session index the turn-fact recorder
+    reads, all before the supervisor starts, whose finished items feed the
+    bridge and whose resync tick repairs each active run. They share one
+    binding store. Bridge calls run on the bridge's own thread pool,
+    tool decisions on a smaller one. Exit stops the supervisor first, so no
+    item is claimed while its executor is missing (an item in flight keeps its
+    lease and is reclaimed), then unregisters in reverse order, also after a
+    failed start.
     """
     if services.host_sharded:
         raise RuntimeError("Coral server plugin does not support host_sharded=True")
@@ -263,34 +404,70 @@ async def coral_lifespan(
     async with AsyncExitStack() as stack:
         if _is_usable_operational_db_uri(storage_location):
             assert storage_location is not None
+            stack.callback(_PROCESS_LIFESPAN.claim())
             await asyncio.to_thread(ensure_coral_schema, storage_location)
             run_store = SqlAlchemyCoralRunStore(storage_location)
             queue_store = SqlAlchemyCoralQueueStore(storage_location)
             scope_runner = OmnigentRunScopeRunner()
+            bound = BoundSessions()
+            bridge = EngineBridge(
+                run_store=run_store,
+                queue_store=queue_store,
+                versions=SqlAlchemyWorkflowVersionStore(storage_location),
+                bound_sessions=bound,
+            )
+            workers = drain_concurrency(getattr(services, "server_config", None))
+            # Each drain worker may wait on one bridge call; the pool never starves them.
+            threads = BridgeThreads(bridge, max_workers=max(BRIDGE_THREADS, workers))
+            stack.callback(threads.close)
+            decisions = BoundedThreads(
+                max_workers=DECISION_THREADS, thread_name_prefix=DECISION_THREAD_NAME
+            )
+            # Pushed before the engine tools register, so it closes after they are removed.
+            stack.callback(decisions.close)
             supervisor = WorkerSupervisor(
                 run_store,
                 queue_store,
                 scope_runner=scope_runner,
+                run_reconciler=threads.schedule_resync,
+                on_finished=threads.feed,
+                hold_policy=bridge_hold_policy,
+                drain_concurrency=workers,
+                resync_interval_s=RESYNC_INTERVAL_S,
             )
             if hasattr(app, "state"):
                 app.state.coral_run_store = run_store
                 app.state.coral_queue_store = queue_store
                 app.state.coral_worker_supervisor = supervisor
+                app.state.coral_engine_bridge = bridge
+                app.state.coral_bound_sessions = bound
             bindings = SqlAlchemySessionBindingStore(storage_location)
-            _wire_guards(run_store=run_store, bindings=bindings, stack=stack)
+            _wire_guards(
+                run_store=run_store,
+                bindings=bindings,
+                port=StoreDecisionPort(bridge),
+                stack=stack,
+                run_in_thread=decisions.run,
+            )
+            _wire_bridge(threads, stack)
             missing = _missing_engine_input(app, services)
             if missing is None:
-                _wire_session_engine(
+                refresher = _wire_session_engine(
                     app,
                     services,
                     db_uri=storage_location,
                     run_store=run_store,
+                    queue_store=queue_store,
                     bindings=bindings,
+                    bound=bound,
                     scope_runner=scope_runner,
+                    threads=threads,
                     stack=stack,
                 )
+                stack.push_async_callback(refresher.stop)
+                await refresher.start()
             else:
-                # Engine effects would then fail permanently as ``executor.missing``.
+                # Session effects are then held as ``executor.missing``, then pause their run.
                 _logger.warning("Coral session engine not wired: %s is missing", missing)
             # Pushed last, so it runs first on exit.
             stack.push_async_callback(supervisor.stop)

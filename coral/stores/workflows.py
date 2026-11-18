@@ -55,7 +55,8 @@ class WorkflowDefinitionStore(Protocol):
     def list_definitions(self, *, workspace_id: int) -> list[WorkflowDefinition]: ...
 
 
-def _check_size(field: str, value: str) -> None:
+def check_stored_size(field: str, value: str) -> None:
+    """Raise :class:`WorkflowTooLargeError` when ``value`` framed exceeds the inline cap."""
     framed = encode(value)
     assert framed is not None
     if len(framed) > MAX_STORED_BYTES:
@@ -107,8 +108,8 @@ class SqlWorkflowDefinitionStore:
         :raises WorkflowTooLargeError: when the YAML or compiled JSON exceeds the cap.
         """
         compiled_json = compiled.model_dump_json()
-        _check_size("yaml_text", yaml_text)
-        _check_size("compiled_json", compiled_json)
+        check_stored_size("yaml_text", yaml_text)
+        check_stored_size("compiled_json", compiled_json)
         content_hash = bytes.fromhex(compiled.content_hash)
         state = _RUNNABLE if runnable else _NOT_RUNNABLE
         now = self._clock()

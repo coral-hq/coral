@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from coral.db import MAX_STORED_BYTES, encode
 from coral.db.enum_codecs import RunStatus, WorkKind, WorkStatus
 from coral.model.ids import derived_id
+
+# Runs not yet completed, failed or cancelled.
+UNFINISHED_RUN_STATUSES = (int(RunStatus.STARTING), int(RunStatus.RUNNING), int(RunStatus.PAUSED))
 
 # ── Domain Exceptions ────────────────────────────────────────────────────────
 
@@ -50,6 +54,10 @@ class TransitionTooLarge(ValueError):
 
 class RunContended(RuntimeError):
     """Optimistic concurrency retry attempts were exhausted without committing."""
+
+
+class ToolReplyTooLarge(ValueError):
+    """A tool reply would exceed the inline storage cap."""
 
 
 # ── Frozen Domain Dataclasses ────────────────────────────────────────────────
@@ -110,6 +118,8 @@ class RunStartSpec:
     state_version: int = 1
     log_version: int = 1
     orchestrator_session_id: str | None = None
+    # JSON of the engine config a run's log is replayed with, frozen at start.
+    engine_config: str | None = None
 
 
 @dataclass(frozen=True)
@@ -575,6 +585,35 @@ class WorkItem:
     result_ref: str | None = None
     error_code: str | None = None
     finished_at: int | None = None
+    # Epoch seconds of the first refusal of the current hold; None when not held.
+    held_since: int | None = None
+
+
+@dataclass(frozen=True)
+class ToolReplyDraft:
+    """Reply an engine tool call commits, stored under the call's checksum.
+
+    :raises ValueError: when ``cksum`` is not 32 bytes.
+    :raises ToolReplyTooLarge: when ``reply`` would not fit its column.
+    """
+
+    cksum: bytes
+    reply: str
+
+    def __post_init__(self) -> None:
+        require_checksum32(self.cksum)
+        framed = encode(self.reply)
+        if framed is not None and len(framed) > MAX_STORED_BYTES:
+            raise ToolReplyTooLarge(
+                f"tool reply is {len(framed)} bytes after compression; "
+                f"the limit is {MAX_STORED_BYTES}"
+            )
+
+
+def require_checksum32(cksum: bytes) -> None:
+    """Refuse a checksum that is not 32 bytes, which MySQL would pad or cut."""
+    if len(cksum) != 32:
+        raise ValueError(f"a tool call checksum is 32 bytes, not {len(cksum)}")
 
 
 @dataclass(frozen=True)
@@ -626,6 +665,14 @@ class Transition:
     logs: Sequence[LogEntryDraft] = ()
     outbox_work: Sequence[WorkItemDraft] = ()
     consumed_work_ids: Sequence[str] = ()
+    # A second reply under the same checksum fails the whole transition.
+    tool_reply: ToolReplyDraft | None = None
+    # FAILED rows of the run among these ids become PENDING: attempts 0, available now,
+    # error code, result, finish time and hold start cleared.
+    revive_work_ids: Sequence[str] = ()
+    # PENDING rows of the run held with one of these error codes: available now,
+    # hold start cleared.
+    release_held_codes: Sequence[str] = ()
 
     @classmethod
     def empty(cls) -> Transition:
@@ -649,6 +696,9 @@ class Transition:
             and len(self.logs) == 0
             and len(self.outbox_work) == 0
             and len(self.consumed_work_ids) == 0
+            and self.tool_reply is None
+            and len(self.revive_work_ids) == 0
+            and len(self.release_held_codes) == 0
         )
 
 
@@ -694,7 +744,17 @@ class RunStore(Protocol):
         *,
         workspace_id: int | None = None,
         now: int | None = None,
-    ) -> CommitOutcome: ...
+        lock_timeout_s: float | None = None,
+    ) -> CommitOutcome:
+        """Apply ``transition`` if the run is still at ``expected_version``.
+
+        :param lock_timeout_s: Bounds the wait for row locks where the database
+            supports it; must be positive.
+        :raises RunVersionConflict: when the run moved past ``expected_version``.
+        :raises IntegrityError: when ``transition.tool_reply`` repeats a stored
+            checksum; nothing of the transition is written.
+        """
+        ...
 
     def get_run(
         self,
@@ -728,6 +788,23 @@ class RunStore(Protocol):
         *,
         workspace_id: int | None = None,
     ) -> RunReceipt | None: ...
+
+    def read_engine_log(
+        self,
+        run_id: str,
+        *,
+        workspace_id: int,
+        after_seq: int = 0,
+        max_run_version: int,
+        limit: int = 500,
+    ) -> list[RunLogEntry]:
+        """Return the run's ENGINE rows after ``after_seq`` committed at or below
+        ``max_run_version``, in ``seq`` order; audit-only rows included."""
+        ...
+
+    def find_tool_reply(self, run_id: str, cksum: bytes, *, workspace_id: int) -> str | None:
+        """Return the reply a transition stored under ``cksum``, else ``None``."""
+        ...
 
     def list_active_runs_all_workspaces(
         self,
@@ -776,6 +853,7 @@ class QueueStore(Protocol):
         lease_seconds: int = 60,
         workspace_id: int | None = None,
         now_fn: Callable[[], float] | None = None,
+        exclude_run_ids: Collection[str] = (),
     ) -> WorkItem | None: ...
 
     def renew_lease(
@@ -800,7 +878,39 @@ class QueueStore(Protocol):
         next_available_at: int | None = None,
         workspace_id: int | None = None,
         now_fn: Callable[[], float] | None = None,
-    ) -> bool: ...
+        hold: bool = False,
+    ) -> bool:
+        """Finish a claimed item; ``hold`` re-pends it without spending an attempt.
+
+        A hold needs ``status`` PENDING and keeps the first hold's start in
+        ``held_since``; any other finish clears it.
+        """
+        ...
+
+    def get_work(self, work_ids: Sequence[str], *, workspace_id: int) -> list[WorkItem]:
+        """Return the workspace's items among ``work_ids``, ordered by id."""
+        ...
+
+    def has_held_work(self, run_id: str, codes: Sequence[str], *, workspace_id: int) -> bool:
+        """Whether a PENDING row of the run is held (``held_since`` set) with one of ``codes``."""
+        ...
+
+    def reschedule_work(
+        self, draft: WorkItemDraft, *, workspace_id: int, available_at: int
+    ) -> None:
+        """Make ``draft``'s one row due at ``available_at``.
+
+        Inserts it when absent; a finished row becomes PENDING with no attempts; a
+        PENDING row keeps the earlier time; a CLAIMED row is left to its worker.
+        """
+        ...
+
+    def purge_finished(
+        self, *, kinds: Sequence[int], finished_before: int, limit: int = 500
+    ) -> int:
+        """Delete up to ``limit`` finished rows of ``kinds`` in every workspace that
+        finished before ``finished_before``; returns how many were deleted."""
+        ...
 
     def reclaim_expired_work(
         self,
@@ -883,6 +993,7 @@ class QueueStore(Protocol):
 
 
 __all__ = [
+    "UNFINISHED_RUN_STATUSES",
     "ActivationDraft",
     "ActivationState",
     "AgentSlotDraft",
@@ -909,10 +1020,13 @@ __all__ = [
     "RunStore",
     "RunVersionConflict",
     "StartKeyConflict",
+    "ToolReplyDraft",
+    "ToolReplyTooLarge",
     "Transition",
     "TransitionTooLarge",
     "WorkItem",
     "WorkItemDraft",
     "WorkKind",
     "WorkStatus",
+    "require_checksum32",
 ]

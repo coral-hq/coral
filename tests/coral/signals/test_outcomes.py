@@ -175,19 +175,24 @@ def test_started_run_applies_529_429_and_401_and_folds() -> None:
     _no_account_switch(limited.entry.effects)
     assert fold(graph, (*running.log, limited.entry), CFG) == limited.state
 
-    due = transition(graph, limited.state, TimerDue(timer_key=probes[0].key), NOW, CFG)
+    cleared_at = probes[0].due_at
+    due = transition(graph, limited.state, TimerDue(timer_key=probes[0].key), cleared_at, CFG)
     assert due.entry.rejection is None
     assert due.state.status == "running"
     assert due.state.causes == ()
-    assert [effect.kind for effect in due.entry.effects] == ["arm_timer"]
+    # The clear re-prompts the turn that hit the limit.
+    assert [effect.kind for effect in due.entry.effects] == ["arm_timer", "nudge"]
+    assert due.entry.effects[1].payload == {"fact_key": "turn:429", "reason": "resume"}
     nxt = next(timer for timer in due.state.timers if timer.kind == "plan_probe")
     assert nxt.stage == 2
-    assert nxt.due_at == NOW + min(POLICY.plan_probe_start * 2, POLICY.plan_probe_cap)
+    assert nxt.due_at == cleared_at + min(POLICY.plan_probe_start * 2, POLICY.plan_probe_cap)
     assert due.entry.effects[0].payload["due_at"] == nxt.due_at.isoformat()
     assert probes[0].key not in {timer.key for timer in due.state.timers}
-    stopped = transition(graph, due.state, TimerDue(timer_key=nxt.key), NOW, CFG)
-    assert stopped.state == due.state
+    # With the pause gone, the next probe only disarms itself.
+    stopped = transition(graph, due.state, TimerDue(timer_key=nxt.key), nxt.due_at, CFG)
     assert stopped.entry.effects == ()
+    assert stopped.state.timers == ()
+    assert stopped.state.status == "running"
     assert (
         fold(graph, (*running.log, limited.entry, due.entry, stopped.entry), CFG) == stopped.state
     )

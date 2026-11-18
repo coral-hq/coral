@@ -1984,9 +1984,10 @@ seams:
       clear_tool_provider_caches; the S102 exact-list hello tests serve no
       providers. pyproject.toml declares Coral's own provider, coral =
       coral.omni.runner.tool_provider:tool_provider, so hosts advertise
-      coral_runner:1 (none while CORAL_DISABLE_HOST_ENTRY_POINTS is set); its
-      production catalog is empty, so it adds no tools, server-dispatched
-      names or prompt text yet. The `_connect_host` helper in
+      coral_runner:2 (none while CORAL_DISABLE_HOST_ENTRY_POINTS is set); its
+      production catalog lists both engine tools, which it offers by stance
+      with their prompt text and names as server-dispatched. The
+      `_connect_host` helper in
       tests/server/integration/test_session_host_launch.py takes optional
       hello capabilities so Coral's facade tests can connect a host with the
       token; existing callers send none. It also exposes

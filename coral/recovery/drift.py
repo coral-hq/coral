@@ -10,8 +10,9 @@ run version, so it is unique per pause epoch: a run resumed while the drift
 remains pauses again on the next detection, and compare-and-swap keeps
 concurrent detectors to one pause. Drift is detected when a step session is
 created and, through :class:`DriftPreSendHook`, before each engine message.
-After an ``anchor_bound`` pause, :class:`DriftPauser` can also stop the
-anchor's runner, best effort.
+With the engine wired, :class:`DriftPauser` pauses through it, so the
+engine's state and the run row agree and a resume lifts the pause. After an
+``anchor_bound`` pause it can also stop the anchor's runner, best effort.
 """
 
 from __future__ import annotations
@@ -19,9 +20,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from coral.db.enum_codecs import RunPauseReason, SessionBindingProgress
 from coral.model.ids import anchor_session_id
@@ -138,6 +139,17 @@ def drift_log_checksum(run_id: str, finding: DriftFinding, run_version: int) -> 
     return pause_log_checksum(_drift_checksum_parts(run_id, finding), run_version)
 
 
+def _drift_body(finding: DriftFinding) -> dict[str, object]:
+    """The drift ``PAUSED`` entry's body."""
+    return {
+        "kind": "pause_run",
+        "reason": "drift",
+        "cause": finding.cause,
+        "session_id": finding.session_id,
+        "detail": finding.occurrence,
+    }
+
+
 def pause_run_for_drift(
     run_store: RunStore,
     *,
@@ -157,16 +169,32 @@ def pause_run_for_drift(
         workspace_id=workspace_id,
         run_id=run_id,
         reason=RunPauseReason.DRIFT,
-        body={
-            "kind": "pause_run",
-            "reason": "drift",
-            "cause": finding.cause,
-            "session_id": finding.session_id,
-            "detail": finding.occurrence,
-        },
+        body=_drift_body(finding),
         checksum_parts=_drift_checksum_parts(run_id, finding),
         now_us=now_us,
     )
+
+
+class DriftEnginePause(Protocol):
+    """Pauses a run ``drift`` through the engine and writes the drift entry in that commit."""
+
+    async def pause_for_drift(
+        self,
+        *,
+        workspace_id: int,
+        run_id: str,
+        cause: str,
+        body: dict[str, object],
+        checksum_parts: Sequence[str],
+        now_us: int,
+    ) -> CommitOutcome:
+        """
+        Start the engine first if it has not started, then pause it for ``cause``.
+
+        Only a starting or running run gets the entry, whose identity is
+        ``checksum_parts`` in the pause epoch, as :func:`pause_run_for_drift` writes it.
+        """
+        ...
 
 
 def _now_us() -> int:
@@ -175,8 +203,11 @@ def _now_us() -> int:
 
 class DriftPauser:
     """
-    Pauses a run for a drift finding, with the store's sync work in a thread.
+    Pauses a run for a drift finding, through the engine when one is given.
 
+    Without ``engine`` the run row alone is paused, with the store's sync work in a thread.
+
+    :param engine: Pauses the engine and the row together, so a resume lifts the pause.
     :param on_anchor_bound: Awaited with ``(workspace_id, run_id, anchor_id)``
         after each ``anchor_bound`` pause, even when the run was paused already,
         because the anchor's runner may still be live. A failure is logged and
@@ -188,23 +219,35 @@ class DriftPauser:
         run_store: RunStore,
         *,
         now_us: Callable[[], int] = _now_us,
+        engine: DriftEnginePause | None = None,
         on_anchor_bound: Callable[[int, str, str], Awaitable[None]] | None = None,
     ) -> None:
         self._run_store = run_store
         self._now_us = now_us
+        self._engine = engine
         self._on_anchor_bound = on_anchor_bound
 
     async def pause(
         self, *, workspace_id: int, run_id: str, finding: DriftFinding
     ) -> CommitOutcome:
-        outcome = await asyncio.to_thread(
-            pause_run_for_drift,
-            self._run_store,
-            workspace_id=workspace_id,
-            run_id=run_id,
-            finding=finding,
-            now_us=self._now_us(),
-        )
+        if self._engine is not None:
+            outcome = await self._engine.pause_for_drift(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                cause=finding.cause,
+                body=_drift_body(finding),
+                checksum_parts=_drift_checksum_parts(run_id, finding),
+                now_us=self._now_us(),
+            )
+        else:
+            outcome = await asyncio.to_thread(
+                pause_run_for_drift,
+                self._run_store,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                finding=finding,
+                now_us=self._now_us(),
+            )
         hook = self._on_anchor_bound
         if finding.cause != "anchor_bound" or hook is None:
             return outcome
@@ -261,6 +304,7 @@ __all__ = [
     "SESSION_CODES",
     "DriftCause",
     "DriftDetected",
+    "DriftEnginePause",
     "DriftFinding",
     "DriftPauser",
     "DriftPreSendHook",

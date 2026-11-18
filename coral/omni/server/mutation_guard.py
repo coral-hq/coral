@@ -192,7 +192,9 @@ def _agent_refusal(attempt: MutationAttempt) -> str | None:
         return _ENGINE_AGENT.format(name=name) + " and can't be edited."
     if attempt.forced:
         return None
+    # Nothing pauses at once: its live steps lose their engine tools and stall on the nudge cap.
     return (
         _ENGINE_AGENT.format(name=name)
-        + "; delete with force=true to remove it anyway (runs that use it pause)."
+        + "; delete with force=true to remove it anyway (steps running it can no longer "
+        "hand off, and their runs pause after repeated nudges)."
     )

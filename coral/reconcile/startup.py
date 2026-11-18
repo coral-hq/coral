@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from coral.omni.protocols import NoOpScopeRunner, RunScopeRunner
+from coral.queue.run_effects import describe_exception, raise_if_cancelling
 from coral.stores.protocols import CoralRun, GateVisitState, QueueStore, RunStore
 
 _logger = logging.getLogger(__name__)
@@ -44,7 +45,8 @@ async def startup_recovery_sweep(
     """Reclaim expired work items and scan open gates and active runs across all workspaces.
 
     Errors in individual gate republishers or run reconcilers are logged and counted
-    without aborting the sweep for remaining gates or runs.
+    without aborting the sweep for remaining gates or runs. Without a republisher the
+    gates are not scanned.
     """
     runner: RunScopeRunner = scope_runner if scope_runner is not None else NoOpScopeRunner()
     reclaimed_total = 0
@@ -62,7 +64,7 @@ async def startup_recovery_sweep(
     open_gates_republished = 0
     errors = 0
     gate_cursor: tuple[int, str, str] | None = None
-    while True:
+    while gate_republisher is not None:
         gates = await asyncio.to_thread(
             run_store.list_open_gates_all_workspaces,
             cursor=gate_cursor,
@@ -72,25 +74,26 @@ async def startup_recovery_sweep(
             break
         for gate in gates:
             open_gates_scanned += 1
-            if gate_republisher is not None:
-                try:
-                    async with runner.run_scope(
-                        workspace_id=gate.workspace_id,
-                        run_id=gate.run_id,
-                        user_id=gate.owner_user_id,
-                    ):
-                        res = gate_republisher(gate)
-                        if inspect.isawaitable(res):
-                            await res
-                    open_gates_republished += 1
-                except Exception:
-                    errors += 1
-                    _logger.exception(
-                        "Startup sweep failed republishing gate %s for run %s in workspace %d",
-                        gate.id,
-                        gate.run_id,
-                        gate.workspace_id,
-                    )
+            try:
+                async with runner.run_scope(
+                    workspace_id=gate.workspace_id,
+                    run_id=gate.run_id,
+                    user_id=gate.owner_user_id,
+                ):
+                    res = gate_republisher(gate)
+                    if inspect.isawaitable(res):
+                        await res
+                open_gates_republished += 1
+            except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- logged
+                raise_if_cancelling(exc)
+                errors += 1
+                _logger.error(
+                    "Startup sweep failed republishing gate %s for run %s in workspace %d: %s",
+                    gate.id,
+                    gate.run_id,
+                    gate.workspace_id,
+                    describe_exception(exc),
+                )
         if len(gates) < page_size:
             break
         last_gate = gates[-1]
@@ -124,12 +127,14 @@ async def startup_recovery_sweep(
                         if inspect.isawaitable(res):
                             await res
                     active_runs_reconciled += 1
-                except Exception:
+                except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- logged
+                    raise_if_cancelling(exc)
                     errors += 1
-                    _logger.exception(
-                        "Startup sweep failed reconciling run %s in workspace %d",
+                    _logger.error(
+                        "Startup sweep failed reconciling run %s in workspace %d: %s",
                         run.id,
                         run.workspace_id,
+                        describe_exception(exc),
                     )
         if len(runs) < page_size:
             break

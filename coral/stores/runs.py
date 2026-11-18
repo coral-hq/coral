@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
-from sqlalchemy import Engine, asc, desc, select, update
-from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import Engine, asc, desc, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -29,6 +26,7 @@ from coral.db import (
     RunLogRow,
     RunRow,
     RunSpecRow,
+    ToolReplyRow,
     WorkRow,
     coral_engine,
     current_workspace_id,
@@ -37,9 +35,10 @@ from coral.db import (
     run_write_transaction,
     shared_read_scope,
 )
-from coral.db.enum_codecs import GateVisitStatus, RunStatus, WorkStatus
+from coral.db.enum_codecs import GateVisitStatus, LogKind, RunStatus, WorkStatus
 from coral.model.ids import derived_id
 from coral.stores.protocols import (
+    UNFINISHED_RUN_STATUSES,
     ActivationState,
     AgentSlotState,
     CommitOutcome,
@@ -57,7 +56,9 @@ from coral.stores.protocols import (
     StartKeyConflict,
     Transition,
     TransitionTooLarge,
+    require_checksum32,
 )
+from coral.stores.work_rows import insert_pending_if_absent, repended_values
 
 _logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ def _compute_spec_digest(spec: RunStartSpec) -> bytes:
         str(spec.state_version),
         str(spec.log_version),
         spec.orchestrator_session_id or "",
+        spec.engine_config or "",
     )
     return hashlib.sha256("\0".join(fields).encode()).digest()
 
@@ -120,6 +122,7 @@ def _compute_stored_spec_digest(run: RunRow, spec: RunSpecRow) -> bytes:
         str(run.state_version),
         str(run.log_version),
         run.orchestrator_session_id or "",
+        spec.engine_config or "",
     )
     return hashlib.sha256("\0".join(fields).encode()).digest()
 
@@ -336,7 +339,24 @@ def _to_run_spec(row: RunSpecRow, run: RunRow) -> RunStartSpec:
         state_version=run.state_version,
         log_version=run.log_version,
         orchestrator_session_id=run.orchestrator_session_id,
+        engine_config=row.engine_config,
     )
+
+
+# Dialects whose transactions take SET LOCAL lock and statement timeouts.
+_LOCK_TIMEOUT_DIALECTS = frozenset({"postgresql", "cockroachdb"})
+_MIN_STATEMENT_TIMEOUT_MS = 1000
+
+
+def _bound_lock_waits(session: Session, lock_timeout_s: float) -> None:
+    """Bound this transaction's row-lock waits, and each statement at 1.5 times that (min 1 s)."""
+    # At least 1 ms: 0 would turn both timeouts off.
+    lock_ms = max(1, math.ceil(lock_timeout_s * 1000))
+    # A statement needs real time to run even when lock waits are tiny.
+    statement_ms = max(_MIN_STATEMENT_TIMEOUT_MS, lock_ms * 3 // 2)
+    # SET takes no bind parameters; both values are ints computed here (milliseconds).
+    session.execute(text(f"SET LOCAL lock_timeout = {lock_ms}"))
+    session.execute(text(f"SET LOCAL statement_timeout = {statement_ms}"))
 
 
 @dataclass(eq=False)
@@ -497,6 +517,7 @@ class SqlAlchemyCoralRunStore:
             max_activations=spec.max_activations,
             refresh_threshold_bp=spec.refresh_threshold_bp,
             rejected_call_limit=spec.rejected_call_limit,
+            engine_config=spec.engine_config,
             created_at=now_s,
         )
 
@@ -620,8 +641,17 @@ class SqlAlchemyCoralRunStore:
         *,
         workspace_id: int | None = None,
         now: int | None = None,
+        lock_timeout_s: float | None = None,
     ) -> CommitOutcome:
-        """Apply state mutations against run_id at expected_version atomically."""
+        """Apply state mutations against run_id at expected_version atomically.
+
+        :param lock_timeout_s: Bounds the wait for row locks on PostgreSQL and
+            CockroachDB; MySQL keeps its lock wait timeout and SQLite its busy timeout.
+        :raises IntegrityError: when ``transition.tool_reply`` repeats a stored
+            checksum; nothing of the transition is written.
+        """
+        if lock_timeout_s is not None and lock_timeout_s <= 0:
+            raise ValueError("lock_timeout_s must be positive")
         if len(transition.logs) > 64:
             raise TransitionTooLarge(f"Transition contains {len(transition.logs)} logs (limit 64)")
         if len(transition.outbox_work) > 64:
@@ -633,7 +663,11 @@ class SqlAlchemyCoralRunStore:
         now_s = int(time.time()) if now is None else now
         now_us = now_s * 1_000_000
 
+        dialect = self._engine.dialect.name
+
         def write(session: Session) -> CommitOutcome:
+            if lock_timeout_s is not None and dialect in _LOCK_TIMEOUT_DIALECTS:
+                _bound_lock_waits(session, lock_timeout_s)
             row = session.get(RunRow, (ws, run_id), with_for_update=True)
             if row is None:
                 raise RunNotFound(f"Run {run_id!r} not found in workspace {ws}")
@@ -860,43 +894,14 @@ class SqlAlchemyCoralRunStore:
                     )
                 )
 
-            dialect = self._engine.dialect.name
             outbox_ids: list[str] = []
             for w in transition.outbox_work:
                 outbox_ids.append(w.id)
-                values: dict[str, Any] = {
-                    "workspace_id": ws,
-                    "id": w.id,
-                    "run_id": run_id,
-                    "kind": w.kind,
-                    "status": int(WorkStatus.PENDING),
-                    "node_id": w.node_id,
-                    "scope_key": w.scope_key,
-                    "slot_generation": w.slot_generation,
-                    "payload": w.payload,
-                    "owner_key": w.owner_key,
-                    "attempts": 0,
-                    "available_at": w.available_at,
-                    "lease_expires_at": None,
-                    "lease_holder": None,
-                    "result": None,
-                    "result_ref": None,
-                    "error_code": None,
-                    "idempotency_cksum": w.idempotency_cksum,
-                    "created_at_us": now_us,
-                    "finished_at": None,
-                }
-                if dialect == "mysql":
-                    stmt = (
-                        mysql_insert(WorkRow)
-                        .values(**values)
-                        .on_duplicate_key_update(workspace_id=WorkRow.workspace_id)
+                session.execute(
+                    insert_pending_if_absent(
+                        dialect, ws, w, run_id=run_id, available_at=w.available_at, now_us=now_us
                     )
-                elif dialect == "sqlite":
-                    stmt = sqlite_insert(WorkRow).values(**values).on_conflict_do_nothing()
-                else:
-                    stmt = pg_insert(WorkRow).values(**values).on_conflict_do_nothing()
-                session.execute(stmt)
+                )
 
             if transition.consumed_work_ids:
                 session.execute(
@@ -911,8 +916,47 @@ class SqlAlchemyCoralRunStore:
                         finished_at=now_s,
                         lease_holder=None,
                         lease_expires_at=None,
+                        held_since=None,
                     )
                 )
+
+            if transition.revive_work_ids:
+                session.execute(
+                    update(WorkRow)
+                    .where(
+                        WorkRow.workspace_id == ws,
+                        WorkRow.run_id == run_id,
+                        WorkRow.id.in_(transition.revive_work_ids),
+                        WorkRow.status == int(WorkStatus.FAILED),
+                    )
+                    .values(**repended_values(now_s))
+                )
+
+            if transition.release_held_codes:
+                session.execute(
+                    update(WorkRow)
+                    .where(
+                        WorkRow.workspace_id == ws,
+                        WorkRow.run_id == run_id,
+                        WorkRow.status == int(WorkStatus.PENDING),
+                        WorkRow.error_code.in_(transition.release_held_codes),
+                    )
+                    .values(available_at=now_s, held_since=None)
+                )
+
+            if transition.tool_reply is not None:
+                # Last, so a repeated checksum fails after every other write and undoes it.
+                session.add(
+                    ToolReplyRow(
+                        workspace_id=ws,
+                        run_id=run_id,
+                        cksum=transition.tool_reply.cksum,
+                        reply=transition.tool_reply.reply,
+                        run_version=new_version,
+                        created_at_us=now_us,
+                    )
+                )
+                session.flush()
 
             return CommitOutcome(
                 run_id=run_id,
@@ -1028,6 +1072,41 @@ class SqlAlchemyCoralRunStore:
                 created_at_us=row.created_at_us,
             )
 
+    def read_engine_log(
+        self,
+        run_id: str,
+        *,
+        workspace_id: int,
+        after_seq: int = 0,
+        max_run_version: int,
+        limit: int = 500,
+    ) -> list[RunLogEntry]:
+        """Return the run's ENGINE rows after ``after_seq`` committed at or below
+        ``max_run_version``, in ``seq`` order; audit-only rows included."""
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        with shared_read_scope(), self._session("read_engine_log") as session:
+            rows = session.scalars(
+                select(RunLogRow)
+                .where(
+                    RunLogRow.workspace_id == workspace_id,
+                    RunLogRow.run_id == run_id,
+                    RunLogRow.kind == int(LogKind.ENGINE),
+                    RunLogRow.seq > after_seq,
+                    RunLogRow.run_version <= max_run_version,
+                )
+                .order_by(asc(RunLogRow.seq))
+                .limit(limit)
+            ).all()
+            return [_to_run_log_entry(r) for r in rows]
+
+    def find_tool_reply(self, run_id: str, cksum: bytes, *, workspace_id: int) -> str | None:
+        """Return the reply a transition stored under ``cksum``, else ``None``."""
+        require_checksum32(cksum)
+        with shared_read_scope(), self._session("find_tool_reply") as session:
+            row = session.get(ToolReplyRow, (workspace_id, run_id, cksum))
+            return None if row is None else row.reply
+
     def list_active_runs_all_workspaces(
         self,
         *,
@@ -1036,13 +1115,8 @@ class SqlAlchemyCoralRunStore:
     ) -> list[CoralRun]:
         """List runs across all workspaces in non-terminal states."""
         dialect = self._engine.dialect.name
-        active_statuses = (
-            int(RunStatus.STARTING),
-            int(RunStatus.RUNNING),
-            int(RunStatus.PAUSED),
-        )
         with shared_read_scope(), self._session("list_active_runs_all_workspaces") as session:
-            stmt = select(RunRow).where(RunRow.status.in_(active_statuses))
+            stmt = select(RunRow).where(RunRow.status.in_(UNFINISHED_RUN_STATUSES))
             if cursor is not None:
                 stmt = stmt.where(
                     keyset_after(

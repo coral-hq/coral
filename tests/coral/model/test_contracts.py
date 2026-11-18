@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from coral.model import CompiledGraph, Workflow, canonical_bytes, canonical_json, content_hash
 from coral.model.authoring import Arrow, DecisionNode, GateNode, StartNode
+from coral.model.ir import CompiledArrow, CompiledNode, CompiledPart
 from tests.coral.workflow_builders import (
     arrow,
     compile_text,
@@ -94,11 +95,11 @@ def test_canonical_json_ignores_key_order() -> None:
 
 def test_canonical_bytes_stable_under_dump_reorder() -> None:
     graph, _ = compile_text(fixture_text("loop"))
-    dumped = graph.model_dump(mode="json", exclude={"analysis", "content_hash"})
-    reordered = json.loads(json.dumps(dumped))
+    dumped = graph.model_dump(
+        mode="json", exclude={"analysis", "content_hash"}, exclude_defaults=True
+    )
+    reordered = {"ir_version": graph.ir_version, **json.loads(json.dumps(dumped))}
     reordered = {key: reordered[key] for key in reversed(list(reordered))}
-    for arrow_entry in reordered["arrows"]:
-        arrow_entry.pop("kind")
     assert canonical_json(reordered) == canonical_bytes(graph)
 
 
@@ -106,9 +107,88 @@ def test_canonical_bytes_exclude_derived_fields() -> None:
     graph, _ = compile_text(fixture_text("loop"))
     data = json.loads(canonical_bytes(graph))
     assert "analysis" not in data and "content_hash" not in data
-    assert all("kind" not in entry for entry in data["arrows"])
+    # A forward arrow is the default, so only the other kinds are written.
+    kinds = [entry.get("kind", "forward") for entry in data["arrows"]]
+    assert kinds == [arrow.kind for arrow in graph.arrows]
+    assert "back" in kinds
     stripped = graph.model_copy(update={"analysis": type(graph.analysis)(), "content_hash": "x"})
     assert canonical_bytes(stripped) == canonical_bytes(graph)
+
+
+def test_a_back_arrow_changes_the_hash() -> None:
+    text = fixture_text("loop")
+    forward_only = text.replace("    back: true\n", "")
+    looped, _ = compile_text(text)
+    unlooped, _ = compile_text(forward_only)
+    assert [item.kind for item in looped.arrows] != [item.kind for item in unlooped.arrows]
+    assert looped.content_hash != unlooped.content_hash
+    assert compile_text(text)[0].content_hash == looped.content_hash
+
+
+# One changed value per field the engine or validator can read; analysis is derived.
+_GRAPH_CHANGES: dict[str, object] = {
+    "ir_version": 2,
+    "workflow_id": "other",
+    "name": "Other",
+    "description": "About",
+}
+_NODE_CHANGES: dict[str, object] = {
+    "id": "work2",
+    "kind": "gate",
+    "name": "Work",
+    "goal": "Another goal",
+    "question": "Why?",
+    "prompt": "Approve?",
+    "roster": ("reviewer",),
+    "harness": "other-harness",
+    "attempts": 9,
+    "concurrency": 9,
+    "list_from": "start.items",
+    "parts": (CompiledPart(name="items", kind="list"),),
+    "outcomes": ("ship",),
+}
+_ARROW_CHANGES: dict[str, object] = {
+    "id": "a9",
+    "source": "end",
+    "target": "end",
+    "label": "other",
+    "kind": "forward",
+    "limit": 9,
+    "at_limit": "a1",
+}
+
+
+def test_every_graph_node_and_arrow_field_has_a_hash_case() -> None:
+    derived = {"nodes", "arrows", "content_hash", "analysis"}
+    assert set(_GRAPH_CHANGES) == set(CompiledGraph.model_fields) - derived
+    assert set(_NODE_CHANGES) == set(CompiledNode.model_fields)
+    assert set(_ARROW_CHANGES) == set(CompiledArrow.model_fields)
+
+
+@pytest.mark.parametrize(
+    ("where", "field"),
+    [("graph", name) for name in _GRAPH_CHANGES]
+    + [("node", name) for name in _NODE_CHANGES]
+    + [("arrow", name) for name in _ARROW_CHANGES],
+)
+def test_each_field_alone_changes_the_hash(where: str, field: str) -> None:
+    graph, _ = compile_text(fixture_text("loop"))
+    if where == "graph":
+        changed = graph.model_copy(update={field: _GRAPH_CHANGES[field]})
+    elif where == "node":
+        nodes = tuple(
+            node.model_copy(update={field: _NODE_CHANGES[field]}) if node.id == "work" else node
+            for node in graph.nodes
+        )
+        changed = graph.model_copy(update={"nodes": nodes})
+    else:
+        back = next(item for item in graph.arrows if item.kind == "back")
+        arrows = tuple(
+            item.model_copy(update={field: _ARROW_CHANGES[field]}) if item is back else item
+            for item in graph.arrows
+        )
+        changed = graph.model_copy(update={"arrows": arrows})
+    assert canonical_bytes(changed) != canonical_bytes(graph)
 
 
 def test_content_hash_is_sha256_hex_of_canonical_bytes() -> None:

@@ -90,11 +90,20 @@ def _crdb_version_tuple(engine: Engine) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2)))
 
 
+_SERIALIZABLE_TRANSACTION = "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+
+
 def _prepare_crdb_ddl(conn: Connection, version: tuple[int, int] | None) -> None:
     if version is not None and version >= (24, 1):
         conn.execute(text("SET autocommit_before_ddl = true"))
         conn.commit()
-    conn.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
+    conn.execute(text(_SERIALIZABLE_TRANSACTION))
+
+
+def commit_crdb_revision(conn: Connection) -> None:
+    """Commit one revision's schema changes, then open the next SERIALIZABLE schema transaction."""
+    conn.commit()
+    conn.execute(text(_SERIALIZABLE_TRANSACTION))
 
 
 def _get_current_coral_revision_on_engine(engine: Engine) -> str | None:

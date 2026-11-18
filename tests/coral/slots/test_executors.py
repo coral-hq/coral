@@ -62,7 +62,44 @@ GENERATION = "gen-1"
 HOST = "h" * 32
 WORKTREE = "/Users/alice/repo-worktrees/coral-r-base"
 AGENT = "a" * 32
+RESOLVED_AGENT = "b" * 32
 NOW_US = 1_700_000_000_000_000
+
+
+class _Agents:
+    """A ``StepAgentResolver`` that records each call and its scope, then answers or refuses."""
+
+    def __init__(self, scope: RecordingScopeRunner, error: BaseException | None = None) -> None:
+        self.scope = scope
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def resolve(
+        self,
+        *,
+        workspace_id: int,
+        owner: str | None,
+        stance: str,
+        workflow_slug: str | None,
+        node_id: str | None,
+        roster_index: int | None,
+        session_id: str | None = None,
+    ) -> str:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "owner": owner,
+                "stance": stance,
+                "workflow_slug": workflow_slug,
+                "node_id": node_id,
+                "roster_index": roster_index,
+                "session_id": session_id,
+                "scope": self.scope.active,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return RESOLVED_AGENT
 
 
 class _Env:
@@ -74,6 +111,8 @@ class _Env:
         host_id: str | None = HOST,
         worktree_path: str | None = WORKTREE,
         refusal: BaseException | None = None,
+        resolver: bool = False,
+        resolver_error: BaseException | None = None,
     ) -> None:
         self.run_store = FakeRunStore(default_workspace_id=WORKSPACE)
         self.run: CoralRun = start_run(
@@ -91,15 +130,36 @@ class _Env:
             refusal=refusal,
             on_create=lambda _request: self.scopes_at_create.append(self.scope.active),
         )
+        self.agents = _Agents(self.scope, resolver_error) if resolver or resolver_error else None
         self.executor = create_session_executor(
             self.facade,
             self.run_store,
             DriftPauser(self.run_store, now_us=lambda: NOW_US),
             self.scope,
+            agents=self.agents,
         )
 
     def key(self, subject: str = "slot-1") -> str:
         return f"{self.run.id}:7:create_session:{subject}"
+
+    def stance_payload(self, **fields: object) -> dict[str, Any]:
+        """A step create as the bridge maps it: the stance and step, no agent id."""
+        payload = {
+            "effect_type": CREATE_SESSION,
+            "effect_key": self.key(),
+            "engine_kind": "create_session",
+            "role": "step",
+            "stance": "implementer",
+            "workflow_slug": "two-steps",
+            "node_id": "implement",
+            "roster_index": 0,
+            "engine_slot_id": "implement||:0",
+            "slot_role": "step_agent",
+            "generation": 1,
+            "slot_id": "1" * 32,
+            **fields,
+        }
+        return {key: value for key, value in payload.items() if value is not None}
 
     def anchor_payload(self, **fields: object) -> dict[str, Any]:
         return {
@@ -143,10 +203,14 @@ def _failed(outcome: object) -> EffectFailed:
     return outcome
 
 
-@pytest.mark.parametrize("role", ["anchor", "step"])
+@pytest.mark.parametrize("role", ["anchor", "step", "stance"])
 async def test_create_session_executor_conformance(role: str) -> None:
-    env = _Env()
-    payload = env.anchor_payload() if role == "anchor" else env.step_payload()
+    env = _Env(resolver=role == "stance")
+    payload = {
+        "anchor": env.anchor_payload,
+        "step": env.step_payload,
+        "stance": env.stance_payload,
+    }[role]()
     outcomes: list[object] = []
 
     async def recording(ctx: Any) -> Any:
@@ -169,8 +233,13 @@ async def test_create_session_executor_conformance(role: str) -> None:
         else effect_session_id(WORKSPACE, env.key())
     )
     # Whether this try created the session is logged, never returned: a repeat must match.
-    assert first == repeat == {"session_id": expected_session, "role": role, "generation": 1}
+    expected_role = "anchor" if role == "anchor" else "step"
+    assert (
+        first == repeat == {"session_id": expected_session, "role": expected_role, "generation": 1}
+    )
     assert len(env.facade.requests) == 2
+    # A redelivered stance create resolves the same agent, so it asks for the same session.
+    assert env.facade.requests[0] == env.facade.requests[1]
 
 
 async def test_the_request_comes_from_the_run_row_and_spec_inside_the_run_scope() -> None:
@@ -388,6 +457,136 @@ async def test_a_paused_run_holds_the_create_without_asking_the_facade(role: str
 
     assert (failure.error_code, failure.retryable) == ("run.paused", True)
     assert env.facade.requests == []
+
+
+# ── the stance form: the executor resolves the step's agent ─────────────────
+
+_RUN_SCOPE_KEYS = ("workspace_id", "run_id", "user_id", "account_generation", "host_id")
+
+
+async def test_a_stance_resolves_to_the_run_owners_agent_inside_the_run_scope() -> None:
+    env = _Env(resolver=True)
+
+    result = _completed(await env.deliver(env.stance_payload()))
+
+    assert env.agents is not None
+    [call] = env.agents.calls
+    scope = call.pop("scope")
+    assert call == {
+        "workspace_id": WORKSPACE,
+        "owner": OWNER,
+        "stance": "implementer",
+        "workflow_slug": "two-steps",
+        "node_id": "implement",
+        "roster_index": 0,
+        # The session the create makes: a retry keeps the agent it runs.
+        "session_id": effect_session_id(WORKSPACE, env.key()),
+    }
+    assert isinstance(scope, dict)
+    assert {key: scope[key] for key in _RUN_SCOPE_KEYS} == {
+        "workspace_id": WORKSPACE,
+        "run_id": env.run.id,
+        "user_id": OWNER,
+        "account_generation": GENERATION,
+        "host_id": HOST,
+    }
+    [request] = env.facade.requests
+    assert (request.agent_id, request.engine_slot_id, request.slot_role, request.node_id) == (
+        RESOLVED_AGENT,
+        "implement||:0",
+        "step_agent",
+        "implement",
+    )
+    assert result["session_id"] == effect_session_id(WORKSPACE, env.key())
+
+
+async def test_an_orchestrator_stance_needs_no_step_reference() -> None:
+    env = _Env(resolver=True)
+    payload = env.stance_payload(
+        stance="orchestrator",
+        workflow_slug=None,
+        node_id=None,
+        roster_index=None,
+        engine_slot_id="orchestrator",
+        slot_role="orchestrator",
+        title="Ship it · orchestrator",
+    )
+
+    _completed(await env.deliver(payload))
+
+    assert env.agents is not None
+    [call] = env.agents.calls
+    assert (call["stance"], call["workflow_slug"], call["node_id"], call["roster_index"]) == (
+        "orchestrator",
+        None,
+        None,
+        None,
+    )
+    [request] = env.facade.requests
+    assert (request.agent_id, request.slot_role, request.title) == (
+        RESOLVED_AGENT,
+        "orchestrator",
+        "Ship it · orchestrator",
+    )
+
+
+async def test_a_rejected_bundle_fails_permanently_before_any_create() -> None:
+    rejected = CoralSessionError("session.agent_not_supported", "the bundle breaks a rule")
+    env = _Env(resolver_error=rejected)
+
+    failure = _failed(await env.deliver(env.stance_payload()))
+
+    assert (failure.error_code, failure.retryable) == ("session.agent_not_supported", False)
+    assert env.facade.requests == []
+
+
+async def test_a_stance_without_a_resolver_is_an_invalid_payload() -> None:
+    env = _Env()
+
+    failure = _failed(await env.deliver(env.stance_payload()))
+
+    assert (failure.error_code, failure.retryable) == ("effect.invalid_payload", False)
+    assert env.facade.requests == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"stance": "anchor"},
+        {"stance": "planner"},
+        {"stance": 3},
+        {"stance": ["implementer"]},
+        {"workflow_slug": None},
+        {"workflow_slug": "w" * 65},
+        {"workflow_slug": "two\nsteps"},
+        {"node_id": None},
+        {"roster_index": None},
+        {"roster_index": -1},
+        {"roster_index": True},
+        {"roster_index": "0"},
+        {"roster_index": 1_000},
+    ],
+)
+async def test_invalid_stance_payloads_are_refused_before_resolving(
+    change: dict[str, object],
+) -> None:
+    env = _Env(resolver=True)
+
+    failure = _failed(await env.deliver(env.stance_payload(**change)))
+
+    assert (failure.error_code, failure.retryable) == ("effect.invalid_payload", False)
+    assert env.agents is not None and env.agents.calls == []
+    assert env.facade.requests == []
+
+
+async def test_a_paused_run_holds_a_stance_create_before_resolving() -> None:
+    env = _Env(resolver=True)
+    env.set_status(RunStatus.PAUSED)
+
+    failure = _failed(await env.deliver(env.stance_payload()))
+
+    assert (failure.error_code, failure.retryable) == ("run.paused", True)
+    assert env.agents is not None and env.agents.calls == []
 
 
 # ── send_input, close_slot, cancel_sessions ─────────────────────────────────
@@ -800,6 +999,42 @@ async def test_a_slot_with_no_session_yet_is_cancelled_without_action() -> None:
     assert env.events == []
 
 
+async def test_a_session_this_run_never_bound_counts_as_cancelled() -> None:
+    # The slot's create never got as far as binding the session the cancel names.
+    env = _Sessions(bound=False)
+
+    result = _completed(await env.deliver(env.cancel, env.cancel_payload()))
+
+    assert result == {"session_id": SESSION}
+    assert env.events == []
+    assert env.dispatch.interrupts == []
+
+
+async def test_a_session_bound_to_another_run_is_left_alone_and_counts_as_cancelled() -> None:
+    env = _Sessions()
+    for key, binding in list(env.bindings.rows.items()):
+        env.bindings.rows[key] = dataclasses.replace(binding, run_id="f" * 32)
+
+    result = _completed(await env.deliver(env.cancel, env.cancel_payload()))
+
+    assert result == {"session_id": SESSION}
+    assert env.events == []
+
+
+async def test_the_session_of_a_create_that_finished_before_the_cancel_is_cancelled() -> None:
+    # One item per run runs at a time, so a cancel queued while its slot's create ran
+    # finds the session that create bound, by the id the create's effect key derives.
+    env = _Sessions(progress=SessionBindingProgress.ROW_CREATED)
+    env.session.status = "running"
+    env.session.response_id = "resp_1"
+
+    result = _completed(await env.deliver(env.cancel, env.cancel_payload()))
+
+    assert result == {"session_id": SESSION}
+    assert env.dispatch.interrupts == ["resp_1"]
+    assert "stop" in env.events
+
+
 async def test_a_cancel_without_a_session_id_key_is_refused() -> None:
     # The reducer's own cancel_sessions payload names no session; forwarded as is,
     # it must fail loudly instead of cancelling nothing.
@@ -833,6 +1068,23 @@ async def test_a_send_or_close_before_the_sessions_row_exists_waits() -> None:
     assert (send.error_code, send.retryable) == ("session.not_ready", True)
     assert (close.error_code, close.retryable) == ("session.not_ready", True)
     assert env.events == []
+
+
+async def test_a_send_to_the_runs_orchestrator_waits_until_its_create_binds_it() -> None:
+    # The bridge names the orchestrator on the run before its create has run.
+    env = _Sessions(bound=False)
+    _, version = env.run_store.load_run_state(env.run.id, workspace_id=WORKSPACE)
+    env.run_store.apply_transition(
+        env.run.id, version, Transition(orchestrator_session_id=SESSION), workspace_id=WORKSPACE
+    )
+    other = _Sessions(bound=False)
+
+    waiting = _failed(await env.deliver(env.send, env.send_payload()))
+    refused = _failed(await other.deliver(other.send, other.send_payload()))
+
+    assert (waiting.error_code, waiting.retryable) == ("session.not_ready", True)
+    assert (refused.error_code, refused.retryable) == ("session.identity_conflict", False)
+    assert env.events == [] and env.dispatch.sends == []
 
 
 async def test_a_writers_close_without_the_closed_label_is_refused_before_anything_runs() -> None:

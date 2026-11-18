@@ -57,6 +57,10 @@ class EngineConfig(_Frozen):
     max_activations: int = 10_000
     timer_policy: TimerPolicy = Field(default_factory=TimerPolicy)
     runner_grace: timedelta = timedelta(seconds=30)
+    # Counted rejections in a row that pause ``rejected_calls``; copied into the run at start.
+    rejected_call_limit: int = Field(default=3, ge=1)
+    # Turn-end nudges in a row without a handoff before the run pauses ``rejected_calls``.
+    nudge_limit: int = Field(default=3, ge=1)
 
 
 class PauseCause(_Frozen):
@@ -91,6 +95,10 @@ class Slot(_Frozen):
     drift: bool = False
     handoff: str | None = None
     handoff_label: str | None = None
+    # The fact key of a failed turn not yet re-prompted, completed, handed off or retried.
+    failed_turn: str | None = None
+    # Turn-end nudges sent while running since the last handoff, resume or retry.
+    nudges: int = 0
 
 
 class Decision(_Frozen):
@@ -163,6 +171,7 @@ class RunState(_Frozen):
     start_key: str | None = None
     version_hash: str | None = None
     max_activations: int = 10_000
+    rejected_call_limit: int = Field(default=3, ge=1)
     seq: int = 0
     causes: tuple[PauseCause, ...] = ()
     activations: tuple[Activation, ...] = ()
@@ -235,6 +244,15 @@ class EffectCompleted(_Frozen):
     kind: Literal["effect_completed"] = "effect_completed"
     effect_key: str
     payload: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class EffectFailed(_Frozen):
+    """An effect that failed for good: ``retryable`` when its retries ran out."""
+
+    kind: Literal["effect_failed"] = "effect_failed"
+    effect_key: str
+    code: str
+    retryable: bool = False
 
 
 class HandoffReceived(_Frozen):
@@ -333,6 +351,7 @@ Input = Annotated[
     | CancelRun
     | RetryStep
     | EffectCompleted
+    | EffectFailed
     | HandoffReceived
     | HandoffEvaluated
     | ChooseArrow

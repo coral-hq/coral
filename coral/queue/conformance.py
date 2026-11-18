@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from coral.queue.executors import (
     EffectCompleted,
     EffectExecutor,
@@ -26,6 +24,9 @@ async def run_executor_conformance(
     run_id: str = "run-conformance-1",
 ) -> None:
     """Verify that an EffectExecutor obeys idempotency, outcome typing, and lease fencing."""
+    # Imported here: ``coral.queue`` runs in servers, where pytest is not installed.
+    import pytest
+
     run_store = FakeRunStore(default_workspace_id=workspace_id)
     queue_store = FakeQueueStore(run_store=run_store, default_workspace_id=workspace_id)
 

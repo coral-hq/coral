@@ -43,7 +43,9 @@ takes its inputs from the caller and asserts nothing:
 
 - `crash_around(monkeypatch, owner, attr, when="before" | "after")` makes
   `owner.attr` raise `SimulatedCrash`. `SimulatedCrash` is a `BaseException`,
-  so catch it with `pytest.raises(SimulatedCrash)`.
+  so catch it with `pytest.raises(SimulatedCrash)`. `crash_around_async` does
+  the same for a coroutine function. With `matching=`, only calls whose
+  arguments it accepts crash; the others run unchanged.
 - `fresh_process(uri)` drops and disposes the cached engine for `uri` and
   returns a new one, so the test sees only committed state. Pass
   `connect=get_or_create_conversation_engine` for a split conversation DB.

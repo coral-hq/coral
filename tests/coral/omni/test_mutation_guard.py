@@ -336,7 +336,8 @@ def test_engine_agents_cannot_be_edited_installed_or_quietly_removed(name: str) 
     )
     assert screen(AGENT_REMOVE) == (
         f"Agent {name!r} is managed by Coral's workflow engine; delete with force=true to "
-        "remove it anyway (runs that use it pause)."
+        "remove it anyway (steps running it can no longer hand off, and their runs pause "
+        "after repeated nudges)."
     )
     assert screen(AGENT_REMOVE, forced=True) is Screen.ALLOW
     assert (

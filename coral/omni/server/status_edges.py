@@ -88,11 +88,11 @@ class _WatchedSession:
 
 class CoralStatusEdges(SessionEdgeWatcher):
     """
-    The S1 observer for sessions a close or cancel is watching, until turn facts persist.
+    The S1 observer for sessions a close or cancel is watching.
 
     :param loop: The server's event loop; watches and waiters live on it.
-    :param sink: Receives each watched session's ``TurnFact``; unset until
-        signals persist them.
+    :param sink: Receives each watched session's ``TurnFact``; the server sets
+        none, since turn facts persist through the ``coral.turn_facts`` observer.
     """
 
     def __init__(

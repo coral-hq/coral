@@ -51,7 +51,7 @@ class CompiledArrow(_Frozen):
     source: str
     target: str
     label: str | None = None
-    # Derived from the authoring fields; excluded from the content hash.
+    # Derived from the authoring fields, and hashed: ``back: true`` is recorded only here.
     kind: ArrowKind = "forward"
     limit: int | None = None
     at_limit: str | None = None

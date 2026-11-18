@@ -49,6 +49,15 @@ class SessionBindingRow(CoralBase):
             "workspace_id", "run_id", "effect_cksum", name="uq_coral_session_bindings_effect"
         ),
         Index("ix_coral_session_bindings_run", "workspace_id", "run_id", "role", "session_id"),
+        # One step session per slot and generation; anchors have no slot and never collide.
+        Index(
+            "uq_coral_session_bindings_slot_generation",
+            "workspace_id",
+            "run_id",
+            "slot_id",
+            "session_generation",
+            unique=True,
+        ),
         make_enum_check_constraint(
             "role", SESSION_BINDING_ROLE, name="ck_coral_session_bindings_role"
         ),

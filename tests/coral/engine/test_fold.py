@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from coral.engine import empty_state, fold, transition
 from coral.engine.types import (
     EffectCompleted,
+    EffectFailed,
     EngineConfig,
     HandoffEvaluated,
     HandoffReceived,
     PauseRun,
     ResumeRun,
+    SessionFailed,
     StartRun,
+    TimerDue,
     TurnEnded,
 )
 from tests.coral.engine.drive import NOW, drive
@@ -172,3 +177,104 @@ def test_duplicate_effect_completed_returns_receipt() -> None:
     assert sum(effect.kind == "send_input" for effect in duplicate.state.effects) == 1
     log = (started.entry, completed.entry, duplicate.entry)
     assert fold(graph, log, CONFIG) == duplicate.state
+
+
+def test_replaying_failures_reprompts_and_a_pending_close_repeats_every_entry() -> None:
+    graph = compile_text(
+        workflow_text(
+            [start(), step("work"), step("ship"), end()],
+            [
+                arrow("a1", "start", "work"),
+                arrow("a2", "work", "ship"),
+                arrow("a3", "ship", "end"),
+            ],
+        )
+    )[0]
+    pending = drive(graph, [RUN], auto_ack=False)
+    create = pending.log[-1].effects[0]
+    working = drive(
+        graph,
+        [
+            EffectFailed(effect_key=create.effect_key, code="session.not_ready", retryable=True),
+            ResumeRun(),
+            EffectCompleted(effect_key=create.effect_key),
+        ],
+        after=pending,
+    )
+    failed_at = NOW + timedelta(minutes=1)
+    failed = drive(
+        graph,
+        [
+            SessionFailed(
+                slot_id=SLOT,
+                failure_class="infra.transient",
+                cause="529",
+                fact_key="turn:sess-1:1:msg:a",
+            )
+        ],
+        after=working,
+        now=failed_at,
+    )
+    stage = failed.state.timers[0]
+    early = drive(graph, [TimerDue(timer_key=stage.key)], after=failed, now=failed_at)
+    nudged = drive(graph, [TimerDue(timer_key=stage.key)], after=early, now=stage.due_at)
+    backoff = nudged.log[-1].effects[0]
+    ended = drive(
+        graph,
+        [
+            EffectCompleted(effect_key=backoff.effect_key),
+            TurnEnded(slot_id=SLOT, fact_key="turn:sess-1:1:msg:b"),
+        ],
+        after=nudged,
+        now=stage.due_at,
+    )
+    turn_nudge = ended.log[-1].effects[0]
+    later = stage.due_at + timedelta(minutes=1)
+    closing = drive(
+        graph,
+        [
+            EffectFailed(
+                effect_key=turn_nudge.effect_key, code="session.host_offline", retryable=True
+            ),
+            ResumeRun(),
+            EffectCompleted(effect_key=turn_nudge.effect_key),
+            HandoffReceived(slot_id=SLOT, body="done"),
+            HandoffEvaluated(slot_id=SLOT, outcome="accepted"),
+        ],
+        after=ended,
+        now=later,
+        auto_ack=False,
+    )
+    close = closing.log[-1].effects[0]
+    finished = drive(
+        graph,
+        [
+            EffectCompleted(effect_key=close.effect_key, payload={"pending_input": True}),
+            ResumeRun(),
+            PauseRun(reason="user", detail="hold"),
+            PauseRun(reason="user", detail="hold"),
+            ResumeRun(),
+            HandoffReceived(slot_id="ship||:0", body="shipped"),
+            HandoffEvaluated(slot_id="ship||:0", outcome="accepted"),
+        ],
+        after=closing,
+        now=later + timedelta(minutes=1),
+    )
+    assert finished.state.status == "completed"
+    assert all(entry.rejection is None for entry in finished.log)
+    # Every effect key carries its entry's seq, so none repeats across the run.
+    for entry in finished.log:
+        assert all(effect.effect_key.startswith(f"run-1:{entry.seq}:") for effect in entry.effects)
+    keys = [effect.effect_key for effect in finished.state.effects]
+    assert len(keys) == len(set(keys))
+
+    for _replay in range(2):
+        state = empty_state()
+        replayed = []
+        for entry in finished.log:
+            result = transition(graph, state, entry.input, entry.now, CONFIG)
+            replayed.append(result.entry)
+            state = result.state
+        assert tuple(replayed) == finished.log
+        assert state == finished.state
+    assert fold(graph, finished.log, CONFIG) == finished.state

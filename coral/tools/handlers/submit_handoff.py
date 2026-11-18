@@ -15,7 +15,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole, SlotRole
-from coral.engine.lifecycle import REJECTED_CALL_LIMIT
 from coral.engine.machines.activation import choosable_labels, find_activation, routes_by_label
 from coral.engine.machines.slot import find_slot
 from coral.engine.types import HandoffEvaluated, HandoffReceived, RejectionObserved, Slot
@@ -94,7 +93,7 @@ def plan(snapshot: RunSnapshot, *, call: EngineToolCall) -> Plan:
         return Reply(replies.evaluating(), log="a handoff is being evaluated")
     handoff = _checked(snapshot, slot, call.arguments)
     if isinstance(handoff, ToolReply):
-        if _streak(snapshot, slot) + 1 >= REJECTED_CALL_LIMIT:
+        if _streak(snapshot, slot) + 1 >= snapshot.state.rejected_call_limit:
             # This observation pauses the run, so the reply says stop.
             handoff = replies.stopping(handoff, "rejected_calls")
         observed = RejectionObserved(slot_id=slot.id, code=HANDOFF_INVALID)

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
 from coral.engine.facts import TurnFact
+from coral.signals.turn_facts import TurnTranscript
 from coral.workspace.ops import HostChannelBackend
 
 HostAccessCode = Literal["not_permitted", "host_offline"]
@@ -32,18 +33,27 @@ def engine_message_text(text: str) -> str:
 @dataclass(frozen=True)
 class TranscriptItem:
     """
-    One transcript item, as the queued-input check reads it.
+    One transcript item, as the queued-input check and the turn transcript read it.
 
     :param engine: The engine's own message: an id it recorded, by the run
         owner, with the exact text it recorded.
     :param client_input: Anything a client created: a user message (meta
         ones too), a slash or terminal command, or any item a person authored.
         Runner and server items, the interrupt marker among them, are not.
+    :param runner: Written for the turn: an assistant reply, reasoning, a tool call
+        or its output, or the error the turn failed with.
+    :param assistant: An assistant reply.
+    :param bookkeeping: Runner bookkeeping, such as a resource event: no reply.
+    :param pending: A message taken but not yet persisted, newer than every item.
     """
 
     item_id: str
     engine: bool
     client_input: bool
+    runner: bool = False
+    assistant: bool = False
+    bookkeeping: bool = False
+    pending: bool = False
 
 
 def queued_input_decision(newest_first: Iterable[TranscriptItem]) -> bool | None:
@@ -61,6 +71,37 @@ def queued_input_decision(newest_first: Iterable[TranscriptItem]) -> bool | None
         if item.client_input:
             return True
     return None
+
+
+def turn_transcript_of(newest_first: Iterable[TranscriptItem]) -> TurnTranscript:
+    """
+    The turn the newest input started, reading items newest first, queued ones before.
+
+    The walk stops at the first engine message. Client input before it makes the
+    newest input the user's; without any engine message the walk decides only that.
+    """
+    newest_substantive: bool | None = None
+    runner_after = client_after = False
+    for item in newest_first:
+        if item.engine:
+            return TurnTranscript(
+                newest_input="user" if client_after else "engine",
+                newest_engine_input_id=item.item_id,
+                newest_substantive_item_is_assistant=newest_substantive is True,
+                runner_item_after_engine_input=runner_after,
+                engine_pending_input=item.pending,
+            )
+        client_after = client_after or item.client_input
+        runner_after = runner_after or item.runner
+        if newest_substantive is None and not item.bookkeeping:
+            newest_substantive = item.assistant
+    return TurnTranscript(
+        newest_input="user" if client_after else None,
+        newest_engine_input_id=None,
+        newest_substantive_item_is_assistant=newest_substantive is True,
+        runner_item_after_engine_input=runner_after,
+        engine_pending_input=False,
+    )
 
 
 @runtime_checkable
@@ -293,6 +334,36 @@ class SessionFacade(Protocol):
 
 
 @runtime_checkable
+class StepAgentResolver(Protocol):
+    """Turns a step's stance into the agent its session runs, materialized as the run owner's."""
+
+    async def resolve(
+        self,
+        *,
+        workspace_id: int,
+        owner: str | None,
+        stance: str,
+        workflow_slug: str | None,
+        node_id: str | None,
+        roster_index: int | None,
+        session_id: str | None = None,
+    ) -> str:
+        """
+        The agent id of the stance's Coral bundle; the orchestrator's needs no step reference.
+
+        Runs inside the run's scopes; a repeat for the same bundle returns the same agent.
+
+        :param owner: The run's user, or ``None`` for an ownerless run (single-user servers).
+        :param session_id: The session the create makes: when an earlier try wrote it,
+            its agent is kept while it is still this stance's bundle of the owner.
+        :raises CoralSessionError: Permanent ``session.agent_not_supported`` when no
+            bundle can be built for the stance and step; permanent ``session.invalid``
+            for an ownerless run on a server that is not single-user.
+        """
+        ...
+
+
+@runtime_checkable
 class SessionDispatch(Protocol):
     """
     Sends engine input to a session and reads its live state (K4 subset).
@@ -348,6 +419,23 @@ class SessionDispatch(Protocol):
         ...
 
 
+@runtime_checkable
+class TurnTranscripts(Protocol):
+    """Reads what a session's transcript shows about its newest turn (K4 subset)."""
+
+    async def turn_transcript(
+        self, *, session_id: str, user_id: str | None, engine_messages: Mapping[str, bytes]
+    ) -> TurnTranscript:
+        """
+        :func:`turn_transcript_of` over the session's queued messages and its newest
+        items, read in pages up to a bound; undecided past it.
+
+        :param engine_messages: Each stable id the engine recorded for the session
+            and the sha256 of the exact text it sent under it.
+        """
+        ...
+
+
 # Matches a watched session's edge, e.g. the end of one turn.
 EdgePredicate = Callable[[ObservedEdge], bool]
 
@@ -370,7 +458,8 @@ class SessionEdgeWatcher(Protocol):
         ...
 
 
-# Receives each turn fact of a watched session; unset until signals persist them.
+# Receives each turn fact of a watched session; the server sets none (turn facts persist
+# through the ``coral.turn_facts`` observer).
 TurnFactSink = Callable[[TurnFact], None]
 # Runs before an engine message is sent; raises CoralSessionError to refuse it.
 PreSendHook = Callable[[PreSendRequest], Awaitable[None]]
@@ -401,8 +490,12 @@ __all__ = [
     "SessionState",
     "SlotRoleName",
     "StatusEdgeView",
+    "StepAgentResolver",
     "TranscriptItem",
     "TurnFactSink",
+    "TurnTranscript",
+    "TurnTranscripts",
     "engine_message_text",
     "queued_input_decision",
+    "turn_transcript_of",
 ]
