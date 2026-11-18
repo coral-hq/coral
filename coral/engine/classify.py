@@ -1,7 +1,8 @@
 """Failure classes. Explicit codes, statuses and origins are matched before error text.
 
-Spend-cap text is the one exception: it wins over a 429 or 403. ``cause`` is always a
-fixed token of at most 64 characters, never error text.
+Spend-cap text is the one exception: it wins over a 429 or 403. Other error text is
+read only at its start, after the runtime's wrapper, in the shapes claude-sdk reports.
+``cause`` is always a fixed token of at most 64 characters, never error text.
 """
 
 from __future__ import annotations
@@ -28,9 +29,10 @@ _AUTH_CODES = frozenset(
     {"authentication_failed", "claude_sdk_auth_failed", "coral_subscription_auth_refused"}
 )
 _LIMIT_CODES = frozenset({"rate_limit_exceeded", "usage_limited", "rate_limit_error"})
-# ``edge_lost``: a failed turn whose status edge was lost, rebuilt from the transcript.
+# ``edge_lost``: a failed turn whose status edge was lost, rebuilt from the transcript;
+# ``turn_unreadable``: a turn that is over but too long for its transcript walk.
 _TRANSIENT_CODES = frozenset(
-    {"overloaded", "transient_upstream_error", "overloaded_error", "edge_lost"}
+    {"overloaded", "transient_upstream_error", "overloaded_error", "edge_lost", "turn_unreadable"}
 )
 _TRANSIENT_ORIGINS = frozenset(
     {
@@ -39,14 +41,19 @@ _TRANSIENT_ORIGINS = frozenset(
         "runner_failed_to_start",
     }
 )
-# claude-sdk keeps the HTTP status only in its error text. Shapes traced in code, not yet
-# captured from the real CLI: each marker maps to the fixed token stored as ``cause``.
-_STATUS_IN_TEXT = re.compile(r"\b(?:API Error: |Error code: |status[_ ]code[=: ])(\d{3})\b")
-_LIMIT_MARKERS = (
-    ("rate_limit_error", "rate_limit_error"),
-    ("usage limit reached", "usage_limit_phrase"),
+# claude-sdk keeps the HTTP status only in its error text, which the runtime wraps once.
+# Shapes traced in code, not yet captured from the real CLI; each is read only at the
+# start of the text, so a tool's output quoted later in it picks no class.
+_WRAPPER = re.compile(r"\s*(?:inner executor error:\s*)?")
+_STATUS_AT_START = re.compile(r"(?:API Error: |Error code: |status[_ ]code[=: ])(\d{3})\b")
+# The API's error body, e.g. ``{"type":"error","error":{"type":"overloaded_error",...}}``.
+_ERROR_BODY_AT_START = re.compile(
+    r'\{\s*"type"\s*:\s*"error"\s*,\s*"error"\s*:\s*\{\s*"type"\s*:\s*"([a-z_]{1,64})"'
 )
-_TRANSIENT_MARKERS = (("overloaded_error", "overloaded_error"),)
+_LIMIT_BODY_TYPES = frozenset({"rate_limit_error"})
+_TRANSIENT_BODY_TYPES = frozenset({"overloaded_error"})
+# The subscription CLI's limit notice, e.g. ``Claude AI usage limit reached|1760000000``.
+_USAGE_LIMIT_AT_START = re.compile(r"Claude AI usage limit reached\b")
 # A policy hook's denial quotes its own reason, which must not pick a failure class.
 _POLICY_DENIALS = ("LLM call denied by policy:", "LLM response denied by policy:")
 
@@ -63,10 +70,11 @@ class Class(BaseModel):
 def classify_failure(snapshot: TurnSnapshot) -> Class:
     """Classify one failure. Spend-cap text wins over HTTP 429 and over 403.
 
-    Error text is read for a status or a marker only when no explicit code, status or
-    origin decided the class and ``status_code`` is unset. A status is read only from
-    the anchored shapes ``API Error: NNN``, ``Error code: NNN`` and
-    ``status[_ ]code[=: ]NNN``. A policy denial's text is never read.
+    Error text is read only when no explicit code, status or origin decided the class
+    and ``status_code`` is unset, and only at its start (after the runtime's
+    ``inner executor error:`` wrapper): a status in the shapes ``API Error: NNN``,
+    ``Error code: NNN`` and ``status[_ ]code[=: ]NNN``; without one, the API's error
+    body type or the usage-limit notice. A policy denial's text is never read.
     """
     text = snapshot.error_text
     if text is not None and any(denial in text for denial in _POLICY_DENIALS):
@@ -104,22 +112,28 @@ def classify_failure(snapshot: TurnSnapshot) -> Class:
 
 
 def _classify_text(text: str | None) -> Class | None:
-    """The class the error text names, read only when no explicit field decided it."""
+    """The class the start of the error text names, read only when no explicit field decided it."""
     if text is None:
         return None
-    status = _status_in(text)
-    if status in {401, 403}:
-        return Class(name="auth", cause=str(status))
-    limited = _marker(text, _LIMIT_MARKERS)
-    if limited is not None:
-        return Class(name="plan.usage_limit", cause=limited)
-    if status == 429:
-        return Class(name="plan.usage_limit", cause="429")
-    transient = _marker(text, _TRANSIENT_MARKERS)
-    if transient is not None:
-        return Class(name="infra.transient", cause=transient)
-    if _server_error(status):
-        return Class(name="infra.transient", cause=str(status))
+    wrapped = _WRAPPER.match(text)
+    start = text[wrapped.end() :] if wrapped is not None else text
+    found = _STATUS_AT_START.match(start)
+    if found is not None:
+        status = int(found.group(1))
+        if status in {401, 403}:
+            return Class(name="auth", cause=str(status))
+        if status == 429:
+            return Class(name="plan.usage_limit", cause="429")
+        if _server_error(status):
+            return Class(name="infra.transient", cause=str(status))
+        return None
+    body = _ERROR_BODY_AT_START.match(start)
+    if body is not None and body.group(1) in _LIMIT_BODY_TYPES:
+        return Class(name="plan.usage_limit", cause=body.group(1))
+    if body is not None and body.group(1) in _TRANSIENT_BODY_TYPES:
+        return Class(name="infra.transient", cause=body.group(1))
+    if _USAGE_LIMIT_AT_START.match(start) is not None:
+        return Class(name="plan.usage_limit", cause="usage_limit_phrase")
     return None
 
 
@@ -132,22 +146,6 @@ def _spend_cause(text: str | None, code: str | None) -> str | None:
             return _SPEND_CODE
         if any(phrase in value for phrase in _SPEND_PHRASES):
             return _SPEND_PHRASE
-    return None
-
-
-def _status_in(text: str) -> int | None:
-    found = _STATUS_IN_TEXT.search(text)
-    return int(found.group(1)) if found is not None else None
-
-
-def _marker(text: str | None, markers: tuple[tuple[str, str], ...]) -> str | None:
-    """The token of the first marker found in ``text``, ignoring case."""
-    if text is None:
-        return None
-    folded = text.casefold()
-    for marker, token in markers:
-        if marker in folded:
-            return token
     return None
 
 

@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from coral.bridge.bound_sessions import BoundSessions
 from coral.bridge.codec import decode_entries
 from coral.bridge.executors import (
     DECISION_THREAD_NAME,
@@ -28,7 +29,7 @@ from coral.bridge.executors import (
     BridgeThreads,
     bridge_hold_policy,
 )
-from coral.bridge.mapping import RUN_RESYNC, TIMER
+from coral.bridge.mapping import RUN_RESYNC, TIMER, TURN_FACT
 from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import EngineBridge
 from coral.db import WorkRow
@@ -42,6 +43,7 @@ from coral.omni.server import plugin as plugin_module
 from coral.omni.server.dispatch import OmnigentSessionDispatch
 from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
 from coral.omni.server.sessions import RUN_ID_LABEL_KEY, OmnigentSessionFacade
+from coral.omni.server.turn_facts import BoundSessionRefresher, TurnFactRecorder
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue import executors as queue_executors
 from coral.queue.executors import (
@@ -118,12 +120,13 @@ ENGINE_EFFECT_TYPES = frozenset(
         WORKSPACE_COMMIT,
         WORKSPACE_SALVAGE,
         WORKSPACE_RESET,
+        TURN_FACT,
     }
 )
 # The bridge's own executors: they need only the Coral stores.
 BRIDGE_EFFECT_TYPES = frozenset({TIMER, RUN_RESYNC})
-# The status-edge observer and the confirmed-stop record's observer.
-ENGINE_OBSERVERS = frozenset({"coral", "coral.confirmed_stops"})
+# The status-edge observer, the confirmed-stop record's observer and the turn-fact recorder.
+ENGINE_OBSERVERS = frozenset({"coral", "coral.confirmed_stops", "coral.turn_facts"})
 NOTHING: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
 ENGINE_TOOL_NAMES = frozenset(decl.name for decl in ENGINE_TOOLS)
 
@@ -320,6 +323,7 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
             state = server.app.state
             assert observers["coral"] == state.coral_status_edges.observe
             assert observers["coral.confirmed_stops"] == state.coral_confirmed_stops.observe
+            assert observers["coral.turn_facts"] == state.coral_turn_fact_recorder.observe
             # Only cancel_sessions runs for a run that already ended (cancel_run ends it).
             registrations = {kind: get_registration(kind) for kind in ENGINE_EFFECT_TYPES}
             assert {
@@ -825,6 +829,75 @@ async def test_each_lifespan_guards_bound_sessions_through_its_own_run_store_onl
         set_status(run_store, run.id, RunStatus.PAUSED)
         unguarded = await bash(session_id)
         assert unguarded.action == PolicyAction.ALLOW
+
+
+@pytest.mark.usefixtures("no_engine_resync")
+async def test_the_lifespan_records_the_turn_ends_of_bound_sessions_from_a_refreshed_index(
+    server: _Server,
+) -> None:
+    await asyncio.to_thread(ensure_coral_schema, server.db_uri)
+    run_store = SqlAlchemyCoralRunStore(server.db_uri)
+    run = run_store.start_run(
+        RunStartSpec("wf", "v1", "Run", "", workspace_id=DEFAULT_WORKSPACE_ID)
+    )
+    _, version = run_store.load_run_state(run.id, workspace_id=DEFAULT_WORKSPACE_ID)
+    run_store.apply_transition(
+        run.id,
+        version,
+        Transition(status=int(RunStatus.RUNNING)),
+        workspace_id=DEFAULT_WORKSPACE_ID,
+    )
+    session_id = "f" * 32
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    bindings.reserve(
+        SessionBindingDraft(
+            workspace_id=DEFAULT_WORKSPACE_ID,
+            session_id=session_id,
+            run_id=run.id,
+            role="step",
+            effect_key=f"{run.id}:2:create_session:work||:0",
+            slot_id="work||:0",
+            slot_role="step_agent",
+            session_generation=1,
+        )
+    )
+    bindings.record_progress(DEFAULT_WORKSPACE_ID, session_id, SessionBindingProgress.ROW_CREATED)
+    queue_store = SqlAlchemyCoralQueueStore(server.db_uri)
+
+    async with coral_lifespan(server.app, server.services):
+        state = server.app.state
+        index = state.coral_bound_sessions
+        recorder = state.coral_turn_fact_recorder
+        refresher = state.coral_bound_session_refresher
+        assert isinstance(index, BoundSessions) and isinstance(recorder, TurnFactRecorder)
+        assert isinstance(refresher, BoundSessionRefresher) and not refresher.stopped
+        assert state.coral_engine_bridge.bound_sessions is index
+        # The index was filled at start, before any create fed it.
+        bound = index.lookup(DEFAULT_WORKSPACE_ID, session_id)
+        assert bound is not None and (bound.run_id, bound.engine_slot_id) == (run.id, "work||:0")
+        session_live_state.notify_status_edge(
+            session_live_state.SessionStatusEdge(
+                session_id=session_id,
+                status="idle",
+                previous_status="running",
+                turn_outcome="completed",
+                workspace_id=DEFAULT_WORKSPACE_ID,
+                observed_at_ms=1_700_000_000_000,
+            )
+        )
+        await asyncio.to_thread(recorder.wait_idle)
+        signal = WorkItemDraft.signal(
+            run_id=run.id,
+            idempotency_key=f"sig:{session_id}:unknown:idle:1700000000000",
+            payload="",
+        )
+        assert recorder.written == 1
+
+    assert refresher.stopped and recorder.closed
+    assert "coral.turn_facts" not in session_live_state._status_edge_observers
+    [row] = queue_store.get_work([signal.id], workspace_id=DEFAULT_WORKSPACE_ID)
+    payload = json.loads(row.payload)
+    assert (payload["effect_type"], payload["session_id"]) == ("turn_fact", session_id)
 
 
 @pytest.mark.parametrize("missing", ["session_event_dispatch", "project_store"])

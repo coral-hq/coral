@@ -26,7 +26,7 @@ from coral.bridge.mapping import (
     timer_draft,
 )
 from coral.bridge.projection import project_run, project_slots
-from coral.db.enum_codecs import RunStatus
+from coral.db.enum_codecs import RUN_PAUSE_REASON, RunStatus
 from coral.engine import types as engine
 from coral.model.ir import CompiledGraph
 from coral.recovery.drift import DriftCause
@@ -37,7 +37,6 @@ _logger = logging.getLogger(__name__)
 # Executors refuse with these while a run is paused or drifted; a resume releases them.
 DRIFT_EFFECT_CODES = tuple(f"drift.{cause}" for cause in get_args(DriftCause))
 RESUME_RELEASE_CODES = ("run.paused", *DRIFT_EFFECT_CODES)
-_SETTLED = frozenset({"paused", *engine.TERMINAL_STATUSES})
 
 
 @dataclass(frozen=True)
@@ -103,8 +102,10 @@ def build_commit(
     The transition that records ``applied`` against ``snapshot``; empty when it changes nothing.
 
     A commit whose entries are all refused and that changes nothing else is empty.
-    A run row paused outside the engine (its engine state runs) keeps that pause
-    unless ``lift_store_pause``, which only a resume passes.
+    A run row paused while its engine ran keeps that pause and its reason, also when the
+    engine then pauses, unless ``lift_store_pause``, which only a resume passes. A row
+    that shows the engine's own pause follows the engine: a resume, a retry or a plan
+    probe that clears it also lifts the row's.
 
     :raises TransitionTooLarge: when the rows exceed the store's cap after timer
         rows, which the resync adds again, were dropped.
@@ -140,11 +141,24 @@ def build_commit(
 
     now_s = epoch_seconds(now)
     projected = project_run(run, final, now=now_s)
-    lifted = lift_store_pause and run.status == int(RunStatus.PAUSED) and final.status == "running"
-    if run.status == int(RunStatus.PAUSED) and final.status not in _SETTLED and not lifted:
-        # Paused by the store only: the engine runs, but the row stays paused.
+    row_paused = run.status == int(RunStatus.PAUSED)
+    lifted = lift_store_pause and row_paused and final.status == "running"
+    # The row shows the engine's pause when its reason is the engine's first cause.
+    engine_owned = (
+        first.status == "paused"
+        and bool(first.causes)
+        and run.pause_reason == RUN_PAUSE_REASON[first.causes[0].reason]
+    )
+    # The row's own pause stands: made while the engine ran, or it is not the pause the
+    # engine is leaving now. A row showing another engine cause is repaired instead.
+    row_only = (
+        row_paused
+        and not lifted
+        and (first.status != "paused" or (final.status == "running" and not engine_owned))
+    )
+    if row_only and final.status not in engine.TERMINAL_STATUSES:
         projected = replace(projected, status=None, pause_reason=None, clear_pause_reason=False)
-    resumed = (first.status == "paused" and final.status == "running") or lifted
+    resumed = not row_only and final.status == "running" and (first.status == "paused" or lifted)
     release = tuple(
         dict.fromkeys((*(RESUME_RELEASE_CODES if resumed else ()), *release_held_codes))
     )

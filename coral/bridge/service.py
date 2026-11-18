@@ -16,9 +16,11 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 import zstandard
 
+from coral.bridge.bound_sessions import BoundSessions, created_session
 from coral.bridge.codec import EngineLogDecodeError, decode_entries
 from coral.bridge.commit import (
     RESUME_RELEASE_CODES,
@@ -44,7 +46,7 @@ from coral.bridge.config import (
 from coral.bridge.feedback import feedback_input, finished_from_row
 from coral.bridge.fold import EngineStateCache
 from coral.bridge.graphs import PinnedGraphError, PinnedGraphs
-from coral.bridge.keys import anchor_effect_key, effect_work_id
+from coral.bridge.keys import anchor_effect_key, effect_work_id, slot_session_id
 from coral.bridge.mapping import (
     FED_KINDS,
     MapContext,
@@ -52,12 +54,16 @@ from coral.bridge.mapping import (
     UnsupportedStance,
     anchor_create_draft,
     map_effect,
+    regather_key,
     resync_draft,
     timer_draft,
+    turn_signal_draft,
 )
 from coral.db.enum_codecs import ActorKind, LogKind, RunPauseReason, RunStatus, WorkStatus
 from coral.engine import transition
 from coral.engine import types as engine
+from coral.engine.facts import TurnFact
+from coral.engine.reconcile import awaiting_effect, reconcile
 from coral.queue.drainer import FinishedWork
 from coral.queue.run_effects import describe_exception
 from coral.recovery.pause import pause_log_checksum, pause_run_once
@@ -104,6 +110,9 @@ _START_SCAN_ROWS = 8
 
 Inputs = Callable[[EngineSnapshot], Sequence[engine.Input]]
 Extras = Callable[[EngineSnapshot, Sequence[Applied]], CommitExtras]
+# ``applied``: the fact's inputs were committed; ``awaiting_effect``: its slot waits on
+# a leased effect, so nothing was written; ``no_input``: the fact changes nothing.
+TurnFactResult = Literal["applied", "awaiting_effect", "no_input"]
 
 
 class RunNotRunnable(ValueError):
@@ -158,6 +167,7 @@ class ResyncReport:
     timers: int = 0
     released: bool = False
     repaired: bool = False
+    regathered: int = 0
 
 
 class EngineBridge:
@@ -175,11 +185,17 @@ class EngineBridge:
         clock: Callable[[], datetime] = utc_now,
         fold_cache_size: int = FOLD_CACHE_RUNS,
         fold_cache_bytes: int = FOLD_CACHE_BYTES,
+        bound_sessions: BoundSessions | None = None,
     ) -> None:
+        """
+        :param bound_sessions: The status-edge recorder's index; each completed create's
+            session is pushed into it.
+        """
         self._runs = run_store
         self._queue = queue_store
         self._versions = versions
         self._clock = clock
+        self._bound = bound_sessions
         self._graphs = PinnedGraphs(versions, max_entries=fold_cache_size)
         self._states = EngineStateCache(
             run_store, max_runs=fold_cache_size, max_bytes=fold_cache_bytes
@@ -195,6 +211,10 @@ class EngineBridge:
     @property
     def versions(self) -> SqlAlchemyWorkflowVersionStore:
         return self._versions
+
+    @property
+    def bound_sessions(self) -> BoundSessions | None:
+        return self._bound
 
     def now(self) -> datetime:
         return self._clock()
@@ -549,8 +569,10 @@ class EngineBridge:
         Fold a finished row's outcome into its run; rows the engine does not track are skipped.
 
         A contended commit is left to the resync, which feeds it from the stored row. A
-        failure whose row a resume has revived since is not fed.
+        failure whose row a resume has revived since is not fed. A completed create's
+        session goes into the bound-session index.
         """
+        self._index_created(finished)
         command = feedback_input(finished)
         if command is None:
             return
@@ -570,6 +592,38 @@ class EngineBridge:
             )
         except EngineLoadFailed:
             return
+
+    def _index_created(self, finished: FinishedWork) -> None:
+        if self._bound is None:
+            return
+        created = created_session(finished)
+        if created is not None:
+            self._bound.push(*created)
+
+    def apply_turn_fact(self, *, workspace_id: int, run_id: str, fact: TurnFact) -> TurnFactResult:
+        """
+        Reconcile one gathered turn fact and commit its inputs.
+
+        A slot still waiting on its leased effect (a create, send or nudge without a
+        receipt) writes nothing: the caller holds the signal and gathers again after the
+        receipt. A fact whose key is receipted, or whose inputs the engine refuses,
+        changes nothing.
+
+        :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
+        :raises RunContended: when other commits kept winning.
+        """
+        awaiting = [False]
+
+        def inputs(snapshot: EngineSnapshot) -> tuple[engine.Input, ...]:
+            awaiting[0] = awaiting_effect(snapshot.state, fact.slot_id)
+            if awaiting[0]:
+                return ()
+            return reconcile(snapshot.state, [fact], self._clock(), snapshot.config)
+
+        commit = self.commit_inputs(workspace_id=workspace_id, run_id=run_id, inputs=inputs)
+        if awaiting[0]:
+            return "awaiting_effect"
+        return "applied" if commit.outcome.applied else "no_input"
 
     # ── repair ───────────────────────────────────────────────────────────────
 
@@ -595,7 +649,8 @@ class EngineBridge:
         Starts a run whose ``StartRun`` was lost; feeds finished rows of unreceipted
         effects and queues missing ones (never reviving one: only a resume does);
         restores and revives timer rows of armed timers; releases holds of a running
-        run; and writes the projection when the rows differ from it.
+        run; re-gathers the turn facts of its working slots, so a lost status edge is
+        recovered; and writes the projection when the rows differ from it.
 
         :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
         """
@@ -644,7 +699,41 @@ class EngineBridge:
             timers=timers,
             released=held and repair.outcome.applied,
             repaired=repair.outcome.applied,
+            regathered=self._regather(snapshot),
         )
+
+    def _regather(self, snapshot: EngineSnapshot) -> int:
+        """
+        Queue a re-gather signal for each working slot of a running run, once per bucket.
+
+        A slot waiting on its leased effect is skipped: its receipt comes first. A
+        paused run is not re-gathered; its resume re-prompts what failed.
+        """
+        state, run = snapshot.state, snapshot.store.run
+        if state.status != "running" or snapshot.store.status != int(RunStatus.RUNNING):
+            return 0
+        now_s = epoch_seconds(self._clock())
+        drafts: list[WorkItemDraft] = []
+        for slot in state.slots:
+            if slot.status != "working" or awaiting_effect(state, slot.id):
+                continue
+            session_id = slot_session_id(run.workspace_id, state, slot.id)
+            if session_id is None:
+                continue
+            drafts.append(
+                turn_signal_draft(
+                    run_id=run.id,
+                    session_id=session_id,
+                    engine_slot_id=slot.id,
+                    generation=slot.session_generation,
+                    idempotency_key=regather_key(session_id, now_s),
+                    edge=None,
+                    available_at=now_s,
+                )
+            )
+        if drafts:
+            self._queue.enqueue_work(drafts, workspace_id=run.workspace_id, now=now_s)
+        return len(drafts)
 
     def _repair_effects(self, snapshot: EngineSnapshot) -> tuple[int, int, list[WorkItem]]:
         """Queue missing rows of unreceipted effects and the anchor; feed finished ones."""
@@ -690,7 +779,9 @@ class EngineBridge:
             if row.status == int(WorkStatus.ABANDONED):
                 _logger.debug("Coral run %s has abandoned work %s", run.id, row.id)
                 continue
-            command = feedback_input(finished_from_row(row))
+            outcome = finished_from_row(row)
+            self._index_created(outcome)
+            command = feedback_input(outcome)
             if command is not None:
                 fed.append(_Fed(row.id, row.status == int(WorkStatus.FAILED), command))
         for start in range(0, len(fed), FEED_BATCH):
@@ -761,4 +852,5 @@ __all__ = [
     "EngineLoadFailed",
     "ResyncReport",
     "RunNotRunnable",
+    "TurnFactResult",
 ]

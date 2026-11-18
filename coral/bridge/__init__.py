@@ -10,6 +10,8 @@ import importlib
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from coral.bridge.bound_sessions import BoundSession as BoundSession
+    from coral.bridge.bound_sessions import BoundSessions as BoundSessions
     from coral.bridge.codec import EngineLogDecodeError as EngineLogDecodeError
     from coral.bridge.codec import decode_entries as decode_entries
     from coral.bridge.codec import entry_draft as entry_draft
@@ -26,6 +28,7 @@ if TYPE_CHECKING:
     from coral.bridge.executors import bridge_hold_policy as bridge_hold_policy
     from coral.bridge.executors import run_resync_executor as run_resync_executor
     from coral.bridge.executors import timer_executor as timer_executor
+    from coral.bridge.executors import turn_fact_executor as turn_fact_executor
     from coral.bridge.fold import EngineStateCache as EngineStateCache
     from coral.bridge.fold import FoldedRun as FoldedRun
     from coral.bridge.graphs import PinnedGraphError as PinnedGraphError
@@ -46,6 +49,8 @@ if TYPE_CHECKING:
     from coral.bridge.start import start_engine_run as start_engine_run
 
 _MODULES: dict[str, str] = {
+    "BoundSession": "coral.bridge.bound_sessions",
+    "BoundSessions": "coral.bridge.bound_sessions",
     "EngineLogDecodeError": "coral.bridge.codec",
     "Applied": "coral.bridge.commit",
     "CommitExtras": "coral.bridge.commit",
@@ -62,6 +67,7 @@ _MODULES: dict[str, str] = {
     "bridge_hold_policy": "coral.bridge.executors",
     "run_resync_executor": "coral.bridge.executors",
     "timer_executor": "coral.bridge.executors",
+    "turn_fact_executor": "coral.bridge.executors",
     "EngineStateCache": "coral.bridge.fold",
     "FoldedRun": "coral.bridge.fold",
     "PinnedGraphError": "coral.bridge.graphs",

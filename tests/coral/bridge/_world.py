@@ -23,6 +23,7 @@ from typing import Any
 
 from sqlalchemy import create_engine
 
+from coral.bridge.bound_sessions import BoundSessions
 from coral.bridge.codec import decode_entries
 from coral.bridge.config import ENGINE_LOG_PAGE, freeze_engine_config
 from coral.bridge.executors import (
@@ -30,9 +31,10 @@ from coral.bridge.executors import (
     bridge_hold_policy,
     run_resync_executor,
     timer_executor,
+    turn_fact_executor,
 )
 from coral.bridge.keys import slot_session_id
-from coral.bridge.mapping import RUN_RESYNC, TIMER
+from coral.bridge.mapping import RUN_RESYNC, TIMER, TURN_FACT
 from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import BridgeCommit, EngineBridge
 from coral.bridge.start import start_engine_run
@@ -43,6 +45,7 @@ from coral.engine.machines.slot import find_slot
 from coral.engine.types import RunState, TurnEnded
 from coral.model.ids import derived_id
 from coral.omni.protocols import SessionCreateRequest, SessionRef, SessionState
+from coral.omni.server.turn_facts import TurnFactRecorder
 from coral.queue import FinishedWork, SqlAlchemyCoralQueueStore
 from coral.queue.drainer import WorkDrainer
 from coral.queue.executors import EffectExecutor, register_executor, unregister_executor
@@ -77,6 +80,7 @@ from coral.tools.dispatch import EngineToolCall, ToolDispatcher
 from coral.tools.handlers import PLANNERS
 from coral.tools.schemas import ToolReply
 from coral.workspace.run_worktree import run_branch_name
+from omnigent.server.session_live_state import SessionStatusEdge
 from tests.coral.omni.fakes import FakeSessionFacade
 from tests.coral.slots._close_fakes import FakeDispatch, FakeEdgeWatcher, FakeStableIds
 from tests.coral.workflow_builders import compile_text, fixture_text
@@ -123,6 +127,8 @@ class World:
     versions: SqlAlchemyWorkflowVersionStore
     clock: ManualClock
     bridge: EngineBridge
+    # The bridge's bound-session index, which its create feedback fills.
+    bound: BoundSessions
     # The database of a SQL world; ``None`` on the in-memory stores.
     db_uri: str | None = None
 
@@ -154,9 +160,22 @@ class World:
         db_uri: str | None = None,
     ) -> World:
         clock = ManualClock()
-        bridge = EngineBridge(run_store=runs, queue_store=queue, versions=versions, clock=clock)
+        bound = BoundSessions()
+        bridge = EngineBridge(
+            run_store=runs,
+            queue_store=queue,
+            versions=versions,
+            clock=clock,
+            bound_sessions=bound,
+        )
         return cls(
-            runs=runs, queue=queue, versions=versions, clock=clock, bridge=bridge, db_uri=db_uri
+            runs=runs,
+            queue=queue,
+            versions=versions,
+            clock=clock,
+            bridge=bridge,
+            bound=bound,
+            db_uri=db_uri,
         )
 
     def run(self, run_id: str) -> CoralRun:
@@ -405,7 +424,8 @@ class Sessions:
 
     The drainer runs every work kind on the world's clock, with the bridge's hold
     policy and its finished hook; ``before_feed`` runs first for each finished row.
-    The engine tools are decided by the store port through the real dispatcher.
+    The engine tools are decided by the store port through the real dispatcher. Status
+    edges go through the turn-fact recorder over the world's bound-session index.
     """
 
     world: World
@@ -420,6 +440,7 @@ class Sessions:
     agents: StanceAgents
     threads: BridgeThreads
     dispatcher: ToolDispatcher
+    recorder: TurnFactRecorder
     drainer: WorkDrainer = field(init=False)
     before_feed: Callable[[FinishedWork], Awaitable[None]] | None = None
 
@@ -467,6 +488,16 @@ class Sessions:
             ),
             TIMER: timer_executor(self.threads),
             RUN_RESYNC: run_resync_executor(self.threads),
+            TURN_FACT: turn_fact_executor(
+                self.threads,
+                bindings=self.bindings,
+                dispatch=self.dispatch,
+                transcripts=self.dispatch,
+                stable_ids=self.stable_ids,
+                facade=self.facade,
+                drift=pauser,
+                scope_runner=scope,
+            ),
         }
 
     async def drain(self) -> int:
@@ -498,6 +529,47 @@ class Sessions:
         session_id = slot_session_id(WORKSPACE, state, engine_slot_id)
         assert session_id is not None, f"slot {engine_slot_id} has no session"
         return session_id
+
+    def publish(self, run_id: str, engine_slot_id: str, status: str, **fields: Any) -> None:
+        """
+        Publish one status edge of the slot's session, as the server does, and wait for its row.
+
+        The session's live status follows the edge; the edge's time is the world's clock.
+        """
+        session_id = self.session_of(run_id, engine_slot_id)
+        fields.setdefault("observed_at_ms", int(self.world.clock.now.timestamp() * 1000))
+        fields.setdefault("origin", "relayed_runner_status")
+        self.dispatch.sessions[session_id].status = status
+        self.recorder.observe(
+            SessionStatusEdge(
+                session_id=session_id,
+                status=status,
+                previous_status="running",
+                workspace_id=WORKSPACE,
+                **fields,
+            )
+        )
+        self.recorder.wait_idle()
+
+    def complete_turn(self, run_id: str, engine_slot_id: str, **fields: Any) -> None:
+        """The slot's agent replies and its turn completes without a handoff."""
+        self.dispatch.reply(self.session_of(run_id, engine_slot_id))
+        fields.setdefault("turn_outcome", "completed")
+        self.publish(run_id, engine_slot_id, "idle", **fields)
+
+    def fail_turn(
+        self, run_id: str, engine_slot_id: str, message: str, *, code: str = "RuntimeError"
+    ) -> None:
+        """The slot's turn fails as claude-sdk reports it: a code and the error text."""
+        self.publish(
+            run_id,
+            engine_slot_id,
+            "failed",
+            turn_outcome="failed",
+            error_code=code,
+            error_message=message,
+            failure_origin="relayed_runner_status",
+        )
 
     def end_turn(self, run_id: str, engine_slot_id: str) -> BridgeCommit:
         """
@@ -531,14 +603,15 @@ async def serving(world: World) -> AsyncIterator[Sessions]:
         bindings: FakeBindings | SqlAlchemySessionBindingStore = FakeBindings(
             run_store=world.runs, clock=lambda: world.clock.epoch, reservable=True
         )
-        stable_ids: StableIds = FakeStableIds(events)
+        stable_ids: StableIds = FakeStableIds(events, clock=lambda: world.clock.epoch)
         intents: WorkspaceOpIntents = FakeIntents(events)
     else:
         bindings = SqlAlchemySessionBindingStore(world.db_uri)
-        stable_ids = SqlAlchemyStableIdStore(world.db_uri)
+        stable_ids = SqlAlchemyStableIdStore(world.db_uri, clock=lambda: world.clock.epoch)
         intents = SqlAlchemyWorkspaceOpIntentStore(world.db_uri)
     dispatch = FakeDispatch(events, owner=USER)
     threads = BridgeThreads(world.bridge)
+    recorder = TurnFactRecorder(world.bound, world.queue, clock=lambda: world.clock.epoch)
     sessions = Sessions(
         world=world,
         events=events,
@@ -552,8 +625,10 @@ async def serving(world: World) -> AsyncIterator[Sessions]:
         agents=StanceAgents(),
         threads=threads,
         dispatcher=ToolDispatcher(StoreDecisionPort(world.bridge), PLANNERS),
+        recorder=recorder,
     )
     executors = sessions.executors()
+    recorder.start()
     try:
         for effect_type, executor in executors.items():
             register_executor(
@@ -566,6 +641,7 @@ async def serving(world: World) -> AsyncIterator[Sessions]:
     finally:
         for effect_type, executor in executors.items():
             unregister_executor(effect_type, executor)
+        recorder.close()
         threads.close()
 
 

@@ -40,6 +40,7 @@ from coral.engine.types import (
     ResumeRun,
     SessionFailed,
     StartRun,
+    Timer,
     TimerDue,
 )
 from coral.recovery.drift import DriftFinding, drift_log_checksum
@@ -262,6 +263,101 @@ def test_a_pause_made_outside_the_engine_stays_until_a_resume_lifts_it(world: Wo
     lifted = _build(world, run.id, ResumeRun(), lift_store_pause=True)
     assert (lifted.status, lifted.clear_pause_reason) == (int(RunStatus.RUNNING), True)
     assert "run.paused" in lifted.release_held_codes
+
+
+def test_an_engine_that_runs_again_on_its_own_lifts_the_rows_pause(world: World) -> None:
+    run_id = _working(world)
+    limited = SessionFailed(
+        slot_id=IMPLEMENT,
+        failure_class="plan.usage_limit",
+        cause="429",
+        fact_key="turn:s:1:msg:m1",
+    )
+    _commit(world, run_id, limited)
+    assert world.run(run_id).pause_reason == int(RunPauseReason.PLAN_LIMIT)
+    [probe] = world.bridge.load(workspace_id=WORKSPACE, run_id=run_id).state.timers
+    world.clock.now = probe.due_at
+
+    # The plan probe clears the engine's own pause: the row follows it.
+    cleared = _build(world, run_id, TimerDue(timer_key=probe.key))
+
+    assert (cleared.status, cleared.clear_pause_reason) == (int(RunStatus.RUNNING), True)
+    assert "run.paused" in cleared.release_held_codes
+
+
+def _plan_limited(world: World) -> tuple[str, Timer]:
+    """A working run paused ``plan_limit`` by a 429, and the probe that will clear it."""
+    run_id = _working(world)
+    limited = SessionFailed(
+        slot_id=IMPLEMENT,
+        failure_class="plan.usage_limit",
+        cause="429",
+        fact_key="turn:s:1:msg:m1",
+    )
+    _commit(world, run_id, limited)
+    [probe] = world.bridge.load(workspace_id=WORKSPACE, run_id=run_id).state.timers
+    return run_id, probe
+
+
+def test_a_drift_found_under_a_plan_pause_keeps_the_row_paused_when_the_probe_clears(
+    world: World,
+) -> None:
+    run_id, probe = _plan_limited(world)
+    world.bridge.pause_for_drift(
+        workspace_id=WORKSPACE,
+        run_id=run_id,
+        cause="session_archived",
+        body={"kind": "pause_run", "reason": "drift", "cause": "session_archived"},
+        checksum_parts=("coral-drift", run_id, "session_archived", "s" * 32),
+        now_us=0,
+    )
+    world.clock.now = probe.due_at
+
+    cleared = _build(world, run_id, TimerDue(timer_key=probe.key))
+
+    # The engine is still paused by the drift: the row stays paused, now showing the
+    # drift, and nothing is released.
+    assert (cleared.status, cleared.pause_reason, cleared.clear_pause_reason) == (
+        None,
+        int(RunPauseReason.DRIFT),
+        False,
+    )
+    assert (cleared.release_held_codes, cleared.revive_work_ids) == ((), ())
+
+
+def test_a_pause_made_on_the_row_alone_outlives_an_engine_pause_and_its_clearing(
+    world: World,
+) -> None:
+    run_id = _working(world)
+    runs = world.runs
+    assert isinstance(runs, FakeRunStore)
+    runs.runs[(WORKSPACE, run_id)] = dataclasses.replace(
+        runs.runs[(WORKSPACE, run_id)],
+        status=int(RunStatus.PAUSED),
+        pause_reason=int(RunPauseReason.FAILURE_PATH),
+    )
+    limited = SessionFailed(
+        slot_id=IMPLEMENT,
+        failure_class="plan.usage_limit",
+        cause="429",
+        fact_key="turn:s:1:msg:m1",
+    )
+    _commit(world, run_id, limited)
+    # The engine's own pause does not take over the row's reason.
+    assert world.run(run_id).pause_reason == int(RunPauseReason.FAILURE_PATH)
+    [probe] = world.bridge.load(workspace_id=WORKSPACE, run_id=run_id).state.timers
+    world.clock.now = probe.due_at
+
+    cleared = _build(world, run_id, TimerDue(timer_key=probe.key))
+    lifted = _build(world, run_id, ResumeRun(), lift_store_pause=True)
+
+    assert (cleared.status, cleared.pause_reason, cleared.clear_pause_reason) == (
+        None,
+        None,
+        False,
+    )
+    assert (cleared.release_held_codes, cleared.revive_work_ids) == ((), ())
+    assert (lifted.status, lifted.clear_pause_reason) == (int(RunStatus.RUNNING), True)
 
 
 # ── commands ─────────────────────────────────────────────────────────────────

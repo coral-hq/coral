@@ -12,9 +12,11 @@ import pytest
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 
+from coral.bridge.mapping import edge_signal_key, regather_key, turn_signal_draft
 from coral.db import WorkflowVersionRow
-from coral.db.enum_codecs import ActorKind, LogKind, RunStatus, WorkStatus
+from coral.db.enum_codecs import ActorKind, LogKind, RunStatus, WorkKind, WorkStatus
 from coral.queue import SqlAlchemyCoralQueueStore
+from coral.signals.turn_facts import EdgeFacts
 from coral.stores.fakes import FakeQueueStore, FakeRunStore
 from coral.stores.protocols import (
     CommitOutcome,
@@ -533,3 +535,37 @@ def test_pinned_version_round_trips_and_racing_pins_store_one_row(coral_db_uri: 
     with engine.connect() as connection:
         count = connection.execute(select(func.count()).select_from(WorkflowVersionRow))
         assert count.scalar_one() == 1
+
+
+def test_a_turn_signal_is_written_once_per_edge_and_once_per_re_gather_bucket(
+    stores: Stores,
+) -> None:
+    run = _start(stores)
+    session_id = "s" * 32
+    edge = EdgeFacts(status="failed", observed_at_ms=NOW * 1000, turn_outcome="failed")
+
+    def signal(key: str, facts: EdgeFacts | None) -> WorkItemDraft:
+        return turn_signal_draft(
+            run_id=run.id,
+            session_id=session_id,
+            engine_slot_id="implement||:0",
+            generation=1,
+            idempotency_key=key,
+            edge=facts,
+            available_at=NOW,
+        )
+
+    first = signal(edge_signal_key(session_id, edge), edge)
+    repeat = signal(edge_signal_key(session_id, edge), edge)
+    later_edge = dataclasses.replace(edge, observed_at_ms=NOW * 1000 + 1)
+    later = signal(edge_signal_key(session_id, later_edge), later_edge)
+    bucket = signal(regather_key(session_id, NOW), None)
+    same_bucket = signal(regather_key(session_id, NOW + 299 - NOW % 300), None)
+    for draft in (first, repeat, later, bucket, same_bucket):
+        stores.queue.enqueue_work([draft], workspace_id=WORKSPACE, now=NOW)
+
+    ids = {first.id, repeat.id, later.id, bucket.id, same_bucket.id}
+    rows = stores.queue.get_work(sorted(ids), workspace_id=WORKSPACE)
+    assert (len(ids), len(rows)) == (3, 3)
+    assert {row.kind for row in rows} == {int(WorkKind.SIGNAL)}
+    assert all(row.slot_generation == 1 for row in rows)

@@ -7,13 +7,19 @@ carry the store slot id and generation, so the drainer can fence stale work.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 
-from coral.bridge.config import MAX_PAYLOAD_BYTES, ceil_epoch_seconds, epoch_seconds
+from coral.bridge.config import (
+    MAX_PAYLOAD_BYTES,
+    REGATHER_BUCKET_S,
+    ceil_epoch_seconds,
+    epoch_seconds,
+)
 from coral.bridge.keys import (
     ORCHESTRATOR_GENERATION,
     ORCHESTRATOR_SLOT_ID,
@@ -32,6 +38,7 @@ from coral.engine import types as engine
 from coral.engine.machines.activation import find_activation
 from coral.engine.machines.slot import find_slot
 from coral.model.ir import CompiledGraph
+from coral.signals.turn_facts import EdgeFacts
 from coral.slots.executors import CANCEL_SESSIONS, CLOSE_SLOT, CREATE_SESSION, SEND_INPUT
 from coral.stores.protocols import WorkItemDraft
 from coral.tools.catalog import ORCHESTRATOR_STANCE, STEP_STANCES
@@ -51,6 +58,7 @@ UNMAPPED_KINDS: Mapping[str, str] = MappingProxyType(
 )
 TIMER = "timer"
 RUN_RESYNC = "run_resync"
+TURN_FACT = "turn_fact"
 # The idempotency key of a run's one recurring resync row.
 _RESYNC_KEY = "resync"
 _SCOPE_KEY_CHARS = 512
@@ -173,6 +181,59 @@ def resync_draft(run_id: str, *, available_at: int = 0) -> WorkItemDraft:
     )
 
 
+def edge_signal_key(session_id: str, edge: EdgeFacts) -> str:
+    """One signal per published edge: a repeat of the edge writes no second row."""
+    tail = edge.response_id or edge.origin
+    return f"sig:{session_id}:{tail}:{edge.status}:{edge.observed_at_ms}"
+
+
+def regather_key(session_id: str, now_s: int) -> str:
+    """One re-gather per session in each five-minute bucket."""
+    return f"sig:{session_id}:resync:{now_s // REGATHER_BUCKET_S}"
+
+
+def turn_signal_draft(
+    *,
+    run_id: str,
+    session_id: str,
+    engine_slot_id: str,
+    generation: int,
+    idempotency_key: str,
+    edge: EdgeFacts | None,
+    available_at: int,
+) -> WorkItemDraft:
+    """
+    The ``turn_fact`` signal of a session's turn end, or of a re-gather without an edge.
+
+    It is fenced by the slot's generation. An edge whose error text does not fit the
+    payload keeps a shorter message.
+    """
+    while True:
+        payload: dict[str, Any] = {
+            "effect_type": TURN_FACT,
+            "session_id": session_id,
+            "slot_id": store_slot_id(run_id, engine_slot_id),
+            "engine_slot_id": engine_slot_id,
+            "generation": generation,
+        }
+        if edge is not None:
+            payload["edge"] = edge.payload()
+        draft = WorkItemDraft.signal(
+            run_id=run_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            scope_key=engine_slot_id if len(engine_slot_id) <= _SCOPE_KEY_CHARS else None,
+            owner_key=slot_owner_key(run_id, engine_slot_id),
+            slot_generation=generation,
+            available_at=available_at,
+        )
+        fits = len(draft.payload.encode()) <= MAX_PAYLOAD_BYTES
+        if fits or edge is None or not edge.error_message:
+            return _checked(draft)
+        message = edge.error_message
+        edge = dataclasses.replace(edge, error_message=message[: len(message) // 2])
+
+
 def _create(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft:
     slot = find_slot(ctx.state, effect.subject)
     profile = slot.profile if slot is not None else str(effect.payload.get("profile", ""))
@@ -243,13 +304,17 @@ __all__ = [
     "FED_KINDS",
     "RUN_RESYNC",
     "TIMER",
+    "TURN_FACT",
     "UNMAPPED_KINDS",
     "MapContext",
     "MappedPayloadTooLarge",
     "UnsupportedStance",
     "anchor_create_draft",
+    "edge_signal_key",
     "map_effect",
     "orchestrator_create_draft",
+    "regather_key",
     "resync_draft",
     "timer_draft",
+    "turn_signal_draft",
 ]

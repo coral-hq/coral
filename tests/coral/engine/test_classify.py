@@ -106,7 +106,7 @@ _SDK_TEXT = "inner executor error: "
                 + 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}',
             },
             "infra.transient",
-            "overloaded_error",
+            "529",
         ),
         (
             {"error_code": "RuntimeError", "error_text": _SDK_TEXT + "API Error: 529 busy"},
@@ -114,10 +114,10 @@ _SDK_TEXT = "inner executor error: "
             "529",
         ),
         ({"error_text": "Error code: 529 - overloaded"}, "infra.transient", "529"),
-        ({"error_text": "upstream failed: status_code=503"}, "infra.transient", "503"),
-        ({"error_text": "upstream failed: status code 502"}, "infra.transient", "502"),
+        ({"error_text": "status_code=503 from upstream"}, "infra.transient", "503"),
+        ({"error_text": _SDK_TEXT + "status code 502 from upstream"}, "infra.transient", "502"),
         (
-            {"error_text": 'body {"type":"overloaded_error"}'},
+            {"error_text": '{"type":"error","error":{"type":"overloaded_error","message":"x"}}'},
             "infra.transient",
             "overloaded_error",
         ),
@@ -129,7 +129,7 @@ _SDK_TEXT = "inner executor error: "
             "429",
         ),
         (
-            {"error_text": 'body {"type":"rate_limit_error"}'},
+            {"error_text": _SDK_TEXT + '{"type": "error", "error": {"type": "rate_limit_error"}}'},
             "plan.usage_limit",
             "rate_limit_error",
         ),
@@ -162,6 +162,15 @@ def test_claude_sdk_shapes_map_to_their_class(
         "Error code:529",
         "status: 503",
         "API Error: 5290",
+        # Shapes quoted after the start, as a tool's output would be.
+        "Command failed: tool printed 'API Error: 401' in its output",
+        "Tool hook error: see status_code=429 in log",
+        "bash: grep usage limit reached in file",
+        "upstream failed: status_code=503",
+        'body {"type":"error","error":{"type":"overloaded_error"}}',
+        _SDK_TEXT + "the tool said API Error: 529",
+        # A status the shapes name but no class reads: the body's type is not read then.
+        'API Error: 400 {"type":"error","error":{"type":"rate_limit_error"}}',
     ],
 )
 def test_a_status_is_read_only_from_the_anchored_shapes(text: str) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from coral.bridge.config import epoch_us
 from coral.engine import types as engine
 from coral.engine.machines.slot import effect_seq
-from coral.model.ids import derived_id, effect_session_id
+from coral.model.ids import derived_id, effect_message_id, effect_session_id
 from coral.stores.protocols import WorkItemDraft
 
 # The orchestrator's binding slot; engine slot ids always contain ``|``, so it cannot collide.
@@ -54,10 +54,20 @@ def timer_work_key(timer: engine.Timer) -> str:
 
 def slot_create_key(state: engine.RunState, engine_slot_id: str) -> str | None:
     """The key of the slot's latest ``create_session`` effect, or ``None`` before it has one."""
+    return _latest_key(state, engine_slot_id, frozenset({"create_session"}))
+
+
+def slot_message_id(workspace_id: int, state: engine.RunState, engine_slot_id: str) -> str | None:
+    """The stable id of the slot's latest engine message (its brief or a nudge), if any."""
+    key = _latest_key(state, engine_slot_id, frozenset({"send_input", "nudge"}))
+    return None if key is None else effect_message_id(workspace_id, key)
+
+
+def _latest_key(state: engine.RunState, engine_slot_id: str, kinds: frozenset[str]) -> str | None:
     latest: str | None = None
     latest_seq = -1
     for effect in state.effects:
-        if effect.kind != "create_session" or effect.subject != engine_slot_id:
+        if effect.kind not in kinds or effect.subject != engine_slot_id:
             continue
         seq = effect_seq(effect)
         if latest is None or seq > latest_seq:
@@ -84,6 +94,7 @@ __all__ = [
     "orchestrator_effect_key",
     "roster_index",
     "slot_create_key",
+    "slot_message_id",
     "slot_owner_key",
     "slot_session_id",
     "store_activation_id",
