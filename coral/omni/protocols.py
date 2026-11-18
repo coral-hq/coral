@@ -458,7 +458,8 @@ class SessionEdgeWatcher(Protocol):
         ...
 
 
-# Receives each turn fact of a watched session; unset until signals persist them.
+# Receives each turn fact of a watched session; the server sets none (turn facts persist
+# through the ``coral.turn_facts`` observer).
 TurnFactSink = Callable[[TurnFact], None]
 # Runs before an engine message is sent; raises CoralSessionError to refuse it.
 PreSendHook = Callable[[PreSendRequest], Awaitable[None]]

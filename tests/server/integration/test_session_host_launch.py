@@ -171,7 +171,7 @@ async def _connect_host(
     :param app: The FastAPI app under test (its ``state.host_registry``
         is the same instance the session-create launch path reads).
     :param capabilities: Capability tokens for the hello, e.g.
-        ``["coral_runner:1"]``; ``None`` sends none.
+        ``["coral_runner:2"]``; ``None`` sends none.
     :returns: The connected ASGI communicator, ready to exchange frames.
     """
     path = f"/v1/hosts/{_HOST_ID}/tunnel"
