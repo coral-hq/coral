@@ -1,10 +1,11 @@
-"""The bridge in the drain pool: its executors, its hold policy and its thread pool.
+"""The bridge in the drain pool: its executors, its hold policy and its thread pools.
 
 Every bridge call is synchronous and may wait on the run row's lock, so async
 callers (executors, the finished hook, the resync reconciler, the drift pauser)
 run it on a dedicated bounded thread pool instead of the event loop's default
-executor. A call keeps running in its thread when its task is cancelled; bridge
-commits are idempotent, so a repeat is safe.
+executor; engine tool decisions get a smaller pool of their own. A call keeps
+running in its thread when its task is cancelled; bridge commits are idempotent,
+so a repeat is safe.
 """
 
 from __future__ import annotations
@@ -37,12 +38,62 @@ _logger = logging.getLogger(__name__)
 # Bridge calls in flight at once in one process.
 BRIDGE_THREADS = 8
 BRIDGE_THREAD_NAME = "coral-bridge"
+# Engine tool decisions in flight at once in one process, on a pool of their own.
+DECISION_THREADS = 4
+DECISION_THREAD_NAME = "coral-decision"
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
 
-class BridgeThreads:
+class PoolClosed(RuntimeError):
+    """The pool closed before the call ran, so nothing ran; the caller may try again."""
+
+
+class BoundedThreads:
+    """A bounded thread pool for blocking calls from the event loop; closed by its owner."""
+
+    def __init__(self, *, max_workers: int, thread_name_prefix: str) -> None:
+        self._pool = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix=thread_name_prefix
+        )
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    async def run(self, fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs) -> _T:
+        """``fn(*args, **kwargs)`` on the pool, in a copy of the caller's context.
+
+        :raises PoolClosed: when the pool closes while the call waits for a thread.
+        :raises RuntimeError: when the pool is already closed.
+        """
+        context = contextvars.copy_context()
+
+        def call() -> _T:
+            return context.run(fn, *args, **kwargs)
+
+        future = self._pool.submit(call)
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if future.cancelled() and self._closed and (task is None or not task.cancelling()):
+                raise PoolClosed("the call was dropped when its thread pool closed") from None
+            raise
+
+    def close(self) -> None:
+        """
+        Take no more calls; calls already running finish in their threads.
+
+        A call still waiting for a thread is dropped: its caller gets :class:`PoolClosed`.
+        """
+        self._closed = True
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+class BridgeThreads(BoundedThreads):
     """
     Runs the bridge's calls on its own bounded thread pool; owned and closed by the lifespan.
 
@@ -52,36 +103,12 @@ class BridgeThreads:
     """
 
     def __init__(self, bridge: EngineBridge, *, max_workers: int = BRIDGE_THREADS) -> None:
+        super().__init__(max_workers=max_workers, thread_name_prefix=BRIDGE_THREAD_NAME)
         self._bridge = bridge
-        self._pool = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix=BRIDGE_THREAD_NAME
-        )
-        self._closed = False
 
     @property
     def bridge(self) -> EngineBridge:
         return self._bridge
-
-    @property
-    def closed(self) -> bool:
-        return self._closed
-
-    async def run(self, fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs) -> _T:
-        """``fn(*args, **kwargs)`` on the pool, in a copy of the caller's context.
-
-        :raises RuntimeError: once the pool is closed.
-        """
-        context = contextvars.copy_context()
-
-        def call() -> _T:
-            return context.run(fn, *args, **kwargs)
-
-        return await asyncio.get_running_loop().run_in_executor(self._pool, call)
-
-    def close(self) -> None:
-        """Take no more calls; calls already running finish in their threads."""
-        self._closed = True
-        self._pool.shutdown(wait=False, cancel_futures=True)
 
     async def feed(self, finished: FinishedWork) -> None:
         """The drainer's finished hook: fold the row's outcome into its run."""
@@ -239,7 +266,11 @@ def _timer_payload(ctx: ExecutionContext) -> tuple[str, datetime]:
 __all__ = [
     "BRIDGE_THREADS",
     "BRIDGE_THREAD_NAME",
+    "DECISION_THREADS",
+    "DECISION_THREAD_NAME",
+    "BoundedThreads",
     "BridgeThreads",
+    "PoolClosed",
     "bridge_hold_policy",
     "run_resync_executor",
     "timer_executor",

@@ -152,7 +152,13 @@ class FakeDispatch:
     ) -> SendReceipt:
         session = self._act("send_message", session_id)
         self.sends.append(
-            {"workspace_id": workspace_id, "run_id": run_id, "stable_id": stable_id, "text": text}
+            {
+                "workspace_id": workspace_id,
+                "run_id": run_id,
+                "session_id": session_id,
+                "stable_id": stable_id,
+                "text": text,
+            }
         )
         if any(item.item_id == stable_id for item in session.transcript):
             return SendReceipt(item_id=stable_id, delivery="already_persisted")

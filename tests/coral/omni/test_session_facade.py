@@ -766,8 +766,8 @@ async def test_native_harness_step_is_refused_before_anything_is_created(
 
 @pytest.mark.parametrize(
     "capabilities",
-    [None, ["coral_runner:2", "os_sandbox:none"], ["CORAL_RUNNER:1"]],
-    ids=["none", "another-version", "other-case"],
+    [None, ["coral_runner:1", "os_sandbox:none"], ["coral_runner:3"], ["CORAL_RUNNER:2"]],
+    ids=["none", "before-engine-tools", "another-version", "other-case"],
 )
 async def test_a_host_without_the_coral_runner_token_is_refused(
     unlaunched: _Coral, launcher: _RecordingLauncher, app: FastAPI, capabilities: list[str] | None

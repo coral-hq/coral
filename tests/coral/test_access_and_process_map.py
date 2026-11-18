@@ -57,14 +57,15 @@ def test_access_adapter_delegates_auth_and_permissions() -> None:
 
 
 def test_process_map_constants_and_disable_flag() -> None:
-    assert CORAL_RUNNER_TOKEN == "coral_runner:1"
+    # Version 2: the host's Coral offers the engine tools.
+    assert CORAL_RUNNER_TOKEN == "coral_runner:2"
     assert host_entry_points_disabled({}) is False
     assert host_entry_points_disabled({"CORAL_DISABLE_HOST_ENTRY_POINTS": "1"}) is True
     assert host_entry_points_disabled({"CORAL_DISABLE_HOST_ENTRY_POINTS": "false"}) is False
 
 
 def test_host_tokens_follow_the_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert host_tokens({}) == ("coral_runner:1",)
+    assert host_tokens({}) == ("coral_runner:2",)
     assert host_tokens({"CORAL_DISABLE_HOST_ENTRY_POINTS": "1"}) == ()
     # Without an explicit environment the process's own is read.
     monkeypatch.setenv("CORAL_DISABLE_HOST_ENTRY_POINTS", "true")

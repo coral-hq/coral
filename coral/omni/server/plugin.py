@@ -16,7 +16,14 @@ from coral.api.info import create_info_router
 from coral.api.sub_features import resolve_sub_features
 from coral.api.workflows import create_workflows_router
 from coral.bridge.config import RESYNC_INTERVAL_S
-from coral.bridge.executors import BridgeThreads, bridge_hold_policy
+from coral.bridge.executors import (
+    DECISION_THREAD_NAME,
+    DECISION_THREADS,
+    BoundedThreads,
+    BridgeThreads,
+    bridge_hold_policy,
+)
+from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import EngineBridge
 from coral.db.migrate import ensure_coral_schema
 from coral.db.models_workflows import CoralBase
@@ -29,6 +36,8 @@ from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import FreshBindingLookup, SqlAlchemySessionBindingStore
 from coral.stores.workflow_versions import SqlAlchemyWorkflowVersionStore
 from coral.stores.workflows import SqlWorkflowDefinitionStore
+from coral.tools.dispatch import ThreadRunner
+from coral.tools.port import RunDecisionPort
 from coral.workers.supervisor import MAX_DRAIN_CONCURRENCY, WorkerSupervisor
 from omnigent.process_logging import data_dir
 from omnigent.server.server_plugins import ServerPluginRegistration, ServerServices
@@ -144,19 +153,23 @@ def _missing_engine_input(app: Any, services: ServerServices) -> str | None:
 
 
 def _wire_guards(
-    *, run_store: RunStore, bindings: FreshBindingLookup, stack: AsyncExitStack
+    *,
+    run_store: RunStore,
+    bindings: FreshBindingLookup,
+    port: RunDecisionPort | None,
+    stack: AsyncExitStack,
+    run_in_thread: ThreadRunner = asyncio.to_thread,
 ) -> None:
     """
     Register what protects bound sessions, whether or not the session engine is wired.
 
-    The engine tools register from the production catalog with no decision
-    port: nothing while the catalog is empty, and once it lists a tool each
-    call answers that the engine is not running. They read bindings fresh.
-    Coral's required-policy provider reads them through a cache of found rows
-    and reads run status through a cache each run-store commit clears. The S53
-    mutation guard reads the same cache of found rows and refuses clients'
-    changes to bound sessions and engine agents. Every registration's undo goes
-    on ``stack``.
+    The engine tools register from the production catalog, answered by
+    ``port`` (``None`` answers that the engine is not running); they read
+    bindings fresh and decide on ``run_in_thread``. Coral's required-policy
+    provider reads bindings through a cache of found rows and reads run status
+    through a cache each run-store commit clears. The S53 mutation guard reads
+    the same cache of found rows and refuses clients' changes to bound sessions
+    and engine agents. Every registration's undo goes on ``stack``.
     """
     from coral.omni.policies.bindings_cache import CachedBindingLookup
     from coral.omni.policies.provider import CoralPolicyProvider
@@ -167,7 +180,9 @@ def _wire_guards(
     from omnigent.runtime.policies.required_providers import register_required_policy_provider
     from omnigent.server.mutation_guards import register_mutation_guard
 
-    register_engine_tools(catalog=CATALOG, port=None, bindings=bindings, stack=stack)
+    register_engine_tools(
+        catalog=CATALOG, port=port, bindings=bindings, stack=stack, run_in_thread=run_in_thread
+    )
     statuses = RunStatusCache(run_store)
     stack.callback(run_store.register_post_commit(statuses.invalidate))
     # One cache of found bindings for every guard that classifies sessions.
@@ -334,12 +349,13 @@ async def coral_lifespan(
 
     One lifespan per process: on a usable operational database it first claims
     the process, and a second one entered meanwhile raises before registering
-    anything. Then the guards for bound sessions and the engine bridge's
-    executors are registered, and with the server's stores present also the
-    session engine's executors and status-edge observers, all before the
-    supervisor starts, whose finished items feed the bridge and whose resync
-    tick repairs each active run. They share one binding store. Bridge calls
-    run on the bridge's own thread pool. Exit stops the supervisor first, so no
+    anything. Then the guards for bound sessions, the engine tools with the
+    decision port and the engine bridge's executors are registered, and with
+    the server's stores present also the session engine's executors and
+    status-edge observers, all before the supervisor starts, whose finished
+    items feed the bridge and whose resync tick repairs each active run. They
+    share one binding store. Bridge calls run on the bridge's own thread pool,
+    tool decisions on a smaller one. Exit stops the supervisor first, so no
     item is claimed while its executor is missing (an item in flight keeps its
     lease and is reclaimed), then unregisters in reverse order, also after a
     failed start.
@@ -365,6 +381,11 @@ async def coral_lifespan(
             )
             threads = BridgeThreads(bridge)
             stack.callback(threads.close)
+            decisions = BoundedThreads(
+                max_workers=DECISION_THREADS, thread_name_prefix=DECISION_THREAD_NAME
+            )
+            # Pushed before the engine tools register, so it closes after they are removed.
+            stack.callback(decisions.close)
             supervisor = WorkerSupervisor(
                 run_store,
                 queue_store,
@@ -381,7 +402,13 @@ async def coral_lifespan(
                 app.state.coral_worker_supervisor = supervisor
                 app.state.coral_engine_bridge = bridge
             bindings = SqlAlchemySessionBindingStore(storage_location)
-            _wire_guards(run_store=run_store, bindings=bindings, stack=stack)
+            _wire_guards(
+                run_store=run_store,
+                bindings=bindings,
+                port=StoreDecisionPort(bridge),
+                stack=stack,
+                run_in_thread=decisions.run,
+            )
             _wire_bridge(threads, stack)
             missing = _missing_engine_input(app, services)
             if missing is None:

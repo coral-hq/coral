@@ -4,7 +4,8 @@ A resent call (the runner reattaching, or retrying after its read timeout)
 waits for the first one while it runs and gets the stored reply after it
 committed, on this server or after a restart. The port re-checks the stored
 reply on every attempt, which covers other replicas. Decisions on one run run
-one at a time, and a process runs a bounded number at once.
+one at a time, and a process runs a bounded number at once, and fewer per run,
+on the thread runner it is given.
 """
 
 from __future__ import annotations
@@ -13,8 +14,9 @@ import asyncio
 import functools
 import hashlib
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import ParamSpec, Protocol, TypeVar
 
 from coral.engine.machines.slot import find_slot
 from coral.engine.types import RejectionObserved
@@ -39,11 +41,23 @@ _logger = logging.getLogger(__name__)
 DEFAULT_WAIT_S = 30.0
 # Decisions one process runs or queues at once; more are answered "busy".
 DEFAULT_MAX_IN_FLIGHT = 64
+# Of those, decisions on one run: they run one at a time, so one run never takes the budget.
+DEFAULT_MAX_IN_FLIGHT_PER_RUN = 4
 # The /mcp route accepts operation ids of 1 to 128 characters.
 OPERATION_ID_MAX = 128
 
 _Key = tuple[int, str, bytes]
 _RunKey = tuple[int, str]
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+
+class ThreadRunner(Protocol):
+    """Runs a blocking call off the event loop, e.g. ``asyncio.to_thread`` or a pool's ``run``."""
+
+    def __call__(
+        self, fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs
+    ) -> Awaitable[_T]: ...
 
 
 def operation_checksum(run_id: str, session_id: str, tool: str, operation_id: str) -> bytes:
@@ -104,6 +118,9 @@ class ToolDispatcher:
         gets its reply.
     :param max_in_flight: Decisions running or queued at once; a new one past
         it is answered with an uncounted "busy" reply.
+    :param max_in_flight_per_run: The same bound for the decisions on one run.
+    :param run_in_thread: Runs each blocking port call; a server passes its own
+        bounded pool, so tool calls never wait on other work's threads.
     """
 
     def __init__(
@@ -113,12 +130,17 @@ class ToolDispatcher:
         *,
         wait_s: float = DEFAULT_WAIT_S,
         max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
+        max_in_flight_per_run: int = DEFAULT_MAX_IN_FLIGHT_PER_RUN,
+        run_in_thread: ThreadRunner = asyncio.to_thread,
     ) -> None:
         self._port = port
         self._planners = planners
         self._wait_s = wait_s
         self._max_in_flight = max_in_flight
+        self._max_in_flight_per_run = max_in_flight_per_run
+        self._run_in_thread = run_in_thread
         self._in_flight: dict[_Key, _Decision] = {}
+        self._run_in_flight: dict[_RunKey, int] = {}
         self._run_locks: dict[_RunKey, asyncio.Lock] = {}
         self._run_users: dict[_RunKey, int] = {}
 
@@ -141,13 +163,16 @@ class ToolDispatcher:
         key = (binding.workspace_id, binding.run_id, cksum)
         decision = self._in_flight.get(key)
         if decision is None:
+            run_key = (binding.workspace_id, binding.run_id)
+            on_run = self._run_in_flight.get(run_key, 0)
             if len(self._in_flight) >= self._max_in_flight:
-                reply = busy()
-                self._log_refusal(call, reply, "too many decisions in flight")
-                return reply
+                return self._busy(call, "too many decisions in flight")
+            if on_run >= self._max_in_flight_per_run:
+                return self._busy(call, "too many decisions in flight on this run")
             task = asyncio.get_running_loop().create_task(self._decide(call, planner, cksum))
             decision = _Decision(call=call, task=task)
             self._in_flight[key] = decision
+            self._run_in_flight[run_key] = on_run + 1
             task.add_done_callback(functools.partial(self._settled, key, decision))
         decision.waiters += 1
         try:
@@ -198,11 +223,11 @@ class ToolDispatcher:
             return result
 
         try:
-            stored = await asyncio.to_thread(self._port.find_reply, workspace_id, run_id, cksum)
+            stored = await self._run_in_thread(self._port.find_reply, workspace_id, run_id, cksum)
             if stored is not None:
                 return stored
             try:
-                reply = await asyncio.to_thread(
+                reply = await self._run_in_thread(
                     self._port.decide,
                     workspace_id,
                     run_id,
@@ -215,7 +240,7 @@ class ToolDispatcher:
                 if reply.reason in COUNTED_REASONS:
                     # Counted like the planner's own refusals: observed, stored, not info-logged.
                     observe = functools.partial(_observe, binding=binding, reply=reply)
-                    return await asyncio.to_thread(
+                    return await self._run_in_thread(
                         self._port.decide,
                         workspace_id,
                         run_id,
@@ -291,9 +316,20 @@ class ToolDispatcher:
             f" ({detail})" if detail else "",
         )
 
+    def _busy(self, call: EngineToolCall, detail: str) -> ToolReply:
+        reply = busy()
+        self._log_refusal(call, reply, detail)
+        return reply
+
     def _settled(self, key: _Key, decision: _Decision, task: asyncio.Task[ToolReply]) -> None:
         if self._in_flight.get(key) is decision:
             del self._in_flight[key]
+        run_key = (key[0], key[1])
+        on_run = self._run_in_flight[run_key] - 1
+        if on_run:
+            self._run_in_flight[run_key] = on_run
+        else:
+            del self._run_in_flight[run_key]
         if task.cancelled():
             return
         error = task.exception()

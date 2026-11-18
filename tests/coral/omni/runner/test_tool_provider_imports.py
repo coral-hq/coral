@@ -58,9 +58,11 @@ def test_entry_point_advertises_the_runner_token_without_database_modules(
 
         # Loading the provider and asking it for a Coral spec's tools adds only its own modules.
         before = set(sys.modules)
-        assert extension_host_capabilities() == ("coral_runner:1",)
+        assert extension_host_capabilities() == ("coral_runner:2",)
         params = {"coral": {"generated": {"stance": "implementer"}}}
-        assert extension_tool_sets(AgentSpec(spec_version=1, params=params)) == ()
+        tool_sets = extension_tool_sets(AgentSpec(spec_version=1, params=params))
+        names = [tool["function"]["name"] for tool_set in tool_sets for tool in tool_set.tools]
+        assert names == ["coral_submit_handoff"], names
         extra = loaded_outside(
             before,
             {
@@ -70,7 +72,7 @@ def test_entry_point_advertises_the_runner_token_without_database_modules(
         )
         assert not extra, extra
         assert "coral.omni.runner.tool_provider" in sys.modules
-        assert host_capabilities()[-1] == "coral_runner:1", host_capabilities()
+        assert host_capabilities()[-1] == "coral_runner:2", host_capabilities()
         """)
 
     _run_without_database_imports(tmp_path, code, _declared_entry_point())

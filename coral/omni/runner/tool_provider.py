@@ -32,7 +32,7 @@ class CoralToolProvider:
     Each stance's declarations are picked once; :meth:`tool_set` returns fresh
     schema copies, so a caller cannot change a later answer.
 
-    :param catalog: The declarations to offer; production offers none.
+    :param catalog: The declarations to offer; production offers every engine tool.
     :raises ValueError: When a declaration cannot be offered (``validate_catalog``).
     """
 
@@ -63,7 +63,7 @@ class CoralToolProvider:
         return self._names
 
     def host_capabilities(self) -> tuple[str, ...]:
-        """``coral_runner:1``, unless Coral's host entry points are disabled."""
+        """``coral_runner:2``, unless Coral's host entry points are disabled."""
         return host_tokens()
 
 

@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,20 +21,27 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from coral.bridge.executors import BridgeThreads, bridge_hold_policy
+from coral.bridge.codec import decode_entries
+from coral.bridge.executors import (
+    DECISION_THREAD_NAME,
+    BoundedThreads,
+    BridgeThreads,
+    bridge_hold_policy,
+)
 from coral.bridge.mapping import RUN_RESYNC, TIMER
+from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import EngineBridge
 from coral.db import WorkRow
 from coral.db.enum_codecs import RunPauseReason, RunStatus, SessionBindingProgress, WorkStatus
 from coral.db.migrate import ensure_coral_schema
 from coral.model.ids import anchor_session_id
 from coral.omni.policies.state import RunStatusCache
-from coral.omni.protocols import CoralSessionError
+from coral.omni.protocols import CoralSessionError, SendReceipt, SessionCreateRequest, SessionRef
 from coral.omni.server import OmnigentRunScopeRunner, coral_lifespan
 from coral.omni.server import plugin as plugin_module
 from coral.omni.server.dispatch import OmnigentSessionDispatch
 from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
-from coral.omni.server.sessions import RUN_ID_LABEL_KEY
+from coral.omni.server.sessions import RUN_ID_LABEL_KEY, OmnigentSessionFacade
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue import executors as queue_executors
 from coral.queue.executors import (
@@ -52,6 +59,8 @@ from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import SessionBindingDraft, SqlAlchemySessionBindingStore
 from coral.tools import catalog as tool_catalog
 from coral.tools.catalog import ENGINE_TOOLS, SUBMIT_HANDOFF
+from coral.tools.replies import not_run_member
+from coral.tools.schemas import ToolReply
 from coral.workers.supervisor import WorkerSupervisor
 from coral.workspace.executors import WORKSPACE_COMMIT, WORKSPACE_RESET, WORKSPACE_SALVAGE
 from omnigent.db.account_authority import account_generation, current_account_user
@@ -70,7 +79,7 @@ from omnigent.server.host_registry import _expected_host_owner
 from omnigent.server.mutation_guards import SESSION_UPDATE, MutationAttempt, check_mutation
 from omnigent.server.routes._sessions import helpers as session_helpers
 from omnigent.server.server_plugins import ServerServices
-from omnigent.server.server_tools import ServerToolCall, ServerToolResult, server_tool
+from omnigent.server.server_tools import ServerToolCall, server_tool
 from omnigent.spec import AgentSpec
 from omnigent.spec.types import Phase, PolicyAction
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
@@ -81,7 +90,16 @@ from omnigent.stores.host_store import HostStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
-from tests.coral.bridge._world import World, start_without_engine
+from tests.coral.bridge._world import (
+    USER,
+    BindingFacade,
+    World,
+    activation_in,
+    run_spec,
+    start,
+    start_without_engine,
+)
+from tests.coral.slots._close_fakes import FakeDispatch
 from tests.coral.workspace._executor_fakes import (
     FakeHostChannel,
     add_slot,
@@ -320,9 +338,8 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
 
 
 async def test_a_second_concurrent_lifespan_raises_before_registering_anything(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: _Server,
 ) -> None:
-    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
     kinds = ENGINE_EFFECT_TYPES | BRIDGE_EFFECT_TYPES
     with installed_tool_providers():
         async with coral_lifespan(server.app, server.services):
@@ -456,27 +473,11 @@ async def test_the_supervisor_starts_a_run_whose_engine_start_was_lost(server: _
         await poll_until_async(started, timeout_s=budget(30))
 
 
-@pytest.mark.parametrize("engine", ["wired", "unwired"])
-async def test_the_production_catalog_registers_no_engine_tool(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
-) -> None:
-    assert tool_catalog.CATALOG == ()
-    if engine == "unwired":
-        monkeypatch.delattr(server.app.state, "session_event_dispatch")
-    async with coral_lifespan(server.app, server.services):
-        assert _engine_registrations() == (
-            (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS) if engine == "wired" else NOTHING
-        )
-        assert _engine_tools() == frozenset()
-        assert all(server_tool(f"mcp__omnigent__{name}") is None for name in ENGINE_TOOL_NAMES)
-
-
 @pytest.mark.parametrize("engine", ["wired", "unwired", "no_database"])
-async def test_engine_tools_are_wired_without_the_session_engine_and_removed_on_exit(
+async def test_engine_tools_are_wired_with_the_decision_port_and_removed_on_exit(
     server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
 ) -> None:
-    # A catalog that lists the tools; without a decision port each answers "not running".
-    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
+    assert tool_catalog.CATALOG == ENGINE_TOOLS
     services: Any = server.services
     if engine == "unwired":
         monkeypatch.delattr(server.app.state, "session_event_dispatch")
@@ -503,13 +504,175 @@ async def test_engine_tools_are_wired_without_the_session_engine_and_removed_on_
             if engine == "no_database":
                 assert _engine_tools() == frozenset()
             else:
+                # Registered with or without the session engine; the runner's prefixed name
+                # finds the same handler.
                 assert _engine_tools() == ENGINE_TOOL_NAMES
                 handler = server_tool(SUBMIT_HANDOFF.name)
                 assert handler is not None
-                assert await handler(call) == ServerToolResult(
-                    "Coral's workflow engine is not running on this server", is_error=True
-                )
+                assert server_tool(f"mcp__omnigent__{SUBMIT_HANDOFF.name}") is handler
+                # The call passes the port check and the binding lookup; an unbound session is
+                # not a run member.
+                result = await handler(call)
+                assert not result.is_error
+                assert ToolReply.from_json(result.text) == not_run_member()
     assert _engine_tools() == frozenset()
+
+
+@pytest.mark.parametrize(
+    "exit_while_deciding", [False, True], ids=["call_then_exit", "exit_mid_call"]
+)
+@pytest.mark.usefixtures("coral_policy_registry")
+async def test_a_live_handoff_call_commits_on_a_run_the_supervisor_started(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, exit_while_deciding: bool
+) -> None:
+    """
+    The supervisor creates the anchor and the step and sends the brief; the step hands off.
+
+    This server has no host or runner for the step, so its create and its brief stop at the
+    facade's and the dispatch's boundary; the anchor is created for real. A decision still
+    running when the lifespan exits finishes on its thread, commits and answers.
+    """
+    ensure_coral_schema(server.db_uri)
+    world = World.sql(server.db_uri)
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    sessions = FakeDispatch([], owner=USER)
+    steps = BindingFacade(bindings=bindings, dispatch=sessions)
+    anchors: list[SessionRef] = []
+    create = OmnigentSessionFacade.create_session
+
+    async def create_session(
+        facade: OmnigentSessionFacade,
+        request: SessionCreateRequest,
+        *,
+        ensure_lease: Callable[[], Awaitable[None]],
+    ) -> SessionRef:
+        if request.role == "step":
+            return await steps.create_session(request, ensure_lease=ensure_lease)
+        anchors.append(await create(facade, request, ensure_lease=ensure_lease))
+        return anchors[-1]
+
+    async def send_message(_dispatch: OmnigentSessionDispatch, **message: Any) -> SendReceipt:
+        return await sessions.send_message(**message)
+
+    monkeypatch.setattr(OmnigentSessionFacade, "create_session", create_session)
+    monkeypatch.setattr(OmnigentSessionDispatch, "send_message", send_message)
+    # Where the tool call's store reads and decisions run.
+    deciding = threading.Event()
+    threads_used: list[str] = []
+    for owner, name in (
+        (SqlAlchemySessionBindingStore, "find_by_session"),
+        (StoreDecisionPort, "find_reply"),
+        (StoreDecisionPort, "decide"),
+    ):
+        monkeypatch.setattr(
+            owner, name, _thread_recording(getattr(owner, name), deciding, threads_used)
+        )
+    held, release = threading.Event(), threading.Event()
+    if exit_while_deciding:
+        decide = StoreDecisionPort.decide
+
+        def held_decide(port: StoreDecisionPort, *args: Any, **kwargs: Any) -> ToolReply:
+            held.set()
+            assert release.wait(budget(30))
+            return decide(port, *args, **kwargs)
+
+        monkeypatch.setattr(StoreDecisionPort, "decide", held_decide)
+    pools: list[BoundedThreads] = []
+    # The engine tools registered when the decision pool closed.
+    tools_at_close: list[frozenset[str]] = []
+
+    class RecordingPool(BoundedThreads):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            pools.append(self)
+
+        def close(self) -> None:
+            tools_at_close.append(_engine_tools())
+            super().close()
+
+    monkeypatch.setattr(plugin_module, "BoundedThreads", RecordingPool)
+    run = start(world, spec=run_spec(workspace_id=DEFAULT_WORKSPACE_ID))
+
+    def briefed() -> bool:
+        state = world.bridge.load(workspace_id=DEFAULT_WORKSPACE_ID, run_id=run.id).state
+        return [slot.status for slot in state.slots] == ["working"]
+
+    try:
+        with installed_tool_providers():
+            async with coral_lifespan(server.app, server.services):
+                await poll_until_async(briefed, timeout_s=budget(30))
+                [brief] = sessions.sends
+                session_id = str(brief["session_id"])
+                handler = server_tool(SUBMIT_HANDOFF.name)
+                assert handler is not None
+                deciding.set()
+                call = asyncio.ensure_future(
+                    handler(
+                        ServerToolCall(
+                            session_id=session_id,
+                            name=SUBMIT_HANDOFF.name,
+                            arguments={
+                                "activation_id": activation_in(str(brief["text"])),
+                                "status": "done",
+                                "report": "Implemented the change.",
+                            },
+                            operation_id="op-1",
+                            runner_proven=True,
+                            actor=None,
+                        )
+                    )
+                )
+                if exit_while_deciding:
+                    assert await asyncio.to_thread(held.wait, budget(30))
+                else:
+                    await call
+                assert [pool.closed for pool in pools] == [False]
+        assert [pool.closed for pool in pools] == [True]
+        # The tools were unregistered first, so no new call reached the closing pool.
+        assert tools_at_close == [frozenset()]
+    finally:
+        release.set()
+    result = await call
+    deciding.clear()
+
+    assert not result.is_error
+    assert ToolReply.from_json(result.text).accepted
+    # The supervisor ran the anchor's create and the step's, as the run owner's agent.
+    assert [anchor.session_id for anchor in anchors] == [
+        anchor_session_id(DEFAULT_WORKSPACE_ID, run.id)
+    ]
+    [step] = steps.requests
+    assert (step.engine_slot_id, step.user_id) == ("implement||:0", USER)
+    agent = server.services.agent_store.get(step.agent_id or "")
+    assert agent is not None and agent.created_by == USER
+    # The handoff committed with the calling session as its actor.
+    rows = world.runs.read_engine_log(
+        run.id, workspace_id=DEFAULT_WORKSPACE_ID, max_run_version=2**31
+    )
+    entries = decode_entries(rows)
+    assert [
+        (entry.input.kind, row.actor_ref)
+        for row, entry in zip(rows, entries, strict=True)
+        if entry.input.kind.startswith("handoff_")
+    ] == [("handoff_received", session_id), ("handoff_evaluated", session_id)]
+    # The lookup, the reply check and the decision ran on the decision pool.
+    assert threads_used and all(name.startswith(DECISION_THREAD_NAME) for name in threads_used)
+    assert {"find_by_session", "find_reply", "decide"} == {
+        name.split("@", 1)[1] for name in threads_used
+    }
+
+
+def _thread_recording(
+    method: Callable[..., Any], recording: threading.Event, threads_used: list[str]
+) -> Callable[..., Any]:
+    """``method``, recording the thread it ran on while ``recording`` is set."""
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        if recording.is_set():
+            threads_used.append(f"{threading.current_thread().name}@{method.__name__}")
+        return method(*args, **kwargs)
+
+    return recorded
 
 
 @pytest.mark.parametrize("engine", ["wired", "unwired"])
@@ -719,9 +882,8 @@ def _fail_lifespan_start(patch: pytest.MonkeyPatch, failing: str) -> None:
 
 @pytest.mark.parametrize("failing", ["schema", "executor", "observer", "supervisor_start"])
 async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, failing: str
+    server: _Server, failing: str
 ) -> None:
-    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
     with pytest.MonkeyPatch.context() as patch:
         _fail_lifespan_start(patch, failing)
         with installed_tool_providers(), pytest.raises(RuntimeError, match="failed"):

@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-CORAL_RUNNER_TOKEN = "coral_runner:1"
+# Version 2 hosts offer the engine tools; a host on an older Coral is refused for steps.
+CORAL_RUNNER_TOKEN = "coral_runner:2"
 DISABLE_HOST_ENTRY_POINTS_ENV = "CORAL_DISABLE_HOST_ENTRY_POINTS"
 
 

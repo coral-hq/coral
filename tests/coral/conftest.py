@@ -1,4 +1,4 @@
-"""Fixtures for Coral's omni-tier tests."""
+"""Fixtures shared by Coral's Tier A tests."""
 
 from __future__ import annotations
 

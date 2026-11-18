@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import dataclasses
 import json
@@ -17,7 +18,9 @@ from coral.bridge.codec import decode_entries
 from coral.bridge.config import HOLD_RULES
 from coral.bridge.executors import (
     BRIDGE_THREAD_NAME,
+    BoundedThreads,
     BridgeThreads,
+    PoolClosed,
     bridge_hold_policy,
     run_resync_executor,
     timer_executor,
@@ -48,6 +51,7 @@ from coral.recovery.drift import DriftDetected, DriftFinding, DriftPauser
 from coral.slots.executors import CREATE_SESSION, create_session_executor
 from coral.stores.fakes import FakeRunStore
 from coral.stores.protocols import WorkItem
+from tests.budgets import budget
 from tests.coral.bridge._world import (
     IMPLEMENT,
     USER,
@@ -735,6 +739,54 @@ async def test_a_closed_pool_takes_no_more_calls(world: World) -> None:
     assert pool.closed
     with pytest.raises(RuntimeError):
         await pool.run(datetime.now)
+
+
+async def test_a_call_waiting_for_a_thread_when_the_pool_closes_is_dropped_as_retryable() -> None:
+    pool = BoundedThreads(max_workers=1, thread_name_prefix="test-pool")
+    entered, release = threading.Event(), threading.Event()
+    ran: list[str] = []
+
+    def held() -> str:
+        entered.set()
+        assert release.wait(budget(10))
+        return "ran"
+
+    try:
+        running = asyncio.create_task(pool.run(held))
+        assert await asyncio.to_thread(entered.wait, budget(10))
+        queued = asyncio.create_task(pool.run(ran.append, "queued"))
+        await asyncio.sleep(0)
+        pool.close()
+    finally:
+        release.set()
+
+    # The running call finishes; the waiting one never runs and is retryable, not cancelled.
+    assert await running == "ran"
+    with pytest.raises(PoolClosed):
+        await queued
+    assert ran == []
+
+
+async def test_a_cancelled_caller_of_a_waiting_call_is_still_cancelled() -> None:
+    pool = BoundedThreads(max_workers=1, thread_name_prefix="test-pool")
+    entered, release = threading.Event(), threading.Event()
+
+    def held() -> None:
+        entered.set()
+        assert release.wait(budget(10))
+
+    try:
+        running = asyncio.create_task(pool.run(held))
+        assert await asyncio.to_thread(entered.wait, budget(10))
+        queued = asyncio.create_task(pool.run(datetime.now))
+        await asyncio.sleep(0)
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+    finally:
+        release.set()
+        pool.close()
+    await running
 
 
 async def test_the_reconciler_schedules_the_runs_resync_on_the_pool(

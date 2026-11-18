@@ -7,10 +7,12 @@ import json
 import logging
 import threading
 from collections.abc import Callable, Iterator
+from typing import TypeVar
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from coral.bridge.executors import BoundedThreads
 from coral.db.enum_codecs import RunPauseReason, RunStatus
 from coral.engine.types import HandoffEvaluated, HandoffReceived, PauseRun, RejectionObserved
 from coral.model.ir import CompiledGraph
@@ -25,6 +27,7 @@ from tests._helpers.polling import poll_until_async
 from tests.coral.tools.fake_decision_port import InMemoryDecisionPort, step_binding
 from tests.coral.workflow_builders import arrow, compile_text, end, start, step, workflow_text
 
+_T = TypeVar("_T")
 SUBMIT = SUBMIT_HANDOFF.name
 DISPATCH_LOGGER = "coral.tools.dispatch"
 SLOT = "work||:0"
@@ -410,7 +413,8 @@ async def test_concurrent_handoffs_under_new_operation_ids_commit_once(
     port: InMemoryDecisionPort,
 ) -> None:
     port.add_run(_graph())
-    dispatcher = ToolDispatcher(port, PLANNERS)
+    # Every call is decided: the per-run cap is tested on its own.
+    dispatcher = ToolDispatcher(port, PLANNERS, max_in_flight_per_run=8)
 
     replies = await asyncio.gather(
         *(dispatcher.dispatch(_call(op=f"op-{index}")) for index in range(8))
@@ -426,7 +430,8 @@ async def test_concurrent_invalid_calls_pause_the_run_after_exactly_three(
     port: InMemoryDecisionPort,
 ) -> None:
     port.add_run(_graph())
-    dispatcher = ToolDispatcher(port, PLANNERS)
+    # Every call is decided: the per-run cap is tested on its own.
+    dispatcher = ToolDispatcher(port, PLANNERS, max_in_flight_per_run=6)
 
     replies = await asyncio.gather(
         *(dispatcher.dispatch(_invalid_call(f"op-{index}")) for index in range(6))
@@ -538,6 +543,33 @@ async def test_decisions_on_one_run_take_turns_and_other_runs_do_not_wait(
     assert other_runs.peak == 2
 
 
+async def test_every_port_call_runs_on_the_given_thread_runner(
+    port: InMemoryDecisionPort,
+) -> None:
+    port.add_run(_graph(labelled=True))
+    ran: list[str] = []
+
+    async def recording_runner(fn: Callable[..., _T], /, *args: object, **kwargs: object) -> _T:
+        ran.append(getattr(fn, "__name__", "planned"))
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    # A done handoff without its label: the engine refuses it, and the dispatcher counts it
+    # in a second decision.
+    unlabelled = Commit(
+        (
+            HandoffReceived(slot_id=SLOT, body=BODY),
+            HandoffEvaluated(slot_id=SLOT, outcome="accepted"),
+        ),
+        ToolReply(accepted=True, next=STOP),
+    )
+    dispatcher = ToolDispatcher(port, _planner(unlabelled), run_in_thread=recording_runner)
+
+    reply = await dispatcher.dispatch(_call())
+
+    assert reply.reason == "handoff.invalid"
+    assert ran == ["find_reply", "decide", "decide"]
+
+
 async def test_past_the_in_flight_cap_a_new_call_is_told_busy_uncounted(
     port: InMemoryDecisionPort, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -566,6 +598,102 @@ async def test_past_the_in_flight_cap_a_new_call_is_told_busy_uncounted(
     # The cap frees up once the decision is done: the next call is decided (the slot closed).
     assert (await dispatcher.dispatch(_invalid_call("op-3"))).reason == "slot_closed"
     assert port.decide_calls == 2
+
+
+class _RunOneHeld(_HeldPort):
+    """The fake port, with run-1's decisions held until the test releases them."""
+
+    def decide(
+        self,
+        workspace_id: int,
+        run_id: str,
+        planner: Planner,
+        cksum: bytes,
+        *,
+        actor: str | None = None,
+    ) -> ToolReply:
+        if run_id == "run-1":
+            self.entered.set()
+            assert self.release.wait(10)
+        return self.inner.decide(workspace_id, run_id, planner, cksum, actor=actor)
+
+
+def _run_two_call(op: str = "op-1") -> EngineToolCall:
+    return EngineToolCall(
+        binding=step_binding(SLOT, session_id="sess-2", run_id="run-2"),
+        tool=SUBMIT,
+        arguments=ARGUMENTS,
+        operation_id=op,
+    )
+
+
+async def test_past_the_per_run_cap_that_run_is_told_busy_while_other_runs_decide(
+    port: InMemoryDecisionPort, caplog: pytest.LogCaptureFixture
+) -> None:
+    port.add_run(_graph())
+    port.add_run(_graph(), run_id="run-2")
+    held = _RunOneHeld(port)
+    dispatcher = ToolDispatcher(held, PLANNERS, max_in_flight_per_run=2)
+    caplog.set_level(logging.INFO, logger=DISPATCH_LOGGER)
+
+    first = asyncio.create_task(dispatcher.dispatch(_call(op="op-1")))
+    assert await asyncio.to_thread(held.entered.wait, 10)
+    # A second decision on run-1 waits for the first: the run is at its cap.
+    queued = asyncio.create_task(dispatcher.dispatch(_invalid_call("op-2")))
+    await asyncio.sleep(0)
+    busy = await dispatcher.dispatch(_invalid_call("op-3"))
+    other_run = await dispatcher.dispatch(_run_two_call())
+    held.release.set()
+
+    assert (busy.accepted, busy.reason) == (False, "evaluation_in_progress")
+    assert other_run == ToolReply(accepted=True, next=STOP)
+    assert await first == ToolReply(accepted=True, next=STOP)
+    assert (await queued).reason == "slot_closed"
+    assert any(
+        "too many decisions in flight on this run" in record.getMessage()
+        for record in caplog.records
+    )
+    # Nothing was counted for the refused call, and the run takes calls again once done.
+    assert not any(entry.input.kind == "rejection_observed" for entry in port.log())
+    assert (await dispatcher.dispatch(_invalid_call("op-4"))).reason == "slot_closed"
+
+
+async def test_a_decision_waiting_for_a_thread_when_the_pool_closes_is_a_transport_error(
+    port: InMemoryDecisionPort,
+) -> None:
+    """The lifespan closes the decision pool: a waiting decision asks its caller to retry."""
+    port.add_run(_graph())
+    port.add_run(_graph(), run_id="run-2")
+    held = _RunOneHeld(port)
+    pool = BoundedThreads(max_workers=1, thread_name_prefix="test-decision")
+    submitted: list[str] = []
+
+    async def run_in_pool(fn: Callable[..., _T], /, *args: object, **kwargs: object) -> _T:
+        # Recorded as the call is handed to the pool.
+        submitted.append(getattr(fn, "__name__", "call"))
+        return await pool.run(fn, *args, **kwargs)
+
+    dispatcher = ToolDispatcher(held, PLANNERS, run_in_thread=run_in_pool)
+    try:
+        first = asyncio.create_task(dispatcher.dispatch(_call()))
+        assert await asyncio.to_thread(held.entered.wait, 10)
+        waiting = asyncio.create_task(dispatcher.dispatch(_run_two_call()))
+        # run-2's reply check waits behind run-1's decision on the only thread.
+        await poll_until_async(lambda: submitted == ["find_reply", "decide", "find_reply"])
+        pool.close()
+    finally:
+        held.release.set()
+
+    assert await first == ToolReply(accepted=True, next=STOP)
+    with pytest.raises(TransportError, match="retry"):
+        await waiting
+    # Nothing of the dropped call was written; a resend after the restart decides it.
+    assert not port.stored_replies().keys() & {
+        operation_checksum("run-2", "sess-2", SUBMIT, "op-1")
+    }
+    assert await ToolDispatcher(port, PLANNERS).dispatch(_run_two_call()) == ToolReply(
+        accepted=True, next=STOP
+    )
 
 
 class _FailingPort(_HeldPort):

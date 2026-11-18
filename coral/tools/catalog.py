@@ -1,8 +1,8 @@
 """The one declaration of Coral's engine tools: names, schemas, stances and prompt text.
 
 Standard library only: hosts and runners import it through Coral's tool
-provider. The production :data:`CATALOG` is empty, so no agent is offered a
-tool until the engine can answer it; :data:`ENGINE_TOOLS` declares them all.
+provider. :data:`ENGINE_TOOLS` declares them all, and the production
+:data:`CATALOG` offers every one: the server answers them through its decision port.
 """
 
 from __future__ import annotations
@@ -86,8 +86,8 @@ CHOOSE_ARROW = EngineToolDecl(
 ENGINE_TOOLS: tuple[EngineToolDecl, ...] = (SUBMIT_HANDOFF, CHOOSE_ARROW)
 # Every engine tool's exact name, for policy exemptions that must not match look-alikes.
 ENGINE_TOOL_NAMES: frozenset[str] = frozenset(decl.name for decl in ENGINE_TOOLS)
-# What runners advertise: nothing until the engine can answer the tools.
-CATALOG: tuple[EngineToolDecl, ...] = ()
+# What runners advertise and the server answers.
+CATALOG: tuple[EngineToolDecl, ...] = ENGINE_TOOLS
 
 
 def tools_for_stance(catalog: Sequence[EngineToolDecl], stance: str) -> tuple[EngineToolDecl, ...]:

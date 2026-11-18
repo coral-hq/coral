@@ -1,4 +1,4 @@
-"""Coral's engine tools are declared once, by stance, and the production catalog is empty."""
+"""Coral's engine tools are declared once, by stance, and the production catalog lists them all."""
 
 from __future__ import annotations
 
@@ -51,17 +51,16 @@ _BUNDLES = [
 ]
 
 
-def test_production_catalog_is_empty() -> None:
-    assert CATALOG == ()
-    validate_catalog(ENGINE_TOOLS)
-    assert ENGINE_TOOLS == (SUBMIT_HANDOFF, CHOOSE_ARROW)
-    assert [tools_for_stance(ENGINE_TOOLS, stance.value) for stance in Stance] == [
+def test_production_catalog_lists_every_engine_tool() -> None:
+    assert CATALOG == ENGINE_TOOLS == (SUBMIT_HANDOFF, CHOOSE_ARROW)
+    validate_catalog(CATALOG)
+    # The anchor gets nothing; each other stance gets its own tool.
+    assert [tools_for_stance(CATALOG, stance.value) for stance in Stance] == [
         (),
         (CHOOSE_ARROW,),
         (SUBMIT_HANDOFF,),
         (SUBMIT_HANDOFF,),
     ]
-    assert [tools_for_stance(CATALOG, stance.value) for stance in Stance] == [()] * len(Stance)
     # The orchestrator allowlist and the exact-name exemptions do not depend on
     # what production advertises.
     assert orchestrator_tool_names() == frozenset({"coral_choose_arrow"})

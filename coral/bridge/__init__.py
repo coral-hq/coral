@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from coral.bridge.config import engine_config_for as engine_config_for
     from coral.bridge.config import freeze_engine_config as freeze_engine_config
     from coral.bridge.config import utc_now as utc_now
+    from coral.bridge.executors import BoundedThreads as BoundedThreads
     from coral.bridge.executors import BridgeThreads as BridgeThreads
     from coral.bridge.executors import bridge_hold_policy as bridge_hold_policy
     from coral.bridge.executors import run_resync_executor as run_resync_executor
@@ -56,6 +57,7 @@ _MODULES: dict[str, str] = {
     "engine_config_for": "coral.bridge.config",
     "freeze_engine_config": "coral.bridge.config",
     "utc_now": "coral.bridge.config",
+    "BoundedThreads": "coral.bridge.executors",
     "BridgeThreads": "coral.bridge.executors",
     "bridge_hold_policy": "coral.bridge.executors",
     "run_resync_executor": "coral.bridge.executors",
