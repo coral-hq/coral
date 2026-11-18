@@ -393,6 +393,9 @@ def _connect_marker_path(log_path: Path) -> Path:
 # Collect adopted children every two seconds. Process discovery runs off-loop;
 # exit-status collection uses nonblocking waits.
 _ORPHAN_REAP_INTERVAL_S = 2.0
+# CORAL(S71): warn once sweeps stay paused this long, then at most every five minutes.
+_ORPHAN_REAPER_PAUSE_WARNING_S = 60.0
+_ORPHAN_REAPER_PAUSE_WARNING_INTERVAL_S = 300.0
 
 
 def _install_child_subreaper() -> bool:
@@ -424,6 +427,19 @@ def _install_child_subreaper() -> bool:
         return libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0
     except (OSError, AttributeError):
         return False
+
+
+# CORAL(S71): pair a zombie's PID with its start time so a reused PID never matches.
+def _zombie_create_time(pid: int) -> float | None:
+    """Return the start time of the exited, unreaped process at ``pid``.
+
+    :param pid: A direct child of this host, e.g. ``4242``.
+    :returns: Its start time while it is a zombie, else ``None``.
+    """
+    with contextlib.suppress(psutil.Error):
+        if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+            return _proc.process_create_time(pid)
+    return None
 
 
 def _read_log_tail(path: Path, max_bytes: int = _LOG_TAIL_MAX_BYTES) -> str:
@@ -1423,7 +1439,14 @@ class HostProcess:
         # stealing it would corrupt that command's returncode to 0 (#1782).
         # Mutated only on the event loop by the guard helpers below, so a plain
         # counter is sufficient.
+        # CORAL(S71): the two-sweep rule protects every prompt owner; this pause
+        # also covers a guarded run() still reading a pipe its exited child left open.
         self._owned_subprocess_ops = 0
+        # CORAL(S71): zombies the last sweep saw, by PID and start time.
+        self._orphan_zombie_candidates: dict[int, float] = {}
+        # CORAL(S71): when sweeps were first skipped for guarded ops, and the last warning.
+        self._orphan_reaper_paused_since: float | None = None
+        self._orphan_reaper_pause_warned_at: float | None = None
         # Keep cancellation-shielded worker tasks alive until they release the
         # orphan-reaper guard after their subprocesses have actually finished.
         self._host_subprocess_tasks: set[asyncio.Task[object]] = set()
@@ -1555,7 +1578,8 @@ class HostProcess:
         while True:
             try:
                 await asyncio.sleep(_ORPHAN_REAP_INTERVAL_S)
-                if self._owned_subprocess_ops or not IS_POSIX:
+                # CORAL(S71): a pause that outlasts a minute is logged, rate-limited.
+                if not IS_POSIX or self._orphan_sweep_paused(time.monotonic()):
                     continue
                 # Process discovery may scan a large process table. Only the
                 # nonblocking, ownership-aware waits run on the event loop.
@@ -1566,12 +1590,41 @@ class HostProcess:
             except Exception:  # a reaper must never die on a stray error
                 _logger.debug("orphan reaper sweep failed", exc_info=True)
 
+    # CORAL(S71): report guarded pauses, warning when one outlasts a minute.
+    def _orphan_sweep_paused(self, now: float) -> bool:
+        """Return whether guarded host subprocesses pause this sweep.
+
+        :param now: This sweep's :func:`time.monotonic` reading.
+        :returns: ``True`` while any guarded operation is in flight.
+        """
+        if not self._owned_subprocess_ops:
+            self._orphan_reaper_paused_since = None
+            return False
+        if self._orphan_reaper_paused_since is None:
+            self._orphan_reaper_paused_since = now
+        paused_for = now - self._orphan_reaper_paused_since
+        warned_at = self._orphan_reaper_pause_warned_at
+        if paused_for > _ORPHAN_REAPER_PAUSE_WARNING_S and (
+            warned_at is None or now - warned_at >= _ORPHAN_REAPER_PAUSE_WARNING_INTERVAL_S
+        ):
+            self._orphan_reaper_pause_warned_at = now
+            _logger.warning(
+                "Orphan reaper paused for %.0fs by %d host subprocess operation(s); "
+                "exited orphans stay unreaped until they finish",
+                paused_for,
+                self._owned_subprocess_ops,
+            )
+        return True
+
     def _reap_orphans_once(self, child_pids: Iterable[int] | None = None) -> int:
-        """Reap each unowned child independently, preserving owned exit status.
+        """Reap each unowned child that stayed a zombie since the previous sweep.
 
         Targeted waits let a stalled owner coexist with orphan cleanup. A
         completed process handle no longer reserves its reusable PID, but its
         runner record remains available to the watcher for crash reporting.
+        CORAL(S71): a waiting owner collects its child within milliseconds of
+        exit, so a zombie two sweeps saw (same PID and start time) has none.
+        Sweeps run only from :meth:`_orphan_reaper_loop`, which spaces them.
 
         :param child_pids: Optional direct-child snapshot collected off-loop.
         :returns: Count of orphan (non-runner) processes reaped this sweep.
@@ -1585,9 +1638,18 @@ class HostProcess:
         if child_pids is None:
             child_pids = self._orphan_child_pids()
         tracked = self._tracked_runner_pids()
+        previous_zombies = self._orphan_zombie_candidates
+        zombies: dict[int, float] = {}
         reaped = 0
         for pid in child_pids:
             if pid in tracked:
+                continue
+            # CORAL(S71): a zombie seen for the first time may still have an owner.
+            create_time = _zombie_create_time(pid)
+            if create_time is None:
+                continue
+            if previous_zombies.get(pid) != create_time:
+                zombies[pid] = create_time
                 continue
             try:
                 waited_pid, _status = os.waitpid(pid, os.WNOHANG)
@@ -1595,6 +1657,7 @@ class HostProcess:
                 # A watcher may have consumed this exit after the snapshot.
                 continue
             reaped += waited_pid > 0
+        self._orphan_zombie_candidates = zombies
         if reaped:
             _logger.debug("orphan reaper reaped %d process(es)", reaped)
         return reaped
@@ -5216,10 +5279,8 @@ class HostProcess:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await watcher
             self._cleanup_runners()
-            # Final drain: _cleanup_runners has just reaped the tracked
-            # runners via Popen, so any of their still-orphaned tool
-            # grandchildren are now reapable and no tracked pid can be stolen.
-            self._reap_orphans_once()
+            # CORAL(S71): no final drain: one sweep cannot confirm a zombie, and the
+            # children this host leaves go to init (or the next subreaper) on exit.
             # Stop the runner zygote last: its forked children were just
             # terminated above, and closing its control socket lets it exit.
             if self._zygote is not None:
