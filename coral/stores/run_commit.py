@@ -28,12 +28,14 @@ def commit_with_retry(
     sleep: Callable[[float], None] = time.sleep,
     account_checker: Callable[[], None] | None = None,
     now: int | None = None,
+    lock_timeout_s: float | None = None,
 ) -> CommitOutcome:
     """Execute a pure reducer and apply its transition under optimistic CAS with retries.
 
     If command_idempotency_cksum is supplied, checks for an existing receipt at the start
     of EVERY attempt. If another worker already committed the command, returns the receipt
-    immediately without invoking reduce_fn.
+    immediately without invoking reduce_fn. ``lock_timeout_s`` is passed to every
+    ``apply_transition`` attempt.
     """
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
@@ -77,6 +79,7 @@ def commit_with_retry(
                 transition=transition,
                 workspace_id=workspace_id,
                 now=now,
+                lock_timeout_s=lock_timeout_s,
             )
         except RunVersionConflict as exc:
             if attempt == max_attempts:

@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from typing import Any
 
-from coral.db.enum_codecs import GateVisitStatus, RunStatus, WorkKind, WorkStatus
+from sqlalchemy.exc import IntegrityError
+
+from coral.db.enum_codecs import GateVisitStatus, LogKind, RunStatus, WorkKind, WorkStatus
 from coral.model.ids import derived_id
 from coral.stores.protocols import (
+    UNFINISHED_RUN_STATUSES,
     ActivationState,
     AgentSlotState,
     CommitOutcome,
@@ -31,8 +35,10 @@ from coral.stores.protocols import (
     TransitionTooLarge,
     WorkItem,
     WorkItemDraft,
+    require_checksum32,
 )
 from coral.stores.runs import PostCommitHooks, _compute_spec_digest
+from coral.stores.work_rows import FINISHED_WORK_STATUSES, MIN_HOLD_DELAY_S, repended_values
 
 
 class FakeRunStore:
@@ -51,6 +57,7 @@ class FakeRunStore:
         self.gate_visits: dict[tuple[int, str, str], GateVisitState] = {}
         self.logs: dict[tuple[int, str], list[RunLogEntry]] = {}
         self.work: dict[tuple[int, str], WorkItem] = {}
+        self.tool_replies: dict[tuple[int, str, bytes], str] = {}
         self.post_commit_hooks = PostCommitHooks()
         self.before_apply_hook: Callable[[str, int], None] | None = None
 
@@ -169,7 +176,10 @@ class FakeRunStore:
         *,
         workspace_id: int | None = None,
         now: int | None = None,
+        lock_timeout_s: float | None = None,
     ) -> CommitOutcome:
+        if lock_timeout_s is not None and lock_timeout_s <= 0:
+            raise ValueError("lock_timeout_s must be positive")
         if len(transition.logs) > 64:
             raise TransitionTooLarge(f"Transition contains {len(transition.logs)} logs (limit 64)")
         if len(transition.outbox_work) > 64:
@@ -195,6 +205,12 @@ class FakeRunStore:
             run = self.runs[(ws, run_id)]
             if run.version != expected_version:
                 raise RunVersionConflict(run_id, expected_version, run.version)
+            reply = transition.tool_reply
+            if reply is not None and (ws, run_id, reply.cksum) in self.tool_replies:
+                # As the primary key does in SQL: the whole transition is refused.
+                raise IntegrityError(
+                    "INSERT INTO coral_tool_replies", None, Exception("duplicate tool reply")
+                )
 
             new_version = run.version + 1
             new_status = transition.status if transition.status is not None else run.status
@@ -467,30 +483,42 @@ class FakeRunStore:
                     )
 
             for work_id in transition.consumed_work_ids:
-                if (ws, work_id) in self.work:
-                    old = self.work[(ws, work_id)]
-                    self.work[(ws, work_id)] = WorkItem(
-                        workspace_id=old.workspace_id,
-                        id=old.id,
-                        run_id=old.run_id,
-                        kind=old.kind,
+                consumed = self.work.get((ws, work_id))
+                if consumed is not None and consumed.run_id == run_id:
+                    self.work[(ws, work_id)] = dataclasses.replace(
+                        consumed,
                         status=int(WorkStatus.SUCCEEDED),
-                        payload=old.payload,
-                        idempotency_cksum=old.idempotency_cksum,
-                        available_at=old.available_at,
-                        created_at_us=old.created_at_us,
-                        attempts=old.attempts,
-                        node_id=old.node_id,
-                        scope_key=old.scope_key,
-                        slot_generation=old.slot_generation,
-                        owner_key=old.owner_key,
                         lease_expires_at=None,
                         lease_holder=None,
-                        result=old.result,
-                        result_ref=old.result_ref,
-                        error_code=old.error_code,
                         finished_at=now_s,
+                        held_since=None,
                     )
+
+            for work_id in transition.revive_work_ids:
+                failed = self.work.get((ws, work_id))
+                if (
+                    failed is not None
+                    and failed.run_id == run_id
+                    and failed.status == int(WorkStatus.FAILED)
+                ):
+                    self.work[(ws, work_id)] = dataclasses.replace(
+                        failed, **repended_values(now_s)
+                    )
+
+            if transition.release_held_codes:
+                for key, held in list(self.work.items()):
+                    if (
+                        key[0] == ws
+                        and held.run_id == run_id
+                        and held.status == int(WorkStatus.PENDING)
+                        and held.error_code in transition.release_held_codes
+                    ):
+                        self.work[key] = dataclasses.replace(
+                            held, available_at=now_s, held_since=None
+                        )
+
+            if reply is not None:
+                self.tool_replies[(ws, run_id, reply.cksum)] = reply.reply
 
             outcome = CommitOutcome(
                 run_id=run_id,
@@ -574,19 +602,43 @@ class FakeRunStore:
                     )
             return None
 
+    def read_engine_log(
+        self,
+        run_id: str,
+        *,
+        workspace_id: int,
+        after_seq: int = 0,
+        max_run_version: int,
+        limit: int = 500,
+    ) -> list[RunLogEntry]:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        with self._lock:
+            entries = sorted(
+                (
+                    entry
+                    for entry in self.logs.get((workspace_id, run_id), [])
+                    if entry.kind == int(LogKind.ENGINE)
+                    and entry.seq > after_seq
+                    and entry.run_version <= max_run_version
+                ),
+                key=lambda entry: entry.seq,
+            )
+            return entries[:limit]
+
+    def find_tool_reply(self, run_id: str, cksum: bytes, *, workspace_id: int) -> str | None:
+        require_checksum32(cksum)
+        with self._lock:
+            return self.tool_replies.get((workspace_id, run_id, cksum))
+
     def list_active_runs_all_workspaces(
         self,
         *,
         cursor: tuple[int, str] | None = None,
         limit: int = 100,
     ) -> list[CoralRun]:
-        active_statuses = {
-            int(RunStatus.STARTING),
-            int(RunStatus.RUNNING),
-            int(RunStatus.PAUSED),
-        }
         with self._lock:
-            active = [r for r in self.runs.values() if r.status in active_statuses]
+            active = [r for r in self.runs.values() if r.status in UNFINISHED_RUN_STATUSES]
             active.sort(key=lambda r: (r.workspace_id, r.id))
             if cursor is not None:
                 active = [r for r in active if (r.workspace_id, r.id) > cursor]
@@ -684,13 +736,17 @@ class FakeQueueStore:
         lease_seconds: int = 60,
         workspace_id: int | None = None,
         now_fn: Callable[[], float] | None = None,
+        exclude_run_ids: Collection[str] = (),
     ) -> WorkItem | None:
         clock = now_fn or time.time
         now_s = int(clock())
         kinds_set = set(kinds)
+        excluded = set(exclude_run_ids)
 
         with self._lock:
-            for key, item in sorted(self.work.items(), key=lambda kv: kv[1].available_at):
+            for key, item in sorted(
+                self.work.items(), key=lambda kv: (kv[1].available_at, kv[1].id)
+            ):
                 ws, _ = key
                 if workspace_id is not None and ws != workspace_id:
                     continue
@@ -698,28 +754,14 @@ class FakeQueueStore:
                     item.status == int(WorkStatus.PENDING)
                     and item.kind in kinds_set
                     and item.available_at <= now_s
+                    and item.run_id not in excluded
                 ):
-                    claimed = WorkItem(
-                        workspace_id=item.workspace_id,
-                        id=item.id,
-                        run_id=item.run_id,
-                        kind=item.kind,
+                    claimed = dataclasses.replace(
+                        item,
                         status=int(WorkStatus.CLAIMED),
-                        payload=item.payload,
-                        idempotency_cksum=item.idempotency_cksum,
-                        available_at=item.available_at,
-                        created_at_us=item.created_at_us,
                         attempts=item.attempts + 1,
-                        node_id=item.node_id,
-                        scope_key=item.scope_key,
-                        slot_generation=item.slot_generation,
-                        owner_key=item.owner_key,
                         lease_expires_at=now_s + lease_seconds,
                         lease_holder=worker_id,
-                        result=item.result,
-                        result_ref=item.result_ref,
-                        error_code=item.error_code,
-                        finished_at=item.finished_at,
                     )
                     self.work[key] = claimed
                     return claimed
@@ -749,28 +791,7 @@ class FakeQueueStore:
                 or (item.lease_expires_at is not None and item.lease_expires_at <= now_s)
             ):
                 return False
-            self.work[key] = WorkItem(
-                workspace_id=item.workspace_id,
-                id=item.id,
-                run_id=item.run_id,
-                kind=item.kind,
-                status=item.status,
-                payload=item.payload,
-                idempotency_cksum=item.idempotency_cksum,
-                available_at=item.available_at,
-                created_at_us=item.created_at_us,
-                attempts=item.attempts,
-                node_id=item.node_id,
-                scope_key=item.scope_key,
-                slot_generation=item.slot_generation,
-                owner_key=item.owner_key,
-                lease_expires_at=now_s + lease_seconds,
-                lease_holder=worker_id,
-                result=item.result,
-                result_ref=item.result_ref,
-                error_code=item.error_code,
-                finished_at=item.finished_at,
-            )
+            self.work[key] = dataclasses.replace(item, lease_expires_at=now_s + lease_seconds)
             return True
 
     def finish_work(
@@ -785,7 +806,10 @@ class FakeQueueStore:
         next_available_at: int | None = None,
         workspace_id: int | None = None,
         now_fn: Callable[[], float] | None = None,
+        hold: bool = False,
     ) -> bool:
+        if hold and int(status) != int(WorkStatus.PENDING):
+            raise ValueError("a hold re-pends the item: status must be PENDING")
         clock = now_fn or time.time
         now_s = int(clock())
         ws = self._resolve_ws(workspace_id)
@@ -804,30 +828,87 @@ class FakeQueueStore:
 
             res_str = json.dumps(result, sort_keys=True) if result is not None else None
             avail_at = next_available_at if next_available_at is not None else item.available_at
-            finished = None if status == int(WorkStatus.PENDING) else now_s
-            self.work[key] = WorkItem(
-                workspace_id=item.workspace_id,
-                id=item.id,
-                run_id=item.run_id,
-                kind=item.kind,
+            repended = int(status) == int(WorkStatus.PENDING)
+            held_since = None if not repended else item.held_since
+            if hold:
+                avail_at = max(avail_at, now_s + MIN_HOLD_DELAY_S)
+                held_since = now_s if held_since is None else held_since
+            self.work[key] = dataclasses.replace(
+                item,
                 status=status,
-                payload=item.payload,
-                idempotency_cksum=item.idempotency_cksum,
                 available_at=avail_at,
-                created_at_us=item.created_at_us,
-                attempts=item.attempts,
-                node_id=item.node_id,
-                scope_key=item.scope_key,
-                slot_generation=item.slot_generation,
-                owner_key=item.owner_key,
+                attempts=max(item.attempts - 1, 0) if hold else item.attempts,
                 lease_expires_at=None,
                 lease_holder=None,
                 result=res_str,
-                result_ref=item.result_ref,
                 error_code=error_code,
-                finished_at=finished,
+                finished_at=None if repended else now_s,
+                held_since=held_since,
             )
             return True
+
+    def get_work(self, work_ids: Sequence[str], *, workspace_id: int) -> list[WorkItem]:
+        wanted = set(work_ids)
+        with self._lock:
+            found = [
+                item
+                for (ws, work_id), item in self.work.items()
+                if ws == workspace_id and work_id in wanted
+            ]
+        return sorted(found, key=lambda item: item.id)
+
+    def reschedule_work(
+        self, draft: WorkItemDraft, *, workspace_id: int, available_at: int
+    ) -> None:
+        if int(draft.kind) == int(WorkKind.EFFECT):
+            raise ValueError("reschedule_work takes signal and timer rows, not effects")
+        with self._lock:
+            existing = next(
+                (
+                    (key, item)
+                    for key, item in self.work.items()
+                    if key[0] == workspace_id
+                    and item.run_id == draft.run_id
+                    and item.idempotency_cksum == draft.idempotency_cksum
+                ),
+                None,
+            )
+            if existing is None:
+                self.enqueue_work(
+                    [dataclasses.replace(draft, available_at=available_at)],
+                    workspace_id=workspace_id,
+                )
+                return
+            key, item = existing
+            if item.status == int(WorkStatus.PENDING):
+                self.work[key] = dataclasses.replace(
+                    item, available_at=min(item.available_at, available_at)
+                )
+            elif item.status in FINISHED_WORK_STATUSES:
+                self.work[key] = dataclasses.replace(item, **repended_values(available_at))
+
+    def purge_finished(
+        self, *, kinds: Sequence[int], finished_before: int, limit: int = 500
+    ) -> int:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        kind_vals = {int(kind) for kind in kinds}
+        if int(WorkKind.EFFECT) in kind_vals:
+            raise ValueError("purge_finished keeps effect rows")
+        with self._lock:
+            purgeable = sorted(
+                (
+                    (item.finished_at or 0, key)
+                    for key, item in self.work.items()
+                    if item.status in FINISHED_WORK_STATUSES
+                    and item.kind in kind_vals
+                    and item.finished_at is not None
+                    and item.finished_at < finished_before
+                ),
+            )[:limit]
+            for _, key in purgeable:
+                del self.work[key]
+            return len(purgeable)
 
     def reclaim_expired_work(
         self,
@@ -850,27 +931,11 @@ class FakeQueueStore:
                     and item.lease_expires_at is not None
                     and item.lease_expires_at <= now_s
                 ):
-                    self.work[key] = WorkItem(
-                        workspace_id=item.workspace_id,
-                        id=item.id,
-                        run_id=item.run_id,
-                        kind=item.kind,
+                    self.work[key] = dataclasses.replace(
+                        item,
                         status=int(WorkStatus.PENDING),
-                        payload=item.payload,
-                        idempotency_cksum=item.idempotency_cksum,
-                        available_at=item.available_at,
-                        created_at_us=item.created_at_us,
-                        attempts=item.attempts,
-                        node_id=item.node_id,
-                        scope_key=item.scope_key,
-                        slot_generation=item.slot_generation,
-                        owner_key=item.owner_key,
                         lease_expires_at=None,
                         lease_holder=None,
-                        result=item.result,
-                        result_ref=item.result_ref,
-                        error_code=item.error_code,
-                        finished_at=item.finished_at,
                     )
                     reclaimed += 1
                     if reclaimed >= limit:

@@ -8,6 +8,7 @@ import pytest
 
 from coral.stores.fakes import FakeQueueStore, FakeRunStore
 from coral.stores.protocols import (
+    CommitOutcome,
     LogEntryDraft,
     QueueStore,
     RunContended,
@@ -268,3 +269,60 @@ def test_account_checker_invoked_and_aborts_on_failure() -> None:
         )
 
     assert checker_called == 1
+
+
+def test_lock_timeout_reaches_every_apply_attempt() -> None:
+    """The lock timeout is passed to each CAS attempt, the retried one included."""
+
+    class RecordingRunStore(FakeRunStore):
+        lock_timeouts: list[float | None]
+
+        def apply_transition(
+            self,
+            run_id: str,
+            expected_version: int,
+            transition: Transition,
+            *,
+            workspace_id: int | None = None,
+            now: int | None = None,
+            lock_timeout_s: float | None = None,
+        ) -> CommitOutcome:
+            self.lock_timeouts.append(lock_timeout_s)
+            return super().apply_transition(
+                run_id,
+                expected_version,
+                transition,
+                workspace_id=workspace_id,
+                now=now,
+                lock_timeout_s=lock_timeout_s,
+            )
+
+    store = RecordingRunStore()
+    store.lock_timeouts = []
+    run = store.start_run(
+        RunStartSpec(workflow_id="wf", version_id="v1", title="Run", request_preview="")
+    )
+    conflicted = False
+
+    def conflict_once(run_id: str, expected_version: int) -> None:
+        nonlocal conflicted
+        if not conflicted:
+            conflicted = True
+            store.apply_transition(
+                run_id, expected_version, Transition(status=int(RunStatus.RUNNING))
+            )
+
+    store.before_apply_hook = conflict_once
+
+    outcome = commit_with_retry(
+        run_store=store,
+        workspace_id=run.workspace_id,
+        run_id=run.id,
+        reduce_fn=lambda state: Transition(logs=(LogEntryDraft(kind=1, actor_kind=1, body="x"),)),
+        sleep=lambda _: None,
+        lock_timeout_s=10,
+    )
+
+    assert outcome.applied is True
+    # The caller's two attempts carry the timeout; the injected writer passed none.
+    assert store.lock_timeouts == [10, None, 10]

@@ -815,11 +815,8 @@ class OmnigentSessionFacade(SessionFacade):
         try:
             return await asyncio.to_thread(self._bindings.reserve, draft)
         except BindingConflict as exc:
-            raise _refused(
-                "session.binding_conflict",
-                f"session {session_id} is already bound with a different "
-                f"{', '.join(exc.fields) or 'effect'}",
-            ) from exc
+            # The store's message names only this session and its own slot and generation.
+            raise _refused("session.binding_conflict", str(exc)) from exc
 
     async def _require_torn(
         self, request: SessionCreateRequest, session_id: str, conv: Conversation, new: _NewSession

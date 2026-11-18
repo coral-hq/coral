@@ -1,5 +1,7 @@
 """Engine log rows, engine-bridge codes, pinned graphs, frozen configs, holds and tool replies.
 
+Also indexes finished work rows for the retention purge.
+
 Revision ID: coral_0003_engine_bridge
 Revises: coral_0002_session_facade
 
@@ -28,6 +30,8 @@ _EVALUATING = 10
 _CLOSING = 11
 _ENGINE = 22
 _SLOT_GENERATION_INDEX = "uq_coral_session_bindings_slot_generation"
+_FINISHED_WORK_INDEX = "ix_coral_work_finished"
+_FINISHED_WORK_COLUMNS = ["kind", "status", "finished_at", "workspace_id", "id"]
 _VERSION_CONTENT_CHECK = "ck_coral_workflow_versions_content"
 _VERSION_CONTENT_SQL = (
     "(yaml_ref IS NOT NULL OR yaml_text IS NOT NULL) "
@@ -129,6 +133,8 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("engine_config", CAPPED_TEXT, nullable=True))
     with op.batch_alter_table("coral_work") as batch_op:
         batch_op.add_column(sa.Column("held_since", sa.BigInteger(), nullable=True))
+    # Lets the retention purge read a bounded range per kind and status.
+    op.create_index(_FINISHED_WORK_INDEX, "coral_work", _FINISHED_WORK_COLUMNS)
     op.create_table(
         "coral_tool_replies",
         sa.Column("workspace_id", sa.BigInteger(), nullable=False),
@@ -193,6 +199,7 @@ def downgrade() -> None:
     # The checks can still fail on data, so restore them before dropping anything.
     _replace_checks(widen=False)
     op.drop_index(_SLOT_GENERATION_INDEX, table_name="coral_session_bindings")
+    op.drop_index(_FINISHED_WORK_INDEX, table_name="coral_work")
     op.drop_table("coral_tool_replies")
     with op.batch_alter_table("coral_work") as batch_op:
         batch_op.drop_column("held_since")

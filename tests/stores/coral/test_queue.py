@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 from collections.abc import AsyncIterator
+from typing import Any
 
+import pytest
 from sqlalchemy import select
 
 from coral.db import WorkRow, coral_engine, ensure_coral_schema
-from coral.db.enum_codecs import RunStatus, WorkStatus
+from coral.db.enum_codecs import RunStatus, WorkKind, WorkStatus
 from coral.queue import (
     EffectCompleted,
     EffectFailed,
@@ -26,9 +29,11 @@ from coral.stores.protocols import (
     QueueStore,
     RunStartSpec,
     Transition,
+    WorkItem,
     WorkItemDraft,
 )
 from coral.stores.runs import SqlAlchemyCoralRunStore
+from coral.stores.work_rows import MIN_HOLD_DELAY_S
 
 
 def test_queue_enqueue_claim_renew_finish_reclaim_lifecycle(db_uri: str) -> None:
@@ -472,3 +477,321 @@ async def test_work_drainer_runs_wind_down_effects_of_a_cancelled_run(db_uri: st
         other.id: (int(WorkStatus.ABANDONED), "run.terminal"),
         stale_cancel.id: (int(WorkStatus.ABANDONED), "slot.generation_mismatch"),
     }
+
+
+# ── Holds, claim exclusion, rescheduling and retention (SQL and fake) ──────────
+
+_WS = 7
+_NOW = 1_700_000_000
+_WORKER = "worker-1"
+
+
+@pytest.fixture(params=["sql", "fake"])
+def queue(request: pytest.FixtureRequest) -> QueueStore:
+    if request.param == "sql":
+        return SqlAlchemyCoralQueueStore(request.getfixturevalue("coral_db_uri"))
+    return FakeQueueStore()
+
+
+def _signal(run_id: str, key: str, *, available_at: int = 0) -> WorkItemDraft:
+    return WorkItemDraft.signal(
+        run_id=run_id, idempotency_key=key, payload={}, available_at=available_at
+    )
+
+
+def _claim(queue: QueueStore, at: int, *, workspace_id: int = _WS, **kwargs: Any) -> WorkItem:
+    item = queue.claim_work(
+        _WORKER,
+        kinds=(int(WorkKind.SIGNAL), int(WorkKind.TIMER), int(WorkKind.EFFECT)),
+        workspace_id=workspace_id,
+        now_fn=lambda: float(at),
+        **kwargs,
+    )
+    assert item is not None
+    return item
+
+
+def _finish(
+    queue: QueueStore,
+    item: WorkItem,
+    status: WorkStatus,
+    at: int,
+    *,
+    workspace_id: int = _WS,
+    **kwargs: Any,
+) -> None:
+    assert item.lease_expires_at is not None
+    assert queue.finish_work(
+        item.id,
+        worker_id=_WORKER,
+        expected_lease_expires_at=item.lease_expires_at,
+        status=int(status),
+        workspace_id=workspace_id,
+        now_fn=lambda: float(at),
+        **kwargs,
+    )
+
+
+def _one(queue: QueueStore, draft: WorkItemDraft, *, workspace_id: int = _WS) -> WorkItem:
+    [item] = queue.get_work([draft.id], workspace_id=workspace_id)
+    return item
+
+
+def test_claim_skips_items_of_excluded_runs(queue: QueueStore) -> None:
+    busy = _signal("run-busy", "first", available_at=_NOW - 10)
+    free = _signal("run-free", "second", available_at=_NOW)
+    queue.enqueue_work([busy, free], workspace_id=_WS, now=_NOW)
+
+    assert _claim(queue, _NOW, exclude_run_ids=("run-busy",)).id == free.id
+    assert (
+        queue.claim_work(
+            _WORKER,
+            kinds=(int(WorkKind.SIGNAL),),
+            workspace_id=_WS,
+            now_fn=lambda: float(_NOW),
+            exclude_run_ids=("run-busy",),
+        )
+        is None
+    )
+    assert _claim(queue, _NOW).id == busy.id
+
+
+def test_hold_repends_without_spending_an_attempt_and_keeps_its_start(
+    queue: QueueStore,
+) -> None:
+    draft = _signal("run-1", "held")
+    queue.enqueue_work([draft], workspace_id=_WS, now=_NOW)
+
+    for at in (_NOW, _NOW + 300, _NOW + 600):
+        claimed = _claim(queue, at)
+        assert claimed.attempts == 1
+        _finish(
+            queue,
+            claimed,
+            WorkStatus.PENDING,
+            at,
+            error_code="run.paused",
+            next_available_at=at + 300,
+            hold=True,
+        )
+        held = _one(queue, draft)
+        assert (held.status, held.attempts, held.available_at) == (
+            int(WorkStatus.PENDING),
+            0,
+            at + 300,
+        )
+        assert (held.held_since, held.error_code, held.finished_at) == (_NOW, "run.paused", None)
+
+    # A hold needs the item re-pended; the claim is left as it was.
+    claimed = _claim(queue, _NOW + 900)
+    with pytest.raises(ValueError, match="hold"):
+        queue.finish_work(
+            claimed.id,
+            worker_id=_WORKER,
+            expected_lease_expires_at=claimed.lease_expires_at or 0,
+            status=int(WorkStatus.FAILED),
+            workspace_id=_WS,
+            now_fn=lambda: float(_NOW + 900),
+            hold=True,
+        )
+    assert _one(queue, draft) == claimed
+
+    # A retry past the horizon spends an attempt but keeps the first refusal's time,
+    # so the horizon is not restarted by the next hold.
+    _finish(
+        queue,
+        claimed,
+        WorkStatus.PENDING,
+        _NOW + 900,
+        error_code="session.not_ready",
+        next_available_at=_NOW + 910,
+    )
+    retried = _one(queue, draft)
+    assert (retried.held_since, retried.attempts) == (_NOW, 1)
+    claimed = _claim(queue, _NOW + 910)
+    _finish(queue, claimed, WorkStatus.PENDING, _NOW + 910, error_code="run.paused", hold=True)
+    assert _one(queue, draft).held_since == _NOW
+    _finish(queue, _claim(queue, _NOW + 920), WorkStatus.SUCCEEDED, _NOW + 920)
+    done = _one(queue, draft)
+    assert (done.status, done.held_since, done.finished_at) == (
+        int(WorkStatus.SUCCEEDED),
+        None,
+        _NOW + 920,
+    )
+
+
+@pytest.mark.parametrize("status", [WorkStatus.FAILED, WorkStatus.ABANDONED])
+def test_a_finish_ends_the_hold(queue: QueueStore, status: WorkStatus) -> None:
+    draft = _signal("run-1", "held")
+    queue.enqueue_work([draft], workspace_id=_WS, now=_NOW)
+    _finish(queue, _claim(queue, _NOW), WorkStatus.PENDING, _NOW, error_code="x", hold=True)
+
+    _finish(queue, _claim(queue, _NOW + 60), status, _NOW + 60, error_code="x")
+
+    assert _one(queue, draft).held_since is None
+
+
+def test_a_hold_is_never_due_sooner_than_the_minimum_delay(queue: QueueStore) -> None:
+    draft = _signal("run-1", "held")
+    queue.enqueue_work([draft], workspace_id=_WS, now=_NOW)
+
+    # No delay, then one in the past: neither makes the item claimable at once.
+    for next_available_at in (None, _NOW - 60):
+        at = _NOW if next_available_at is None else _NOW + 10
+        _finish(
+            queue,
+            _claim(queue, at),
+            WorkStatus.PENDING,
+            at,
+            error_code="run.paused",
+            next_available_at=next_available_at,
+            hold=True,
+        )
+        assert _one(queue, draft).available_at == at + MIN_HOLD_DELAY_S
+        assert (
+            queue.claim_work(
+                _WORKER,
+                kinds=(int(WorkKind.SIGNAL),),
+                workspace_id=_WS,
+                now_fn=lambda at=at: float(at + MIN_HOLD_DELAY_S - 1),
+            )
+            is None
+        )
+
+
+def test_get_work_reads_only_the_callers_workspace(queue: QueueStore) -> None:
+    first = _signal("run-1", "first")
+    second = _signal("run-1", "second")
+    queue.enqueue_work([first, second], workspace_id=_WS, now=_NOW)
+    queue.enqueue_work([first], workspace_id=_WS + 1, now=_NOW)
+
+    assert {item.id for item in queue.get_work([second.id, first.id], workspace_id=_WS)} == {
+        first.id,
+        second.id,
+    }
+    assert [item.workspace_id for item in queue.get_work([first.id], workspace_id=_WS + 1)] == [
+        _WS + 1
+    ]
+    assert queue.get_work([second.id], workspace_id=_WS + 1) == []
+    assert queue.get_work([], workspace_id=_WS) == []
+
+
+def test_reschedule_inserts_repends_finished_rows_and_keeps_the_earlier_time(
+    queue: QueueStore,
+) -> None:
+    draft = _signal("run-1", "resync")
+
+    queue.reschedule_work(draft, workspace_id=_WS, available_at=_NOW + 900)
+    inserted = _one(queue, draft)
+    assert (inserted.status, inserted.attempts, inserted.available_at) == (
+        int(WorkStatus.PENDING),
+        0,
+        _NOW + 900,
+    )
+    # A pending row keeps the earlier time: a later call never delays it.
+    queue.reschedule_work(draft, workspace_id=_WS, available_at=_NOW + 960)
+    assert _one(queue, draft).available_at == _NOW + 900
+    queue.reschedule_work(draft, workspace_id=_WS, available_at=_NOW)
+    assert _one(queue, draft).available_at == _NOW
+
+    # A claimed row belongs to its worker.
+    claimed = _claim(queue, _NOW)
+    queue.reschedule_work(draft, workspace_id=_WS, available_at=_NOW - 60)
+    assert _one(queue, draft) == claimed
+
+    for status, at in (
+        (WorkStatus.SUCCEEDED, _NOW),
+        (WorkStatus.FAILED, _NOW + 60),
+        (WorkStatus.ABANDONED, _NOW + 120),
+    ):
+        if status is not WorkStatus.SUCCEEDED:
+            claimed = _claim(queue, at)
+        _finish(queue, claimed, status, at, error_code="code", result={"r": 1})
+        queue.reschedule_work(draft, workspace_id=_WS, available_at=at + 60)
+        repended = _one(queue, draft)
+        assert repended == dataclasses.replace(
+            repended,
+            status=int(WorkStatus.PENDING),
+            attempts=0,
+            available_at=at + 60,
+            error_code=None,
+            result=None,
+            finished_at=None,
+            held_since=None,
+            lease_holder=None,
+            lease_expires_at=None,
+        )
+    assert len(queue.get_work([draft.id], workspace_id=_WS)) == 1
+    assert queue.get_work([draft.id], workspace_id=_WS + 1) == []
+
+
+def test_purge_finished_deletes_old_finished_signal_and_timer_rows_in_batches(
+    queue: QueueStore,
+) -> None:
+    cutoff = _NOW
+    old = cutoff - 100
+
+    def finished(
+        draft: WorkItemDraft, status: WorkStatus, at: int, workspace_id: int = _WS
+    ) -> None:
+        queue.enqueue_work([draft], workspace_id=workspace_id, now=at)
+        claimed = _claim(queue, at, workspace_id=workspace_id)
+        assert claimed.id == draft.id
+        _finish(queue, claimed, status, at, workspace_id=workspace_id)
+
+    purged = [
+        _signal("run-1", "succeeded"),
+        WorkItemDraft.timer(run_id="run-1", idempotency_key="failed timer", available_at=0),
+        _signal("run-1", "abandoned"),
+    ]
+    finished(purged[0], WorkStatus.SUCCEEDED, old)
+    finished(purged[1], WorkStatus.FAILED, old)
+    finished(purged[2], WorkStatus.ABANDONED, old)
+    other_workspace = _signal("run-9", "other workspace")
+    finished(other_workspace, WorkStatus.SUCCEEDED, old, workspace_id=_WS + 1)
+    effect = WorkItemDraft.effect(run_id="run-1", idempotency_key="effect", payload={})
+    finished(effect, WorkStatus.SUCCEEDED, old)
+    recent = _signal("run-1", "recent")
+    finished(recent, WorkStatus.SUCCEEDED, cutoff)
+    claimed = _signal("run-1", "claimed")
+    queue.enqueue_work([claimed], workspace_id=_WS, now=old)
+    _claim(queue, old)
+    pending = _signal("run-1", "pending", available_at=_NOW + 3600)
+    queue.enqueue_work([pending], workspace_id=_WS, now=old)
+
+    kinds = (int(WorkKind.SIGNAL), int(WorkKind.TIMER))
+    batches = [
+        queue.purge_finished(kinds=kinds, finished_before=cutoff, limit=3) for _ in range(3)
+    ]
+
+    assert batches == [3, 1, 0]
+    kept = [effect, recent, claimed, pending]
+    assert {
+        item.id for item in queue.get_work([d.id for d in purged + kept], workspace_id=_WS)
+    } == {draft.id for draft in kept}
+    assert queue.get_work([other_workspace.id], workspace_id=_WS + 1) == []
+    assert queue.purge_finished(kinds=(), finished_before=cutoff) == 0
+
+
+def test_effect_rows_are_never_rescheduled_or_purged(queue: QueueStore) -> None:
+    effect = WorkItemDraft.effect(run_id="run-1", idempotency_key="effect", payload={})
+    queue.enqueue_work([effect], workspace_id=_WS, now=_NOW)
+    _finish(queue, _claim(queue, _NOW), WorkStatus.SUCCEEDED, _NOW)
+    before = _one(queue, effect)
+
+    with pytest.raises(ValueError, match="not effects"):
+        queue.reschedule_work(effect, workspace_id=_WS, available_at=_NOW + 60)
+    with pytest.raises(ValueError, match="keeps effect rows"):
+        queue.purge_finished(
+            kinds=(int(WorkKind.SIGNAL), int(WorkKind.EFFECT)), finished_before=_NOW + 60
+        )
+    assert _one(queue, effect) == before
+
+
+def test_claim_breaks_ties_by_id(queue: QueueStore) -> None:
+    drafts = [_signal("run-1", key) for key in ("one", "two", "three", "four")]
+    queue.enqueue_work(drafts, workspace_id=_WS, now=_NOW)
+
+    claimed = [_claim(queue, _NOW).id for _ in drafts]
+
+    assert claimed == sorted(draft.id for draft in drafts)

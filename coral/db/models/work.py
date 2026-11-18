@@ -69,6 +69,15 @@ class WorkRow(CoralBase):
             "id",
         ),
         Index("ix_coral_work_run", "workspace_id", "run_id", "status", "id"),
+        # The retention purge: finished rows of one kind and status, oldest first.
+        Index(
+            "ix_coral_work_finished",
+            "kind",
+            "status",
+            "finished_at",
+            "workspace_id",
+            "id",
+        ),
         make_enum_check_constraint("kind", WORK_KIND, name="ck_coral_work_kind"),
         make_enum_check_constraint("status", WORK_STATUS, name="ck_coral_work_status"),
     )

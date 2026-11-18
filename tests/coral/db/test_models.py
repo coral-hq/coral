@@ -574,6 +574,16 @@ def test_engine_bridge_columns_table_and_binding_index() -> None:
     assert tables["coral_run_specs"].c.engine_config.nullable is True
     assert isinstance(tables["coral_work"].c.held_since.type, BigInteger)
     assert tables["coral_work"].c.held_since.nullable is True
+    (purge,) = [
+        index for index in tables["coral_work"].indexes if index.name == "ix_coral_work_finished"
+    ]
+    assert [column.name for column in purge.columns] == [
+        "kind",
+        "status",
+        "finished_at",
+        "workspace_id",
+        "id",
+    ]
 
     replies = tables["coral_tool_replies"]
     assert [column.name for column in replies.primary_key.columns] == [

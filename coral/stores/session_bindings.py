@@ -8,13 +8,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from sqlalchemy import Engine, asc, select
+from sqlalchemy import ColumnElement, Engine, asc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from coral.db import (
+    RunRow,
     SessionBindingRow,
     coral_engine,
+    keyset_after,
     make_named_managed_session_maker,
     run_write_transaction,
     shared_read_scope,
@@ -28,13 +30,17 @@ from coral.db.enum_codecs import (
     encode_slot_role,
 )
 from coral.model.ids import anchor_session_id
+from coral.stores.protocols import UNFINISHED_RUN_STATUSES
 
 
 class BindingConflict(Exception):
     """A stored binding disagrees with the reservation.
 
-    The message names only the caller's own session; ``fields`` lists what
-    differs and ``stored`` holds the stored binding (if any) for logs.
+    The message names only the caller's own session, slot and generation.
+    ``fields`` lists the fields that differ from the session's stored binding, or
+    the reservation's fields another session of the run already holds (its
+    effect, or its slot and generation). ``stored`` holds the session's own stored
+    binding, if any, for logs.
     """
 
     def __init__(
@@ -144,7 +150,12 @@ class FreshBindingLookup(SessionBindingLookup, Protocol):
 _MATCHED_FIELDS = ("run_id", "role", "slot_id", "slot_role", "session_generation", "host_id")
 
 
-def _draft_binding(draft: SessionBindingDraft, now: int) -> SessionBinding:
+def binding_from_draft(draft: SessionBindingDraft, now: int) -> SessionBinding:
+    """Return the binding ``draft`` reserves at ``now``.
+
+    :raises ValueError: when an anchor carries slot fields or a non-derived session
+        id, or a step lacks its slot id or slot role.
+    """
     role = SessionBindingRole(encode_session_binding_role(draft.role))
     slot_role = None if draft.slot_role is None else SlotRole(encode_slot_role(draft.slot_role))
     if role is SessionBindingRole.ANCHOR:
@@ -205,9 +216,11 @@ def _to_row(binding: SessionBinding) -> SessionBindingRow:
     )
 
 
-def _adopt(row: SessionBindingRow, wanted: SessionBinding) -> SessionBinding:
-    """Return the stored binding when ``wanted`` reserves the same one, else raise."""
-    stored = _to_binding(row)
+def adopt_binding(stored: SessionBinding, wanted: SessionBinding) -> SessionBinding:
+    """Return ``stored`` when ``wanted`` reserves the same binding, else raise.
+
+    :raises BindingConflict: naming the fields that differ.
+    """
     names = _MATCHED_FIELDS
     if wanted.role is SessionBindingRole.STEP:
         names = (*names, "effect_cksum")
@@ -219,6 +232,33 @@ def _adopt(row: SessionBindingRow, wanted: SessionBinding) -> SessionBinding:
             stored=stored,
         )
     return stored
+
+
+def effect_taken(wanted: SessionBinding) -> BindingConflict:
+    """The conflict for an effect already bound to another session of the run."""
+    return BindingConflict(
+        f"the effect for session {wanted.session_id} is already bound to "
+        "another session of this run",
+        fields=("effect_cksum",),
+    )
+
+
+def slot_generation_taken(wanted: SessionBinding) -> BindingConflict:
+    """The conflict for a slot and generation already bound to another session of the run."""
+    return BindingConflict(
+        f"slot {wanted.slot_id} generation {wanted.session_generation} for session "
+        f"{wanted.session_id} is already bound to another session of this run",
+        fields=("slot_id", "session_generation"),
+    )
+
+
+def is_listed_bound_session(binding: SessionBinding, run_status: int | None) -> bool:
+    """Whether ``list_bound_sessions`` returns ``binding`` of a run in ``run_status``."""
+    return (
+        binding.role is SessionBindingRole.STEP
+        and binding.progress >= SessionBindingProgress.ROW_CREATED
+        and run_status in UNFINISHED_RUN_STATUSES
+    )
 
 
 class SqlAlchemySessionBindingStore:
@@ -238,6 +278,7 @@ class SqlAlchemySessionBindingStore:
             if isinstance(db_uri_or_engine, str)
             else db_uri_or_engine
         )
+        self._dialect = engine.dialect.name
         self._clock = clock
         self._session = make_named_managed_session_maker(
             engine, query_name_prefix="coral.session_bindings"
@@ -250,18 +291,19 @@ class SqlAlchemySessionBindingStore:
         """Store the binding unless present; return the stored binding.
 
         :raises BindingConflict: when the stored binding differs in run, role, slot
-            id, slot role, generation, host or (for a step) effect, or the effect
-            is already bound to another session of the run.
+            id, slot role, generation, host or (for a step) effect, or the effect,
+            or the step's slot and generation, is already bound to another session
+            of the run.
         :raises ValueError: when an anchor carries slot fields or a non-derived
             session id, or a step lacks its slot id or slot role.
         """
-        wanted = _draft_binding(draft, int(self._clock()))
+        wanted = binding_from_draft(draft, int(self._clock()))
         key = (wanted.workspace_id, wanted.session_id)
 
         def _reserve(session: Session) -> SessionBinding:
             stored = session.get(SessionBindingRow, key)
             if stored is not None:
-                return _adopt(stored, wanted)
+                return adopt_binding(_to_binding(stored), wanted)
             session.add(_to_row(wanted))
             return wanted
 
@@ -270,13 +312,20 @@ class SqlAlchemySessionBindingStore:
         except IntegrityError as exc:
             with shared_read_scope(), self._session("reserve.read_back") as session:
                 stored = session.get(SessionBindingRow, key)
-                if stored is None:
-                    raise BindingConflict(
-                        f"the effect for session {wanted.session_id} is already bound to "
-                        "another session of this run",
-                        fields=("effect_cksum",),
-                    ) from exc
-                return _adopt(stored, wanted)
+                if stored is not None:
+                    return adopt_binding(_to_binding(stored), wanted)
+                if _run_has_binding(
+                    session, wanted, SessionBindingRow.effect_cksum == wanted.effect_cksum
+                ):
+                    raise effect_taken(wanted) from exc
+                if wanted.slot_id is not None and _run_has_binding(
+                    session,
+                    wanted,
+                    SessionBindingRow.slot_id == wanted.slot_id,
+                    SessionBindingRow.session_generation == wanted.session_generation,
+                ):
+                    raise slot_generation_taken(wanted) from exc
+            raise
 
     def record_progress(
         self, workspace_id: int, session_id: str, progress: SessionBindingProgress | str
@@ -329,6 +378,60 @@ class SqlAlchemySessionBindingStore:
             ).all()
             return [_to_binding(row) for row in rows]
 
+    def list_bound_sessions(
+        self, *, cursor: tuple[int, str] | None = None, limit: int = 500
+    ) -> list[SessionBinding]:
+        """Return created step sessions, orchestrators included, of unfinished runs.
+
+        Reads every workspace: runs starting, running or paused, bindings past
+        ``row_created``. Keyset-paged on ``(workspace_id, session_id)``.
+        """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        stmt = (
+            select(SessionBindingRow)
+            .join(
+                RunRow,
+                (RunRow.workspace_id == SessionBindingRow.workspace_id)
+                & (RunRow.id == SessionBindingRow.run_id),
+            )
+            .where(
+                SessionBindingRow.role == int(SessionBindingRole.STEP),
+                SessionBindingRow.progress >= int(SessionBindingProgress.ROW_CREATED),
+                RunRow.status.in_(UNFINISHED_RUN_STATUSES),
+            )
+        )
+        if cursor is not None:
+            stmt = stmt.where(
+                keyset_after(
+                    (SessionBindingRow.workspace_id, SessionBindingRow.session_id),
+                    cursor,
+                    descending=False,
+                    dialect_name=self._dialect,
+                )
+            )
+        stmt = stmt.order_by(
+            asc(SessionBindingRow.workspace_id), asc(SessionBindingRow.session_id)
+        ).limit(limit)
+        with shared_read_scope(), self._session("list_bound_sessions") as session:
+            return [_to_binding(row) for row in session.scalars(stmt).all()]
+
+
+def _run_has_binding(
+    session: Session, wanted: SessionBinding, *matching: ColumnElement[bool]
+) -> bool:
+    """Whether another binding of ``wanted``'s run matches every condition."""
+    found = session.scalars(
+        select(SessionBindingRow.session_id)
+        .where(
+            SessionBindingRow.workspace_id == wanted.workspace_id,
+            SessionBindingRow.run_id == wanted.run_id,
+            *matching,
+        )
+        .limit(1)
+    ).first()
+    return found is not None
+
 
 __all__ = [
     "BindingConflict",
@@ -339,5 +442,10 @@ __all__ = [
     "SessionBindingLookup",
     "SessionBindings",
     "SqlAlchemySessionBindingStore",
+    "adopt_binding",
+    "binding_from_draft",
     "effect_checksum",
+    "effect_taken",
+    "is_listed_bound_session",
+    "slot_generation_taken",
 ]

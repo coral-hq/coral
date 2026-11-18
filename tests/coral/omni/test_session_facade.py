@@ -1076,6 +1076,23 @@ async def test_a_redelivery_that_rebinds_the_session_is_a_binding_conflict(
     assert host.launches_for(coral.step_id()) == 0
 
 
+async def test_a_second_session_for_one_slot_and_generation_is_a_binding_conflict(
+    coral: _Coral, host: _Host, runner: _Runner
+) -> None:
+    await coral.anchor()
+    _completed(await coral.deliver(coral.step_payload()))
+
+    # Another effect for the same slot and generation would bind a second session to it.
+    failure = _failed(await coral.deliver(coral.step_payload(seq=3)))
+
+    assert (failure.error_code, failure.retryable) == ("session.binding_conflict", False)
+    assert f"slot {SLOT} generation 1" in failure.message
+    assert "already bound to another session of this run" in failure.message
+    assert coral.step_id() not in failure.message
+    assert coral.progress(coral.step_id(seq=3)) is None
+    assert host.launches_for(coral.step_id(seq=3)) == 0
+
+
 async def test_a_step_before_its_anchor_is_retryable(
     unlaunched: _Coral, launcher: _RecordingLauncher, host: _Host
 ) -> None:
