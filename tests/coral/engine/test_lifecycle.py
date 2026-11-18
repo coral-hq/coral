@@ -1320,9 +1320,8 @@ def test_a_resume_that_leaves_the_run_paused_reprompts_nothing() -> None:
         [
             RUN,
             SessionFailed(slot_id=SLOT, failure_class="auth", cause="401", fact_key=FACT_A),
-            SessionFailed(
-                slot_id=PAIR, failure_class="agent.failed", cause="agent.failed", fact_key=FACT_B
-            ),
+            # A permanent failure only a retry clears.
+            PauseRun(reason="failure_path", detail="dispatch.policy_denied"),
         ],
     )
     resumed = drive(graph, [ResumeRun()], after=paused)
@@ -1330,7 +1329,67 @@ def test_a_resume_that_leaves_the_run_paused_reprompts_nothing() -> None:
     assert resumed.log[-1].effects == ()
     assert resumed.state.status == "paused"
     assert [cause.reason for cause in resumed.state.causes] == ["failure_path"]
-    assert [slot.failed_turn for slot in resumed.state.slots] == [FACT_A, FACT_B]
+    assert [slot.failed_turn for slot in resumed.state.slots] == [FACT_A, None]
+
+
+def test_resume_clears_a_steps_unnamed_turn_failure_and_re_prompts_it_once() -> None:
+    graph = _pair_graph()
+    paused = drive(
+        graph,
+        [
+            RUN,
+            SessionFailed(
+                slot_id=PAIR, failure_class="agent.failed", cause="agent.failed", fact_key=FACT_B
+            ),
+        ],
+    )
+    assert paused.state.causes == (
+        PauseCause(reason="failure_path", detail="agent.failed", subject=PAIR),
+    )
+
+    resumed = drive(graph, [ResumeRun()], after=paused)
+
+    assert resumed.log[-1].rejection is None
+    assert (resumed.state.status, resumed.state.causes) == ("running", ())
+    assert [
+        (effect.kind, effect.subject, effect.payload) for effect in resumed.log[-1].effects
+    ] == [("nudge", PAIR, {"fact_key": FACT_B, "reason": "resume"})]
+    assert [slot.failed_turn for slot in resumed.state.slots] == [None, None]
+    assert fold(graph, resumed.log) == resumed.state
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        # A run-level cause with the same detail is not a step's failed turn.
+        PauseRun(reason="failure_path", detail="agent.failed"),
+        PauseRun(reason="failure_path", detail="transition_too_large"),
+    ],
+    ids=["run_level_same_detail", "unbuildable_commit"],
+)
+def test_resume_leaves_every_other_failure_path_cause_to_a_retry(other: PauseRun) -> None:
+    graph = _pair_graph()
+    paused = drive(
+        graph,
+        [
+            RUN,
+            SessionFailed(
+                slot_id=PAIR, failure_class="agent.failed", cause="agent.failed", fact_key=FACT_B
+            ),
+            other,
+        ],
+    )
+
+    resumed = drive(graph, [ResumeRun()], after=paused)
+
+    assert resumed.state.status == "paused"
+    assert resumed.state.causes == (
+        PauseCause(reason="failure_path", detail=other.detail, subject=""),
+    )
+    assert resumed.log[-1].effects == ()
+    only_other = transition(graph, resumed.state, ResumeRun(), NOW)
+    assert only_other.entry.rejection is not None
+    assert only_other.entry.rejection.code == "resume_not_allowed"
 
 
 def test_the_nudge_cap_pauses_rejected_calls_and_resume_resets_it() -> None:
@@ -1447,19 +1506,15 @@ def test_a_pending_close_waits_for_every_cause_and_a_retry_finishes_it() -> None
     paused = drive(
         graph,
         [
-            SessionFailed(
-                slot_id="side||:0",
-                failure_class="agent.failed",
-                cause="agent.failed",
-                fact_key=FACT_B,
-            ),
+            # A permanent failure only a retry clears.
+            PauseRun(reason="failure_path", detail="dispatch.policy_denied"),
             EffectCompleted(effect_key=close.effect_key, payload={"pending_input": True}),
         ],
         after=closing,
         auto_ack=False,
     )
     assert [(cause.reason, cause.detail) for cause in paused.state.causes] == [
-        ("failure_path", "agent.failed"),
+        ("failure_path", "dispatch.policy_denied"),
         ("drift", "pending_input"),
     ]
 
@@ -1533,12 +1588,8 @@ def test_a_retry_that_returns_the_run_to_running_reprompts_failed_slots() -> Non
         [
             RUN,
             SessionFailed(slot_id=SLOT, failure_class="auth", cause="401", fact_key=FACT_A),
-            SessionFailed(
-                slot_id="side||:0",
-                failure_class="agent.failed",
-                cause="agent.failed",
-                fact_key=FACT_B,
-            ),
+            # A permanent failure only a retry clears.
+            PauseRun(reason="failure_path", detail="dispatch.policy_denied"),
             ResumeRun(),
         ],
     )

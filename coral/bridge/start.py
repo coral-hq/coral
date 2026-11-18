@@ -103,7 +103,9 @@ def start_engine_run(
 
     :param actor: Who starts it, recorded on the run's first engine row; ``None`` only
         on a server without authentication.
-    :param allow_ownerless: Accept a spec without ``user_id`` (auth-less servers only).
+    :param allow_ownerless: Accept a spec without ``user_id``: only on a single-user
+        server, where its agents are the local user's; anywhere else its first create
+        is refused ``session.invalid``.
     :raises RunNotRunnable: for the first rule the workflow or spec breaks.
     :raises StartKeyConflict: when the key started a run with other caller fields or
         another YAML.

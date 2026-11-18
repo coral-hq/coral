@@ -128,12 +128,6 @@ class EngineStateCache:
         )
         return folded
 
-    def forget(self, *, workspace_id: int, run_id: str) -> None:
-        with self._lock:
-            dropped = self._runs.pop((workspace_id, run_id), None)
-            if dropped is not None:
-                self._bytes -= dropped.log_bytes
-
     def _extend(
         self,
         workspace_id: int,

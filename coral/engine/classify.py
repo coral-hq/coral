@@ -46,6 +46,12 @@ _TRANSIENT_ORIGINS = frozenset(
 # start of the text, so a tool's output quoted later in it picks no class.
 _WRAPPER = re.compile(r"\s*(?:inner executor error:\s*)?")
 _STATUS_AT_START = re.compile(r"(?:API Error: |Error code: |status[_ ]code[=: ])(\d{3})\b")
+# Omnigent's runner names an HTTP status in its own failures: a harness that refused the
+# turn, a runner request the server relays, and an agent spec it could not load.
+_RUNNER_STATUS_AT_START = re.compile(
+    r"(?:turn failed \(status |runner returned status "
+    r"|Could not load the agent spec \([^()]{0,200}\bHTTP )(\d{3})\b"
+)
 # The API's error body, e.g. ``{"type":"error","error":{"type":"overloaded_error",...}}``.
 _ERROR_BODY_AT_START = re.compile(
     r'\{\s*"type"\s*:\s*"error"\s*,\s*"error"\s*:\s*\{\s*"type"\s*:\s*"([a-z_]{1,64})"'
@@ -73,7 +79,9 @@ def classify_failure(snapshot: TurnSnapshot) -> Class:
     Error text is read only when no explicit code, status or origin decided the class
     and ``status_code`` is unset, and only at its start (after the runtime's
     ``inner executor error:`` wrapper): a status in the shapes ``API Error: NNN``,
-    ``Error code: NNN`` and ``status[_ ]code[=: ]NNN``; without one, the API's error
+    ``Error code: NNN`` and ``status[_ ]code[=: ]NNN``, or in the runner's own
+    ``turn failed (status NNN)``, ``runner returned status NNN`` and
+    ``Could not load the agent spec (... HTTP NNN)``; without one, the API's error
     body type or the usage-limit notice. A policy denial's text is never read.
     """
     text = snapshot.error_text
@@ -117,16 +125,9 @@ def _classify_text(text: str | None) -> Class | None:
         return None
     wrapped = _WRAPPER.match(text)
     start = text[wrapped.end() :] if wrapped is not None else text
-    found = _STATUS_AT_START.match(start)
+    found = _STATUS_AT_START.match(start) or _RUNNER_STATUS_AT_START.match(start)
     if found is not None:
-        status = int(found.group(1))
-        if status in {401, 403}:
-            return Class(name="auth", cause=str(status))
-        if status == 429:
-            return Class(name="plan.usage_limit", cause="429")
-        if _server_error(status):
-            return Class(name="infra.transient", cause=str(status))
-        return None
+        return _status_class(int(found.group(1)))
     body = _ERROR_BODY_AT_START.match(start)
     if body is not None and body.group(1) in _LIMIT_BODY_TYPES:
         return Class(name="plan.usage_limit", cause=body.group(1))
@@ -134,6 +135,17 @@ def _classify_text(text: str | None) -> Class | None:
         return Class(name="infra.transient", cause=body.group(1))
     if _USAGE_LIMIT_AT_START.match(start) is not None:
         return Class(name="plan.usage_limit", cause="usage_limit_phrase")
+    return None
+
+
+def _status_class(status: int) -> Class | None:
+    """The class an HTTP status read from error text names, if any."""
+    if status in {401, 403}:
+        return Class(name="auth", cause=str(status))
+    if status == 429:
+        return Class(name="plan.usage_limit", cause="429")
+    if _server_error(status):
+        return Class(name="infra.transient", cause=str(status))
     return None
 
 

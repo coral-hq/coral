@@ -56,6 +56,7 @@ from coral.omni.server.bundles import (
     StepBundleRejected,
     agent_owner,
     check_hygiene,
+    ownerless_runs_allowed,
     pack_bundle,
 )
 from coral.omni.server.host_access import HostAccessError, OwnerHost, authorize_owner_host
@@ -334,7 +335,7 @@ class OmnigentSessionFacade(SessionFacade):
         *,
         ensure_lease: Callable[[], Awaitable[None]],
     ) -> SessionRef:
-        if self._auth_on and request.user_id is None:
+        if request.user_id is None and not ownerless_runs_allowed():
             raise _refused(
                 "session.invalid",
                 f"run {request.run_id} has no owner, and this server requires one",

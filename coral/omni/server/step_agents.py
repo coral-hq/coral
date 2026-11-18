@@ -25,6 +25,7 @@ from coral.omni.server.bundles import (
     StepBundleRejected,
     agent_owner,
     materialize,
+    ownerless_runs_allowed,
 )
 from coral.profiles.bundle_spec import (
     ENGINE_PREFIX,
@@ -80,7 +81,6 @@ class OmnigentStepAgents:
     Materializes a step's stance as the run owner's agent, in a thread, cached per bundle.
 
     :param conversation_store: Reads a retried create's session, whose agent it keeps.
-    :param auth_on: The server has authentication: an ownerless run gets no agent.
     """
 
     def __init__(
@@ -89,13 +89,11 @@ class OmnigentStepAgents:
         artifact_store: ArtifactStore,
         *,
         conversation_store: ConversationStore | None = None,
-        auth_on: bool = False,
         max_entries: int = STEP_AGENT_CACHE_ENTRIES,
     ) -> None:
         self._agents = agent_store
         self._artifacts = artifact_store
         self._conversations = conversation_store
-        self._auth_on = auth_on
         self._max_entries = max_entries
         self._cache: OrderedDict[tuple[int, str | None, str], MaterializedAgent] = OrderedDict()
         self._lock = threading.Lock()
@@ -116,11 +114,11 @@ class OmnigentStepAgents:
 
         :param session_id: The session the create makes. When an earlier try wrote it
             and it runs the owner's agent of this bundle's name, that agent is kept.
-        :raises CoralSessionError: Permanent ``session.invalid`` for an ownerless run on a
-            server with authentication; permanent ``session.agent_not_supported`` when the
+        :raises CoralSessionError: Permanent ``session.invalid`` for an ownerless run
+            outside a single-user server; permanent ``session.agent_not_supported`` when the
             stance or step cannot name a bundle, or the bundle breaks a step rule.
         """
-        if owner is None and self._auth_on:
+        if owner is None and not ownerless_runs_allowed():
             raise CoralSessionError(
                 "session.invalid", "the run has no owner, and this server requires one"
             )

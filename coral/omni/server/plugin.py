@@ -18,6 +18,7 @@ from coral.api.workflows import create_workflows_router
 from coral.bridge.bound_sessions import BoundSessions
 from coral.bridge.config import RESYNC_INTERVAL_S
 from coral.bridge.executors import (
+    BRIDGE_THREADS,
     DECISION_THREAD_NAME,
     DECISION_THREADS,
     BoundedThreads,
@@ -312,7 +313,6 @@ def _wire_session_engine(
         services.agent_store,
         services.artifact_store,
         conversation_store=services.conversation_store,
-        auth_on=services.auth_provider is not None,
     )
     executors: dict[str, EffectExecutor] = {
         CREATE_SESSION: create_session_executor(
@@ -416,7 +416,9 @@ async def coral_lifespan(
                 versions=SqlAlchemyWorkflowVersionStore(storage_location),
                 bound_sessions=bound,
             )
-            threads = BridgeThreads(bridge)
+            workers = drain_concurrency(getattr(services, "server_config", None))
+            # Each drain worker may wait on one bridge call; the pool never starves them.
+            threads = BridgeThreads(bridge, max_workers=max(BRIDGE_THREADS, workers))
             stack.callback(threads.close)
             decisions = BoundedThreads(
                 max_workers=DECISION_THREADS, thread_name_prefix=DECISION_THREAD_NAME
@@ -430,7 +432,7 @@ async def coral_lifespan(
                 run_reconciler=threads.schedule_resync,
                 on_finished=threads.feed,
                 hold_policy=bridge_hold_policy,
-                drain_concurrency=drain_concurrency(getattr(services, "server_config", None)),
+                drain_concurrency=workers,
                 resync_interval_s=RESYNC_INTERVAL_S,
             )
             if hasattr(app, "state"):

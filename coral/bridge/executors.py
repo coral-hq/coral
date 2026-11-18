@@ -51,7 +51,7 @@ from coral.queue.run_effects import (
     session_id_field,
 )
 from coral.recovery.drift import DriftPauser, classify_step
-from coral.signals.turn_facts import EdgeFacts, LiveFacts, build_turn_fact
+from coral.signals.turn_facts import EDGE_LOST, EdgeFacts, LiveFacts, build_turn_fact
 from coral.stores.protocols import CommitOutcome, CoralRun, RunContended, RunNotFound, WorkItem
 from coral.stores.session_bindings import SessionBindingLookup
 from coral.stores.stable_ids import StableIds
@@ -84,11 +84,16 @@ class BoundedThreads:
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix=thread_name_prefix
         )
+        self._max_workers = max_workers
         self._closed = False
 
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def max_workers(self) -> int:
+        return self._max_workers
 
     async def run(self, fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs) -> _T:
         """``fn(*args, **kwargs)`` on the pool, in a copy of the caller's context.
@@ -416,9 +421,10 @@ async def _orchestrator_turn(
         return "no_input"
     async with run_scope(sources.scope_runner, snapshot.store):
         gone = await _session_gone(snapshot, signal, sources)
-    if gone is not None:
-        return gone
-    pause = failure_pause(signal.edge)
+        if gone is not None:
+            return gone
+        edge = signal.edge or await _lost_failure(snapshot, signal, sources)
+    pause = failure_pause(edge)
     if pause is None:
         return "orchestrator_turn"
     store = snapshot.store
@@ -431,6 +437,38 @@ async def _orchestrator_turn(
         ),
     )
     return "orchestrator_paused" if commit.outcome.applied else "no_input"
+
+
+async def _lost_failure(
+    snapshot: EngineSnapshot, signal: _TurnSignal, sources: _Sources
+) -> EdgeFacts | None:
+    """
+    The orchestrator's failed turn a re-gather finds without its edge, as that edge.
+
+    As for a step, a live ``failed`` status is this turn's only once a runner item
+    follows the newest engine message (a request or a re-request): before that it is
+    the previous turn's lingering status.
+    """
+    store = snapshot.store
+    engine_messages = await asyncio.to_thread(
+        sources.stable_ids.checksums_for_session,
+        store.workspace_id,
+        signal.session_id,
+        run_id=store.run_id,
+    )
+    if not engine_messages:
+        return None
+    transcript = await sources.transcripts.turn_transcript(
+        session_id=signal.session_id, user_id=store.run.user_id, engine_messages=engine_messages
+    )
+    if transcript.newest_input != "engine" or not transcript.runner_item_after_engine_input:
+        return None
+    live = await sources.dispatch.live_status(session_id=signal.session_id)
+    if live.status != "failed":
+        return None
+    return EdgeFacts(
+        status="failed", observed_at_ms=0, turn_outcome="failed", error_code=EDGE_LOST
+    )
 
 
 async def _session_gone(

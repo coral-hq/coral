@@ -244,7 +244,7 @@ holds some codes without spending an attempt, whatever their retryable flag
 | `session.host_not_permitted` | no | The host is unknown (an id no host can have included), another user's, another registration's or a managed sandbox. |
 | `session.host_unsupported` | no | The owner's live host connection does not advertise `coral_runner:2`: update Coral on that host, or unset `CORAL_DISABLE_HOST_ENTRY_POINTS` there. Checked before any row, and again before the launch. |
 | `session.owner_revoked` | no | The run owner's account was revoked or re-registered. |
-| `session.invalid` | no | An ownerless run on a server with auth; a step run with no worktree on a host; a server with no project store or no host access; another refusal. |
+| `session.invalid` | no | An ownerless run outside a single-user server; a step run with no worktree on a host; a server with no project store or no host access; another refusal. |
 | `dispatch.runner_unavailable` | yes | The runner did not take the event in 120 s, or the server answered `RUNNER_UNAVAILABLE` (a relaunch refusal included), `HOST_OFFLINE`, `WRONG_REPLICA` or `CONFLICT`. |
 | `dispatch.stop_unconfirmed` | yes | The server could not confirm that no runner of the session is alive. |
 | `dispatch.failed` | yes | Any other server error. |
@@ -553,7 +553,25 @@ three times in a row, and the next such turn end pauses the run
 `rejected_calls`; a 529 backs off (re-prompts at 30 s and 2 min, then pauses
 `infra` at 8 min if the step still fails); a 429 pauses `plan_limit`, and a
 probe from 5 minutes, doubling to an hour, clears it and re-prompts; a 401
-pauses `auth`. A resume re-prompts each failed or stopped step once.
+pauses `auth`. The classifier reads explicit codes and statuses first, then only
+the start of the error text: claude-sdk's `API Error: NNN`, `Error code: NNN`,
+`status_code=NNN`, the API's error body and the usage-limit notice, and
+Omnigent's own `turn failed (status NNN)`, `runner returned status NNN` and
+`Could not load the agent spec (... HTTP NNN)`. A failure no rule names
+(`agent.failed`) pauses the run `failure_path`.
+
+**What a resume clears.** `ResumeRun` clears the causes `user`,
+`rejected_calls`, `infra`, `auth`, `drift`, `plan_limit` and
+`authority_revoked`; `budget` only with a higher activation cap; and a step's
+failed turn no rule names (`failure_path`, detail `agent.failed`, until steps
+can be retried: CRL-137). A resume that returns the run to running re-prompts
+each failed or stopped step once. Every other `failure_path` cause (a
+permanent effect failure such as `dispatch.policy_denied` or
+`session.host_unsupported`, a permanent anchor or orchestrator failure, a
+commit that cannot be built) and `liveness` need a retry (CRL-137); until then
+such a run can only be cancelled. A run paused `failure_path` with detail
+`engine.load_failed` can be neither resumed nor cancelled (see the deferred
+table). `engine_upgrade` is cleared by neither.
 
 **The orchestrator.** The commit that opens a run's first decision names
 `orchestrator_session_id` and queues the orchestrator's create (bundle
@@ -562,7 +580,8 @@ each later decision gets a request. A decision unanswered at 30 and at 60
 minutes gets a reminder while the run runs, and every return to running asks
 again about each decision still open. While a decision waits, a failed
 orchestrator turn pauses the run `plan_limit`, `auth` or `infra` (detail
-`orchestrator:<class>`), and an archived or deleted orchestrator pauses it
+`orchestrator:<class>`; a failure whose edge was lost is found by the
+re-gather once a runner item follows the request, and pauses `infra`), and an archived or deleted orchestrator pauses it
 `drift`; the resume asks again. A resume commit that cannot hold every
 re-request drops the extra ones, which are asked again only at the next
 resume; the start bound of 48 keeps a commit from filling up this way.
@@ -605,7 +624,9 @@ the stored state.
   (single-user mode acts as `"local"`), so the owner, grant and
   launch-permission paths are proven mostly with auth off.
 - **Error texts.** The 529, 429 and 401 texts the classifier reads are the
-  shapes traced in the claude-sdk code, not captured from a real run.
+  shapes traced in the claude-sdk and runner code, not captured from a real
+  run. A text no rule reads pauses `failure_path` (`agent.failed`), which a
+  resume clears and re-prompts.
 
 ## Run protection
 
@@ -911,11 +932,11 @@ process (see "The engine bridge" and
 
 | Work | Owner |
 |---|---|
-| Runs API and SSE: the routes that start, resume and cancel runs, and their authorization (the bridge authorizes nothing). Take the owner from the authenticated user, never the request (an ownerless run's agents are the local user's on a single-user server; use `allow_ownerless` only without auth), and the host, worktree and branch from `coral/workspace/run_worktree.py`. Show stalls, pause causes and a step a person typed into. Project activation and gate rows. Store the full run request: briefs carry only `request_preview`, at most 512 characters. | CRL-135 |
+| Runs API and SSE: the routes that start, resume and cancel runs, and their authorization (the bridge authorizes nothing). Take the owner from the authenticated user, never the request (an ownerless run's agents are the local user's on a single-user server; use `allow_ownerless` only there: anywhere else its first create is refused `session.invalid`), and the host, worktree and branch from `coral/workspace/run_worktree.py`. Show stalls, pause causes and a step a person typed into, and offer only cancel for a run paused `failure_path` by anything but a step's `agent.failed` (see "What a resume clears"). Project activation and gate rows. Store the full run request: briefs carry only `request_preview`, at most 512 characters. | CRL-135 |
 | Unloadable runs: one already paused for another reason shows no load-failure cause, and none can be cancelled, because cancel goes through the engine and no store-only cancel exists | CRL-135 |
 | A pause made on the run row alone has no durable marker: a resync repair between the engine's own pause and its plan probe can take over the row's reason, and the probe then lifts the row | CRL-135 |
 | Gates and the Inbox: `publish_gate`, `withdraw_gate` and `notify` delivery queue no work, and the decision alert reaches only the orchestrator. No claude-sdk gate may be labelled Enforced until the sandbox probe below passes. | CRL-134 (alerts: GTE-06) |
-| Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)), which must check the host token; `runner_lost` and `retry_step` work, binding a retried slot's new session with the slot's current `session_generation` (port rule (a), [`engine-tools.md`](engine-tools.md)); replacing an orchestrator, with keys and a fence scoped to its generation; backoff for an orchestrator's transient failures, which pause the run at once; winding down the anchor and orchestrator sessions after a run ends | CRL-137 |
+| Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)), which must check the host token; `runner_lost` and `retry_step` work (a retry clears every `failure_path` cause, and a resume then stops clearing a step's `agent.failed`), binding a retried slot's new session with the slot's current `session_generation` (port rule (a), [`engine-tools.md`](engine-tools.md)); replacing an orchestrator, with keys and a fence scoped to its generation; backoff for an orchestrator's transient failures, which pause the run at once; winding down the anchor and orchestrator sessions after a run ends | CRL-137 |
 | Tier B: the real 529, 429 and 401 texts the classifier reads, and worktree fingerprint noise on real hosts, which pauses writer steps `drift` (`pending_input`) | CRL-137 |
 | ADR-05 probe 15 residuals: the sandbox probe on macOS seatbelt and Linux bwrap (sibling harness sockets, sibling runners' environments, bridge dirs, the user's credential files), before the walking skeleton is done | CRL-137 |
 | A force-deleted `coral__` agent leaves the live steps that run it unable to hand off, with only `/mcp` failing closed, until the nudge cap pauses the run: consult the required-policy provider on the no-agent branch keyed on the binding, or stop the run's sessions on a forced delete | CRL-137 |

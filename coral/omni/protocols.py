@@ -353,12 +353,12 @@ class StepAgentResolver(Protocol):
 
         Runs inside the run's scopes; a repeat for the same bundle returns the same agent.
 
-        :param owner: The run's user, or ``None`` on an auth-less server.
+        :param owner: The run's user, or ``None`` for an ownerless run (single-user servers).
         :param session_id: The session the create makes: when an earlier try wrote it,
             its agent is kept while it is still this stance's bundle of the owner.
         :raises CoralSessionError: Permanent ``session.agent_not_supported`` when no
             bundle can be built for the stance and step; permanent ``session.invalid``
-            for an ownerless run on a server that requires an owner.
+            for an ownerless run on a server that is not single-user.
         """
         ...
 

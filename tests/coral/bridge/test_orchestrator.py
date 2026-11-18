@@ -633,6 +633,37 @@ async def test_a_failed_orchestrator_turn_pauses_its_run_and_resume_re_requests(
     assert world.run(run_id).status == int(RunStatus.COMPLETED)
 
 
+@pytest.mark.parametrize(
+    "ran", [False, True], ids=["lingering_status", "failed_after_the_request"]
+)
+async def test_a_failed_orchestrator_turn_whose_edge_was_lost_pauses_at_the_re_gather(
+    asked: tuple[Sessions, str], ran: bool
+) -> None:
+    sessions, run_id = asked
+    world = sessions.world
+    orchestrator = sessions.orchestrator_of(run_id)
+    if ran:
+        # The orchestrator took the request, then its turn failed; the edge never came.
+        sessions.dispatch.reply(orchestrator, assistant=False)
+    sessions.dispatch.sessions[orchestrator].status = "failed"
+
+    world.clock.advance(300)
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    await sessions.drain()
+
+    [signal] = _signals_of(world, run_id, orchestrator)
+    if not ran:
+        # A status left from before the request: nothing to pause for.
+        assert json.loads(signal.result or "{}") == {"turn_fact": "orchestrator_turn"}
+        assert world.run(run_id).status == int(RunStatus.RUNNING)
+        return
+    assert json.loads(signal.result or "{}") == {"turn_fact": "orchestrator_paused"}
+    assert _status(world, run_id) == (int(RunStatus.PAUSED), int(RunPauseReason.INFRA))
+    assert world.assert_fold_matches(run_id).causes == (
+        PauseCause(reason="infra", detail="orchestrator:infra.transient", subject=""),
+    )
+
+
 def _failed_edge(**fields: Any) -> EdgeFacts:
     values: dict[str, Any] = {"status": "failed", "observed_at_ms": 1, "turn_outcome": "failed"}
     values.update(fields)

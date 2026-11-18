@@ -561,6 +561,26 @@ def test_one_busy_session_cannot_fill_the_queue_for_other_runs(
     assert (recording.written, len(_signals(queue))) == (4, 4)
 
 
+def test_an_edge_handed_off_as_the_recorder_closes_never_blocks_a_wait(
+    queue: _ThreadRecordingQueue,
+) -> None:
+    class ClosingRecorder(TurnFactRecorder):
+        def _take(self, key: tuple[int, str]) -> bool:
+            # The close lands after the observer's check and before its hand-off.
+            taken = super()._take(key)
+            self.close()
+            return taken
+
+    recording = ClosingRecorder(
+        _index((WORKSPACE, BOUND_SESSION, BOUND)), queue, clock=lambda: NOW
+    )
+    recording.start()
+    recording.observe(_status_edge())
+    recording.wait_idle()
+
+    assert (queue.attempts, recording.written) == (0, 0)
+
+
 def test_an_observer_failure_never_reaches_the_publisher(queue: _ThreadRecordingQueue) -> None:
     class BrokenIndex(BoundSessions):
         def lookup(self, workspace_id: int, session_id: str) -> BoundSession | None:
@@ -666,6 +686,21 @@ def test_a_rebuild_drops_a_session_pushed_before_it_read_the_store() -> None:
     BoundSessionRefresher(source, index).refresh()
 
     assert len(index) == 0
+
+
+def test_a_rebuild_whose_read_fails_leaves_the_index_as_it_was() -> None:
+    index = _index((WORKSPACE, BOUND_SESSION, BOUND))
+
+    class Down(_ListedBindings):
+        def list_bound_sessions(self, **_page: Any) -> list[SessionBinding]:
+            raise OperationalError("SELECT", {}, RuntimeError("database is down"))
+
+    with pytest.raises(OperationalError):
+        BoundSessionRefresher(Down([]), index).refresh()
+
+    # No rebuild is left open to collect pushes, and the entries stand.
+    assert not index.rebuilding
+    assert index.lookup(WORKSPACE, BOUND_SESSION) == BOUND
 
 
 def test_bindings_without_an_engine_slot_are_not_indexed() -> None:

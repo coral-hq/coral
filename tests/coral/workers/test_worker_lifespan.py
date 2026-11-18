@@ -387,7 +387,8 @@ async def test_a_second_concurrent_lifespan_raises_before_registering_anything(
 
 
 @pytest.mark.parametrize(
-    ("server_config", "workers"), [({}, 4), ({"coral_drain_concurrency": 2}, 2)]
+    ("server_config", "workers"),
+    [({}, 4), ({"coral_drain_concurrency": 2}, 2), ({"coral_drain_concurrency": 16}, 16)],
 )
 async def test_the_lifespan_wires_the_bridge_into_the_supervisor_and_unwires_it_on_exit(
     server: _Server,
@@ -426,6 +427,8 @@ async def test_the_lifespan_wires_the_bridge_into_the_supervisor_and_unwires_it_
         assert wiring["run_reconciler"] == threads.schedule_resync
         assert wiring["hold_policy"] is bridge_hold_policy
         assert (wiring["drain_concurrency"], wiring["resync_interval_s"]) == (workers, 60)
+        # Never fewer bridge threads than drain workers.
+        assert threads.max_workers == max(8, workers)
         assert not threads.closed
 
     # The supervisor stopped first, so no timer or resync item found its executor missing.

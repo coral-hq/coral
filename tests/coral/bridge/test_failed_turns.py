@@ -414,3 +414,43 @@ async def test_the_backoff_stages_fire_from_their_timer_rows(
     fired = [command for command in _inputs(world, run_id) if isinstance(command, TimerDue)]
     assert [command.timer_key.rsplit(":", 1)[-1] for command in fired] == ["1"]
     assert _texts(sessions, run_id)[-1].startswith(BACKOFF)
+
+
+async def test_a_failure_no_rule_names_pauses_and_a_resume_re_prompts_the_step_once(
+    world: World, briefed: tuple[Sessions, str]
+) -> None:
+    sessions, run_id = briefed
+    sessions.fail_turn(run_id, IMPLEMENT, "inner executor error: the harness gave up")
+    await sessions.drain()
+    assert _status(world, run_id) == (int(RunStatus.PAUSED), int(RunPauseReason.FAILURE_PATH))
+    assert _failures(world, run_id) == [("agent.failed", "agent.failed")]
+
+    world.bridge.resume_run(workspace_id=WORKSPACE, run_id=run_id, actor=USER)
+    await sessions.drain()
+
+    texts = _texts(sessions, run_id)
+    assert len(texts) == 2 and texts[-1].startswith(RESUME)
+    assert _status(world, run_id) == RUNNING
+    await sessions.run(Agent(sessions))
+    assert world.run(run_id).status == int(RunStatus.COMPLETED)
+
+
+@pytest.mark.parametrize(
+    ("message", "failure"),
+    [
+        ("turn failed (status 529)", ("infra.transient", "529")),
+        ("turn failed (status 503)", ("infra.transient", "503")),
+    ],
+)
+async def test_the_runners_own_status_failure_backs_off_like_the_api_s(
+    world: World, briefed: tuple[Sessions, str], message: str, failure: tuple[str, str]
+) -> None:
+    sessions, run_id = briefed
+    failed_at = world.clock.now
+    sessions.fail_turn(run_id, IMPLEMENT, message, code="runner_error")
+    await sessions.drain()
+
+    assert _failures(world, run_id) == [failure]
+    assert _status(world, run_id) == RUNNING
+    await _at(world, sessions, failed_at, 30)
+    assert _texts(sessions, run_id)[-1].startswith(BACKOFF)

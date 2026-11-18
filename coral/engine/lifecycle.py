@@ -75,6 +75,10 @@ _RESUME_REASONS: frozenset[PauseReason] = frozenset(
     }
 )
 _RETRY_REASONS: frozenset[PauseReason] = frozenset({"infra", "failure_path", "liveness"})
+# A step's failed turn no rule names pauses ``failure_path`` with this detail. Until steps
+# can be retried, a resume clears it too and re-prompts the step; other ``failure_path``
+# causes (a permanent effect failure, an unbuildable commit) still need a retry.
+_UNNAMED_TURN_FAILURE = "agent.failed"
 _COUNTED_REJECTIONS = frozenset({"handoff.invalid", "tool.illegal"})
 # A failed turn of a slot in these states came after its accepted handoff.
 _HANDED_OFF = frozenset({"closing", "closed"})
@@ -100,21 +104,22 @@ def pause_run(state: RunState, command: PauseRun) -> ApplyResult:
 def resume_run(graph: CompiledGraph, state: RunState, command: ResumeRun) -> ApplyResult:
     """Clear the causes ResumeRun is allowed to clear. A miss changes nothing.
 
-    A run that is running again finishes pending closes, advances, and re-prompts its
-    failed and stopped slots.
+    That is every resumable reason, ``budget`` given a higher cap, and a step's failed
+    turn no rule names. A run that is running again finishes pending closes, advances,
+    and re-prompts its failed and stopped slots.
     """
-    reasons: set[PauseReason] = set()
-    for cause in state.causes:
-        if cause.reason in _RESUME_REASONS:
-            reasons.add(cause.reason)
     store_cap: int | None = None
     if any(cause.reason == "budget" for cause in state.causes):
         if command.cap is not None and command.cap > state.max_activations:
-            reasons.add("budget")
             store_cap = command.cap
+
+    def cleared(cause: PauseCause) -> bool:
+        return _resume_clears(cause) or (cause.reason == "budget" and store_cap is not None)
+
+    reasons = {cause.reason for cause in state.causes if cleared(cause)}
     if not reasons:
         return refuse(state, "resume_not_allowed")
-    updated = _drop_causes(state, reasons)
+    updated = _without_causes(state, cleared)
     changes: dict[str, object] = {"seq": state.seq + 1}
     if store_cap is not None:
         changes["max_activations"] = store_cap
@@ -131,6 +136,17 @@ def resume_run(graph: CompiledGraph, state: RunState, command: ResumeRun) -> App
         updated, nudges = _reprompt(updated, "resume")
         effects = (*effects, *nudges)
     return ApplyResult(state=updated, effects=effects)
+
+
+def _resume_clears(cause: PauseCause) -> bool:
+    """A resumable reason, or a step's failed turn no rule names (until steps can retry)."""
+    if cause.reason in _RESUME_REASONS:
+        return True
+    return (
+        cause.reason == "failure_path"
+        and cause.detail == _UNNAMED_TURN_FAILURE
+        and cause.subject != ""
+    )
 
 
 def cancel_run(state: RunState) -> ApplyResult:

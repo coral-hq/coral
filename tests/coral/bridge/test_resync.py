@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import zstandard
 
+from coral.bridge import fold as fold_module
 from coral.bridge.commit import build_commit
 from coral.bridge.config import PAUSED_RESYNC_DELAY_S, ceil_epoch_seconds
 from coral.bridge.keys import anchor_effect_key, effect_work_id
@@ -264,6 +265,31 @@ def test_an_unloadable_run_pauses_once_and_later_resyncs_do_nothing(world: World
         world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run.id)
     assert world.run(run.id).version == paused.version
     assert [row.kind for row in logs].count(int(LogKind.PAUSED)) == 1
+
+
+def test_a_defect_while_folding_is_raised_not_filed_as_an_unloadable_run(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = start(world)
+
+    def broken(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("a reducer defect")
+
+    monkeypatch.setattr(fold_module, "fold_log", broken)
+    # A new process: nothing folded yet.
+    cold = EngineBridge(
+        run_store=world.runs, queue_store=world.queue, versions=world.versions, clock=world.clock
+    )
+    version = world.run(run.id).version
+
+    with pytest.raises(ValueError, match="reducer defect"):
+        cold.resync_run(workspace_id=WORKSPACE, run_id=run.id)
+
+    # Nothing paused the run: a fixed defect lets it go on.
+    assert (world.run(run.id).status, world.run(run.id).version) == (
+        int(RunStatus.RUNNING),
+        version,
+    )
 
 
 def test_a_terminal_run_is_only_projected(world: World) -> None:

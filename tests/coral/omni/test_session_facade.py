@@ -1994,18 +1994,22 @@ def _stance_executor(coral: _Coral) -> None:
 
 
 @pytest.mark.usefixtures("coral_policy_registry", "host")
-@pytest.mark.parametrize(("single_user", "stored_as"), [(True, "local"), (False, None)])
+@pytest.mark.parametrize("auth_on", [False, True], ids=["no_auth_provider", "auth_provider"])
 async def test_an_ownerless_runs_stance_create_works_on_a_single_user_server(
-    unlaunched: _Coral,
+    app: FastAPI,
+    stores: _Stores,
+    db_uri: str,
+    launcher: _RecordingLauncher,
     monkeypatch: pytest.MonkeyPatch,
-    single_user: bool,
-    stored_as: str | None,
+    auth_on: bool,
 ) -> None:
-    """Omnigent reads no user as the local user there; the agent is stored and matched so."""
-    if single_user:
-        monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
-    else:
-        monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    """
+    Omnigent reads no user as the local user there; the agent is stored and matched so.
+
+    A served single-user server has an auth provider too, which changes nothing here.
+    """
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    unlaunched = _Coral(app, stores, db_uri, launcher=launcher, auth_on=auth_on)
     _stance_executor(unlaunched)
     await unlaunched.anchor()
 
@@ -2014,7 +2018,7 @@ async def test_an_ownerless_runs_stance_create_works_on_a_single_user_server(
     conv = unlaunched.conversation(session_id)
     assert conv is not None and conv.agent_id is not None
     agent = unlaunched.stores.agent.get(conv.agent_id)
-    assert agent is not None and (agent.kind, agent.created_by) == ("user", stored_as)
+    assert agent is not None and (agent.kind, agent.created_by) == ("user", "local")
 
 
 class _FailsFirstLaunch(_RecordingLauncher):
@@ -2057,10 +2061,16 @@ async def test_a_create_retried_after_a_bundle_change_keeps_the_agent_it_wrote(
     assert coral.progress(session_id) == SessionBindingProgress.INITIALIZED
 
 
-async def test_with_auth_on_a_run_without_an_owner_is_refused(
-    app: FastAPI, stores: _Stores, db_uri: str
+@pytest.mark.parametrize("auth_on", [False, True], ids=["no_auth_provider", "auth_provider"])
+async def test_outside_a_single_user_server_a_run_without_an_owner_is_refused(
+    app: FastAPI,
+    stores: _Stores,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_on: bool,
 ) -> None:
-    coral = _Coral(app, stores, db_uri, auth_on=True)
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    coral = _Coral(app, stores, db_uri, auth_on=auth_on)
 
     failure = _failed(await coral.deliver(coral.anchor_payload()))
 

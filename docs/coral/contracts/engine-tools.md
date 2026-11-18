@@ -277,7 +277,9 @@ Each item below was left to the bridge in v0; each has its line in
   paused step can still hand off" holds only at the policy layer.
 - **Stopped turns.** A resume, or a plan-limit probe that clears its pause,
   re-prompts with one nudge every slot that is `evaluating` with no handoff or
-  whose last turn failed. After a store outage the resync re-gathers the turn
+  whose last turn failed; a resume also clears a step's failed turn no rule
+  names (`agent.failed`), so that slot is re-prompted too (see
+  [`session-facade.md`](session-facade.md), "What a resume clears"). After a store outage the resync re-gathers the turn
   of each working slot of a running run every five minutes, so a turn end
   lost then is folded and nudged.
 - **Nudge lease.** `nudge` is a leased kind (`_LEASED_KINDS` in

@@ -94,21 +94,19 @@ async def test_a_stance_resolves_to_the_owners_bundle_and_repeats_reuse_it(
     )
 
 
-@pytest.mark.parametrize(("single_user", "stored_as"), [(True, "local"), (False, None)])
 async def test_an_ownerless_runs_step_is_one_agent_across_concurrent_and_restarted_resolvers(
     agent_store: SqlAlchemyAgentStore,
     tmp_path: Path,
     materialized: list[dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
-    single_user: bool,
-    stored_as: str | None,
 ) -> None:
     """
-    An auth-less server's run has no owner; each process materializes the same row.
+    A single-user server's run may have no owner; each process materializes the same row.
 
-    A single-user server reads no user as its local user, so the row is that user's.
+    That server reads no user as its local user, so the row is that user's.
     """
-    _single_user(monkeypatch, single_user)
+    stored_as = "local"
+    _single_user(monkeypatch, True)
     artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
 
     async def resolve() -> str:
@@ -223,12 +221,14 @@ async def test_a_stance_with_no_step_bundle_is_a_permanent_refusal(
     assert materialized == []
 
 
-async def test_an_ownerless_run_gets_no_agent_on_a_server_with_authentication(
-    agent_store: SqlAlchemyAgentStore, tmp_path: Path, materialized: list[dict[str, Any]]
+async def test_an_ownerless_run_gets_no_agent_outside_a_single_user_server(
+    agent_store: SqlAlchemyAgentStore,
+    tmp_path: Path,
+    materialized: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    agents = OmnigentStepAgents(
-        agent_store, LocalArtifactStore(str(tmp_path / "artifacts")), auth_on=True
-    )
+    _single_user(monkeypatch, False)
+    agents = OmnigentStepAgents(agent_store, LocalArtifactStore(str(tmp_path / "artifacts")))
 
     with pytest.raises(CoralSessionError) as refused:
         await agents.resolve(workspace_id=WORKSPACE, owner=None, stance="implementer", **STEP)

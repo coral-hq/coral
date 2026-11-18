@@ -78,6 +78,11 @@ class BoundSessions:
     def __len__(self) -> int:
         return len(self._entries)
 
+    @property
+    def rebuilding(self) -> bool:
+        """A rebuild is reading the store: pushes are kept for it."""
+        return self._rebuilding
+
     def lookup(self, workspace_id: int, session_id: str) -> BoundSession | None:
         """One dict read; safe on any thread, never blocks."""
         return self._entries.get((workspace_id, session_id))
@@ -112,6 +117,12 @@ class BoundSessions:
             self._recent = []
             self._rebuilding = False
             self._entries = rebuilt
+
+    def abandon_rebuild(self) -> None:
+        """End a rebuild whose read failed; the index stays as it was."""
+        with self._lock:
+            self._recent = []
+            self._rebuilding = False
 
 
 def created_session(finished: FinishedWork) -> tuple[int, str, BoundSession] | None:

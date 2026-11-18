@@ -139,6 +139,33 @@ _SDK_TEXT = "inner executor error: "
             "usage_limit_phrase",
         ),
         ({"error_text": _SDK_TEXT + "API Error: 401 invalid x-api-key"}, "auth", "401"),
+        # Omnigent's runner, for a harness that refused the turn over HTTP.
+        (
+            {"error_code": "runner_error", "error_text": "turn failed (status 529)"},
+            "infra.transient",
+            "529",
+        ),
+        (
+            {"error_code": "RuntimeError", "error_text": "turn failed (status 502)"},
+            "infra.transient",
+            "502",
+        ),
+        (
+            {"error_code": "runner_error", "error_text": "turn failed (status 429)"},
+            "plan.usage_limit",
+            "429",
+        ),
+        ({"error_code": "runner_error", "error_text": "turn failed (status 401)"}, "auth", "401"),
+        ({"error_code": "runner_error", "error_text": "turn failed (status 403)"}, "auth", "403"),
+        ({"error_text": "runner returned status 503"}, "infra.transient", "503"),
+        (
+            {
+                "error_text": "Could not load the agent spec (RuntimeError HTTP 503). "
+                "Request failed on the runner; see the runner log for details."
+            },
+            "infra.transient",
+            "503",
+        ),
         ({"error_code": "claude_sdk_auth_failed"}, "auth", "claude_sdk_auth_failed"),
         (
             {"error_code": "coral_subscription_auth_refused"},
@@ -169,6 +196,10 @@ def test_claude_sdk_shapes_map_to_their_class(
         "upstream failed: status_code=503",
         'body {"type":"error","error":{"type":"overloaded_error"}}',
         _SDK_TEXT + "the tool said API Error: 529",
+        "the tool said turn failed (status 529)",
+        "turn failed (status 204)",
+        "turn failed",
+        "Could not load the agent spec (ConnectError). Request failed on the runner.",
         # A status the shapes name but no class reads: the body's type is not read then.
         'API Error: 400 {"type":"error","error":{"type":"rate_limit_error"}}',
     ],

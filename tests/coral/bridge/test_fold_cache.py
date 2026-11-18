@@ -274,9 +274,6 @@ def test_another_graph_or_config_and_an_evicted_run_fold_from_the_start() -> Non
     cache.fold(workspace_id=WORKSPACE, run_id=other.id, version=1, graph=GRAPH, config=CONFIG)
     _fold(cache, committed.final)
     assert reader.take()[0].after_seq == 0
-    cache.forget(workspace_id=WORKSPACE, run_id=RUN_ID)
-    _fold(cache, committed.final)
-    assert reader.take()[0].after_seq == 0
 
 
 def _engine_bytes(committed: CommittedRun) -> int:

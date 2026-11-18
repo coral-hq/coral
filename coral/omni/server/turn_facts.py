@@ -98,6 +98,9 @@ class TurnFactRecorder:
         self._worker: threading.Thread | None = None
         self._closed = False
         self._observer_failed = False
+        # Set once the worker has left: an edge handed off later is dropped at once.
+        self._stopped = False
+        self._stop_lock = threading.Lock()
         self.written = 0
         self.dropped_full = 0
         self.dropped_busy = 0
@@ -131,6 +134,12 @@ class TurnFactRecorder:
                 self._release(key)
                 self.dropped_full += 1
                 _log_every_hundredth(self.dropped_full, "the turn-fact queue is full")
+                return
+            if self._closed:
+                # A close raced this hand-off: no worker may be left to take the edge.
+                with self._stop_lock:
+                    if self._stopped:
+                        self._drop_pending()
         except Exception:  # an observer bug must not break the publish
             # One traceback; repeats go to debug.
             first, self._observer_failed = not self._observer_failed, True
@@ -165,6 +174,9 @@ class TurnFactRecorder:
         self._closed = True
         worker = self._worker
         if worker is None:
+            with self._stop_lock:
+                self._stopped = True
+                self._drop_pending()
             return
         while True:
             try:
@@ -172,18 +184,30 @@ class TurnFactRecorder:
                 break
             except queue.Full:
                 # Make room for the stop: the queued edges are dropped anyway.
-                with contextlib.suppress(queue.Empty):
-                    dropped = self._pending.get_nowait()
-                    if dropped is not None:
-                        self._release((dropped[0].workspace_id, dropped[0].session_id))
-                    self._pending.task_done()
+                self._drop_pending(limit=1)
         worker.join(timeout_s)
+
+    def _drop_pending(self, *, limit: int | None = None) -> None:
+        """Take queued edges off the queue unwritten, all of them or ``limit``."""
+        dropped = 0
+        while limit is None or dropped < limit:
+            try:
+                item = self._pending.get_nowait()
+            except queue.Empty:
+                return
+            if item is not None:
+                self._release((item[0].workspace_id, item[0].session_id))
+            self._pending.task_done()
+            dropped += 1
 
     def _work(self) -> None:
         while True:
             item = self._pending.get()
             try:
                 if item is None:
+                    with self._stop_lock:
+                        self._stopped = True
+                        self._drop_pending()
                     return
                 if not self._closed:
                     self._record(*item)
@@ -261,6 +285,15 @@ class BoundSessionRefresher:
     def refresh(self) -> int:
         """Rebuild the index in one paged read; returns how many sessions it holds."""
         since = self._index.begin_rebuild()
+        try:
+            entries = self._read()
+        except BaseException:
+            self._index.abandon_rebuild()
+            raise
+        self._index.replace(entries, since=since)
+        return len(entries)
+
+    def _read(self) -> dict[SessionKey, BoundSession]:
         entries: dict[SessionKey, BoundSession] = {}
         cursor: tuple[int, str] | None = None
         while True:
@@ -270,10 +303,8 @@ class BoundSessionRefresher:
                 if bound is not None:
                     entries[(binding.workspace_id, binding.session_id)] = bound
             if len(page) < self._page_size:
-                break
+                return entries
             cursor = (page[-1].workspace_id, page[-1].session_id)
-        self._index.replace(entries, since=since)
-        return len(entries)
 
     async def start(self) -> None:
         """Fill the index once, then keep rebuilding it in the background."""

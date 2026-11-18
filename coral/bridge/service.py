@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Literal
 
 import zstandard
+from pydantic import ValidationError
 
 from coral.bridge.bound_sessions import BoundSessions, created_session
 from coral.bridge.codec import EngineLogDecodeError, decode_entries
@@ -94,13 +95,16 @@ from coral.stores.workflow_versions import SqlAlchemyWorkflowVersionStore
 
 _logger = logging.getLogger(__name__)
 
-# A run whose rows, pinned graph, frozen config or log cannot be read or replayed.
+# A run whose rows, pinned graph, frozen config or log cannot be read or decoded. Any
+# other error (a reducer defect while folding, say) is raised as is, not filed as an
+# unloadable run, which nothing can resume or cancel.
 _LOAD_ERRORS = (
     PinnedGraphError,
     FrozenConfigMissing,
     EngineLogDecodeError,
     zstandard.ZstdError,
-    ValueError,
+    ValidationError,
+    json.JSONDecodeError,
 )
 # Stored text that does not decode while the run's rows load.
 _STORED_TEXT_ERRORS = (zstandard.ZstdError, UnicodeDecodeError)
