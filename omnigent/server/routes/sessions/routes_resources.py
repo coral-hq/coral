@@ -910,31 +910,39 @@ def register_resources_routes(
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             if conv is None:
                 raise _session_not_found()
-        # ``level is None`` means permissions are disabled (single-user) or, on a
-        # child session, access inherited from the parent chain with no direct
-        # grant. Edit collaborators keep the workspace unconditionally; a
-        # view-only grant reaches it only once the owner shares its files.
-        if access.level is None or access.level >= LEVEL_EDIT or conv.share_workspace_files:
-            return conv, await _owns_session(user_id, conv, access.level)
+        # Edit collaborators keep the workspace unconditionally; a view-only
+        # grant reaches it only once the owner shares its files.
+        # CORAL(S103): a child's level and share opt-in are its root's.
+        owner = await _clears_level(user_id, conv, access.level, LEVEL_OWNER)
+        if (
+            owner
+            or await _clears_level(user_id, conv, access.level, LEVEL_EDIT)
+            or await _shares_workspace_files(conv)
+        ):
+            return conv, owner
         raise OmnigentError(
             f"{user_id!r} needs edit access to browse the workspace of session "
             f"{session_id!r}, or the owner must enable file sharing",
             code=ErrorCode.FORBIDDEN,
         )
 
-    async def _owns_session(user_id: str | None, conv: Conversation, level: int | None) -> bool:
-        """Whether the caller clears the owner bar :func:`_browse_level` sets.
+    async def _clears_level(
+        user_id: str | None, conv: Conversation, level: int | None, required_level: int
+    ) -> bool:
+        """Whether the caller holds *required_level* on an already-readable session.
 
-        The same decision ``_validate_session(..., LEVEL_OWNER)`` makes, without
-        raising: permissions disabled, an admin or direct owner grant, or — on a
-        child session — ownership resolved through the parent chain, which is
-        the only case that costs a further lookup.
+        The same decision ``_validate_session(..., required_level)`` makes,
+        without raising: permissions disabled, an admin or direct grant, or — on
+        a child session — the level resolved through the parent chain (the
+        child's own grants are ignored), which is the only case that costs a
+        further lookup.
 
         :param user_id: The authenticated user.
         :param conv: The conversation already authorized for reading.
         :param level: The caller's direct level from that authorization, or
             ``None`` when permissions are disabled or no direct grant exists.
-        :returns: ``True`` for an effective owner.
+        :param required_level: The level to check, e.g. ``LEVEL_OWNER``.
+        :returns: ``True`` when the caller clears *required_level*.
         """
         if permission_store is None:
             return True
@@ -943,11 +951,27 @@ def register_resources_routes(
                 check_session_access,
                 user_id,
                 conv.parent_conversation_id,
-                LEVEL_OWNER,
+                required_level,
                 permission_store,
                 conversation_store,
             )
-        return level is not None and level >= LEVEL_OWNER
+        return level is not None and level >= required_level
+
+    async def _shares_workspace_files(conv: Conversation) -> bool:
+        """Whether the owner opted into view-level file sharing for *conv*.
+
+        A child session follows its root's ``share_workspace_files``, as its
+        access follows the root's grants; its own flag is ignored.
+
+        :param conv: The conversation already authorized for reading.
+        :returns: ``True`` when view-level collaborators may read its files.
+        """
+        if conv.parent_conversation_id is None:
+            return conv.share_workspace_files
+        root = await asyncio.to_thread(
+            conversation_store.get_conversation, conv.root_conversation_id
+        )
+        return root is not None and root.share_workspace_files
 
     def _resolve_browse_path(request: Request, client_path: str) -> tuple[bool, str]:
         """Resolve a filesystem request path against its declared base.
