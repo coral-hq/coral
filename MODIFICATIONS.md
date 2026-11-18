@@ -195,6 +195,7 @@ OPS-01's generator will maintain this file later.
 | `tests/cli/test_import.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/cli/test_login_databricks.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/conftest.py` | S31 | upstream-extension | Preserves alembic_version and coral_alembic_version during test table truncation across Postgres, MySQL, and CockroachDB (S31). |
+| `tests/db/test_cockroachdb.py` | S104 | coral-specific | The tests that rewind or clear the Alembic revision (baseline upgrade, interrupted-bootstrap resume, account-generation backfill, project-preferences copy) each run on a new CockroachDB database that is dropped afterwards, not on the shared worker database, which keeps Coral's tables between tests. |
 | `tests/db/test_crdb_core.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/dev/lint/test_custom_lint.py` | S39 | coral-specific | Asserts `coral-import-boundary` is registered last in `custom_lint.RULES` (S39). |
 | `tests/e2e/integrations/deploy/gensee/test_managed_lifecycle.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |

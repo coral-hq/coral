@@ -2595,3 +2595,36 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
+
+  - id: S104
+    title: CockroachDB tests that rewind the schema revision use their own database
+    owner: WS-PLATFORM
+    status: landed
+    category: coral-specific
+    note: >-
+      The per-worker CockroachDB test database keeps Coral's tables between
+      tests: S31 preserves `coral_alembic_version`, and Coral store tests call
+      `ensure_coral_schema(db_uri)` on it. The interrupted-bootstrap test
+      cleared `alembic_version` there, so the bootstrap check found Coral's
+      tables outside Omnigent's metadata and refused to resume. The failure
+      left the worker database without a revision, which broke the downgrade
+      tests and every later test on that worker. Whether it happened depended
+      on which xdist worker ran `tests/stores/coral/test_run_store.py` first.
+      The five tests that rewind or clear the revision now each get a new
+      database that the fixture drops afterwards; the read-only checks stay
+      on the shared one.
+    files:
+      - tests/db/test_cockroachdb.py
+    tests:
+      - tests/db/test_cockroachdb.py
+    budget_lines: 40
+    budget_exception:
+      lines: 83
+      reason: >-
+        tests/db/test_cockroachdb.py (83 changed lines: 59 added, 24 removed):
+        the scratch-database fixture with its imports, and the mechanical
+        rename of `db_uri` to `scratch_crdb_uri` in the five rewinding tests.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
