@@ -33,6 +33,8 @@ share opt-in never widens absolute-path browsing, which stays owner-only.
 The same owner bar decides whether a workspace symlink may lead outside the
 workspace: only the owner's workspace-relative reads reach the runner marked
 ``scope=reach``. ``conv_share`` has sharing off; ``conv_open`` has it on.
+A child session's access and share opt-in are its root's: ``conv_child``
+(under ``conv_share``) and ``conv_open_child`` (under ``conv_open``).
 """
 
 from __future__ import annotations
@@ -289,6 +291,8 @@ def app(runner_globals_reset: None, runner_client: _RecordingRunnerClient) -> Fa
     # A sub-agent of conv_share: nobody holds a direct grant on it, so every
     # caller's access is inherited through the parent.
     conv_store.add("conv_child", parent="conv_share")
+    # CORAL(S103): a sub-agent of conv_open; its own flag is off, its root's on.
+    conv_store.add("conv_open_child", parent="conv_open")
     perm_store = _StubPermissionStore()
     perm_store.add_grant("owner@example.com", "conv_share", LEVEL_EDIT)
     perm_store.add_grant("viewer@example.com", "conv_share", LEVEL_READ)
@@ -479,7 +483,7 @@ async def test_filesystem_allows_the_owner_outside_the_workspace(
         ("admin@example.com", _FS_RELATIVE.replace("conv_share", "conv_child"), True),
         ("manager@example.com", _FS_RELATIVE.replace("conv_share", "conv_child"), False),
         ("owner@example.com", _FS_RELATIVE.replace("conv_share", "conv_child"), False),
-        ("viewer@example.com", _FS_RELATIVE.replace("conv_share", "conv_child"), False),
+        ("viewer@example.com", _FS_RELATIVE.replace("conv_share", "conv_open_child"), False),
     ],
     ids=[
         "owner",
@@ -491,7 +495,7 @@ async def test_filesystem_allows_the_owner_outside_the_workspace(
         "child-admin",
         "child-inherited-manager",
         "child-inherited-editor",
-        "child-inherited-viewer",
+        "child-shared-viewer",
     ],
 )
 async def test_filesystem_marks_reach_scope_for_the_owner_only(
@@ -671,16 +675,21 @@ _CONTENT_READ_IDS = (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url_tmpl", _CONTENT_READ_PATHS, ids=_CONTENT_READ_IDS)
+@pytest.mark.parametrize(
+    "session_id", ["conv_share", "conv_child"], ids=["direct-viewer", "child-inherited-viewer"]
+)
 async def test_workspace_reads_deny_view_only_when_not_shared(
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
     url_tmpl: str,
+    session_id: str,
 ) -> None:
     """With sharing off (the default), a view-only grant cannot read the
     workspace on ANY content surface, and the request never reaches the
-    runner — so no file bytes or paths can leak."""
+    runner — so no file bytes or paths can leak. CORAL(S103): a view-only
+    grant inherited from the root is held to the root's opt-in too."""
     resp = await client.get(
-        url_tmpl.format(cid="conv_share"), headers={"X-Forwarded-Email": "viewer@example.com"}
+        url_tmpl.format(cid=session_id), headers={"X-Forwarded-Email": "viewer@example.com"}
     )
 
     assert resp.status_code == 403, resp.text
@@ -689,15 +698,20 @@ async def test_workspace_reads_deny_view_only_when_not_shared(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url_tmpl", _CONTENT_READ_PATHS, ids=_CONTENT_READ_IDS)
+@pytest.mark.parametrize(
+    "session_id", ["conv_open", "conv_open_child"], ids=["direct-viewer", "child-inherited-viewer"]
+)
 async def test_workspace_reads_allow_view_only_when_shared(
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
     url_tmpl: str,
+    session_id: str,
 ) -> None:
     """Once the owner opts into sharing files (``share_workspace_files``), the
-    same view-only grant reaches every content surface."""
+    same view-only grant reaches every content surface — on a child too, whose
+    own flag is off but whose root's is on (CORAL(S103))."""
     resp = await client.get(
-        url_tmpl.format(cid="conv_open"), headers={"X-Forwarded-Email": "viewer@example.com"}
+        url_tmpl.format(cid=session_id), headers={"X-Forwarded-Email": "viewer@example.com"}
     )
 
     assert resp.status_code == 200, resp.text
