@@ -299,7 +299,7 @@ def awaiting_effect(state: RunState, slot_id: str) -> bool:
     for effect in state.effects:
         if effect.subject != slot_id or effect.kind not in _LEASED_KINDS:
             continue
-        seq = _effect_seq(effect)
+        seq = effect_seq(effect)
         if latest is None or seq > latest_seq:
             latest = effect
             latest_seq = seq
@@ -497,7 +497,7 @@ def _rephase(state: RunState, owner_id: str) -> RunState:
     return replace_activation(state, owner_id, status=status)
 
 
-def _effect_seq(effect: Effect) -> int:
+def effect_seq(effect: Effect) -> int:
     """Seq embedded in ``{run_id}:{seq}:{kind}:{subject}``. Unknown keys sort first."""
     marker = f":{effect.kind}:{effect.subject}"
     if not effect.effect_key.endswith(marker):

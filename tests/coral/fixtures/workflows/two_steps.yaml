@@ -1,0 +1,27 @@
+id: two-steps
+name: Two steps
+nodes:
+  - id: start
+    kind: start
+  - id: implement
+    kind: step
+    name: Implement
+    goal: Implement the change
+    roster: [implementer]
+  - id: review
+    kind: step
+    name: Review
+    goal: Review the change
+    roster: [reviewer]
+  - id: end
+    kind: end
+arrows:
+  - id: a1
+    from: start
+    to: implement
+  - id: a2
+    from: implement
+    to: review
+  - id: a3
+    from: review
+    to: end

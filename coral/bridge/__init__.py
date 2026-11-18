@@ -1,0 +1,62 @@
+"""The engine-to-queue bridge: engine state from the run log, effects as queued work.
+
+Public names load on first use, so importing one bridge module does not load
+the others (the mapper imports the session executors, which other modules use).
+"""
+
+from __future__ import annotations
+
+import importlib
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from coral.bridge.codec import EngineLogDecodeError as EngineLogDecodeError
+    from coral.bridge.codec import decode_entries as decode_entries
+    from coral.bridge.codec import entry_draft as entry_draft
+    from coral.bridge.config import FrozenConfigMissing as FrozenConfigMissing
+    from coral.bridge.config import engine_config_for as engine_config_for
+    from coral.bridge.config import freeze_engine_config as freeze_engine_config
+    from coral.bridge.config import utc_now as utc_now
+    from coral.bridge.fold import EngineStateCache as EngineStateCache
+    from coral.bridge.fold import FoldedRun as FoldedRun
+    from coral.bridge.graphs import PinnedGraphError as PinnedGraphError
+    from coral.bridge.graphs import PinnedGraphMismatch as PinnedGraphMismatch
+    from coral.bridge.graphs import PinnedGraphs as PinnedGraphs
+    from coral.bridge.keys import ORCHESTRATOR_SLOT_ID as ORCHESTRATOR_SLOT_ID
+    from coral.bridge.mapping import FED_KINDS as FED_KINDS
+    from coral.bridge.mapping import MapContext as MapContext
+    from coral.bridge.mapping import map_effect as map_effect
+    from coral.bridge.projection import project_run as project_run
+    from coral.bridge.projection import project_slots as project_slots
+
+_MODULES: dict[str, str] = {
+    "EngineLogDecodeError": "coral.bridge.codec",
+    "decode_entries": "coral.bridge.codec",
+    "entry_draft": "coral.bridge.codec",
+    "FrozenConfigMissing": "coral.bridge.config",
+    "engine_config_for": "coral.bridge.config",
+    "freeze_engine_config": "coral.bridge.config",
+    "utc_now": "coral.bridge.config",
+    "EngineStateCache": "coral.bridge.fold",
+    "FoldedRun": "coral.bridge.fold",
+    "PinnedGraphError": "coral.bridge.graphs",
+    "PinnedGraphMismatch": "coral.bridge.graphs",
+    "PinnedGraphs": "coral.bridge.graphs",
+    "ORCHESTRATOR_SLOT_ID": "coral.bridge.keys",
+    "FED_KINDS": "coral.bridge.mapping",
+    "MapContext": "coral.bridge.mapping",
+    "map_effect": "coral.bridge.mapping",
+    "project_run": "coral.bridge.projection",
+    "project_slots": "coral.bridge.projection",
+}
+
+__all__ = sorted(_MODULES)
+
+
+def __getattr__(name: str) -> Any:
+    module = _MODULES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(module), name)
+    globals()[name] = value
+    return value
