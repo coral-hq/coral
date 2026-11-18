@@ -169,6 +169,8 @@ def _supervisor(
         "clock": time,
         "wait": time.wait,
         "resync_interval_s": None,
+        # A lease no test outlives, renewed less often than any test waits.
+        "lease_seconds": 100_000,
         "renew_interval_s": 10_000.0,
         # Idle workers wait this times the pool size, never a retry delay's length.
         "poll_interval_s": 0.1,
@@ -575,6 +577,30 @@ async def test_idle_workers_poll_the_queue_once_per_poll_interval() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    ("lease_seconds", "renew_interval_s"), [(120, 90.0), (120, 120.0), (100, 1_000.0)]
+)
+def test_a_renewal_interval_of_three_quarters_of_the_lease_or_more_is_refused(
+    lease_seconds: int, renew_interval_s: float
+) -> None:
+    # Its first renewal would come after the step-down time, so leadership would flap.
+    run_store = FakeRunStore()
+    with pytest.raises(ValueError, match="renew_interval_s"):
+        WorkerSupervisor(
+            run_store,
+            FakeQueueStore(run_store=run_store),
+            lease_seconds=lease_seconds,
+            renew_interval_s=renew_interval_s,
+        )
+    accepted = WorkerSupervisor(
+        run_store,
+        FakeQueueStore(run_store=run_store),
+        lease_seconds=lease_seconds,
+        renew_interval_s=lease_seconds * 0.75 - 0.5,
+    )
+    assert accepted.lease_manager.lease_seconds == lease_seconds
+
+
 async def test_a_failed_lease_renewal_is_retried_and_leadership_continues(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -658,8 +684,8 @@ async def test_a_replica_that_cannot_renew_steps_down_before_another_can_lead(
 
     caplog.set_level(logging.WARNING, logger="coral.workers.supervisor")
     time = VirtualTime(_START)
-    leases = {"lease_seconds": 120, "standby_retry_s": 7.0}
-    first = _supervisor(run_store, first_queue, time, renew_interval_s=30.0, **leases)
+    leases = {"lease_seconds": 120, "renew_interval_s": 30.0, "standby_retry_s": 7.0}
+    first = _supervisor(run_store, first_queue, time, **leases)
     second = _supervisor(run_store, second_queue, time, worker_id="worker-2", **leases)
     register_executor(_STEP, _step)
     try:

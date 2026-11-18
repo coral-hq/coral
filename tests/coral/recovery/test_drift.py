@@ -6,9 +6,12 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
+from coral.bridge.executors import BridgeThreads
 from coral.db.enum_codecs import (
     ActorKind,
     LogKind,
@@ -27,12 +30,16 @@ from coral.recovery.drift import (
     DriftPreSendHook,
     classify_anchor,
     classify_step,
+    drift_log_checksum,
     find_drift,
     pause_run_for_drift,
 )
 from coral.stores.fakes import FakeRunStore
-from coral.stores.protocols import CoralRun, RunNotFound, Transition
+from coral.stores.protocols import CoralRun, RunLogEntry, RunNotFound, Transition
 from coral.stores.session_bindings import SessionBinding, effect_checksum
+from tests.coral.bridge._world import WORKSPACE as ENGINE_WORKSPACE
+from tests.coral.bridge._world import World
+from tests.coral.bridge._world import start as start_engine_run
 from tests.coral.omni.fakes import FakeSessionFacade, present
 from tests.coral.workspace._executor_fakes import FakeBindings, start_run, step_binding
 
@@ -551,3 +558,90 @@ async def test_the_pre_send_hook_lets_an_undrifted_send_through() -> None:
     state, _ = store.load_run_state(run.id, workspace_id=WORKSPACE)
     assert state.run.status == RunStatus.RUNNING
     assert _drift_logs(store, run) == []
+
+
+# ── through the engine ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def engine_world(tmp_path: Path) -> AsyncIterator[tuple[World, BridgeThreads]]:
+    world = World.fake(tmp_path)
+    threads = BridgeThreads(world.bridge)
+    try:
+        yield world, threads
+    finally:
+        threads.close()
+
+
+def _rows(world: World, run_id: str, kind: LogKind) -> list[RunLogEntry]:
+    runs = world.runs
+    assert isinstance(runs, FakeRunStore)
+    return [row for row in runs.logs[(ENGINE_WORKSPACE, run_id)] if row.kind == int(kind)]
+
+
+async def test_a_drift_pause_goes_through_the_engine_and_a_resume_resumes_it(
+    engine_world: tuple[World, BridgeThreads],
+) -> None:
+    world, threads = engine_world
+    run = start_engine_run(world)
+    finding = DriftFinding(
+        "anchor_archived", anchor_session_id(ENGINE_WORKSPACE, run.id), ARCHIVED_AT
+    )
+    pauser = DriftPauser(world.runs, engine=threads, now_us=lambda: NOW_US)
+    version = world.run(run.id).version
+
+    first = await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
+    again = await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
+
+    assert first.applied and not again.applied
+    paused = world.run(run.id)
+    assert (paused.status, paused.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
+    state = world.assert_fold_matches(run.id)
+    assert [(cause.reason, cause.detail) for cause in state.causes] == [
+        ("drift", "anchor_archived")
+    ]
+    # The engine's pause and the drift entry are one commit.
+    [marker] = _rows(world, run.id, LogKind.PAUSED)
+    engine_pause = _rows(world, run.id, LogKind.ENGINE)[-1]
+    assert json.loads(engine_pause.body)["input"] == {
+        "kind": "pause_run",
+        "reason": "drift",
+        "detail": "anchor_archived",
+    }
+    assert marker.run_version == engine_pause.run_version == version + 1
+    assert json.loads(marker.body) == {
+        "kind": "pause_run",
+        "reason": "drift",
+        "cause": "anchor_archived",
+        "session_id": finding.session_id,
+        "detail": ARCHIVED_AT,
+    }
+    assert marker.idempotency_cksum == drift_log_checksum(run.id, finding, version)
+    assert marker.created_at_us == NOW_US
+
+    world.bridge.resume_run(workspace_id=ENGINE_WORKSPACE, run_id=run.id, actor="user:alice")
+    assert world.run(run.id).status == RunStatus.RUNNING
+    assert world.assert_fold_matches(run.id).causes == ()
+    # Resumed while the drift persists: the next detection pauses the run again.
+    assert (
+        await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
+    ).applied
+    assert len(_rows(world, run.id, LogKind.PAUSED)) == 2
+
+
+async def test_an_anchor_bound_pause_through_the_engine_still_stops_the_anchor(
+    engine_world: tuple[World, BridgeThreads],
+) -> None:
+    world, threads = engine_world
+    run = start_engine_run(world)
+    anchor = anchor_session_id(ENGINE_WORKSPACE, run.id)
+    hook = _StopHook()
+    pauser = DriftPauser(world.runs, engine=threads, now_us=lambda: NOW_US, on_anchor_bound=hook)
+    finding = DriftFinding("anchor_bound", anchor, "runner-1")
+
+    for _ in range(2):
+        await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
+
+    assert hook.calls == [(ENGINE_WORKSPACE, run.id, anchor)] * 2
+    assert world.run(run.id).pause_reason == RunPauseReason.DRIFT
+    assert len(_rows(world, run.id, LogKind.PAUSED)) == 1

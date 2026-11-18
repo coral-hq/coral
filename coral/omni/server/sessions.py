@@ -52,7 +52,12 @@ from coral.omni.protocols import (
     SessionRef,
     SessionState,
 )
-from coral.omni.server.bundles import StepBundleRejected, check_hygiene, pack_bundle
+from coral.omni.server.bundles import (
+    StepBundleRejected,
+    agent_owner,
+    check_hygiene,
+    pack_bundle,
+)
 from coral.omni.server.host_access import HostAccessError, OwnerHost, authorize_owner_host
 from coral.omni.server.worktrees import connect_run_worktree_host
 from coral.profiles.bundle_spec import ENGINE_PREFIX, Stance, build_seed_bundle_yaml
@@ -651,6 +656,9 @@ class OmnigentSessionFacade(SessionFacade):
         """
         The step's agent, if the server or the run owner authored it.
 
+        An ownerless run's own agents are its server's local user's on a single-user
+        server, as Omnigent reads them (:func:`agent_owner`).
+
         Never a copy of another user's agent (the facade does not mint one), and
         never the run anchor's agent.
         """
@@ -665,7 +673,7 @@ class OmnigentSessionFacade(SessionFacade):
         if (
             agent is None
             or agent.name.lower() == ANCHOR_AGENT_NAME
-            or not (agent.operator_authored or agent.created_by == request.user_id)
+            or not (agent.operator_authored or agent.created_by == agent_owner(request.user_id))
         ):
             raise _agent_not_permitted(agent_id)
         try:

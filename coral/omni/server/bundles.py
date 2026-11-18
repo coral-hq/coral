@@ -18,6 +18,7 @@ from coral.profiles.bundle_spec import (
 )
 from omnigent.errors import OmnigentError
 from omnigent.harness_aliases import is_claude_sdk_harness_name
+from omnigent.server.auth import RESERVED_USER_LOCAL, local_single_user_enabled
 from omnigent.server.bundles import uploaded_agent_for, validate_agent_bundle
 from omnigent.spec.types import AgentSpec, FunctionPolicySpec, Phase, SharePolicy
 from omnigent.stores.agent_store import AgentStore
@@ -39,6 +40,19 @@ class MaterializedAgent(BaseModel):
 
 class StepBundleRejected(Exception):
     """A step bundle broke a hygiene or validation rule. Retrying cannot fix it."""
+
+
+def agent_owner(user_id: str | None) -> str | None:
+    """
+    The ``created_by`` a run owner's user agents carry, as Omnigent reads it at session create.
+
+    A single-user server reads no user as its local user when it checks who may bind
+    a user agent, so an ownerless run's agents are stored, and matched, as that user's.
+    Elsewhere no user stays ``None``; a server with auth refuses ownerless runs first.
+    """
+    if user_id is None and local_single_user_enabled():
+        return RESERVED_USER_LOCAL
+    return user_id
 
 
 def pack_bundle(config_yaml: bytes) -> bytes:

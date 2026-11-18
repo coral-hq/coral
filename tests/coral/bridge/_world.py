@@ -182,19 +182,26 @@ def start(
 
 
 def start_without_engine(
-    world: World, *, start_key: str = "bare", yaml_text: str | None = None
+    world: World,
+    *,
+    start_key: str = "bare",
+    yaml_text: str | None = None,
+    workspace_id: int = WORKSPACE,
+    user: str | None = USER,
 ) -> CoralRun:
     """A run whose ``start_run`` committed and whose ``StartRun`` did not: a crash between."""
     text = yaml_text if yaml_text is not None else fixture_text("two_steps")
     pinned = world.versions.pin(
-        workspace_id=WORKSPACE,
+        workspace_id=workspace_id,
         workflow_id=DEFINITION,
         graph=compile_text(text)[0],
         yaml_text=text,
-        created_by=USER,
+        created_by=user,
     )
     spec = run_spec(
+        user=user,
         start_key=start_key,
+        workspace_id=workspace_id,
         version_id=pinned.id,
         rejected_call_limit=3,
         engine_config=freeze_engine_config(max_activations=100, rejected_call_limit=3),

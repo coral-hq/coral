@@ -10,7 +10,6 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,12 +21,17 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from coral.bridge.executors import BridgeThreads, bridge_hold_policy
+from coral.bridge.mapping import RUN_RESYNC, TIMER
+from coral.bridge.service import EngineBridge
 from coral.db import WorkRow
 from coral.db.enum_codecs import RunPauseReason, RunStatus, SessionBindingProgress, WorkStatus
+from coral.db.migrate import ensure_coral_schema
 from coral.model.ids import anchor_session_id
 from coral.omni.policies.state import RunStatusCache
 from coral.omni.protocols import CoralSessionError
 from coral.omni.server import OmnigentRunScopeRunner, coral_lifespan
+from coral.omni.server import plugin as plugin_module
 from coral.omni.server.dispatch import OmnigentSessionDispatch
 from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
 from coral.omni.server.sessions import RUN_ID_LABEL_KEY
@@ -77,6 +81,7 @@ from omnigent.stores.host_store import HostStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
+from tests.coral.bridge._world import World, start_without_engine
 from tests.coral.workspace._executor_fakes import (
     FakeHostChannel,
     add_slot,
@@ -97,6 +102,8 @@ ENGINE_EFFECT_TYPES = frozenset(
         WORKSPACE_RESET,
     }
 )
+# The bridge's own executors: they need only the Coral stores.
+BRIDGE_EFFECT_TYPES = frozenset({TIMER, RUN_RESYNC})
 # The status-edge observer and the confirmed-stop record's observer.
 ENGINE_OBSERVERS = frozenset({"coral", "coral.confirmed_stops"})
 NOTHING: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
@@ -107,6 +114,11 @@ def _engine_registrations() -> tuple[frozenset[str], frozenset[str]]:
     """The session engine's effect executors and status-edge observers registered now."""
     observers = frozenset(session_live_state._status_edge_observers) & ENGINE_OBSERVERS
     return registered_executor_kinds() & ENGINE_EFFECT_TYPES, observers
+
+
+def _bridge_registrations() -> frozenset[str]:
+    """The bridge's executors registered now."""
+    return registered_executor_kinds() & BRIDGE_EFFECT_TYPES
 
 
 def _engine_tools() -> frozenset[str]:
@@ -131,6 +143,17 @@ class _Server:
     app: FastAPI
     services: ServerServices
     db_uri: str
+
+
+@pytest.fixture
+def no_engine_resync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Keep the supervisor's resync off the test's runs.
+
+    These tests start runs on the store alone, or time an engine start themselves; the
+    resync would start or pause them (a run without a frozen config cannot be loaded).
+    """
+    monkeypatch.setattr(EngineBridge, "schedule_resync", lambda _bridge, _run: None)
 
 
 @pytest.fixture
@@ -296,27 +319,141 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
         assert _engine_registrations() == NOTHING
 
 
-async def test_an_overlapping_lifespan_takes_over_and_outlives_the_earlier_exit(
+async def test_a_second_concurrent_lifespan_raises_before_registering_anything(
     server: _Server, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
+    kinds = ENGINE_EFFECT_TYPES | BRIDGE_EFFECT_TYPES
     with installed_tool_providers():
-        async with AsyncExitStack() as later:
-            async with coral_lifespan(server.app, server.services):
-                # Entered while the first still runs: it replaces the registrations, no conflict.
-                await later.enter_async_context(coral_lifespan(server.app, server.services))
-                edges = server.app.state.coral_status_edges
-                handler = server_tool(SUBMIT_HANDOFF.name)
-            # The earlier exit removes only its own registrations.
-            assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
-            assert session_live_state._status_edge_observers["coral"] == edges.observe
-            assert _engine_tools() == ENGINE_TOOL_NAMES
+        async with coral_lifespan(server.app, server.services):
+            state = server.app.state
+            first = (
+                state.coral_engine_bridge,
+                state.coral_worker_supervisor,
+                state.coral_run_store,
+            )
+            executors = {kind: get_executor(kind) for kind in kinds}
+            handler = server_tool(SUBMIT_HANDOFF.name)
+
+            with pytest.raises(RuntimeError, match="already running in this process"):
+                async with coral_lifespan(server.app, server.services):
+                    pass
+
+            # The first lifespan keeps every registration and its state.
+            assert {kind: get_executor(kind) for kind in kinds} == executors
+            assert session_live_state._status_edge_observers["coral"] == (
+                state.coral_status_edges.observe
+            )
             assert server_tool(SUBMIT_HANDOFF.name) is handler
             assert _coral_policies_registered()
+            assert (
+                state.coral_engine_bridge,
+                state.coral_worker_supervisor,
+                state.coral_run_store,
+            ) == first
+            await poll_until_async(first[1].leader_ready_event.is_set, timeout_s=budget(30))
+        assert _engine_registrations() == NOTHING
+        assert _bridge_registrations() == frozenset()
+        assert _engine_tools() == frozenset()
+        assert not _coral_policies_registered()
+        assert _coral_mutation_guard() is None
+
+        # Once the first exits, a lifespan starts again.
+        async with coral_lifespan(server.app, server.services):
+            assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
+            assert server.app.state.coral_engine_bridge is not first[0]
     assert _engine_registrations() == NOTHING
-    assert _engine_tools() == frozenset()
-    assert not _coral_policies_registered()
-    assert _coral_mutation_guard() is None
+
+
+@pytest.mark.parametrize(
+    ("server_config", "workers"), [({}, 4), ({"coral_drain_concurrency": 2}, 2)]
+)
+async def test_the_lifespan_wires_the_bridge_into_the_supervisor_and_unwires_it_on_exit(
+    server: _Server,
+    monkeypatch: pytest.MonkeyPatch,
+    server_config: dict[str, Any],
+    workers: int,
+) -> None:
+    built: list[dict[str, Any]] = []
+
+    class RecordingSupervisor(WorkerSupervisor):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            built.append(kwargs)
+            super().__init__(*args, **kwargs)
+
+    at_stop: list[frozenset[str]] = []
+    stop = WorkerSupervisor.stop
+
+    async def recording_stop(supervisor: WorkerSupervisor) -> None:
+        at_stop.append(_bridge_registrations())
+        await stop(supervisor)
+
+    monkeypatch.setattr(plugin_module, "WorkerSupervisor", RecordingSupervisor)
+    monkeypatch.setattr(WorkerSupervisor, "stop", recording_stop)
+
+    services = dataclasses.replace(server.services, server_config=server_config)
+    async with coral_lifespan(server.app, services):
+        bridge = server.app.state.coral_engine_bridge
+        assert isinstance(bridge, EngineBridge)
+        assert bridge.run_store is server.app.state.coral_run_store
+        assert _bridge_registrations() == BRIDGE_EFFECT_TYPES
+        assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
+        [wiring] = built
+        threads = wiring["on_finished"].__self__
+        assert isinstance(threads, BridgeThreads) and threads.bridge is bridge
+        assert wiring["on_finished"] == threads.feed
+        assert wiring["run_reconciler"] == threads.schedule_resync
+        assert wiring["hold_policy"] is bridge_hold_policy
+        assert (wiring["drain_concurrency"], wiring["resync_interval_s"]) == (workers, 60)
+        assert not threads.closed
+
+    # The supervisor stopped first, so no timer or resync item found its executor missing.
+    assert at_stop == [BRIDGE_EFFECT_TYPES]
+    assert _bridge_registrations() == frozenset()
+    assert threads.closed
+
+
+@pytest.mark.parametrize("value", [0, 65, True, "4", 2.0])
+async def test_a_drain_concurrency_outside_1_to_64_fails_the_start_and_wires_nothing(
+    server: _Server, value: object
+) -> None:
+    services = dataclasses.replace(
+        server.services, server_config={"coral_drain_concurrency": value}
+    )
+
+    with pytest.raises(ValueError, match="coral_drain_concurrency"):
+        async with coral_lifespan(server.app, services):
+            pass
+
+    assert _engine_registrations() == NOTHING
+    assert _bridge_registrations() == frozenset()
+    # The process is free again: a lifespan with a valid config starts.
+    async with coral_lifespan(server.app, server.services):
+        assert _bridge_registrations() == BRIDGE_EFFECT_TYPES
+
+
+def test_the_drain_concurrency_defaults_to_four() -> None:
+    assert plugin_module.drain_concurrency(None) == 4
+    assert plugin_module.drain_concurrency({}) == 4
+    assert plugin_module.drain_concurrency({"coral_drain_concurrency": None}) == 4
+    assert plugin_module.drain_concurrency({"coral_drain_concurrency": 64}) == 64
+
+
+async def test_the_supervisor_starts_a_run_whose_engine_start_was_lost(server: _Server) -> None:
+    """The startup sweep schedules the run's resync; the pool drains it on the bridge."""
+    ensure_coral_schema(server.db_uri)
+    world = World.sql(server.db_uri)
+    run = start_without_engine(world, workspace_id=DEFAULT_WORKSPACE_ID, user=None)
+
+    def started() -> bool:
+        return bool(
+            world.runs.read_engine_log(
+                run.id, workspace_id=DEFAULT_WORKSPACE_ID, max_run_version=2**31
+            )
+        )
+
+    async with coral_lifespan(server.app, server.services):
+        await poll_until_async(started, timeout_s=budget(30))
 
 
 @pytest.mark.parametrize("engine", ["wired", "unwired"])
@@ -448,6 +585,7 @@ async def test_the_mutation_guard_refuses_changes_to_a_bound_session_while_the_l
     await check_mutation(model_change(bound))
 
 
+@pytest.mark.usefixtures("no_engine_resync")
 async def test_each_lifespan_guards_bound_sessions_through_its_own_run_store_only(
     server: _Server, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -537,17 +675,21 @@ async def test_a_server_without_an_engine_input_wires_nothing(
         services = dataclasses.replace(services, project_store=None)
     async with coral_lifespan(server.app, services):
         assert _engine_registrations() == NOTHING
-        # Only the session engine is left out; the supervisor still runs.
+        # Only the session engine is left out; the bridge and the supervisor still run.
+        assert _bridge_registrations() == BRIDGE_EFFECT_TYPES
         supervisor = server.app.state.coral_worker_supervisor
         await poll_until_async(supervisor.leader_ready_event.is_set, timeout_s=budget(30))
 
 
-@pytest.mark.parametrize("failing", ["executor", "observer", "supervisor_start"])
-async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, failing: str
-) -> None:
-    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
-    if failing == "executor":
+def _fail_lifespan_start(patch: pytest.MonkeyPatch, failing: str) -> None:
+    """Make the lifespan's start fail at ``failing``."""
+    if failing == "schema":
+
+        def failing_schema(_db_uri: str) -> None:
+            raise RuntimeError("schema check failed")
+
+        patch.setattr(plugin_module, "ensure_coral_schema", failing_schema)
+    elif failing == "executor":
         register_executor = queue_executors.register_executor
         registered: list[str] = []
 
@@ -557,7 +699,7 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
             register_executor(effect_type, fn, **kwargs)
             registered.append(effect_type)
 
-        monkeypatch.setattr(queue_executors, "register_executor", failing_register_executor)
+        patch.setattr(queue_executors, "register_executor", failing_register_executor)
     elif failing == "observer":
         register = session_live_state.register_status_edge_observer
 
@@ -566,24 +708,38 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
                 raise RuntimeError("observer registration failed")
             return register(name, fn)
 
-        monkeypatch.setattr(session_live_state, "register_status_edge_observer", failing_register)
+        patch.setattr(session_live_state, "register_status_edge_observer", failing_register)
     else:
 
         async def failing_start(_supervisor: WorkerSupervisor) -> None:
             raise RuntimeError("supervisor start failed")
 
-        monkeypatch.setattr(WorkerSupervisor, "start", failing_start)
+        patch.setattr(WorkerSupervisor, "start", failing_start)
 
-    with installed_tool_providers(), pytest.raises(RuntimeError, match="failed"):
-        async with coral_lifespan(server.app, server.services):
-            pass
+
+@pytest.mark.parametrize("failing", ["schema", "executor", "observer", "supervisor_start"])
+async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
+    with pytest.MonkeyPatch.context() as patch:
+        _fail_lifespan_start(patch, failing)
+        with installed_tool_providers(), pytest.raises(RuntimeError, match="failed"):
+            async with coral_lifespan(server.app, server.services):
+                pass
 
     assert _engine_registrations() == NOTHING
+    assert _bridge_registrations() == frozenset()
     assert _engine_tools() == frozenset()
     assert not _coral_policies_registered()
     assert _coral_mutation_guard() is None
+    # The failed start released the process: the next lifespan starts.
+    async with coral_lifespan(server.app, server.services):
+        assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
+        assert _bridge_registrations() == BRIDGE_EFFECT_TYPES
 
 
+@pytest.mark.usefixtures("no_engine_resync")
 async def test_item_claimed_during_exit_is_retried_not_failed(
     server: _Server, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -654,6 +810,7 @@ async def test_item_claimed_during_exit_is_retried_not_failed(
     assert done.result is not None and json.loads(done.result) == {"session_id": None}
 
 
+@pytest.mark.usefixtures("no_engine_resync")
 async def test_a_close_and_a_commit_share_one_stop_record(
     server: _Server, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -745,6 +902,7 @@ async def test_a_close_and_a_commit_share_one_stop_record(
     assert (after_rerun.error_code, after_rerun.retryable) == ("session.turn_state_unknown", True)
 
 
+@pytest.mark.usefixtures("no_engine_resync")
 async def test_an_anchor_bound_send_stops_the_anchor_runner_through_the_lifespans_dispatch(
     server: _Server, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -761,16 +919,9 @@ async def test_an_anchor_bound_send_stops_the_anchor_runner_through_the_lifespan
     monkeypatch.setattr(OmnigentSessionDispatch, "stop", recording_stop)
     workspace_id = DEFAULT_WORKSPACE_ID
     run_store = SqlAlchemyCoralRunStore(server.db_uri)
-    run = start_run(
-        run_store,
-        workspace_id=workspace_id,
-        user_id=None,
-        account_generation=None,
-        host_id=None,
-        repo_path=None,
-        worktree_path=None,
-        run_branch=None,
-    )
+    # An engine run whose start has not committed: the drift pause starts it first.
+    ensure_coral_schema(server.db_uri)
+    run = start_without_engine(World.sql(server.db_uri), workspace_id=workspace_id, user=None)
     # Someone attached a runner to the run's anchor.
     anchor = anchor_session_id(workspace_id, run.id)
     server.services.conversation_store.create_conversation(
@@ -809,3 +960,6 @@ async def test_an_anchor_bound_send_stops_the_anchor_runner_through_the_lifespan
     stored = run_store.get_run(run.id, workspace_id=workspace_id)
     assert stored is not None
     assert (stored.status, stored.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
+    # The pause went through the engine: its state is paused for the same drift.
+    state = World.sql(server.db_uri).bridge.load(workspace_id=workspace_id, run_id=run.id).state
+    assert [(cause.reason, cause.detail) for cause in state.causes] == [("drift", "anchor_bound")]

@@ -293,6 +293,36 @@ class SessionFacade(Protocol):
 
 
 @runtime_checkable
+class StepAgentResolver(Protocol):
+    """Turns a step's stance into the agent its session runs, materialized as the run owner's."""
+
+    async def resolve(
+        self,
+        *,
+        workspace_id: int,
+        owner: str | None,
+        stance: str,
+        workflow_slug: str | None,
+        node_id: str | None,
+        roster_index: int | None,
+        session_id: str | None = None,
+    ) -> str:
+        """
+        The agent id of the stance's Coral bundle; the orchestrator's needs no step reference.
+
+        Runs inside the run's scopes; a repeat for the same bundle returns the same agent.
+
+        :param owner: The run's user, or ``None`` on an auth-less server.
+        :param session_id: The session the create makes: when an earlier try wrote it,
+            its agent is kept while it is still this stance's bundle of the owner.
+        :raises CoralSessionError: Permanent ``session.agent_not_supported`` when no
+            bundle can be built for the stance and step; permanent ``session.invalid``
+            for an ownerless run on a server that requires an owner.
+        """
+        ...
+
+
+@runtime_checkable
 class SessionDispatch(Protocol):
     """
     Sends engine input to a session and reads its live state (K4 subset).
@@ -401,6 +431,7 @@ __all__ = [
     "SessionState",
     "SlotRoleName",
     "StatusEdgeView",
+    "StepAgentResolver",
     "TranscriptItem",
     "TurnFactSink",
     "engine_message_text",

@@ -58,7 +58,6 @@ HOLD_RULES: Mapping[str, tuple[int, int | None]] = MappingProxyType(
     }
 )
 # ``drift.<cause>`` failures wait for the resume commit like ``run.paused``.
-DRIFT_HOLD_PREFIX = "drift."
 DRIFT_HOLD = (300, None)
 
 # Periodic work, in seconds.
@@ -119,7 +118,6 @@ def engine_config_for(spec: RunStartSpec) -> EngineConfig:
 __all__ = [
     "BOUND_SESSIONS_REFRESH_S",
     "DRIFT_HOLD",
-    "DRIFT_HOLD_PREFIX",
     "ENGINE_LOG_PAGE",
     "ENGINE_VERSION",
     "FEED_BATCH",

@@ -40,6 +40,8 @@ PURGE_BATCH = 500
 # Batches per resync tick, so a large backlog does not hold the resync task.
 PURGE_BATCHES_PER_TICK = 20
 MAX_DRAIN_CONCURRENCY = 64
+# A leader that cannot confirm its lease steps down once this share of it has passed.
+_STEP_DOWN_FRACTION = 0.75
 # Finished signal and timer rows are purged after the retention; effect rows stay for audit.
 _PURGED_KINDS = (int(WorkKind.SIGNAL), int(WorkKind.TIMER))
 
@@ -113,6 +115,11 @@ class WorkerSupervisor:
             raise ValueError("resync_interval_s must be positive")
         if retention_s < PURGE_INTERVAL_S:
             raise ValueError(f"retention_s must be at least {PURGE_INTERVAL_S}")
+        if renew_interval_s >= lease_seconds * _STEP_DOWN_FRACTION:
+            # Its renewal would come after the step-down time, so leadership would flap.
+            raise ValueError(
+                "renew_interval_s must be below 3/4 of lease_seconds, when the leader steps down"
+            )
         self._run_store = run_store
         self._queue_store = queue_store
         self._lease_manager = WorkerLeaseManager(
@@ -348,7 +355,7 @@ class WorkerSupervisor:
         until = self._lease_manager.confirmed_until
         if until is None:
             return self._clock()
-        return until - self._lease_manager.lease_seconds / 4
+        return until - self._lease_manager.lease_seconds * (1 - _STEP_DOWN_FRACTION)
 
     async def _drain_worker(self) -> None:
         loss_ev = self._lease_manager.lease_lost_event

@@ -8,6 +8,7 @@ instead of being retried.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import threading
@@ -126,10 +127,16 @@ class EngineLoadFailed(RuntimeError):
 
 @dataclass(frozen=True)
 class BridgeCommit:
-    """A commit's outcome and every entry its inputs produced, refused ones included."""
+    """
+    A commit's outcome and every entry its inputs produced, refused ones included.
+
+    :param unbuildable: Set when the inputs could not be committed: the detail the run
+        was paused ``failure_path`` with instead.
+    """
 
     outcome: CommitOutcome
     entries: tuple[engine.LogEntry, ...]
+    unbuildable: str | None = None
 
 
 @dataclass(frozen=True)
@@ -298,7 +305,8 @@ class EngineBridge:
 
         A refused input is skipped and the next sees the state unchanged; a result that
         changes nothing is not written. A commit that cannot be built pauses the run
-        ``failure_path`` in a separate commit instead.
+        ``failure_path`` in a separate commit instead, which the result's
+        ``unbuildable`` names.
 
         :param actor: Who asked: a user id, the calling session, or ``None`` for the engine.
         :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
@@ -317,7 +325,9 @@ class EngineBridge:
                 run_id,
                 describe_exception(exc),
             )
-            return self._pause_visibly(workspace_id, run_id, _unbuildable_detail(exc))
+            detail = _unbuildable_detail(exc)
+            paused = self._pause_visibly(workspace_id, run_id, detail)
+            return dataclasses.replace(paused, unbuildable=detail)
 
     def _commit_inputs(
         self,

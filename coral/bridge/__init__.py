@@ -21,6 +21,10 @@ if TYPE_CHECKING:
     from coral.bridge.config import engine_config_for as engine_config_for
     from coral.bridge.config import freeze_engine_config as freeze_engine_config
     from coral.bridge.config import utc_now as utc_now
+    from coral.bridge.executors import BridgeThreads as BridgeThreads
+    from coral.bridge.executors import bridge_hold_policy as bridge_hold_policy
+    from coral.bridge.executors import run_resync_executor as run_resync_executor
+    from coral.bridge.executors import timer_executor as timer_executor
     from coral.bridge.fold import EngineStateCache as EngineStateCache
     from coral.bridge.fold import FoldedRun as FoldedRun
     from coral.bridge.graphs import PinnedGraphError as PinnedGraphError
@@ -51,6 +55,10 @@ _MODULES: dict[str, str] = {
     "engine_config_for": "coral.bridge.config",
     "freeze_engine_config": "coral.bridge.config",
     "utc_now": "coral.bridge.config",
+    "BridgeThreads": "coral.bridge.executors",
+    "bridge_hold_policy": "coral.bridge.executors",
+    "run_resync_executor": "coral.bridge.executors",
+    "timer_executor": "coral.bridge.executors",
     "EngineStateCache": "coral.bridge.fold",
     "FoldedRun": "coral.bridge.fold",
     "PinnedGraphError": "coral.bridge.graphs",
