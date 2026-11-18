@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable, Iterator
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from coral.db.enum_codecs import RunPauseReason, RunStatus
 from coral.engine.types import HandoffEvaluated, HandoffReceived, PauseRun, RejectionObserved
@@ -75,10 +76,18 @@ class _HeldPort:
     def find_reply(self, workspace_id: int, run_id: str, cksum: bytes) -> ToolReply | None:
         return self.inner.find_reply(workspace_id, run_id, cksum)
 
-    def decide(self, workspace_id: int, run_id: str, planner: Planner, cksum: bytes) -> ToolReply:
+    def decide(
+        self,
+        workspace_id: int,
+        run_id: str,
+        planner: Planner,
+        cksum: bytes,
+        *,
+        actor: str | None = None,
+    ) -> ToolReply:
         self.entered.set()
         assert self.release.wait(10)
-        return self.inner.decide(workspace_id, run_id, planner, cksum)
+        return self.inner.decide(workspace_id, run_id, planner, cksum, actor=actor)
 
 
 def _planner(planned: Plan) -> dict[str, Callable[..., Plan]]:
@@ -337,7 +346,15 @@ class _ReplicaPort:
     def find_reply(self, workspace_id: int, run_id: str, cksum: bytes) -> ToolReply | None:
         return self.inner.find_reply(workspace_id, run_id, cksum)
 
-    def decide(self, workspace_id: int, run_id: str, planner: Planner, cksum: bytes) -> ToolReply:
+    def decide(
+        self,
+        workspace_id: int,
+        run_id: str,
+        planner: Planner,
+        cksum: bytes,
+        *,
+        actor: str | None = None,
+    ) -> ToolReply:
         waited = False
 
         def together(snapshot: RunSnapshot) -> Plan:
@@ -347,7 +364,7 @@ class _ReplicaPort:
                 self.barrier.wait()
             return planner(snapshot)
 
-        return self.inner.decide(workspace_id, run_id, together, cksum)
+        return self.inner.decide(workspace_id, run_id, together, cksum, actor=actor)
 
 
 def _invalid_call(op: str) -> EngineToolCall:
@@ -465,7 +482,15 @@ class _OverlapPort:
     def find_reply(self, workspace_id: int, run_id: str, cksum: bytes) -> ToolReply | None:
         return self.inner.find_reply(workspace_id, run_id, cksum)
 
-    def decide(self, workspace_id: int, run_id: str, planner: Planner, cksum: bytes) -> ToolReply:
+    def decide(
+        self,
+        workspace_id: int,
+        run_id: str,
+        planner: Planner,
+        cksum: bytes,
+        *,
+        actor: str | None = None,
+    ) -> ToolReply:
         with self._lock:
             self.active += 1
             self.peak = max(self.peak, self.active)
@@ -475,7 +500,7 @@ class _OverlapPort:
         if first:
             self.overlapped.wait(0.5)
         try:
-            return self.inner.decide(workspace_id, run_id, planner, cksum)
+            return self.inner.decide(workspace_id, run_id, planner, cksum, actor=actor)
         finally:
             with self._lock:
                 self.active -= 1
@@ -546,7 +571,15 @@ async def test_past_the_in_flight_cap_a_new_call_is_told_busy_uncounted(
 class _FailingPort(_HeldPort):
     """The held fake port whose decision fails once released."""
 
-    def decide(self, workspace_id: int, run_id: str, planner: Planner, cksum: bytes) -> ToolReply:
+    def decide(
+        self,
+        workspace_id: int,
+        run_id: str,
+        planner: Planner,
+        cksum: bytes,
+        *,
+        actor: str | None = None,
+    ) -> ToolReply:
         self.entered.set()
         assert self.release.wait(10)
         raise RuntimeError("database went away")
@@ -563,14 +596,53 @@ async def test_a_failure_no_caller_waits_for_is_logged(
         await ToolDispatcher(failing, PLANNERS, wait_s=0.01).dispatch(_call())
     failing.release.set()
 
-    def failure_logged() -> bool:
-        return any(record.levelno == logging.ERROR for record in caplog.records)
+    def failures() -> list[logging.LogRecord]:
+        return [record for record in caplog.records if "could not be decided" in record.message]
 
-    await poll_until_async(failure_logged)
-    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
-    assert len(errors) == 1
-    assert errors[0].exc_info is not None
-    assert "sess-1" in errors[0].getMessage()
+    await poll_until_async(failures)
+    (failure,) = failures()
+    # Named by its type and text, without a traceback that could carry SQL values.
+    assert (failure.levelno, failure.exc_info) == (logging.WARNING, None)
+    assert "sess-1" in failure.getMessage()
+    assert "RuntimeError: database went away" in failure.getMessage()
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+class _StoreErrorPort:
+    """A port whose store fails with a database error that carries SQL and a bound value."""
+
+    def find_reply(self, workspace_id: int, run_id: str, cksum: bytes) -> ToolReply | None:
+        return None
+
+    def decide(
+        self,
+        workspace_id: int,
+        run_id: str,
+        planner: Planner,
+        cksum: bytes,
+        *,
+        actor: str | None = None,
+    ) -> ToolReply:
+        raise IntegrityError(
+            "INSERT INTO coral_tool_replies (reply) VALUES (?)",
+            ("SENTINEL handoff body",),
+            Exception("UNIQUE constraint failed"),
+        )
+
+
+async def test_a_store_error_is_a_transport_error_logged_without_its_sql(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=DISPATCH_LOGGER)
+
+    with pytest.raises(TransportError) as failed:
+        await ToolDispatcher(_StoreErrorPort(), PLANNERS).dispatch(_call())
+
+    assert str(failed.value) == "Coral could not answer this call; retry shortly"
+    assert failed.value.__cause__ is None and failed.value.__suppress_context__
+    assert "IntegrityError" in caplog.text and "sess-1" in caplog.text
+    assert "SENTINEL" not in caplog.text and "INSERT" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 async def test_a_store_pause_that_wins_the_race_is_answered_not_counted(

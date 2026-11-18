@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from coral.engine.machines.slot import find_slot
 from coral.engine.types import RejectionObserved
+from coral.queue.run_effects import describe_exception
 from coral.stores.session_bindings import SessionBinding
 from coral.tools.port import (
     Commit,
@@ -202,7 +203,12 @@ class ToolDispatcher:
                 return stored
             try:
                 reply = await asyncio.to_thread(
-                    self._port.decide, workspace_id, run_id, planned, cksum
+                    self._port.decide,
+                    workspace_id,
+                    run_id,
+                    planned,
+                    cksum,
+                    actor=binding.session_id,
                 )
             except EngineRefused as refused:
                 reply = self._engine_reply(call, refused)
@@ -210,7 +216,12 @@ class ToolDispatcher:
                     # Counted like the planner's own refusals: observed, stored, not info-logged.
                     observe = functools.partial(_observe, binding=binding, reply=reply)
                     return await asyncio.to_thread(
-                        self._port.decide, workspace_id, run_id, observe, cksum
+                        self._port.decide,
+                        workspace_id,
+                        run_id,
+                        observe,
+                        cksum,
+                        actor=binding.session_id,
                     )
                 detail = f"engine refused {refused.code}"
             else:
@@ -226,6 +237,18 @@ class ToolDispatcher:
                 run_id,
             )
             raise TransportError("Coral is busy with this run; retry shortly") from exc
+        except TransportError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- answered as a retryable transport error
+            # A store or load failure: named by its type, never with SQL text or values.
+            _logger.warning(
+                "Coral %s from session %s in run %s could not be decided (%s); asked to retry",
+                call.tool,
+                binding.session_id,
+                run_id,
+                describe_exception(exc),
+            )
+            raise TransportError("Coral could not answer this call; retry shortly") from None
         self._log_refusal(call, reply, detail)
         return reply
 
@@ -278,11 +301,11 @@ class ToolDispatcher:
         if error is not None and decision.waiters == 0 and not isinstance(error, TransportError):
             _logger.error(
                 "Coral %s from session %s in run %s: the decision failed after its callers "
-                "stopped waiting",
+                "stopped waiting (%s)",
                 decision.call.tool,
                 decision.call.binding.session_id,
                 decision.call.binding.run_id,
-                exc_info=error,
+                describe_exception(error),
             )
 
 

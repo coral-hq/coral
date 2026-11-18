@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from coral.bridge.mapping import FED_KINDS as FED_KINDS
     from coral.bridge.mapping import MapContext as MapContext
     from coral.bridge.mapping import map_effect as map_effect
+    from coral.bridge.port import StoreDecisionPort as StoreDecisionPort
     from coral.bridge.projection import project_run as project_run
     from coral.bridge.projection import project_slots as project_slots
     from coral.bridge.service import BridgeCommit as BridgeCommit
@@ -68,6 +69,7 @@ _MODULES: dict[str, str] = {
     "FED_KINDS": "coral.bridge.mapping",
     "MapContext": "coral.bridge.mapping",
     "map_effect": "coral.bridge.mapping",
+    "StoreDecisionPort": "coral.bridge.port",
     "project_run": "coral.bridge.projection",
     "project_slots": "coral.bridge.projection",
     "BridgeCommit": "coral.bridge.service",

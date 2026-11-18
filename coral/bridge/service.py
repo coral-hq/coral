@@ -97,7 +97,7 @@ _UNBUILDABLE: tuple[tuple[type[Exception], str], ...] = (
     (UnsupportedStance, "unsupported_stance"),
     (MappedPayloadTooLarge, "payload_too_large"),
 )
-_UNBUILDABLE_TYPES = tuple(kind for kind, _detail in _UNBUILDABLE)
+UNBUILDABLE_ERRORS = tuple(kind for kind, _detail in _UNBUILDABLE)
 LOAD_FAILED_DETAIL = "engine.load_failed"
 # Rows read at a time while looking for a run's start entry.
 _START_SCAN_ROWS = 8
@@ -319,15 +319,25 @@ class EngineBridge:
         except EngineLoadFailed as exc:
             self._pause_unloadable(exc)
             raise
-        except _UNBUILDABLE_TYPES as exc:
-            _logger.warning(
-                "Coral pauses run %s: its commit cannot be built (%s)",
-                run_id,
-                describe_exception(exc),
-            )
-            detail = _unbuildable_detail(exc)
-            paused = self._pause_visibly(workspace_id, run_id, detail)
-            return dataclasses.replace(paused, unbuildable=detail)
+        except UNBUILDABLE_ERRORS as exc:
+            return self.pause_unbuildable(workspace_id=workspace_id, run_id=run_id, error=exc)
+
+    def pause_unbuildable(
+        self, *, workspace_id: int, run_id: str, error: Exception
+    ) -> BridgeCommit:
+        """
+        Pause the run ``failure_path`` because ``error`` keeps its commit from being built.
+
+        :param error: One of :data:`UNBUILDABLE_ERRORS`; its kind names the pause detail.
+        """
+        _logger.warning(
+            "Coral pauses run %s: its commit cannot be built (%s)",
+            run_id,
+            describe_exception(error),
+        )
+        detail = _unbuildable_detail(error)
+        paused = self._pause_visibly(workspace_id, run_id, detail)
+        return dataclasses.replace(paused, unbuildable=detail)
 
     def _commit_inputs(
         self,
@@ -358,7 +368,7 @@ class EngineBridge:
                     release_held_codes=extras.release_held_codes,
                     lift_store_pause=lift_store_pause,
                 )
-            except _UNBUILDABLE_TYPES:
+            except UNBUILDABLE_ERRORS:
                 _logger.warning(
                     "Coral run %s cannot commit inputs %s",
                     run_id,
@@ -745,6 +755,7 @@ def _unbuildable_detail(exc: Exception) -> str:
 
 __all__ = [
     "LOAD_FAILED_DETAIL",
+    "UNBUILDABLE_ERRORS",
     "BridgeCommit",
     "EngineBridge",
     "EngineLoadFailed",

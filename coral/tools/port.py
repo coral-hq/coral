@@ -76,13 +76,16 @@ class RunDecisionPort(Protocol):
        replica or a restart).
     2. Load a :class:`RunSnapshot`, with the graph pinned to the run's version
        hash. A missing run raises :class:`~coral.stores.protocols.RunNotFound`.
-    3. Run ``planner``. A :class:`Reply` is returned as it is; nothing is written.
+    3. Run ``planner``. A :class:`Reply` is returned as it is, unless a reply
+       was stored under ``cksum`` since step 1 (another server committed the
+       same call), which is returned instead; nothing is written.
     4. For a :class:`Commit`, run ``transition(graph, state, input, now)`` for
        each input in order. If any is rejected, write nothing: return
        ``reply`` for an observation, else raise :class:`EngineRefused`.
     5. Otherwise write every log entry, its effects and ``reply.to_json()``
        under ``cksum`` in one ``apply_transition``, compare-and-swap on the
-       snapshot's run version, and return ``reply``.
+       snapshot's run version, and return ``reply``. The entries record
+       ``actor``, the calling session, as who asked.
     6. On a version conflict, start again from 1. After
        :data:`MAX_DECIDE_ATTEMPTS` attempts raise
        :class:`~coral.stores.protocols.RunContended`.
@@ -111,7 +114,13 @@ class RunDecisionPort(Protocol):
     def find_reply(self, workspace_id: int, run_id: str, cksum: bytes) -> ToolReply | None: ...
 
     def decide(
-        self, workspace_id: int, run_id: str, planner: Planner, cksum: bytes
+        self,
+        workspace_id: int,
+        run_id: str,
+        planner: Planner,
+        cksum: bytes,
+        *,
+        actor: str | None = None,
     ) -> ToolReply: ...
 
 

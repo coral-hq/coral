@@ -2,8 +2,8 @@
 
 Tests set the store row (status, pause reason, orchestrator) apart from the
 engine state, as drift and budget pauses do, and can make the next commits lose
-their compare-and-swap. :class:`FakeBindingLookup` serves the bindings the
-calls name.
+their compare-and-swap. Each entry ``decide`` commits records its ``actor``.
+:class:`FakeBindingLookup` serves the bindings the calls name.
 """
 
 from __future__ import annotations
@@ -87,6 +87,8 @@ class _Run:
     graph: CompiledGraph
     driven: Driven
     replies: dict[bytes, str] = field(default_factory=dict)
+    # Who asked for each logged entry: the calling session for ``decide``, else None.
+    actors: list[str | None] = field(default_factory=list)
 
 
 class InMemoryDecisionPort:
@@ -131,7 +133,9 @@ class InMemoryDecisionPort:
             updated_at=0,
         )
         with self._lock:
-            self._runs[(workspace_id, run_id)] = _Run(row=row, graph=graph, driven=driven)
+            self._runs[(workspace_id, run_id)] = _Run(
+                row=row, graph=graph, driven=driven, actors=[None] * len(driven.log)
+            )
 
     def apply(
         self,
@@ -194,6 +198,17 @@ class InMemoryDecisionPort:
         with self._lock:
             return dict(self._run(workspace_id, run_id).replies)
 
+    def actors(
+        self, *, run_id: str = RUN_ID, workspace_id: int = WORKSPACE
+    ) -> list[tuple[str, str | None]]:
+        """Each logged entry's input kind and who asked for it."""
+        with self._lock:
+            run = self._run(workspace_id, run_id)
+            return [
+                (entry.input.kind, actor)
+                for entry, actor in zip(run.driven.log, run.actors, strict=True)
+            ]
+
     def assert_folds(self) -> None:
         """Every run's state is its log replayed."""
         with self._lock:
@@ -207,7 +222,15 @@ class InMemoryDecisionPort:
             stored = None if run is None else run.replies.get(cksum)
         return None if stored is None else ToolReply.from_json(stored)
 
-    def decide(self, workspace_id: int, run_id: str, planner: Planner, cksum: bytes) -> ToolReply:
+    def decide(
+        self,
+        workspace_id: int,
+        run_id: str,
+        planner: Planner,
+        cksum: bytes,
+        *,
+        actor: str | None = None,
+    ) -> ToolReply:
         with self._lock:
             self.decide_calls += 1
         for _ in range(MAX_DECIDE_ATTEMPTS):
@@ -244,6 +267,7 @@ class InMemoryDecisionPort:
                 if run.row.version != snapshot.run.version:
                     continue
                 run.driven = Driven(state=state, log=(*run.driven.log, *entries))
+                run.actors.extend([actor] * len(entries))
                 assert fold(run.graph, run.driven.log) == state
                 self._bump(run)
                 run.replies[cksum] = plan.reply.to_json()
@@ -260,6 +284,7 @@ class InMemoryDecisionPort:
         run.driven = _accepted(
             drive(run.graph, list(inputs), auto_ack=auto_ack, after=run.driven), after=run.driven
         )
+        run.actors.extend([None] * (len(run.driven.log) - len(run.actors)))
         self._bump(run)
 
     @staticmethod
