@@ -2552,3 +2552,45 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S103
+    title: A child session's workspace files follow its root's grants and file-sharing opt-in
+    owner: WS-WORKSPACE
+    status: landed
+    category: upstreamable
+    note: >-
+      The workspace content-read gate (`_authorize_browse_read_with_owner`,
+      behind file read and list, changed files, diffs, search and the GitHub
+      diff views) treated a child session's `level is None`, which means
+      access inherited from the parent chain, like "permissions disabled".
+      So a READ or `__public__` grant on a root exposed every child's
+      workspace, bypassing the owner's `share_workspace_files` opt-in (off by
+      default). In Coral's ADR-05 topology every step is a child of the run's
+      anchor, so this was the default path. The gate now resolves a child's
+      edit and owner level through the parent chain (`_clears_level`, the
+      former `_owns_session` with a required level; the child's own grants
+      are ignored, as in `check_session_access`) and reads the opt-in from
+      the root row (`_shares_workspace_files`); only a missing permission
+      store means "permissions disabled". A child's own
+      `share_workspace_files` is ignored. Top-level sessions cost no extra
+      query; a child viewer costs two parent-chain checks and one root read.
+    files:
+      - omnigent/server/routes/sessions/routes_resources.py
+      - tests/server/routes/test_shell_permission_gate.py
+    tests:
+      - tests/server/routes/test_shell_permission_gate.py
+    budget_lines: 40
+    budget_exception:
+      lines: 54
+      reason: >-
+        omnigent/server/routes/sessions/routes_resources.py (54 changed lines:
+        39 added, 15 removed): the gate's new condition, the rename of
+        `_owns_session` to `_clears_level` with a required level so the edit
+        check reuses the owner check's parent walk, and the root share-flag
+        helper, each with its docstring.
+        tests/server/routes/test_shell_permission_gate.py (26) is within
+        budget.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true
