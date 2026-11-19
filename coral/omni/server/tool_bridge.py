@@ -8,6 +8,8 @@ session's binding by the authenticated session id, fresh on every call, and
 dispatches. The run, role, slot and generation come only from that row, never
 from labels or arguments. The lookup and the decision run on the thread runner
 the server passes; a lookup that does not finish in time is answered "retry".
+A ``done`` handoff also carries the server's verdict on its step's
+``done_when`` commands, when an evidence checker is wired.
 """
 
 from __future__ import annotations
@@ -16,10 +18,12 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
+from typing import Protocol
 
-from coral.stores.session_bindings import FreshBindingLookup
+from coral.evidence.ir import EvidenceVerdict, InProgress
+from coral.stores.session_bindings import FreshBindingLookup, SessionBinding
 from coral.tools import replies
-from coral.tools.catalog import EngineToolDecl, validate_catalog
+from coral.tools.catalog import SUBMIT_HANDOFF, EngineToolDecl, validate_catalog
 from coral.tools.dispatch import EngineToolCall, ThreadRunner, ToolDispatcher, TransportError
 from coral.tools.handlers import PLANNERS
 from coral.tools.port import RunDecisionPort
@@ -42,6 +46,12 @@ LOOKUP_FAILED = "could not look up this session; retry"
 LOOKUP_TIMEOUT_S = 10.0
 
 
+class EvidenceSource(Protocol):
+    async def verdict(self, binding: SessionBinding) -> EvidenceVerdict | None:
+        """The verdict on the binding's step, or ``None`` when it has no done-when commands."""
+        ...
+
+
 def register_engine_tools(
     *,
     catalog: Sequence[EngineToolDecl],
@@ -50,6 +60,7 @@ def register_engine_tools(
     stack: AsyncExitStack,
     run_in_thread: ThreadRunner = asyncio.to_thread,
     lookup_timeout_s: float = LOOKUP_TIMEOUT_S,
+    evidence: EvidenceSource | None = None,
 ) -> None:
     """
     Register one server tool per ``catalog`` entry; each unregister goes on ``stack``.
@@ -62,6 +73,8 @@ def register_engine_tools(
         cache that keeps found rows is refused, even with an empty catalog.
     :param run_in_thread: Runs each call's binding lookup and port calls.
     :param lookup_timeout_s: How long a call waits for its binding lookup.
+    :param evidence: Judges a ``done`` handoff's done-when commands; ``None``
+        skips the check (each step's handoff is taken on its word).
     :raises TypeError: For a lookup that does not declare fresh reads.
     :raises ValueError: For a declaration that cannot be offered, or one no
         planner answers.
@@ -83,7 +96,9 @@ def register_engine_tools(
         None if port is None else ToolDispatcher(port, PLANNERS, run_in_thread=run_in_thread)
     )
     for decl in catalog:
-        handler = _handler(decl.name, dispatcher, bindings, run_in_thread, lookup_timeout_s)
+        handler = _handler(
+            decl.name, dispatcher, bindings, run_in_thread, lookup_timeout_s, evidence
+        )
         stack.callback(register_server_tool(decl.name, handler))
 
 
@@ -93,6 +108,7 @@ def _handler(
     bindings: FreshBindingLookup,
     run_in_thread: ThreadRunner,
     lookup_timeout_s: float,
+    evidence: EvidenceSource | None,
 ) -> ServerToolHandler:
     def refuse(call: ServerToolCall, message: str) -> ServerToolResult:
         # The session only: the arguments and the operation id are the caller's.
@@ -138,6 +154,7 @@ def _handler(
             tool=tool,
             arguments=call.arguments,
             operation_id=call.operation_id,
+            evidence=await _verdict(tool, evidence, binding, call),
         )
         try:
             reply = await dispatcher.dispatch(engine_call)
@@ -146,3 +163,16 @@ def _handler(
         return ServerToolResult(reply.to_json())
 
     return handle
+
+
+async def _verdict(
+    tool: str, evidence: EvidenceSource | None, binding: SessionBinding, call: ServerToolCall
+) -> EvidenceVerdict | None:
+    """The evidence verdict a ``done`` handoff carries; a failed check reads as in progress."""
+    if evidence is None or tool != SUBMIT_HANDOFF.name or call.arguments.get("status") != "done":
+        return None
+    try:
+        return await evidence.verdict(binding)
+    except Exception:
+        _logger.exception("Coral evidence check failed for session %s", call.session_id)
+        return InProgress(reason="the evidence check failed; it will be tried again")
