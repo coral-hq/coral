@@ -11,7 +11,7 @@ after it. :class:`EvidenceChecker` answers ``coral_submit_handoff``:
 
 Any call still in flight or started during the check, a record that failed moments ago,
 or a fingerprint that cannot be read gives "in progress", never "missing". "In progress"
-lasts at most ``IN_PROGRESS_LIMIT_S`` for a session; after that, and at once for a run
+lasts at most ``IN_PROGRESS_LIMIT_S`` over one run of retries; after that, and at once for a run
 with no worktree, the commands are "missing" as ``unverified``, which spends an attempt.
 A shell run that overlapped another call of the session is stored with no command, so
 it can never be evidence.
@@ -74,8 +74,8 @@ IN_FLIGHT_EXPIRY_S = 7_500.0
 RECORD_TIMEOUT_S = 20.0
 # How long a session's submits may be answered "in progress" before they count as missing.
 IN_PROGRESS_LIMIT_S = 120.0
-# Answers further apart than this start a new wait: the agent stopped retrying meanwhile.
-IN_PROGRESS_GAP_S = 30.0
+# Checks started further apart than this start a new wait: the agent stopped retrying.
+IN_PROGRESS_GAP_S = 90.0
 _STEP_CACHE_MAX = 1_024
 
 
@@ -210,17 +210,21 @@ class InFlightCalls:
                 return False
             return True
 
-    def waited_too_long(self, workspace_id: int, session_id: str) -> bool:
-        """Note an "in progress" answer; true once a run of them lasts ``IN_PROGRESS_LIMIT_S``."""
+    def waited_too_long(self, workspace_id: int, session_id: str, started: float) -> bool:
+        """
+        Note an "in progress" answer to a check begun at ``started``.
+
+        True once a run of them, each check started within ``IN_PROGRESS_GAP_S`` of the
+        previous one's start, spans ``IN_PROGRESS_LIMIT_S``.
+        """
         key = (workspace_id, session_id)
         with self._lock:
-            now = self._clock()
-            since, last = self._waiting_since.get(key, (now, now))
-            if now - last > IN_PROGRESS_GAP_S:
+            since, last = self._waiting_since.get(key, (started, started))
+            if started - last > IN_PROGRESS_GAP_S:
                 # A new run of "in progress" answers, not a continuation of an old one.
-                since = now
-            if now - since < IN_PROGRESS_LIMIT_S:
-                self._waiting_since[key] = (since, now)
+                since = started
+            if self._clock() - since < IN_PROGRESS_LIMIT_S:
+                self._waiting_since[key] = (since, started)
                 return False
             del self._waiting_since[key]
             return True
@@ -399,11 +403,12 @@ class EvidenceChecker:
         workspace_id, session_id = binding.workspace_id, binding.session_id
         if step.target is None:
             return _unverified(step.requirement)
+        started = self._in_flight.now()
         found = await self._judge(step, workspace_id, session_id)
         if not isinstance(found, InProgress):
             self._in_flight.judged(workspace_id, session_id)
             return found
-        if self._in_flight.waited_too_long(workspace_id, session_id):
+        if self._in_flight.waited_too_long(workspace_id, session_id, started):
             _logger.warning(
                 "Coral evidence: session %s stayed unverifiable (%s); counting it missing",
                 session_id,

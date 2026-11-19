@@ -399,11 +399,12 @@ async def test_a_cancelled_record_marks_the_session_lagging(harness: _Harness) -
 def test_the_in_progress_limit_counts_one_run_of_retries() -> None:
     now = [0.0]
     calls = InFlightCalls(clock=lambda: now[0])
-    assert not calls.waited_too_long(WORKSPACE, SESSION)
+    assert not calls.waited_too_long(WORKSPACE, SESSION, now[0])
     now[0] = 600.0
-    assert not calls.waited_too_long(WORKSPACE, SESSION)
-    for _ in range(11):
-        now[0] += 10.0
-        assert not calls.waited_too_long(WORKSPACE, SESSION)
-    now[0] += 10.0
-    assert calls.waited_too_long(WORKSPACE, SESSION)
+    assert not calls.waited_too_long(WORKSPACE, SESSION, now[0])
+    for _ in range(5):
+        now[0] += 20.0
+        # Each check takes 10 s; the next starts 20 s after the last one began.
+        assert not calls.waited_too_long(WORKSPACE, SESSION, now[0] - 10.0)
+    now[0] += 20.0
+    assert calls.waited_too_long(WORKSPACE, SESSION, now[0] - 10.0)

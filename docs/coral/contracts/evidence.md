@@ -80,8 +80,8 @@ planner as `EngineToolCall.evidence`. A `blocked` handoff is not checked.
 5. It reads the session's rows and calls `coral.evidence.evaluate`. A call of
    the session that started during the check makes the answer in progress.
 
-A session answered "in progress" for 120 s in a row (retries no more than
-30 s apart) gets `unverified` for
+A session answered "in progress" for 120 s in a row (checks started no more
+than 90 s apart) gets `unverified` for
 every item instead, so a step whose worktree cannot be read cannot loop.
 
 The evaluator walks the rows in order:
@@ -110,8 +110,10 @@ only if they all passed, and nothing after them can undo what they saw.
     `2>&1`). A quoted `"&&"` is an argument, never a join;
   - grouping `( ) { }`, or a function definition;
   - an env assignment, e.g. `PYTEST_ADDOPTS=--co pytest -q`;
-  - a command that changes the shell: `cd`, `alias`, `trap`, `export`,
-    `eval`, `exec`, `source`, `env`, `set` and the like.
+  - a redirection (`<`, `>`) outside quotes;
+  - a command whose first word is any bash, zsh or POSIX builtin or keyword
+    (`exit`, `cd`, `printf`, `read`, `alias`, `trap`, `export`, `eval`,
+    `source`, `[`, `if` and the rest), or `env`.
 - One level of `sh|bash|zsh|dash -c '<script>'` is unwrapped, with flags
   `-e`, `-u` and `-x` only (no `-l` or `-i`, which load startup files). Its
   script follows the same rules.

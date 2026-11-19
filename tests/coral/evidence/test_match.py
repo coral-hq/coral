@@ -50,6 +50,13 @@ from coral.evidence.match import argv_of, matches, segments
         ('bash -c "echo \\"&&\\" pytest -q"', False),
         ("pytest -q 2>&1", False),
         ("{ true; } && pytest -q", False),
+        ("exit 0 && pytest -q", False),
+        ('bash -c "exit 0 && pytest -q"', False),
+        ("printf -v PATH /tmp/fake && pytest -q", False),
+        ("read -r PATH < /tmp/p && pytest -q", False),
+        ("mapfile x && pytest -q", False),
+        ("[ -f a ] && pytest -q", False),
+        ("pytest -q > out.txt", False),
     ],
 )
 def test_only_a_plain_and_chain_ending_in_the_command_counts(command: str, counted: bool) -> None:

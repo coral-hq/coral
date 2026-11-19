@@ -7,8 +7,10 @@ did. Any of these refuse the whole line:
 - ``#``, ``$``, a backtick, a backslash, a newline or ``<<`` anywhere;
 - outside quotes, a join other than ``&&`` (a quoted ``"&&"`` is an argument);
 - grouping (``( ) { }``), a function definition, or an env assignment;
-- a command that changes the shell itself (``cd``, ``alias``, ``trap``, ``export``,
-  ``eval``, ``source``, ``env`` and the like).
+- a redirection (``<``, ``>``) outside quotes;
+- any command whose first word is a shell builtin or keyword (``exit``, ``cd``,
+  ``printf``, ``read``, ``alias``, ``trap``, ``export``, ``eval``, ``source``, ``env``
+  and every other one).
 
 One level of ``sh -c '<script>'`` (also bash, zsh, dash; flags ``-e``, ``-u``, ``-x``
 only) in the last command is unwrapped, and its script follows the same rules. The
@@ -25,38 +27,119 @@ from dataclasses import dataclass
 
 _GROUPING = frozenset({"(", ")", "{", "}", "((", "))", "()"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
-# Builtins and commands that change how later commands of the line behave.
+# Every bash, zsh and POSIX builtin or keyword, and ``env``: refused as any command's first
+# word, so nothing in the line can exit early, rebind PATH or redefine the test (fail closed).
 _SHELL_STATE = frozenset(
     {
+        "!",
         ".",
+        ":",
+        "[",
+        "[[",
+        "]]",
         "alias",
+        "autoload",
+        "bg",
+        "bind",
+        "bindkey",
+        "break",
         "builtin",
+        "caller",
+        "case",
         "cd",
+        "chdir",
         "command",
+        "compgen",
+        "complete",
+        "compopt",
+        "continue",
+        "coproc",
         "declare",
+        "dirs",
+        "disown",
+        "do",
+        "done",
+        "echo",
+        "elif",
+        "else",
+        "emulate",
         "enable",
         "env",
+        "esac",
         "eval",
         "exec",
+        "exit",
         "export",
+        "false",
+        "fc",
+        "fg",
+        "fi",
+        "float",
+        "for",
         "function",
+        "functions",
+        "getopts",
         "hash",
+        "help",
+        "history",
+        "if",
+        "in",
+        "integer",
+        "jobs",
+        "kill",
+        "let",
         "local",
+        "logout",
+        "mapfile",
+        "noglob",
         "popd",
+        "print",
+        "printf",
         "pushd",
+        "pwd",
+        "read",
+        "readarray",
         "readonly",
+        "repeat",
+        "return",
+        "select",
         "set",
+        "setopt",
+        "shift",
         "shopt",
         "source",
+        "suspend",
+        "test",
+        "then",
+        "time",
+        "times",
         "trap",
+        "true",
+        "type",
         "typeset",
+        "ulimit",
+        "umask",
         "unalias",
+        "unfunction",
+        "unhash",
         "unset",
+        "unsetopt",
+        "until",
+        "vared",
+        "wait",
+        "whence",
+        "where",
+        "which",
+        "while",
+        "zmodload",
+        "{",
+        "}",
     }
 )
 _REFUSED_TEXT = ("#", "$", "`", "\\", "\n", "\r", "<<")
-# Outside quotes, any of these but ``&&`` refuses the line: other joins, background, subshells.
-_OPERATOR_CHARS = frozenset(";|&()")
+# Outside quotes, any of these but ``&&`` refuses the line: joins, background, subshells,
+# redirections.
+_OPERATOR_CHARS = frozenset(";|&()<>")
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 # A shell flag cluster with -c and only flags that load no startup files: -c, -ec, -xc.
 _DASH_C = re.compile(r"^-[eux]*c[eux]*$")
