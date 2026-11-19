@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI
 from sqlalchemy import Engine, create_engine
 
+from coral.api.inbox import create_inbox_router
 from coral.api.info import create_info_router
 from coral.api.sub_features import resolve_sub_features
 from coral.api.workflows import create_workflows_router
@@ -31,6 +32,7 @@ from coral.db.migrate import ensure_coral_schema
 from coral.db.models_workflows import CoralBase
 from coral.gates.republish import GateRepublisher
 from coral.omni.protocols import GatePublisher, RunScopeRunner
+from coral.omni.server.access import request_viewer
 from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.queue.executors import EffectExecutor
 from coral.queue.store import SqlAlchemyCoralQueueStore
@@ -42,6 +44,7 @@ from coral.stores.workflows import SqlWorkflowDefinitionStore
 from coral.tools.dispatch import ThreadRunner
 from coral.tools.port import RunDecisionPort
 from coral.workers.supervisor import MAX_DRAIN_CONCURRENCY, WorkerSupervisor
+from omnigent.db.db_models import current_workspace_id
 from omnigent.process_logging import data_dir
 from omnigent.server.server_plugins import ServerPluginRegistration, ServerServices
 
@@ -602,6 +605,11 @@ def register(services: ServerServices) -> ServerPluginRegistration:
         SqlWorkflowDefinitionStore(engine),
         workspace_id_dependency=_single_workspace_id,
     )
+    # The feed reads the alert store the lifespan publishes; the caller is the owner.
+    inbox_router = create_inbox_router(
+        viewer_dependency=request_viewer(services.auth_provider),
+        workspace_id_dependency=current_workspace_id,
+    )
 
     @asynccontextmanager
     async def workflow_engine_lifespan(
@@ -614,7 +622,11 @@ def register(services: ServerServices) -> ServerPluginRegistration:
             engine.dispose()
 
     return ServerPluginRegistration(
-        routers=((info_router, "", ["coral"]), (workflows_router, "/v1/coral", ["coral"])),
+        routers=(
+            (info_router, "", ["coral"]),
+            (workflows_router, "/v1/coral", ["coral"]),
+            (inbox_router, "/v1/coral", ["coral"]),
+        ),
         lifespan_hooks=(coral_lifespan, workflow_engine_lifespan),
         policy_modules=("coral.omni.policies.hygiene", "coral.omni.policies.guards"),
     )

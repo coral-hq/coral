@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
+from fastapi import HTTPException, Request
 from starlette.requests import HTTPConnection
 
 from coral.omni.protocols import Viewer
@@ -54,6 +57,30 @@ def viewer_for(user_id: str | None, auth_provider: AuthProvider | None) -> Viewe
         account_generation=account_generation(user_id),
         check_generation=authority is not None,
     )
+
+
+def request_viewer(
+    auth_provider: AuthProvider | None,
+) -> Callable[[Request], Awaitable[Viewer]]:
+    """
+    A FastAPI dependency giving the request's caller as a :class:`Viewer`.
+
+    It authenticates and builds the Viewer in one call, in the request's task, so
+    ``viewer_for`` reads the account authority this authentication bound.
+    A configured provider that finds no user is a 401, as in Omnigent's routes; a
+    caller ``viewer_for`` refuses is a 403.
+    """
+
+    async def viewer(request: Request) -> Viewer:
+        user_id = resolve_user_id(request, auth_provider)
+        if auth_provider is not None and user_id is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        found = viewer_for(user_id, auth_provider)
+        if found is None:
+            raise HTTPException(status_code=403, detail="Not permitted")
+        return found
+
+    return viewer
 
 
 def has_session_access(

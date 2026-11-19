@@ -30,9 +30,7 @@ from coral.stores.protocols import (
     AlertDraft,
     AlertRecord,
     AlertResolution,
-    CoralRun,
     LogEntryDraft,
-    RunStartSpec,
     RunStore,
     RunVersionConflict,
     ToolReplyDraft,
@@ -40,14 +38,20 @@ from coral.stores.protocols import (
     TransitionTooLarge,
 )
 from omnigent.db import current_query_name
+from tests.stores.coral._alerts import (
+    ALICE,
+    BOB,
+    NOW,
+    OTHER_WORKSPACE,
+    WORKSPACE,
+    alert_draft,
+    alert_payload,
+    commit_alert_changes,
+    start_owned_run,
+)
 from tests.stores.coral._faults import SimulatedCrash, crash_around, fresh_process, run_racing
 from tests.stores.coral.conftest import CoralSplitDb
 
-WORKSPACE = 7
-OTHER_WORKSPACE = 8
-NOW = 1_700_000_000
-ALICE = "alice"
-BOB = "bob"
 OPEN = int(AlertStatus.OPEN)
 ACKED = int(AlertStatus.ACKED)
 RESOLVED = int(AlertStatus.RESOLVED)
@@ -95,86 +99,6 @@ def _sql(uri: str) -> tuple[RunStore, SqlAlchemyAlertStore]:
     return run_store_module.SqlAlchemyCoralRunStore(uri), SqlAlchemyAlertStore(uri)
 
 
-def _start(
-    runs: RunStore,
-    key: str,
-    *,
-    user_id: str | None = ALICE,
-    generation: str | None = None,
-    workspace_id: int = WORKSPACE,
-) -> CoralRun:
-    spec = RunStartSpec(
-        "wf",
-        "v1",
-        f"Run {key}",
-        "p",
-        workspace_id=workspace_id,
-        user_id=user_id,
-        account_generation=generation,
-    )
-    return runs.start_run(spec, start_key=key, now=NOW)
-
-
-def _payload(title: str = "Run paused") -> str:
-    return AlertPayload(
-        title=title,
-        message="The run paused.",
-        run_title="Fix the parser",
-        actions=("open_run", "mark_read"),
-        deep_link="/workflows/runs/r",
-    ).model_dump_json()
-
-
-def _raise(
-    run: CoralRun,
-    kind: AlertKind,
-    key: str,
-    *,
-    subject: str | None = None,
-    priority: AlertPriority = AlertPriority.NORMAL,
-    created_at: int = 0,
-    title: str = "Run paused",
-) -> AlertDraft:
-    return AlertDraft(
-        id=derived_id("coral-alert", str(run.workspace_id), run.id, kind.name.lower(), key),
-        run_id=run.id,
-        kind=int(kind),
-        priority=int(priority),
-        subject_id=subject or derived_id("coral-alert-subject", run.id, key),
-        payload=_payload(title),
-        # As the run names its owner; the store folds the local user into None.
-        owner_user_id=run.user_id,
-        account_generation=run.account_generation,
-        created_at=created_at,
-    )
-
-
-def _commit(
-    runs: RunStore,
-    run: CoralRun,
-    *,
-    raises: Sequence[AlertDraft] = (),
-    resolutions: Sequence[AlertResolution] = (),
-    now: int = NOW,
-    tool_reply: ToolReplyDraft | None = None,
-    expected_version: int | None = None,
-) -> None:
-    current = runs.get_run(run.id, workspace_id=run.workspace_id)
-    assert current is not None
-    runs.apply_transition(
-        run.id,
-        current.version if expected_version is None else expected_version,
-        Transition(
-            alert_raises=raises,
-            alert_resolutions=resolutions,
-            logs=(LogEntryDraft(kind=1, actor_kind=1, body="{}"),),
-            tool_reply=tool_reply,
-        ),
-        workspace_id=run.workspace_id,
-        now=now,
-    )
-
-
 def _inbox(
     alerts: SqlAlchemyAlertStore,
     viewer: Viewer,
@@ -197,13 +121,13 @@ def _newest_first(drafts: Sequence[AlertDraft]) -> list[str]:
 
 
 def test_a_repeated_raise_keeps_one_row_and_never_reopens(stores: _Stores) -> None:
-    run = _start(stores.runs, "raise", generation="g1")
-    pause = _raise(run, AlertKind.PAUSE, "2")
-    later = dataclasses.replace(pause, payload=_payload("Changed"))
+    run = start_owned_run(stores.runs, "raise", generation="g1")
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
+    later = dataclasses.replace(pause, payload=alert_payload("Changed"))
 
     # The same id twice in one commit: the first draft wins.
-    _commit(stores.runs, run, raises=(pause, later))
-    _commit(stores.runs, run, raises=(later,), now=NOW + 10)
+    commit_alert_changes(stores.runs, run, raises=(pause, later))
+    commit_alert_changes(stores.runs, run, raises=(later,), now=NOW + 10)
     opened = AlertRecord(
         workspace_id=WORKSPACE,
         id=pause.id,
@@ -219,44 +143,44 @@ def test_a_repeated_raise_keeps_one_row_and_never_reopens(stores: _Stores) -> No
     )
     assert stores.read(run.id) == [opened]
 
-    _commit(
+    commit_alert_changes(
         stores.runs,
         run,
         resolutions=(AlertResolution(subject_id=pause.subject_id),),
         now=NOW + 20,
     )
-    _commit(stores.runs, run, raises=(pause,), now=NOW + 30)
+    commit_alert_changes(stores.runs, run, raises=(pause,), now=NOW + 30)
     assert stores.read(run.id) == [
         dataclasses.replace(opened, status=RESOLVED, resolved_at=NOW + 20)
     ]
 
 
 def test_a_raise_keeps_its_own_creation_time(stores: _Stores) -> None:
-    run = _start(stores.runs, "created")
-    stamped = _raise(run, AlertKind.WATCHDOG, "effect", created_at=NOW - 50)
+    run = start_owned_run(stores.runs, "created")
+    stamped = alert_draft(run, AlertKind.WATCHDOG, "effect", created_at=NOW - 50)
 
-    _commit(stores.runs, run, raises=(stamped,), now=NOW)
+    commit_alert_changes(stores.runs, run, raises=(stamped,), now=NOW)
 
     assert [(r.id, r.created_at) for r in stores.read(run.id)] == [(stamped.id, NOW - 50)]
 
 
 def test_resolutions_move_only_the_runs_matching_open_or_acked_rows(stores: _Stores) -> None:
-    run = _start(stores.runs, "resolve")
-    other = _start(stores.runs, "other")
+    run = start_owned_run(stores.runs, "resolve")
+    other = start_owned_run(stores.runs, "other")
     shared_subject = "5" * 32
-    gate = _raise(run, AlertKind.GATE, "visit", subject=shared_subject)
-    pause = _raise(run, AlertKind.PAUSE, "2")
-    watchdog = _raise(run, AlertKind.WATCHDOG, "effect")
-    done = _raise(run, AlertKind.RUN_COMPLETED, "run_completed", priority=AlertPriority.LOW)
-    other_gate = _raise(other, AlertKind.GATE, "visit", subject=shared_subject)
-    _commit(stores.runs, run, raises=(gate, pause, watchdog, done))
-    _commit(stores.runs, other, raises=(other_gate,))
+    gate = alert_draft(run, AlertKind.GATE, "visit", subject=shared_subject)
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
+    watchdog = alert_draft(run, AlertKind.WATCHDOG, "effect")
+    done = alert_draft(run, AlertKind.RUN_COMPLETED, "run_completed", priority=AlertPriority.LOW)
+    other_gate = alert_draft(other, AlertKind.GATE, "visit", subject=shared_subject)
+    commit_alert_changes(stores.runs, run, raises=(gate, pause, watchdog, done))
+    commit_alert_changes(stores.runs, other, raises=(other_gate,))
     stores.mark_acked(watchdog.id)
 
     def states(run_id: str) -> dict[str, tuple[int, int | None]]:
         return {r.id: (r.status, r.resolved_at) for r in stores.read(run_id)}
 
-    _commit(
+    commit_alert_changes(
         stores.runs,
         run,
         resolutions=(AlertResolution(subject_id=shared_subject),),
@@ -270,7 +194,7 @@ def test_resolutions_move_only_the_runs_matching_open_or_acked_rows(stores: _Sto
     }
 
     blocking = (AlertKind.GATE, AlertKind.QUESTION, AlertKind.PAUSE, AlertKind.WATCHDOG)
-    _commit(
+    commit_alert_changes(
         stores.runs,
         run,
         resolutions=(AlertResolution(kinds=tuple(int(kind) for kind in blocking)),),
@@ -287,56 +211,62 @@ def test_resolutions_move_only_the_runs_matching_open_or_acked_rows(stores: _Sto
 
 
 def test_alerts_land_only_with_their_entry(stores: _Stores) -> None:
-    run = _start(stores.runs, "atomic")
-    pause = _raise(run, AlertKind.PAUSE, "2")
+    run = start_owned_run(stores.runs, "atomic")
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
 
     with pytest.raises(RunVersionConflict):
-        _commit(stores.runs, run, raises=(pause,), expected_version=run.version + 1)
+        commit_alert_changes(stores.runs, run, raises=(pause,), expected_version=run.version + 1)
     with pytest.raises(TransitionTooLarge, match="65 alert raises"):
-        _commit(
+        commit_alert_changes(
             stores.runs,
             run,
-            raises=tuple(_raise(run, AlertKind.PAUSE, str(i)) for i in range(65)),
+            raises=tuple(alert_draft(run, AlertKind.PAUSE, str(i)) for i in range(65)),
         )
     with pytest.raises(ValueError, match="another run"):
-        _commit(stores.runs, run, raises=(dataclasses.replace(pause, run_id="f" * 32),))
+        commit_alert_changes(
+            stores.runs, run, raises=(dataclasses.replace(pause, run_id="f" * 32),)
+        )
     reply = ToolReplyDraft(b"\1" * 32, "{}")
-    _commit(stores.runs, run, tool_reply=reply)
+    commit_alert_changes(stores.runs, run, tool_reply=reply)
     # A repeated tool reply refuses the whole transition, alerts included.
     with pytest.raises(IntegrityError):
-        _commit(stores.runs, run, raises=(pause,), tool_reply=reply)
+        commit_alert_changes(stores.runs, run, raises=(pause,), tool_reply=reply)
 
     assert stores.read(run.id) == []
     assert len(stores.runs.read_log(run.id, workspace_id=WORKSPACE)) == 1
     current = stores.runs.get_run(run.id, workspace_id=WORKSPACE)
     assert current is not None and current.version == run.version + 1
 
-    _commit(
+    commit_alert_changes(
         stores.runs,
         run,
-        raises=tuple(_raise(run, AlertKind.PAUSE, str(i)) for i in range(64)),
+        raises=tuple(alert_draft(run, AlertKind.PAUSE, str(i)) for i in range(64)),
     )
     assert len(stores.read(run.id)) == 64
 
 
 def test_a_new_raise_on_a_resolved_subject_opens_its_own_row(stores: _Stores) -> None:
-    run = _start(stores.runs, "re-raise")
+    run = start_owned_run(stores.runs, "re-raise")
     subject = derived_id("coral-alert-subject", run.id, "pause")
-    first, second, third = (_raise(run, AlertKind.PAUSE, key, subject=subject) for key in "246")
+    first, second, third = (
+        alert_draft(run, AlertKind.PAUSE, key, subject=subject) for key in "246"
+    )
 
     def states() -> dict[str, tuple[int, int | None]]:
         return {r.id: (r.status, r.resolved_at) for r in stores.read(run.id)}
 
-    _commit(stores.runs, run, raises=(first,))
-    _commit(stores.runs, run, resolutions=(AlertResolution(subject_id=subject),), now=NOW + 1)
-    _commit(stores.runs, run, raises=(first, second), now=NOW + 2)
+    commit_alert_changes(stores.runs, run, raises=(first,))
+    commit_alert_changes(
+        stores.runs, run, resolutions=(AlertResolution(subject_id=subject),), now=NOW + 1
+    )
+    commit_alert_changes(stores.runs, run, raises=(first, second), now=NOW + 2)
     stores.mark_acked(second.id)
     # A re-raise neither reopens a resolved row nor an acked one.
-    _commit(stores.runs, run, raises=(second,), now=NOW + 3)
+    commit_alert_changes(stores.runs, run, raises=(second,), now=NOW + 3)
     assert states() == {first.id: (RESOLVED, NOW + 1), second.id: (ACKED, None)}
 
     # Raises are written first, so a resolution in the same commit closes them too.
-    _commit(
+    commit_alert_changes(
         stores.runs,
         run,
         raises=(third,),
@@ -351,9 +281,9 @@ def test_a_new_raise_on_a_resolved_subject_opens_its_own_row(stores: _Stores) ->
 
 
 def test_racing_commits_raising_one_alert_keep_the_first_writers_row(stores: _Stores) -> None:
-    run = _start(stores.runs, "race")
-    pause = _raise(run, AlertKind.PAUSE, "2")
-    drafts = [dataclasses.replace(pause, payload=_payload(f"writer {i}")) for i in range(4)]
+    run = start_owned_run(stores.runs, "race")
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
+    drafts = [dataclasses.replace(pause, payload=alert_payload(f"writer {i}")) for i in range(4)]
 
     def commit(index: int) -> None:
         # Each loss means another writer committed, so four attempts always suffice.
@@ -408,22 +338,22 @@ def _payload_at_every_limit() -> str:
 
 
 def test_a_payload_at_every_length_limit_round_trips(stores: _Stores) -> None:
-    run = _start(stores.runs, "large")
+    run = start_owned_run(stores.runs, "large")
     largest = dataclasses.replace(
-        _raise(run, AlertKind.GATE, "visit"), payload=_payload_at_every_limit()
+        alert_draft(run, AlertKind.GATE, "visit"), payload=_payload_at_every_limit()
     )
 
-    _commit(stores.runs, run, raises=(largest,))
+    commit_alert_changes(stores.runs, run, raises=(largest,))
 
     assert [r.payload for r in stores.read(run.id)] == [largest.payload]
 
 
 def test_a_raise_and_a_kinds_resolution_in_one_commit_land_resolved(stores: _Stores) -> None:
-    run = _start(stores.runs, "raise-and-end")
-    gate = _raise(run, AlertKind.GATE, "visit")
-    done = _raise(run, AlertKind.RUN_COMPLETED, "run_completed", priority=AlertPriority.LOW)
+    run = start_owned_run(stores.runs, "raise-and-end")
+    gate = alert_draft(run, AlertKind.GATE, "visit")
+    done = alert_draft(run, AlertKind.RUN_COMPLETED, "run_completed", priority=AlertPriority.LOW)
 
-    _commit(
+    commit_alert_changes(
         stores.runs,
         run,
         raises=(gate, done),
@@ -438,11 +368,11 @@ def test_a_raise_and_a_kinds_resolution_in_one_commit_land_resolved(stores: _Sto
 
 
 def test_the_local_user_is_stored_as_no_owner(stores: _Stores) -> None:
-    run = _start(stores.runs, "local-owner", user_id=LOCAL_USER_ID)
-    pause = _raise(run, AlertKind.PAUSE, "2")
+    run = start_owned_run(stores.runs, "local-owner", user_id=LOCAL_USER_ID)
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
     assert pause.owner_user_id == LOCAL_USER_ID
 
-    _commit(stores.runs, run, raises=(pause,))
+    commit_alert_changes(stores.runs, run, raises=(pause,))
 
     assert [(r.id, r.owner_user_id) for r in stores.read(run.id)] == [(pause.id, None)]
 
@@ -471,11 +401,11 @@ def test_a_crash_after_the_alert_writes_rolls_back_the_whole_commit(
     coral_db_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runs, _ = _sql(coral_db_uri)
-    run = _start(runs, "crash")
+    run = start_owned_run(runs, "crash")
     crash_around(monkeypatch, run_store_module, "apply_alert_changes", when="after")
 
     with pytest.raises(SimulatedCrash):
-        _commit(runs, run, raises=(_raise(run, AlertKind.PAUSE, "2"),))
+        commit_alert_changes(runs, run, raises=(alert_draft(run, AlertKind.PAUSE, "2"),))
 
     engine = fresh_process(coral_db_uri)
     reopened = run_store_module.SqlAlchemyCoralRunStore(engine)
@@ -487,10 +417,10 @@ def test_a_crash_after_the_alert_writes_rolls_back_the_whole_commit(
 
 def test_alerts_are_written_to_the_operational_db(coral_split_db: CoralSplitDb) -> None:
     runs, alerts = _sql(coral_split_db.operational_uri)
-    run = _start(runs, "split")
-    pause = _raise(run, AlertKind.PAUSE, "2")
+    run = start_owned_run(runs, "split")
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
 
-    _commit(runs, run, raises=(pause,))
+    commit_alert_changes(runs, run, raises=(pause,))
 
     assert [r.id for r in alerts.list_for_run(workspace_id=WORKSPACE, run_id=run.id)] == [pause.id]
     with sqlite3.connect(coral_split_db.operational_path) as connection:
@@ -507,14 +437,16 @@ def test_the_inbox_lists_only_the_viewers_open_alerts_in_the_workspace(
     coral_db_uri: str,
 ) -> None:
     runs, alerts = _sql(coral_db_uri)
-    mine = _start(runs, "mine")
-    open_pause = _raise(mine, AlertKind.PAUSE, "2")
-    acked = _raise(mine, AlertKind.WATCHDOG, "effect")
-    resolved = _raise(mine, AlertKind.GATE, "visit")
-    _commit(runs, mine, raises=(open_pause, acked, resolved))
+    mine = start_owned_run(runs, "mine")
+    open_pause = alert_draft(mine, AlertKind.PAUSE, "2")
+    acked = alert_draft(mine, AlertKind.WATCHDOG, "effect")
+    resolved = alert_draft(mine, AlertKind.GATE, "visit")
+    commit_alert_changes(runs, mine, raises=(open_pause, acked, resolved))
     outcome = alerts.ack(workspace_id=WORKSPACE, viewer=Viewer(ALICE), alert_id=acked.id, now=NOW)
     assert outcome == "acked"
-    _commit(runs, mine, resolutions=(AlertResolution(subject_id=resolved.subject_id),))
+    commit_alert_changes(
+        runs, mine, resolutions=(AlertResolution(subject_id=resolved.subject_id),)
+    )
     others: dict[str, AlertDraft] = {}
     for key, user_id, workspace_id in (
         ("bobs", BOB, WORKSPACE),
@@ -522,9 +454,9 @@ def test_the_inbox_lists_only_the_viewers_open_alerts_in_the_workspace(
         ("local-none", None, WORKSPACE),
         ("local-named", LOCAL_USER_ID, WORKSPACE),
     ):
-        run = _start(runs, key, user_id=user_id, workspace_id=workspace_id)
-        others[key] = _raise(run, AlertKind.PAUSE, "2")
-        _commit(runs, run, raises=(others[key],))
+        run = start_owned_run(runs, key, user_id=user_id, workspace_id=workspace_id)
+        others[key] = alert_draft(run, AlertKind.PAUSE, "2")
+        commit_alert_changes(runs, run, raises=(others[key],))
 
     assert _inbox(alerts, Viewer(ALICE)) == ([open_pause.id], None)
     # Owners compare exactly, even where the database collation folds them.
@@ -544,14 +476,14 @@ def test_the_inbox_lists_normal_before_low_newest_first_and_pages_without_gaps(
     coral_db_uri: str,
 ) -> None:
     runs, alerts = _sql(coral_db_uri)
-    run = _start(runs, "paging")
+    run = start_owned_run(runs, "paging")
     normal = [
-        _raise(run, AlertKind.PAUSE, f"normal-{i}", created_at=NOW + offset)
+        alert_draft(run, AlertKind.PAUSE, f"normal-{i}", created_at=NOW + offset)
         for i, offset in enumerate((10, 20, 20, 30))
     ]
     # The newest alert is low priority; it still comes after every normal one.
     low = [
-        _raise(
+        alert_draft(
             run,
             AlertKind.RUN_COMPLETED,
             f"low-{i}",
@@ -560,7 +492,7 @@ def test_the_inbox_lists_normal_before_low_newest_first_and_pages_without_gaps(
         )
         for i, offset in enumerate((40, 15, 15))
     ]
-    _commit(runs, run, raises=(*normal, *low))
+    commit_alert_changes(runs, run, raises=(*normal, *low))
     expected = _newest_first(normal) + _newest_first(low)
 
     assert _inbox(alerts, Viewer(ALICE)) == (expected, None)
@@ -584,12 +516,12 @@ def test_the_inbox_lists_a_recorded_generation_only_to_a_viewer_who_proves_it(
     coral_db_uri: str,
 ) -> None:
     runs, alerts = _sql(coral_db_uri)
-    recorded_run = _start(runs, "old-account", generation="g1")
-    plain_run = _start(runs, "no-generation")
-    recorded = _raise(recorded_run, AlertKind.PAUSE, "2", created_at=NOW + 2)
-    plain = _raise(plain_run, AlertKind.PAUSE, "2", created_at=NOW + 1)
-    _commit(runs, recorded_run, raises=(recorded,))
-    _commit(runs, plain_run, raises=(plain,))
+    recorded_run = start_owned_run(runs, "old-account", generation="g1")
+    plain_run = start_owned_run(runs, "no-generation")
+    recorded = alert_draft(recorded_run, AlertKind.PAUSE, "2", created_at=NOW + 2)
+    plain = alert_draft(plain_run, AlertKind.PAUSE, "2", created_at=NOW + 1)
+    commit_alert_changes(runs, recorded_run, raises=(recorded,))
+    commit_alert_changes(runs, plain_run, raises=(plain,))
     newer_account = Viewer(ALICE, "g2", check_generation=True)
 
     assert _inbox(alerts, Viewer(ALICE, "g1", check_generation=True)) == (
@@ -613,12 +545,12 @@ def test_the_inbox_lists_a_recorded_generation_only_to_a_viewer_who_proves_it(
 
 def test_paging_tied_alerts_among_hidden_rows_skips_and_repeats_none(coral_db_uri: str) -> None:
     runs, alerts = _sql(coral_db_uri)
-    run = _start(runs, "many")
+    run = start_owned_run(runs, "many")
     # Three timestamps across both priorities, so ids break most ties.
     visible = [
-        _raise(run, AlertKind.PAUSE, f"normal-{i}", created_at=NOW + i % 3) for i in range(18)
+        alert_draft(run, AlertKind.PAUSE, f"normal-{i}", created_at=NOW + i % 3) for i in range(18)
     ] + [
-        _raise(
+        alert_draft(
             run,
             AlertKind.RUN_COMPLETED,
             f"low-{i}",
@@ -627,15 +559,15 @@ def test_paging_tied_alerts_among_hidden_rows_skips_and_repeats_none(coral_db_ur
         )
         for i in range(12)
     ]
-    _commit(runs, run, raises=visible)
+    commit_alert_changes(runs, run, raises=visible)
     # Another owner's rows and rows of a generation the viewer does not prove share every time.
     for key, user_id, generation in (("bobs", BOB, None), ("old-account", ALICE, "g1")):
-        noise_run = _start(runs, key, user_id=user_id, generation=generation)
-        _commit(
+        noise_run = start_owned_run(runs, key, user_id=user_id, generation=generation)
+        commit_alert_changes(
             runs,
             noise_run,
             raises=[
-                _raise(noise_run, AlertKind.PAUSE, f"noise-{i}", created_at=NOW + i % 3)
+                alert_draft(noise_run, AlertKind.PAUSE, f"noise-{i}", created_at=NOW + i % 3)
                 for i in range(9)
             ],
         )
@@ -658,7 +590,7 @@ def test_paging_tied_alerts_among_hidden_rows_skips_and_repeats_none(coral_db_ur
 
     # Rows change between pages: a seen row is acked, an unseen one resolves, a newer one opens.
     unseen = next(d for d in visible if d.id == expected[-1])
-    newer = _raise(run, AlertKind.PAUSE, "newer", created_at=NOW + 10)
+    newer = alert_draft(run, AlertKind.PAUSE, "newer", created_at=NOW + 10)
     changed: list[bool] = []
 
     def change_once(seen: list[str]) -> None:
@@ -669,7 +601,7 @@ def test_paging_tied_alerts_among_hidden_rows_skips_and_repeats_none(coral_db_ur
             workspace_id=WORKSPACE, viewer=Viewer(ALICE), alert_id=seen[0], now=NOW
         )
         assert outcome == "acked"
-        _commit(
+        commit_alert_changes(
             runs,
             run,
             raises=(newer,),
@@ -682,15 +614,15 @@ def test_paging_tied_alerts_among_hidden_rows_skips_and_repeats_none(coral_db_ur
 
 def test_a_tampered_cursor_only_moves_within_the_viewers_alerts(coral_db_uri: str) -> None:
     runs, alerts = _sql(coral_db_uri)
-    run = _start(runs, "tamper")
-    bobs_run = _start(runs, "bobs", user_id=BOB)
-    normal = _raise(run, AlertKind.PAUSE, "normal", created_at=NOW + 1)
-    low = _raise(
+    run = start_owned_run(runs, "tamper")
+    bobs_run = start_owned_run(runs, "bobs", user_id=BOB)
+    normal = alert_draft(run, AlertKind.PAUSE, "normal", created_at=NOW + 1)
+    low = alert_draft(
         run, AlertKind.RUN_COMPLETED, "low", priority=AlertPriority.LOW, created_at=NOW + 2
     )
-    bobs = _raise(bobs_run, AlertKind.PAUSE, "bobs", created_at=NOW + 3)
-    _commit(runs, run, raises=(normal, low))
-    _commit(runs, bobs_run, raises=(bobs,))
+    bobs = alert_draft(bobs_run, AlertKind.PAUSE, "bobs", created_at=NOW + 3)
+    commit_alert_changes(runs, run, raises=(normal, low))
+    commit_alert_changes(runs, bobs_run, raises=(bobs,))
     mine = [normal.id, low.id]
     normal_priority, low_priority = int(AlertPriority.NORMAL), int(AlertPriority.LOW)
 
@@ -717,13 +649,13 @@ def test_the_inbox_limit_is_one_to_a_hundred(coral_db_uri: str, limit: int) -> N
 def test_the_inbox_reads_each_priority_as_one_index_range(coral_db_uri: str) -> None:
     engine = coral_engine(coral_db_uri)
     runs, alerts = run_store_module.SqlAlchemyCoralRunStore(engine), SqlAlchemyAlertStore(engine)
-    run = _start(runs, "plan")
-    _commit(
+    run = start_owned_run(runs, "plan")
+    commit_alert_changes(
         runs,
         run,
         raises=(
-            _raise(run, AlertKind.PAUSE, "normal"),
-            _raise(run, AlertKind.RUN_COMPLETED, "low", priority=AlertPriority.LOW),
+            alert_draft(run, AlertKind.PAUSE, "normal"),
+            alert_draft(run, AlertKind.RUN_COMPLETED, "low", priority=AlertPriority.LOW),
         ),
     )
     queries: list[tuple[str, Any]] = []
@@ -759,12 +691,12 @@ def test_the_inbox_reads_each_priority_as_one_index_range(coral_db_uri: str) -> 
 
 def test_ack_marks_an_owners_open_alert_read_once(coral_db_uri: str) -> None:
     runs, alerts = _sql(coral_db_uri)
-    run = _start(runs, "ack")
-    pause = _raise(run, AlertKind.PAUSE, "2")
-    gate = _raise(run, AlertKind.GATE, "visit")
-    question = _raise(run, AlertKind.QUESTION, "question")
-    done = _raise(run, AlertKind.RUN_COMPLETED, "run_completed", priority=AlertPriority.LOW)
-    _commit(runs, run, raises=(pause, gate, question, done))
+    run = start_owned_run(runs, "ack")
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
+    gate = alert_draft(run, AlertKind.GATE, "visit")
+    question = alert_draft(run, AlertKind.QUESTION, "question")
+    done = alert_draft(run, AlertKind.RUN_COMPLETED, "run_completed", priority=AlertPriority.LOW)
+    commit_alert_changes(runs, run, raises=(pause, gate, question, done))
 
     def ack(viewer: Viewer, alert_id: str, *, workspace_id: int = WORKSPACE) -> str:
         return alerts.ack(workspace_id=workspace_id, viewer=viewer, alert_id=alert_id, now=NOW + 5)
@@ -796,7 +728,7 @@ def test_ack_marks_an_owners_open_alert_read_once(coral_db_uri: str) -> None:
     assert record(gate.id).status == OPEN
     assert _inbox(alerts, Viewer(ALICE)) == ([*_newest_first((gate, question)), done.id], None)
 
-    _commit(runs, run, resolutions=(AlertResolution(subject_id=gate.subject_id),))
+    commit_alert_changes(runs, run, resolutions=(AlertResolution(subject_id=gate.subject_id),))
     assert ack(Viewer(ALICE), gate.id) == "unchanged"
     assert ack(Viewer(ALICE), done.id) == "acked"
     assert _inbox(alerts, Viewer(ALICE)) == ([question.id], None)
@@ -806,18 +738,18 @@ def test_ack_of_another_generations_alert_is_not_found_and_changes_nothing(
     coral_db_uri: str,
 ) -> None:
     runs, alerts = _sql(coral_db_uri)
-    run = _start(runs, "ack-generation", generation="g1")
-    plain_run = _start(runs, "ack-plain")
-    local_run = _start(runs, "ack-local", user_id=None)
-    named_local_run = _start(runs, "ack-local-named", user_id=LOCAL_USER_ID)
-    pause = _raise(run, AlertKind.PAUSE, "2")
-    plain_pause = _raise(plain_run, AlertKind.PAUSE, "2")
-    local_pause = _raise(local_run, AlertKind.PAUSE, "2")
-    named_local_pause = _raise(named_local_run, AlertKind.PAUSE, "2")
-    _commit(runs, run, raises=(pause,))
-    _commit(runs, plain_run, raises=(plain_pause,))
-    _commit(runs, local_run, raises=(local_pause,))
-    _commit(runs, named_local_run, raises=(named_local_pause,))
+    run = start_owned_run(runs, "ack-generation", generation="g1")
+    plain_run = start_owned_run(runs, "ack-plain")
+    local_run = start_owned_run(runs, "ack-local", user_id=None)
+    named_local_run = start_owned_run(runs, "ack-local-named", user_id=LOCAL_USER_ID)
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
+    plain_pause = alert_draft(plain_run, AlertKind.PAUSE, "2")
+    local_pause = alert_draft(local_run, AlertKind.PAUSE, "2")
+    named_local_pause = alert_draft(named_local_run, AlertKind.PAUSE, "2")
+    commit_alert_changes(runs, run, raises=(pause,))
+    commit_alert_changes(runs, plain_run, raises=(plain_pause,))
+    commit_alert_changes(runs, local_run, raises=(local_pause,))
+    commit_alert_changes(runs, named_local_run, raises=(named_local_pause,))
 
     def ack(viewer: Viewer, alert_id: str) -> str:
         return alerts.ack(workspace_id=WORKSPACE, viewer=viewer, alert_id=alert_id, now=NOW + 5)
@@ -842,9 +774,9 @@ def test_ack_of_another_generations_alert_is_not_found_and_changes_nothing(
 
 def test_racing_acks_of_one_alert_ack_it_once(coral_db_uri: str) -> None:
     runs, alerts = _sql(coral_db_uri)
-    run = _start(runs, "ack-race")
-    pause = _raise(run, AlertKind.PAUSE, "2")
-    _commit(runs, run, raises=(pause,))
+    run = start_owned_run(runs, "ack-race")
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
+    commit_alert_changes(runs, run, raises=(pause,))
 
     outcomes = run_racing(
         4,
@@ -863,9 +795,9 @@ def test_racing_acks_of_one_alert_ack_it_once(coral_db_uri: str) -> None:
 def test_an_ack_that_loses_to_a_resolve_after_its_read_is_unchanged(coral_db_uri: str) -> None:
     engine = coral_engine(coral_db_uri)
     runs, alerts = run_store_module.SqlAlchemyCoralRunStore(engine), SqlAlchemyAlertStore(engine)
-    run = _start(runs, "ack-loses")
-    pause = _raise(run, AlertKind.PAUSE, "2")
-    _commit(runs, run, raises=(pause,))
+    run = start_owned_run(runs, "ack-loses")
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
+    commit_alert_changes(runs, run, raises=(pause,))
     resolved: list[bool] = []
 
     def resolve_before_the_ack_update(connection: Any, *args: Any) -> None:
@@ -900,8 +832,8 @@ def test_an_ack_that_loses_to_a_resolve_after_its_read_is_unchanged(coral_db_uri
 def test_alert_statements_run_under_their_query_names(coral_db_uri: str) -> None:
     engine = coral_engine(coral_db_uri)
     runs, alerts = run_store_module.SqlAlchemyCoralRunStore(engine), SqlAlchemyAlertStore(engine)
-    run = _start(runs, "names")
-    pause = _raise(run, AlertKind.PAUSE, "2")
+    run = start_owned_run(runs, "names")
+    pause = alert_draft(run, AlertKind.PAUSE, "2")
     names: list[str | None] = []
 
     def capture(*args: Any) -> None:
@@ -910,7 +842,7 @@ def test_alert_statements_run_under_their_query_names(coral_db_uri: str) -> None
 
     event.listen(engine, "before_cursor_execute", capture)
     try:
-        _commit(
+        commit_alert_changes(
             runs,
             run,
             raises=(pause,),
