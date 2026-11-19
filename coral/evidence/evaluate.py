@@ -6,7 +6,7 @@ One session's observations are walked in ``obs_seq`` order. A *change* is:
 - a shell run whose L1 after it is unknown, or differs from the last known L1;
 - a submit-time L1 that differs from the last known L1.
 
-A change made by a run that matched a ``may_modify`` command is a check change and is
+A change made by a run that is only a ``may_modify`` command is a check change and is
 ignored. A change found at a shell run is placed at that run, so the run itself predates
 it: a test that rewrites tracked files must be ``may_modify``. A write or edit leaves the
 L1 unknown, so the next shell run starts from its own L1 instead of reporting the write
@@ -27,7 +27,7 @@ from coral.evidence.ir import (
     Pass,
     RequiredCommand,
 )
-from coral.evidence.match import matches
+from coral.evidence.match import argv_matches, segments
 
 
 def evaluate(
@@ -60,12 +60,13 @@ def evaluate(
             known_l1 = None
             continue
         command = obs.command or ""
-        matched = [item for item in requirement.items if matches(item.run, command)]
+        matched, whole_line = _matched(requirement.items, command)
         for item in matched:
             runs[item.item_id].append((index, obs))
         changed = obs.l1_after is None or (known_l1 is not None and obs.l1_after != known_l1)
         known_l1 = obs.l1_after
-        if changed and not any(item.may_modify for item in matched):
+        check_change = whole_line and all(item.may_modify for item in matched)
+        if changed and not check_change:
             last_change = (index, None)
     if known_l1 is not None and submit_l1 != known_l1:
         last_change = (len(ordered), None)
@@ -77,6 +78,31 @@ def evaluate(
     return Missing(items=missing) if missing else Pass()
 
 
+def _matched(
+    items: tuple[RequiredCommand, ...], command: str
+) -> tuple[list[RequiredCommand], bool]:
+    """
+    The items a line ran, and whether the line is nothing but them.
+
+    In an ``&&`` chain that exits 0 every command passed, but a command after a test
+    could undo what the test saw, so only the trailing run of required commands counts.
+    """
+    found = segments(command)
+    matched: list[RequiredCommand] = []
+    count = 0
+    for segment in reversed(found):
+        hits = [
+            item
+            for item in items
+            if argv_matches(item.run, segment.argv, allow_args=item.allow_args)
+        ]
+        if not hits:
+            break
+        matched.extend(item for item in hits if item not in matched)
+        count += 1
+    return matched, bool(found) and count == len(found)
+
+
 def _judge(
     item: RequiredCommand,
     item_runs: list[tuple[int, CommandObservation]],
@@ -85,6 +111,11 @@ def _judge(
     if not item_runs:
         return MissingItem(item_id=item.item_id, run=item.run, reason="never_ran")
     after = [obs for index, obs in item_runs if last_change is None or index > last_change[0]]
+    if not after and last_change is not None:
+        last_index, last_obs = item_runs[-1]
+        if last_index == last_change[0] and last_obs.l1_after is None:
+            # The run is the last change only because the tree could not be read after it.
+            return MissingItem(item_id=item.item_id, run=item.run, reason="unverified")
     if not after:
         path = last_change[1] if last_change is not None else None
         return MissingItem(

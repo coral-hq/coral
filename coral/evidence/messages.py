@@ -12,7 +12,14 @@ def item_message(item: MissingItem) -> str:
     """One line for one item, e.g. "`pytest -q` ran before the last change to `a.py`; ..."."""
     run = _shown(item.run)
     if item.reason == "never_ran":
-        return f"`{run}` has not run in this step; run it."
+        return (
+            f"`{run}` has not run in this step; run it as its own command, or last in an "
+            "`&&` chain."
+        )
+    if item.reason == "unverified":
+        return (
+            f"Coral could not check `{run}` because the worktree could not be read; run it again."
+        )
     if item.reason == "predates_change":
         where = f" to `{_shown(item.changed_path)}`" if item.changed_path else ""
         return f"`{run}` ran before the last change{where}; run it again."

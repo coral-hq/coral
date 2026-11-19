@@ -14,6 +14,7 @@ from coral.bridge.bound_sessions import BoundSession, BoundSessions
 from coral.evidence.fakes import InMemoryObservationLog
 from coral.evidence.ir import EvidenceRequirement, InProgress, Missing, Pass, RequiredCommand
 from coral.omni.server.observations import (
+    IN_PROGRESS_LIMIT_S,
     OBSERVER_NAME,
     EvidenceCapture,
     EvidenceChecker,
@@ -23,6 +24,7 @@ from coral.omni.server.observations import (
 )
 from omnigent.db.db_models import workspace_scope
 from omnigent.server.tool_result_observers import (
+    ObservedToolCall,
     complete_tool_call,
     register_tool_call_observer,
     tool_call_scope,
@@ -51,7 +53,7 @@ class _Steps(StepEvidenceLookup):
         del workspace_id, run_id, slot_id
         if self.requirement is None:
             return None
-        return StepEvidence(requirement=self.requirement, run=Any, target=None)  # type: ignore[arg-type]
+        return StepEvidence(requirement=self.requirement, run=Any, target=Any)  # type: ignore[arg-type]
 
 
 class _Tree:
@@ -297,3 +299,96 @@ def test_the_step_lookup_reads_the_slot_s_node_once() -> None:
     assert lookup.find(WORKSPACE, RUN_ID, SLOT) is found
     assert lookup.find(WORKSPACE, RUN_ID, "missing||:0") is None
     assert loads == [(WORKSPACE, RUN_ID), (WORKSPACE, RUN_ID)]
+
+
+async def test_a_run_that_overlapped_another_call_is_not_evidence(harness: _Harness) -> None:
+    release = asyncio.Event()
+    envelope = json.dumps({"exit_code": 0, "timed_out": False})
+
+    async def test_run() -> None:
+        with workspace_scope(WORKSPACE), tool_call_scope(SESSION, "sys_os_shell", "mcpop_t"):
+            await release.wait()
+            await complete_tool_call(
+                SESSION,
+                "sys_os_shell",
+                {"command": "pytest -q"},
+                envelope,
+                is_error=False,
+                operation_id="mcpop_t",
+            )
+
+    task = asyncio.create_task(test_run())
+    await poll_until_async(lambda: harness.in_flight.open_before(WORKSPACE, SESSION, 1e18) == 1)
+    await harness.edit("src/app.py")
+    release.set()
+    await task
+
+    found = await harness.verdict()
+    assert isinstance(found, Missing) and found.items[0].reason == "never_ran"
+
+
+async def test_in_progress_turns_into_unverified_after_the_limit() -> None:
+    now = [0.0]
+    harness = _Harness()
+    harness.in_flight = InFlightCalls(clock=lambda: now[0])
+    checker = EvidenceChecker(
+        steps=_Steps(),
+        observations=harness.log,
+        in_flight=harness.in_flight,
+        read_l1=harness.tree.read_l1,
+        run_in_thread=_inline,
+    )
+    harness.tree.readable = False
+    binding = step_binding(SLOT, session_id=SESSION)
+
+    assert isinstance(await checker.verdict(binding), InProgress)
+    now[0] = IN_PROGRESS_LIMIT_S + 1
+    late = await checker.verdict(binding)
+    assert isinstance(late, Missing) and late.items[0].reason == "unverified"
+
+
+async def test_a_run_without_a_worktree_is_unverified_at_once() -> None:
+    class _NoWorktree(_Steps):
+        def find(self, workspace_id: int, run_id: str, slot_id: str) -> StepEvidence | None:
+            found = super().find(workspace_id, run_id, slot_id)
+            assert found is not None
+            return StepEvidence(requirement=found.requirement, run=found.run, target=None)
+
+    harness = _Harness()
+    checker = EvidenceChecker(
+        steps=_NoWorktree(),
+        observations=harness.log,
+        in_flight=harness.in_flight,
+        read_l1=harness.tree.read_l1,
+        run_in_thread=_inline,
+    )
+    found = await checker.verdict(step_binding(SLOT, session_id=SESSION))
+    assert isinstance(found, Missing) and found.items[0].reason == "unverified"
+
+
+async def test_a_cancelled_record_marks_the_session_lagging(harness: _Harness) -> None:
+    started = asyncio.Event()
+
+    async def stuck(*_args: object) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    harness.capture._run_in_thread = stuck  # type: ignore[assignment]
+    call = ObservedToolCall(
+        session_id=SESSION,
+        tool_name="sys_os_shell",
+        arguments={"command": "pytest -q"},
+        output="{}",
+        is_error=False,
+        operation_id="mcpop_c",
+    )
+    with workspace_scope(WORKSPACE):
+        token = harness.capture.enter(SESSION, "sys_os_shell", "mcpop_c")
+        assert token is not None
+        task = asyncio.create_task(harness.capture.complete(token, call))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    harness.capture.release(token)
+    assert harness.in_flight.lagging(WORKSPACE, SESSION)

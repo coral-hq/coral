@@ -12,7 +12,7 @@ EVIDENCE_IR_VERSION = 1
 
 EvidenceScope = Literal["per_agent"]
 ObservedTool = Literal["shell", "write", "edit"]
-MissingReason = Literal["never_ran", "predates_change", "failed", "exit_unknown"]
+MissingReason = Literal["never_ran", "predates_change", "failed", "exit_unknown", "unverified"]
 
 
 class _Frozen(BaseModel):
@@ -31,14 +31,18 @@ class RequiredCommand(_Frozen):
     """
     One command that must pass after the step's last change.
 
-    :param run: Matched as an argv prefix of a shell segment, e.g. ``pytest -q``.
+    :param run: One plain command, e.g. ``pytest -q``, matched as the last command
+        of an ``&&`` chain (``coral.evidence.match``).
     :param may_modify: The command may change the tree (a formatter); its own
-        changes do not count as the step's last change.
+        changes do not count as the step's last change when it runs on its own.
+    :param allow_args: A run may add arguments after ``run``; by default the
+        argv must be exactly ``run``'s.
     """
 
     item_id: str
     run: str
     may_modify: bool = False
+    allow_args: bool = False
 
 
 class EvidenceRequirement(_Frozen):
@@ -93,9 +97,14 @@ class InProgress(_Frozen):
 EvidenceVerdict = Pass | Missing | InProgress
 
 
+_COMMAND_KEYS = ("id", "run", "may_modify", "allow_args")
+
+
 def compile_done_when(block: object, *, yaml_path: str) -> EvidenceRequirement:
     """
-    Compile an authored ``done_when`` mapping: ``{commands: [{id?, run, may_modify?}]}``.
+    Compile an authored ``done_when`` mapping.
+
+    The shape is ``{commands: [{id?, run, may_modify?, allow_args?}]}``.
 
     :raises EvidenceIRError: For any shape problem, naming its yaml path.
     """
@@ -120,24 +129,36 @@ def _compile_command(
 ) -> RequiredCommand:
     if not isinstance(entry, dict):
         raise EvidenceIRError(where, "each command is a mapping with a run key")
-    unknown = sorted(str(key) for key in entry if key not in ("id", "run", "may_modify"))
+    unknown = sorted(str(key) for key in entry if key not in _COMMAND_KEYS)
     if unknown:
-        raise EvidenceIRError(f"{where}.{unknown[0]}", "unknown key; use id, run and may_modify")
+        raise EvidenceIRError(
+            f"{where}.{unknown[0]}", "unknown key; use id, run, may_modify and allow_args"
+        )
     run = entry.get("run")
     if not isinstance(run, str) or not run.strip():
         raise EvidenceIRError(f"{where}.run", "give the command to run")
     if not argv_of(run):
-        raise EvidenceIRError(f"{where}.run", "the command must be one simple command")
+        raise EvidenceIRError(
+            f"{where}.run",
+            "the command must be one plain command: no &&, ;, |, $, #, quotes left open, "
+            "env assignments or cd",
+        )
     item_id = entry.get("id", default_id)
     if not isinstance(item_id, str) or not item_id:
         raise EvidenceIRError(f"{where}.id", "the id must be a non-empty string")
     if item_id in seen:
         raise EvidenceIRError(f"{where}.id", f"the id {item_id!r} is used twice")
     seen.add(item_id)
-    may_modify = entry.get("may_modify", False)
-    if not isinstance(may_modify, bool):
-        raise EvidenceIRError(f"{where}.may_modify", "use true or false")
-    return RequiredCommand(item_id=item_id, run=run.strip(), may_modify=may_modify)
+    flags = {name: entry.get(name, False) for name in ("may_modify", "allow_args")}
+    for name, value in flags.items():
+        if not isinstance(value, bool):
+            raise EvidenceIRError(f"{where}.{name}", "use true or false")
+    return RequiredCommand(
+        item_id=item_id,
+        run=run.strip(),
+        may_modify=flags["may_modify"],
+        allow_args=flags["allow_args"],
+    )
 
 
 __all__ = [

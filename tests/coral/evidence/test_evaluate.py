@@ -19,7 +19,7 @@ from coral.evidence.ir import (
 from coral.evidence.messages import verdict_message
 
 TESTS = RequiredCommand(item_id="tests", run="pytest -q")
-FORMAT = RequiredCommand(item_id="format", run="ruff format", may_modify=True)
+FORMAT = RequiredCommand(item_id="format", run="ruff format", may_modify=True, allow_args=True)
 REQUIREMENT = EvidenceRequirement(items=(TESTS,))
 
 
@@ -204,3 +204,26 @@ def test_seeded_sequences_pass_only_when_a_clean_run_follows_the_last_change(see
                 log.shell("ls", str(l1))
         verdict = evaluate(REQUIREMENT, log.items, submit_l1=str(l1))
         assert (verdict == Pass()) == (last_good_run > last_change), log.items
+
+
+def test_a_command_after_the_tests_disqualifies_the_line() -> None:
+    log = _Log().shell("mv tests/a.py /tmp/a.py && pytest -q && mv /tmp/a.py tests/a.py", "A")
+    assert _reasons(evaluate(REQUIREMENT, log.items, submit_l1="A")) == [
+        ("tests", "never_ran", None)
+    ]
+
+
+def test_a_may_modify_command_absorbs_only_its_own_line() -> None:
+    requirement = EvidenceRequirement(items=(TESTS, FORMAT))
+    log = _Log().shell("pytest -q", "A").shell("touch src/x.py && ruff format .", "B")
+    assert _reasons(evaluate(requirement, log.items, submit_l1="B")) == [
+        ("tests", "predates_change", None),
+        ("format", "predates_change", None),
+    ]
+
+
+def test_an_unreadable_tree_after_the_tests_is_unverified() -> None:
+    log = _Log().shell("pytest -q", None)
+    assert _reasons(evaluate(REQUIREMENT, log.items, submit_l1="A")) == [
+        ("tests", "unverified", None)
+    ]

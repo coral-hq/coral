@@ -9,8 +9,12 @@ after it. :class:`EvidenceChecker` answers ``coral_submit_handoff``:
 2. It fingerprints the worktree.
 3. It evaluates the stored observations.
 
-Any call still in flight, a record that failed moments ago, or a fingerprint that cannot
-be read gives "in progress", never "missing".
+Any call still in flight or started during the check, a record that failed moments ago,
+or a fingerprint that cannot be read gives "in progress", never "missing". "In progress"
+lasts at most ``IN_PROGRESS_LIMIT_S`` for a session; after that, and at once for a run
+with no worktree, the commands are "missing" as ``unverified``, which spends an attempt.
+A shell run that overlapped another call of the session is stored with no command, so
+it can never be evidence.
 
 The in-flight set is per process: a call made on another replica, or before a restart,
 is covered only by its stored row (TLD-08).
@@ -34,7 +38,13 @@ from coral.engine.machines.activation import find_activation, find_node
 from coral.engine.machines.slot import find_slot
 from coral.evidence.capture import observation_from_tool, observed_tool, op_key_for
 from coral.evidence.evaluate import evaluate
-from coral.evidence.ir import EvidenceRequirement, EvidenceVerdict, InProgress
+from coral.evidence.ir import (
+    EvidenceRequirement,
+    EvidenceVerdict,
+    InProgress,
+    Missing,
+    MissingItem,
+)
 from coral.omni.protocols import HostWorkspaceChannels
 from coral.queue.run_effects import EffectRefused
 from coral.stores import protocols as store
@@ -57,8 +67,13 @@ COVER_WAIT_S = 10.0
 COVER_POLL_S = 0.05
 # A failed record answers submits "in progress" for this long, then they are judged.
 LAG_GRACE_S = 30.0
-# An entered call older than this is forgotten (longer than the MCP proxy's own timeout).
-IN_FLIGHT_EXPIRY_S = 1_200.0
+# An entered call older than this is forgotten: longer than the MCP proxy's own forward
+# timeout (``MCP_PROXY_FORWARD_TIMEOUT_S``, 7,230 s).
+IN_FLIGHT_EXPIRY_S = 7_500.0
+# One record's whole budget, well under S105's 30 s bound on ``complete``.
+RECORD_TIMEOUT_S = 20.0
+# How long a session's submits may be answered "in progress" before they count as missing.
+IN_PROGRESS_LIMIT_S = 120.0
 _STEP_CACHE_MAX = 1_024
 
 
@@ -129,25 +144,47 @@ class InFlightCalls:
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
         self._open: dict[tuple[int, str], dict[int, float]] = {}
+        self._overlapped: set[int] = set()
+        self._last_entered: dict[tuple[int, str], float] = {}
         self._lagging: dict[tuple[int, str], float] = {}
+        self._waiting_since: dict[tuple[int, str], float] = {}
 
     def now(self) -> float:
         return self._clock()
 
     def enter(self, workspace_id: int, session_id: str) -> int:
+        """Track a call; every call of the session open with it is marked overlapped."""
         call_id = next(self._ids)
+        key = (workspace_id, session_id)
         with self._lock:
-            self._open.setdefault((workspace_id, session_id), {})[call_id] = self._clock()
+            now = self._clock()
+            calls = self._open.setdefault(key, {})
+            if calls:
+                self._overlapped.update(calls)
+                self._overlapped.add(call_id)
+            calls[call_id] = now
+            self._last_entered[key] = now
         return call_id
+
+    def overlapped(self, call_id: int) -> bool:
+        """Whether another call of the same session ran at any time during this one."""
+        with self._lock:
+            return call_id in self._overlapped
 
     def leave(self, workspace_id: int, session_id: str, call_id: int) -> None:
         key = (workspace_id, session_id)
         with self._lock:
+            self._overlapped.discard(call_id)
             calls = self._open.get(key)
             if calls is not None:
                 calls.pop(call_id, None)
                 if not calls:
                     del self._open[key]
+
+    def entered_after(self, workspace_id: int, session_id: str, mark: float) -> bool:
+        """Whether a call of the session started after ``mark``."""
+        with self._lock:
+            return self._last_entered.get((workspace_id, session_id), float("-inf")) > mark
 
     def open_before(self, workspace_id: int, session_id: str, mark: float) -> int:
         """Calls of the session entered at or before ``mark`` and not yet expired."""
@@ -170,6 +207,21 @@ class InFlightCalls:
                 del self._lagging[key]
                 return False
             return True
+
+    def waited_too_long(self, workspace_id: int, session_id: str) -> bool:
+        """Note an "in progress" answer; true once they have lasted ``IN_PROGRESS_LIMIT_S``."""
+        key = (workspace_id, session_id)
+        with self._lock:
+            since = self._waiting_since.setdefault(key, self._clock())
+            if self._clock() - since < IN_PROGRESS_LIMIT_S:
+                return False
+            del self._waiting_since[key]
+            return True
+
+    def judged(self, workspace_id: int, session_id: str) -> None:
+        """A submit got a verdict: the next "in progress" starts a new wait."""
+        with self._lock:
+            self._waiting_since.pop((workspace_id, session_id), None)
 
 
 async def worktree_l1(
@@ -258,9 +310,12 @@ class EvidenceCapture:
         if not isinstance(token, _Token):
             return
         try:
-            await self._record(token, call)
-        except Exception:
+            await asyncio.wait_for(self._record(token, call), RECORD_TIMEOUT_S)
+        except BaseException as exc:
+            # A cancel (S105's own timeout) loses the record too: the submit must wait.
             self._in_flight.mark_lagging(token.workspace_id, token.session_id)
+            if not isinstance(exc, Exception):
+                raise
             _logger.exception(
                 "Coral evidence: could not record a %s call of session %s",
                 call.tool_name,
@@ -280,12 +335,16 @@ class EvidenceCapture:
         l1_after = None
         if observed_tool(call.tool_name) == "shell":
             l1_after = await self._read_l1(step, token.session_id, COMMAND_FINGERPRINT_TIMEOUT_S)
+        arguments = call.arguments
+        if self._in_flight.overlapped(token.call_id):
+            # Another call may have changed the tree while this one ran: not evidence.
+            arguments = {name: value for name, value in arguments.items() if name != "command"}
         observation = observation_from_tool(
             session_id=token.session_id,
             op_key=op_key_for(call.operation_id, f"server:{token.call_id}:{self._clock_us()}"),
             obs_seq=self._clock_us(),
             tool_name=call.tool_name,
-            arguments=call.arguments,
+            arguments=arguments,
             output=call.output,
             l1_after=l1_after,
         )
@@ -331,7 +390,26 @@ class EvidenceChecker:
         if step is None:
             return None
         workspace_id, session_id = binding.workspace_id, binding.session_id
-        in_progress = await self._wait_for_cover(workspace_id, session_id)
+        if step.target is None:
+            return _unverified(step.requirement)
+        found = await self._judge(step, workspace_id, session_id)
+        if not isinstance(found, InProgress):
+            self._in_flight.judged(workspace_id, session_id)
+            return found
+        if self._in_flight.waited_too_long(workspace_id, session_id):
+            _logger.warning(
+                "Coral evidence: session %s stayed unverifiable (%s); counting it missing",
+                session_id,
+                found.reason,
+            )
+            return _unverified(step.requirement)
+        return found
+
+    async def _judge(
+        self, step: StepEvidence, workspace_id: int, session_id: str
+    ) -> EvidenceVerdict:
+        mark = self._in_flight.now()
+        in_progress = await self._wait_for_cover(workspace_id, session_id, mark)
         if in_progress is None and self._in_flight.lagging(workspace_id, session_id):
             in_progress = "a recent tool call has not been recorded yet"
         if in_progress is not None:
@@ -344,16 +422,26 @@ class EvidenceChecker:
         except Exception:
             _logger.exception("Coral evidence: cannot read session %s observations", session_id)
             return InProgress(reason="the recorded commands could not be read yet")
+        if self._in_flight.entered_after(workspace_id, session_id, mark):
+            return InProgress(reason="a tool call started while the handoff was checked")
         return evaluate(step.requirement, observations, submit_l1=submit_l1)
 
-    async def _wait_for_cover(self, workspace_id: int, session_id: str) -> str | None:
-        mark = self._in_flight.now()
+    async def _wait_for_cover(self, workspace_id: int, session_id: str, mark: float) -> str | None:
         deadline = mark + self._cover_wait_s
         while self._in_flight.open_before(workspace_id, session_id, mark):
             if self._in_flight.now() >= deadline:
                 return "earlier tool calls are still running or being recorded"
             await self._sleep(COVER_POLL_S)
         return None
+
+
+def _unverified(requirement: EvidenceRequirement) -> Missing:
+    return Missing(
+        items=tuple(
+            MissingItem(item_id=item.item_id, run=item.run, reason="unverified")
+            for item in requirement.items
+        )
+    )
 
 
 __all__ = [
