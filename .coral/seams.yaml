@@ -2628,3 +2628,41 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S105
+    title: Tool-call observers see each MCP-proxied call start, its raw result and its end
+    owner: WS-WORKSPACE
+    status: landed
+    category: upstreamable
+    note: >-
+      Done-when evidence needs each step's shell exit codes and file writes
+      recorded before the agent sees the result. claude-sdk sends every OS
+      operation through the server's `/mcp` proxy, so the server is where
+      that happens. A new registry, `omnigent/server/tool_result_observers.py`,
+      is empty unless an extension registers. `_handle_mcp_tools_call` now
+      wraps the original handler (renamed `_mcp_tools_call`, unchanged) in
+      `tool_call_scope`, which enters each observer and releases it on every
+      path, and calls `complete_tool_call` with the runner's raw output just
+      before TOOL_RESULT policy. Observer failures are logged and never change
+      the result; each complete is bounded. This replaces the runner-side
+      S68/S69(a) seams the roadmap planned for EVD-02.
+    files:
+      - omnigent/server/tool_result_observers.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - tests/server/routes/test_sessions_mcp_proxy_policy_retry.py
+    tests:
+      - tests/server/routes/test_sessions_mcp_proxy_policy_retry.py
+    budget_lines: 40
+    budget_exception:
+      lines: 160
+      reason: >-
+        omnigent/server/tool_result_observers.py is a new file (about 160
+        lines, most of it docstrings): the registry, the scope and the
+        bounded complete. orchestration.py (44 changed lines) is the wrapper
+        that keeps the original signature plus the one awaited call.
+        tests/server/routes/test_sessions_mcp_proxy_policy_retry.py (63) adds
+        three observer cases to the existing server-tool harness.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: true
