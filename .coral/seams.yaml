@@ -22,6 +22,8 @@ allowed_roots:
     new_files_only: false
   - path: web/src/brand/
     new_files_only: false
+  - path: web/src/workflows/
+    new_files_only: false
   - path: .claude/skills/
     new_files_only: true
 
@@ -2817,5 +2819,227 @@ seams:
         routes_events.py 7, tests/server/conftest.py 3.
       approver: nicholasjano (delegated)
     anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S34
+    title: Coral desk routes, navigation and palette entries
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      Records the Coral desk anchors already in the tree. App.tsx mounts
+      coralRoutes (the /workflows and /profiles desk behind the Coral
+      gate) before the catch-all route. Sidebar.tsx adds
+      CoralPrimaryNavigation after Inbox; useActiveNavItem treats Coral desk
+      paths as their own rows, never New session, and never matches a
+      workflow key in the path against another nav leaf. CommandPalette.tsx
+      adds useCoralPaletteActions (Go to Workflows, Agent Profiles with
+      profiles_desk), empty while Coral is off. The Coral modules live under
+      web/src/workflows/, now an allowed root. The three test files gained
+      their anchors with this ledger entry.
+    files:
+      - web/src/App.tsx
+      - web/src/App.test.tsx
+      - web/src/shell/CommandPalette.tsx
+      - web/src/shell/CommandPalette.test.tsx
+      - web/src/shell/Sidebar.tsx
+      - web/src/shell/Sidebar.test.tsx
+    tests:
+      - web/src/App.test.tsx
+      - web/src/shell/CommandPalette.test.tsx
+      - web/src/shell/Sidebar.test.tsx
+    budget_lines: 40
+    budget_exception:
+      lines: 144
+      reason: >-
+        Changed lines against the upstream base, per file. The production
+        files are within budget: App.tsx 3, CommandPalette.tsx 13, Sidebar.tsx
+        34 (S34's share; S80 and S89 change it too). web/src/App.test.tsx (144:
+        the Coral desk route matrix, its identity mock and QueryClient wrapper,
+        and the two anchors), web/src/shell/Sidebar.test.tsx (65) and
+        web/src/shell/CommandPalette.test.tsx (35) hold the tests.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S84
+    title: Coral page header on the Inbox and Tasks pages
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      Records the Coral desk header anchors already in the tree. The Inbox and
+      Automations page
+      headers render through web/src/brand/CoralPageHeader (variant list):
+      the Inbox keeps its title, count badge and screen-reader summary; the
+      Automations header keeps its title, description, intro button and New
+      automation button with the same test ids. Covered by the brand header's
+      own tests and the existing page tests.
+    files:
+      - web/src/pages/InboxPage.tsx
+      - web/src/pages/TasksPage.tsx
+    tests:
+      - web/src/brand/CoralPageHeader.test.tsx
+      - web/src/pages/InboxPage.test.tsx
+    budget_lines: 40
+    budget_exception:
+      lines: 63
+      reason: >-
+        web/src/pages/TasksPage.tsx (63 changed lines: 32 added, 31 removed)
+        moves the existing header into CoralPageHeader's title, description,
+        titleAccessory and actions props, mostly re-indentation.
+        web/src/pages/InboxPage.tsx's S84 share is 30.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S37
+    title: Inbox extension kinds
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      web/src/lib/inboxKinds.ts (no Coral import) lets an extension register
+      an Inbox kind: it claims the pending prompts it renders, adds entries
+      (key, epoch-second time, awaiting or unread tab, opaque data), renders
+      them with the page's own card primitives, reports loading, an error
+      with Retry, a badge count of items no session count already covers and
+      incompleteness, and can silence the generic notifier for rows (S36).
+      Every registered kind is wrapped so that no call can throw into the
+      Inbox, the badge or the notifier: a call that throws (or answers
+      malformed data) counts as nothing and is warned about once per kind, its
+      fields are read once at registration, and each rendered entry sits in its
+      own error boundary (InboxKindEntryView), so a faulty kind is left out
+      while the rest of the Inbox keeps working. The
+      registry is a module store read with useSyncExternalStore (as
+      terminalSplitPanesStore), so the sidebar provider and the Inbox read it
+      without a provider; snapshots are stable until a change; registering
+      the same id replaces in place and an unregister removes only its own
+      registration. partitionElicitations hands each pending event to the
+      first claiming kind and keeps the rest in their source. InboxPage
+      changes only at its eight S37 anchors (15 comment sites: imports and KIND_UI, the
+      extension union member, the kinds hook with the partition and kind
+      entries, visibility, counts and summary, the recency groups, the
+      default expansion, loading, error rows and the empty state, and the
+      render delegation). useSidebarData adds the kinds' badge counts and
+      incompleteness. With no kind registered every value equals today's;
+      Coral registers its workflow kind from CoralRuntime (S85) in a later
+      step, so this lands dark.
+    files:
+      - web/src/lib/inboxKinds.ts
+      - web/src/lib/inboxKinds.test.ts
+      - web/src/pages/InboxPage.tsx
+      - web/src/pages/InboxPage.test.tsx
+      - web/src/hooks/useSidebarData.tsx
+      - web/src/hooks/useSidebarData.test.tsx
+    tests:
+      - web/src/lib/inboxKinds.test.ts
+      - web/src/pages/InboxPage.test.tsx
+      - web/src/hooks/useSidebarData.test.tsx
+    budget_lines: 40
+    budget_exception:
+      lines: 278
+      reason: >-
+        Changed lines against the upstream base, per file.
+        web/src/lib/inboxKinds.ts (new, 278 lines): the kind, entry, card and
+        UI interfaces with their contracts, the module store, the per-kind
+        guard and render error boundary, the partition and the two badge
+        helpers. web/src/pages/InboxPage.tsx (110 changed lines: 104 added, 6
+        removed, S37's share; S84 has 30) across the eight anchors at 15
+        comment sites. Tests: web/src/lib/inboxKinds.test.ts (new, 199: the
+        registry, the partition and a throwing or malformed kind),
+        web/src/pages/InboxPage.test.tsx (205: claim and render, tabs, default
+        expansion, loading, error rows and the empty state, sorting and
+        toggling, live unregister, and a kind throwing in render, claims,
+        entries or summary) and web/src/hooks/useSidebarData.test.tsx (69: the
+        badge and incompleteness, and a throwing badge count).
+        web/src/hooks/useSidebarData.tsx (10) is within budget.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S36
+    title: The idle notifier skips rows an Inbox kind silences
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      useIdleNotifications reads the registered Inbox kinds (S37) through a
+      ref and, in both loops (a turn end when it is scheduled and again when
+      it fires after the settle window, and a new prompt), skips a row any
+      kind silences, so a kind that notifies for its own rows (Coral's
+      once-per-run notifications for run sessions) is not doubled by the
+      per-session toast. The dock badge is unchanged. With no kind nothing
+      changes.
+    files:
+      - web/src/hooks/useIdleNotifications.ts
+      - web/src/hooks/useIdleNotifications.test.tsx
+    tests:
+      - web/src/hooks/useIdleNotifications.test.tsx
+    budget_lines: 10
+    budget_exception:
+      lines: 131
+      reason: >-
+        web/src/hooks/useIdleNotifications.test.tsx (131 added lines): four
+        tests, each with its fake kind: both loops for a silenced and an
+        ordinary row, a kind registered after mount until it unregisters, a
+        kind whose silences throws, and a kind registered while a turn end
+        settles. The hook itself changes 9 lines.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S85
+    title: Mount Coral's web runtime
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      main.tsx mounts web/src/workflows/CoralRuntime inside
+      SessionUpdatesProvider, before RunnerHealthProvider, where the session
+      rows its notifications need exist and below the sidebar data provider
+      that reads the Inbox kinds. CoralRuntime renders nothing; it registers
+      the workflow Inbox kind and run notifications only when Coral is
+      available, from a later step, and nothing before that.
+    files:
+      - web/src/main.tsx
+    tests:
+      - web/src/workflows/CoralRuntime.test.tsx
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: MF-1
+    title: Workflows desk web dependencies (dagre layout, YAML parsing)
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      Dependency-manifest entry (non-seam, K16 MF-n). The workflows desk
+      added two runtime dependencies to web/package.json:
+      @dagrejs/dagre ^3.1.3 (DAG layout for the read-only graph, used by
+      web/src/workflows/layout/dagreLayout.ts) and yaml ^2.9.0 (declared for the
+      workflow editor; nothing in web/ imports it yet, and it was already in
+      the lockfile as a transitive dependency); pnpm-lock.yaml gains their
+      importer entries and
+      @dagrejs/dagre 3.1.3 with @dagrejs/graphlib 4.0.6, and the same lock
+      refresh added three lines of deprecated metadata to @smithy/core 3.35.1.
+      JSON and the lockfile cannot carry anchors. S83 ledgers the Newsreader font lines in the same
+      two files.
+    files:
+      - web/package.json
+      - pnpm-lock.yaml
+    tests:
+      - web/src/workflows/layout/dagreLayout.test.ts
+    budget_lines: 40
+    anchor_exempt:
+      - web/package.json
+      - pnpm-lock.yaml
     upstream_first: false
     upstream_candidate: false

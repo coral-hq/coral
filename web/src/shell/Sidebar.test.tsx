@@ -33,6 +33,7 @@ import { ARIA_MOD_KEY, MOD_KEY, SHIFT_KEY } from "@/components/KeyboardShortcut"
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
 import type * as PullRequestsModule from "@/hooks/usePullRequests";
+// CORAL(S34): Coral nav rows follow a mocked Coral info.
 import type { CoralInfo } from "@/workflows/api/types";
 import type * as CoralInfoModule from "@/workflows/gate/useCoralInfo";
 import {
@@ -115,6 +116,7 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
   usePullRequestInfo: usePullRequestInfoMock,
 }));
 
+// CORAL(S34)
 const coralInfoState = vi.hoisted(() => ({ data: undefined as CoralInfo | undefined }));
 // Drive the Coral nav rows without a server; the pure helpers stay real.
 vi.mock("@/workflows/gate/useCoralInfo", async (importOriginal) => ({
@@ -1283,6 +1285,7 @@ describe("Sidebar session list", () => {
     expect(screen.getByTestId("new-chat-button")).not.toHaveClass("bg-[var(--sidebar-active)]");
   });
 
+  // CORAL(S34): Coral desk navigation rows.
   describe("Coral desk navigation", () => {
     function setCoralInfo(info: CoralInfo | undefined) {
       coralInfoState.data = info;

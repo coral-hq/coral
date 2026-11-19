@@ -43,6 +43,9 @@ import {
   resetReadStateForTests,
   seedReadState,
 } from "@/hooks/useUnseenConversations";
+// CORAL(S37): the extension-kind tests at the end of this file.
+import { HandIcon } from "lucide-react";
+import { registerInboxKind, type InboxKind } from "@/lib/inboxKinds";
 
 // Keep real controls for native delivery and directory grants.
 vi.mock("@/components/blocks/ApprovalCard", async (importActual) => {
@@ -1671,4 +1674,206 @@ describe("automation failures", () => {
     }
     if (state !== "continuation") expect(screen.queryByText(/Nothing waiting/)).toBeNull();
   });
+});
+
+// CORAL(S37): a registered extension kind takes the prompts it claims and renders its entries.
+describe("InboxPage extension kinds", () => {
+  /** A kind that claims `gate_*` prompts and adds one unread note of its own. */
+  function fakeKind(overrides: Partial<InboxKind> = {}): InboxKind {
+    return {
+      id: "fake",
+      claims: ({ event }) => String(event.elicitation_id).startsWith("gate_"),
+      entries: (claimed) => [
+        ...claimed.map(({ event }) => ({
+          key: `fake:gate:${String(event.elicitation_id)}`,
+          at: 1_700_000_500,
+          tab: "awaiting" as const,
+          data: null,
+        })),
+        { key: "fake:note", at: 1_699_000_000, tab: "unread" as const, data: null },
+      ],
+      badgeCount: 0,
+      incomplete: false,
+      loading: false,
+      error: null,
+      summary: (count) => `${count} fake`,
+      silences: () => false,
+      render: (entry, expanded, onToggle, ui) => (
+        <ui.InboxCard
+          testId="inbox-fake"
+          dataKind={entry.key}
+          tile={<ui.KindTile icon={HandIcon} tone="yellow" />}
+          kindLabel="Fake"
+          title={entry.key}
+          preview={undefined}
+          at={entry.at}
+          unread={entry.tab === "unread"}
+          expanded={expanded}
+          onToggle={onToggle}
+        >
+          <ui.InboxActions>
+            <button type="button" className={ui.primaryAction}>
+              Act on {entry.key}
+            </button>
+          </ui.InboxActions>
+        </ui.InboxCard>
+      ),
+      ...overrides,
+    };
+  }
+
+  function registerKindForTest(kind: InboxKind) {
+    const unregister = registerInboxKind(kind);
+    onTestFinished(unregister);
+  }
+
+  function renderClaimedInbox() {
+    const row = conversation({ id: "sess_anchor", title: "Run", pending_elicitations_count: 2 });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [
+        rawElicitation("gate_1", "Gate prompt"),
+        rawElicitation("eli_1", "Approve this?"),
+      ],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    renderPage();
+  }
+
+  it("renders a claimed prompt only as the kind's card, with its count, summary and tab", async () => {
+    registerKindForTest(fakeKind());
+    renderClaimedInbox();
+
+    expect(await screen.findByText("Approve this?")).toBeInTheDocument();
+    expect(screen.getAllByTestId("inbox-item")).toHaveLength(1);
+    expect(screen.queryByText("Gate prompt")).not.toBeInTheDocument();
+    const cards = screen.getAllByTestId("inbox-fake");
+    expect(cards.map((card) => card.getAttribute("data-kind"))).toEqual([
+      "fake:gate:gate_1",
+      "fake:note",
+    ]);
+    expect(screen.getByText("1 approval · 2 fake")).toBeInTheDocument();
+    // The newest awaiting entry is the kind's, so it starts expanded instead of the approval.
+    expect(cards[0]).toHaveAttribute("data-expanded", "true");
+    expect(screen.getByTestId("inbox-item")).toHaveAttribute("data-expanded", "false");
+    expect(screen.getByRole("button", { name: "Act on fake:gate:gate_1" })).toBeInTheDocument();
+
+    selectTab("Awaiting response");
+    expect(screen.getAllByTestId("inbox-fake").map((c) => c.dataset.kind)).toEqual([
+      "fake:gate:gate_1",
+    ]);
+    expect(screen.getByTestId("inbox-item")).toBeInTheDocument();
+    selectTab("Unread");
+    expect(screen.getAllByTestId("inbox-fake").map((c) => c.dataset.kind)).toEqual(["fake:note"]);
+    expect(screen.queryByTestId("inbox-item")).not.toBeInTheDocument();
+  });
+
+  it("keeps the approval expanded when it is newer than every awaiting kind entry", async () => {
+    registerKindForTest(
+      fakeKind({ entries: () => [{ key: "fake:old", at: 1, tab: "awaiting", data: null }] }),
+    );
+    renderClaimedInbox();
+    expect(await screen.findByTestId("inbox-item")).toHaveAttribute("data-expanded", "true");
+    expect(screen.getByTestId("inbox-fake")).toHaveAttribute("data-expanded", "false");
+  });
+
+  it("waits on a loading kind before showing the empty state", () => {
+    registerKindForTest(fakeKind({ loading: true, entries: () => [] }));
+    renderPage();
+    expect(screen.getByText("Loading inbox…")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing waiting on you")).not.toBeInTheDocument();
+  });
+
+  it("shows a kind's error row with a working Retry while approvals still render", async () => {
+    const retry = vi.fn();
+    registerKindForTest(
+      fakeKind({ entries: () => [], error: { message: "Couldn’t load fake items.", retry } }),
+    );
+    renderClaimedInbox();
+
+    expect(await screen.findByText("Approve this?")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn’t load fake items.");
+    fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/Nothing waiting/)).not.toBeInTheDocument();
+  });
+
+  it("sorts kind entries among the approvals by time and toggles them like any card", async () => {
+    registerKindForTest(
+      fakeKind({
+        entries: () => [
+          { key: "fake:older", at: 1_600_000_000, tab: "unread", data: null },
+          { key: "fake:newer", at: 1_700_000_900, tab: "awaiting", data: null },
+        ],
+      }),
+    );
+    renderClaimedInbox();
+    await screen.findByText("Approve this?");
+
+    const order = screen
+      .getAllByTestId(/^inbox-(item|fake)$/)
+      .map((card) => card.dataset.kind ?? "approval");
+    expect(order).toEqual(["fake:newer", "approval", "fake:older"]);
+    fireEvent.click(screen.getByRole("button", { name: "Fake: fake:older" }));
+    expect(screen.getByRole("button", { name: "Fake: fake:older" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Act on fake:older" })).toBeInTheDocument();
+  });
+
+  it("shows a claimed prompt as an approval again once its kind unregisters", async () => {
+    const unregister = registerInboxKind(fakeKind());
+    onTestFinished(unregister);
+    renderClaimedInbox();
+    expect(await screen.findByText("1 approval · 2 fake")).toBeInTheDocument();
+
+    act(() => unregister());
+
+    expect(screen.queryByTestId("inbox-fake")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("inbox-item")).toHaveLength(2);
+    expect(screen.getByText("Gate prompt")).toBeInTheDocument();
+    expect(screen.getByText("2 approvals")).toBeInTheDocument();
+  });
+
+  it("keeps the empty state hidden while a kind with nothing loaded reports an error", () => {
+    registerKindForTest(
+      fakeKind({
+        entries: () => [],
+        error: { message: "Couldn’t load fake items.", retry: vi.fn() },
+      }),
+    );
+    renderPage();
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn’t load fake items.");
+    expect(screen.queryByText(/Nothing waiting/)).not.toBeInTheDocument();
+  });
+
+  it.each(["render", "claims", "entries", "summary"] as const)(
+    "keeps the Inbox and its approvals when a kind throws in %s",
+    async (where) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      onTestFinished(() => {
+        warn.mockRestore();
+        consoleError.mockRestore();
+      });
+      registerKindForTest(
+        fakeKind({
+          // Warnings are once per kind id, so each case uses its own.
+          id: `faulty-${where}`,
+          [where]: () => {
+            throw new Error(`kind bug in ${where}`);
+          },
+        }),
+      );
+      renderClaimedInbox();
+
+      expect(await screen.findByText("Approve this?")).toBeInTheDocument();
+      // A kind that cannot claim leaves its prompt to the approval list.
+      expect(screen.queryByText("Gate prompt") !== null).toBe(where === "claims");
+      // Cards render only when the kind's own render and entries work.
+      const cards = screen.queryAllByTestId("inbox-fake");
+      expect(cards.length > 0).toBe(where === "claims" || where === "summary");
+      expect(warn).toHaveBeenCalledOnce();
+    },
+  );
 });
