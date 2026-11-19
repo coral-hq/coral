@@ -13,10 +13,13 @@ import inspect
 import pytest
 
 import coral.omni._upstream as upstream
+from coral.alerts.types import LOCAL_USER_ID
 from omnigent.db.workspace_cache import WorkspaceScopedCache
+from omnigent.server.auth import RESERVED_USER_LOCAL
 
 # name -> (the module that defines it, its signature as Coral calls it)
 PINNED: dict[str, tuple[str, str]] = {
+    "APPROVAL_EVENT_TYPE": ("omnigent.server.routes._sessions.common", ""),
     "CLIENT_SESSION_EVENT_TYPES": ("omnigent.server.routes._sessions.common", ""),
     "HostWorkspaceOpNotPermittedError": ("omnigent.server.routes._host_workspace_ops", ""),
     "HostWorkspaceOpUnavailableError": (
@@ -143,8 +146,11 @@ CACHES = frozenset(
 )
 # Event-type sets Coral classifies by membership; their members may change upstream.
 TYPE_SETS = frozenset({"CLIENT_SESSION_EVENT_TYPES", "RUNNER_SESSION_EVENT_TYPES"})
+# Constants Coral compares with; pin name -> the value it must keep.
+VALUES = {"APPROVAL_EVENT_TYPE": "approval"}
 # Pins whose name differs from their source's: pin name -> source attribute.
 ALIASES = {
+    "APPROVAL_EVENT_TYPE": "_APPROVAL_TYPE",
     "RUNNER_SESSION_EVENT_TYPES": "_RUNNER_SESSION_EVENT_TYPES",
     "label_key_skeleton": "_label_key_skeleton",
     "pending_elicitation_count": "count_for",
@@ -183,5 +189,12 @@ def test_pin_keeps_its_upstream_source_and_signature(name: str) -> None:
         assert isinstance(source, WorkspaceScopedCache)
     elif name in TYPE_SETS:
         assert isinstance(source, frozenset) and all(isinstance(kind, str) for kind in source)
+    elif name in VALUES:
+        assert source == VALUES[name]
     else:
         assert _signature(source) == expected
+
+
+def test_coral_names_the_local_user_as_omnigent_reserves_it() -> None:
+    """Runs, alerts and gate answers treat this id and ``None`` as the single local user."""
+    assert LOCAL_USER_ID == RESERVED_USER_LOCAL

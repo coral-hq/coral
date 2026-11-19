@@ -58,9 +58,17 @@ def find_visit(state: engine.RunState, run_id: str, visit_id: str) -> engine.Gat
     return None
 
 
+def receipt_label(state: engine.RunState, token: str) -> str | None:
+    """The label the receipt of the visit ``token`` records, if the state holds one."""
+    receipt = next((item for item in state.receipts if item.key == token), None)
+    label = receipt.payload.get("label") if receipt is not None else None
+    return label if isinstance(label, str) else None
+
+
 def row_by_elicitation(
     rows: Sequence[GateVisitState], elicitation_id: str
 ) -> GateVisitState | None:
+    """The row whose stored prompt id is ``elicitation_id``."""
     for row in rows:
         if row.elicitation_id == elicitation_id:
             return row
@@ -96,5 +104,6 @@ __all__ = [
     "live_visit",
     "live_visit_ids",
     "new_gate_elicitation_id",
+    "receipt_label",
     "row_by_elicitation",
 ]

@@ -10,6 +10,7 @@ import pytest
 from coral.alerts.rules import alert_subject
 from coral.alerts.types import AlertPayload
 from coral.bridge.commit import Applied, build_commit
+from coral.bridge.executors import BridgeThreads
 from coral.bridge.mapping import UnsupportedStance
 from coral.bridge.service import GateAnswerResult
 from coral.db.enum_codecs import (
@@ -19,13 +20,20 @@ from coral.db.enum_codecs import (
     GateVisitStatus,
     RunPauseReason,
     RunStatus,
+    SessionBindingProgress,
 )
 from coral.engine import transition
 from coral.engine.types import PauseRun
+from coral.gates.executors import publish_live
 from coral.gates.ids import gate_visit_id
+from coral.gates.republish import GateRepublisher
+from coral.gates.verdict import GateAnswer, GateAnswers, GateVerdict
 from coral.model.ids import anchor_session_id
+from coral.omni.protocols import Viewer
+from coral.reconcile import startup_recovery_sweep
 from coral.stores.alerts import SqlAlchemyAlertStore
 from coral.stores.protocols import AlertRecord, RunVersionConflict
+from coral.stores.session_bindings import SessionBindingDraft, SqlAlchemySessionBindingStore
 from tests.coral.bridge._gates import (
     APPROVE_TOKEN,
     CHANGE_TOKEN,
@@ -40,7 +48,16 @@ from tests.coral.bridge._gates import (
     visit,
     work_for,
 )
-from tests.coral.bridge._world import USER, WORKSPACE, World, run_id_for, start
+from tests.coral.bridge._world import (
+    USER,
+    WORKSPACE,
+    FakeGatePrompts,
+    RecordingGatePublisher,
+    World,
+    run_id_for,
+    run_spec,
+    start,
+)
 from tests.stores.coral._faults import SimulatedCrash, crash_around, fresh_process, run_racing
 
 
@@ -391,3 +408,73 @@ def test_two_replicas_answering_at_once_commit_one_answer(
         (int(AlertKind.RUN_COMPLETED), int(AlertStatus.OPEN)),
     ]
     world.assert_fold_matches(run.id)
+
+
+async def test_a_restart_republishes_each_live_visit_as_first_shown_and_takes_its_answer(
+    coral_db_uri: str,
+) -> None:
+    world = World.sql(coral_db_uri)
+    live = start(world, GATE_ONLY, spec=run_spec(start_key="live"), start_key="live")
+    answered = start(world, GATE_ONLY, spec=run_spec(start_key="answered"), start_key="answered")
+    shown = RecordingGatePublisher()
+    threads = BridgeThreads(world.bridge)
+    try:
+        for run in (live, answered):
+            await publish_live(
+                shown,
+                threads,
+                workspace_id=WORKSPACE,
+                run_id=run.id,
+                visit_ids=[row.id for row in gate_rows(world, run.id)],
+            )
+    finally:
+        threads.close()
+    assert answer(world, answered.id, APPROVE_TOKEN, "approve").outcome == "accepted"
+    live_anchor = anchor_session_id(WORKSPACE, live.id)
+
+    # A new process: no prompt survived; the startup sweep republishes from the rows.
+    world = _reopened(coral_db_uri)
+    republished = RecordingGatePublisher()
+    threads = BridgeThreads(world.bridge)
+    bindings = SqlAlchemySessionBindingStore(coral_db_uri)
+    bindings.reserve(
+        SessionBindingDraft(
+            workspace_id=WORKSPACE,
+            session_id=live_anchor,
+            run_id=live.id,
+            role="anchor",
+            effect_key=f"{live.id}:0:create_session:anchor",
+        )
+    )
+    for progress in (SessionBindingProgress.ROW_CREATED, SessionBindingProgress.INITIALIZED):
+        bindings.record_progress(WORKSPACE, live_anchor, progress)
+    republisher = GateRepublisher(
+        threads, republished, bindings=bindings, prompts=FakeGatePrompts(republished)
+    )
+    try:
+        report = await startup_recovery_sweep(
+            world.runs, world.queue, gate_republisher=republisher
+        )
+        (elicitation_id,) = [row.elicitation_id for row in gate_rows(world, live.id)]
+        assert elicitation_id is not None
+        verdict = await GateAnswers(
+            threads=threads, bindings=bindings, run_store=world.runs
+        ).answer(
+            GateAnswer(
+                workspace_id=WORKSPACE,
+                session_id=live_anchor,
+                elicitation_id=elicitation_id,
+                action="accept",
+                content={"decision": "approve"},
+                viewer=Viewer(user_id=USER),
+            )
+        )
+    finally:
+        threads.close()
+
+    assert republished.pending == {
+        (live_anchor, elicitation_id): shown.pending[(live_anchor, elicitation_id)]
+    }
+    assert (report.open_gates_scanned, report.open_gates_republished) == (1, 1)
+    assert verdict == GateVerdict(status="accepted")
+    assert _gate_alert(coral_db_uri, live.id).status == int(AlertStatus.RESOLVED)

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from coral.engine.facts import TurnFact
 from coral.signals.turn_facts import TurnTranscript
@@ -204,6 +204,44 @@ class Viewer:
     user_id: str | None
     account_generation: str | None = None
     check_generation: bool = False
+
+
+@runtime_checkable
+class GatePublisher(Protocol):
+    """Shows and drops a gate visit's prompt on a session; called in its workspace's scope."""
+
+    async def publish(
+        self, *, session_id: str, elicitation_id: str, params: Mapping[str, Any]
+    ) -> None:
+        """Publish or replace the prompt; re-publishing an id keeps one pending prompt."""
+        ...
+
+    async def withdraw(self, *, session_id: str, elicitation_id: str) -> bool:
+        """Drop the prompt if it is pending on the session; ``True`` when one was."""
+        ...
+
+
+@dataclass(frozen=True)
+class TrackedPrompt:
+    """A gate prompt this process saw published on a session of a workspace."""
+
+    workspace_id: int
+    session_id: str
+    elicitation_id: str
+
+
+class PendingGatePrompts(Protocol):
+    """The gate prompts this process published and has not seen resolved."""
+
+    def tracked(self) -> list[TrackedPrompt]:
+        """Every tracked prompt, oldest first, as of the call."""
+        ...
+
+    def forget(self, prompt: TrackedPrompt) -> None: ...
+
+    def is_pending(self, prompt: TrackedPrompt) -> bool:
+        """Whether the prompt is still pending here; call in its workspace's scope."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -486,12 +524,14 @@ __all__ = [
     "CoralSessionError",
     "EdgePredicate",
     "EdgeWatch",
+    "GatePublisher",
     "HostAccessCode",
     "HostAccessRefused",
     "HostWorkspaceChannels",
     "LiveStatus",
     "NoOpScopeRunner",
     "ObservedEdge",
+    "PendingGatePrompts",
     "PreSendHook",
     "PreSendRequest",
     "RunScopeRunner",
@@ -506,6 +546,7 @@ __all__ = [
     "SlotRoleName",
     "StatusEdgeView",
     "StepAgentResolver",
+    "TrackedPrompt",
     "TranscriptItem",
     "TurnFactSink",
     "TurnTranscript",

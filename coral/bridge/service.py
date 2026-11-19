@@ -79,6 +79,7 @@ from coral.gates.ids import (
     MAX_GATE_OUTCOME_CHARS,
     live_visit_ids,
     new_gate_elicitation_id,
+    receipt_label,
 )
 from coral.queue.drainer import FinishedWork
 from coral.queue.run_effects import describe_exception
@@ -608,7 +609,7 @@ class EngineBridge:
         answers: list[Applied] = []
 
         def inputs(snapshot: EngineSnapshot) -> tuple[engine.Input, ...]:
-            answered[0] = _receipt_label(snapshot.state, token)
+            answered[0] = receipt_label(snapshot.state, token)
             if answered[0] == label:
                 return ()
             return (engine.AnswerGate(token=token, label=label, by=actor, note=note),)
@@ -1020,13 +1021,6 @@ def _unbuildable_detail(exc: Exception) -> str:
 def _storable(text: str, limit: int) -> bool:
     """Within ``limit`` characters and free of NUL and lone surrogates, which no row takes."""
     return len(text) <= limit and sanitize(text) == text
-
-
-def _receipt_label(state: engine.RunState, token: str) -> str | None:
-    """The label a gate visit's receipt records, if the state holds one."""
-    receipt = next((item for item in state.receipts if item.key == token), None)
-    label = receipt.payload.get("label") if receipt is not None else None
-    return label if isinstance(label, str) else None
 
 
 __all__ = [

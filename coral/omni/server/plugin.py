@@ -29,7 +29,8 @@ from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import EngineBridge
 from coral.db.migrate import ensure_coral_schema
 from coral.db.models_workflows import CoralBase
-from coral.omni.protocols import RunScopeRunner
+from coral.gates.republish import GateRepublisher
+from coral.omni.protocols import GatePublisher, RunScopeRunner
 from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.queue.executors import EffectExecutor
 from coral.queue.store import SqlAlchemyCoralQueueStore
@@ -45,6 +46,7 @@ from omnigent.process_logging import data_dir
 from omnigent.server.server_plugins import ServerPluginRegistration, ServerServices
 
 if TYPE_CHECKING:
+    from coral.omni.server.gates import GateAnswering, LocalGatePrompts
     from coral.omni.server.turn_facts import BoundSessionRefresher
 
 _logger = logging.getLogger(__name__)
@@ -52,6 +54,8 @@ _logger = logging.getLogger(__name__)
 # Workspaces are not modelled yet, so every request shares one workflow library.
 _SINGLE_WORKSPACE_ID = 0
 _CORAL_DB_FILENAME = "coral.db"
+# The task that withdraws this process's stale gate prompts.
+GATE_SWEEP_TASK = "coral-gate-prompt-sweep"
 # Status-edge observer names: watched sessions' edges, and the confirmed-stop record.
 STATUS_EDGE_OBSERVER = "coral"
 CONFIRMED_STOPS_OBSERVER = "coral.confirmed_stops"
@@ -164,6 +168,7 @@ def _wire_guards(
     port: RunDecisionPort | None,
     stack: AsyncExitStack,
     run_in_thread: ThreadRunner = asyncio.to_thread,
+    gate_answering: Callable[[], bool] | None = None,
 ) -> None:
     """
     Register what protects bound sessions, whether or not the session engine is wired.
@@ -174,7 +179,9 @@ def _wire_guards(
     provider reads bindings through a cache of found rows and reads run status
     through a cache each run-store commit clears. The S53 mutation guard reads
     the same cache of found rows and refuses clients' changes to bound sessions
-    and engine agents. Every registration's undo goes on ``stack``.
+    and engine agents; a run's anchor takes approvals while ``gate_answering``
+    says gate answers reach their handler. Every registration's undo goes on
+    ``stack``.
     """
     from coral.omni.policies.bindings_cache import CachedBindingLookup
     from coral.omni.policies.provider import CoralPolicyProvider
@@ -194,7 +201,12 @@ def _wire_guards(
     found_bindings = CachedBindingLookup(bindings)
     provider = CoralPolicyProvider(bindings=found_bindings, statuses=statuses)
     stack.callback(register_required_policy_provider(REQUIRED_POLICY_PROVIDER, provider))
-    stack.callback(register_mutation_guard(MUTATION_GUARD, CoralMutationGuard(found_bindings)))
+    guard = (
+        CoralMutationGuard(found_bindings)
+        if gate_answering is None
+        else CoralMutationGuard(found_bindings, gate_answering=gate_answering)
+    )
+    stack.callback(register_mutation_guard(MUTATION_GUARD, guard))
 
 
 def _register_executors(
@@ -224,6 +236,79 @@ def _wire_bridge(threads: BridgeThreads, stack: AsyncExitStack) -> None:
     _register_executors(
         {TIMER: timer_executor(threads), RUN_RESYNC: run_resync_executor(threads)}, stack
     )
+
+
+def _wire_gates(
+    app: Any,
+    services: ServerServices,
+    *,
+    db_uri: str,
+    threads: BridgeThreads,
+    run_store: RunStore,
+    bindings: SqlAlchemySessionBindingStore,
+    scope_runner: RunScopeRunner,
+    publisher: GatePublisher,
+    answering: GateAnswering,
+    prompts: LocalGatePrompts,
+    stack: AsyncExitStack,
+) -> None:
+    """
+    Register gate delivery and gate answers, whether or not the session engine is wired.
+
+    The publish and withdraw executors (withdraws run after their run ended), then
+    the verdict handler, and only then the anchor's admission of approvals. On exit
+    the admission ends first, then answers admitted just before get a moment to
+    reach the handler, which refuses them as retryable, then the handler goes.
+    ``prompts`` observes every publish, and the sweep task withdraws this process's
+    stale prompts until exit. Every undo goes on ``stack``. The server's auth
+    provider is required: a services object without one is not taken as auth off.
+    """
+    from coral.gates.executors import gate_publish_executor, gate_withdraw_executor
+    from coral.gates.ids import GATE_ELICITATION_PREFIX, GATE_PUBLISH, GATE_WITHDRAW
+    from coral.gates.sweep import GatePromptSweeper
+    from coral.gates.verdict import GateAnswers
+    from coral.omni.server.gates import ANSWER_GRACE_S, gate_verdict_handler
+    from coral.stores.alerts import SqlAlchemyAlertStore
+    from omnigent.runtime.pending_elicitations import add_elicitation_observer
+    from omnigent.server.elicitation_hooks import register_elicitation_verdict_handler
+
+    _register_executors(
+        {
+            GATE_PUBLISH: gate_publish_executor(
+                threads, publisher, bindings, run_store, scope_runner
+            ),
+            GATE_WITHDRAW: gate_withdraw_executor(threads, publisher, run_store, scope_runner),
+        },
+        stack,
+        runs_after_terminal=frozenset({GATE_WITHDRAW}),
+    )
+    answers = GateAnswers(threads=threads, bindings=bindings, run_store=run_store)
+    handler = gate_verdict_handler(answers, services.auth_provider, answering)
+    stack.callback(register_elicitation_verdict_handler(GATE_ELICITATION_PREFIX, handler))
+    stack.push_async_callback(asyncio.sleep, ANSWER_GRACE_S)
+    answering.enable()
+    stack.callback(answering.disable)
+    stack.callback(add_elicitation_observer(prompts.observe))
+    sweeper = GatePromptSweeper(
+        threads=threads,
+        bindings=bindings,
+        publisher=publisher,
+        prompts=prompts,
+        scope_runner=scope_runner,
+    )
+    stop = asyncio.Event()
+    sweep = asyncio.create_task(sweeper.run(stop), name=GATE_SWEEP_TASK)
+    stack.push_async_callback(_stop_task, stop, sweep)
+    if hasattr(app, "state"):
+        app.state.coral_gate_publisher = publisher
+        app.state.coral_gate_prompts = prompts
+        app.state.coral_alert_store = SqlAlchemyAlertStore(db_uri)
+
+
+async def _stop_task(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
+    stop.set()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 def _wire_session_engine(
@@ -384,11 +469,13 @@ async def coral_lifespan(
     One lifespan per process: on a usable operational database it first claims
     the process, and a second one entered meanwhile raises before registering
     anything. Then the guards for bound sessions, the engine tools with the
-    decision port and the engine bridge's executors are registered, and with
-    the server's stores present also the session engine's executors, its
-    status-edge observers and the bound-session index the turn-fact recorder
-    reads, all before the supervisor starts, whose finished items feed the
-    bridge and whose resync tick repairs each active run. They share one
+    decision port, the engine bridge's executors and gate delivery and answers
+    are registered, and with the server's stores present also the session
+    engine's executors, its status-edge observers and the bound-session index
+    the turn-fact recorder reads, all before the supervisor starts, whose
+    startup sweep republishes open gates, whose finished items feed the bridge
+    and whose resync tick repairs each active run and shows again any gate
+    prompt this process lost. They share one
     binding store. Bridge calls run on the bridge's own thread pool,
     tool decisions on a smaller one. Exit stops the supervisor first, so no
     item is claimed while its executor is missing (an item in flight keeps its
@@ -403,6 +490,12 @@ async def coral_lifespan(
 
     async with AsyncExitStack() as stack:
         if _is_usable_operational_db_uri(storage_location):
+            from coral.omni.server.gates import (
+                GateAnswering,
+                LocalGatePrompts,
+                OmnigentGatePublisher,
+            )
+
             assert storage_location is not None
             stack.callback(_PROCESS_LIFESPAN.claim())
             await asyncio.to_thread(ensure_coral_schema, storage_location)
@@ -425,10 +518,19 @@ async def coral_lifespan(
             )
             # Pushed before the engine tools register, so it closes after they are removed.
             stack.callback(decisions.close)
+            publisher = OmnigentGatePublisher()
+            # Off until the gate verdict handler registers; off again before it is removed.
+            answering = GateAnswering()
+            # The gate prompts this process shows, which the republisher does not re-send.
+            prompts = LocalGatePrompts()
+            bindings = SqlAlchemySessionBindingStore(storage_location)
             supervisor = WorkerSupervisor(
                 run_store,
                 queue_store,
                 scope_runner=scope_runner,
+                gate_republisher=GateRepublisher(
+                    threads, publisher, bindings=bindings, prompts=prompts
+                ),
                 run_reconciler=threads.schedule_resync,
                 on_finished=threads.feed,
                 hold_policy=bridge_hold_policy,
@@ -441,15 +543,28 @@ async def coral_lifespan(
                 app.state.coral_worker_supervisor = supervisor
                 app.state.coral_engine_bridge = bridge
                 app.state.coral_bound_sessions = bound
-            bindings = SqlAlchemySessionBindingStore(storage_location)
             _wire_guards(
                 run_store=run_store,
                 bindings=bindings,
                 port=StoreDecisionPort(bridge),
                 stack=stack,
                 run_in_thread=decisions.run,
+                gate_answering=answering,
             )
             _wire_bridge(threads, stack)
+            _wire_gates(
+                app,
+                services,
+                db_uri=storage_location,
+                threads=threads,
+                run_store=run_store,
+                bindings=bindings,
+                scope_runner=scope_runner,
+                publisher=publisher,
+                answering=answering,
+                prompts=prompts,
+                stack=stack,
+            )
             missing = _missing_engine_input(app, services)
             if missing is None:
                 refresher = _wire_session_engine(
