@@ -8,10 +8,13 @@ import json
 import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from coral.alerts.rules import alert_id
 from coral.bridge.codec import decode_entries
 from coral.bridge.executors import BridgeThreads
 from coral.db.enum_codecs import (
     ActorKind,
+    AlertKind,
+    AlertStatus,
     LogKind,
     RunPauseReason,
     RunStatus,
@@ -21,6 +24,7 @@ from coral.db.enum_codecs import (
 from coral.engine.types import PauseRun
 from coral.model.ids import anchor_session_id
 from coral.recovery.drift import DriftFinding, DriftPauser
+from coral.stores.alerts import SqlAlchemyAlertStore
 from coral.stores.protocols import LogEntryDraft, RunStartSpec, Transition
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from tests.coral.bridge._world import WORKSPACE as ENGINE_WORKSPACE
@@ -28,6 +32,17 @@ from tests.coral.bridge._world import World, start
 from tests.stores.coral._faults import fresh_process
 
 WORKSPACE = 7
+
+
+def _pause_alerts(coral_db_uri: str, run_id: str, workspace_id: int) -> list[tuple[str, int]]:
+    """The run's committed pause alerts: id and status, oldest first."""
+    return [
+        (alert.id, alert.status)
+        for alert in SqlAlchemyAlertStore(coral_db_uri).list_for_run(
+            workspace_id=workspace_id, run_id=run_id
+        )
+        if alert.kind == int(AlertKind.PAUSE)
+    ]
 
 
 def test_drift_pause_persists_on_every_lane(coral_db_uri: str) -> None:
@@ -139,6 +154,16 @@ def test_drift_pauses_once_per_epoch_on_every_lane(coral_db_uri: str) -> None:
         drift_log_checksum(run.id, finding, paused_version - 1),
         drift_log_checksum(run.id, finding, paused_version + 1),
     ]
+    # Each pause epoch raised its own alert with its entry. The raw resume above skips the
+    # alert rules (a bridge resume resolves the first), so only the ids are compared.
+    assert sorted(alert for alert, _status in _pause_alerts(coral_db_uri, run.id, WORKSPACE)) == (
+        sorted(
+            [
+                alert_id(WORKSPACE, run.id, "pause", str(paused_version)),
+                alert_id(WORKSPACE, run.id, "pause", str(paused_version + 2)),
+            ]
+        )
+    )
     # Without the epoch, the second pause would repeat the first entry's identity: refused.
     with pytest.raises((IntegrityError, OperationalError)):
         reopened.apply_transition(
@@ -187,6 +212,9 @@ async def test_a_drift_pause_through_the_engine_resumes_on_every_lane(coral_db_u
         assert pause == PauseRun(reason="drift", detail="session_archived")
         assert marker.run_version == engine_rows[-1].run_version == version
         assert json.loads(marker.body)["cause"] == "session_archived"
+        assert _pause_alerts(coral_db_uri, run.id, ENGINE_WORKSPACE) == [
+            (alert_id(ENGINE_WORKSPACE, run.id, "pause", str(version)), int(AlertStatus.OPEN))
+        ]
 
         world.bridge.resume_run(workspace_id=ENGINE_WORKSPACE, run_id=run.id, actor="user:alice")
         resumed = SqlAlchemyCoralRunStore(fresh_process(coral_db_uri)).get_run(
@@ -195,5 +223,8 @@ async def test_a_drift_pause_through_the_engine_resumes_on_every_lane(coral_db_u
         assert resumed is not None
         assert (resumed.status, resumed.pause_reason) == (RunStatus.RUNNING, None)
         assert world.assert_fold_matches(run.id).causes == ()
+        assert _pause_alerts(coral_db_uri, run.id, ENGINE_WORKSPACE) == [
+            (alert_id(ENGINE_WORKSPACE, run.id, "pause", str(version)), int(AlertStatus.RESOLVED))
+        ]
     finally:
         threads.close()

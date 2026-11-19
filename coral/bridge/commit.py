@@ -2,8 +2,9 @@
 
 The transition carries the entries as ENGINE log rows, the work their effects
 queue (transactional outbox), the orchestrator's rows, timer rows for new
-armings, the run, slot and gate-visit projections, and on a return to running
-the release of held rows and the revival of exhausted effects.
+armings, the run, slot and gate-visit projections, the alerts they raise and
+resolve, and on a return to running the release of held rows and the revival
+of exhausted effects.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import get_args
 
+from coral.alerts.rules import commit_alerts
 from coral.bridge.codec import entry_draft
 from coral.bridge.config import MAX_COMMIT_ROWS, epoch_seconds
 from coral.bridge.gate_rows import live_publish_effects, project_gates
@@ -27,7 +29,7 @@ from coral.bridge.mapping import (
     timer_draft,
 )
 from coral.bridge.orchestrator import is_decision_reminder, orchestrator_rows, revivable_work_ids
-from coral.bridge.projection import project_run, project_slots
+from coral.bridge.projection import RunProjection, project_run, project_slots
 from coral.db.enum_codecs import RUN_PAUSE_REASON, RunStatus
 from coral.engine import types as engine
 from coral.gates.ids import new_gate_elicitation_id
@@ -112,7 +114,9 @@ def build_commit(
     probe that clears it also lifts the row's. The commit that opens the run's first
     decision also names its orchestrator session and queues its create (see
     :mod:`coral.bridge.orchestrator`). Gate-visit rows follow the final state, so
-    any commit, an empty resync one too, writes a missing or diverged row.
+    any commit, an empty resync one too, writes a missing or diverged row. Alerts
+    follow those rows, the run row's status and the entries' effects (see
+    :mod:`coral.alerts.rules`).
 
     :param gate_elicitation_ids: Draws the prompt id of a visit row written for the
         first time.
@@ -174,6 +178,25 @@ def build_commit(
     release = tuple(
         dict.fromkeys((*(RESUME_RELEASE_CODES if resumed else ()), *release_held_codes))
     )
+    gate_visits = project_gates(
+        run,
+        final,
+        snapshot.store.gate_visits,
+        workspace_id=run.workspace_id,
+        now=now_s,
+        new_elicitation_id=gate_elicitation_ids,
+    )
+    alerts = commit_alerts(
+        run,
+        snapshot.graph,
+        first=first,
+        final=final,
+        effects=(effect for item in accepted for effect in item.entry.effects),
+        loaded_gates=snapshot.store.gate_visits,
+        gate_drafts=gate_visits,
+        status=run.status if projected.status is None else projected.status,
+        pause_reason=_pause_reason_after(run, projected),
+    )
     changes = store.Transition(
         status=projected.status,
         pause_reason=projected.pause_reason,
@@ -182,14 +205,9 @@ def build_commit(
         activation_count_delta=projected.activation_count_delta,
         finished_at=projected.finished_at,
         agent_slots=project_slots(run.id, final, snapshot.store.agent_slots, now=now_s),
-        gate_visits=project_gates(
-            run,
-            final,
-            snapshot.store.gate_visits,
-            workspace_id=run.workspace_id,
-            now=now_s,
-            new_elicitation_id=gate_elicitation_ids,
-        ),
+        gate_visits=gate_visits,
+        alert_raises=alerts.raises,
+        alert_resolutions=alerts.resolutions,
         logs=tuple(extra_logs),
         outbox_work=tuple(outbox),
         tool_reply=tool_reply,
@@ -199,6 +217,13 @@ def build_commit(
     if not accepted and changes.is_empty:
         return store.Transition.empty()
     return replace(changes, logs=tuple(logs))
+
+
+def _pause_reason_after(run: store.CoralRun, projected: RunProjection) -> int | None:
+    """The run row's pause reason once the commit's projection is written."""
+    if projected.pause_reason is not None:
+        return projected.pause_reason
+    return None if projected.clear_pause_reason else run.pause_reason
 
 
 def _effect_rows(

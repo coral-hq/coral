@@ -25,6 +25,10 @@ AlertAction = Literal["answer", "open_run", "mark_read", "resume", "cancel"]
 LOCAL_USER_ID = "local"
 MAX_ALERT_OUTCOMES = 16
 MAX_ALERT_OUTCOME_CHARS = 128
+# Free text is cut to these before a payload is built.
+MAX_ALERT_MESSAGE_CHARS = 280
+MAX_ALERT_RUN_TITLE_CHARS = 256
+MAX_ALERT_STEP_LABEL_CHARS = 128
 
 
 class AlertPayload(BaseModel):
@@ -33,9 +37,9 @@ class AlertPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     title: str = Field(max_length=120)
-    message: str = Field(max_length=280)
-    run_title: str = Field(max_length=256)
-    step_label: str | None = Field(default=None, max_length=128)
+    message: str = Field(max_length=MAX_ALERT_MESSAGE_CHARS)
+    run_title: str = Field(max_length=MAX_ALERT_RUN_TITLE_CHARS)
+    step_label: str | None = Field(default=None, max_length=MAX_ALERT_STEP_LABEL_CHARS)
     node_id: str | None = Field(default=None, max_length=64)
     actions: tuple[AlertAction, ...]
     deep_link: str = Field(max_length=512)
@@ -73,8 +77,11 @@ def generation_matches(recorded: str | None, viewer: GenerationProof) -> bool:
 
 __all__ = [
     "LOCAL_USER_ID",
+    "MAX_ALERT_MESSAGE_CHARS",
     "MAX_ALERT_OUTCOMES",
     "MAX_ALERT_OUTCOME_CHARS",
+    "MAX_ALERT_RUN_TITLE_CHARS",
+    "MAX_ALERT_STEP_LABEL_CHARS",
     "AlertAction",
     "AlertKindName",
     "AlertPayload",

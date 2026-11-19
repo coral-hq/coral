@@ -7,12 +7,25 @@ from typing import Any
 
 import pytest
 
+from coral.alerts.rules import alert_subject
+from coral.alerts.types import AlertPayload
+from coral.bridge.commit import Applied, build_commit
 from coral.bridge.mapping import UnsupportedStance
 from coral.bridge.service import GateAnswerResult
-from coral.db.enum_codecs import GateVisitStatus, RunPauseReason, RunStatus
+from coral.db.enum_codecs import (
+    AlertKind,
+    AlertPriority,
+    AlertStatus,
+    GateVisitStatus,
+    RunPauseReason,
+    RunStatus,
+)
+from coral.engine import transition
 from coral.engine.types import PauseRun
 from coral.gates.ids import gate_visit_id
 from coral.model.ids import anchor_session_id
+from coral.stores.alerts import SqlAlchemyAlertStore
+from coral.stores.protocols import AlertRecord, RunVersionConflict
 from tests.coral.bridge._gates import (
     APPROVE_TOKEN,
     CHANGE_TOKEN,
@@ -27,13 +40,31 @@ from tests.coral.bridge._gates import (
     visit,
     work_for,
 )
-from tests.coral.bridge._world import USER, WORKSPACE, World, start
-from tests.stores.coral._faults import fresh_process, run_racing
+from tests.coral.bridge._world import USER, WORKSPACE, World, run_id_for, start
+from tests.stores.coral._faults import SimulatedCrash, crash_around, fresh_process, run_racing
 
 
 def _reopened(coral_db_uri: str) -> World:
     fresh_process(coral_db_uri)
     return World.sql(coral_db_uri)
+
+
+def _alerts(coral_db_uri: str, run_id: str) -> list[tuple[int, int, int, str]]:
+    """The run's alerts as committed: kind, priority, status and subject, by kind."""
+    records = SqlAlchemyAlertStore(coral_db_uri).list_for_run(
+        workspace_id=WORKSPACE, run_id=run_id
+    )
+    return sorted(
+        (alert.kind, alert.priority, alert.status, alert.subject_id) for alert in records
+    )
+
+
+def _gate_alert(coral_db_uri: str, run_id: str) -> AlertRecord:
+    records = SqlAlchemyAlertStore(coral_db_uri).list_for_run(
+        workspace_id=WORKSPACE, run_id=run_id
+    )
+    (alert,) = [record for record in records if record.kind == int(AlertKind.GATE)]
+    return alert
 
 
 def _first_load_waits(
@@ -81,6 +112,14 @@ def test_an_open_visit_is_one_open_row_and_one_publish_row(coral_db_uri: str) ->
         "bridge_item": "gate",
         "visit_id": row.id,
     }
+    # The gate's alert committed with its row and names the row's prompt.
+    alert = _gate_alert(coral_db_uri, run.id)
+    assert (alert.status, alert.subject_id, alert.owner_user_id) == (
+        int(AlertStatus.OPEN),
+        row.id,
+        USER,
+    )
+    assert AlertPayload.model_validate_json(alert.payload).elicitation_id == row.elicitation_id
 
     # A repeated start and a resync keep the row and its stored id; nothing new is queued.
     version = world.run(run.id).version
@@ -90,6 +129,9 @@ def test_an_open_visit_is_one_open_row_and_one_publish_row(coral_db_uri: str) ->
     assert gate_rows(world, run.id) == [row]
     assert world.run(run.id).version == version
     assert len(gate_ids.issued) == 1
+    assert _alerts(coral_db_uri, run.id) == [
+        (int(AlertKind.GATE), int(AlertPriority.NORMAL), int(AlertStatus.OPEN), row.id)
+    ]
     world.assert_fold_matches(run.id)
 
 
@@ -111,6 +153,89 @@ def test_a_cancel_at_an_open_gate_cancels_its_row_and_queues_its_withdraw(
     assert item is not None
     assert (payload(item)["effect_type"], payload(item)["visit_id"]) == ("gate_withdraw", row.id)
     assert world.run(run.id).status == int(RunStatus.CANCELLED)
+    # The cancel resolved the gate's alert and raised the run's own, low one.
+    assert _alerts(coral_db_uri, run.id) == [
+        (int(AlertKind.GATE), int(AlertPriority.NORMAL), int(AlertStatus.RESOLVED), row.id),
+        (
+            int(AlertKind.RUN_CANCELLED),
+            int(AlertPriority.LOW),
+            int(AlertStatus.OPEN),
+            alert_subject(run.id, "run"),
+        ),
+    ]
+
+
+def test_a_commit_that_loses_its_version_writes_neither_its_entry_nor_its_alert(
+    coral_db_uri: str,
+) -> None:
+    world = World.sql(coral_db_uri)
+    run = start(world, GATE_ONLY)
+    snapshot = world.bridge.load(workspace_id=WORKSPACE, run_id=run.id)
+    paused = transition(
+        snapshot.graph,
+        snapshot.state,
+        PauseRun(reason="infra", detail="stale"),
+        world.clock(),
+        snapshot.config,
+    )
+    stale = build_commit(
+        snapshot,
+        (Applied(entry=paused.entry, before=snapshot.state, after=paused.state),),
+        now=world.clock(),
+    )
+    assert [draft.kind for draft in stale.alert_raises] == [int(AlertKind.PAUSE)]
+    # Another commit moves the run first.
+    world.bridge.commit_inputs(
+        workspace_id=WORKSPACE,
+        run_id=run.id,
+        inputs=lambda _snapshot: (PauseRun(reason="user", detail="look"),),
+    )
+
+    with pytest.raises(RunVersionConflict):
+        world.runs.apply_transition(run.id, snapshot.version, stale, workspace_id=WORKSPACE)
+
+    world = _reopened(coral_db_uri)
+    assert [kind for kind, *_rest in _alerts(coral_db_uri, run.id)] == [int(AlertKind.GATE)]
+    assert [cause.reason for cause in world.assert_fold_matches(run.id).causes] == ["user"]
+
+
+def test_a_process_that_dies_after_a_gate_commit_leaves_one_alert_per_subject(
+    coral_db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = World.sql(coral_db_uri)
+    with monkeypatch.context() as patch:
+        crash_around(patch, world.runs, "apply_transition", when="after")
+        with pytest.raises(SimulatedCrash):
+            start(world, GATE_ONLY)
+    run_id = run_id_for()
+
+    # A new process resyncs the run and the caller retries its start.
+    world = _reopened(coral_db_uri)
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    start(world, GATE_ONLY)
+    (row,) = gate_rows(world, run_id)
+    assert _alerts(coral_db_uri, run_id) == [
+        (int(AlertKind.GATE), int(AlertPriority.NORMAL), int(AlertStatus.OPEN), row.id)
+    ]
+
+    with monkeypatch.context() as patch:
+        crash_around(patch, world.runs, "apply_transition", when="after")
+        with pytest.raises(SimulatedCrash):
+            answer(world, run_id, APPROVE_TOKEN, "approve")
+
+    world = _reopened(coral_db_uri)
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    assert answer(world, run_id, APPROVE_TOKEN, "approve").outcome == "duplicate"
+    assert _alerts(coral_db_uri, run_id) == [
+        (int(AlertKind.GATE), int(AlertPriority.NORMAL), int(AlertStatus.RESOLVED), row.id),
+        (
+            int(AlertKind.RUN_COMPLETED),
+            int(AlertPriority.LOW),
+            int(AlertStatus.OPEN),
+            alert_subject(run_id, "run"),
+        ),
+    ]
+    world.assert_fold_matches(run_id)
 
 
 def test_an_answer_is_accepted_once_and_later_ones_are_told_why(coral_db_uri: str) -> None:
@@ -211,6 +336,13 @@ def test_an_unbuildable_answer_pauses_the_run_and_is_never_accepted(
     )
     assert visit(world, run.id, CHANGE_TOKEN).status == "open"
     assert gate_rows(world, run.id)[0].status == int(GateVisitStatus.OPEN)
+    # The pause raised its alert; the gate's stays open for the answer still to come.
+    assert [
+        (kind, status) for kind, _priority, status, _subject in _alerts(coral_db_uri, run.id)
+    ] == [
+        (int(AlertKind.GATE), int(AlertStatus.OPEN)),
+        (int(AlertKind.PAUSE), int(AlertStatus.OPEN)),
+    ]
 
 
 def test_two_replicas_answering_at_once_commit_one_answer(
@@ -251,4 +383,11 @@ def test_two_replicas_answering_at_once_commit_one_answer(
         f"user-{winner}",
     )
     assert world.run(run.id).status == int(RunStatus.COMPLETED)
+    # One gate alert, resolved, and one run-end alert, whichever replica won.
+    assert [
+        (kind, status) for kind, _priority, status, _subject in _alerts(coral_db_uri, run.id)
+    ] == [
+        (int(AlertKind.GATE), int(AlertStatus.RESOLVED)),
+        (int(AlertKind.RUN_COMPLETED), int(AlertStatus.OPEN)),
+    ]
     world.assert_fold_matches(run.id)

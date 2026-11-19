@@ -2,10 +2,10 @@
 
 Drift pauses a run straight through the run store, without the engine. A
 starting or running run moves to ``paused(<reason>)`` with one ``PAUSED`` log
-entry; a paused or finished run is left as it is. The entry's identity hashes
-the caller's parts plus the run version, so it is unique per pause epoch: a run
-resumed while the cause remains pauses again on the next detection, and
-compare-and-swap keeps concurrent callers to one pause.
+entry and the pause's alert; a paused or finished run is left as it is. The
+entry's identity hashes the caller's parts plus the run version, so it is unique
+per pause epoch: a run resumed while the cause remains pauses again on the next
+detection, and compare-and-swap keeps concurrent callers to one pause.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 
+from coral.alerts.rules import row_pause_alert
 from coral.db.enum_codecs import ActorKind, LogKind, RunPauseReason, RunStatus
 from coral.stores.protocols import CommitOutcome, CoralRun, LogEntryDraft, RunStore, Transition
 from coral.stores.run_commit import commit_on_run_row
@@ -59,7 +60,13 @@ def pause_run_once(
             idempotency_cksum=pause_log_checksum(checksum_parts, run.version),
             created_at_us=now_us,
         )
-        return Transition(status=int(RunStatus.PAUSED), pause_reason=int(reason), logs=(entry,))
+        alert = row_pause_alert(run, int(reason))
+        return Transition(
+            status=int(RunStatus.PAUSED),
+            pause_reason=int(reason),
+            alert_raises=() if alert is None else (alert,),
+            logs=(entry,),
+        )
 
     return commit_on_run_row(
         run_store=run_store,

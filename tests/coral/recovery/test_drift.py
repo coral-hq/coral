@@ -11,9 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from coral.alerts.rules import PAUSE_MESSAGES, alert_id
+from coral.alerts.types import AlertPayload
 from coral.bridge.executors import BridgeThreads
 from coral.db.enum_codecs import (
     ActorKind,
+    AlertKind,
+    AlertStatus,
     LogKind,
     RunPauseReason,
     RunStatus,
@@ -35,7 +39,7 @@ from coral.recovery.drift import (
     pause_run_for_drift,
 )
 from coral.stores.fakes import FakeRunStore
-from coral.stores.protocols import CoralRun, RunLogEntry, RunNotFound, Transition
+from coral.stores.protocols import AlertRecord, CoralRun, RunLogEntry, RunNotFound, Transition
 from coral.stores.session_bindings import SessionBinding, effect_checksum
 from tests.coral.bridge._world import WORKSPACE as ENGINE_WORKSPACE
 from tests.coral.bridge._world import World
@@ -100,6 +104,16 @@ def _drift_logs(store: FakeRunStore, run: CoralRun) -> list[dict[str, object]]:
         json.loads(entry.body)
         for entry in store.logs[(WORKSPACE, run.id)]
         if entry.kind == int(LogKind.PAUSED)
+    ]
+
+
+def _pause_alerts(
+    store: FakeRunStore, run: CoralRun, workspace_id: int = WORKSPACE
+) -> list[AlertRecord]:
+    return [
+        alert
+        for alert in store.list_alerts(run.id, workspace_id=workspace_id)
+        if alert.kind == int(AlertKind.PAUSE)
     ]
 
 
@@ -191,6 +205,16 @@ def test_drift_pauses_a_live_run_with_one_paused_log(status: RunStatus) -> None:
         ).encode()
     ).digest()
     assert entry.idempotency_cksum == expected_cksum
+    # The pause raises one alert for its epoch, owned as the run is.
+    [alert] = store.list_alerts(run.id, workspace_id=WORKSPACE)
+    assert (alert.id, alert.kind, alert.status) == (
+        alert_id(WORKSPACE, run.id, "pause", str(version + 1)),
+        int(AlertKind.PAUSE),
+        int(AlertStatus.OPEN),
+    )
+    assert (alert.owner_user_id, alert.account_generation) == ("alice", "gen-1")
+    payload = AlertPayload.model_validate_json(alert.payload)
+    assert (payload.pause_reason, payload.message) == ("drift", PAUSE_MESSAGES["drift"])
 
 
 def test_a_second_detection_in_one_pause_epoch_adds_nothing() -> None:
@@ -209,6 +233,7 @@ def test_a_second_detection_in_one_pause_epoch_adds_nothing() -> None:
     assert not again.applied
     assert store.load_run_state(run.id, workspace_id=WORKSPACE)[1] == version
     assert len(_drift_logs(store, run)) == 1
+    assert len(_pause_alerts(store, run)) == 1
 
 
 def test_resume_without_unarchive_pauses_again() -> None:
@@ -272,6 +297,7 @@ def test_a_finished_run_is_never_paused(status: RunStatus) -> None:
     assert not outcome.applied
     assert state.run.status == status
     assert _drift_logs(store, run) == []
+    assert store.list_alerts(run.id, workspace_id=WORKSPACE) == []
 
 
 def test_concurrent_detectors_pause_the_run_once() -> None:
@@ -296,6 +322,7 @@ def test_concurrent_detectors_pause_the_run_once() -> None:
     assert raced == [True]
     assert not outcome.applied
     assert len(_drift_logs(store, run)) == 1
+    assert len(_pause_alerts(store, run)) == 1
 
 
 async def test_drift_pauser_pauses_with_its_clock() -> None:
@@ -618,15 +645,26 @@ async def test_a_drift_pause_goes_through_the_engine_and_a_resume_resumes_it(
     }
     assert marker.idempotency_cksum == drift_log_checksum(run.id, finding, version)
     assert marker.created_at_us == NOW_US
+    runs = world.runs
+    assert isinstance(runs, FakeRunStore)
+    [paused_alert] = _pause_alerts(runs, run, ENGINE_WORKSPACE)
+    assert paused_alert.status == int(AlertStatus.OPEN)
 
     world.bridge.resume_run(workspace_id=ENGINE_WORKSPACE, run_id=run.id, actor="user:alice")
     assert world.run(run.id).status == RunStatus.RUNNING
     assert world.assert_fold_matches(run.id).causes == ()
+    assert [alert.status for alert in _pause_alerts(runs, run, ENGINE_WORKSPACE)] == [
+        int(AlertStatus.RESOLVED)
+    ]
     # Resumed while the drift persists: the next detection pauses the run again.
+    world.clock.advance(60)
     assert (
         await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
     ).applied
     assert len(_rows(world, run.id, LogKind.PAUSED)) == 2
+    first, again = _pause_alerts(runs, run, ENGINE_WORKSPACE)
+    assert first.id == paused_alert.id != again.id
+    assert (first.status, again.status) == (int(AlertStatus.RESOLVED), int(AlertStatus.OPEN))
 
 
 async def test_an_anchor_bound_pause_through_the_engine_still_stops_the_anchor(

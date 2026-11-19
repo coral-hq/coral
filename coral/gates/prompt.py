@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from coral.alerts.rules import run_link
 from coral.alerts.types import normalize_owner
 from coral.bridge.messages import gate_prompt_text, strip_format_characters
 from coral.engine import types as engine
@@ -51,7 +52,7 @@ def gate_params(
             "run_owner": normalize_owner(run.user_id),
             "run_title": strip_format_characters(run.title),
             "outcomes": outcomes,
-            "deep_link": f"/workflows/runs/{run.id}?node={row.node_id}&panel=gate",
+            "deep_link": run_link(run.id, row.node_id, panel="gate"),
         },
     }
 
