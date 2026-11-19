@@ -1,0 +1,291 @@
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  ArrowRightIcon,
+  BanIcon,
+  BellIcon,
+  CheckIcon,
+  CircleCheckIcon,
+  CirclePauseIcon,
+  CircleXIcon,
+  HandIcon,
+  TimerIcon,
+  type LucideIcon,
+} from "lucide-react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
+import { ElicitationMessage } from "@/components/blocks/ElicitationMessage";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import type { InboxKindUi, InboxTileTone } from "@/lib/inboxKinds";
+import { Link } from "@/lib/routing";
+import { approve } from "@/lib/sessionsApi";
+import { cn } from "@/lib/utils";
+import type { WorkflowAlert, WorkflowAlertKind } from "../api/types";
+import { runPath } from "../nav/coralPaths";
+import { gateCardState, type GateSubmission } from "./cardState";
+import { WORKFLOW_INBOX_QUERY_KEY } from "./useWorkflowInbox";
+import { gateView, type WorkflowGateEntryData } from "./workflowEntries";
+
+const PROMPT_PREVIEW_CHARS = 600;
+const PROMPT_MAX_CHARS = 8_000;
+const MAX_NOTE_CHARS = 2_000;
+
+function subscribeOnline(listener: () => void): () => void {
+  window.addEventListener("online", listener);
+  window.addEventListener("offline", listener);
+  return () => {
+    window.removeEventListener("online", listener);
+    window.removeEventListener("offline", listener);
+  };
+}
+
+const readOnline = () => navigator.onLine !== false;
+
+function useOnline(): boolean {
+  return useSyncExternalStore(subscribeOnline, readOnline, () => true);
+}
+
+/** The gate's prompt as plain text; a long one is cut behind "Show more". */
+function GatePrompt({ message }: { message: string }) {
+  const [open, setOpen] = useState(false);
+  const full = message.slice(0, PROMPT_MAX_CHARS);
+  const long = full.length > PROMPT_PREVIEW_CHARS;
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <ElicitationMessage
+        message={long && !open ? `${full.slice(0, PROMPT_PREVIEW_CHARS)}…` : full}
+        className="text-ui break-words whitespace-pre-wrap"
+      />
+      {long && (
+        <Button
+          variant="link"
+          size="xs"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+          className="h-auto p-0"
+        >
+          {open ? "Show less" : "Show more"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+export interface WorkflowGateCardProps {
+  data: WorkflowGateEntryData;
+  /** Epoch seconds. */
+  at: number;
+  viewerId: string | null;
+  expanded: boolean;
+  onToggle: () => void;
+  ui: InboxKindUi;
+}
+
+/** One workflow gate: its context, and an answer posted to the anchor's prompt. */
+export function WorkflowGateCard({
+  data,
+  at,
+  viewerId,
+  expanded,
+  onToggle,
+  ui,
+}: WorkflowGateCardProps) {
+  const view = gateView(data);
+  const queryClient = useQueryClient();
+  const online = useOnline();
+  const noteId = useId();
+  const statusRef = useRef<HTMLParagraphElement>(null);
+  const [note, setNote] = useState("");
+  const [submission, setSubmission] = useState<GateSubmission>({ status: "idle" });
+  // The feed lists only the caller's own alerts; without one, the prompt names the owner.
+  const owner = data.prompt?.runOwner ?? null;
+  const isOwner = data.alert !== null || owner === null || owner === viewerId;
+  const state = gateCardState({ isOwner, online, submission });
+  const { elicitationId, sessionId } = view;
+  const showForm =
+    state.showForm && elicitationId !== null && sessionId !== null && view.outcomes.length > 0;
+  const waitingHours =
+    view.openedAt === null ? 0 : Math.floor((Date.now() / 1000 - view.openedAt) / 3600);
+
+  useEffect(() => {
+    if (submission.status === "failed") statusRef.current?.focus();
+  }, [submission]);
+
+  const submit = (decision: string) => {
+    if (!state.canSubmit || elicitationId === null || sessionId === null) return;
+    setSubmission({ status: "submitting" });
+    const content: Record<string, unknown> = { decision };
+    if (note.trim() !== "") content.note = note;
+    approve(sessionId, elicitationId, { action: "accept", content }).then(
+      () => {
+        setSubmission({ status: "answered", label: decision });
+        void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+        void queryClient.invalidateQueries({ queryKey: WORKFLOW_INBOX_QUERY_KEY });
+      },
+      (error: unknown) => setSubmission({ status: "failed", error }),
+    );
+  };
+
+  return (
+    <ui.InboxCard
+      testId="inbox-workflow-gate"
+      dataKind="workflow-gate"
+      tile={<ui.KindTile icon={HandIcon} tone="yellow" />}
+      kindLabel="Workflow gate"
+      title={view.runTitle}
+      preview={view.title}
+      at={at}
+      unread
+      expanded={expanded}
+      onToggle={onToggle}
+    >
+      <div className="flex flex-col gap-1">
+        <p className="text-ui font-medium">{view.runTitle}</p>
+        {view.stepLabel && <p className="text-sm text-muted-foreground">Step: {view.stepLabel}</p>}
+        {waitingHours >= 1 && (
+          <p className="text-sm text-muted-foreground">Waiting {waitingHours} h</p>
+        )}
+      </div>
+      {view.message && <GatePrompt message={view.message} />}
+      {showForm && (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor={noteId} className="text-sm text-muted-foreground">
+            Note
+          </label>
+          <Textarea
+            id={noteId}
+            value={note}
+            maxLength={MAX_NOTE_CHARS}
+            disabled={!state.canSubmit}
+            onChange={(event) => setNote(event.target.value)}
+            className="max-h-48 min-h-14 resize-none"
+          />
+        </div>
+      )}
+      <p
+        ref={statusRef}
+        tabIndex={-1}
+        role="status"
+        aria-live="polite"
+        // Kept in the accessibility tree while empty, so its first message is announced.
+        className={cn(
+          "text-sm outline-none",
+          state.message === null && "sr-only",
+          state.kind === "refused" || state.kind === "error"
+            ? "text-destructive"
+            : "text-muted-foreground",
+        )}
+      >
+        {state.message}
+      </p>
+      <p className="text-xs text-muted-foreground">Coral notifies you while the app is open.</p>
+      <ui.InboxActions>
+        {view.runId && (
+          <Button asChild variant="outline" size="xs" className={ui.outlineAction}>
+            <Link
+              to={runPath(view.runId, { node: view.nodeId ?? undefined, panel: "gate" })}
+              componentId="inbox.workflow_gate.open_run"
+            >
+              Open run <ArrowRightIcon className="size-3.5" />
+            </Link>
+          </Button>
+        )}
+        {showForm &&
+          view.outcomes.map((outcome) => (
+            <Button
+              key={outcome}
+              variant={outcome === "approve" ? "default" : "outline"}
+              size="xs"
+              className={outcome === "approve" ? ui.primaryAction : ui.outlineAction}
+              disabled={!state.canSubmit}
+              onClick={() => submit(outcome)}
+              componentId="inbox.workflow_gate.answer"
+            >
+              {outcome}
+            </Button>
+          ))}
+      </ui.InboxActions>
+    </ui.InboxCard>
+  );
+}
+
+const ALERT_LOOKS: Record<
+  WorkflowAlertKind,
+  { label: string; icon: LucideIcon; tone: InboxTileTone }
+> = {
+  gate: { label: "Workflow gate", icon: HandIcon, tone: "yellow" },
+  question: { label: "Workflow question", icon: HandIcon, tone: "yellow" },
+  pause: { label: "Run paused", icon: CirclePauseIcon, tone: "yellow" },
+  watchdog: { label: "Decision waiting", icon: TimerIcon, tone: "yellow" },
+  overdue: { label: "Run overdue", icon: TimerIcon, tone: "yellow" },
+  reaction: { label: "Workflow alert", icon: BellIcon, tone: "gray" },
+  run_completed: { label: "Run completed", icon: CircleCheckIcon, tone: "gray" },
+  run_cancelled: { label: "Run cancelled", icon: BanIcon, tone: "gray" },
+  run_failed: { label: "Run failed", icon: CircleXIcon, tone: "red" },
+};
+
+export interface WorkflowAlertCardProps {
+  alert: WorkflowAlert;
+  /** Epoch seconds. */
+  at: number;
+  expanded: boolean;
+  onToggle: () => void;
+  ui: InboxKindUi;
+  onMarkRead: (alertId: string) => void;
+}
+
+/** A workflow alert that needs no answer: a pause, a waiting decision or a run's end. */
+export function WorkflowAlertCard({
+  alert,
+  at,
+  expanded,
+  onToggle,
+  ui,
+  onMarkRead,
+}: WorkflowAlertCardProps) {
+  const look = ALERT_LOOKS[alert.kind];
+  return (
+    <ui.InboxCard
+      testId="inbox-workflow-alert"
+      dataKind="workflow-alert"
+      tile={<ui.KindTile icon={look.icon} tone={look.tone} />}
+      kindLabel={look.label}
+      title={alert.run_title}
+      preview={alert.message}
+      at={at}
+      unread
+      expanded={expanded}
+      onToggle={onToggle}
+    >
+      <div className="flex flex-col gap-1">
+        <p className="text-ui font-medium">{alert.title}</p>
+        {alert.step_label && (
+          <p className="text-sm text-muted-foreground">Step: {alert.step_label}</p>
+        )}
+      </div>
+      <p className="text-ui break-words whitespace-pre-wrap text-muted-foreground">
+        {alert.message}
+      </p>
+      <ui.InboxActions>
+        <Button asChild size="xs" className={ui.primaryAction}>
+          <Link
+            to={runPath(alert.run_id, { node: alert.node_id ?? undefined })}
+            componentId="inbox.workflow_alert.open_run"
+          >
+            Open run <ArrowRightIcon className="size-3.5" />
+          </Link>
+        </Button>
+        {alert.actions.includes("mark_read") && (
+          <Button
+            variant="outline"
+            size="xs"
+            className={ui.outlineAction}
+            onClick={() => onMarkRead(alert.alert_id)}
+            componentId="inbox.workflow_alert.mark_read"
+          >
+            <CheckIcon className="size-3.5" /> Mark as read
+          </Button>
+        )}
+      </ui.InboxActions>
+    </ui.InboxCard>
+  );
+}
