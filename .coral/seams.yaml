@@ -2692,3 +2692,130 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S6a
+    title: Request-free publish and withdraw of claimed elicitation ids
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      omnigent/server/elicitation_hooks.py lets a server component publish a
+      form elicitation on a session with no HTTP request behind it, and
+      withdraw it. publish_form_elicitation(session_id, params, *,
+      elicitation_id) accepts only an id a registered S6b verdict handler
+      claims, 1-64 of A-Za-z0-9_- and never starting with Omnigent's elicit_
+      (ValueError otherwise, and for params that do not validate as
+      ElicitationRequestParams), builds the same ElicitationRequestEvent
+      payload as the mcp_elicitation branch (model_dump(), so unset optional
+      params are null and extra params keys such as coral survive) and calls
+      session_stream.publish as a module attribute. Re-publishing an id
+      replaces the stored prompt with the count unchanged. There is no
+      ancestor mirror: the only planned caller publishes on a run anchor,
+      which has no parent. The caller must be inside the session's workspace
+      scope. withdraw_elicitation(session_id, elicitation_id) refuses a
+      malformed or unclaimed id, returns False and publishes nothing when the
+      prompt is not pending on that session, and otherwise publishes a
+      verdict-less response.elicitation_resolved and returns True; the
+      answer path uses the same withdraw without the id check, so a handler
+      unregistered mid-answer cannot turn the answer into an error. The
+      mcp_elicitation branch is unchanged. elicitation_hooks imports helpers,
+      schemas, session_stream, errors and pending_elicitations; helpers
+      imports neither orchestration nor this module, so there is no cycle.
+    files:
+      - omnigent/server/elicitation_hooks.py
+      - tests/server/test_elicitation_hooks.py
+      - tests/server/integration/test_sessions_elicitation_api.py
+    tests:
+      - tests/server/test_elicitation_hooks.py
+      - tests/server/integration/test_sessions_elicitation_api.py
+    budget_lines: 40
+    budget_exception:
+      lines: 342
+      reason: >-
+        Changed lines against the base, per file, shared with S6b.
+        omnigent/server/elicitation_hooks.py (new, 281 lines): the header,
+        imports and id rules (37), S6b's registry and answer section (185)
+        and S6a's publish section (59: the claimed-id check, the unchecked
+        withdraw, publish and withdraw, with docstrings).
+        tests/server/test_elicitation_hooks.py (new, 341): the prefix,
+        registry, publish, withdraw, no-caller, malformed-id, mid-answer
+        unregister, tombstone and runner-forward skip, and raising-handler
+        unit tests. tests/server/integration/test_sessions_elicitation_api.py
+        (342 added): the test_gate_ handler and event recorder fixtures, the
+        answer helper and the publish, both-route, caller, access, duplicate,
+        refusal, malformed-id and child-session cases.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S6b
+    title: Stable-id elicitation verdict handlers on both answer routes
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A component registers an async verdict handler for an id prefix
+      (register_elicitation_verdict_handler: [a-z][a-z0-9_]{0,31}_, never
+      elicit_, never a prefix of or prefixed by a registered one, ValueError
+      otherwise; unlike the S1 and S53 registries a second registration
+      raises instead of replacing, since one Coral lifespan runs per
+      process). The returned unregister removes that registration only (a
+      per-registration marker, so a stale uninstaller never removes a later
+      registration, even of the same handler). _resolve_elicitation gains a
+      keyword-only resolved_by whose default NO_CALLER names no one, and
+      returns VerdictDecision | None. Its first step,
+      resolve_claimed_elicitation, returns None for an unclaimed id, which
+      then takes today's path byte for byte (native delivery, harness
+      Future, tombstones, resolved fan-out, runner forward). A claimed id
+      never reaches those. Without the handler it is refused with NO_CALLER
+      (forbidden, no_caller), so the existing direct test calls cannot answer
+      one, and as invalid_answer (409 on both routes) when the id is not 1-64
+      of A-Za-z0-9_- or the result is invalid (the resolve URL's FastAPI body
+      check answers 422 first for a malformed body). Otherwise the handler is
+      awaited in the request's task, with no timeout (it bounds its own
+      waits), with an ElicitationVerdict (session, id, validated result,
+      resolved_by: the authenticated user, None when the request carried no
+      identity). A non-duplicate acceptance publishes the resolved event with
+      the verdict; clear_pending withdraws a still-pending prompt, except on
+      a forbidden refusal, so a caller refused for who they are never clears
+      the owner's prompt. Both touch the answered session only: claimed
+      prompts are never mirrored, so nothing is published to ancestors, and
+      an answer on a child cannot clear its parent's prompt. Nothing else is
+      published, and the outcome stands if the handler is unregistered while
+      it runs. The resolve URL and the approval event pass resolved_by=user_id
+      and, for a claimed id, return verdict_response(decision) before the
+      deferred policy writes: 202 {"queued": false}, with "duplicate": true
+      for a duplicate, or an OmnigentError FORBIDDEN (forbidden) or CONFLICT
+      with the message "[<reason>] <message>". A handler's own exception
+      propagates (500, nothing published). ELICITATION_RESOLVE_LEVEL, the S53
+      guard call and unclaimed ids are unchanged. The registry global carries
+      the workspace-scoped-cache lint disable (keyed by prefix). The server
+      tests' elicitation reset also drops handlers.
+    files:
+      - omnigent/server/elicitation_hooks.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - omnigent/server/routes/sessions/routes_elicitations.py
+      - omnigent/server/routes/sessions/routes_events.py
+      - tests/server/conftest.py
+      - tests/server/test_elicitation_hooks.py
+      - tests/server/integration/test_sessions_elicitation_api.py
+    tests:
+      - tests/server/test_elicitation_hooks.py
+      - tests/server/integration/test_sessions_elicitation_api.py
+    budget_lines: 40
+    budget_exception:
+      lines: 342
+      reason: >-
+        Changed lines against the base, per file. The new module and the two
+        test files are shared with S6a (see S6a's reason); the registry and
+        answer section of elicitation_hooks.py is 185 lines with docstrings.
+        The Omnigent route files are within budget:
+        omnigent/server/routes/_sessions/orchestration.py 17 (the module
+        import, the keyword and return type, the docstring, the claimed branch
+        and two explicit None returns), routes_elicitations.py 7,
+        routes_events.py 7, tests/server/conftest.py 3.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

@@ -108,6 +108,7 @@ from omnigent.server.background_session_titles import (
     prepare_background_session_title,
     schedule_background_child_task_summary,
 )
+from omnigent.server.elicitation_hooks import verdict_response  # CORAL(S6b)
 from omnigent.server.failed_status_diagnostics import (
     bound_runner_connection,
     failed_status_intake_attributes,
@@ -2298,7 +2299,11 @@ def register_events_routes(
             # to the runner for runner-side (policy) elicitations.
             # The dedicated URL endpoint (``.../elicitations/{eid}/
             # resolve``) routes through the same helper.
-            await _resolve_elicitation(session_id, body.data, runner_router, conversation_store)
+            decision = await _resolve_elicitation(
+                session_id, body.data, runner_router, conversation_store, resolved_by=user_id
+            )
+            if decision is not None:  # CORAL(S6b): a claimed id's handler answered
+                return {**verdict_response(decision)}
             # Apply any policy writes deferred by the relay tool-call ASK gate
             # (e.g. a cost-budget checkpoint) now that the verdict is in.
             await _apply_pending_policy_ask_writes(

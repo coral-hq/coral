@@ -39,7 +39,7 @@ from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from omnigent.runtime import init as init_runtime
 from omnigent.runtime import pending_elicitations
 from omnigent.runtime.agent_cache import AgentCache
-from omnigent.server import _elicitation_registry, presence
+from omnigent.server import _elicitation_registry, elicitation_hooks, presence  # CORAL(S6b)
 from omnigent.server.app import create_app
 from omnigent.server.routes import sessions as sessions_routes
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
@@ -457,6 +457,7 @@ def _reset_elicitation_state() -> Iterator[None]:
     yield
     pending_elicitations.reset_for_tests()
     _elicitation_registry.reset_for_tests()
+    elicitation_hooks.reset_for_tests()  # CORAL(S6b): verdict handlers too
     # Presence is likewise module-global (keyed by conversation/user)
     # with pending leave-grace timers that would fire into later tests.
     presence.reset_for_tests()
