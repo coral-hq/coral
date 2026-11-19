@@ -192,6 +192,21 @@ class HostWorkspaceChannels(Protocol):
 
 
 @dataclass(frozen=True)
+class Viewer:
+    """
+    The authenticated caller of an owner-scoped read or write, built next to authentication.
+
+    :param user_id: ``None`` for the single local user.
+    :param check_generation: The request carried an account authority, so
+        ``account_generation`` is proven; a recorded generation needs it.
+    """
+
+    user_id: str | None
+    account_generation: str | None = None
+    check_generation: bool = False
+
+
+@dataclass(frozen=True)
 class SessionCreateRequest:
     """
     One ``create_session`` effect, with its identity taken from the stored run.
@@ -495,6 +510,7 @@ __all__ = [
     "TurnFactSink",
     "TurnTranscript",
     "TurnTranscripts",
+    "Viewer",
     "engine_message_text",
     "queued_input_decision",
     "turn_transcript_of",

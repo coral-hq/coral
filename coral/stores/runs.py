@@ -37,6 +37,7 @@ from coral.db import (
 )
 from coral.db.enum_codecs import GateVisitStatus, LogKind, RunStatus, WorkStatus
 from coral.model.ids import derived_id
+from coral.stores.alerts import apply_alert_changes, check_alert_raises
 from coral.stores.protocols import (
     UNFINISHED_RUN_STATUSES,
     ActivationState,
@@ -658,6 +659,7 @@ class SqlAlchemyCoralRunStore:
             raise TransitionTooLarge(
                 f"Transition contains {len(transition.outbox_work)} outbox items (limit 64)"
             )
+        check_alert_raises(run_id, transition.alert_raises)
 
         ws = self._resolve_workspace_id(workspace_id)
         now_s = int(time.time()) if now is None else now
@@ -893,6 +895,15 @@ class SqlAlchemyCoralRunStore:
                         resolved_at=gv.resolved_at,
                     )
                 )
+
+            apply_alert_changes(
+                session,
+                workspace_id=ws,
+                run_id=run_id,
+                raises=transition.alert_raises,
+                resolutions=transition.alert_resolutions,
+                now=now_s,
+            )
 
             outbox_ids: list[str] = []
             for w in transition.outbox_work:

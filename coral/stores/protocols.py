@@ -49,7 +49,7 @@ class RunVersionConflict(Exception):
 
 
 class TransitionTooLarge(ValueError):
-    """Transition exceeds the per-commit cap (64 logs or 64 outbox items)."""
+    """Transition exceeds a per-commit cap (64 logs, 64 outbox items or 64 alert raises)."""
 
 
 class RunContended(RuntimeError):
@@ -397,6 +397,68 @@ class GateVisitState:
 
 
 @dataclass(frozen=True)
+class AlertDraft:
+    """Alert a transition raises: inserted when its id is absent, never reopened.
+
+    :raises ValueError: when ``payload`` would not fit its column.
+    """
+
+    id: str
+    run_id: str
+    kind: int
+    priority: int
+    subject_id: str
+    payload: str
+    owner_user_id: str | None = None
+    account_generation: str | None = None
+    # 0: the commit's time.
+    created_at: int = 0
+
+    def __post_init__(self) -> None:
+        framed = encode(self.payload)
+        if framed is not None and len(framed) > MAX_STORED_BYTES:
+            raise ValueError(
+                f"alert payload is {len(framed)} bytes after compression; "
+                f"the limit is {MAX_STORED_BYTES}"
+            )
+
+
+@dataclass(frozen=True)
+class AlertResolution:
+    """Resolves the run's open or acked alerts about one subject, or of the given kinds.
+
+    :raises ValueError: unless exactly one of ``subject_id`` and ``kinds`` is given.
+    """
+
+    subject_id: str | None = None
+    kinds: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (self.subject_id is None) == (not self.kinds):
+            raise ValueError("an alert resolution names exactly one of subject_id and kinds")
+
+
+@dataclass(frozen=True)
+class AlertRecord:
+    """Frozen state of a stored alert."""
+
+    workspace_id: int
+    id: str
+    run_id: str
+    owner_user_id: str | None
+    account_generation: str | None
+    kind: int
+    priority: int
+    subject_id: str
+    status: int
+    payload: str
+    created_at: int
+    acked_at: int | None = None
+    acked_by: str | None = None
+    resolved_at: int | None = None
+
+
+@dataclass(frozen=True)
 class LogEntryDraft:
     """Draft append-only event log row to persist."""
 
@@ -662,6 +724,9 @@ class Transition:
     handoffs: Sequence[HandoffDraft] = ()
     handoff_items: Sequence[HandoffItemDraft] = ()
     gate_visits: Sequence[GateVisitDraft] = ()
+    # Raises are written first, so a resolution in the same commit also matches them.
+    alert_raises: Sequence[AlertDraft] = ()
+    alert_resolutions: Sequence[AlertResolution] = ()
     logs: Sequence[LogEntryDraft] = ()
     outbox_work: Sequence[WorkItemDraft] = ()
     consumed_work_ids: Sequence[str] = ()
@@ -693,6 +758,8 @@ class Transition:
             and len(self.handoffs) == 0
             and len(self.handoff_items) == 0
             and len(self.gate_visits) == 0
+            and len(self.alert_raises) == 0
+            and len(self.alert_resolutions) == 0
             and len(self.logs) == 0
             and len(self.outbox_work) == 0
             and len(self.consumed_work_ids) == 0
@@ -998,6 +1065,9 @@ __all__ = [
     "ActivationState",
     "AgentSlotDraft",
     "AgentSlotState",
+    "AlertDraft",
+    "AlertRecord",
+    "AlertResolution",
     "CommitOutcome",
     "CoralRun",
     "GateVisitDraft",
