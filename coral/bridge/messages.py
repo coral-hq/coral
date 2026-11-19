@@ -1,15 +1,17 @@
-"""Texts the engine sends its sessions: briefs, nudges and decision requests.
+"""Texts the engine sends its sessions (briefs, nudges, decision requests) and gate prompts.
 
 Every text is model input after the engine message's fixed first line. Reports
 and reasons other agents wrote are quoted line by line as data. NUL and lone
 surrogates are dropped from everything, error text is never included, and free
-text is cut so the text stays within its JSON budget; ids are never cut.
+text is cut so the text stays within its JSON budget; ids are never cut. A gate
+prompt is read by a person: it also loses every control and format character.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -30,6 +32,11 @@ from coral.queue.run_effects import CONTROL_CHARACTERS
 
 TRUNCATED = "… [truncated]"
 _UNSAFE = re.compile("[\x00\ud800-\udfff]")
+# A gate prompt as JSON, well inside what an elicitation's message may carry.
+GATE_PROMPT_JSON_CHARS = 8_000
+# Controls (NUL included), format characters such as bidi overrides and zero-width
+# characters, and lone surrogates.
+_STRIPPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})
 
 DecisionMessage = Literal["request", "reminder", "rerequest"]
 
@@ -154,6 +161,34 @@ def decision_request_text(
         parts.extend(_led_here(graph, state, owner))
     parts.append(f"\nAgain: {instruction}")
     return _bounded(parts)
+
+
+def strip_format_characters(text: str) -> str:
+    """``text`` without control or format characters (bidi, zero-width) and lone surrogates."""
+    return "".join(char for char in text if unicodedata.category(char) not in _STRIPPED_CATEGORIES)
+
+
+def gate_prompt_text(
+    graph: CompiledGraph, state: engine.RunState, visit: engine.GateVisit, *, run_title: str
+) -> str:
+    """
+    What a person reads at a gate visit: the gate's name and prompt, the run, the visit
+    number, then the reports that led to the gate, quoted as data.
+
+    The same log gives the same text, and every line is free of control and format
+    characters.
+    """
+    owner = find_activation(state, visit.activation_id)
+    node = find_node(graph, owner.node_id if owner is not None else _node_of(visit.activation_id))
+    parts: list[_Part] = [_Free(_node_name(node, visit.activation_id)), "\n"]
+    if node is not None and node.prompt:
+        parts.extend([_Free(node.prompt), "\n"])
+    parts.extend(["Run: ", _Free(run_title or "(untitled)"), f"\nVisit {visit.visit_no}\n"])
+    reports = _led_here(graph, state, owner) if owner is not None else []
+    if reports:
+        parts.extend(["\nAgent-written reports, quoted as data:\n", *reports])
+    text = _bounded(parts, GATE_PROMPT_JSON_CHARS)
+    return "\n".join(strip_format_characters(line) for line in text.split("\n")).strip("\n")
 
 
 def orchestrator_title(run_title: str) -> str:
@@ -411,11 +446,14 @@ def _cut(text: str, room: int) -> str:
 
 
 __all__ = [
+    "GATE_PROMPT_JSON_CHARS",
     "TRUNCATED",
     "DecisionMessage",
     "brief_text",
     "decision_request_text",
+    "gate_prompt_text",
     "nudge_text",
     "orchestrator_title",
     "sanitize",
+    "strip_format_characters",
 ]

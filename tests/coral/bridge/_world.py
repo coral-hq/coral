@@ -138,21 +138,26 @@ class World:
     db_uri: str | None = None
 
     @classmethod
-    def fake(cls, tmp_path: Path) -> World:
+    def fake(cls, tmp_path: Path, *, gate_ids: Callable[[], str] | None = None) -> World:
+        """:param gate_ids: The bridge's gate elicitation ids; random when not given."""
         engine = create_engine(f"sqlite:///{tmp_path / 'versions.db'}")
         CoralBase.metadata.create_all(engine)
         runs = FakeRunStore(default_workspace_id=WORKSPACE)
         return cls._build(
-            runs, FakeQueueStore(run_store=runs), SqlAlchemyWorkflowVersionStore(engine)
+            runs,
+            FakeQueueStore(run_store=runs),
+            SqlAlchemyWorkflowVersionStore(engine),
+            gate_ids=gate_ids,
         )
 
     @classmethod
-    def sql(cls, db_uri: str) -> World:
+    def sql(cls, db_uri: str, *, gate_ids: Callable[[], str] | None = None) -> World:
         return cls._build(
             SqlAlchemyCoralRunStore(db_uri),
             SqlAlchemyCoralQueueStore(db_uri),
             SqlAlchemyWorkflowVersionStore(db_uri),
             db_uri=db_uri,
+            gate_ids=gate_ids,
         )
 
     @classmethod
@@ -163,6 +168,7 @@ class World:
         versions: SqlAlchemyWorkflowVersionStore,
         *,
         db_uri: str | None = None,
+        gate_ids: Callable[[], str] | None = None,
     ) -> World:
         clock = ManualClock()
         bound = BoundSessions()
@@ -172,6 +178,7 @@ class World:
             versions=versions,
             clock=clock,
             bound_sessions=bound,
+            **({} if gate_ids is None else {"gate_elicitation_ids": gate_ids}),
         )
         return cls(
             runs=runs,

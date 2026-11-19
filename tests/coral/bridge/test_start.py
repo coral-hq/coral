@@ -17,7 +17,12 @@ from coral.bridge.config import (
     freeze_engine_config,
 )
 from coral.bridge.service import EngineBridge
-from coral.bridge.start import RunNotRunnable, live_slot_bound, worst_effect_key_length
+from coral.bridge.start import (
+    RunNotRunnable,
+    live_slot_bound,
+    live_work_bound,
+    worst_effect_key_length,
+)
 from coral.db.enum_codecs import ActorKind, LogKind, RunStatus, SlotStatus, WorkKind
 from coral.engine.types import EngineConfig
 from coral.model.canonical import canonical_bytes, content_hash
@@ -44,6 +49,7 @@ from tests.coral.workflow_builders import (
     decision,
     end,
     fixture_text,
+    gate,
     step,
     workflow_text,
 )
@@ -373,6 +379,114 @@ def test_a_decision_re_request_key_counts_toward_the_worst_effect_key() -> None:
     assert len(rerequest_key) > len(step_key)
 
     assert worst_effect_key_length(graph, run_id) == len(rerequest_key)
+
+
+def _gate_with(outcomes: list[str]) -> str:
+    """``start → wide (a gate with these outcomes, each to the end) → end``."""
+    return workflow_text(
+        [start_node(), gate("wide", outcomes=outcomes), end()],
+        [
+            arrow("a0", "start", "wide"),
+            *(
+                arrow(f"o{index}", "wide", "end", label=name)
+                for index, name in enumerate(outcomes)
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "refused"),
+    [
+        (["approve", "reject", *(f"o{index}" for index in range(14))], False),
+        (["approve", "reject", *(f"o{index}" for index in range(15))], True),
+        (["approve", "reject", "x" * 128], False),
+        (["approve", "reject", "x" * 129], True),
+    ],
+    ids=["16_outcomes", "17_outcomes", "128_characters", "129_characters"],
+)
+def test_a_gate_with_too_many_or_too_long_outcomes_is_refused(
+    world: World, outcomes: list[str], refused: bool
+) -> None:
+    yaml_text = _gate_with(outcomes)
+    if refused:
+        assert _refusal(world, yaml_text) == "graph.gate_too_large"
+        assert world.runs.get_run(run_id_for(), workspace_id=WORKSPACE) is None
+    else:
+        assert start(world, yaml_text).status == int(RunStatus.RUNNING)
+
+
+def _gates_after_one_step(count: int) -> str:
+    names = [f"g{index}" for index in range(count)]
+    return workflow_text(
+        [start_node(), step("plan"), *(gate(name, outcomes=["approve"]) for name in names), end()],
+        [
+            arrow("a0", "start", "plan"),
+            *(arrow(f"s{index}", "plan", name) for index, name in enumerate(names)),
+            *(
+                arrow(f"e{index}", name, "end", label="approve")
+                for index, name in enumerate(names)
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize(("count", "refused"), [(48, False), (49, True)])
+def test_gates_open_at_once_count_toward_the_width_bound(
+    world: World, count: int, refused: bool
+) -> None:
+    # Each open gate adds a publish row, and later a withdraw, to one commit.
+    yaml_text = _gates_after_one_step(count)
+    assert live_work_bound(compile_text(yaml_text)[0]) == count
+    if refused:
+        assert _refusal(world, yaml_text) == "graph.too_wide"
+    else:
+        assert start(world, yaml_text).status == int(RunStatus.RUNNING)
+
+
+def test_a_gate_withdraw_key_counts_toward_the_worst_effect_key() -> None:
+    # The gate's pass digits come from the loop's limit (2, so at most pass 3); the visit
+    # number takes as many digits as the activation cap.
+    graph = compile_text(fixture_text("gated"))[0]
+    run_id = run_id_for()
+    step_key = f"{run_id}:{'9' * 10}:{'k' * len('cancel_sessions')}:implement||a4:9:0"
+    withdraw_key = f"{run_id}:{'9' * 10}:withdraw_gate:approve_change||a4:9:9999"
+    assert len(withdraw_key) > len(step_key)
+
+    assert worst_effect_key_length(graph, run_id) == len(withdraw_key)
+
+
+def test_a_gate_whose_worst_case_withdraw_key_exceeds_512_characters_is_refused(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    long_id = "g" * 64
+    yaml_text = workflow_text(
+        [start_node(), gate(long_id, outcomes=["approve"]), end()],
+        [arrow("a0", "start", long_id), arrow("a1", long_id, "end", label="approve")],
+    )
+    graph = compile_text(yaml_text)[0]
+
+    def nested(count: int) -> CompiledGraph:
+        loops = tuple(
+            LoopInfo(
+                back_arrow_id=f"{index}".rjust(64, "b"),
+                head=long_id,
+                tail=long_id,
+                body=(long_id,),
+                limit=None,
+                at_limit_arrow_id=None,
+                entry_arrow_ids=(),
+            )
+            for index in range(count)
+        )
+        return graph.model_copy(update={"analysis": Analysis(loops=loops)})
+
+    # Each enclosing loop adds a 72-character iteration part; the key is 128 characters more.
+    assert worst_effect_key_length(nested(5), run_id_for()) == 128 + 72 * 5
+    _checked_as(monkeypatch, nested(5))
+    start(world, yaml_text)
+    _checked_as(monkeypatch, nested(6))
+    assert _refusal(world, yaml_text, start_key="second") == "graph.ids_too_long"
 
 
 def _reanalyzed(monkeypatch: pytest.MonkeyPatch) -> CompiledGraph:

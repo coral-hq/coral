@@ -2,20 +2,21 @@
 
 The transition carries the entries as ENGINE log rows, the work their effects
 queue (transactional outbox), the orchestrator's rows, timer rows for new
-armings, the run and slot projections, and on a return to running the release
-of held rows and the revival of exhausted effects.
+armings, the run, slot and gate-visit projections, and on a return to running
+the release of held rows and the revival of exhausted effects.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import get_args
 
 from coral.bridge.codec import entry_draft
 from coral.bridge.config import MAX_COMMIT_ROWS, epoch_seconds
+from coral.bridge.gate_rows import live_publish_effects, project_gates
 from coral.bridge.keys import anchor_effect_key, effect_work_id
 from coral.bridge.mapping import (
     FED_KINDS,
@@ -29,6 +30,7 @@ from coral.bridge.orchestrator import is_decision_reminder, orchestrator_rows, r
 from coral.bridge.projection import project_run, project_slots
 from coral.db.enum_codecs import RUN_PAUSE_REASON, RunStatus
 from coral.engine import types as engine
+from coral.gates.ids import new_gate_elicitation_id
 from coral.model.ir import CompiledGraph
 from coral.recovery.drift import DriftCause
 from coral.stores import protocols as store
@@ -98,6 +100,7 @@ def build_commit(
     tool_reply: store.ToolReplyDraft | None = None,
     release_held_codes: Sequence[str] = (),
     lift_store_pause: bool = False,
+    gate_elicitation_ids: Callable[[], str] = new_gate_elicitation_id,
 ) -> store.Transition:
     """
     The transition that records ``applied`` against ``snapshot``; empty when it changes nothing.
@@ -108,7 +111,11 @@ def build_commit(
     that shows the engine's own pause follows the engine: a resume, a retry or a plan
     probe that clears it also lifts the row's. The commit that opens the run's first
     decision also names its orchestrator session and queues its create (see
-    :mod:`coral.bridge.orchestrator`).
+    :mod:`coral.bridge.orchestrator`). Gate-visit rows follow the final state, so
+    any commit, an empty resync one too, writes a missing or diverged row.
+
+    :param gate_elicitation_ids: Draws the prompt id of a visit row written for the
+        first time.
 
     :raises TransitionTooLarge: when the rows exceed the store's cap after timer
         rows (which the resync adds again) and the orchestrator's re-asks were dropped.
@@ -175,6 +182,14 @@ def build_commit(
         activation_count_delta=projected.activation_count_delta,
         finished_at=projected.finished_at,
         agent_slots=project_slots(run.id, final, snapshot.store.agent_slots, now=now_s),
+        gate_visits=project_gates(
+            run,
+            final,
+            snapshot.store.gate_visits,
+            workspace_id=run.workspace_id,
+            now=now_s,
+            new_elicitation_id=gate_elicitation_ids,
+        ),
         logs=tuple(extra_logs),
         outbox_work=tuple(outbox),
         tool_reply=tool_reply,
@@ -255,7 +270,10 @@ def _new_timer_rows(
 
 
 def _revivable(run: store.CoralRun, state: engine.RunState) -> tuple[str, ...]:
-    """Rows a resume may revive: unreceipted fed effects', the anchor's and the orchestrator's."""
+    """
+    Rows a resume may revive: unreceipted fed effects', the anchor's, the orchestrator's
+    and the publishes of live gate visits.
+    """
     receipted = {receipt.key for receipt in state.receipts}
     keys = [
         effect.effect_key
@@ -263,6 +281,7 @@ def _revivable(run: store.CoralRun, state: engine.RunState) -> tuple[str, ...]:
         if effect.kind in FED_KINDS and effect.effect_key not in receipted
     ]
     keys.append(anchor_effect_key(run.id))
+    keys.extend(effect.effect_key for effect in live_publish_effects(state))
     ids = (effect_work_id(run.id, key) for key in keys)
     return tuple(dict.fromkeys((*ids, *revivable_work_ids(run, state))))
 

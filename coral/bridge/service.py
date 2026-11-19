@@ -44,8 +44,9 @@ from coral.bridge.config import (
     epoch_us,
     utc_now,
 )
-from coral.bridge.feedback import decision_of, feedback_input, finished_from_row
+from coral.bridge.feedback import decision_of, feedback_input, finished_from_row, gate_of
 from coral.bridge.fold import EngineStateCache
+from coral.bridge.gate_rows import live_publish_effects
 from coral.bridge.graphs import PinnedGraphError, PinnedGraphs
 from coral.bridge.keys import (
     ORCHESTRATOR_GENERATION,
@@ -66,12 +67,19 @@ from coral.bridge.mapping import (
     timer_draft,
     turn_signal_draft,
 )
+from coral.bridge.messages import sanitize
 from coral.bridge.orchestrator import open_decisions, regather_session, repair_drafts
 from coral.db.enum_codecs import ActorKind, LogKind, RunPauseReason, RunStatus, WorkStatus
 from coral.engine import transition
 from coral.engine import types as engine
 from coral.engine.facts import TurnFact
 from coral.engine.reconcile import awaiting_effect, reconcile
+from coral.gates.ids import (
+    MAX_GATE_NOTE_CHARS,
+    MAX_GATE_OUTCOME_CHARS,
+    live_visit_ids,
+    new_gate_elicitation_id,
+)
 from coral.queue.drainer import FinishedWork
 from coral.queue.run_effects import describe_exception
 from coral.recovery.pause import pause_log_checksum, pause_run_once
@@ -165,12 +173,33 @@ class _Fed:
     An outcome to feed, and whether it reports a failure of its row.
 
     :param decision_id: For a message to the orchestrator, the decision it is about.
+    :param visit_id: For a gate's publish or withdraw, the visit row it is about.
     """
 
     work_id: str
     failed: bool
     command: engine.Input
     decision_id: str | None = None
+    visit_id: str | None = None
+
+
+@dataclass(frozen=True)
+class GateAnswerResult:
+    """
+    What committing one gate answer did.
+
+    :param code: For a refusal, the engine's code, ``invalid_answer`` (a label or note no
+        row can store; nothing was loaded), ``unbuildable`` (the run was paused instead)
+        or ``run.contended``.
+    :param allowed: For ``tool.illegal`` only, the labels the gate takes.
+    :param answered_label: The label a receipt for the visit's token held in the state
+        the answer was applied to, if it had one.
+    """
+
+    outcome: Literal["accepted", "duplicate", "refused"]
+    code: str | None = None
+    allowed: tuple[str, ...] = ()
+    answered_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,16 +231,19 @@ class EngineBridge:
         fold_cache_size: int = FOLD_CACHE_RUNS,
         fold_cache_bytes: int = FOLD_CACHE_BYTES,
         bound_sessions: BoundSessions | None = None,
+        gate_elicitation_ids: Callable[[], str] = new_gate_elicitation_id,
     ) -> None:
         """
         :param bound_sessions: The status-edge recorder's index; each completed create's
             session is pushed into it.
+        :param gate_elicitation_ids: Draws the prompt id of a gate visit's new row.
         """
         self._runs = run_store
         self._queue = queue_store
         self._versions = versions
         self._clock = clock
         self._bound = bound_sessions
+        self._gate_ids = gate_elicitation_ids
         self._graphs = PinnedGraphs(versions, max_entries=fold_cache_size)
         self._states = EngineStateCache(
             run_store, max_runs=fold_cache_size, max_bytes=fold_cache_bytes
@@ -231,6 +263,10 @@ class EngineBridge:
     @property
     def bound_sessions(self) -> BoundSessions | None:
         return self._bound
+
+    @property
+    def gate_elicitation_ids(self) -> Callable[[], str]:
+        return self._gate_ids
 
     def now(self) -> datetime:
         return self._clock()
@@ -403,6 +439,7 @@ class EngineBridge:
                     tool_reply=extras.tool_reply,
                     release_held_codes=extras.release_held_codes,
                     lift_store_pause=lift_store_pause,
+                    gate_elicitation_ids=self._gate_ids,
                 )
             except UNBUILDABLE_ERRORS:
                 _logger.warning(
@@ -541,6 +578,76 @@ class EngineBridge:
             inputs=lambda _snapshot: (engine.TimerDue(timer_key=timer_key),),
         )
 
+    def answer_gate(
+        self,
+        *,
+        workspace_id: int,
+        run_id: str,
+        token: str,
+        label: str,
+        note: str,
+        actor: str,
+    ) -> GateAnswerResult:
+        """
+        Commit one ``AnswerGate`` for the visit ``token``; ``actor`` answers as a user.
+
+        A receipt for the token with the same label, in the state the commit is reduced
+        on, commits nothing: a retry is a duplicate even after the answer asked the gate
+        again. A commit that cannot be built pauses the run and is refused
+        ``unbuildable``, never accepted. A label over 128 characters, a note over 2,000,
+        or either holding NUL or a lone surrogate is refused ``invalid_answer`` first.
+
+        :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
+        :raises RunNotFound: when the workspace has no such run.
+        """
+        if not _storable(label, MAX_GATE_OUTCOME_CHARS) or not _storable(
+            note, MAX_GATE_NOTE_CHARS
+        ):
+            return GateAnswerResult(outcome="refused", code="invalid_answer")
+        answered: list[str | None] = [None]
+        answers: list[Applied] = []
+
+        def inputs(snapshot: EngineSnapshot) -> tuple[engine.Input, ...]:
+            answered[0] = _receipt_label(snapshot.state, token)
+            if answered[0] == label:
+                return ()
+            return (engine.AnswerGate(token=token, label=label, by=actor, note=note),)
+
+        def observe(_snapshot: EngineSnapshot, applied: Sequence[Applied]) -> CommitExtras:
+            answers[:] = [
+                item for item in applied if isinstance(item.entry.input, engine.AnswerGate)
+            ]
+            return CommitExtras()
+
+        try:
+            commit = self.commit_inputs(
+                workspace_id=workspace_id, run_id=run_id, inputs=inputs, actor=actor, extra=observe
+            )
+        except RunContended:
+            return GateAnswerResult(outcome="refused", code="run.contended")
+        if commit.unbuildable is not None:
+            return GateAnswerResult(
+                outcome="refused", code="unbuildable", answered_label=answered[0]
+            )
+        if not answers:
+            return GateAnswerResult(outcome="duplicate", answered_label=answered[0])
+        (applied,) = answers
+        rejection = applied.entry.rejection
+        if rejection is not None:
+            # Other refusals list the engine's input kinds, which mean nothing to a person.
+            labels = rejection.allowed_values if rejection.code == "tool.illegal" else ()
+            return GateAnswerResult(
+                outcome="refused",
+                code=rejection.code,
+                allowed=labels,
+                answered_label=answered[0],
+            )
+        # Decided by the entry, not by whether the commit applied: a gate-row repair in
+        # the same commit applies it too.
+        if applied.accepted and applied.entry.receipt_key == token and commit.outcome.applied:
+            return GateAnswerResult(outcome="accepted")
+        return GateAnswerResult(outcome="duplicate", answered_label=answered[0])
+
     def pause_for_drift(
         self,
         *,
@@ -594,7 +701,7 @@ class EngineBridge:
             return
         item = finished.item
         failed = finished.status == int(WorkStatus.FAILED)
-        pending = (_Fed(item.id, failed, command, decision_of(item)),)
+        pending = (_Fed(item.id, failed, command, decision_of(item), gate_of(item)),)
         try:
             self.commit_inputs(
                 workspace_id=item.workspace_id,
@@ -776,8 +883,8 @@ class EngineBridge:
 
     def _repair_effects(self, snapshot: EngineSnapshot) -> tuple[int, int, list[WorkItem]]:
         """
-        Queue missing rows of unreceipted effects, the anchor and the orchestrator's
-        create and requests; feed finished ones.
+        Queue missing rows of unreceipted effects, the anchor, the orchestrator's create
+        and requests, and live gate visits' publishes; feed finished ones.
         """
         run = snapshot.store.run
         now = self._clock()
@@ -796,6 +903,10 @@ class EngineBridge:
             for effect in snapshot.state.effects
             if effect.kind in FED_KINDS and effect.effect_key not in receipted
         }
+        effects.update(
+            (effect_work_id(run.id, effect.effect_key), effect)
+            for effect in live_publish_effects(snapshot.state)
+        )
         anchor_id = effect_work_id(run.id, anchor_effect_key(run.id))
         # Their keys are recomputed from the run and its open decisions.
         orchestrator = {draft.id: draft for draft in repair_drafts(ctx, run)}
@@ -831,7 +942,7 @@ class EngineBridge:
             command = feedback_input(outcome)
             if command is not None:
                 failed = row.status == int(WorkStatus.FAILED)
-                fed.append(_Fed(row.id, failed, command, decision_of(row)))
+                fed.append(_Fed(row.id, failed, command, decision_of(row), gate_of(row)))
         for start in range(0, len(fed), FEED_BATCH):
             batch = tuple(fed[start : start + FEED_BATCH])
             try:
@@ -857,7 +968,8 @@ class EngineBridge:
 
         A resume revives exhausted rows in its own commit; read inside the commit's
         attempt, a stale failure is dropped instead of pausing the resumed run again.
-        A failed message to the orchestrator counts only while its decision is open.
+        A failed message to the orchestrator counts only while its decision is open,
+        and a failed gate row only while its visit is live.
         """
         failed = [item.work_id for item in fed if item.failed]
         standing = {
@@ -866,11 +978,13 @@ class EngineBridge:
             if row.status == int(WorkStatus.FAILED)
         }
         waiting = {item.activation_id for item in open_decisions(snapshot.state)}
+        live = live_visit_ids(snapshot.state, snapshot.store.run_id)
         return tuple(
             item.command
             for item in fed
             if (not item.failed or item.work_id in standing)
             and (item.decision_id is None or item.decision_id in waiting)
+            and (item.visit_id is None or item.visit_id in live)
         )
 
     def _repair_timers(self, snapshot: EngineSnapshot) -> int:
@@ -903,12 +1017,25 @@ def _unbuildable_detail(exc: Exception) -> str:
     return next(detail for kind, detail in _UNBUILDABLE if isinstance(exc, kind))
 
 
+def _storable(text: str, limit: int) -> bool:
+    """Within ``limit`` characters and free of NUL and lone surrogates, which no row takes."""
+    return len(text) <= limit and sanitize(text) == text
+
+
+def _receipt_label(state: engine.RunState, token: str) -> str | None:
+    """The label a gate visit's receipt records, if the state holds one."""
+    receipt = next((item for item in state.receipts if item.key == token), None)
+    label = receipt.payload.get("label") if receipt is not None else None
+    return label if isinstance(label, str) else None
+
+
 __all__ = [
     "LOAD_FAILED_DETAIL",
     "UNBUILDABLE_ERRORS",
     "BridgeCommit",
     "EngineBridge",
     "EngineLoadFailed",
+    "GateAnswerResult",
     "ResyncReport",
     "RunNotRunnable",
     "TurnFactResult",

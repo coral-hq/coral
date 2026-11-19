@@ -122,7 +122,14 @@ class StoreDecisionPort:
             state = result.state
         reply = ToolReplyDraft(cksum=cksum, reply=plan.reply.to_json())
         try:
-            changes = build_commit(snapshot, applied, now=now, actor=actor, tool_reply=reply)
+            changes = build_commit(
+                snapshot,
+                applied,
+                now=now,
+                actor=actor,
+                tool_reply=reply,
+                gate_elicitation_ids=self._bridge.gate_elicitation_ids,
+            )
         except UNBUILDABLE_ERRORS as exc:
             # Paused visibly instead; planned again, the call is answered as paused.
             self._bridge.pause_unbuildable(workspace_id=workspace_id, run_id=run_id, error=exc)
