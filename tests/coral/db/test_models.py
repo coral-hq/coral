@@ -57,6 +57,7 @@ EXPECTED_TABLE_NAMES = frozenset(
         "coral_stable_ids",
         "coral_workspace_op_intents",
         "coral_tool_replies",
+        "coral_command_observations",
     }
 )
 
@@ -87,7 +88,7 @@ def _column_index_byte_length(col: Column) -> int:
 def test_exactly_20_tables_registered_and_no_metadata_overlap() -> None:
     tables = CoralBase.metadata.tables
     assert set(tables.keys()) == EXPECTED_TABLE_NAMES
-    assert len(tables) == 20
+    assert len(tables) == 21
 
     omnigent_tables = set(OmnigentBase.metadata.tables.keys())
     conversation_tables = set(ConversationBase.metadata.tables.keys())
@@ -178,6 +179,7 @@ def test_exact_internal_and_external_id_lengths() -> None:
         "coral_stable_ids": {"stable_id", "run_id"},
         "coral_workspace_op_intents": {"run_id"},
         "coral_tool_replies": {"run_id"},
+        "coral_command_observations": {"run_id"},
     }
 
     external_ref_columns: dict[str, set[str]] = {
@@ -197,6 +199,7 @@ def test_exact_internal_and_external_id_lengths() -> None:
         "coral_session_bindings": {"session_id", "host_id"},
         "coral_stable_ids": {"session_id"},
         "coral_workspace_op_intents": {"host_id"},
+        "coral_command_observations": {"session_id"},
     }
 
     for table_name, cols in internal_id_columns.items():
