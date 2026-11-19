@@ -1149,6 +1149,51 @@ async def test_failed_dispatch_releases_arm_so_republish_re_fires(
     assert elicitation_armed(notifier, "elicit_retry") is True
 
 
+# CORAL(S5): an observer added beside the notifier cannot break the parent wake.
+@pytest.mark.asyncio
+async def test_parent_wake_fires_beside_a_raising_added_observer(
+    conv_store: SqlAlchemyConversationStore,
+) -> None:
+    """A raising added observer stops neither the block wake nor its resolution notice."""
+    parent = conv_store.create_conversation(kind="default", title="parent")
+    child = conv_store.create_conversation(
+        kind="sub_agent", title="codex:beside", parent_conversation_id=parent.id
+    )
+    dispatch = _RecordingDispatch()
+    notifier = SubagentBlockNotifier(
+        conversation_store=conv_store,
+        wake_dispatch=dispatch,
+        loop=asyncio.get_event_loop(),
+    )
+    failed_on: list[str | None] = []
+
+    def _failing_observer(conversation_id: str, event: dict[str, Any]) -> None:
+        failed_on.append(event.get("type"))
+        raise RuntimeError("observer bug")
+
+    # The notifier holds the primary slot, as configure_subagent_block_notifier wires it.
+    pending_elicitations.set_elicitation_observer(notifier.observe)
+    remove_failing = pending_elicitations.add_elicitation_observer(_failing_observer)
+    try:
+        pending_elicitations.record_publish(
+            child.id, _request_event("elicit_beside", message="Codex wants to run 'ls'")
+        )
+        await _wait_for_calls(dispatch, expected=1)
+        pending_elicitations.record_publish(child.id, _resolved_event("elicit_beside", "accept"))
+        await _wait_for_calls(dispatch, expected=2)
+    finally:
+        remove_failing()
+        pending_elicitations.set_elicitation_observer(None)
+        notifier.close()
+
+    assert [call.parent_id for call in dispatch.calls] == [parent.id, parent.id]
+    assert "Codex wants to run 'ls'" in dispatch.calls[0].notice
+    assert "has been resolved" in dispatch.calls[1].notice
+    # The failing observer really ran on both events.
+    assert failed_on == ["response.elicitation_request", "response.elicitation_resolved"]
+    assert not elicitation_armed(notifier, "elicit_beside")
+
+
 @pytest.mark.asyncio
 async def test_handle_request_skips_stale_wake_when_block_resolved(
     conv_store: SqlAlchemyConversationStore,

@@ -2628,3 +2628,67 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S5
+    title: Crash-isolated, copy-on-write elicitation observers
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      pending_elicitations had one observer slot, owned by the sub-agent block
+      notifier, and called it with no try/except, so a raising observer
+      propagated out of record_publish and session_stream.publish before the
+      SSE fan-out and dropped delivery of the prompt. add_elicitation_observer
+      now adds further observers beside that primary slot and returns an
+      idempotent uninstaller that removes only its own registration (the exact
+      object it added, first match, so a bound method or an observer added
+      twice is handled). Added observers are a tuple replaced as a whole under
+      a writers-only lock; each publish reads the primary and the tuple once
+      without a lock. _notify_observer calls the primary, then the added
+      observers in registration order, each in its own try/except: a failure
+      logs one WARNING traceback per observer name (log_once), then a DEBUG
+      line with the session id, and never stops the other observers, the
+      count hook or the publish. set_elicitation_observer and
+      configure_subagent_block_notifier are unchanged, so the notifier's
+      uninstall (clearing the primary) cannot remove added observers.
+      The failure log names the observer by its __qualname__, falling back to
+      its type's, so a name lookup that raises cannot escape either.
+      reset_for_tests clears the tuple. Contract for consumers: observers get a
+      bare conversation id in the publisher's workspace scope, share the event
+      dict with the index and subscribers (read-only), and may be called once
+      more after their uninstaller returns; for an observer added twice, an
+      uninstaller removes its earliest remaining registration.
+      omnigent.process_logging imports only omnigent._platform at module
+      level, so there is no import cycle. The first consumer is Coral's gate
+      prompt tracker; with nothing added, behaviour is unchanged except that a
+      raising primary observer is now logged instead of breaking the publish.
+    files:
+      - omnigent/runtime/pending_elicitations.py
+      - tests/runtime/test_pending_elicitations.py
+      - tests/runtime/test_subagent_block_notifier.py
+    tests:
+      - tests/runtime/test_pending_elicitations.py
+      - tests/runtime/test_subagent_block_notifier.py
+    budget_lines: 40
+    budget_exception:
+      lines: 217
+      reason: >-
+        Changed lines against the base, per file.
+        omnigent/runtime/pending_elicitations.py (90: 84 added, 6 removed): the
+        logger, the observer tuple and its lock, add_elicitation_observer with
+        its uninstaller and consumer contract, the never-raising
+        _observer_name and the isolated _notify_observer loop, each with its
+        docstring, and the reset of the tuple.
+        tests/runtime/test_pending_elicitations.py (217: 216 added, 1 removed):
+        the anchored imports and seven tests (the primary and two added
+        observers per event type; a raising primary or added observer with its
+        logging and no prompt content in the log; an observer whose name
+        lookup raises; delivery to a stream subscriber beside a raising
+        observer; uninstall scope; observers changed during delivery applying
+        from the next event; the reset).
+        tests/runtime/test_subagent_block_notifier.py (45): the parent wake and
+        resolution notice beside a raising added observer.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
