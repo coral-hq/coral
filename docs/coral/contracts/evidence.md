@@ -80,7 +80,8 @@ planner as `EngineToolCall.evidence`. A `blocked` handoff is not checked.
 5. It reads the session's rows and calls `coral.evidence.evaluate`. A call of
    the session that started during the check makes the answer in progress.
 
-A session answered "in progress" for 120 s in a row gets `unverified` for
+A session answered "in progress" for 120 s in a row (retries no more than
+30 s apart) gets `unverified` for
 every item instead, so a step whose worktree cannot be read cannot loop.
 
 The evaluator walks the rows in order:
@@ -104,8 +105,9 @@ only if they all passed, and nothing after them can undo what they saw.
 - `pytest -q` and `ruff format . && pytest -q` count.
 - `pytest -q && mv /tmp/a tests/a` does not: a command follows the test.
 - These refuse the whole line:
-  - `#`, `$`, a backtick, a newline or `<<` anywhere;
-  - a join other than `&&`: `||`, `;`, `|`, `&`;
+  - `#`, `$`, a backtick, a backslash, a newline or `<<` anywhere;
+  - outside quotes, a join other than `&&`: `||`, `;`, `|`, `&` (also in
+    `2>&1`). A quoted `"&&"` is an argument, never a join;
   - grouping `( ) { }`, or a function definition;
   - an env assignment, e.g. `PYTEST_ADDOPTS=--co pytest -q`;
   - a command that changes the shell: `cd`, `alias`, `trap`, `export`,
@@ -131,6 +133,10 @@ asking for another try.
 - **One server process.** Calls still in flight, overlaps and the 120 s limit
   are tracked per process, so another replica's running call is covered only
   once its row is stored.
+- **Ignored and out-of-tree files.** The digest covers tracked and untracked
+  files that git does not ignore. A change to an ignored file (`.venv/`, a
+  cache) or a file outside the worktree is not seen, so replacing the test
+  runner there is not caught.
 - **What a test reads.** Edits to test config (`conftest.py`, `pytest.ini`)
   are changes like any other, and the tests must run again after them. Whether
   those edits are honest is for review, not for this check.

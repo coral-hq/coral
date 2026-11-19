@@ -341,8 +341,10 @@ async def test_in_progress_turns_into_unverified_after_the_limit() -> None:
     harness.tree.readable = False
     binding = step_binding(SLOT, session_id=SESSION)
 
-    assert isinstance(await checker.verdict(binding), InProgress)
-    now[0] = IN_PROGRESS_LIMIT_S + 1
+    while now[0] < IN_PROGRESS_LIMIT_S - 10:
+        assert isinstance(await checker.verdict(binding), InProgress)
+        now[0] += 10.0
+    now[0] = IN_PROGRESS_LIMIT_S
     late = await checker.verdict(binding)
     assert isinstance(late, Missing) and late.items[0].reason == "unverified"
 
@@ -392,3 +394,16 @@ async def test_a_cancelled_record_marks_the_session_lagging(harness: _Harness) -
             await task
     harness.capture.release(token)
     assert harness.in_flight.lagging(WORKSPACE, SESSION)
+
+
+def test_the_in_progress_limit_counts_one_run_of_retries() -> None:
+    now = [0.0]
+    calls = InFlightCalls(clock=lambda: now[0])
+    assert not calls.waited_too_long(WORKSPACE, SESSION)
+    now[0] = 600.0
+    assert not calls.waited_too_long(WORKSPACE, SESSION)
+    for _ in range(11):
+        now[0] += 10.0
+        assert not calls.waited_too_long(WORKSPACE, SESSION)
+    now[0] += 10.0
+    assert calls.waited_too_long(WORKSPACE, SESSION)

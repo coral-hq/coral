@@ -4,9 +4,9 @@ Matching fails closed: a line counts only when it is a chain of simple commands 
 ``&&`` whose last command is the required one, so the line exits 0 only if that command
 did. Any of these refuse the whole line:
 
-- ``#``, ``$``, a backtick, a newline or ``<<`` anywhere;
-- a join other than ``&&``, grouping (``( ) { }``), a function definition, or an env
-  assignment;
+- ``#``, ``$``, a backtick, a backslash, a newline or ``<<`` anywhere;
+- outside quotes, a join other than ``&&`` (a quoted ``"&&"`` is an argument);
+- grouping (``( ) { }``), a function definition, or an env assignment;
 - a command that changes the shell itself (``cd``, ``alias``, ``trap``, ``export``,
   ``eval``, ``source``, ``env`` and the like).
 
@@ -23,7 +23,6 @@ import re
 import shlex
 from dataclasses import dataclass
 
-_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", ";;", "|&", ";&", ";;&"})
 _GROUPING = frozenset({"(", ")", "{", "}", "((", "))", "()"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 # Builtins and commands that change how later commands of the line behave.
@@ -55,7 +54,9 @@ _SHELL_STATE = frozenset(
         "unset",
     }
 )
-_REFUSED_TEXT = ("#", "$", "`", "\n", "\r", "<<")
+_REFUSED_TEXT = ("#", "$", "`", "\\", "\n", "\r", "<<")
+# Outside quotes, any of these but ``&&`` refuses the line: other joins, background, subshells.
+_OPERATOR_CHARS = frozenset(";|&()")
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 # A shell flag cluster with -c and only flags that load no startup files: -c, -ec, -xc.
 _DASH_C = re.compile(r"^-[eux]*c[eux]*$")
@@ -115,29 +116,56 @@ def _chain(command: str) -> tuple[tuple[str, ...], ...] | None:
     text = command.strip()
     if not text or any(part in text for part in _REFUSED_TEXT):
         return None
-    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    try:
-        tokens = list(lexer)
-    except ValueError:
+    parts = _split_on_and(text)
+    if parts is None:
         return None
-    groups: list[list[str]] = [[]]
-    for token in tokens:
-        if token == "&&":
-            groups.append([])
-        elif token in _SEPARATORS or token in _GROUPING:
+    chain: list[tuple[str, ...]] = []
+    for part in parts:
+        try:
+            argv = tuple(shlex.split(part, comments=False, posix=True))
+        except ValueError:
+            return None
+        if not argv or _ASSIGNMENT.match(argv[0]) or argv[0] in _SHELL_STATE:
+            return None
+        if argv[0] in _GROUPING or any(word in _GROUPING for word in argv):
+            return None
+        chain.append(argv)
+    return tuple(chain)
+
+
+def _split_on_and(text: str) -> list[str] | None:
+    """
+    ``text`` split on ``&&`` outside quotes; ``None`` for any other operator outside them.
+
+    Joins are read from the raw text, so a quoted ``"&&"`` is an argument, never a join.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+            current.append(char)
+        elif text.startswith("&&", index):
+            parts.append("".join(current))
+            current = []
+            index += 2
+            continue
+        elif char in _OPERATOR_CHARS:
             return None
         else:
-            groups[-1].append(token)
-    chain: list[tuple[str, ...]] = []
-    for group in groups:
-        if not group or _ASSIGNMENT.match(group[0]) or group[0] in _SHELL_STATE:
-            return None
-        if any(token.endswith("()") or token in "{}" for token in group):
-            return None
-        chain.append(tuple(group))
-    return tuple(chain)
+            current.append(char)
+        index += 1
+    if quote is not None:
+        return None
+    parts.append("".join(current))
+    return parts
 
 
 def _shell_script(argv: tuple[str, ...]) -> str | None:

@@ -74,6 +74,8 @@ IN_FLIGHT_EXPIRY_S = 7_500.0
 RECORD_TIMEOUT_S = 20.0
 # How long a session's submits may be answered "in progress" before they count as missing.
 IN_PROGRESS_LIMIT_S = 120.0
+# Answers further apart than this start a new wait: the agent stopped retrying meanwhile.
+IN_PROGRESS_GAP_S = 30.0
 _STEP_CACHE_MAX = 1_024
 
 
@@ -147,7 +149,7 @@ class InFlightCalls:
         self._overlapped: set[int] = set()
         self._last_entered: dict[tuple[int, str], float] = {}
         self._lagging: dict[tuple[int, str], float] = {}
-        self._waiting_since: dict[tuple[int, str], float] = {}
+        self._waiting_since: dict[tuple[int, str], tuple[float, float]] = {}
 
     def now(self) -> float:
         return self._clock()
@@ -209,11 +211,16 @@ class InFlightCalls:
             return True
 
     def waited_too_long(self, workspace_id: int, session_id: str) -> bool:
-        """Note an "in progress" answer; true once they have lasted ``IN_PROGRESS_LIMIT_S``."""
+        """Note an "in progress" answer; true once a run of them lasts ``IN_PROGRESS_LIMIT_S``."""
         key = (workspace_id, session_id)
         with self._lock:
-            since = self._waiting_since.setdefault(key, self._clock())
-            if self._clock() - since < IN_PROGRESS_LIMIT_S:
+            now = self._clock()
+            since, last = self._waiting_since.get(key, (now, now))
+            if now - last > IN_PROGRESS_GAP_S:
+                # A new run of "in progress" answers, not a continuation of an old one.
+                since = now
+            if now - since < IN_PROGRESS_LIMIT_S:
+                self._waiting_since[key] = (since, now)
                 return False
             del self._waiting_since[key]
             return True

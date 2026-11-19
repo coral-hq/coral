@@ -42,6 +42,14 @@ from coral.evidence.match import argv_of, matches, segments
         ("echo pytest -q", False),
         ("pytest", False),
         ("pytest -q 'unterminated", False),
+        ('echo "&&" pytest -q', False),
+        ("echo '&&' pytest -q", False),
+        ("true \\&\\& pytest -q", False),
+        ('printf %s "&&" pytest -q', False),
+        ('sh -c "true" "&&" pytest -q', False),
+        ('bash -c "echo \\"&&\\" pytest -q"', False),
+        ("pytest -q 2>&1", False),
+        ("{ true; } && pytest -q", False),
     ],
 )
 def test_only_a_plain_and_chain_ending_in_the_command_counts(command: str, counted: bool) -> None:
