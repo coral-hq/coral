@@ -463,7 +463,8 @@ class GateVisitRow(CoralBase):
     scope_key: Mapped[str] = mapped_column(CaseSensitiveString(512), nullable=False)
     visit_no: Mapped[int] = mapped_column(Integer, nullable=False)
     owner_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
-    token: Mapped[str] = mapped_column(String(64), nullable=False)
+    # The engine token, "<activation id>:<visit number>", stored whole.
+    token: Mapped[str] = mapped_column(CaseSensitiveString(512), nullable=False)
     elicitation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
     elicitation_session_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, default=None
