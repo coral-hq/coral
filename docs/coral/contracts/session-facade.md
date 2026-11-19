@@ -1,8 +1,9 @@
 # Contract K4 (subset) and K18: Coral session facade, dispatch and status edges
 
 - **Status:** Draft v1, live. `coral_lifespan` registers the seven executors,
-  the engine bridge's `timer`, `run_resync` and `turn_fact` executors, and the
-  status-edge observers below. The engine bridge queues their work from each
+  the engine bridge's `timer`, `run_resync` and `turn_fact` executors, the
+  gate executors `gate_publish` and `gate_withdraw`, and the status-edge
+  observers below. The engine bridge queues their work from each
   run's engine log and folds their outcomes back (see "The engine bridge").
 - **Code:** protocols and value types in `coral/omni/protocols.py`; the
   facade in `coral/omni/server/sessions.py`; dispatch in
@@ -12,11 +13,14 @@
   `coral/workspace/executors.py`; shared executor steps in
   `coral/queue/run_effects.py`; drift in `coral/recovery/drift.py`; the engine
   bridge in `coral/bridge/`; step agents in `coral/omni/server/step_agents.py`;
-  the turn-fact recorder in `coral/omni/server/turn_facts.py`; wiring in
-  `coral/omni/server/plugin.py`.
+  the turn-fact recorder in `coral/omni/server/turn_facts.py`; gates and
+  alerts in `coral/gates/`, `coral/alerts/` and `coral/omni/server/gates.py`;
+  wiring in `coral/omni/server/plugin.py`.
 - **Related:** [`workspace-ops.md`](workspace-ops.md) (K13: the git ops and
-  their errors), [`persistence.md`](persistence.md) (the `coral_0002` and
-  `coral_0003` tables), [`plugin.md`](plugin.md) (K17),
+  their errors), [`persistence.md`](persistence.md) (the `coral_0002`,
+  `coral_0003` and `coral_0004` tables), [`plugin.md`](plugin.md) (K17),
+  [`gates-and-inbox.md`](gates-and-inbox.md) (gates, run alerts and the
+  workflow Inbox),
   [`engine-tools.md`](engine-tools.md) (K6),
   [`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md)
   (session topology).
@@ -31,7 +35,13 @@
    tools' decision pool (4 threads) and the worker supervisor.
 2. It registers the run protection below, the engine tools
    ([`engine-tools.md`](engine-tools.md)) and the bridge's own executors,
-   `timer` and `run_resync`, which need only Coral's stores.
+   `timer` and `run_resync`, which need only Coral's stores. Then gate
+   delivery and answers, also without the session engine: the
+   `gate_publish` and `gate_withdraw` executors (`gate_withdraw` with
+   `runs_after_terminal`), the verdict handler for `coral_gate_` prompts,
+   then the anchor's admission of approvals, the S5 observer that tracks this
+   process's gate prompts and the per-process prompt sweep
+   ([`gates-and-inbox.md`](gates-and-inbox.md)).
 3. When the app has `state.session_event_dispatch` and the plugin services
    carry the conversation, agent, artifact, host and project stores, the
    agent cache, the host registry and the runner router, it wires the session
@@ -57,14 +67,18 @@
    `executor.missing` for up to 30 minutes, then retried until their attempts
    run out, which pauses the run `infra`.
 4. It starts the supervisor last. Its finished items feed the bridge, its
-   hold policy is the bridge's, and its resync task repairs each active run
-   (see "The engine bridge").
+   hold policy is the bridge's, its startup sweep republishes every open
+   gate's prompt, and its resync task repairs each active run and shows again
+   any gate prompt this process lost (see "The engine bridge").
 
 On exit it stops the supervisor first: the drain workers are cancelled, and an
 item in flight keeps its lease and is reclaimed after it expires, so no item is
 claimed while its executor is missing. Then it stops the refresher and
-unregisters the observers, the recorder and the executors in reverse order;
-the decision pool closes after the engine tools are removed, then the bridge's
+unregisters the observers, the recorder and the executors in reverse order. The
+gates go in the same order: the prompt sweep stops, the gate prompt observer is
+removed, the anchor stops admitting approvals (an answer admitted just before
+is told to retry), then the verdict handler and the gate executors go. The
+decision pool closes after the engine tools are removed, then the bridge's
 pool, and the process claim is released last. A start that fails part-way
 unregisters what it registered. Entering again after an exit registers again
 without a conflict.
@@ -74,10 +88,12 @@ runs raises `RuntimeError` before it registers anything, and the first keeps
 its registrations ([`plugin.md`](plugin.md)).
 
 The built objects are on `app.state`: `coral_run_store`, `coral_queue_store`,
-`coral_worker_supervisor`, `coral_engine_bridge` and `coral_bound_sessions`,
-and with the session engine also `coral_session_facade`,
-`coral_session_dispatch`, `coral_status_edges`, `coral_confirmed_stops`,
-`coral_turn_fact_recorder` and `coral_bound_session_refresher`.
+`coral_worker_supervisor`, `coral_engine_bridge`, `coral_bound_sessions`,
+`coral_gate_publisher`, `coral_gate_prompts` and `coral_alert_store` (which the
+workflow Inbox routes read), and with the session engine also
+`coral_session_facade`, `coral_session_dispatch`, `coral_status_edges`,
+`coral_confirmed_stops`, `coral_turn_fact_recorder` and
+`coral_bound_session_refresher`.
 
 ## Ids
 
@@ -430,19 +446,20 @@ workflow, and takes the run owner, credentials, workflow and run target from
 the server, never from the request. Engine tool calls record the calling
 session ([`engine-tools.md`](engine-tools.md)).
 
-**One commit path.** Every engine input (a start, a finished item's outcome,
-a timer, a turn fact, a resume or cancel, a drift pause, an engine-tool
-decision) goes through `build_commit` (`coral/bridge/commit.py`) and one
-compare-and-swap `apply_transition`: the entries as ENGINE log rows, the work
-their effects queue, timer rows for new armings, the run and slot
-projections, and, on a return to running, the release of held items and the
-revival of exhausted effects. Engine state is never stored: it is the fold of
-the run's ENGINE rows over the graph pinned at start, with the config frozen
-in the run spec ([`persistence.md`](persistence.md)). A run that cannot be
-loaded is paused `failure_path` (detail `engine.load_failed`) once, on its row
-alone. A commit that cannot be built (more than 64 rows, a profile with no
-step stance, an oversized payload) pauses the run `failure_path` instead of
-being retried.
+**One commit path.** Every engine input (a start, a finished item's outcome, a
+timer, a turn fact, a resume or cancel, a drift pause, an engine-tool decision)
+goes through `build_commit` (`coral/bridge/commit.py`) and one compare-and-swap
+`apply_transition`: the entries as ENGINE log rows, the work their effects
+queue, timer rows for new armings, the run, slot and gate-visit projections,
+the run's alert raises and resolutions
+([`gates-and-inbox.md`](gates-and-inbox.md)), and, on a return to running, the
+release of held items and the revival of exhausted effects. Engine state is
+never stored: it is the fold of the run's ENGINE rows over the graph pinned at
+start, with the config frozen in the run spec
+([`persistence.md`](persistence.md)). A run that cannot be loaded is paused
+`failure_path` (detail `engine.load_failed`) once, on its row alone. A commit
+that cannot be built (more than 64 rows, a profile with no step stance, an
+oversized payload) pauses the run `failure_path` instead of being retried.
 
 **Start.** `start_engine_run` compiles and validates the YAML itself, never
 taking a graph from the caller, and refuses, before anything is written, with
@@ -450,14 +467,16 @@ taking a graph from the caller, and refuses, before anything is written, with
 `graph.unresolved`, `graph.no_start`, `profile.unsupported` (a roster profile
 other than `implementer` or `reviewer`), `run.owner_required`,
 `run.field_invalid` (out-of-range limits, a preset orchestrator, text a column
-cannot take), `run.target_invalid` (no host, worktree or repository, or
-another branch than `run_branch_name(run_id)`), `graph.leaves_region` (an
-arrow out of a parallel branch), `graph.concurrent_writers` (two implementers
-at once in one worktree), `graph.too_wide` (more than 32 live slots, or 48
-live slots and open decisions) and `graph.ids_too_long` (an effect key over
-512 characters). It then pins the graph, starts the run and commits
-`StartRun`. A repeat with the same key, caller fields and YAML returns the same
-run; anything else is `StartKeyConflict`.
+cannot take), `run.target_invalid` (no host, worktree or repository, or another
+branch than `run_branch_name(run_id)`), `graph.leaves_region` (an arrow out of
+a parallel branch), `graph.concurrent_writers` (two implementers at once in one
+worktree), `graph.too_wide` (more than 32 live slots, or 48 live slots, open
+decisions and open gates), `graph.gate_too_large` (a gate with more than 16
+outcomes or an outcome over 128 characters) and `graph.ids_too_long` (an effect
+key over 512 characters, a gate's `withdraw_gate` key included). It then pins
+the graph, starts the run and commits `StartRun`. A repeat with the same key,
+caller fields and YAML returns the same run; anything else is
+`StartKeyConflict`.
 
 **Work.** One row per effect or bridge item, keyed so a repeated commit never
 queues it twice. Slot rows carry the store `slot_id` and the slot's
@@ -477,14 +496,17 @@ generation, so the drainer abandons a stale one; every payload stays under
 | An armed timer | TIMER `timer`, due at its deadline | `timer:<key>:<generation>:<due_at_us>` | The executor commits `TimerDue` |
 | A bound session's turn end; a re-gather | SIGNAL `turn_fact` | `sig:<session>:<response or origin>:<status>:<observed_at_ms>`; `sig:<session>:resync:<five-minute bucket>` | The executor reconciles the turn |
 | The run's repair | SIGNAL `run_resync`, one recurring row per run | `resync` | The executor runs the resync |
+| `publish_gate` | EFFECT `gate_publish`, payload the visit's row id only | the effect key | Never fed to the engine; a final failure pauses the run (`gate:<code>`) while its visit is live |
+| `withdraw_gate` | EFFECT `gate_withdraw`, run after the run ended too | the effect key | Never fed; a failure never pauses the run |
 
-`publish_gate`, `withdraw_gate`, `notify` (other than a decision reminder),
-`runner_lost` and `retry_step` queue no work yet; each is logged when
-committed. `arm_timer` needs none: timer rows come from the run's armed
-timers. Briefs carry the step's goal, the run request (its `request_preview`,
-at most 512 characters), the reports that led to the step and the label and
-reason of a decision that sent the run there, quoted line by line as data;
-every brief and nudge repeats the activation id.
+`notify` (other than a decision reminder), `runner_lost` and `retry_step` queue
+no work yet; each is logged when committed. Alerts come from the commit itself,
+not from `notify` ([`gates-and-inbox.md`](gates-and-inbox.md)). `arm_timer`
+needs none: timer rows come from the run's armed timers. Briefs carry the
+step's goal, the run request (its `request_preview`, at most 512 characters),
+the reports that led to the step and the label and reason of a decision that
+sent the run there, quoted line by line as data; every brief and nudge repeats
+the activation id.
 
 **Feedback.** The drainer finishes a row first; then the bridge's hook folds
 its outcome (`coral/bridge/feedback.py`). A SUCCEEDED row becomes
@@ -494,7 +516,8 @@ run `infra` and leaves the effect without a receipt; any other failure is
 permanent, receipts the effect and pauses `failure_path`. The receipt marks
 the effect consumed, so feeding a row twice changes nothing. A completed
 create pushes its session into the bound-session index. Only a resume revives
-a FAILED row of an unreceipted effect.
+a FAILED row of an unreceipted effect, and a FAILED `gate_publish` of a live
+visit.
 
 **Holds** (`bridge_hold_policy`). A refused item with one of these codes is
 re-pended without spending its attempt. Its horizon counts from
@@ -519,12 +542,12 @@ once in a process, so a slow close holds up only its own run. Every minute it
 makes each active run's `run_resync` row due, a paused run's at most every 15
 minutes. The resync starts a run whose `StartRun` was lost; feeds the finished
 rows of unreceipted effects, the anchor and the orchestrator's create and open
-requests, and queues missing ones; restores the rows of armed timers and
-revives a FAILED one; releases the holds of a running run; re-gathers the turn
-of each working slot of a running run, and of the orchestrator a decision
-waits on, once every five minutes; and writes the projection when the rows
-differ. Hourly, finished SIGNAL and TIMER rows older than 24 hours are purged;
-EFFECT rows stay.
+requests, and queues missing ones, a live gate visit's `gate_publish` among
+them; restores the rows of armed timers and revives a FAILED one; releases the
+holds of a running run; re-gathers the turn of each working slot of a running
+run, and of the orchestrator a decision waits on, once every five minutes; and
+writes the projection when the rows differ. Hourly, finished SIGNAL and TIMER
+rows older than 24 hours are purged; EFFECT rows stay.
 
 **Turn facts.** `TurnFactRecorder` (`coral/omni/server/turn_facts.py`) is the
 S1 observer `"coral.turn_facts"`. For each published edge it does one dict
@@ -622,7 +645,10 @@ the stored state.
 - **Auth-off tests.** Most facade tests, and the lifespan tests of the bridge,
   run without an auth provider, which a production server always has
   (single-user mode acts as `"local"`), so the owner, grant and
-  launch-permission paths are proven mostly with auth off.
+  launch-permission paths are proven mostly with auth off. Gate answers and
+  the workflow Inbox also run through the real routes under header and
+  accounts authentication (`tests/coral/omni/test_gate_routes_auth.py`,
+  `test_gate_routes_accounts.py`).
 - **Error texts.** The 529, 429 and 401 texts the classifier reads are the
   shapes traced in the claude-sdk and runner code, not captured from a real
   run. A text no rule reads pauses `failure_path` (`agent.failed`), which a
@@ -739,7 +765,7 @@ are refused alike.
 |---|---|---|
 | `PATCH /v1/sessions/{id}` | every field but the allowed ones: `runner_id`, `model_override`, `reasoning_effort`, `collaboration_mode`, `permission_mode`, `approval_mode`, `cost_control_mode_override`, `subagent_routing_override`, `external_session_id`, `terminal_launch_args`, `project_id`, `share_workspace_files` (either value); every label whose key, as a case- and accent-insensitive collation compares it, starts with `omnigent.` (`omnigent.closed` with any value, `omnigent.parent_wake`, `omnigent.wrapper`, `omnigent.ui` and the rest), except exactly `omnigent.pinned`; a title containing `:closed:`, which Omnigent also reads as closed | `title`, `archived` (with `delete_worktree`), `family_pinned`, `silent`, `omnigent.pinned`, labels outside `omnigent.` |
 | Renames through `/agent-title` and `/auto-title` | a title containing `:closed:` | any other title |
-| Events to the anchor or a closed step (`omnigent.closed` = `true`) | every client event type but the allowed ones, items such as `reasoning` or `function_call`, an approval (also through `POST /v1/sessions/{id}/elicitations/{eid}/resolve`) and a peer `session_message` included, and any type Omnigent adds for clients later | `interrupt`, `stop_session` |
+| Events to the anchor or a closed step (`omnigent.closed` = `true`) | every client event type but the allowed ones, items such as `reasoning` or `function_call`, an approval (also through `POST /v1/sessions/{id}/elicitations/{eid}/resolve`) and a peer `session_message` included, and any type Omnigent adds for clients later | `interrupt`, `stop_session`; on the anchor (closed or not) also an approval, by either route, while Coral's gate verdict handler is registered |
 | Events to an open step or the orchestrator | `clear` (claude-sdk would move the step into an unbound session), a peer agent's `session_message` | `message`, `slash_command`, `compact`, `retry_session`, items, approvals, `interrupt`, `stop_session` |
 | Runner-only event types (`external_*`, `subagent.status`), on any bound session, including the batched `external_conversation_item` path | from a client: Omnigent lets an owner post them, and some write the session (effort, launch args, mode labels, child rows) | from the session's own runner: a tunnel token bound to the row's `runner_id` |
 | Runner launch; a grant (public included); a child session (JSON, multipart or orchestrated create) or a sibling (`sibling_source_id`, checked against the family's root); `PUT /v1/sessions/{id}/agent`; a session MCP server create, update, delete or registry select; a scheduled task created or patched to continue it | always | none |
@@ -800,7 +826,13 @@ test until someone classifies it.
   terminal attach.
 - Session policies on a run session stay editable, so a user's ASK or DENY on
   the anchor reaches every step.
-- Admins bypass Omnigent's access checks, not the mutation guard.
+- Admins bypass Omnigent's access checks, not the mutation guard. An admin's
+  or an edit grantee's gate answer reaches the gate handler, which refuses it
+  (`not_permitted`): only the run owner answers a gate.
+- While the anchor admits approvals, an approval for an id no handler claims
+  takes Omnigent's own path there: it answers 202 and drops a step prompt
+  mirrored onto the anchor without answering it. Only the owner or an admin
+  can post it ([`gates-and-inbox.md`](gates-and-inbox.md), Residuals).
 - A split-database row read torn, without its labels, is not protected until
   the facade repairs it: the `coral.run_id` label is the only pre-filter.
 - A scheduled task pointed at a session before it was bound is not checked
@@ -920,6 +952,14 @@ test until someone classifies it.
   and an owner-authenticated gate answer, resume or cancel does not prove a
   person took it. ADR-05 records this as probe 15's decision, with its owners
   ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md)).
+- **Servers that require no identity.** With authentication off, or on a
+  single-user header server, every request without credentials is the local
+  user. Any process of that user that can reach the server (a step shell the
+  sandbox lets reach loopback or the server URL, or the `omnigent` CLI) can
+  read a gate's prompt and answer it as the owner, and with a single-user
+  server bound to a non-loopback address so can any network peer. Nothing on
+  the server can tell such a process from the person, so no gate is labelled
+  Enforced there ([`gates-and-inbox.md`](gates-and-inbox.md)).
 
 ## Deferred work and owners
 
@@ -932,13 +972,13 @@ process (see "The engine bridge" and
 
 | Work | Owner |
 |---|---|
-| Runs API and SSE: the routes that start, resume and cancel runs, and their authorization (the bridge authorizes nothing). Take the owner from the authenticated user, never the request (an ownerless run's agents are the local user's on a single-user server; use `allow_ownerless` only there: anywhere else its first create is refused `session.invalid`), and the host, worktree and branch from `coral/workspace/run_worktree.py`. Show stalls, pause causes and a step a person typed into, and offer only cancel for a run paused `failure_path` by anything but a step's `agent.failed` (see "What a resume clears"). Project activation and gate rows. Store the full run request: briefs carry only `request_preview`, at most 512 characters. | CRL-135 |
+| Runs API and SSE: the routes that start, resume and cancel runs, and their authorization (the bridge authorizes nothing). Take the owner from the authenticated user, never the request (an ownerless run's agents are the local user's on a single-user server; use `allow_ownerless` only there: anywhere else its first create is refused `session.invalid`), and the host, worktree and branch from `coral/workspace/run_worktree.py`. Show stalls, pause causes and a step a person typed into, and offer only cancel for a run paused `failure_path` by anything but a step's `agent.failed` (see "What a resume clears"). Project activation rows (gate rows are projected by the bridge). Store the full run request: briefs carry only `request_preview`, at most 512 characters. The workflow Inbox's run actions: Resume and Cancel, the run view, marking a run's alerts read when it is opened, and bulk ack ([`gates-and-inbox.md`](gates-and-inbox.md)). | CRL-135 |
 | Unloadable runs: one already paused for another reason shows no load-failure cause, and none can be cancelled, because cancel goes through the engine and no store-only cancel exists | CRL-135 |
 | A pause made on the run row alone has no durable marker: a resync repair between the engine's own pause and its plan probe can take over the row's reason, and the probe then lifts the row | CRL-135 |
-| Gates and the Inbox: `publish_gate`, `withdraw_gate` and `notify` delivery queue no work, and the decision alert reaches only the orchestrator. No claude-sdk gate may be labelled Enforced until the sandbox probe below passes. | CRL-134 (alerts: GTE-06) |
 | Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)), which must check the host token; `runner_lost` and `retry_step` work (a retry clears every `failure_path` cause, and a resume then stops clearing a step's `agent.failed`), binding a retried slot's new session with the slot's current `session_generation` (port rule (a), [`engine-tools.md`](engine-tools.md)); replacing an orchestrator, with keys and a fence scoped to its generation; backoff for an orchestrator's transient failures, which pause the run at once; winding down the anchor and orchestrator sessions after a run ends | CRL-137 |
 | Tier B: the real 529, 429 and 401 texts the classifier reads, and worktree fingerprint noise on real hosts, which pauses writer steps `drift` (`pending_input`) | CRL-137 |
-| ADR-05 probe 15 residuals: the sandbox probe on macOS seatbelt and Linux bwrap (sibling harness sockets, sibling runners' environments, bridge dirs, the user's credential files), before the walking skeleton is done | CRL-137 |
+| ADR-05 probe 15 residuals: the sandbox probe on macOS seatbelt and Linux bwrap (sibling harness sockets, sibling runners' environments, bridge dirs, the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials), before the walking skeleton is done | CRL-137 |
+| Label a gate Enforced only when that probe passes and the server requires identity, with steps holding no owner credential; never on single-user or auth-off servers. No gate is labelled Enforced today | RUL-02 |
 | A force-deleted `coral__` agent leaves the live steps that run it unable to hand off, with only `/mcp` failing closed, until the nudge cap pauses the run: consult the required-policy provider on the no-agent branch keyed on the binding, or stop the run's sessions on a forced delete | CRL-137 |
 | Runner proof has two predicates (S49's `runner_proven` and the events route's bound-runner check); prove end to end that a real claude-sdk step's runner-only traffic passes the event guard | CRL-137 |
 | Host channel `fingerprint(L2)`, `merge`, `check`, and the backend swap (WSP-02/WSP-07); the macOS move-aside after a host crash and `git worktree prune` (see "Also known") | CRL-141 |

@@ -10,7 +10,6 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -43,7 +42,6 @@ from coral.db.enum_codecs import (
     WorkStatus,
 )
 from coral.db.migrate import ensure_coral_schema
-from coral.engine.types import AnswerGate
 from coral.gates import sweep as sweep_module
 from coral.gates.ids import GATE_ELICITATION_PREFIX, GATE_PUBLISH, GATE_WITHDRAW
 from coral.gates.republish import GateRepublisher
@@ -71,7 +69,7 @@ from coral.queue.executors import (
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.slots.executors import CANCEL_SESSIONS, CLOSE_SLOT, CREATE_SESSION, SEND_INPUT
 from coral.stores.alerts import SqlAlchemyAlertStore
-from coral.stores.protocols import CoralRun, RunStartSpec, Transition, WorkItemDraft
+from coral.stores.protocols import RunStartSpec, Transition, WorkItemDraft
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import SessionBindingDraft, SqlAlchemySessionBindingStore
 from coral.tools import catalog as tool_catalog
@@ -88,11 +86,9 @@ from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.policies.types import EvaluationContext, PolicyResult
 from omnigent.runtime import pending_elicitations
-from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.builder import build_policy_engine
 from omnigent.runtime.policies.required_providers import required_policies_apply
-from omnigent.server import elicitation_hooks, mutation_guards, session_live_state
-from omnigent.server.app import create_app
+from omnigent.server import accounts_store, elicitation_hooks, mutation_guards, session_live_state
 from omnigent.server.host_registry import _expected_host_owner
 from omnigent.server.mutation_guards import (
     SESSION_EVENT,
@@ -105,15 +101,10 @@ from omnigent.server.server_plugins import ServerServices
 from omnigent.server.server_tools import ServerToolCall, server_tool
 from omnigent.spec import AgentSpec
 from omnigent.spec.types import Phase, PolicyAction
-from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
-from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
-from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
-from omnigent.stores.host_store import HostStore
-from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
-from tests.coral.bridge._gates import APPROVE_TOKEN, GATE_ONLY
+from tests.coral.bridge._gates import APPROVE_TOKEN
 from tests.coral.bridge._world import (
     USER,
     BindingFacade,
@@ -122,6 +113,17 @@ from tests.coral.bridge._world import (
     run_spec,
     start,
     start_without_engine,
+)
+from tests.coral.omni._gate_server import (
+    CoralServer,
+    coral_server,
+    gate_answers,
+    gate_run,
+    pending_here,
+    pending_prompts,
+    prompt_shown,
+    resolve_gate,
+    run_status,
 )
 from tests.coral.slots._close_fakes import FakeDispatch
 from tests.coral.workspace._executor_fakes import (
@@ -179,13 +181,9 @@ def _coral_mutation_guard() -> object | None:
     return dict(mutation_guards._registered()).get(MUTATION_GUARD)
 
 
-@dataclass
-class _Server:
-    """A real app with the stores the session engine needs, and its plugin services."""
-
-    app: FastAPI
-    services: ServerServices
-    db_uri: str
+def _registration_carriers() -> int:
+    """How many S105 carriers a password change would call now."""
+    return len(accounts_store._registration_carriers)
 
 
 @pytest.fixture
@@ -200,45 +198,8 @@ def no_engine_resync(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def server(db_uri: str, tmp_path: Path) -> _Server:
-    artifact = LocalArtifactStore(str(tmp_path / "artifacts"))
-    conversation = SqlAlchemyConversationStore(db_uri)
-    agent = SqlAlchemyAgentStore(db_uri)
-    agent_cache = AgentCache(artifact_store=artifact, cache_dir=tmp_path / "cache")
-    host = HostStore(db_uri)
-    project = SqlAlchemyProjectStore(db_uri)
-    file = SqlAlchemyFileStore(db_uri)
-    app = create_app(
-        agent_store=agent,
-        file_store=file,
-        conversation_store=conversation,
-        artifact_store=artifact,
-        agent_cache=agent_cache,
-        host_store=host,
-        project_store=project,
-    )
-    services = ServerServices(
-        agent_store=agent,
-        file_store=file,
-        conversation_store=conversation,
-        artifact_store=artifact,
-        agent_cache=agent_cache,
-        comment_store=None,
-        policy_store=None,
-        permission_store=None,
-        scheduled_task_store=None,
-        project_store=project,
-        preference_store=None,
-        host_store=host,
-        account_store=None,
-        auth_provider=None,
-        runner_router=app.state.runner_router,
-        host_registry=app.state.host_registry,
-        tunnel_registry=app.state.tunnel_registry,
-        server_config={},
-        host_sharded=False,
-    )
-    return _Server(app=app, services=services, db_uri=db_uri)
+def server(db_uri: str, tmp_path: Path) -> CoralServer:
+    return coral_server(db_uri, tmp_path)
 
 
 async def test_omnigent_run_scope_runner_sets_all_three_ambient_scopes() -> None:
@@ -279,6 +240,7 @@ async def test_coral_lifespan_skips_in_memory_or_d1_and_boots_on_operational_db(
     async with coral_lifespan(app, in_mem_services):
         assert not hasattr(app.state, "coral_worker_supervisor")
         assert _engine_registrations() == NOTHING
+        assert _registration_carriers() == 0
 
     # 2. Cloudflare D1 is skipped cleanly
     d1_services = cast(
@@ -291,6 +253,7 @@ async def test_coral_lifespan_skips_in_memory_or_d1_and_boots_on_operational_db(
     async with coral_lifespan(app, d1_services):
         assert not hasattr(app.state, "coral_worker_supervisor")
         assert _engine_registrations() == NOTHING
+        assert _registration_carriers() == 0
 
     # 3. Host-sharded raises RuntimeError
     sharded_services = cast(
@@ -323,11 +286,14 @@ async def test_coral_lifespan_skips_in_memory_or_d1_and_boots_on_operational_db(
         assert sup.is_leader
         # Without the server's stores the session engine stays unwired.
         assert _engine_registrations() == NOTHING
+        # A password change carries the owner's Coral rows only while Coral runs.
+        assert _registration_carriers() == 1
     assert not sup.is_leader
+    assert _registration_carriers() == 0
 
 
 async def test_coral_lifespan_registers_and_unregisters_engine_executors(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     at_stop: list[tuple[frozenset[str], frozenset[str]]] = []
     stop = WorkerSupervisor.stop
@@ -365,7 +331,7 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
 
 
 async def test_a_second_concurrent_lifespan_raises_before_registering_anything(
-    server: _Server,
+    server: CoralServer,
 ) -> None:
     kinds = ENGINE_EFFECT_TYPES | BRIDGE_EFFECT_TYPES
     with installed_tool_providers():
@@ -414,7 +380,7 @@ async def test_a_second_concurrent_lifespan_raises_before_registering_anything(
     [({}, 4), ({"coral_drain_concurrency": 2}, 2), ({"coral_drain_concurrency": 16}, 16)],
 )
 async def test_the_lifespan_wires_the_bridge_into_the_supervisor_and_unwires_it_on_exit(
-    server: _Server,
+    server: CoralServer,
     monkeypatch: pytest.MonkeyPatch,
     server_config: dict[str, Any],
     workers: int,
@@ -462,7 +428,7 @@ async def test_the_lifespan_wires_the_bridge_into_the_supervisor_and_unwires_it_
 
 @pytest.mark.parametrize("value", [0, 65, True, "4", 2.0])
 async def test_a_drain_concurrency_outside_1_to_64_fails_the_start_and_wires_nothing(
-    server: _Server, value: object
+    server: CoralServer, value: object
 ) -> None:
     services = dataclasses.replace(
         server.services, server_config={"coral_drain_concurrency": value}
@@ -486,7 +452,9 @@ def test_the_drain_concurrency_defaults_to_four() -> None:
     assert plugin_module.drain_concurrency({"coral_drain_concurrency": 64}) == 64
 
 
-async def test_the_supervisor_starts_a_run_whose_engine_start_was_lost(server: _Server) -> None:
+async def test_the_supervisor_starts_a_run_whose_engine_start_was_lost(
+    server: CoralServer,
+) -> None:
     """The startup sweep schedules the run's resync; the pool drains it on the bridge."""
     ensure_coral_schema(server.db_uri)
     world = World.sql(server.db_uri)
@@ -505,7 +473,7 @@ async def test_the_supervisor_starts_a_run_whose_engine_start_was_lost(server: _
 
 @pytest.mark.parametrize("engine", ["wired", "unwired", "no_database"])
 async def test_engine_tools_are_wired_with_the_decision_port_and_removed_on_exit(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, engine: str
 ) -> None:
     assert tool_catalog.CATALOG == ENGINE_TOOLS
     services: Any = server.services
@@ -553,7 +521,7 @@ async def test_engine_tools_are_wired_with_the_decision_port_and_removed_on_exit
 )
 @pytest.mark.usefixtures("coral_policy_registry")
 async def test_a_live_handoff_call_commits_on_a_run_the_supervisor_started(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, exit_while_deciding: bool
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, exit_while_deciding: bool
 ) -> None:
     """
     The supervisor creates the anchor and the step and sends the brief; the step hands off.
@@ -707,7 +675,7 @@ def _thread_recording(
 
 @pytest.mark.parametrize("engine", ["wired", "unwired"])
 async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifespan(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, engine: str
 ) -> None:
     hooks: list[str] = []
     register_post_commit = SqlAlchemyCoralRunStore.register_post_commit
@@ -741,7 +709,7 @@ async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifes
 
 
 async def test_the_mutation_guard_refuses_changes_to_a_bound_session_while_the_lifespan_runs(
-    server: _Server,
+    server: CoralServer,
 ) -> None:
     """The registered guard reads the real binding store in the request's workspace."""
     bindings = SqlAlchemySessionBindingStore(server.db_uri)
@@ -780,7 +748,7 @@ async def test_the_mutation_guard_refuses_changes_to_a_bound_session_while_the_l
 
 @pytest.mark.usefixtures("no_engine_resync")
 async def test_each_lifespan_guards_bound_sessions_through_its_own_run_store_only(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     heard: list[tuple[int, str]] = []
     invalidate = RunStatusCache.invalidate
@@ -859,7 +827,7 @@ async def test_each_lifespan_guards_bound_sessions_through_its_own_run_store_onl
 
 @pytest.mark.usefixtures("no_engine_resync")
 async def test_the_lifespan_records_the_turn_ends_of_bound_sessions_from_a_refreshed_index(
-    server: _Server,
+    server: CoralServer,
 ) -> None:
     await asyncio.to_thread(ensure_coral_schema, server.db_uri)
     run_store = SqlAlchemyCoralRunStore(server.db_uri)
@@ -928,7 +896,7 @@ async def test_the_lifespan_records_the_turn_ends_of_bound_sessions_from_a_refre
 
 @pytest.mark.parametrize("missing", ["session_event_dispatch", "project_store"])
 async def test_a_server_without_an_engine_input_wires_nothing(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, missing: str
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, missing: str
 ) -> None:
     services = server.services
     if missing == "session_event_dispatch":
@@ -981,7 +949,7 @@ def _fail_lifespan_start(patch: pytest.MonkeyPatch, failing: str) -> None:
 
 @pytest.mark.parametrize("failing", ["schema", "executor", "observer", "supervisor_start"])
 async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
-    server: _Server, failing: str
+    server: CoralServer, failing: str
 ) -> None:
     with pytest.MonkeyPatch.context() as patch:
         _fail_lifespan_start(patch, failing)
@@ -995,6 +963,7 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
     assert not _coral_policies_registered()
     assert _coral_mutation_guard() is None
     assert elicitation_hooks.claimed_handler(GATE_PROMPT) is None
+    assert _registration_carriers() == 0
     # The failed start released the process: the next lifespan starts.
     async with coral_lifespan(server.app, server.services):
         assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
@@ -1003,7 +972,7 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
 
 @pytest.mark.usefixtures("no_engine_resync")
 async def test_item_claimed_during_exit_is_retried_not_failed(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_store = SqlAlchemyCoralRunStore(server.db_uri)
     queue = SqlAlchemyCoralQueueStore(server.db_uri)
@@ -1074,7 +1043,7 @@ async def test_item_claimed_during_exit_is_retried_not_failed(
 
 @pytest.mark.usefixtures("no_engine_resync")
 async def test_a_close_and_a_commit_share_one_stop_record(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A close's confirmed stop lets a later commit past its turn check, until the step runs."""
     workspace_id = DEFAULT_WORKSPACE_ID
@@ -1166,7 +1135,7 @@ async def test_a_close_and_a_commit_share_one_stop_record(
 
 @pytest.mark.usefixtures("no_engine_resync")
 async def test_an_anchor_bound_send_stops_the_anchor_runner_through_the_lifespans_dispatch(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The drift pause's stop reaches the dispatch the lifespan built, which holds the pauser."""
     stops: list[tuple[str, str | None]] = []
@@ -1284,7 +1253,7 @@ def _record_gate_wiring(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> N
     monkeypatch.setattr(WorkerSupervisor, "stop", recording_stop)
 
 
-def _anchor_approval(server: _Server) -> MutationAttempt:
+def _anchor_approval(server: CoralServer) -> MutationAttempt:
     """An approval posted to a run's anchor, whose binding row the store holds."""
     conversations = cast(SqlAlchemyConversationStore, server.services.conversation_store)
     anchor = conversations.create_conversation(
@@ -1308,7 +1277,7 @@ def _anchor_approval(server: _Server) -> MutationAttempt:
 @pytest.mark.usefixtures("clean_elicitations")
 @pytest.mark.parametrize("engine", ["wired", "unwired"])
 async def test_the_lifespan_wires_gate_delivery_and_answers_and_unwires_them_in_order(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, engine: str
 ) -> None:
     """Gates are wired with or without the session engine, each lifespan again."""
     ensure_coral_schema(server.db_uri)
@@ -1361,43 +1330,6 @@ async def test_the_lifespan_wires_gate_delivery_and_answers_and_unwires_them_in_
     await check_mutation(approval)
 
 
-def _gate_run(server: _Server, start_key: str = "gate-1") -> tuple[World, CoralRun, str, str]:
-    """A ``gate_only`` run of the single local user at its gate; its anchor and prompt id."""
-    ensure_coral_schema(server.db_uri)
-    world = World.sql(server.db_uri)
-    run = start(
-        world,
-        GATE_ONLY,
-        spec=run_spec(user=None, start_key=start_key, workspace_id=DEFAULT_WORKSPACE_ID),
-        start_key=start_key,
-        allow_ownerless=True,
-        actor=None,
-    )
-    state, _version = world.runs.load_run_state(run.id, workspace_id=DEFAULT_WORKSPACE_ID)
-    [row] = state.gate_visits
-    assert row.elicitation_id is not None
-    return world, run, anchor_session_id(DEFAULT_WORKSPACE_ID, run.id), row.elicitation_id
-
-
-def _status(world: World, run: CoralRun) -> int:
-    stored = world.runs.get_run(run.id, workspace_id=DEFAULT_WORKSPACE_ID)
-    assert stored is not None
-    return stored.status
-
-
-def _pending_here(session_id: str, elicitation_id: str) -> bool:
-    """Whether this process's index holds the prompt on the session."""
-    with workspace_scope(DEFAULT_WORKSPACE_ID):
-        found = pending_elicitations.lookup(elicitation_id, conversation_id=session_id)
-    return found is not None
-
-
-def _shown(server: _Server, session_id: str, elicitation_id: str) -> bool:
-    """Whether the session exists and holds the prompt; a startup republish precedes the create."""
-    session = server.services.conversation_store.get_conversation(session_id)
-    return session is not None and _pending_here(session_id, elicitation_id)
-
-
 def _publish_finished(world: World, run_id: str) -> bool:
     """Whether the run's ``gate_publish`` rows succeeded, so no publish re-check is to come."""
     state = world.bridge.load(workspace_id=DEFAULT_WORKSPACE_ID, run_id=run_id).state
@@ -1408,34 +1340,12 @@ def _publish_finished(world: World, run_id: str) -> bool:
     return bool(rows) and all(row.status == int(WorkStatus.SUCCEEDED) for row in rows)
 
 
-def _alerts(server: _Server, run_id: str) -> list[tuple[int, int]]:
+def _alerts(server: CoralServer, run_id: str) -> list[tuple[int, int]]:
     """The run's alerts as sorted ``(kind, status)`` pairs."""
     alerts = SqlAlchemyAlertStore(server.db_uri).list_for_run(
         workspace_id=DEFAULT_WORKSPACE_ID, run_id=run_id
     )
     return sorted((alert.kind, alert.status) for alert in alerts)
-
-
-async def _pending_prompts(client: httpx.AsyncClient, session_id: str) -> list[dict[str, Any]]:
-    response = await client.get(f"/v1/sessions/{session_id}")
-    assert response.status_code == 200, response.text
-    return list(response.json().get("pending_elicitations") or [])
-
-
-def _resolve(
-    client: httpx.AsyncClient, session_id: str, elicitation_id: str, label: str = "approve"
-) -> Awaitable[httpx.Response]:
-    return client.post(
-        f"/v1/sessions/{session_id}/elicitations/{elicitation_id}/resolve",
-        json={"action": "accept", "content": {"decision": label}},
-    )
-
-
-def _answers(world: World, run_id: str) -> list[AnswerGate]:
-    rows = world.runs.read_engine_log(
-        run_id, workspace_id=DEFAULT_WORKSPACE_ID, max_run_version=2**31
-    )
-    return [entry.input for entry in decode_entries(rows) if isinstance(entry.input, AnswerGate)]
 
 
 @pytest.mark.usefixtures("clean_elicitations")
@@ -1451,21 +1361,21 @@ def _answers(world: World, run_id: str) -> list[AnswerGate]:
     ids=["same_label", "other_label"],
 )
 async def test_two_answers_at_once_through_the_resolve_route_advance_the_gate_once(
-    server: _Server, labels: tuple[str, str], outcomes: list[tuple[int, dict[str, Any]]] | None
+    server: CoralServer, labels: tuple[str, str], outcomes: list[tuple[int, dict[str, Any]]] | None
 ) -> None:
     """Auth off: the prompt is on the anchor; one answer commits, the other is told why."""
-    world, run, anchor, prompt = _gate_run(server)
+    world, run, anchor, prompt = gate_run(server.db_uri)
     transport = httpx.ASGITransport(app=server.app)
     async with (
         httpx.AsyncClient(transport=transport, base_url="http://test") as client,
         coral_lifespan(server.app, server.services),
     ):
-        await poll_until_async(lambda: _shown(server, anchor, prompt), timeout_s=budget(30))
-        [shown] = await _pending_prompts(client, anchor)
+        await poll_until_async(lambda: prompt_shown(server, anchor, prompt), timeout_s=budget(30))
+        [shown] = await pending_prompts(client, anchor)
         responses = await asyncio.gather(
-            *(_resolve(client, anchor, prompt, label) for label in labels)
+            *(resolve_gate(client, anchor, prompt, label) for label in labels)
         )
-        after = await _pending_prompts(client, anchor)
+        after = await pending_prompts(client, anchor)
 
     assert shown["elicitation_id"] == prompt
     assert shown["params"]["coral"]["run_id"] == run.id
@@ -1477,7 +1387,7 @@ async def test_two_answers_at_once_through_the_resolve_route_advance_the_gate_on
         ((response.status_code, response.json()) for response in responses),
         key=lambda item: (item[0], "error" in item[1], "duplicate" in item[1]),
     )
-    [winner] = _answers(world, run.id)
+    [winner] = gate_answers(world, run.id)
     if outcomes is not None:
         assert answered == outcomes
     else:
@@ -1485,7 +1395,7 @@ async def test_two_answers_at_once_through_the_resolve_route_advance_the_gate_on
         assert answered[1][1]["error"]["message"] == (
             f"[already_answered] Already answered: {winner.label}."
         )
-    assert (winner.by, _status(world, run)) == ("local", int(RunStatus.COMPLETED))
+    assert (winner.by, run_status(world, run)) == ("local", int(RunStatus.COMPLETED))
     assert after == []
     alerts = SqlAlchemyAlertStore(server.db_uri).list_for_run(
         workspace_id=DEFAULT_WORKSPACE_ID, run_id=run.id
@@ -1497,9 +1407,9 @@ async def test_two_answers_at_once_through_the_resolve_route_advance_the_gate_on
 
 @pytest.mark.usefixtures("clean_elicitations")
 async def test_the_prompt_relayed_onto_another_session_cannot_answer_the_gate(
-    server: _Server,
+    server: CoralServer,
 ) -> None:
-    world, run, anchor, prompt = _gate_run(server)
+    world, run, anchor, prompt = gate_run(server.db_uri)
     transport = httpx.ASGITransport(app=server.app)
     async with (
         httpx.AsyncClient(transport=transport, base_url="http://test") as client,
@@ -1507,16 +1417,16 @@ async def test_the_prompt_relayed_onto_another_session_cannot_answer_the_gate(
     ):
         agent = await create_test_agent(client)
         other = await create_session_for_agent(client, agent["id"])
-        await poll_until_async(lambda: _shown(server, anchor, prompt), timeout_s=budget(30))
-        [shown] = await _pending_prompts(client, anchor)
+        await poll_until_async(lambda: prompt_shown(server, anchor, prompt), timeout_s=budget(30))
+        [shown] = await pending_prompts(client, anchor)
         with workspace_scope(DEFAULT_WORKSPACE_ID):
             await elicitation_hooks.publish_form_elicitation(
                 other, shown["params"], elicitation_id=prompt
             )
-        relayed = await _resolve(client, other, prompt)
-        relayed_left = _pending_here(other, prompt)
-        still_waiting = _status(world, run)
-        answered = await _resolve(client, anchor, prompt)
+        relayed = await resolve_gate(client, other, prompt)
+        relayed_left = pending_here(other, prompt)
+        still_waiting = run_status(world, run)
+        answered = await resolve_gate(client, anchor, prompt)
 
     assert relayed.status_code == 409, relayed.text
     assert relayed.json()["error"]["message"] == (
@@ -1526,59 +1436,61 @@ async def test_the_prompt_relayed_onto_another_session_cannot_answer_the_gate(
     assert not relayed_left
     assert still_waiting == int(RunStatus.RUNNING)
     assert answered.status_code == 202, answered.text
-    assert [answer.label for answer in _answers(world, run.id)] == ["approve"]
+    assert [answer.label for answer in gate_answers(world, run.id)] == ["approve"]
 
 
 @pytest.mark.usefixtures("clean_elicitations")
 async def test_a_restarted_server_shows_the_same_prompt_and_takes_its_answer(
-    server: _Server,
+    server: CoralServer,
 ) -> None:
-    world, run, anchor, prompt = _gate_run(server)
+    world, run, anchor, prompt = gate_run(server.db_uri)
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         async with coral_lifespan(server.app, server.services):
-            await poll_until_async(lambda: _shown(server, anchor, prompt), timeout_s=budget(30))
-            [before] = await _pending_prompts(client, anchor)
+            await poll_until_async(
+                lambda: prompt_shown(server, anchor, prompt), timeout_s=budget(30)
+            )
+            [before] = await pending_prompts(client, anchor)
         # The process died: its index of prompts went with it.
         pending_elicitations.reset_for_tests()
-        assert await _pending_prompts(client, anchor) == []
+        assert await pending_prompts(client, anchor) == []
 
         async with coral_lifespan(server.app, server.services):
-            await poll_until_async(lambda: _pending_here(anchor, prompt), timeout_s=budget(30))
-            [after] = await _pending_prompts(client, anchor)
-            answered = await _resolve(client, anchor, prompt)
+            await poll_until_async(lambda: pending_here(anchor, prompt), timeout_s=budget(30))
+            [after] = await pending_prompts(client, anchor)
+            answered = await resolve_gate(client, anchor, prompt)
 
     assert after == before
     assert answered.status_code == 202, answered.text
-    assert _status(world, run) == int(RunStatus.COMPLETED)
+    assert run_status(world, run) == int(RunStatus.COMPLETED)
 
 
 @pytest.mark.usefixtures("clean_elicitations")
 async def test_answers_after_the_gate_moved_on_reach_the_handler_without_its_prompt(
-    server: _Server,
+    server: CoralServer,
 ) -> None:
     """A retry is a duplicate by either route; another answer is refused; one commit."""
-    world, run, anchor, prompt = _gate_run(server)
+    world, run, anchor, prompt = gate_run(server.db_uri)
     transport = httpx.ASGITransport(app=server.app)
     async with (
         httpx.AsyncClient(transport=transport, base_url="http://test") as client,
         coral_lifespan(server.app, server.services),
     ):
-        await poll_until_async(lambda: _shown(server, anchor, prompt), timeout_s=budget(30))
-        shown = await _pending_prompts(client, anchor)
-        first = await _resolve(client, anchor, prompt)
-        after = await _pending_prompts(client, anchor)
+        await poll_until_async(lambda: prompt_shown(server, anchor, prompt), timeout_s=budget(30))
+        shown = await pending_prompts(client, anchor)
+        first = await resolve_gate(client, anchor, prompt)
+        after = await pending_prompts(client, anchor)
         approval = {
             "elicitation_id": prompt,
             "action": "accept",
             "content": {"decision": "approve"},
         }
         later = [
-            await _resolve(client, anchor, prompt),
+            await resolve_gate(client, anchor, prompt),
             await client.post(
                 f"/v1/sessions/{anchor}/events", json={"type": "approval", "data": approval}
             ),
-            await _resolve(client, anchor, prompt, "reject"),
+            await resolve_gate(client, anchor, prompt, "reject"),
             await client.post(
                 f"/v1/sessions/{anchor}/elicitations/{prompt}/resolve", json={"action": "decline"}
             ),
@@ -1592,7 +1504,7 @@ async def test_answers_after_the_gate_moved_on_reach_the_handler_without_its_pro
     assert [
         (response.status_code, response.json()["error"]["message"]) for response in later[2:]
     ] == [refused] * 2
-    assert [(answer.label, answer.by) for answer in _answers(world, run.id)] == [
+    assert [(answer.label, answer.by) for answer in gate_answers(world, run.id)] == [
         ("approve", "local")
     ]
     assert _alerts(server, run.id) == sorted(
@@ -1604,15 +1516,17 @@ async def test_answers_after_the_gate_moved_on_reach_the_handler_without_its_pro
 
 
 @pytest.mark.usefixtures("clean_elicitations")
-async def test_a_cancel_withdraws_the_shown_prompt_after_the_run_ended(server: _Server) -> None:
-    world, run, anchor, prompt = _gate_run(server)
+async def test_a_cancel_withdraws_the_shown_prompt_after_the_run_ended(
+    server: CoralServer,
+) -> None:
+    world, run, anchor, prompt = gate_run(server.db_uri)
     transport = httpx.ASGITransport(app=server.app)
     async with (
         httpx.AsyncClient(transport=transport, base_url="http://test") as client,
         coral_lifespan(server.app, server.services),
     ):
         await poll_until_async(
-            lambda: _shown(server, anchor, prompt) and _publish_finished(world, run.id),
+            lambda: prompt_shown(server, anchor, prompt) and _publish_finished(world, run.id),
             timeout_s=budget(30),
         )
         await asyncio.to_thread(
@@ -1621,16 +1535,16 @@ async def test_a_cancel_withdraws_the_shown_prompt_after_the_run_ended(server: _
             run_id=run.id,
             actor="local",
         )
-        await poll_until_async(lambda: not _pending_here(anchor, prompt), timeout_s=budget(30))
-        after = await _pending_prompts(client, anchor)
-        answered = await _resolve(client, anchor, prompt)
+        await poll_until_async(lambda: not pending_here(anchor, prompt), timeout_s=budget(30))
+        after = await pending_prompts(client, anchor)
+        answered = await resolve_gate(client, anchor, prompt)
 
     assert after == []
     assert (answered.status_code, answered.json()["error"]["message"]) == (
         409,
         "[no_longer_waiting] This gate is no longer waiting.",
     )
-    assert (_answers(world, run.id), _status(world, run)) == ([], int(RunStatus.CANCELLED))
+    assert (gate_answers(world, run.id), run_status(world, run)) == ([], int(RunStatus.CANCELLED))
     assert _alerts(server, run.id) == sorted(
         [
             (int(AlertKind.GATE), int(AlertStatus.RESOLVED)),
@@ -1648,18 +1562,18 @@ class _EagerSweeper(GatePromptSweeper):
 
 @pytest.mark.usefixtures("clean_elicitations")
 async def test_the_sweep_withdraws_a_prompt_whose_gate_was_answered_elsewhere(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Another replica committed the answer, so no resolve reached this process."""
     monkeypatch.setattr(sweep_module, "GatePromptSweeper", _EagerSweeper)
-    world, run, anchor, prompt = _gate_run(server)
+    world, run, anchor, prompt = gate_run(server.db_uri)
     transport = httpx.ASGITransport(app=server.app)
     async with (
         httpx.AsyncClient(transport=transport, base_url="http://test") as client,
         coral_lifespan(server.app, server.services),
     ):
         await poll_until_async(
-            lambda: _shown(server, anchor, prompt) and _publish_finished(world, run.id),
+            lambda: prompt_shown(server, anchor, prompt) and _publish_finished(world, run.id),
             timeout_s=budget(30),
         )
         tracked = server.app.state.coral_gate_prompts.tracked()
@@ -1672,12 +1586,12 @@ async def test_the_sweep_withdraws_a_prompt_whose_gate_was_answered_elsewhere(
             note="",
             actor="local",
         )
-        await poll_until_async(lambda: not _pending_here(anchor, prompt), timeout_s=budget(30))
+        await poll_until_async(lambda: not pending_here(anchor, prompt), timeout_s=budget(30))
         tracked_after = server.app.state.coral_gate_prompts.tracked()
-        retried = await _resolve(client, anchor, prompt)
+        retried = await resolve_gate(client, anchor, prompt)
 
     assert [item.elicitation_id for item in tracked] == [prompt]
     assert (elsewhere.outcome, tracked_after) == ("accepted", [])
     assert (retried.status_code, retried.json()) == (202, {"queued": False, "duplicate": True})
-    assert len(_answers(world, run.id)) == 1
+    assert len(gate_answers(world, run.id)) == 1
     assert (int(AlertKind.GATE), int(AlertStatus.RESOLVED)) in _alerts(server, run.id)

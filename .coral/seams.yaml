@@ -3043,3 +3043,52 @@ seams:
       - pnpm-lock.yaml
     upstream_first: false
     upstream_candidate: false
+
+  - id: S105
+    title: Registration carriers move a plugin's rows across a password change
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A password change (or an admin reset) rotates an account's generation,
+      and `_carry_registration_work` moves the account's scheduled tasks and
+      hosts to the new one in the same transaction. Coral's runs and alerts
+      record the generation they were created under and only a request that
+      proves it can answer the run's gates or list its alerts, so without a
+      carry the owner lost her own gates and Inbox after changing her
+      password. `register_registration_carrier(fn)` adds a callable that
+      `_carry_registration_work` calls as `fn(session, user_id, old, new)`
+      after tasks and hosts move; it writes only through that session. An
+      error it raises aborts the rotation, so the account and every carried
+      row keep one generation. A savepoint could isolate a failing carrier;
+      aborting is chosen so a run never silently loses its owner, since the
+      old generation is recorded nowhere else to repair from. The cost: any
+      fault in Coral's carrier fails every password change and admin reset on
+      that server until it is fixed or Coral is unloaded; deleting the
+      account still revokes access (deletion calls no carrier). A retried
+      transaction calls it again. Registrations are a copy-on-write tuple of
+      (token, carrier) pairs under a writers-only lock; the returned
+      unregister removes only its own pair and is idempotent. Deleting and
+      re-creating an account calls no carrier, so a new registration sees
+      nothing of the old one. Coral's lifespan registers one carrier on a
+      usable operational database, which is the database the accounts live
+      in, and removes it on exit (`coral/stores/registration.py`).
+    files:
+      - omnigent/server/accounts_store.py
+      - tests/server/test_registration_carriers.py
+    tests:
+      - tests/server/test_registration_carriers.py
+      - tests/server/test_account_revocation.py
+    budget_lines: 40
+    budget_exception:
+      lines: 129
+      reason: >-
+        omnigent/server/accounts_store.py (36 added lines: the import, the
+        registry with its docstring and the carrier loop) is within budget.
+        tests/server/test_registration_carriers.py (new, 129 lines): four
+        tests (the call and its transaction, a failing carrier's rollback, no
+        call without a rotation or on re-creation, and unregister scope).
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

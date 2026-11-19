@@ -49,6 +49,8 @@ from omnigent.process_logging import data_dir
 from omnigent.server.server_plugins import ServerPluginRegistration, ServerServices
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
     from coral.omni.server.gates import GateAnswering, LocalGatePrompts
     from coral.omni.server.turn_facts import BoundSessionRefresher
 
@@ -239,6 +241,25 @@ def _wire_bridge(threads: BridgeThreads, stack: AsyncExitStack) -> None:
     _register_executors(
         {TIMER: timer_executor(threads), RUN_RESYNC: run_resync_executor(threads)}, stack
     )
+
+
+def _wire_registration_carrier(stack: AsyncExitStack) -> None:
+    """
+    Carry the owner's Coral rows across a password change (S105).
+
+    Omnigent calls the carrier inside the rotation's transaction on the operational
+    database, which holds Coral's tables; an error aborts the rotation. Its undo goes
+    on ``stack``.
+    """
+    from coral.stores.registration import carry_account_generation
+    from omnigent.server.accounts_store import register_registration_carrier
+
+    def carry(session: Session, user_id: str, old: str, new: str) -> None:
+        carry_account_generation(
+            session, workspace_id=current_workspace_id(), user_id=user_id, old=old, new=new
+        )
+
+    stack.callback(register_registration_carrier(carry))
 
 
 def _wire_gates(
@@ -472,7 +493,8 @@ async def coral_lifespan(
     One lifespan per process: on a usable operational database it first claims
     the process, and a second one entered meanwhile raises before registering
     anything. Then the guards for bound sessions, the engine tools with the
-    decision port, the engine bridge's executors and gate delivery and answers
+    decision port, the engine bridge's executors, the carrier that moves the
+    owner's Coral rows across a password change, and gate delivery and answers
     are registered, and with the server's stores present also the session
     engine's executors, its status-edge observers and the bound-session index
     the turn-fact recorder reads, all before the supervisor starts, whose
@@ -555,6 +577,7 @@ async def coral_lifespan(
                 gate_answering=answering,
             )
             _wire_bridge(threads, stack)
+            _wire_registration_carrier(stack)
             _wire_gates(
                 app,
                 services,
