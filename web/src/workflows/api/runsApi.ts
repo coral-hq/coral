@@ -2,10 +2,9 @@ import { authenticatedFetch } from "@/lib/identity";
 import { ApiError, apiErrorFromResponse } from "@/lib/sessionsApi";
 import type { CoralOperations, RunDetail } from "./generated/coralApi";
 
-// The runs API client (`/v1/coral/runs`). A refusal is the Coral envelope
-// `{error: {code, message, details}}`, thrown as an `ApiError` carrying the
-// status, code, message and `Retry-After`. Paths and bodies are typed from the
-// generated operations, so a renamed route fails the type check.
+// The runs API client (`/v1/coral/runs`). A refusal's Coral envelope is thrown as an
+// `ApiError` with its status, code, message and `Retry-After`. Paths and bodies are typed
+// from the generated operations, so a renamed route fails the type check.
 
 /** A lifecycle action, as a run's `allowed_actions` names it. */
 export type RunAction = RunDetail["allowed_actions"][number];

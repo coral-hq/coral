@@ -37,7 +37,7 @@ from coral.bridge.graphs import PinnedGraphMismatch, verified_content_hash
 from coral.bridge.keys import decision_rerequest_key
 from coral.bridge.mapping import FED_KINDS, UNMAPPED_KINDS
 from coral.bridge.messages import sanitize, strip_format_characters
-from coral.bridge.service import STORED_TEXT_ERRORS, EngineBridge, RunNotRunnable, RunRead
+from coral.bridge.service import EngineBridge, RunNotRunnable, RunRead
 from coral.db.enum_codecs import (
     RUN_AUTH_MODE,
     RUN_EXECUTION_TARGET,
@@ -49,7 +49,13 @@ from coral.gates.ids import MAX_GATE_OUTCOME_CHARS, MAX_GATE_OUTCOMES
 from coral.model.ids import derived_id
 from coral.model.ir import CompiledGraph, CompiledNode
 from coral.queue.run_effects import MAX_EFFECT_KEY_CHARS
-from coral.stores.protocols import CoralRun, RunNotFound, RunStartSpec, StartKeyConflict
+from coral.stores.protocols import (
+    STORED_TEXT_ERRORS,
+    CoralRun,
+    RunNotFound,
+    RunStartSpec,
+    StartKeyConflict,
+)
 from coral.stores.workflows import WorkflowTooLargeError
 from coral.tools.catalog import STEP_STANCES
 from coral.validate import ValidateContext
@@ -275,8 +281,8 @@ def _check_retry(
         raise StartKeyConflict(f"run {run.id} was started with other fields")
     try:
         pinned = bridge.versions.load(workspace_id=run.workspace_id, version_id=run.version_id)
-    except (ValueError, *STORED_TEXT_ERRORS):
-        # A row stored by reference only, or whose text does not decode.
+    except STORED_TEXT_ERRORS:
+        # A row stored by reference only (a ValueError), or whose text does not decode.
         pinned = None
     if pinned is None:
         raise StartKeyConflict(f"run {run.id} cannot be read back to compare this start")

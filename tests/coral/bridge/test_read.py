@@ -45,23 +45,30 @@ def _log_corrupt(world: World, run_id: str) -> None:
     logs[0] = dataclasses.replace(logs[0], body="{}")
 
 
-def _rows_undecodable(world: World, run_id: str) -> None:
-    runs = _runs(world)
-    load = runs.load_run_state
+def _rows_failing(error: Exception) -> Callable[[World, str], None]:
+    """The run's rows raise ``error`` when they are read."""
 
-    def failing(broken: str, **kwargs: object) -> object:
-        if broken == run_id:
-            raise zstandard.ZstdError("not a zstd frame")
-        return load(broken, **kwargs)  # type: ignore[arg-type]
+    def undecodable(world: World, run_id: str) -> None:
+        runs = _runs(world)
+        load = runs.load_run_state
 
-    runs.load_run_state = failing  # type: ignore[method-assign]
+        def failing(broken: str, **kwargs: object) -> object:
+            if broken == run_id:
+                raise error
+            return load(broken, **kwargs)  # type: ignore[arg-type]
+
+        runs.load_run_state = failing  # type: ignore[method-assign]
+
+    return undecodable
 
 
 UNLOADABLE: dict[str, Callable[[World, str], None]] = {
     "graph": _graph_missing,
     "config": _config_missing,
     "log": _log_corrupt,
-    "rows": _rows_undecodable,
+    "rows": _rows_failing(zstandard.ZstdError("not a zstd frame")),
+    # A frame cut short, of a codec this server does not know, or too large.
+    "rows_unknown_codec": _rows_failing(ValueError("Unknown compression codec")),
 }
 
 
@@ -103,7 +110,7 @@ def test_a_run_that_cannot_be_loaded_reads_as_its_row_and_writes_nothing(
         assert not read.loadable
         assert read.snapshot is None
         assert read.run == world.run(run.id)
-        assert (read.rows is None) == (kind == "rows")
+        assert (read.rows is None) == kind.startswith("rows")
         if read.rows is not None:
             assert read.rows.run == read.run
 
@@ -116,6 +123,9 @@ def test_a_run_that_cannot_be_loaded_reads_as_its_row_and_writes_nothing(
         int(RunStatus.PAUSED),
         int(RunPauseReason.FAILURE_PATH),
     )
+    # A command's commit fails the same way, so a cancel falls back to the row.
+    with pytest.raises(EngineLoadFailed):
+        world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
 
 
 def _paused(world: World) -> str:

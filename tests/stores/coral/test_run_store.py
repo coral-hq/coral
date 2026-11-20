@@ -953,7 +953,7 @@ def test_a_tolerant_log_read_shows_a_too_short_stored_value_as_a_placeholder(
     original = _commit_logs(store, run, 3)
     lane.corrupt(run.id, 2, column, stored)
 
-    with pytest.raises((*STORED_TEXT_ERRORS, ValueError)):
+    with pytest.raises(STORED_TEXT_ERRORS):
         store.read_log(run.id, workspace_id=WORKSPACE)
     assert store.read_log(run.id, workspace_id=WORKSPACE, tolerant=True) == [
         original[0],

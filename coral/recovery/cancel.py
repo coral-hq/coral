@@ -25,13 +25,14 @@ from dataclasses import dataclass
 from coral.alerts.rules import UnstoppedSessions, run_end_alerts
 from coral.bridge.config import MAX_ACTOR_REF_CHARS, MAX_LIVE_SLOTS
 from coral.bridge.gate_rows import gate_visit_draft
-from coral.bridge.service import LOAD_FAILED_DETAIL, STORED_TEXT_ERRORS
+from coral.bridge.service import LOAD_FAILED_DETAIL
 from coral.db.enum_codecs import ActorKind, GateVisitStatus, LogKind, RunStatus, SlotStatus
 from coral.model.ids import anchor_session_id
 from coral.omni.protocols import GatePublisher
 from coral.queue.run_effects import describe_exception, raise_if_cancelling
 from coral.slots.executors import CANCEL_SESSIONS
 from coral.stores.protocols import (
+    STORED_TEXT_ERRORS,
     UNFINISHED_RUN_STATUSES,
     CommitOutcome,
     CoralRun,

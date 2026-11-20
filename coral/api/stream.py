@@ -27,7 +27,6 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from functools import partial
 from typing import Any, ParamSpec, Protocol, TypeVar
 
 import anyio
@@ -36,14 +35,15 @@ from starlette.requests import ClientDisconnect
 from starlette.responses import StreamingResponse
 from starlette.types import Message, Receive, Scope, Send
 
-from coral.alerts.types import is_owner
+from coral.alerts.types import CallerKey, caller_key, is_owner
 from coral.api.errors import CoralApiError
 from coral.api.run_models import MAX_STORED_INT, entry_frame, run_header
-from coral.api.run_service import CallerKey, caller_key, server_busy
+from coral.api.run_service import server_busy
 from coral.bridge.executors import BoundedThreads
 from coral.bridge.service import RunRead
 from coral.engine.projection import project
 from coral.engine.types import JsonPatch
+from coral.limits import Slot, Slots, WarnOnce
 from coral.omni.protocols import Viewer
 from coral.queue.run_effects import describe_exception
 from coral.runview.actions import RunViewFacts
@@ -99,7 +99,6 @@ _LOADS_BUSY_TEXT = "Too many of your run streams are starting; try again."
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
-_K = TypeVar("_K")
 Wait = Callable[[asyncio.Event, float], Awaitable[None]]
 
 
@@ -161,28 +160,15 @@ class RunReader(Protocol):
     def read(self, *, workspace_id: int, run_id: str) -> RunRead: ...
 
 
-class LoadShare:
-    """One snapshot load counted against its user's share until released, once."""
-
-    def __init__(self, release: Callable[[], None]) -> None:
-        self._free = release
-        self._released = False
-
-    def release(self) -> None:
-        if not self._released:
-            self._released = True
-            self._free()
-
-
 class StreamReservation:
     """
-    One stream's slot under the hub's caps, released once by its response or its lapse,
-    and the share of the user's snapshot loads its opening load takes.
+    One stream's slots under the hub's caps, released once by its response or its lapse,
+    and the slot of the user's snapshot loads its opening load takes.
     """
 
-    def __init__(self, release: Callable[[], None], *, opening_load: LoadShare) -> None:
-        self._free = release
-        self._opening_load: LoadShare | None = opening_load
+    def __init__(self, slots: tuple[Slot, ...], *, opening_load: Slot) -> None:
+        self._slots = slots
+        self._opening_load: Slot | None = opening_load
         self._released = False
         self._lapse: asyncio.TimerHandle | None = None
 
@@ -200,28 +186,21 @@ class StreamReservation:
             self._lapse.cancel()
             self._lapse = None
 
-    def take_opening_load(self) -> LoadShare | None:
-        """The opening load's share, handed once to the load that uses it, which frees it."""
-        share, self._opening_load = self._opening_load, None
-        return share
+    def take_opening_load(self) -> Slot | None:
+        """The opening load's slot, handed once to the load that uses it, which frees it."""
+        load, self._opening_load = self._opening_load, None
+        return load
 
     def release(self) -> None:
         if self._released:
             return
         self._released = True
         self.claim()
-        share = self.take_opening_load()
-        if share is not None:
-            share.release()
-        self._free()
-
-
-def _decrement(counts: dict[_K, int], key: _K) -> None:
-    remaining = counts.get(key, 0) - 1
-    if remaining > 0:
-        counts[key] = remaining
-    else:
-        counts.pop(key, None)
+        load = self.take_opening_load()
+        if load is not None:
+            load.release()
+        for slot in self._slots:
+            slot.release()
 
 
 class _ConnectBuckets:
@@ -276,7 +255,7 @@ class RunWatcher:
         self._loop = asyncio.get_running_loop()
         self._poked = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
-        self._warned = False
+        self._read_failed = WarnOnce()
 
     def offer(self, row: CoralRun) -> None:
         """Hold ``row`` when it is newer than, or as new as and unlike, the held one."""
@@ -318,8 +297,7 @@ class RunWatcher:
                     hub.run_store.get_run, self.run_id, workspace_id=self.workspace_id
                 )
             except Exception as exc:  # noqa: BLE001 -- logged once, read again next poll
-                if not self._warned:
-                    self._warned = True
+                if self._read_failed.first():
                     _logger.warning(
                         "Coral cannot read run %s for its streams: %s",
                         self.run_id,
@@ -380,14 +358,13 @@ class RunStreamHub:
         # Watchers by run id alone, which the commit hook names; read on other threads.
         self._by_run: dict[str, set[RunWatcher]] = {}
         self._lock = threading.Lock()
-        self._streams = 0
-        self._per_user: dict[tuple[int, CallerKey], int] = {}
-        self._per_run_user: dict[tuple[int, str, CallerKey], int] = {}
-        self._loads: dict[CallerKey, int] = {}
-        # Loads whose threads still run, held so none is collected before it ends.
-        self._load_calls: set[asyncio.Task[Any]] = set()
-        # The first run row a stream cannot read is a warning; later ones go to debug.
-        self._undecodable_warned = False
+        self._user_streams = Slots[tuple[int, CallerKey]](
+            per_key=MAX_STREAMS_PER_USER, total=MAX_STREAMS
+        )
+        self._run_streams = Slots[tuple[int, str, CallerKey]](per_key=MAX_STREAMS_PER_RUN_USER)
+        # Snapshot loads by user, each counted until its thread call ends.
+        self.loads = Slots[CallerKey](per_key=MAX_LOADS_PER_USER)
+        self._undecodable = WarnOnce()
         self._connects = _ConnectBuckets(
             burst=CONNECT_BURST, per_s=CONNECT_RATE_PER_S, clock=clock
         )
@@ -399,7 +376,7 @@ class RunStreamHub:
     @property
     def streams(self) -> int:
         """Slots held: streams open, and reserved ones no response has ended yet."""
-        return self._streams
+        return self._user_streams.held
 
     @property
     def watchers(self) -> int:
@@ -411,7 +388,7 @@ class RunStreamHub:
     def reserve(self, viewer: Viewer, workspace_id: int, run_id: str) -> StreamReservation:
         """
         A slot for one stream of ``viewer``'s on the run, which lapses unless a response
-        claims it, with a share of the user's snapshot loads for its opening load.
+        claims it, with a slot of the user's snapshot loads for its opening load.
 
         :raises CoralApiError: 503 ``server_busy`` while the server shuts down, once the
             hub is closed, or while the user has :data:`MAX_LOADS_PER_USER` loads running;
@@ -420,71 +397,30 @@ class RunStreamHub:
         if self._closed or self.shutting_down():
             raise server_busy(_SHUTTING_DOWN_TEXT, retry_after_s=STREAM_RETRY_AFTER_S)
         caller = caller_key(viewer)
-        user = (workspace_id, caller)
-        run_user = (workspace_id, run_id, caller)
-        if (
-            self._streams >= MAX_STREAMS
-            or self._per_user.get(user, 0) >= MAX_STREAMS_PER_USER
-            or self._per_run_user.get(run_user, 0) >= MAX_STREAMS_PER_RUN_USER
-        ):
-            _logger.debug("Coral refused a run stream: %d open", self._streams)
+        user, run_user = (workspace_id, caller), (workspace_id, run_id, caller)
+        if self._user_streams.full(user) or self._run_streams.full(run_user):
+            _logger.debug("Coral refused a run stream: %d open", self.streams)
             raise stream_limit()
-        if self._loads.get(caller, 0) >= MAX_LOADS_PER_USER:
+        if self.loads.full(caller):
             _logger.debug("Coral refused a run stream: the caller's loads are running")
             raise server_busy(_LOADS_BUSY_TEXT)
         if not self._connects.take(run_user):
             raise stream_limit()
-        self._streams += 1
-        self._per_user[user] = self._per_user.get(user, 0) + 1
-        self._per_run_user[run_user] = self._per_run_user.get(run_user, 0) + 1
         reservation = StreamReservation(
-            partial(self._release, user, run_user), opening_load=self.load_share(caller)
+            (self._user_streams.take(user), self._run_streams.take(run_user)),
+            opening_load=self.loads.take(caller),
         )
         reservation.lapse_after(self._lapse_s)
         return reservation
 
-    def load_share(self, caller: CallerKey) -> LoadShare:
-        """Count one snapshot load of ``caller``'s until the share is released."""
-        self._loads[caller] = self._loads.get(caller, 0) + 1
-        return LoadShare(partial(_decrement, self._loads, caller))
-
-    def run_load(
-        self, share: LoadShare, fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs
-    ) -> asyncio.Task[_T]:
-        """
-        ``fn`` on the pool as a load counted by ``share`` until its thread call ends, even
-        when the stream that asked for it goes away first (or the pool closes).
-        """
-        try:
-            call = asyncio.get_running_loop().create_task(self.threads.run(fn, *args, **kwargs))
-        except BaseException:
-            share.release()
-            raise
-        self._load_calls.add(call)
-        call.add_done_callback(partial(self._load_ended, share))
-        return call
-
-    def _load_ended(self, share: LoadShare, call: asyncio.Task[Any]) -> None:
-        self._load_calls.discard(call)
-        share.release()
-        # Marks an error seen even when no stream waits for the load any more.
-        if not call.cancelled():
-            call.exception()
-
     def note_undecodable(self, run_id: str, exc: Exception) -> None:
         """A run row holds a code this server does not know: logged once, then at debug."""
-        first, self._undecodable_warned = not self._undecodable_warned, True
         _logger.log(
-            logging.WARNING if first else logging.DEBUG,
+            self._undecodable.level(),
             "Coral ended a stream of run %s: its row holds a code this server cannot read: %s",
             run_id,
             describe_exception(exc),
         )
-
-    def _release(self, user: tuple[int, CallerKey], run_user: tuple[int, str, CallerKey]) -> None:
-        self._streams -= 1
-        _decrement(self._per_user, user)
-        _decrement(self._per_run_user, run_user)
 
     def stream(
         self,
@@ -499,8 +435,8 @@ class RunStreamHub:
         """
         A stream of the run for ``viewer``, who must own it; nothing is read until it runs.
 
-        :param reservation: The stream's slot; its opening load takes the reservation's
-            load share.
+        :param reservation: The stream's slots; its opening load takes the reservation's
+            load slot.
         """
         return RunStream(
             self,
@@ -797,9 +733,10 @@ class RunStream:
             server cannot read.
         """
         opening = None if self._reservation is None else self._reservation.take_opening_load()
-        share = opening or self._hub.load_share(caller_key(self._viewer))
-        call = self._hub.run_load(share, self._open, cursor)
-        # A stream that goes away leaves the load running, and counted, until it ends.
+        load = opening or self._hub.loads.take(caller_key(self._viewer))
+        call = asyncio.get_running_loop().create_task(self._hub.threads.run(self._open, cursor))
+        # A stream that goes away leaves the load running, and counted, until its thread ends.
+        load.release_when_done(call)
         opened = await self._mapped(asyncio.shield(call))
         run = opened.run
         if not is_owner(run.user_id, run.account_generation, self._viewer):
@@ -1000,7 +937,6 @@ __all__ = [
     "STREAM_THREADS",
     "STREAM_THREAD_NAME",
     "CoralEventStream",
-    "LoadShare",
     "RunReader",
     "RunStream",
     "RunStreamHub",

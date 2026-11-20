@@ -246,6 +246,15 @@ def test_a_stream_of_events_answers_no_json_and_types_its_events() -> None:
         pytest.param(
             {"type": "object", "properties": {"x" * 100: {"type": "string"}}}, id="over-width"
         ),
+        # A typeless schema is any JSON value only when it constrains nothing.
+        pytest.param({"allOf": [_ref("Tags")], "description": "Tags."}, id="typeless-all-of"),
+        pytest.param(
+            {
+                "type": "object",
+                "properties": {"pair": {"type": "array", "prefixItems": [{"type": "string"}]}},
+            },
+            id="tuple-items",
+        ),
     ],
 )
 def test_a_form_it_cannot_lay_out_is_refused(schema: dict[str, Any]) -> None:

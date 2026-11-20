@@ -21,10 +21,9 @@ import logging
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any, Literal, NoReturn, ParamSpec, Protocol, TypeVar
 
-from coral.alerts.types import LOCAL_USER_ID, is_owner, normalize_owner
+from coral.alerts.types import LOCAL_USER_ID, CallerKey, caller_key, is_owner, normalize_owner
 from coral.api.errors import CoralApiError, run_not_found
 from coral.api.run_models import (
     RUN_ID,
@@ -64,6 +63,7 @@ from coral.bridge.start import check_startable, replay_start, start_engine_run
 from coral.db.enum_codecs import encode_run_status
 from coral.engine import types as engine
 from coral.gates.verdict import GateAnswers, GateVerdict, VisitAnswer
+from coral.limits import Slots, WarnOnce
 from coral.model.ids import derived_id
 from coral.model.ir import CompiledGraph
 from coral.omni.protocols import GatePublisher, Viewer
@@ -128,8 +128,6 @@ _WORKTREE_REFUSALS: Mapping[str, tuple[Any, int]] = {
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
-# Whose share a call or stream takes: the caller's normalized owner id and generation.
-CallerKey = tuple[str | None, str | None]
 
 
 def server_busy(
@@ -175,11 +173,6 @@ def _write_errors(action: str, run_id: str) -> Iterator[None]:
         raise RuntimeError(f"Coral could not {action} the run.") from None
 
 
-def caller_key(viewer: Viewer) -> CallerKey:
-    """The share of the server ``viewer`` uses: one per user and account generation."""
-    return normalize_owner(viewer.user_id), viewer.account_generation
-
-
 class InFlight:
     """
     Runs blocking calls on a bounded pool, at most so many in flight in all and per user.
@@ -200,17 +193,16 @@ class InFlight:
         """:param max_calls: Calls in flight in all; one per thread when not given, so a
         full pool refuses at once instead of queueing a call until its timeout."""
         self._threads = threads
-        self._max_calls = threads.max_workers if max_calls is None else max_calls
-        self._max_per_caller = max_per_caller
         self._timeout_s = timeout_s
-        self._by_caller: dict[CallerKey, int] = {}
-        # Calls whose threads still run, held so none is collected before it ends.
-        self._calls: set[asyncio.Task[Any]] = set()
+        self._slots = Slots[CallerKey](
+            per_key=max_per_caller,
+            total=threads.max_workers if max_calls is None else max_calls,
+        )
 
     @property
     def in_flight(self) -> int:
         """Calls holding a slot: running, waiting for a thread, or timed out but running."""
-        return len(self._calls)
+        return self._slots.held
 
     @property
     def closed(self) -> bool:
@@ -226,16 +218,16 @@ class InFlight:
             caller has its share in flight, or the call runs past its timeout.
         """
         key = caller_key(viewer)
-        held = self._by_caller.get(key, 0)
-        if self._threads.closed or len(self._calls) >= self._max_calls:
+        slot = None if self._threads.closed else self._slots.acquire(key)
+        if slot is None:
+            _logger.debug(
+                "Coral refused a runs-API call: %d in flight, %d of the caller's",
+                self._slots.held,
+                self._slots.held_by(key),
+            )
             raise server_busy()
-        if held >= self._max_per_caller:
-            _logger.debug("Coral refused a runs-API call: the caller has %d in flight", held)
-            raise server_busy()
-        self._by_caller[key] = held + 1
         call = asyncio.get_running_loop().create_task(self._threads.run(fn, *args, **kwargs))
-        self._calls.add(call)
-        call.add_done_callback(partial(self._finished, key))
+        slot.release_when_done(call)
         # asyncio.wait neither raises on a timeout nor cancels the call.
         done, _pending = await asyncio.wait({call}, timeout=self._timeout_s)
         if not done:
@@ -250,25 +242,6 @@ class InFlight:
             if self._threads.closed:
                 raise server_busy() from None
             raise
-
-    def _finished(self, key: CallerKey, call: asyncio.Task[Any]) -> None:
-        self._calls.discard(call)
-        held = self._by_caller.get(key, 0) - 1
-        if held > 0:
-            self._by_caller[key] = held
-        else:
-            self._by_caller.pop(key, None)
-        # Marks an error seen even when the request gave up before reading it.
-        if not call.cancelled():
-            call.exception()
-
-
-class RunReads(Protocol):
-    """The bridge's reads the runs API uses; neither ever writes."""
-
-    def read(self, *, workspace_id: int, run_id: str) -> RunRead: ...
-
-    def pinned_graph(self, *, workspace_id: int, version_id: str) -> CompiledGraph: ...
 
 
 class HostConnector(Protocol):
@@ -302,16 +275,13 @@ class StartSlots:
     def __init__(
         self, *, max_starts: int = MAX_STARTS, max_per_caller: int = MAX_STARTS_PER_USER
     ) -> None:
-        self._max_starts = max_starts
-        self._max_per_caller = max_per_caller
-        self._by_caller: dict[CallerKey, int] = {}
-        self._in_flight = 0
+        self._slots = Slots[CallerKey](per_key=max_per_caller, total=max_starts)
         self._locks: dict[tuple[int, str], _KeyLock] = {}
 
     @property
     def in_flight(self) -> int:
         """Starts holding a slot, running or waiting for their run's turn."""
-        return self._in_flight
+        return self._slots.held
 
     @asynccontextmanager
     async def hold(self, viewer: Viewer, workspace_id: int, run_id: str) -> AsyncIterator[None]:
@@ -321,14 +291,14 @@ class StartSlots:
         :raises CoralApiError: 503 ``server_busy`` when the limits are reached.
         """
         key = caller_key(viewer)
-        held = self._by_caller.get(key, 0)
-        if self._in_flight >= self._max_starts or held >= self._max_per_caller:
+        slot = self._slots.acquire(key)
+        if slot is None:
             _logger.debug(
-                "Coral refused a start: %d in flight, %d of the caller's", self._in_flight, held
+                "Coral refused a start: %d in flight, %d of the caller's",
+                self._slots.held,
+                self._slots.held_by(key),
             )
             raise server_busy()
-        self._by_caller[key] = held + 1
-        self._in_flight += 1
         turn = self._locks.setdefault((workspace_id, run_id), _KeyLock())
         turn.users += 1
         try:
@@ -338,12 +308,7 @@ class StartSlots:
             turn.users -= 1
             if turn.users == 0:
                 self._locks.pop((workspace_id, run_id), None)
-            self._in_flight -= 1
-            remaining = self._by_caller.get(key, 0) - 1
-            if remaining > 0:
-                self._by_caller[key] = remaining
-            else:
-                self._by_caller.pop(key, None)
+            slot.release()
 
 
 @dataclass(frozen=True)
@@ -418,8 +383,7 @@ class RunsApi:
         self._connect_host = connect_host
         self._requires_generation = requires_generation
         self._starts = starts or StartSlots()
-        # The first unreadable pinned graph is a warning; later ones go to debug.
-        self._graph_warned = False
+        self._graph_unreadable = WarnOnce()
 
     @property
     def in_flight(self) -> InFlight:
@@ -522,9 +486,8 @@ class RunsApi:
                 version_id=run.version_id,
             )
         except PinnedGraphError as exc:
-            first, self._graph_warned = not self._graph_warned, True
             _logger.log(
-                logging.WARNING if first else logging.DEBUG,
+                self._graph_unreadable.level(),
                 "Coral cannot read the pinned graph of run %s: %s",
                 run_id,
                 describe_exception(exc),
@@ -1017,14 +980,11 @@ __all__ = [
     "MAX_API_CALLS_PER_USER",
     "MAX_STARTS",
     "MAX_STARTS_PER_USER",
-    "CallerKey",
     "GraphRead",
     "HostConnector",
     "InFlight",
-    "RunReads",
     "RunsApi",
     "StartSlots",
     "StartedRun",
-    "caller_key",
     "server_busy",
 ]

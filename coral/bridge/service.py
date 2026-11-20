@@ -16,6 +16,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import Literal
 
 import zstandard
@@ -117,6 +118,9 @@ _LOAD_ERRORS = (
     ValidationError,
     json.JSONDecodeError,
 )
+# Stored text that does not decode in the fold or a commit's reducer. Of the ValueErrors
+# only UnicodeDecodeError counts there: another may be a reducer defect.
+_FOLD_TEXT_ERRORS = (zstandard.ZstdError, UnicodeDecodeError)
 # Commits that fail the same way every time: the run pauses with this detail instead.
 _UNBUILDABLE: tuple[tuple[type[Exception], str], ...] = (
     (TransitionTooLarge, "transition_too_large"),
@@ -357,7 +361,7 @@ class EngineBridge:
             return RunRead(run=run, rows=None, snapshot=None)
         try:
             snapshot = self._snapshot(rows)
-        except (EngineLoadFailed, *STORED_TEXT_ERRORS) as exc:
+        except (EngineLoadFailed, *_FOLD_TEXT_ERRORS) as exc:
             # A log or pinned version that is not UTF-8 fails below the load errors.
             _logger.debug(
                 "Coral reads run %s without its engine state: %s",
@@ -378,11 +382,14 @@ class EngineBridge:
         )
 
     def _load_rows(self, workspace_id: int, run_id: str) -> RunState:
+        return self._load_state(workspace_id, run_id)[0]
+
+    def _load_state(self, workspace_id: int, run_id: str) -> tuple[RunState, int]:
+        """The run's rows and version; rows whose stored text does not decode fail the load."""
         try:
-            state, _version = self._runs.load_run_state(run_id, workspace_id=workspace_id)
+            return self._runs.load_run_state(run_id, workspace_id=workspace_id)
         except STORED_TEXT_ERRORS as exc:
             raise EngineLoadFailed(workspace_id, run_id, exc) from exc
-        return state
 
     def _snapshot(self, rows: RunState) -> EngineSnapshot:
         workspace_id, run_id = rows.workspace_id, rows.run_id
@@ -543,10 +550,11 @@ class EngineBridge:
                 workspace_id=workspace_id,
                 run_id=run_id,
                 reduce_fn=reduce,
+                load_state=partial(self._load_state, workspace_id, run_id),
                 now=epoch_seconds(now),
                 lock_timeout_s=LOCK_TIMEOUT_S,
             )
-        except STORED_TEXT_ERRORS as exc:
+        except _FOLD_TEXT_ERRORS as exc:
             raise EngineLoadFailed(workspace_id, run_id, exc) from exc
         return BridgeCommit(outcome=outcome, entries=tuple(item.entry for item in latest[0]))
 
@@ -1168,7 +1176,6 @@ def _storable(text: str, limit: int) -> bool:
 
 __all__ = [
     "LOAD_FAILED_DETAIL",
-    "STORED_TEXT_ERRORS",
     "UNBUILDABLE_ERRORS",
     "USER_PAUSE_DETAIL",
     "BridgeCommit",

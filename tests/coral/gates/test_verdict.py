@@ -808,6 +808,53 @@ async def test_one_user_s_answers_never_hold_every_admission(
     assert (bob_verdict.verdict, verdict.verdict) == (ACCEPTED, ACCEPTED)
 
 
+async def test_a_user_s_answers_ending_in_start_order_free_both_admissions(
+    gates: Gates, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_ids = [gates.open(start_key=f"fifo-{index}")[0] for index in range(4)]
+    committing = {run_id: threading.Event() for run_id in run_ids}
+    ends = {run_id: threading.Event() for run_id in run_ids}
+    answer_gate = gates.world.bridge.answer_gate
+
+    def held(**kwargs: Any) -> GateAnswerResult:
+        committing[kwargs["run_id"]].set()
+        assert ends[kwargs["run_id"]].wait(30)
+        return answer_gate(**kwargs)
+
+    monkeypatch.setattr(gates.world.bridge, "answer_gate", held)
+    threads = BridgeThreads(gates.world.bridge)
+    answers = GateAnswers(
+        threads=threads,
+        bindings=gates.bindings,
+        run_store=gates.world.runs,
+        max_in_flight=4,
+        max_per_user=2,
+    )
+    verdicts: list[GateVerdict | None] = []
+    try:
+        for pair in (run_ids[:2], run_ids[2:]):
+            tasks = [
+                asyncio.create_task(answers.answer_visit(_visit_answer(run_id))) for run_id in pair
+            ]
+            await poll_until_async(
+                lambda pair=pair, tasks=tasks: all(
+                    committing[run_id].is_set() or task.done()
+                    for run_id, task in zip(pair, tasks, strict=True)
+                ),
+                timeout_s=budget(30),
+            )
+            # The first to start ends first.
+            for run_id, task in zip(pair, tasks, strict=True):
+                ends[run_id].set()
+                verdicts.append((await task).verdict)
+    finally:
+        for end in ends.values():
+            end.set()
+        threads.close()
+
+    assert verdicts == [ACCEPTED] * 4
+
+
 async def test_an_answer_to_an_ended_run_that_cannot_load_is_no_longer_waiting(
     gates: Gates, monkeypatch: pytest.MonkeyPatch
 ) -> None:

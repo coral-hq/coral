@@ -2191,7 +2191,7 @@ async def test_a_resume_with_a_higher_cap_clears_a_budget_pause(writes: Api) -> 
     assert (resumed.status_code, resumed.json()["status"]) == (200, "running")
 
 
-@pytest.mark.parametrize("broken", ["config_missing", "spec_missing"])
+@pytest.mark.parametrize("broken", ["config_missing", "spec_missing", "unknown_codec"])
 async def test_a_cancel_of_a_run_that_cannot_load_ends_it_on_its_row_and_withdraws_its_prompt(
     writes: Api, broken: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2204,13 +2204,18 @@ async def test_a_cancel_of_a_run_that_cannot_load_ends_it_on_its_row_and_withdra
         _config_missing(world, run)
     else:
         load = world.runs.load_run_state
+        error = (
+            RunNotFound(f"RunSpec for run {run.id!r} not found")
+            if broken == "spec_missing"
+            else ValueError("Unknown compression codec")
+        )
 
-        def spec_missing(run_id: str, **options: Any) -> Any:
+        def rows_failing(run_id: str, **options: Any) -> Any:
             if run_id == run.id:
-                raise RunNotFound(f"RunSpec for run {run_id!r} not found")
+                raise error
             return load(run_id, **options)
 
-        monkeypatch.setattr(world.runs, "load_run_state", spec_missing)
+        monkeypatch.setattr(world.runs, "load_run_state", rows_failing)
 
     async with _client(writes.app()) as client:
         response = await client.post(f"{RUNS}/{run.id}:cancel", headers=_as(ALICE), json={})
@@ -2223,7 +2228,7 @@ async def test_a_cancel_of_a_run_that_cannot_load_ends_it_on_its_row_and_withdra
         if row.kind == int(LogKind.RUN_FINISHED)
     ]
     assert [body["store_only"] for body in finished] == [True]
-    if broken == "config_missing":
+    if broken != "spec_missing":
         # Its gate row closed, and this process's prompt went with it.
         assert ("withdraw", anchor, prompt) in publisher.calls
         assert publisher.pending == {}

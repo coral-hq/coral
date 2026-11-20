@@ -17,8 +17,10 @@ from coral.omni.protocols import Viewer
 
 # Runs not yet completed, failed or cancelled.
 UNFINISHED_RUN_STATUSES = (int(RunStatus.STARTING), int(RunStatus.RUNNING), int(RunStatus.PAUSED))
-# Stored text that does not decode when its row is read.
-STORED_TEXT_ERRORS = (zstandard.ZstdError, UnicodeDecodeError)
+# Stored text that does not decode when its row is read: a bad zstd frame, or a
+# ``ValueError`` for text that is not UTF-8 or a frame cut short, of an unknown codec or
+# too large.
+STORED_TEXT_ERRORS = (zstandard.ZstdError, ValueError)
 # Most runs one page of a caller's run list holds.
 MAX_OWNED_RUNS_LIMIT = 50
 

@@ -1,4 +1,4 @@
-"""Alert names, the stored payload, and who may see an alert. Pure: no I/O."""
+"""Alert names, the stored payload, and who may see an alert or share a limit. Pure: no I/O."""
 
 from __future__ import annotations
 
@@ -91,6 +91,15 @@ def is_owner(
     )
 
 
+# Whose share of a per-user limit a caller takes: its normalized owner id and generation.
+CallerKey = tuple[str | None, str | None]
+
+
+def caller_key(viewer: OwnerProof) -> CallerKey:
+    """The caller's share of a per-user limit: one per user and account generation."""
+    return normalize_owner(viewer.user_id), viewer.account_generation
+
+
 __all__ = [
     "LOCAL_USER_ID",
     "MAX_ALERT_MESSAGE_CHARS",
@@ -101,8 +110,10 @@ __all__ = [
     "AlertAction",
     "AlertKindName",
     "AlertPayload",
+    "CallerKey",
     "GenerationProof",
     "OwnerProof",
+    "caller_key",
     "generation_matches",
     "is_owner",
     "normalize_owner",

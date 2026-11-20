@@ -21,12 +21,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, TypeVar
 
-from coral.alerts.types import LOCAL_USER_ID, is_owner, normalize_owner
+from coral.alerts.types import LOCAL_USER_ID, CallerKey, caller_key, is_owner
 from coral.bridge.commit import EngineSnapshot
 from coral.bridge.executors import BridgeThreads, PoolClosed
 from coral.bridge.messages import sanitize, strip_format_characters
@@ -44,6 +43,7 @@ from coral.gates.ids import (
     receipt_label,
     row_by_elicitation,
 )
+from coral.limits import Slots
 from coral.model.ids import anchor_session_id
 from coral.model.ir import CompiledNode
 from coral.omni.protocols import Viewer
@@ -175,37 +175,6 @@ class VisitVerdict:
 _ACCEPTED = GateVerdict(status="accepted")
 _DUPLICATE = GateVerdict(status="duplicate", clear_pending=True)
 _CROWDED = GateVerdict(status="refused", reason="run_busy", message=_CROWDED_TEXT)
-# A caller's share of the admissions: its normalized owner id and account generation.
-_CallerKey = tuple[str | None, str | None]
-
-
-class _Admissions:
-    """Answers admitted at once, at most so many in all and per caller; use on one loop."""
-
-    def __init__(self, *, total: int, per_caller: int) -> None:
-        self._total = total
-        self._per_caller = per_caller
-        self._admitted = 0
-        self._by_caller: dict[_CallerKey, int] = {}
-
-    @contextmanager
-    def admit(self, viewer: Viewer) -> Iterator[bool]:
-        """Whether ``viewer``'s answer is admitted; an admission is held for the block."""
-        key = (normalize_owner(viewer.user_id), viewer.account_generation)
-        held = self._by_caller.get(key, 0)
-        if self._admitted >= self._total or held >= self._per_caller:
-            yield False
-            return
-        self._admitted += 1
-        self._by_caller[key] = held + 1
-        try:
-            yield True
-        finally:
-            self._admitted -= 1
-            if held:
-                self._by_caller[key] = held
-            else:
-                self._by_caller.pop(key, None)
 
 
 class GateAnswers:
@@ -234,7 +203,8 @@ class GateAnswers:
         self._bindings = bindings
         self._runs = run_store
         self._timeout_s = timeout_s
-        self._admissions = _Admissions(total=max_in_flight, per_caller=max_per_user)
+        # Answers admitted at once, in all and per user and account generation.
+        self._admissions = Slots[CallerKey](per_key=max_per_user, total=max_in_flight)
 
     async def answer(self, answer: GateAnswer) -> GateVerdict:
         """
@@ -315,9 +285,10 @@ class GateAnswers:
             return gone
         if not _is_owner(run, answer.viewer):
             return self._not_permitted(elicitation_id, run_id, answer.viewer)
-        with self._admissions.admit(answer.viewer) as admitted:
-            if not admitted:
-                return self._crowded(elicitation_id)
+        admission = self._admissions.acquire(caller_key(answer.viewer))
+        if admission is None:
+            return self._crowded(elicitation_id)
+        with admission:
             return await self._answer_prompt(answer, run_id)
 
     async def _answer_prompt(self, answer: GateAnswer, run_id: str) -> GateVerdict:
@@ -354,9 +325,10 @@ class GateAnswers:
             return VisitVerdict(None)
         if not _is_owner(run, answer.viewer):
             return VisitVerdict(self._not_permitted(visit_id, run_id, answer.viewer))
-        with self._admissions.admit(answer.viewer) as admitted:
-            if not admitted:
-                return VisitVerdict(self._crowded(visit_id))
+        admission = self._admissions.acquire(caller_key(answer.viewer))
+        if admission is None:
+            return VisitVerdict(self._crowded(visit_id))
+        with admission:
             return await self._visit_verdict(answer, visit_id)
 
     async def _visit_verdict(self, answer: VisitAnswer, visit_id: str) -> VisitVerdict:

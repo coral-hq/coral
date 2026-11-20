@@ -366,9 +366,11 @@ mounted Coral routes, is typed, and that the TS types are current.
   records none leaves `usd` a silent lower bound, and a model priced in one session and
   unpriced in another is not listed. A refresh stuck on a huge tree holds up the queue,
   and refreshes past 64 pending are dropped; lists then show cached or `null` spend.
-- **A stored value cut to one byte** (only external truncation writes one) is a `/log`
-  placeholder, but the bridge's `read()` raises on it, so the run's detail is a 500 and its
-  stream ends at once.
+- **A log row whose stored value is cut short, of an unknown codec or too large** is a
+  `/log` placeholder, but the engine's fold raises on it: a `ValueError` there may be a
+  reducer defect, so it is not taken for an unloadable run. The run's detail and `:cancel`
+  answer 500, and its stream ends at once. The same value in the run's spec, slot or gate
+  rows reads as a run that cannot be loaded, which the store-only cancel ends.
 - **Folding collations.** On MySQL, look-alike owner ids are dropped after paging, with no
   scan budget, so one list call can read every look-alike row.
 - `GET /v1/coral/info` is unauthenticated (pre-existing). Omnigent's own `/openapi.json`

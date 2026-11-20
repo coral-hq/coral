@@ -326,11 +326,6 @@ def _log_entry(
     )
 
 
-# What a tolerant log read shows as a placeholder: stored text that does not decode, and a
-# framed value too short to hold its codec (``ValueError``, as ``UnicodeDecodeError`` is).
-_UNDECODABLE_LOG_TEXT = (*STORED_TEXT_ERRORS, ValueError)
-
-
 def _log_text(
     session: Session, workspace_id: int, run_id: str, seq: int
 ) -> tuple[str, str | None] | None:
@@ -343,7 +338,7 @@ def _log_text(
     try:
         body = session.execute(select(RunLogRow.body).where(*key)).scalar_one()
         view_patch = session.execute(select(RunLogRow.view_patch).where(*key)).scalar_one()
-    except _UNDECODABLE_LOG_TEXT:
+    except STORED_TEXT_ERRORS:
         return None
     return body, view_patch
 
@@ -1200,7 +1195,7 @@ class SqlAlchemyCoralRunStore:
                     .all()
                 )
                 return [_to_run_log_entry(r) for r in rows]
-        except _UNDECODABLE_LOG_TEXT:
+        except STORED_TEXT_ERRORS:
             if not tolerant:
                 raise
         return self._read_log_isolating_unreadable(ws, run_id, after_seq, limit)

@@ -24,6 +24,7 @@ def commit_with_retry(
     workspace_id: int,
     run_id: str,
     reduce_fn: Callable[[RunState], Transition],
+    load_state: Callable[[], tuple[RunState, int]] | None = None,
     command_idempotency_cksum: bytes | None = None,
     max_attempts: int = 5,
     base_backoff_s: float = 0.01,
@@ -37,7 +38,8 @@ def commit_with_retry(
     If command_idempotency_cksum is supplied, checks for an existing receipt at the start
     of EVERY attempt. If another worker already committed the command, returns the receipt
     immediately without invoking reduce_fn. ``lock_timeout_s`` is passed to every
-    ``apply_transition`` attempt.
+    ``apply_transition`` attempt. ``load_state``, when given, reads the run's rows and
+    version for each attempt in place of the store's ``load_run_state``.
     """
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
@@ -62,7 +64,10 @@ def commit_with_retry(
                     log_seqs=(receipt.log_seq,),
                 )
 
-        state, version = run_store.load_run_state(run_id, workspace_id=workspace_id)
+        if load_state is None:
+            state, version = run_store.load_run_state(run_id, workspace_id=workspace_id)
+        else:
+            state, version = load_state()
         outcome = _attempt(
             run_store, workspace_id, run_id, version, reduce_fn(state), now, lock_timeout_s
         )

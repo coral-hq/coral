@@ -101,12 +101,14 @@ def _engine_unloadable(world: World, run_id: str) -> Callable[[], None]:
     return loadable
 
 
-def _rows_undecodable(world: World, run_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def _rows_undecodable(
+    world: World, run_id: str, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
     load = world.runs.load_run_state
 
     def failing(broken: str, **options: object) -> object:
         if broken == run_id:
-            raise zstandard.ZstdError("not a zstd frame")
+            raise error
         return load(broken, **options)  # type: ignore[arg-type]
 
     monkeypatch.setattr(world.runs, "load_run_state", failing)
@@ -276,13 +278,20 @@ async def test_open_gate_rows_are_cancelled_and_their_prompts_withdrawn_everywhe
         assert (anchor, row.elicitation_id) not in sessions.gates.pending
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(zstandard.ZstdError("not a zstd frame"), id="zstd"),
+        pytest.param(ValueError("Truncated compression frame"), id="cut_short"),
+    ],
+)
 async def test_a_run_whose_rows_do_not_decode_is_cancelled_and_says_its_sessions_still_run(
-    world: World, monkeypatch: pytest.MonkeyPatch
+    world: World, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     async with serving(world) as sessions:
         run = start(world)
         await sessions.run()
-        _rows_undecodable(world, run.id, monkeypatch)
+        _rows_undecodable(world, run.id, monkeypatch, error)
         read = world.bridge.read(workspace_id=WORKSPACE, run_id=run.id)
         assert (read.rows, read.snapshot) == (None, None)
 

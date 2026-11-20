@@ -17,6 +17,7 @@ from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 
 from coral.bridge.executors import BoundedThreads, PoolClosed
+from coral.limits import Slots
 from coral.omni.protocols import RunSpendReader, RunSpendTotals
 from coral.queue.run_effects import describe_exception
 
@@ -92,10 +93,10 @@ class SpendCache:
         self._wall_clock = wall_clock
         self._max_entries = max_entries
         self._max_pending = max_pending
-        self._max_detail_reads = max_detail_reads
-        self._max_detail_reads_per_caller = max_detail_reads_per_caller
         # Reads a detail started, until they end, by the caller that started them.
-        self._detail_reads: dict[Hashable, int] = {}
+        self._detail_reads = Slots[Hashable](
+            per_key=max_detail_reads_per_caller, total=max_detail_reads
+        )
         self._entries: OrderedDict[_SpendKey, _Entry] = OrderedDict()
         # Reads running, shared by every caller of the key.
         self._reads: dict[_SpendKey, asyncio.Task[None]] = {}
@@ -153,32 +154,20 @@ class SpendCache:
             return None if entry is None else entry.spend
         read = self._reads.get(key)
         if read is None:
-            if (
-                sum(self._detail_reads.values()) >= self._max_detail_reads
-                or self._detail_reads.get(caller, 0) >= self._max_detail_reads_per_caller
-            ):
+            slot = self._detail_reads.acquire(caller)
+            if slot is None:
                 return self.peek(workspace_id=workspace_id, run_id=run_id, finished_at=finished_at)
             self._queued.pop(key, None)
             read = self._start(key, finished_at)
-            if read is not None:
-                self._count_detail_read(caller, read)
+            if read is None:
+                slot.release()
+            else:
+                slot.release_when_done(read)
         if read is not None:
             # asyncio.wait neither raises on a timeout nor cancels the read.
             await asyncio.wait({read}, timeout=wait_s)
         entry = self._touch(key)
         return None if entry is None else entry.spend
-
-    def _count_detail_read(self, caller: Hashable, read: asyncio.Task[None]) -> None:
-        self._detail_reads[caller] = self._detail_reads.get(caller, 0) + 1
-
-        def ended(_read: asyncio.Task[None]) -> None:
-            held = self._detail_reads.get(caller, 0) - 1
-            if held > 0:
-                self._detail_reads[caller] = held
-            else:
-                self._detail_reads.pop(caller, None)
-
-        read.add_done_callback(ended)
 
     def close(self) -> None:
         """Cancel queued and running reads; the owner closes the thread pool."""

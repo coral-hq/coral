@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import Literal
@@ -21,6 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from coral.alerts.types import AlertAction, AlertKindName, AlertPayload
 from coral.api.errors import CoralApiError, CoralRoute, error_responses
 from coral.db.enum_codecs import decode_alert_kind, decode_alert_priority
+from coral.limits import WarnOnce
 from coral.omni.protocols import Viewer
 from coral.queue.run_effects import describe_exception
 from coral.stores.alerts import MAX_INBOX_LIMIT, InboxCursor, SqlAlchemyAlertStore
@@ -117,12 +117,10 @@ class _UnreadableAlerts:
     """Warns about the first alert the feed cannot read; the later ones go to debug."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._warned = False
+        self._warned = WarnOnce()
 
     def skipped(self, alert: AlertRecord, exc: Exception) -> None:
-        with self._lock:
-            first, self._warned = not self._warned, True
+        first = self._warned.first()
         # Only ids and error locations: payloads hold run titles and prompts.
         _logger.log(
             logging.WARNING if first else logging.DEBUG,

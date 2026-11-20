@@ -37,6 +37,8 @@ _OPERATIONS_DOC = (
     "Each status in `errors` answers a `CoralErrorResponse` body."
 )
 _PRIMITIVES = {"string": "string", "integer": "number", "number": "number", "boolean": "boolean"}
+# Keywords that describe a schema without constraining it.
+_ANNOTATIONS = frozenset({"title", "description", "default", "examples"})
 _EVENT_STREAM = "text/event-stream"
 _EVENTS_DOC = "Server-sent events: each event's `data` is one of these, or `[DONE]` at the end."
 
@@ -78,13 +80,14 @@ def _members(schema: Mapping[str, Any]) -> list[str]:
             ["null"] if "null" in unique else []
         )
     kind = schema.get("type")
-    if kind is None:
+    if kind is None and _ANNOTATIONS.issuperset(schema):
+        # Any JSON value, as Pydantic's ``JsonValue`` is.
         return ["unknown"]
     if kind == "null":
         return ["null"]
     if kind in _PRIMITIVES:
         return [_PRIMITIVES[kind]]
-    if kind == "array":
+    if kind == "array" and "prefixItems" not in schema:
         items = _members(schema.get("items", {}))
         item = items[0] if len(items) == 1 else f"({' | '.join(items)})"
         return [f"{item}[]"]
