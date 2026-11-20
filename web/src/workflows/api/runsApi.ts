@@ -1,4 +1,5 @@
 import { authenticatedFetch } from "@/lib/identity";
+import { isRetryableRequestError } from "@/lib/queryRetry";
 import { ApiError, apiErrorFromResponse } from "@/lib/sessionsApi";
 import type { CoralOperations, RunDetail } from "./generated/coralApi";
 
@@ -94,6 +95,10 @@ export async function coralError(response: Response): Promise<ApiError> {
     error.retryAfterMs,
   );
 }
+
+/** A run read's retry rule: once for a failure a retry can fix; a 404 or another refusal is final. */
+export const retryRunRead = (failureCount: number, error: unknown): boolean =>
+  failureCount < 1 && isRetryableRequestError(error);
 
 /** The key of a run's detail in the viewer's `scope`. */
 export const runQueryKey = (scope: string, runId: string) => ["coral-run", scope, runId] as const;

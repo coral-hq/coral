@@ -68,6 +68,8 @@ function runStreamDeps(queryClient: QueryClient, scope: string, runId: string): 
 export interface UseRunStreamOptions {
   /** Called once when the stream reaches `[DONE]` while this hook is mounted. */
   onDone?: () => void;
+  /** A new value starts the stream again from its cached state, as Retry does after a refusal. */
+  restartKey?: number;
 }
 
 /**
@@ -87,6 +89,7 @@ export function useRunStream(runId: string, options: UseRunStreamOptions = {}): 
     // view with `copy[key] = …`, turning an own `__proto__` member into a prototype.
     structuralSharing: false,
   });
+  const { restartKey = 0 } = options;
   const onDone = useRef(options.onDone);
   useEffect(() => {
     onDone.current = options.onDone;
@@ -105,7 +108,7 @@ export function useRunStream(runId: string, options: UseRunStreamOptions = {}): 
       void queryClient.invalidateQueries({ queryKey: runOutcomeQueryKey(scope, runId) });
       onDone.current?.();
     });
-  }, [queryClient, scope, ready, runId]);
+  }, [queryClient, scope, ready, runId, restartKey]);
 
   return cached.data ?? NOT_STARTED;
 }

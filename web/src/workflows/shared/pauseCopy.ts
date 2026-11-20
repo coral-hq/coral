@@ -80,16 +80,19 @@ export function nodeLabel(graph: GraphNodeNames | null, nodeId: string): string 
   return node.name?.trim() ? node.name : node.id;
 }
 
+/** The node of an activation id `<node>|<item>|<iteration>`; `null` without that form. */
+export function activationNodeId(activationId: string): string | null {
+  const bar = activationId.indexOf("|");
+  return bar > 0 ? activationId.slice(0, bar) : null;
+}
+
 /**
  * The node of an engine slot id `<activation>:<index>`, whose activation is
  * `<node>|<item>|<iteration>`; `null` when the id has neither form.
  */
 export function slotNodeId(slotId: string): string | null {
   const end = slotId.lastIndexOf(":");
-  if (end < 0) return null;
-  const activation = slotId.slice(0, end);
-  const bar = activation.indexOf("|");
-  return bar > 0 ? activation.slice(0, bar) : null;
+  return end < 0 ? null : activationNodeId(slotId.slice(0, end));
 }
 
 function failureBody(cause: PauseCauseLike): string {

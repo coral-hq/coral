@@ -276,6 +276,18 @@ describe("useWorkflowRunNotifications", () => {
     expect(showNotification).toHaveBeenCalledTimes(2);
   });
 
+  it("stays silent while the run's own page is open in a focused window", async () => {
+    // WHY: the run view shows the run live, so a notification for it is noise.
+    location.pathname = `/workflows/runs/${RUN_ID}`;
+    const update = await watch();
+    setFocus(true);
+    await update({ alerts: [alert("gate", "1")] });
+    expect(showNotification).not.toHaveBeenCalled();
+    location.pathname = "/workflows/runs/run_2";
+    await update({ alerts: [alert("gate", "2")] });
+    expect(showNotification).toHaveBeenCalledOnce();
+  });
+
   it("does nothing while disabled, and takes a fresh baseline when enabled", async () => {
     // WHY: without Coral nothing notifies; turning it on must not replay what was waiting.
     const update = await watch({ enabled: false });

@@ -463,7 +463,7 @@ OPS-01's generator will maintain this file later.
 | `web/public/licenses/geist-mono-OFL-1.1.txt` | S77 | coral-specific | Added. Verbatim SIL OFL 1.1 text of Geist Mono (`@fontsource-variable/geist-mono`), shipped with the web UI. |
 | `web/public/licenses/newsreader-OFL-1.1.txt` | S77 | coral-specific | Added. Verbatim SIL OFL 1.1 text of Newsreader (`@fontsource-variable/newsreader`), shipped with the web UI. |
 | `web/server-selector-v2.html` | S89b | coral-specific | Window title "Coral — Connect" (S89b). |
-| `web/src/App.test.tsx` | S34 | coral-specific | Coral desk routes: the gated placeholder desk when Coral is on, run and workflow routes instead of the catch-all, an embedded basename, a spinner while Coral info loads, not found when Coral is off or absent (404), `/profiles` only with `profiles_desk`, Retry after a server error, and not found for unknown routes (S34). |
+| `web/src/App.test.tsx` | S34 | coral-specific | Coral desk routes: the gated placeholder desk when Coral is on, the run page (its stream stubbed, so none opens) and the workflow route instead of the catch-all, an embedded basename, a spinner while Coral info loads, not found when Coral is off or absent (404), `/profiles` only with `profiles_desk`, Retry after a server error, and not found for unknown routes (S34). |
 | `web/src/App.tsx` | S34 | coral-specific | Mounts Coral's desk routes (`coralRoutes`, `/workflows` and `/profiles` behind the Coral gate) before the catch-all `NotFoundPage` route (S34). |
 | `web/src/components/BrandLogo.test.tsx` | S79 | coral-specific | Fallback cases expect the Coral mark (S79). |
 | `web/src/components/BrandLogo.tsx` | S79 | coral-specific | The no-logo and failed-logo fallback is `CoralMark` instead of the Otto mascot (S79). |

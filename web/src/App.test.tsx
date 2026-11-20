@@ -13,6 +13,11 @@ vi.mock("@/lib/identity", async (importOriginal) => ({
   ...(await importOriginal<typeof IdentityModule>()),
   authenticatedFetch,
 }));
+// CORAL(S34): the run page's stream stays closed; the run page's own tests drive it.
+const useRunStream = vi.hoisted(() =>
+  vi.fn(() => ({ view: null, viewError: null, header: null, seq: null, status: "connecting" })),
+);
+vi.mock("@/workflows/stream/useRunStream", () => ({ useRunStream }));
 vi.mock("@/lib/analytics", () => ({
   useOmnigentPageView: vi.fn(),
   useOmnigentAnalytics: () => ({ trackClick: vi.fn() }),
@@ -359,10 +364,13 @@ describe("Coral desk routes", () => {
     expect(authenticatedFetch).toHaveBeenCalledWith("/v1/coral/info", expect.anything());
   });
 
-  it("renders a run route instead of the catch-all", async () => {
+  it("renders the run page instead of the catch-all, opening no stream", async () => {
     serveCoral(200, coralInfo());
     renderCoralRoute("/workflows/runs/r1?agent=s1");
-    expect(await screen.findByTestId("workflow-run-placeholder")).toHaveTextContent("r1");
+    expect(await screen.findByTestId("workflow-run-page")).toBeInTheDocument();
+    expect(useRunStream).toHaveBeenCalledWith("r1", expect.anything());
+    const urls = authenticatedFetch.mock.calls.map(([input]) => String(input));
+    expect(urls.filter((url) => url.endsWith("/stream"))).toEqual([]);
   });
 
   it("renders the workflow editor route for an unknown key", async () => {

@@ -182,6 +182,27 @@ describe("useRunStream", () => {
     expect(slots.held()).toBe(0);
   });
 
+  it("starts again on a new restart key after the stream was refused", async () => {
+    // WHY: a refused stream ends for good; the page's Retry asks for it once more.
+    server.reply(jsonResponse(403, {}));
+    const client = new QueryClient();
+    const { result, rerender } = renderHook(
+      ({ restartKey }) => useRunStream(RUN_ID, { restartKey }),
+      { wrapper: providers(client), initialProps: { restartKey: 0 } },
+    );
+    await run();
+    expect(result.current.status).toBe("failed");
+    rerender({ restartKey: 0 });
+    await run(1_000);
+    expect(server.streamRequests()).toHaveLength(1);
+
+    server.reply(sseResponse(wireText(CONTRACT_LIVE)));
+    rerender({ restartKey: 1 });
+    await run();
+    expect(server.streamRequests()).toHaveLength(2);
+    expect(result.current.status).toBe("done");
+  });
+
   it("follows a new run id: the old stream stops and the new run starts from its own key", async () => {
     const otherRun = "b".repeat(32);
     const client = new QueryClient();

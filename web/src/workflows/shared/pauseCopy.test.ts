@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PauseCause, RunHeader } from "../api/generated/coralApi";
 import { CONTRACT_GRAPH, CONTRACT_PAUSE_MESSAGES } from "../fixtures/runViewContract";
 import {
+  activationNodeId,
   LOAD_FAILED_TEXT,
   PAUSE_MESSAGES,
   pauseCopy,
@@ -240,6 +241,19 @@ describe("pauseCopy", () => {
     // WHY: the web's own copy uses ’, while the alert copy must equal the server's exactly.
     expect(LOAD_FAILED_TEXT).toBe("This run can’t be loaded. You can still cancel it.");
     expect(PAUSE_MESSAGES.plan_limit).toBe("A step reached its plan's usage limit.");
+  });
+});
+
+describe("activationNodeId", () => {
+  it.each<[string, string | null]>([
+    ["choose||", "choose"],
+    ["review|items/0|1", "review"],
+    ["choose", null],
+    ["|x|", null],
+    ["", null],
+  ])("reads the node of activation %j", (activationId, nodeId) => {
+    // WHY: open decisions are activation ids, and the banner names their node.
+    expect(activationNodeId(activationId)).toBe(nodeId);
   });
 });
 

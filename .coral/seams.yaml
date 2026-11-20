@@ -2902,13 +2902,14 @@ seams:
       - web/src/shell/Sidebar.test.tsx
     budget_lines: 40
     budget_exception:
-      lines: 144
+      lines: 152
       reason: >-
         Changed lines against the upstream base, per file. The production
         files are within budget: App.tsx 3, CommandPalette.tsx 13, Sidebar.tsx
-        34 (S34's share; S80 and S89 change it too). web/src/App.test.tsx (144:
+        34 (S34's share; S80 and S89 change it too). web/src/App.test.tsx (152:
         the Coral desk route matrix, its identity mock and QueryClient wrapper,
-        and the two anchors), web/src/shell/Sidebar.test.tsx (65) and
+        the run page's stream stub, and the three anchors),
+        web/src/shell/Sidebar.test.tsx (65) and
         web/src/shell/CommandPalette.test.tsx (35) hold the tests.
       approver: nicholasjano (delegated)
     anchor_exempt: []

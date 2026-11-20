@@ -10,6 +10,7 @@ import type {
   SnapshotFrame,
 } from "../api/generated/coralApi";
 import { runStreamUrl } from "../api/runsApi";
+import { isFinishedRunStatus } from "../shared/runStatus";
 import { parseStreamEvent, UnsupportedStreamError, type StreamItem } from "./frames";
 import { SseParser, type SseEvent } from "./sseParser";
 import { applyViewPatch, type JsonObject } from "./viewPatch";
@@ -69,7 +70,6 @@ export const LIMITED_RETRY_MS = 30_000;
 export const HIDDEN_RELEASE_MS = 30_000;
 
 const FINAL_REFUSALS: ReadonlySet<number> = new Set([401, 403, 422]);
-const FINISHED_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 const RETRIED_REFUSALS: ReadonlySet<number> = new Set([429, 503]);
 
 const EMPTY_STATE: RunStreamState = {
@@ -542,7 +542,7 @@ class RunStreamController {
   }
 
   private headerFinished(): boolean {
-    return FINISHED_STATUSES.has(this.state.header?.status ?? "");
+    return isFinishedRunStatus(this.state.header?.status);
   }
 
   private retryStatus(): RunStreamStatus {

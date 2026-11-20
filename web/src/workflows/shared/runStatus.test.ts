@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RunHeader } from "../api/generated/coralApi";
 import type { RunStatus } from "../api/runsApi";
-import { runStatus } from "./runStatus";
+import { isFinishedRunStatus, runStatus } from "./runStatus";
 
 /** Every status the generated union names; `tsc` fails here when the server adds one. */
 const STATUSES = [
@@ -114,5 +114,15 @@ describe("runStatus over every status, pause reason and gate list", () => {
         }
       }
     }
+  });
+});
+
+describe("isFinishedRunStatus", () => {
+  it("is true only for the statuses a run never leaves", () => {
+    // WHY: a finished run stops polling and has its alerts marked read on open.
+    const finished = ["completed", "failed", "cancelled"];
+    const unfinished = ["starting", "running", "paused", "Completed", "", null, undefined];
+    expect(finished.every((status) => isFinishedRunStatus(status))).toBe(true);
+    expect(unfinished.some((status) => isFinishedRunStatus(status))).toBe(false);
   });
 });

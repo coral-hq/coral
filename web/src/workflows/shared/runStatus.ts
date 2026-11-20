@@ -25,6 +25,13 @@ const STATUSES: Readonly<Record<RunStatus, true>> = {
 
 const isRunStatus = (status: string): status is RunStatus => Object.hasOwn(STATUSES, status);
 
+const FINISHED: ReadonlySet<string> = new Set<RunStatus>(["completed", "failed", "cancelled"]);
+
+/** Whether `status` is one a run never leaves. */
+export function isFinishedRunStatus(status: string | null | undefined): boolean {
+  return status != null && FINISHED.has(status);
+}
+
 const pill = (kind: RunStatusKind, text: string, tone: RunStatusTone): RunStatusPillState => ({
   kind,
   text,

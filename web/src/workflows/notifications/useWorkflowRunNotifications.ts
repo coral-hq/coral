@@ -5,6 +5,7 @@ import { useLocation, useNavigate, useRebasePath } from "@/lib/routing";
 import { getSession } from "@/lib/sessionsApi";
 import type { WorkflowAlert } from "../api/types";
 import { isWorkflowGateEvent } from "../inbox/workflowEntries";
+import { runPath } from "../nav/coralPaths";
 import { isRunAnchor, runIdOf } from "../session/coralLabels";
 
 // One OS notification per run event while the app is open. The generic idle
@@ -121,8 +122,8 @@ function alertEvents(
 /**
  * Notify run events while the app is open, tagged `coral:run:<run_id>` and opening
  * the Inbox. The first look at the feed, and at each anchor's prompts, is the
- * baseline; nothing notifies while the Inbox or the run's anchor is open in a
- * focused window.
+ * baseline; nothing notifies while the Inbox, the run's page or its anchor is
+ * open in a focused window.
  *
  * :param alerts: The workflow feed, or `undefined` until it first loads.
  * :param rows: Loaded session rows with the server's pending counts.
@@ -152,6 +153,7 @@ export function useWorkflowRunNotifications(
       const watching =
         focused.current &&
         (path === rebase(INBOX_PATH) ||
+          path === rebase(runPath(event.runId)) ||
           (event.anchorId !== null && path === rebase(`/c/${event.anchorId}`)));
       if (watching) return;
       showNotification({

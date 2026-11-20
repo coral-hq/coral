@@ -2,10 +2,16 @@ import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import type { InboxKindUi } from "@/lib/inboxKinds";
-import { isRetryableRequestError } from "@/lib/queryRetry";
 import { ApiError } from "@/lib/sessionsApi";
 import type { RunDetail, RunSummary } from "../api/generated/coralApi";
-import { getRun, postRunAction, runActionKey, runQueryKey, type RunAction } from "../api/runsApi";
+import {
+  getRun,
+  postRunAction,
+  retryRunRead,
+  runActionKey,
+  runQueryKey,
+  type RunAction,
+} from "../api/runsApi";
 import { useCoralScope } from "../shared/viewerScope";
 import { CardStatusLine } from "./CardStatusLine";
 import { OFFLINE_TEXT, useOnline } from "./useOnline";
@@ -42,10 +48,6 @@ export function runActionErrorText(error: unknown): string {
   if (error.status === 503) return "The server is busy; try again.";
   return UPDATE_FAILED_TEXT;
 }
-
-/** One retry for a failure a retry can fix; a 404 or another refusal is final. */
-const retryRunRead = (failureCount: number, error: unknown) =>
-  failureCount < 1 && isRetryableRequestError(error);
 
 /** The run moved on (409) or is gone (404), so its actions are read again. */
 const rereadsRun = (error: unknown) =>
