@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from omnigent.host.connect import HostProcess, _RunnerHandle
@@ -31,6 +33,7 @@ from omnigent.host.frames import (
 )
 from omnigent.host.identity import HostIdentity
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc
+from omnigent.inner import _proc
 from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
 
 pytestmark = pytest.mark.posix_only
@@ -69,6 +72,14 @@ def zombie_child() -> Iterator[Callable[[], int]]:
                 os.waitpid(pid, 0)
 
 
+def _wait_for_zombie(pid: int) -> None:
+    """Wait until ``pid`` has exited, without collecting its status."""
+    deadline = time.monotonic() + 5.0
+    while psutil.Process(pid).status() != psutil.STATUS_ZOMBIE:
+        assert time.monotonic() < deadline, "child did not exit"
+        time.sleep(0.01)
+
+
 @contextlib.contextmanager
 def _exited_process(exit_code: int) -> Iterator[subprocess.Popen[bytes]]:
     """Leave an exited child waitable until its real owner collects its status."""
@@ -81,11 +92,8 @@ def _exited_process(exit_code: int) -> Iterator[subprocess.Popen[bytes]]:
     try:
         assert proc.stdout is not None
         assert proc.stdout.read() == b""
-        if hasattr(os, "waitid"):
-            deadline = time.monotonic() + 5.0
-            while os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
-                assert time.monotonic() < deadline, "child did not exit"
-                time.sleep(0.01)
+        # CORAL(S71): psutil sees a zombie on every POSIX platform, unlike waitid.
+        _wait_for_zombie(proc.pid)
         yield proc
     finally:
         proc.wait(timeout=5.0)
@@ -94,6 +102,7 @@ def _exited_process(exit_code: int) -> Iterator[subprocess.Popen[bytes]]:
 
 
 def _reap(host: HostProcess, expected: int, child_pids: list[int]) -> None:
+    """Sweep until ``expected`` children are reaped; CORAL(S71): a first sweep only records."""
     deadline = time.monotonic() + 2.0
     reaped = 0
     while reaped < expected and time.monotonic() < deadline:
@@ -127,6 +136,90 @@ def test_targeted_sweep_leaves_unrelated_child_waitable(
         _assert_reaped(orphan)
         assert unrelated.returncode is None
         assert unrelated.wait(timeout=5.0) == 43
+
+
+# CORAL(S71): the two-sweep zombie rule protects owners that no guard covers.
+@pytest.mark.asyncio
+async def test_reaper_loop_leaves_unguarded_child_exit_status_to_its_owner(
+    host: HostProcess, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _exited_process(42) as proc:
+        swept = asyncio.Event()
+        original_sweep = host._reap_orphans_once
+
+        def observed_sweep(child_pids: Iterable[int] | None = None) -> int:
+            count = original_sweep(child_pids)
+            swept.set()
+            return count
+
+        monkeypatch.setattr(host, "_orphan_child_pids", lambda: [proc.pid])
+        monkeypatch.setattr(host, "_reap_orphans_once", observed_sweep)
+        monkeypatch.setattr("omnigent.host.connect._ORPHAN_REAP_INTERVAL_S", 0.01)
+        reaper = asyncio.create_task(host._orphan_reaper_loop())
+        try:
+            await asyncio.wait_for(swept.wait(), timeout=5.0)
+            assert host._owned_subprocess_ops == 0
+            assert proc.pid in host._orphan_zombie_candidates
+            assert proc.returncode is None
+
+            # Like subprocess.run, the owner collects its child before the next sweep.
+            assert proc.wait(timeout=5.0) == 42
+            swept.clear()
+            await asyncio.wait_for(swept.wait(), timeout=5.0)
+            assert host._orphan_zombie_candidates == {}
+        finally:
+            reaper.cancel()
+            await asyncio.gather(reaper, return_exceptions=True)
+
+
+def test_true_orphan_is_reaped_by_the_second_sweep(
+    host: HostProcess, zombie_child: Callable[[], int]
+) -> None:
+    orphan = zombie_child()
+    _wait_for_zombie(orphan)
+
+    assert host._reap_orphans_once([orphan]) == 0
+    assert host._reap_orphans_once([orphan]) == 1
+
+    _assert_reaped(orphan)
+    assert host._orphan_zombie_candidates == {}
+
+
+def test_reused_pid_restarts_the_two_sweep_wait(
+    host: HostProcess, zombie_child: Callable[[], int]
+) -> None:
+    orphan = zombie_child()
+    _wait_for_zombie(orphan)
+    create_time = _proc.process_create_time(orphan)
+    assert create_time is not None
+    # The previous sweep saw an earlier process at this PID.
+    host._orphan_zombie_candidates = {orphan: create_time - 1.0}
+
+    assert host._reap_orphans_once([orphan]) == 0
+    assert host._orphan_zombie_candidates == {orphan: create_time}
+    assert host._reap_orphans_once([orphan]) == 1
+
+    _assert_reaped(orphan)
+
+
+def test_long_reaper_pause_warns_at_a_limited_rate(
+    host: HostProcess, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
+        with host._host_subprocess_op():
+            for now in (100.0, 160.0, 161.0, 400.0, 461.0):
+                assert host._orphan_sweep_paused(now)
+        assert not host._orphan_sweep_paused(462.0)
+        # A new pause is timed from its own start, and shares the rate limit.
+        with host._host_subprocess_op():
+            for now in (470.0, 531.0, 761.0):
+                assert host._orphan_sweep_paused(now)
+
+    assert [record.getMessage().split(";")[0] for record in caplog.records] == [
+        "Orphan reaper paused for 61s by 1 host subprocess operation(s)",
+        "Orphan reaper paused for 361s by 1 host subprocess operation(s)",
+        "Orphan reaper paused for 291s by 1 host subprocess operation(s)",
+    ]
 
 
 @pytest.mark.asyncio
@@ -362,6 +455,8 @@ async def test_discovery_rechecks_ownership_before_reaping(
             swept.set()
             return count
 
+        # CORAL(S71): a first sweep records the zombie, so the loop's sweep would reap it.
+        assert host._reap_orphans_once([proc.pid]) == 0
         monkeypatch.setattr(host, "_orphan_child_pids", paused_discovery)
         monkeypatch.setattr(host, "_reap_orphans_once", observed_sweep)
         monkeypatch.setattr("omnigent.host.connect._ORPHAN_REAP_INTERVAL_S", 0.01)
@@ -432,6 +527,8 @@ async def test_launch_protects_child_until_spawn_worker_returns(
             assert resume.wait(timeout=5.0), "spawn worker was not released"
             return proc, tmp_path / "runner.log"
 
+        # CORAL(S71): a first sweep records the zombie before the launch guard.
+        assert host._reap_orphans_once([proc.pid]) == 0
         monkeypatch.setattr(host, "_spawn_runner_proc", paused_spawn)
         launch = asyncio.create_task(host._handle_launch(frame))
         try:
@@ -536,6 +633,8 @@ async def test_frame_handler_keeps_child_exit_status_while_reaper_sweeps(
             assert resume.wait(timeout=5.0), "frame worker was not released"
             return reply(proc.wait(timeout=5.0))
 
+        # A first sweep records the zombie, as when run() still reads a held-open pipe.
+        assert host._reap_orphans_once([proc.pid]) == 0
         monkeypatch.setattr(host, handler_name, paused_handler)
         dispatch = asyncio.create_task(
             host._dispatch_host_frame(tunnel, frame)  # type: ignore[arg-type]
@@ -544,7 +643,7 @@ async def test_frame_handler_keeps_child_exit_status_while_reaper_sweeps(
             assert await asyncio.wait_for(asyncio.to_thread(started.wait, 5.0), timeout=6.0)
             assert host._owned_subprocess_ops == 1
 
-            # A sweep landing while the handler still owns the exited child.
+            # The second sweep would reap the exited child but for the handler's guard.
             assert host._reap_orphans_once([proc.pid]) == 0
             assert proc.returncode is None
 

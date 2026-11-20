@@ -4664,9 +4664,9 @@ def test_reap_orphans_is_noop_without_wnohang(
 
     Windows has no child reparenting to a subreaper and no
     ``waitpid(-1, WNOHANG)``; touching ``os.WNOHANG`` there raises
-    ``AttributeError``. The final drain runs unguarded in ``run``'s
-    ``finally``, so an unguarded sweep would crash shutdown. Simulate the
-    platform by deleting ``os.WNOHANG`` and assert a quiet ``0``.
+    ``AttributeError``. CORAL(S71): ``run`` no longer drains at shutdown, but
+    a sweep there must still be a quiet no-op. Simulate the platform by deleting
+    ``os.WNOHANG`` and assert a quiet ``0``.
     """
     import os
 
@@ -9187,7 +9187,7 @@ async def test_run_prestarts_zygote_before_first_launch(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(HostProcess, "_connect_and_serve", _fake_connect)
-    # Keep run()'s shutdown sweep from reaping unrelated pytest children.
+    # CORAL(S71): keep run()'s orphan sweeps from reaping unrelated pytest children.
     monkeypatch.setattr(HostProcess, "_reap_orphans_once", lambda self_, _child_pids=None: 0)
 
     await host.run()
