@@ -481,3 +481,34 @@ class FakeChannels:
         if self.refusal is not None:
             raise self.refusal
         return self.channel_backend
+
+
+@dataclass
+class HeldChannels:
+    """Channels whose lookup waits for ``release``; ``entered`` counts the lookups."""
+
+    backend: HostChannelBackend
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    entered: int = 0
+
+    async def channel(self, **_owner: object) -> HostChannelBackend:
+        self.entered += 1
+        await self.release.wait()
+        return self.backend
+
+
+class StalledHost(HostChannelBackend):
+    """A host that takes every op and never answers."""
+
+    async def request(
+        self,
+        host_id: str,
+        op: OpName,
+        *,
+        root: str,
+        params: Mapping[str, object],
+        timeout_s: float,
+        op_key: str | None,
+    ) -> Mapping[str, object]:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")

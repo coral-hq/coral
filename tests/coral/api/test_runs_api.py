@@ -18,7 +18,7 @@ import threading
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast, get_args
+from typing import Any, NoReturn, cast, get_args
 
 import httpx
 import pytest
@@ -27,6 +27,7 @@ from fastapi import FastAPI
 from sqlalchemy import Engine, create_engine, delete
 from sqlalchemy.exc import StatementError
 
+import coral.api.run_service as run_service
 from coral.api.errors import CoralApiError
 from coral.api.outcome import OutcomeDiffs
 from coral.api.run_models import (
@@ -43,6 +44,8 @@ from coral.api.run_service import (
     MAX_API_CALLS_PER_USER,
     MAX_STARTS,
     MAX_STARTS_PER_USER,
+    START_HEAD_DEADLINE_S,
+    START_HEAD_TIMEOUT_S,
     InFlight,
     RunsApi,
     StartSlots,
@@ -60,7 +63,12 @@ from coral.model.ids import anchor_session_id, derived_id
 from coral.model.ir import CompiledGraph
 from coral.omni._upstream import canonical_host_id
 from coral.omni.host.ops import workspace_op_handlers
-from coral.omni.protocols import HostWorkspaceChannels, RunSpendTotals, Viewer
+from coral.omni.protocols import (
+    HostAccessRefused,
+    HostWorkspaceChannels,
+    RunSpendTotals,
+    Viewer,
+)
 from coral.omni.server import coral_lifespan
 from coral.omni.server.access import request_viewer
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
@@ -70,7 +78,8 @@ from coral.stores.fakes import FakeRunStore
 from coral.stores.protocols import CoralRun, RunLogEntry, RunNotFound
 from coral.stores.workflows import SqlWorkflowDefinitionStore, WorkflowDefinition
 from coral.validate.pipeline import check_text
-from coral.workspace.ops import HostChannelBackend
+from coral.workspace.host_backend import host_capability_unavailable
+from coral.workspace.ops import HostChannelBackend, WorkspaceOpError
 from coral.workspace.run_worktree import (
     CreatedRunWorktree,
     HostPathStat,
@@ -107,11 +116,14 @@ from tests.coral.workflow_builders import arrow, fixture_text, step, workflow_te
 from tests.coral.workflow_builders import end as end_node
 from tests.coral.workflow_builders import start as start_node
 from tests.coral.workspace._executor_fakes import (
+    ChannelRequest,
     FakeBindings,
     FakeChannels,
     FakeHostChannel,
+    HeldChannels,
     InProcessHostChannel,
     RecordingScopeRunner,
+    StalledHost,
 )
 
 HEADER = "X-Forwarded-Email"
@@ -217,6 +229,8 @@ class FakeHost(RunWorktreeHost):
     :ivar refuse: Raised when the host is connected, as a refused or offline host is.
     :ivar failing: Every create fails as git would.
     :ivar before_list: Runs before each listing, as another replica's work would.
+    :ivar head_commit: What a create reports as the new worktree's HEAD; an older host
+        reports none.
     """
 
     root: str = REPO
@@ -229,6 +243,7 @@ class FakeHost(RunWorktreeHost):
     refuse: RunWorktreeError | None = None
     failing: bool = False
     before_list: Callable[[], object] | None = None
+    head_commit: str | None = HEAD
 
     async def connect(
         self,
@@ -289,7 +304,7 @@ class FakeHost(RunWorktreeHost):
             self.creating.add(branch)
             await self.release.wait()
             self.creating.discard(branch)
-        return CreatedRunWorktree(path=path, branch=branch, head_commit=HEAD)
+        return CreatedRunWorktree(path=path, branch=branch, head_commit=self.head_commit)
 
     def creates(self) -> int:
         return sum(1 for call in self.calls if call[0] == "create")
@@ -2314,6 +2329,7 @@ async def test_a_request_may_hold_line_breaks_and_tabs(writes: Api) -> None:
 
 def test_the_start_caps_are_the_designed_ones() -> None:
     assert (MAX_STARTS, MAX_STARTS_PER_USER) == (8, 2)
+    assert (START_HEAD_TIMEOUT_S, START_HEAD_DEADLINE_S) == (5.0, 10.0)
 
 
 async def test_a_third_concurrent_start_of_one_user_is_busy_while_another_user_starts(
@@ -2347,6 +2363,334 @@ async def test_a_third_concurrent_start_of_one_user_is_busy_while_another_user_s
     assert other_user.status_code == 201, other_user.text
     assert [response.status_code for response in finished] == [201, 201]
     assert writes.api.starts.in_flight == 0
+
+
+# ── The start head ──────────────────────────────────────────────────────────
+
+# What the scripted host channel reads as a run worktree's HEAD.
+START_HEAD = "3" * 40
+SECRET_PATH = "/home/alice/secret repo"
+
+
+@pytest.fixture
+async def start_heads(
+    world: World, tmp_path: Path
+) -> AsyncIterator[tuple[Api, FakeHostChannel, FakeChannels]]:
+    host_channel, channels = _outcome_host(START_HEAD)
+    built, pools = _build(world, writes=_writes(world, tmp_path), channels=channels)
+    yield built, host_channel, channels
+    _close(built, pools)
+
+
+def _stored_base(world: World, run_id: str) -> str | None:
+    state, _version = world.runs.load_run_state(run_id, workspace_id=WORKSPACE)
+    return state.spec.base_commit
+
+
+def _start_head_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage() for record in caplog.records if record.name == run_service.__name__
+    ]
+
+
+def _crash(*_args: object, **_kwargs: object) -> NoReturn:
+    raise RuntimeError("the server stopped before it stored the run")
+
+
+async def test_a_retry_after_a_crash_between_the_worktree_and_its_run_stores_the_worktrees_head(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host_channel, channels = _outcome_host(START_HEAD)
+    built, pools = _build(
+        world,
+        writes=_writes(world, tmp_path),
+        channels=channels,
+        canonical_host_id=canonical_host_id,
+    )
+    host, definitions = built.services.host, built.services.definitions
+    owner = Viewer(ALICE, account_generation="g1", check_generation=True)
+    request = StartRunRequest.model_validate(
+        _start_body(definitions.save().id, "crashed", host_id=f"host_{HOST_HEX.upper()}")
+    )
+    branch = _branch(ALICE, "crashed")
+    try:
+        with monkeypatch.context() as patched:
+            patched.setattr(run_service, "start_engine_run", _crash)
+            with pytest.raises(RuntimeError):
+                await built.api.start(owner, WORKSPACE, request, definitions=definitions.store)
+        crashed = (_count_runs(world), host.creates(), list(host_channel.requests))
+        retried = await built.api.start(owner, WORKSPACE, request, definitions=definitions.store)
+        replayed = await built.api.start(owner, WORKSPACE, request, definitions=definitions.store)
+    finally:
+        _close(built, pools)
+
+    # The crashed start created the worktree, which reported its commit, and stored no run.
+    assert crashed == (0, 1, [])
+    assert (retried.created, replayed.created) == (True, False)
+    # The retry adopted it and read its head as the starting owner; the replay read nothing.
+    assert host.creates() == 1
+    assert channels.calls == [
+        {
+            "workspace_id": WORKSPACE,
+            "user_id": ALICE,
+            "account_generation": "g1",
+            "host_id": HOST_HEX,
+            "scope": None,
+        }
+    ]
+    assert host_channel.requests == [
+        ChannelRequest(
+            HOST_HEX,
+            "head",
+            host.path_of(branch),
+            {"repo_root": REPO, "branch": branch},
+            START_HEAD_TIMEOUT_S,
+            None,
+        )
+    ]
+    assert _stored_base(world, retried.summary.run_id) == START_HEAD
+
+
+async def test_an_adopted_worktrees_start_head_on_a_real_host_is_the_base_its_outcome_diffs_from(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolate_git_home(monkeypatch, tmp_path / "home")
+    repo = tmp_path.resolve() / "repo"
+    base = make_repository(repo)
+    host_channel = InProcessHostChannel(host_id="host-1", handlers=workspace_op_handlers())
+    channels = FakeChannels(host_channel, RecordingScopeRunner())
+    built, pools = _build(world, writes=_writes(world, tmp_path), channels=channels)
+    host = built.services.host
+    host.root = str(repo)
+    # A crashed start left the run's worktree on its branch, at the repository's head.
+    branch = _branch(ALICE, "adopted")
+    worktree = Path(host.path_of(branch))
+    run_git(repo, "worktree", "add", "-q", "-b", branch, str(worktree))
+    host.worktrees[branch] = str(worktree)
+    definition = built.services.definitions.save(yaml_text=GATE_ONLY)
+    body = _start_body(definition.id, "adopted", repo_path=str(repo))
+    try:
+        async with _client(built.app()) as client:
+            started = await client.post(RUNS, headers=_as(ALICE), json=body)
+            run_id = started.json()["run_id"]
+            # The run's work lands on its branch, then its gate is approved to the end.
+            (worktree / "NEW.md").write_bytes(b"new\n")
+            run_git(worktree, "add", "-A")
+            run_git(worktree, "commit", "-q", "-m", "the run's work")
+            tip = run_git(worktree, "rev-parse", "HEAD").strip()
+            world.bridge.answer_gate(
+                workspace_id=WORKSPACE,
+                run_id=run_id,
+                token=APPROVE_TOKEN,
+                label="approve",
+                note="",
+                actor=ALICE,
+            )
+            outcome = await client.get(f"{RUNS}/{run_id}/outcome", headers=_as(ALICE))
+    finally:
+        _close(built, pools)
+
+    assert started.status_code == 201, started.text
+    assert host.creates() == 0
+    assert _stored_base(world, run_id) == base
+    assert outcome.status_code == 200, outcome.text
+    assert (outcome.json()["status"], outcome.json()["diff_unavailable"]) == ("completed", None)
+    assert outcome.json()["diff"] == {
+        "from_commit": base,
+        "to_commit": tip,
+        "files_changed": 1,
+        "insertions": 1,
+        "deletions": 0,
+        "paths": ["NEW.md"],
+        "paths_truncated": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("reported", "stored", "reads"),
+    [
+        pytest.param(HEAD, HEAD, [], id="created-at-its-commit"),
+        pytest.param(None, START_HEAD, ["head"], id="older-host-reports-none"),
+        pytest.param("abc1234", START_HEAD, ["head"], id="short-commit-id"),
+    ],
+)
+async def test_a_new_worktrees_base_is_the_commit_its_create_reported_or_else_its_head(
+    start_heads: tuple[Api, FakeHostChannel, FakeChannels],
+    reported: str | None,
+    stored: str,
+    reads: list[str],
+) -> None:
+    built, host_channel, channels = start_heads
+    built.services.host.head_commit = reported
+    definition = built.services.definitions.save()
+
+    async with _client(built.app()) as client:
+        response = await client.post(RUNS, headers=_as(ALICE), json=_start_body(definition.id))
+
+    assert response.status_code == 201, response.text
+    assert _stored_base(built.world, response.json()["run_id"]) == stored
+    assert (host_channel.ops(), len(channels.calls)) == (reads, len(reads))
+
+
+START_HEAD_FAILURES = [
+    pytest.param(
+        "channel",
+        HostAccessRefused("not_permitted", f"{SECRET_PATH} is not yours"),
+        "HostAccessRefused not_permitted",
+        id="refused",
+    ),
+    pytest.param(
+        "channel",
+        HostAccessRefused("host_offline", f"no connection for {SECRET_PATH}"),
+        "HostAccessRefused host_offline",
+        id="host-offline",
+    ),
+    pytest.param(
+        "head",
+        WorkspaceOpError("workspace.git_failed", f"fatal: bad HEAD in {SECRET_PATH}"),
+        "WorkspaceOpError workspace.git_failed",
+        id="git-failed",
+    ),
+    pytest.param(
+        "head",
+        WorkspaceOpError("workspace.timeout", f"{SECRET_PATH} is busy"),
+        "WorkspaceOpError workspace.timeout",
+        id="worktree-busy",
+    ),
+    pytest.param(
+        "head",
+        host_capability_unavailable("host-1", SECRET_PATH),
+        "WorkspaceOpError workspace.capability_unavailable",
+        id="older-host-without-head",
+    ),
+    pytest.param("head", ValueError(SECRET_PATH), "ValueError ", id="refused-params"),
+    pytest.param("head", RuntimeError(SECRET_PATH), "RuntimeError ", id="unexpected"),
+    pytest.param(
+        "head",
+        {"head": SECRET_PATH, "branch": None, "merge_in_progress": False},
+        "WorkspaceOpError workspace.backend_unavailable",
+        id="malformed",
+    ),
+    pytest.param(
+        "head",
+        {"head": START_HEAD, "branch": "main", "merge_in_progress": False},
+        "its worktree holds another branch",
+        id="another-branch",
+    ),
+    pytest.param(
+        "head",
+        {"head": START_HEAD, "branch": None, "merge_in_progress": False},
+        "its worktree holds another branch",
+        id="detached",
+    ),
+]
+
+
+@pytest.mark.parametrize(("where", "failure", "logged"), START_HEAD_FAILURES)
+async def test_a_start_whose_head_cannot_be_read_starts_with_no_base_and_logs_no_path(
+    start_heads: tuple[Api, FakeHostChannel, FakeChannels],
+    caplog: pytest.LogCaptureFixture,
+    where: str,
+    failure: Any,
+    logged: str,
+) -> None:
+    built, host_channel, channels = start_heads
+    built.services.host.head_commit = None
+    if where == "channel":
+        channels.refusal = failure
+    else:
+        host_channel.replies["head"] = failure
+    definition = built.services.definitions.save()
+
+    with caplog.at_level(logging.DEBUG):
+        async with _client(built.app()) as client:
+            response = await client.post(RUNS, headers=_as(ALICE), json=_start_body(definition.id))
+
+    assert response.status_code == 201, response.text
+    run_id = response.json()["run_id"]
+    assert _stored_base(built.world, run_id) is None
+    assert _start_head_logs(caplog) == [
+        f"Coral could not read run {run_id}'s start head: {logged}"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert SECRET_PATH not in caplog.text
+
+
+async def test_without_host_channels_a_start_whose_worktree_reported_no_commit_has_no_base(
+    writes: Api, caplog: pytest.LogCaptureFixture
+) -> None:
+    writes.services.host.head_commit = None
+    definition = writes.services.definitions.save()
+
+    with caplog.at_level(logging.DEBUG):
+        async with _client(writes.app()) as client:
+            response = await client.post(RUNS, headers=_as(ALICE), json=_start_body(definition.id))
+
+    assert response.status_code == 201, response.text
+    assert _stored_base(writes.world, response.json()["run_id"]) is None
+    assert _start_head_logs(caplog) == []
+
+
+@pytest.mark.parametrize("stall", ["channel", "head"])
+async def test_a_start_head_read_past_its_deadline_starts_with_no_base(
+    world: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stall: str,
+) -> None:
+    monkeypatch.setattr(run_service, "START_HEAD_DEADLINE_S", 0.05)
+    stalled: HostWorkspaceChannels = (
+        HeldChannels(FakeHostChannel([], {}))
+        if stall == "channel"
+        else FakeChannels(StalledHost(), RecordingScopeRunner())
+    )
+    built, pools = _build(world, writes=_writes(world, tmp_path), channels=stalled)
+    built.services.host.head_commit = None
+    definition = built.services.definitions.save()
+    try:
+        with caplog.at_level(logging.DEBUG):
+            async with _client(built.app()) as client:
+                response = await asyncio.wait_for(
+                    client.post(RUNS, headers=_as(ALICE), json=_start_body(definition.id)),
+                    budget(10),
+                )
+    finally:
+        _close(built, pools)
+
+    assert response.status_code == 201, response.text
+    run_id = response.json()["run_id"]
+    assert _stored_base(world, run_id) is None
+    assert _start_head_logs(caplog) == [
+        f"Coral could not read run {run_id}'s start head: TimeoutError "
+    ]
+    assert built.api.starts.in_flight == 0
+
+
+async def test_a_start_holds_no_pool_thread_and_stores_no_run_while_it_reads_the_head(
+    world: World, tmp_path: Path
+) -> None:
+    host_channel, _channels = _outcome_host(START_HEAD)
+    held = HeldChannels(host_channel)
+    built, pools = _build(world, writes=_writes(world, tmp_path), channels=held)
+    built.services.host.head_commit = None
+    definition = built.services.definitions.save()
+    try:
+        async with _client(built.app()) as client:
+            started = asyncio.create_task(
+                client.post(RUNS, headers=_as(ALICE), json=_start_body(definition.id))
+            )
+            await poll_until_async(lambda: held.entered == 1, timeout_s=budget(10))
+            during = (built.in_flight.in_flight, built.api.starts.in_flight, _count_runs(world))
+            held.release.set()
+            response = await started
+    finally:
+        _close(built, pools)
+
+    assert during == (0, 1, 0)
+    assert response.status_code == 201, response.text
+    assert _stored_base(world, response.json()["run_id"]) == START_HEAD
+    assert host_channel.ops() == ["head"]
 
 
 # ── Pause, resume and cancel ────────────────────────────────────────────────

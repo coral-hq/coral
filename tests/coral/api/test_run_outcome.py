@@ -15,7 +15,6 @@ import logging
 import shlex
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +45,7 @@ from coral.db.enum_codecs import RunStatus
 from coral.omni.protocols import HostAccessRefused, HostWorkspaceChannels, Viewer
 from coral.stores.protocols import CoralRun, RunStartSpec, RunState
 from coral.workspace.executors import RunTarget
-from coral.workspace.ops import HostChannelBackend, OpName, WorkspaceOpError, WorkspaceRef
+from coral.workspace.ops import WorkspaceOpError, WorkspaceRef
 from coral.workspace.run_worktree import run_branch_name
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
@@ -54,8 +53,10 @@ from tests.coral.workspace._executor_fakes import (
     ChannelRequest,
     FakeChannels,
     FakeHostChannel,
+    HeldChannels,
     RecordingScopeRunner,
     Reply,
+    StalledHost,
 )
 
 WORKSPACE = 7
@@ -162,37 +163,6 @@ async def _read(
     target = outcome_target(state)
     assert target is not None
     return await diffs.read(viewer, state=state, target=target, channels=channels)
-
-
-@dataclass
-class HeldChannels:
-    """Channels whose lookup waits for ``release``; ``entered`` counts the lookups."""
-
-    backend: HostChannelBackend
-    release: asyncio.Event = field(default_factory=asyncio.Event)
-    entered: int = 0
-
-    async def channel(self, **_owner: object) -> HostChannelBackend:
-        self.entered += 1
-        await self.release.wait()
-        return self.backend
-
-
-class StalledHost(HostChannelBackend):
-    """A host that takes every op and never answers."""
-
-    async def request(
-        self,
-        host_id: str,
-        op: OpName,
-        *,
-        root: str,
-        params: Mapping[str, object],
-        timeout_s: float,
-        op_key: str | None,
-    ) -> Mapping[str, object]:
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
 
 
 def test_the_outcome_bounds_are_the_designed_ones() -> None:

@@ -75,7 +75,12 @@ from coral.gates.verdict import GateAnswers, GateVerdict, VisitAnswer
 from coral.limits import Slots, WarnOnce
 from coral.model.ids import derived_id
 from coral.model.ir import CompiledGraph
-from coral.omni.protocols import GatePublisher, HostWorkspaceChannels, Viewer
+from coral.omni.protocols import (
+    GatePublisher,
+    HostAccessRefused,
+    HostWorkspaceChannels,
+    Viewer,
+)
 from coral.queue.run_effects import describe_exception
 from coral.recovery.cancel import cancel_run_row, withdraw_local_prompts
 from coral.runview.types import FINISHED_RUN_STATUSES, RunStatusName
@@ -92,6 +97,8 @@ from coral.stores.protocols import (
     StartKeyConflict,
 )
 from coral.stores.workflows import WorkflowDefinitionStore
+from coral.workspace.host_backend import HostWorkspaceOps
+from coral.workspace.ops import HostChannel, WorkspaceOpError, WorkspaceRef
 from coral.workspace.run_worktree import (
     RunWorktree,
     RunWorktreeError,
@@ -115,6 +122,10 @@ MAX_STARTS = 8
 MAX_STARTS_PER_USER = 2
 # A worktree another start is checking out has no run yet; it takes a moment more.
 LOCKED_WORKTREE_RETRY_AFTER_S = 2
+# A start's head read when its worktree reported no commit: the host's deadline, and one
+# deadline over the channel lookup and the read.
+START_HEAD_TIMEOUT_S = 5.0
+START_HEAD_DEADLINE_S = 10.0
 _BUSY_TEXT = "The server is busy; try again."
 _GRAPH_UNREADABLE_TEXT = "The run's workflow graph cannot be read."
 _KEY_CONFLICT_TEXT = "This start key started a run with another request."
@@ -392,7 +403,8 @@ class RunsApi:
         :param requires_generation: The server signs users in to accounts, so a start
             needs a request that proves its account generation.
         :param workspace_channels: The owner's host channels an outcome reads its diff
-            through; without them every diff is ``host_offline``.
+            through, and a start the head of a worktree that reported no commit;
+            without them every diff is ``host_offline`` and such a start has no base.
         :param outcome_diffs: Admits, shares and caches those reads.
         :param canonical_host_id: A host id in the one form every spelling of it
             reduces to; a start stores it, and host ids compare in it. Ids are taken
@@ -672,6 +684,11 @@ class RunsApi:
             raise server_busy(
                 _sentence(exc.message), retry_after_s=LOCKED_WORKTREE_RETRY_AFTER_S
             ) from None
+        base_commit = worktree.start_commit
+        if base_commit is None:
+            base_commit = await self._start_head(
+                viewer, workspace_id, run_id, host_id, generation, request.repo_path, worktree
+            )
         spec = RunStartSpec(
             workflow_id=definition.id,
             version_id="",
@@ -688,7 +705,7 @@ class RunsApi:
             repo_path=request.repo_path,
             worktree_path=worktree.path,
             base_ref=request.base_ref,
-            base_commit=worktree.start_commit,
+            base_commit=base_commit,
             run_branch=worktree.branch,
             max_activations=request.max_activations,
         )
@@ -738,6 +755,56 @@ class RunsApi:
         return await create_or_adopt_run_worktree(
             host, repo_root=request.repo_path, run_id=run_id, base_ref=request.base_ref
         )
+
+    async def _start_head(
+        self,
+        viewer: Viewer,
+        workspace_id: int,
+        run_id: str,
+        host_id: str,
+        generation: str | None,
+        repo_path: str,
+        worktree: RunWorktree,
+    ) -> str | None:
+        """
+        The head of a worktree that reported no start commit: an adopted one, or one an
+        older host made. ``None`` when it cannot be read; it never fails the start.
+
+        No run row exists yet, so no engine commit is on the branch. The read goes
+        through the starting owner's host channel and holds no pool thread.
+        """
+        if self._channels is None:
+            return None
+        ref = WorkspaceRef(host_id=host_id, root=worktree.path, branch=worktree.branch)
+        try:
+            async with asyncio.timeout(START_HEAD_DEADLINE_S):
+                channel = await self._channels.channel(
+                    workspace_id=workspace_id,
+                    user_id=viewer.user_id,
+                    account_generation=generation,
+                    host_id=host_id,
+                )
+                ops = HostWorkspaceOps(
+                    channel, repo_root=repo_path, read_timeout_s=START_HEAD_TIMEOUT_S
+                )
+                found = await ops.head(ref, HostChannel(host_id))
+        except Exception as exc:  # noqa: BLE001 -- the start goes on without a base
+            # Only the fixed codes: host and git messages can hold paths.
+            code = exc.code if isinstance(exc, (HostAccessRefused, WorkspaceOpError)) else ""
+            _logger.info(
+                "Coral could not read run %s's start head: %s %s",
+                run_id,
+                type(exc).__name__,
+                code,
+            )
+            return None
+        if found.branch != worktree.branch:
+            _logger.info(
+                "Coral could not read run %s's start head: its worktree holds another branch",
+                run_id,
+            )
+            return None
+        return found.head
 
     async def _replay(self, viewer: Viewer, run: CoralRun, request: StartRunRequest) -> StartedRun:
         """
