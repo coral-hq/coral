@@ -1316,6 +1316,31 @@ class SqlAlchemyCoralRunStore:
             rows = session.execute(stmt).scalars().all()
             return [_to_coral_run(r) for r in rows]
 
+    def unfinished_run_hosts(self, *, workspace_id: int) -> frozenset[str]:
+        """
+        The host ids, as stored, of the workspace's starting, running and paused runs.
+
+        One ``ix_coral_runs_active`` range joined to each run's spec by its primary key.
+        Ids are returned as stored, so the caller compares them in canonical form.
+        """
+        with shared_read_scope(), self._session("unfinished_run_hosts") as session:
+            statement = (
+                select(RunSpecRow.host_id)
+                .select_from(RunRow)
+                .join(
+                    RunSpecRow,
+                    (RunSpecRow.workspace_id == RunRow.workspace_id)
+                    & (RunSpecRow.run_id == RunRow.id),
+                )
+                .where(
+                    RunRow.status.in_(UNFINISHED_RUN_STATUSES),
+                    RunRow.workspace_id == workspace_id,
+                    RunSpecRow.host_id.is_not(None),
+                )
+                .distinct()
+            )
+            return frozenset(host_id for host_id in session.scalars(statement) if host_id)
+
     def list_open_gates_all_workspaces(
         self,
         *,

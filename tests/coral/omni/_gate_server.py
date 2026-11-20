@@ -166,6 +166,7 @@ def gate_run(
     *,
     user: str | None = None,
     account_generation: str | None = None,
+    **spec_fields: Any,
 ) -> tuple[World, CoralRun, str, str]:
     """
     A ``gate_only`` run at its gate; its anchor and prompt id.
@@ -173,6 +174,7 @@ def gate_run(
     :param user: The run owner; ``None`` is the single local user of a server without
         authentication.
     :param account_generation: The owner's account generation the run records.
+    :param spec_fields: Other fields of the run's spec, such as its ``base_commit``.
     """
     ensure_coral_schema(db_uri)
     world = World.sql(db_uri)
@@ -181,6 +183,7 @@ def gate_run(
         start_key=start_key,
         workspace_id=DEFAULT_WORKSPACE_ID,
         account_generation=account_generation,
+        **spec_fields,
     )
     run = start(
         world, GATE_ONLY, spec=spec, start_key=start_key, allow_ownerless=user is None, actor=user

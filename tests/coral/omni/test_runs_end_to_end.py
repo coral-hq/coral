@@ -3,11 +3,12 @@
 A gate run started through the bridge is listed, read, started again with its start
 key, followed live, paused, resumed and answered through the runs routes until its
 stream ends with ``[DONE]``; a second run is cancelled. After the end, the stream is
-read again from ``Last-Event-ID`` and from ``after_seq``. Opening the finished run marks
-its run-end alert read and leaves every gate's alert. Another user's request on every
-runs route gets the same 404 bytes and marks none of the owner's alerts read. A restart
-on the same database resumes a stream with no gap or repeat, and in accounts mode a
-deleted account's open stream ends at its next re-check and cannot reconnect.
+read again from ``Last-Event-ID`` and from ``after_seq``, and its outcome names its branch
+and checkout command. Opening the finished run marks its run-end alert read and leaves
+every gate's alert. Another user's request on every runs route gets the same 404 bytes
+and marks none of the owner's alerts read. A restart on the same database resumes a
+stream with no gap or repeat, and in accounts mode a deleted account's open stream ends
+at its next re-check and cannot reconnect.
 
 Live streams are served by the app on the test's event loop with their events taken
 as they are sent (an httpx client holds a body until the response ends), so they pass
@@ -32,6 +33,7 @@ from starlette.types import Message
 from coral.api.stream import RECHECK_S, RunStreamHub
 from coral.omni.protocols import Viewer
 from coral.omni.server import coral_lifespan
+from coral.workspace.run_worktree import run_branch_name
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID
 from omnigent.runtime import pending_elicitations
 from omnigent.server import elicitation_hooks
@@ -319,8 +321,8 @@ async def _follow_a_run(
         revalidated = await client.get(
             f"{RUNS}/{run.id}/graph", headers={**owner, "If-None-Match": graph.headers["etag"]}
         )
+        outcome = await client.get(f"{RUNS}/{run.id}/outcome", headers=owner)
         stubs = [
-            await client.get(f"{RUNS}/{run.id}/outcome", headers=owner),
             await client.post(
                 f"{RUNS}/{run.id}/activations/{'a' * 32}:retry", json={}, headers=owner
             ),
@@ -416,9 +418,27 @@ async def _follow_a_run(
     }
     assert graph.status_code == 200 and graph.headers["etag"] == f'"{final["version_id"]}"'
     assert revalidated.status_code == 304
+    # The finished run's outcome: its branch and checkout command; the gate run recorded no
+    # base commit, so no diff and no host contact.
+    branch = run_branch_name(run.id)
+    assert (outcome.status_code, outcome.headers["cache-control"]) == (200, "private, no-store")
+    assert {
+        name: outcome.json()[name]
+        for name in ("status", "branch", "diff", "diff_unavailable", "checkout")
+    } == {
+        "status": "completed",
+        "branch": branch,
+        "diff": None,
+        "diff_unavailable": "base_unknown",
+        "checkout": {
+            "command": f"git -C /repo/coral checkout --detach refs/heads/{branch}",
+            "worktree_command": "cd /repo/coral-worktrees/r1",
+            "unavailable": None,
+        },
+    }
     assert [(response.status_code, response.json()["error"]["code"]) for response in stubs] == [
         (501, "not_implemented")
-    ] * 3
+    ] * 2
 
     assert _actions(cancelled.json()) == ("cancelled", None, []), cancelled.text
     assert _actions(cancelled_again.json()) == ("cancelled", None, [])

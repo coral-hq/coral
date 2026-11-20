@@ -1351,6 +1351,105 @@
         "title": "LoopPassView",
         "type": "object"
       },
+      "OutcomeCheckout": {
+        "additionalProperties": false,
+        "description": "How to check out a run's branch: ``command`` moves the repository's main checkout to\nthe branch tip (detached), ``worktree_command`` opens the run's worktree. Both are\n``None`` with ``unavailable`` set when no safe command can be built.",
+        "properties": {
+          "command": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
+          },
+          "unavailable": {
+            "anyOf": [
+              {
+                "enum": [
+                  "no_worktree",
+                  "unsafe_path",
+                  "non_posix_path"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable"
+          },
+          "worktree_command": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worktree Command"
+          }
+        },
+        "required": [
+          "command",
+          "worktree_command",
+          "unavailable"
+        ],
+        "title": "OutcomeCheckout",
+        "type": "object"
+      },
+      "OutcomeDiff": {
+        "additionalProperties": false,
+        "description": "What a run changed, from ``from_commit`` (its base) to ``to_commit`` (its head when\nread). The counts cover the whole diff; ``paths`` holds at most 100 sorted paths,\neach shown with backslashes and unsafe or invisible characters as ``\\u{XXXX}`` and\ncut at 512 characters, and ``paths_truncated`` says whether the host or the server\ncut it.",
+        "properties": {
+          "deletions": {
+            "title": "Deletions",
+            "type": "integer"
+          },
+          "files_changed": {
+            "title": "Files Changed",
+            "type": "integer"
+          },
+          "from_commit": {
+            "title": "From Commit",
+            "type": "string"
+          },
+          "insertions": {
+            "title": "Insertions",
+            "type": "integer"
+          },
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Paths",
+            "type": "array"
+          },
+          "paths_truncated": {
+            "title": "Paths Truncated",
+            "type": "boolean"
+          },
+          "to_commit": {
+            "title": "To Commit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_commit",
+          "to_commit",
+          "files_changed",
+          "insertions",
+          "deletions",
+          "paths",
+          "paths_truncated"
+        ],
+        "title": "OutcomeDiff",
+        "type": "object"
+      },
       "PauseCause": {
         "additionalProperties": false,
         "properties": {
@@ -1990,6 +2089,156 @@
           "load_error"
         ],
         "title": "RunHeader",
+        "type": "object"
+      },
+      "RunOutcome": {
+        "additionalProperties": false,
+        "description": "What one of the caller's runs produced and how to check it out.\n\nExactly one of ``diff`` and ``diff_unavailable`` is set. ``branch`` and the host\nfields are ``None`` when the run has no worktree of its own; the two paths are also\n``None`` when no command could be built for them. ``head_commit`` is the branch tip\nthe host reported now.",
+        "properties": {
+          "base_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Commit"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "checkout": {
+            "$ref": "#/components/schemas/OutcomeCheckout"
+          },
+          "diff": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutcomeDiff"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "diff_unavailable": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run_not_finished",
+                  "no_worktree",
+                  "base_unknown",
+                  "host_busy",
+                  "host_offline",
+                  "worktree_missing",
+                  "compare_failed",
+                  "busy",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diff Unavailable"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "head_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Commit"
+          },
+          "host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
+          },
+          "repo_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Path"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "starting",
+              "running",
+              "paused",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "worktree_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worktree Path"
+          }
+        },
+        "required": [
+          "run_id",
+          "status",
+          "finished_at",
+          "branch",
+          "host_id",
+          "repo_path",
+          "worktree_path",
+          "base_commit",
+          "head_commit",
+          "diff",
+          "diff_unavailable",
+          "checkout"
+        ],
+        "title": "RunOutcome",
         "type": "object"
       },
       "RunPage": {
@@ -4212,7 +4461,7 @@
     },
     "/v1/coral/runs/{run_id}/outcome": {
       "get": {
-        "description": "Not served yet: the caller's own run answers 501.",
+        "description": "What one of the caller's runs produced: its branch, the commands that check it\nout, and for a finished run its diff from its base commit, read through its host.\nA diff that cannot be read is answered with ``diff_unavailable``, never an error.",
         "operationId": "coral_get_run_outcome",
         "parameters": [
           {
@@ -4226,6 +4475,16 @@
           }
         ],
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOutcome"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -4265,16 +4524,6 @@
               }
             },
             "description": "Unprocessable Content"
-          },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CoralErrorResponse"
-                }
-              }
-            },
-            "description": "Not Implemented"
           },
           "503": {
             "content": {

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
@@ -43,8 +45,16 @@ from coral.stores.session_bindings import (
     slot_generation_taken,
 )
 from coral.stores.workspace_op_intents import OpIntentConflict, WorkspaceOpIntent
-from coral.workspace.ops import HostChannelBackend, OpName
+from coral.workspace.host_backend import map_host_reply
+from coral.workspace.ops import HostChannelBackend, OpName, WorkspaceOpError
 from coral.workspace.run_worktree import run_branch_name
+from omnigent.host.frames import decode_host_frame, encode_host_frame
+from omnigent.host.workspace_ops import (
+    HostWorkspaceOpFrame,
+    HostWorkspaceOpResultFrame,
+    WorkspaceOpHandler,
+    dispatch_workspace_op,
+)
 
 # Every event the fakes see, in order, so a test can assert what came first.
 Events = list[str]
@@ -371,6 +381,58 @@ class FakeHostChannel(HostChannelBackend):
 
     def ops(self) -> list[str]:
         return [request.op for request in self.requests]
+
+
+@dataclass(frozen=True)
+class InProcessHostChannel:
+    """A ``HostChannelBackend`` that serves one host's ops in this process.
+
+    Each request and result crosses the host channel's real frame codec, and
+    the host's real dispatcher runs the handler in a worker thread; replies map
+    through ``map_host_reply``, as the server adapter's do.
+    """
+
+    host_id: str
+    handlers: Mapping[str, WorkspaceOpHandler]
+
+    async def request(
+        self,
+        host_id: str,
+        op: OpName,
+        *,
+        root: str,
+        params: Mapping[str, object],
+        timeout_s: float,
+        op_key: str | None,
+    ) -> Mapping[str, object]:
+        if host_id != self.host_id:
+            raise WorkspaceOpError("workspace.backend_unavailable", f"host {host_id} is offline")
+        sent = HostWorkspaceOpFrame(
+            request_id=secrets.token_hex(16),
+            op=op,
+            root=root,
+            params=dict(params),
+            timeout_s=timeout_s,
+            op_key=op_key,
+        )
+        frame = decode_host_frame(encode_host_frame(sent))
+        assert isinstance(frame, HostWorkspaceOpFrame)
+        result = await dispatch_workspace_op(
+            frame, run_guarded=asyncio.to_thread, handlers=self.handlers
+        )
+        reply = decode_host_frame(encode_host_frame(result))
+        assert isinstance(reply, HostWorkspaceOpResultFrame)
+        return map_host_reply(
+            {
+                "status": reply.status,
+                "payload": reply.payload,
+                "error_code": reply.error_code,
+                "error": reply.error,
+                "exit_code": reply.exit_code,
+                "permanent": reply.permanent,
+            },
+            host_id=host_id,
+        )
 
 
 @dataclass

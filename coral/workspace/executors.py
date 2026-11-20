@@ -61,7 +61,7 @@ from coral.queue.run_effects import (
 from coral.stores.protocols import RunState, RunStore
 from coral.stores.session_bindings import SessionBinding, SessionBindings
 from coral.stores.workspace_op_intents import OpIntentConflict, WorkspaceOpIntents
-from coral.workspace.host_backend import ALWAYS_PERMANENT_CODES, HostWorkspaceOps
+from coral.workspace.host_backend import ALWAYS_PERMANENT_CODES, READ_TIMEOUT_S, HostWorkspaceOps
 from coral.workspace.ops import (
     CommitResult,
     DiffStat,
@@ -272,16 +272,24 @@ def run_target(state: RunState) -> RunTarget:
 
 
 async def workspace_for(
-    channels: HostWorkspaceChannels, state: RunState, target: RunTarget
+    channels: HostWorkspaceChannels,
+    state: RunState,
+    target: RunTarget,
+    *,
+    read_timeout_s: float = READ_TIMEOUT_S,
 ) -> HostWorkspaceOps:
-    """The K13 host backend for the run worktree, authorized for the run's owner."""
+    """
+    The K13 host backend for the run worktree, authorized for the run's owner.
+
+    :param read_timeout_s: The host's deadline for each READ op.
+    """
     channel = await channels.channel(
         workspace_id=state.workspace_id,
         user_id=state.run.user_id,
         account_generation=state.run.account_generation,
         host_id=target.host_id,
     )
-    return HostWorkspaceOps(channel, repo_root=target.repo_root)
+    return HostWorkspaceOps(channel, repo_root=target.repo_root, read_timeout_s=read_timeout_s)
 
 
 def _no_params(_payload: Mapping[str, Any]) -> Mapping[str, Any]:

@@ -11,6 +11,9 @@ from omnigent.runtime.pending_elicitations import count_for as pending_elicitati
 # omnigent/runtime/workflow.py: claude-sdk CLI env, used by coral/omni/server/preflight.py.
 from omnigent.runtime.workflow import _build_claude_sdk_spawn_env
 
+# omnigent/server/host_registry.py: a host id as the registry keys it, used by plugin.py.
+from omnigent.server.host_registry import _canonical_host_id as canonical_host_id
+
 # omnigent/server/routes/_auth_helpers.py: the created_by the server stamps, used by dispatch.py.
 from omnigent.server.routes._auth_helpers import attribution_user
 
@@ -121,6 +124,7 @@ __all__ = [
     "_session_status_cache",
     "_tar_gz_dir",
     "attribution_user",
+    "canonical_host_id",
     "create_worktree_on_host",
     "label_key_skeleton",
     "list_worktrees_on_host",

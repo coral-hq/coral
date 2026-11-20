@@ -266,6 +266,34 @@ export interface LoopPassView {
   pass_index: number;
 }
 
+/**
+ * How to check out a run's branch: ``command`` moves the repository's main checkout to
+ * the branch tip (detached), ``worktree_command`` opens the run's worktree. Both are
+ * ``None`` with ``unavailable`` set when no safe command can be built.
+ */
+export interface OutcomeCheckout {
+  command: string | null;
+  unavailable: "no_worktree" | "unsafe_path" | "non_posix_path" | null;
+  worktree_command: string | null;
+}
+
+/**
+ * What a run changed, from ``from_commit`` (its base) to ``to_commit`` (its head when
+ * read). The counts cover the whole diff; ``paths`` holds at most 100 sorted paths,
+ * each shown with backslashes and unsafe or invisible characters as ``\u{XXXX}`` and
+ * cut at 512 characters, and ``paths_truncated`` says whether the host or the server
+ * cut it.
+ */
+export interface OutcomeDiff {
+  deletions: number;
+  files_changed: number;
+  from_commit: string;
+  insertions: number;
+  paths: string[];
+  paths_truncated: boolean;
+  to_commit: string;
+}
+
 export interface PauseCause {
   detail: string;
   reason:
@@ -423,6 +451,39 @@ export interface RunHeader {
     | null;
   status: "starting" | "running" | "paused" | "completed" | "failed" | "cancelled";
   version: number;
+}
+
+/**
+ * What one of the caller's runs produced and how to check it out.
+ *
+ * Exactly one of ``diff`` and ``diff_unavailable`` is set. ``branch`` and the host
+ * fields are ``None`` when the run has no worktree of its own; the two paths are also
+ * ``None`` when no command could be built for them. ``head_commit`` is the branch tip
+ * the host reported now.
+ */
+export interface RunOutcome {
+  base_commit: string | null;
+  branch: string | null;
+  checkout: OutcomeCheckout;
+  diff: OutcomeDiff | null;
+  diff_unavailable:
+    | "run_not_finished"
+    | "no_worktree"
+    | "base_unknown"
+    | "host_busy"
+    | "host_offline"
+    | "worktree_missing"
+    | "compare_failed"
+    | "busy"
+    | "failed"
+    | null;
+  finished_at: number | null;
+  head_commit: string | null;
+  host_id: string | null;
+  repo_path: string | null;
+  run_id: string;
+  status: "starting" | "running" | "paused" | "completed" | "failed" | "cancelled";
+  worktree_path: string | null;
 }
 
 /** One page of runs, newest first; page again with ``next_cursor`` until it is null. */
@@ -865,7 +926,9 @@ export interface CoralOperations {
   /**
    * GET /v1/coral/runs/{run_id}/outcome
    *
-   * Not served yet: the caller's own run answers 501.
+   * What one of the caller's runs produced: its branch, the commands that check it
+   * out, and for a finished run its diff from its base commit, read through its host.
+   * A diff that cannot be read is answered with ``diff_unavailable``, never an error.
    */
   coral_get_run_outcome: {
     method: "GET";
@@ -873,9 +936,9 @@ export interface CoralOperations {
     params: {
       run_id: string;
     };
-    status: never;
-    response: never;
-    errors: 401 | 403 | 404 | 422 | 501 | 503;
+    status: 200;
+    response: RunOutcome;
+    errors: 401 | 403 | 404 | 422 | 503;
   };
   /**
    * GET /v1/coral/runs/{run_id}/stream

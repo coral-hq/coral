@@ -1,15 +1,18 @@
-"""The owner's runs: start, list, detail, pinned graph, log, actions and gate answers.
+"""The owner's runs: start, list, detail, pinned graph, log, outcome, actions and gate answers.
 
 Unmounted: the Coral server plugin mounts it under ``/v1/coral`` with its own caller
 and workspace dependencies. The runs API is read per request from
 ``app.state.coral_runs_api``, which the lifespan publishes; without it every route
 answers the run 404. Every route that names a run checks it is the caller's through
-:meth:`RunsApi.owned_run` before anything else. Every POST takes a JSON body.
+:meth:`RunsApi.owned_run` before anything else. Every POST takes a JSON body. Run
+reads, writes and their refusals are never cached.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from types import MappingProxyType
+from typing import ClassVar
 
 from fastapi import APIRouter, Depends, Header, Path, Query, Request, Response
 
@@ -28,6 +31,7 @@ from coral.api.run_models import (
     LogPage,
     ResumeRequest,
     RunDetail,
+    RunOutcome,
     RunPage,
     RunSummary,
     StartRunRequest,
@@ -73,6 +77,12 @@ _EVENT_STREAM = {
 }
 
 
+class _RunsRoute(CoralRoute):
+    """A runs route, whose refusals are never cached either."""
+
+    refusal_headers: ClassVar[Mapping[str, str]] = MappingProxyType({"Cache-Control": _NO_STORE})
+
+
 def _runs_api(request: Request) -> RunsApi:
     api = getattr(request.app.state, "coral_runs_api", None)
     if api is None:
@@ -101,7 +111,7 @@ def create_runs_router(
         run is read.
     :param workspace_id_dependency: The request's workspace.
     """
-    router = APIRouter(route_class=CoralRoute)
+    router = APIRouter(route_class=_RunsRoute)
     caller = Depends(viewer_dependency)
     workspace = Depends(workspace_id_dependency)
 
@@ -388,18 +398,24 @@ def create_runs_router(
     @router.get(
         "/runs/{run_id}/outcome",
         operation_id="coral_get_run_outcome",
-        status_code=501,
-        response_class=Response,
-        responses=error_responses(401, 403, 404, 422, 501, 503),
+        response_model=RunOutcome,
+        responses=error_responses(401, 403, 404, 422, 503),
     )
     async def get_run_outcome(
         request: Request,
+        response: Response,
         run_id: str,
         viewer: Viewer = caller,
         workspace_id: int = workspace,
-    ) -> Response:
-        """Not served yet: the caller's own run answers 501."""
-        await _runs_api(request).outcome(viewer, workspace_id, run_id)
+    ) -> RunOutcome:
+        """
+        What one of the caller's runs produced: its branch, the commands that check it
+        out, and for a finished run its diff from its base commit, read through its host.
+        A diff that cannot be read is answered with ``diff_unavailable``, never an error.
+        """
+        outcome = await _runs_api(request).outcome(viewer, workspace_id, run_id)
+        response.headers["Cache-Control"] = _NO_STORE
+        return outcome
 
     return router
 

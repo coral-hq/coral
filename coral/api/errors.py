@@ -10,7 +10,8 @@ no route matches are outside it.
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Mapping
-from typing import Any, Final, Literal
+from types import MappingProxyType
+from typing import Any, ClassVar, Final, Literal
 
 from fastapi import Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -173,6 +174,9 @@ class CoralRoute(APIRoute):
     another server error among them, is left to the server's own handlers.
     """
 
+    # Headers every refusal of the route sends, unless the refusal sets its own.
+    refusal_headers: ClassVar[Mapping[str, str]] = MappingProxyType({})
+
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handle = super().get_route_handler()
         json_only = "POST" in self.methods
@@ -183,15 +187,21 @@ class CoralRoute(APIRoute):
                     raise CoralApiError("validation_failed", _NOT_JSON, 422)
                 return await handle(request)
             except CoralApiError as exc:
-                return exc.response()
+                return self._refused(exc)
             except RequestValidationError as exc:
-                return _from_validation_error(exc).response()
+                return self._refused(_from_validation_error(exc))
             except HTTPException as exc:
                 if not _enveloped(exc.status_code):
                     raise
-                return _from_http_exception(exc).response()
+                return self._refused(_from_http_exception(exc))
 
         return coral_handler
+
+    def _refused(self, exc: CoralApiError) -> JSONResponse:
+        response = exc.response()
+        for name, value in self.refusal_headers.items():
+            response.headers.setdefault(name, value)
+        return response
 
 
 __all__ = [

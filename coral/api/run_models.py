@@ -316,6 +316,85 @@ class RunDetail(RunSummary):
     slots: tuple[SlotOut, ...]
 
 
+# Why a run's outcome has no diff.
+OutcomeUnavailable = Literal[
+    # The run is not completed, failed or cancelled.
+    "run_not_finished",
+    # The spec names no host, repository, worktree or branch, or another run's branch.
+    "no_worktree",
+    # The spec recorded no base commit.
+    "base_unknown",
+    # An unfinished run of the workspace uses the same host.
+    "host_busy",
+    # No host channels, or the host is offline or no longer the owner's to use.
+    "host_offline",
+    # The host refused the target: a removed or displaced worktree, or another branch.
+    "worktree_missing",
+    # Git could not compare the commits, such as a base the repository lacks.
+    "compare_failed",
+    # Too many reads in flight, or the host did not answer in time.
+    "busy",
+    # Anything else, such as a host without the op or a malformed reply.
+    "failed",
+]
+# Why a run's outcome has no checkout command.
+CheckoutUnavailable = Literal["no_worktree", "unsafe_path", "non_posix_path"]
+
+
+class OutcomeDiff(_Out):
+    """
+    What a run changed, from ``from_commit`` (its base) to ``to_commit`` (its head when
+    read). The counts cover the whole diff; ``paths`` holds at most 100 sorted paths,
+    each shown with backslashes and unsafe or invisible characters as ``\\u{XXXX}`` and
+    cut at 512 characters, and ``paths_truncated`` says whether the host or the server
+    cut it.
+    """
+
+    from_commit: str
+    to_commit: str
+    files_changed: int
+    insertions: int
+    deletions: int
+    paths: tuple[str, ...]
+    paths_truncated: bool
+
+
+class OutcomeCheckout(_Out):
+    """
+    How to check out a run's branch: ``command`` moves the repository's main checkout to
+    the branch tip (detached), ``worktree_command`` opens the run's worktree. Both are
+    ``None`` with ``unavailable`` set when no safe command can be built.
+    """
+
+    command: str | None
+    worktree_command: str | None
+    unavailable: CheckoutUnavailable | None
+
+
+class RunOutcome(_Out):
+    """
+    What one of the caller's runs produced and how to check it out.
+
+    Exactly one of ``diff`` and ``diff_unavailable`` is set. ``branch`` and the host
+    fields are ``None`` when the run has no worktree of its own; the two paths are also
+    ``None`` when no command could be built for them. ``head_commit`` is the branch tip
+    the host reported now.
+    """
+
+    run_id: str
+    status: RunStatusName
+    finished_at: int | None
+    branch: str | None
+    host_id: str | None
+    repo_path: str | None
+    worktree_path: str | None
+    base_commit: str | None
+    head_commit: str | None
+    diff: OutcomeDiff | None
+    diff_unavailable: OutcomeUnavailable | None
+    checkout: OutcomeCheckout
+
+
 class RunPage(_Out):
     """One page of runs, newest first; page again with ``next_cursor`` until it is null."""
 
@@ -736,14 +815,19 @@ __all__ = [
     "START_KEY_PATTERN",
     "UNREADABLE_LOG_KIND",
     "WORKFLOW_ID_PATTERN",
+    "CheckoutUnavailable",
     "EmptyRequest",
     "GateAnswerOut",
     "GateAnswerRequest",
     "GateOut",
     "LogEntryOut",
     "LogPage",
+    "OutcomeCheckout",
+    "OutcomeDiff",
+    "OutcomeUnavailable",
     "ResumeRequest",
     "RunDetail",
+    "RunOutcome",
     "RunPage",
     "RunSpend",
     "RunSpendTokens",
