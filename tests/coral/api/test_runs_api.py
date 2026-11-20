@@ -985,13 +985,19 @@ async def test_the_log_pages_after_a_seq(runs_api: Api) -> None:
     assert [row["body"] for row in rest["data"]] == [{"n": 1}, {"n": 2}]
 
 
+@pytest.mark.parametrize("fault", ["undecodable", "not_a_patch"])
 async def test_an_unreadable_log_row_is_a_placeholder_between_readable_ones(
-    runs_api: Api,
+    runs_api: Api, fault: str
 ) -> None:
     world = runs_api.world
     run = _start(world, "log")
     _add_rows(world, run, ['{"n": 1}', '{"n": 2}'])
-    _fake_runs(world).undecodable_logs.add((WORKSPACE, run.id, 2))
+    if fault == "undecodable":
+        _fake_runs(world).undecodable_logs.add((WORKSPACE, run.id, 2))
+    else:
+        # Stored patch text that is JSON but not a patch.
+        rows = _log_rows(world, run)
+        rows[1] = dataclasses.replace(rows[1], view_patch='{"op": "add"}')
 
     async with _client(_app(runs_api.api)) as client:
         page = (await client.get(f"{RUNS}/{run.id}/log", headers=_as(ALICE))).json()

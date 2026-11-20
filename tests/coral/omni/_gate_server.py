@@ -7,13 +7,16 @@ a new entry on the same database. Gate prompts live in this process's index.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from coral.bridge.codec import decode_entries
 from coral.db.migrate import ensure_coral_schema
@@ -39,6 +42,8 @@ from tests.coral.bridge._world import World, run_spec, start
 # Mounts Coral's routers, the workflow Inbox among them, as the server config does.
 CORAL_SERVER_PLUGIN = "coral.server_plugin"
 INBOX = "/v1/coral/inbox"
+ADMIN_PASSWORD = "admin-pw-12345"
+ALICE_PASSWORD = "alice-pw-1234"
 
 
 @dataclass
@@ -100,6 +105,59 @@ def coral_server(
         host_sharded=False,
     )
     return CoralServer(app=app, services=services, db_uri=db_uri)
+
+
+@dataclass
+class AccountsServer:
+    """The real accounts-mode server with Coral mounted, its lifespan run by the app."""
+
+    admin: TestClient
+    alice: TestClient
+    # ``create_app``'s keyword arguments: the server's stores and auth provider.
+    stores: dict[str, Any]
+
+
+def register(admin: TestClient, username: str, password: str) -> TestClient:
+    """A new client signed in as ``username``, registered through an admin's invite."""
+    invite = admin.post("/auth/invite", json={}).json()["token"]
+    client = TestClient(admin.app)
+    response = client.post(
+        "/auth/register", json={"invite": invite, "username": username, "password": password}
+    )
+    assert response.status_code == 200, response.text
+    return client
+
+
+@contextmanager
+def accounts_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[AccountsServer]:
+    """
+    An accounts-mode server with Coral's plugin, an admin signed in with
+    :data:`ADMIN_PASSWORD` and ``alice`` registered with :data:`ALICE_PASSWORD`.
+
+    The admin client holds the app's lifespan and its event loop (``admin.portal``).
+    """
+    import omnigent.server.app as app_module
+    from tests.server.test_accounts import _build_accounts_app, _login
+
+    original = app_module.create_app
+    captured: dict[str, Any] = {}
+
+    def with_coral(**kwargs: Any) -> FastAPI:
+        # Run anchors are filed in their owner's project, so the session engine needs one.
+        db_uri = kwargs["conversation_store"].storage_location
+        kwargs["project_store"] = SqlAlchemyProjectStore(db_uri)
+        captured.update(kwargs)
+        return original(**kwargs, server_plugins=[CORAL_SERVER_PLUGIN])
+
+    monkeypatch.setattr(app_module, "create_app", with_coral)
+    clients = _build_accounts_app(tmp_path, monkeypatch, init_admin_password=ADMIN_PASSWORD)
+    admin = next(clients)
+    try:
+        _login(admin, "admin", ADMIN_PASSWORD)
+        yield AccountsServer(admin, register(admin, "alice", ALICE_PASSWORD), captured)
+    finally:
+        # Resuming the builder past its yield shuts the app down.
+        next(clients, None)
 
 
 def gate_run(
