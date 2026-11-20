@@ -40,6 +40,7 @@ def test_ensure_coral_schema_creates_all_tables_and_allows_row_insertion(db_uri:
         "coral_stable_ids",
         "coral_workspace_op_intents",
         "coral_tool_replies",
+        "coral_command_observations",
     }
 
     assert expected_tables.issubset(existing_tables), (
@@ -48,7 +49,7 @@ def test_ensure_coral_schema_creates_all_tables_and_allows_row_insertion(db_uri:
     assert "coral_alembic_version" in existing_tables
 
     current, head = current_coral_revision(db_uri)
-    assert current == head == "coral_0003_engine_bridge"
+    assert current == head == "coral_0004_observations"
 
     # Insert a WorkflowRow
     with Session(engine) as session:
@@ -133,4 +134,4 @@ def test_s31_truncation_preserves_coral_version_and_clears_data(db_uri: str) -> 
     assert "alembic_version" in all_tables
 
     current, head = current_coral_revision(db_uri)
-    assert current == head == "coral_0003_engine_bridge"
+    assert current == head == "coral_0004_observations"

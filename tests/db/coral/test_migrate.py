@@ -180,7 +180,7 @@ def test_schema_cache_and_clear_cache() -> None:
         # First call migrates
         ensure_coral_schema(uri)
         current, head = current_coral_revision(uri)
-        assert current == head == "coral_0003_engine_bridge"
+        assert current == head == "coral_0004_observations"
 
         # Second call returns early via cache
         ensure_coral_schema(uri)
@@ -310,7 +310,7 @@ def test_cli_upgrade_and_current() -> None:
             check=False,
         )
         assert res.returncode == 0, res.stderr
-        assert "Current Coral revision: coral_0003_engine_bridge" in res.stdout
+        assert "Current Coral revision: coral_0004_observations" in res.stdout
 
 
 def test_s30_omnigent_autogenerate_ignores_coral_tables() -> None:

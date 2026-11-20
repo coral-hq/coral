@@ -157,11 +157,9 @@ marked with a test name.
      Rules for L1:
      - It never passes paths to git as a newline-delimited list, never runs
        filters, and is never computed with a shell `stat`.
-     - EVD-01's shared `l1_digest()` (K11, to be added by EVD-01) fixes the byte
-       layout. Every backend calls that one function, so digests from
-       different backends compare. Until then the host backend uses an
-       interim layout of the same three inputs, so its digests compare only
-       with its own.
+     - `coral.evidence.fingerprint.l1_digest()` (K11) fixes the byte layout.
+       Every real backend calls that one function, so digests from different
+       backends compare; the in-memory fake keeps its own model digest.
      - L1 changes after any edit to a path git reports, including a same-size
        re-edit of a dirty file, and is stable otherwise
        (`test_l1_is_stable_without_edits_and_changes_on_every_edit`). Equal

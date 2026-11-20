@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from coral.evidence.ir import EvidenceIRError, compile_done_when
 from coral.model.ids import RESERVED_WORKFLOW_IDS as RESERVED_WORKFLOW_IDS
 from coral.model.ids import validate_workflow_id
 from coral.model.ir import PartKind
@@ -75,6 +76,18 @@ class StepNode(_NodeBase):
     concurrency: int | None = Field(default=None, ge=1)
     list_from: str | None = None
     parts: list[PartSpec] = Field(default_factory=list)
+    # Commands that must pass after the step's last change: {commands: [{id?, run, may_modify?}]}.
+    done_when: dict[str, Any] | None = None
+
+    @field_validator("done_when")
+    @classmethod
+    def _done_when(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            try:
+                compile_done_when(value, yaml_path="done_when")
+            except EvidenceIRError as exc:
+                raise ValueError(str(exc)) from None
+        return value
 
 
 class DecisionNode(_NodeBase):

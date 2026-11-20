@@ -945,7 +945,7 @@ process (see "The engine bridge" and
 | Native-harness steps (HRN-03), after probe 15 runs on native steps | CRL-138 |
 | `external_session_status` outcome pass-through (HRN-05) | CRL-146 |
 | User take-over of a step (SES-07), with the handoff's `refresh_note`, and attributing a turn a person typed after an engine turn ended | CRL-143 |
-| L1 capture for evidence (EVD-02) | CRL-133 |
 | Unattended-permission preflight (HRN-02) | follow-up: call the CRL-132 preflight from the facade; no live ticket |
 | Full drift: policy, label and bundle drift, anchor sharing (SES-09) | no live ticket |
-| Engine-tool items not built: counting an orchestrator's rejections, the evidence check and `evidence.missing`, `items` | roadmap ENG-06, EVD-04, ENG-08; no ticket named yet |
+| Engine-tool items not built: counting an orchestrator's rejections, `items` | roadmap ENG-06, ENG-08; no ticket named yet |
+| Evidence for native-harness steps' commands, and `per_step` scope ([`evidence.md`](evidence.md)) | with HRN-03 (CRL-138) |

@@ -20,6 +20,7 @@ from typing import ParamSpec, Protocol, TypeVar
 
 from coral.engine.machines.slot import find_slot
 from coral.engine.types import RejectionObserved
+from coral.evidence.ir import EvidenceVerdict
 from coral.queue.run_effects import describe_exception
 from coral.stores.session_bindings import SessionBinding
 from coral.tools.port import (
@@ -89,12 +90,15 @@ class EngineToolCall:
     :param arguments: The tool arguments, unvalidated.
     :param operation_id: The runner's id for this call, resent on retries;
         ``None`` when the call carried none, which is refused.
+    :param evidence: For a ``done`` handoff on a step with ``done_when`` commands,
+        the server's verdict on them; ``None`` when the step has none.
     """
 
     binding: SessionBinding
     tool: str
     arguments: Mapping[str, object]
     operation_id: str | None
+    evidence: EvidenceVerdict | None = None
 
 
 class TransportError(Exception):

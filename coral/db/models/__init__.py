@@ -21,6 +21,7 @@ from coral.db.models.core import (
     WorkflowVersionRow,
 )
 from coral.db.models.sessions import (
+    CommandObservationRow,
     SessionBindingRow,
     StableIdRow,
     WorkspaceOpIntentRow,
@@ -34,6 +35,7 @@ __all__ = [
     "ActivationRow",
     "AgentSlotRow",
     "BlobRefRow",
+    "CommandObservationRow",
     "CoralBase",
     "GateVisitRow",
     "HandoffItemRow",

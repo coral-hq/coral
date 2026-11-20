@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from coral.evidence.ir import compile_done_when
 from coral.model import authoring
 from coral.model.analysis import analyze
 from coral.model.canonical import canonical_bytes, content_hash
@@ -34,6 +35,11 @@ def _compile_node(node: authoring.AuthoringNode) -> CompiledNode:
                 ),
                 list_from=node.list_from,
                 parts=tuple(CompiledPart(name=p.name, kind=p.kind) for p in node.parts),
+                evidence=(
+                    None
+                    if node.done_when is None
+                    else compile_done_when(node.done_when, yaml_path=f"{node.id}.done_when")
+                ),
             )
         case authoring.DecisionNode():
             return CompiledNode(

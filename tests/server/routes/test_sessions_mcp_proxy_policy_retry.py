@@ -39,6 +39,9 @@ from omnigent.server.routes.sessions import (
 
 # CORAL(S10): server tool registry and the test tool provider for the server tool cases.
 from omnigent.server.server_tools import ServerToolCall, ServerToolResult, register_server_tool
+
+# CORAL(S105): tool-call observers for the observer cases.
+from omnigent.server.tool_result_observers import register_tool_call_observer
 from omnigent.spec import AgentSpec
 from omnigent.spec.types import LabelDef, Phase, PolicyAction, StateUpdate, StateUpdateAction
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -1254,3 +1257,63 @@ async def test_server_tool_refuses_arguments_that_are_not_an_object(
         "message": "Invalid tool arguments: expected an object",
     }
     assert (harness.handled, harness.forwarded) == ([], [])
+
+
+# ---------------------------------------------------------------------------
+# CORAL(S105): tool-call observers see a forwarded call's start, raw result and end
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RecordingObserver:
+    """Records every hook; ``fail`` makes ``complete`` raise."""
+
+    events: list[tuple[str, Any]] = field(default_factory=list)
+    fail: bool = False
+
+    def enter(self, session_id: str, tool_name: str, operation_id: str | None) -> object:
+        self.events.append(("enter", (session_id, tool_name, operation_id)))
+        return "token"
+
+    async def complete(self, token: object, call: Any) -> None:
+        self.events.append(("complete", (token, call.tool_name, call.output, call.arguments)))
+        if self.fail:
+            raise RuntimeError("observer broke")
+
+    def release(self, token: object) -> None:
+        self.events.append(("release", token))
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_observers_get_the_raw_result_and_never_change_it(
+    server_tool_harness: _ServerToolHarness, fail: bool
+) -> None:
+    observer = _RecordingObserver(fail=fail)
+    server_tool_harness.tool_call_results.append(PolicyResult(action=PolicyAction.ALLOW))
+    unregister = register_tool_call_observer("test.observer", observer)
+    try:
+        payload = await server_tool_harness.call(
+            {"name": "sys_os_shell", "arguments": {"command": "pytest -q"}}
+        )
+    finally:
+        unregister()
+    assert _text(payload) == "runner output"
+    assert observer.events == [
+        ("enter", (_SESSION_ID, "sys_os_shell", _SERVER_TOOL_OPERATION_ID)),
+        ("complete", ("token", "sys_os_shell", "runner output", {"command": "pytest -q"})),
+        ("release", "token"),
+    ]
+
+
+async def test_a_call_that_never_returns_a_result_is_still_released(
+    server_tool_harness: _ServerToolHarness,
+) -> None:
+    observer = _RecordingObserver()
+    server_tool_harness.tool_call_results.append(PolicyResult(action=PolicyAction.DENY))
+    unregister = register_tool_call_observer("test.observer", observer)
+    try:
+        payload = await server_tool_harness.call({"name": "sys_os_shell", "arguments": {}})
+    finally:
+        unregister()
+    assert "error" in payload
+    assert [name for name, _ in observer.events] == ["enter", "release"]

@@ -589,12 +589,17 @@ async def test_a_live_handoff_call_commits_on_a_run_the_supervisor_started(
     tools_at_close: list[frozenset[str]] = []
 
     class RecordingPool(BoundedThreads):
+        """Records the decision pool; the evidence pool is another ``BoundedThreads``."""
+
         def __init__(self, **kwargs: Any) -> None:
             super().__init__(**kwargs)
-            pools.append(self)
+            self.decisions = kwargs.get("thread_name_prefix") == DECISION_THREAD_NAME
+            if self.decisions:
+                pools.append(self)
 
         def close(self) -> None:
-            tools_at_close.append(_engine_tools())
+            if self.decisions:
+                tools_at_close.append(_engine_tools())
             super().close()
 
     monkeypatch.setattr(plugin_module, "BoundedThreads", RecordingPool)

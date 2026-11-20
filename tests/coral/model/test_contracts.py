@@ -9,6 +9,7 @@ import sys
 import pytest
 from pydantic import ValidationError
 
+from coral.evidence.ir import EvidenceRequirement, RequiredCommand
 from coral.model import CompiledGraph, Workflow, canonical_bytes, canonical_json, content_hash
 from coral.model.authoring import Arrow, DecisionNode, GateNode, StartNode
 from coral.model.ir import CompiledArrow, CompiledNode, CompiledPart
@@ -146,6 +147,7 @@ _NODE_CHANGES: dict[str, object] = {
     "list_from": "start.items",
     "parts": (CompiledPart(name="items", kind="list"),),
     "outcomes": ("ship",),
+    "evidence": EvidenceRequirement(items=(RequiredCommand(item_id="t", run="pytest"),)),
 }
 _ARROW_CHANGES: dict[str, object] = {
     "id": "a9",
