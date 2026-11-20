@@ -22,6 +22,7 @@ const SUMMARY: RunSummary = {
   activation_count: 3,
   allowed_actions: ["pause", "cancel"],
   spend: null,
+  run_branch: "coral/r-0a1b2c3d4e5f/base",
 };
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>

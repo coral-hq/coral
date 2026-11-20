@@ -258,3 +258,10 @@ def ack(
 ) -> Awaitable[httpx.Response]:
     """Mark a workflow alert read."""
     return client.post(f"{INBOX}/{alert_id}/ack", json={}, headers=headers)
+
+
+def ack_run(
+    client: httpx.AsyncClient, run_id: str, headers: Mapping[str, str] | None = None
+) -> Awaitable[httpx.Response]:
+    """Mark a run's low-priority workflow alerts read, as opening the run does."""
+    return client.post(f"{INBOX}/ack", json={"run_id": run_id}, headers=headers)

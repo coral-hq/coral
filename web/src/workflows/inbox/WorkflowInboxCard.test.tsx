@@ -610,6 +610,7 @@ describe("WorkflowAlertCard run actions", () => {
       activation_count: 3,
       allowed_actions: allowedActions,
       spend: null,
+      run_branch: "coral/r-0a1b2c3d4e5f/base",
       version: 7,
       head_seq: 12,
       max_activations: 100,
@@ -634,6 +635,7 @@ describe("WorkflowAlertCard run actions", () => {
   function summaryOf(run: RunDetail): RunSummary {
     const { run_id, workflow_id, version_id, title, status, pause_reason } = run;
     const { created_at, updated_at, finished_at, activation_count, allowed_actions, spend } = run;
+    const { run_branch } = run;
     return {
       run_id,
       workflow_id,
@@ -647,6 +649,7 @@ describe("WorkflowAlertCard run actions", () => {
       activation_count,
       allowed_actions,
       spend,
+      run_branch,
     };
   }
 

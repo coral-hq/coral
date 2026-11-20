@@ -121,6 +121,17 @@ def _pause(key: str, created_at: int = NOW) -> Callable[[CoralRun], AlertDraft]:
     return lambda run: alert_draft(run, AlertKind.PAUSE, key, created_at=created_at)
 
 
+def _done(key: str, created_at: int = NOW) -> Callable[[CoralRun], AlertDraft]:
+    return lambda run: alert_draft(
+        run, AlertKind.RUN_COMPLETED, key, priority=AlertPriority.LOW, created_at=created_at
+    )
+
+
+def _ack_run(client: TestClient, run_id: str, user: str = ALICE) -> Any:
+    """Mark ``run_id``'s low-priority alerts read as ``user``."""
+    return client.post(f"{INBOX}/ack", headers=_as(user), json={"run_id": run_id})
+
+
 def _status(coral_uri: str, run: CoralRun) -> dict[str, tuple[int, int | None, str | None]]:
     records = SqlAlchemyAlertStore(coral_uri).list_for_run(workspace_id=WORKSPACE, run_id=run.id)
     return {record.id: (record.status, record.acked_at, record.acked_by) for record in records}
@@ -179,23 +190,14 @@ def test_an_open_gate_is_listed_with_every_field_until_its_answer_clears_it(
 
 
 def test_normal_alerts_page_newest_first_before_low_ones(coral_uri: str) -> None:
-    def done(key: str, created_at: int) -> Callable[[CoralRun], AlertDraft]:
-        return lambda run: alert_draft(
-            run,
-            AlertKind.RUN_COMPLETED,
-            key,
-            priority=AlertPriority.LOW,
-            created_at=created_at,
-        )
-
     # The low alerts are the newest, yet they are listed after every normal one.
     _run, (old, middle, new, low_old, low_new) = _alerts_of(
         coral_uri,
         _pause("1", NOW + 1),
         _pause("2", NOW + 2),
         _pause("3", NOW + 3),
-        done("done-1", NOW + 10),
-        done("done-2", NOW + 11),
+        _done("done-1", NOW + 10),
+        _done("done-2", NOW + 11),
     )
     client = TestClient(_app(coral_uri))
 
@@ -377,22 +379,27 @@ def test_a_body_with_no_media_type_is_refused_where_fastapi_would_read_it_as_jso
     coral_uri: str,
 ) -> None:
     # Older FastAPI releases, and apps that opt out of strict content types, parse it.
-    run, (pause,) = _alerts_of(coral_uri, _pause("1"))
+    run, (pause, done) = _alerts_of(coral_uri, _pause("1"), _done("run_completed"))
     client = TestClient(_app(coral_uri, strict_content_type=False))
 
     response = _ack(client, pause.id, content=b"{}")
-
-    assert (response.status_code, response.json()) == (
-        422,
-        {
-            "error": {
-                "code": "validation_failed",
-                "message": "The request body must be JSON.",
-                "details": None,
-            }
-        },
+    run_response = client.post(
+        f"{INBOX}/ack", headers=_as(ALICE), content=f'{{"run_id": "{run.id}"}}'.encode()
     )
-    assert _status(coral_uri, run)[pause.id][0] == int(AlertStatus.OPEN)
+
+    for refused in (response, run_response):
+        assert (refused.status_code, refused.json()) == (
+            422,
+            {
+                "error": {
+                    "code": "validation_failed",
+                    "message": "The request body must be JSON.",
+                    "details": None,
+                }
+            },
+        )
+    unchanged = (int(AlertStatus.OPEN), None, None)
+    assert _status(coral_uri, run) == {pause.id: unchanged, done.id: unchanged}
 
 
 def test_a_json_media_type_with_parameters_is_accepted(coral_uri: str) -> None:
@@ -407,6 +414,53 @@ def test_a_json_media_type_with_parameters_is_accepted(coral_uri: str) -> None:
     )
 
     assert response.status_code == 204
+
+
+# ── Marking a run's alerts read ─────────────────────────────────────────────
+
+
+def test_opening_a_run_marks_its_run_end_alert_read_and_leaves_its_pause(coral_uri: str) -> None:
+    run, (pause, done) = _alerts_of(coral_uri, _pause("1"), _done("run_completed"))
+    client = TestClient(_app(coral_uri))
+
+    acked = _ack_run(client, run.id)
+
+    assert (acked.status_code, acked.json()) == (200, {"acked": 1})
+    assert _status(coral_uri, run) == {
+        pause.id: (int(AlertStatus.OPEN), None, None),
+        done.id: (int(AlertStatus.ACKED), ACKED_AT, ALICE),
+    }
+    assert _ids(client, _as(ALICE)) == [pause.id]
+    # Again, or as another user, or for an unknown run: nothing to mark, never a refusal.
+    for user, run_id in ((ALICE, run.id), (BOB, run.id), (ALICE, UNKNOWN_ID)):
+        again = _ack_run(client, run_id, user)
+        assert (again.status_code, again.json()) == (200, {"acked": 0})
+
+
+@pytest.mark.parametrize(
+    "request_body",
+    [
+        pytest.param({"json": {}}, id="no-run-id"),
+        pytest.param({"json": {"run_id": None}}, id="null-run-id"),
+        pytest.param({"json": {"run_id": 7}}, id="number-run-id"),
+        pytest.param({"json": {"run_id": "A" * 32}}, id="upper-case-run-id"),
+        pytest.param({"json": {"run_id": "a" * 31}}, id="short-run-id"),
+        pytest.param({"json": {"run_id": "a" * 32 + "\n"}}, id="trailing-newline"),
+        pytest.param({"json": {"run_id": "a" * 32, "alert_ids": []}}, id="extra-field"),
+        pytest.param({"json": []}, id="not-an-object"),
+        pytest.param({"data": {"run_id": "a" * 32}}, id="form"),
+    ],
+)
+def test_marking_a_runs_alerts_read_needs_exactly_its_run_id(
+    coral_uri: str, request_body: dict[str, Any]
+) -> None:
+    run, (done,) = _alerts_of(coral_uri, _done("run_completed"))
+    client = TestClient(_app(coral_uri))
+
+    response = client.post(f"{INBOX}/ack", headers=_as(ALICE), **request_body)
+
+    assert (response.status_code, response.json()["error"]["code"]) == (422, "validation_failed")
+    assert _status(coral_uri, run)[done.id][0] == int(AlertStatus.OPEN)
 
 
 # ── Who may call ────────────────────────────────────────────────────────────
@@ -436,13 +490,14 @@ def test_another_users_alerts_are_neither_listed_nor_found(coral_uri: str) -> No
 
 
 def test_a_request_with_no_identity_is_unauthenticated(coral_uri: str) -> None:
-    _run, (pause,) = _alerts_of(coral_uri, _pause("1"))
+    run, (pause,) = _alerts_of(coral_uri, _pause("1"))
     client = TestClient(_app(coral_uri))
 
     listed = client.get(INBOX)
     acked = client.post(f"{INBOX}/{pause.id}/ack", json={})
+    run_acked = client.post(f"{INBOX}/ack", json={"run_id": run.id})
 
-    for response in (listed, acked):
+    for response in (listed, acked, run_acked):
         assert (response.status_code, response.json()) == (
             401,
             {
@@ -487,26 +542,28 @@ def test_a_recorded_generation_is_shown_only_to_a_request_that_proves_it(
 
 
 def test_a_request_whose_account_names_another_user_is_refused(coral_uri: str) -> None:
-    _run, (pause,) = _alerts_of(coral_uri, _pause("1"))
+    run, (pause,) = _alerts_of(coral_uri, _pause("1"))
     client = TestClient(_app(coral_uri, auth_provider=ACCOUNTS))
     crossed = {"X-User": ALICE, "X-Account": BOB, "X-Generation": "g1"}
 
     listed = client.get(INBOX, headers=crossed)
     acked = client.post(f"{INBOX}/{pause.id}/ack", headers=crossed, json={})
+    run_acked = client.post(f"{INBOX}/ack", headers=crossed, json={"run_id": run.id})
 
-    for response in (listed, acked):
+    for response in (listed, acked, run_acked):
         assert (response.status_code, response.json()) == (
             403,
             {"error": {"code": "not_permitted", "message": "Not permitted", "details": None}},
         )
 
 
-def test_without_the_alert_store_both_routes_are_not_found() -> None:
+def test_without_the_alert_store_every_route_is_not_found() -> None:
     client = TestClient(_app(None))
 
     for response in (
         client.get(INBOX, headers=_as(ALICE)),
         _ack(client, UNKNOWN_ID, json={}),
+        _ack_run(client, UNKNOWN_ID),
     ):
         assert (response.status_code, response.json()) == (
             404,

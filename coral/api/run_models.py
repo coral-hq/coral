@@ -18,7 +18,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue
 from coral.api.errors import CoralApiError
 from coral.api.spend import CachedSpend
 from coral.bridge.config import MAX_RUN_ACTIVATIONS
-from coral.bridge.messages import sanitize
+from coral.bridge.messages import gate_prompt_text, sanitize
 from coral.bridge.service import LOAD_FAILED_DETAIL, RunRead
 from coral.db.enum_codecs import (
     GateVisitStatus,
@@ -30,6 +30,7 @@ from coral.db.enum_codecs import (
     decode_slot_role,
     decode_slot_status,
 )
+from coral.engine import types as engine
 from coral.engine.machines.activation import find_node
 from coral.engine.projection import RunView, project
 from coral.engine.types import JsonPatch, PauseCause
@@ -48,6 +49,7 @@ from coral.runview.types import (
     RunStatusName,
 )
 from coral.stores.protocols import CoralRun, GateVisitState, RunLogEntry
+from coral.workspace.run_worktree import run_branch_name
 
 RUN_ID = re.compile(r"[0-9a-f]{32}")
 WORKFLOW_ID_PATTERN = r"^[0-9a-f]{32}$"
@@ -233,7 +235,7 @@ class RunSpend(_Out):
 
 
 class RunSummary(_Out):
-    """A run as its owner's run list shows it."""
+    """A run as its owner's run list shows it; ``run_branch`` is derived from its id."""
 
     run_id: str
     workflow_id: str
@@ -247,6 +249,7 @@ class RunSummary(_Out):
     activation_count: int
     allowed_actions: tuple[RunAction, ...]
     spend: RunSpend | None
+    run_branch: str
 
 
 class RunTarget(_Out):
@@ -261,7 +264,10 @@ class RunTarget(_Out):
 
 
 class GateOut(_Out):
-    """A gate visit waiting for its answer."""
+    """
+    A gate visit waiting for its answer. ``context`` is what its approval prompt asks;
+    ``None`` when the run's engine state cannot be loaded or does not hold the visit.
+    """
 
     visit_id: str
     node_id: str
@@ -270,10 +276,14 @@ class GateOut(_Out):
     elicitation_id: str | None
     opened_at: int
     outcomes: tuple[str, ...]
+    context: str | None
 
 
 class SlotOut(_Out):
-    """An agent slot of one of the run's steps."""
+    """
+    An agent slot of one of the run's steps. ``slot_id`` and ``activation_id`` are store
+    ids; ``engine_slot_id`` is the id the run view's slots carry.
+    """
 
     slot_id: str
     node_id: str
@@ -282,6 +292,7 @@ class SlotOut(_Out):
     status: SlotStatusName
     session_id: str | None
     session_generation: int
+    engine_slot_id: str
 
 
 class RunDetail(RunSummary):
@@ -408,6 +419,7 @@ def run_summary(
         activation_count=run.activation_count,
         allowed_actions=actions,
         spend=run_spend(spend),
+        run_branch=run_branch_name(run.id),
     )
 
 
@@ -427,7 +439,20 @@ _LOAD_FAILED_CAUSE: Final = PauseCause(
 )
 
 
-def _gate_out(row: GateVisitState, graph: CompiledGraph | None) -> GateOut:
+def _gate_context(
+    row: GateVisitState, graph: CompiledGraph, state: engine.RunState, run_title: str
+) -> str | None:
+    """The approval prompt's text of the engine visit ``row`` stores, if the state holds it."""
+    visit = next((visit for visit in state.gates if visit.token == row.token), None)
+    return None if visit is None else gate_prompt_text(graph, state, visit, run_title=run_title)
+
+
+def _gate_out(
+    row: GateVisitState,
+    graph: CompiledGraph | None,
+    state: engine.RunState | None,
+    run_title: str,
+) -> GateOut:
     node = None if graph is None else find_node(graph, row.node_id)
     return GateOut(
         visit_id=row.id,
@@ -437,6 +462,9 @@ def _gate_out(row: GateVisitState, graph: CompiledGraph | None) -> GateOut:
         elicitation_id=row.elicitation_id,
         opened_at=row.opened_at,
         outcomes=() if node is None or node.kind != "gate" else node.outcomes,
+        context=None
+        if graph is None or state is None
+        else _gate_context(row, graph, state, run_title),
     )
 
 
@@ -481,11 +509,12 @@ def run_detail(read: RunRead) -> RunDetail:
     actions = _read_actions(read, view)
     spec = None if rows is None else rows.spec
     graph = None if snapshot is None else snapshot.graph
+    state = None if snapshot is None else snapshot.state
     gates = (
         ()
         if rows is None
         else tuple(
-            _gate_out(row, graph)
+            _gate_out(row, graph, state, run.title)
             for row in sorted(rows.gate_visits, key=lambda row: (row.opened_at, row.id))
             if row.status == GateVisitStatus.OPEN
         )
@@ -502,6 +531,7 @@ def run_detail(read: RunRead) -> RunDetail:
                 status=cast(SlotStatusName, decode_slot_status(slot.status)),
                 session_id=slot.session_id,
                 session_generation=slot.session_generation,
+                engine_slot_id=slot.scope_key,
             )
             for slot in rows.agent_slots
         )

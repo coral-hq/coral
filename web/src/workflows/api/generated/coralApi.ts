@@ -19,6 +19,16 @@ export interface Analysis {
   unresolved: UnresolvedFact[];
 }
 
+/** How many alerts a bulk mark-as-read changed; 0 for another user's or an unknown run. */
+export interface BulkAckOut {
+  acked: number;
+}
+
+/** The body of marking a run's low-priority alerts read: the run's id. */
+export interface BulkAckRequest {
+  run_id: string;
+}
+
 /** Resolution of a ``list_from`` reference. */
 export interface CheckedPart {
   node_id: string;
@@ -144,8 +154,12 @@ export interface GateAnswerRequest {
   visit_token: string;
 }
 
-/** A gate visit waiting for its answer. */
+/**
+ * A gate visit waiting for its answer. ``context`` is what its approval prompt asks;
+ * ``None`` when the run's engine state cannot be loaded or does not hold the visit.
+ */
 export interface GateOut {
+  context: string | null;
   elicitation_id: string | null;
   node_id: string;
   opened_at: number;
@@ -348,6 +362,7 @@ export interface RunDetail {
     | "auth"
     | null;
   request_preview: string | null;
+  run_branch: string;
   run_id: string;
   slots: SlotOut[];
   spend: RunSpend | null;
@@ -444,7 +459,7 @@ export interface RunSpendTokens {
 
 export type RunStreamFrame = SnapshotFrame | EntryFrame | RunFrame | ResyncFrame | HeartbeatFrame;
 
-/** A run as its owner's run list shows it. */
+/** A run as its owner's run list shows it; ``run_branch`` is derived from its id. */
 export interface RunSummary {
   activation_count: number;
   allowed_actions: ("pause" | "resume" | "cancel")[];
@@ -465,6 +480,7 @@ export interface RunSummary {
     | "drift"
     | "auth"
     | null;
+  run_branch: string;
   run_id: string;
   spend: RunSpend | null;
   status: "starting" | "running" | "paused" | "completed" | "failed" | "cancelled";
@@ -509,9 +525,13 @@ export interface SavedWorkflowOut {
   workflow_key: string;
 }
 
-/** An agent slot of one of the run's steps. */
+/**
+ * An agent slot of one of the run's steps. ``slot_id`` and ``activation_id`` are store
+ * ids; ``engine_slot_id`` is the id the run view's slots carry.
+ */
 export interface SlotOut {
   activation_id: string;
+  engine_slot_id: string;
   node_id: string;
   role: "step_agent" | "orchestrator" | "verifier" | "merge_resolver";
   session_generation: number;
@@ -682,6 +702,20 @@ export interface CoralOperations {
     };
     status: 200;
     response: WorkflowInboxPage;
+    errors: 401 | 403 | 404 | 422;
+  };
+  /**
+   * POST /v1/coral/inbox/ack
+   *
+   * Mark the caller's open low-priority alerts of one run read, as opening the run
+   * does. Alerts that ask for an action or an answer stay open.
+   */
+  coral_ack_alerts: {
+    method: "POST";
+    path: "/v1/coral/inbox/ack";
+    body: BulkAckRequest;
+    status: 200;
+    response: BulkAckOut;
     errors: 401 | 403 | 404 | 422;
   };
   /**

@@ -106,6 +106,37 @@
         "title": "Analysis",
         "type": "object"
       },
+      "BulkAckOut": {
+        "additionalProperties": false,
+        "description": "How many alerts a bulk mark-as-read changed; 0 for another user's or an unknown run.",
+        "properties": {
+          "acked": {
+            "title": "Acked",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "acked"
+        ],
+        "title": "BulkAckOut",
+        "type": "object"
+      },
+      "BulkAckRequest": {
+        "additionalProperties": false,
+        "description": "The body of marking a run's low-priority alerts read: the run's id.",
+        "properties": {
+          "run_id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "title": "BulkAckRequest",
+        "type": "object"
+      },
       "CheckedPart": {
         "additionalProperties": false,
         "description": "Resolution of a ``list_from`` reference.",
@@ -758,8 +789,19 @@
       },
       "GateOut": {
         "additionalProperties": false,
-        "description": "A gate visit waiting for its answer.",
+        "description": "A gate visit waiting for its answer. ``context`` is what its approval prompt asks;\n``None`` when the run's engine state cannot be loaded or does not hold the visit.",
         "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
           "elicitation_id": {
             "anyOf": [
               {
@@ -806,7 +848,8 @@
           "visit_no",
           "elicitation_id",
           "opened_at",
-          "outcomes"
+          "outcomes",
+          "context"
         ],
         "title": "GateOut",
         "type": "object"
@@ -1646,6 +1689,10 @@
             ],
             "title": "Request Preview"
           },
+          "run_branch": {
+            "title": "Run Branch",
+            "type": "string"
+          },
           "run_id": {
             "title": "Run Id",
             "type": "string"
@@ -1733,6 +1780,7 @@
           "activation_count",
           "allowed_actions",
           "spend",
+          "run_branch",
           "version",
           "head_seq",
           "max_activations",
@@ -2103,7 +2151,7 @@
       },
       "RunSummary": {
         "additionalProperties": false,
-        "description": "A run as its owner's run list shows it.",
+        "description": "A run as its owner's run list shows it; ``run_branch`` is derived from its id.",
         "properties": {
           "activation_count": {
             "title": "Activation Count",
@@ -2162,6 +2210,10 @@
             ],
             "title": "Pause Reason"
           },
+          "run_branch": {
+            "title": "Run Branch",
+            "type": "string"
+          },
           "run_id": {
             "title": "Run Id",
             "type": "string"
@@ -2217,7 +2269,8 @@
           "finished_at",
           "activation_count",
           "allowed_actions",
-          "spend"
+          "spend",
+          "run_branch"
         ],
         "title": "RunSummary",
         "type": "object"
@@ -2449,10 +2502,14 @@
       },
       "SlotOut": {
         "additionalProperties": false,
-        "description": "An agent slot of one of the run's steps.",
+        "description": "An agent slot of one of the run's steps. ``slot_id`` and ``activation_id`` are store\nids; ``engine_slot_id`` is the id the run view's slots carry.",
         "properties": {
           "activation_id": {
             "title": "Activation Id",
+            "type": "string"
+          },
+          "engine_slot_id": {
+            "title": "Engine Slot Id",
             "type": "string"
           },
           "node_id": {
@@ -2513,7 +2570,8 @@
           "role",
           "status",
           "session_id",
-          "session_generation"
+          "session_generation",
+          "engine_slot_id"
         ],
         "title": "SlotOut",
         "type": "object"
@@ -3210,6 +3268,78 @@
           }
         },
         "summary": "List Inbox",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/inbox/ack": {
+      "post": {
+        "description": "Mark the caller's open low-priority alerts of one run read, as opening the run\ndoes. Alerts that ask for an action or an answer stay open.",
+        "operationId": "coral_ack_alerts",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkAckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkAckOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Ack Run Alerts",
         "tags": [
           "coral"
         ]

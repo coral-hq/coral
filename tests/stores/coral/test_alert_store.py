@@ -24,12 +24,13 @@ from coral.db import AlertRow, coral_engine
 from coral.db.enum_codecs import AlertKind, AlertPriority, AlertStatus
 from coral.model.ids import derived_id
 from coral.omni.protocols import Viewer
-from coral.stores.alerts import SqlAlchemyAlertStore
+from coral.stores.alerts import MAX_BULK_ACK, SqlAlchemyAlertStore
 from coral.stores.fakes import FakeRunStore
 from coral.stores.protocols import (
     AlertDraft,
     AlertRecord,
     AlertResolution,
+    CoralRun,
     LogEntryDraft,
     RunStore,
     RunVersionConflict,
@@ -829,6 +830,156 @@ def test_an_ack_that_loses_to_a_resolve_after_its_read_is_unchanged(coral_db_uri
     )
 
 
+# ── Marking a run's low-priority alerts read ─────────────────────────────────
+
+
+def _ack_low(
+    alerts: SqlAlchemyAlertStore,
+    viewer: Viewer,
+    run: CoralRun,
+    *,
+    workspace_id: int = WORKSPACE,
+    limit: int = MAX_BULK_ACK,
+) -> int:
+    return alerts.ack_low_for_run(
+        workspace_id=workspace_id, viewer=viewer, run_id=run.id, now=NOW + 5, limit=limit
+    )
+
+
+def _done(run: CoralRun, key: str = "run_completed") -> AlertDraft:
+    return alert_draft(run, AlertKind.RUN_COMPLETED, key, priority=AlertPriority.LOW)
+
+
+def _statuses(
+    alerts: SqlAlchemyAlertStore, run: CoralRun
+) -> dict[str, tuple[int, int | None, str | None]]:
+    rows = alerts.list_for_run(workspace_id=run.workspace_id, run_id=run.id)
+    return {row.id: (row.status, row.acked_at, row.acked_by) for row in rows}
+
+
+def test_a_runs_bulk_ack_marks_only_its_open_low_priority_alerts_read(coral_db_uri: str) -> None:
+    runs, alerts = _sql(coral_db_uri)
+    run = start_owned_run(runs, "bulk")
+    other_run = start_owned_run(runs, "bulk-other")
+    done = _done(run)
+    kept = (
+        alert_draft(run, AlertKind.PAUSE, "2"),
+        alert_draft(run, AlertKind.WATCHDOG, "effect"),
+        # A cancel that left step sessions running asks its owner to act: normal priority.
+        alert_draft(run, AlertKind.RUN_CANCELLED, "run_cancelled"),
+        # Gates and questions clear only when answered, whatever their priority.
+        alert_draft(run, AlertKind.GATE, "visit", priority=AlertPriority.LOW),
+        alert_draft(run, AlertKind.QUESTION, "question", priority=AlertPriority.LOW),
+    )
+    elsewhere = _done(other_run)
+    commit_alert_changes(runs, run, raises=(done, *kept))
+    commit_alert_changes(runs, other_run, raises=(elsewhere,))
+
+    assert _ack_low(alerts, Viewer(ALICE), run) == 1
+    assert _statuses(alerts, run) == {
+        done.id: (ACKED, NOW + 5, ALICE),
+        **{alert.id: (OPEN, None, None) for alert in kept},
+    }
+    assert _statuses(alerts, other_run) == {elsewhere.id: (OPEN, None, None)}
+    # Marking them read again changes nothing.
+    assert _ack_low(alerts, Viewer(ALICE), run) == 0
+    assert _statuses(alerts, run)[done.id] == (ACKED, NOW + 5, ALICE)
+
+
+def test_a_runs_bulk_ack_marks_none_for_another_owner_workspace_or_generation(
+    coral_db_uri: str,
+) -> None:
+    runs, alerts = _sql(coral_db_uri)
+    run = start_owned_run(runs, "bulk-generation", generation="g1")
+    local_run = start_owned_run(runs, "bulk-local", user_id=None)
+    done, local_done = _done(run), _done(local_run)
+    commit_alert_changes(runs, run, raises=(done,))
+    commit_alert_changes(runs, local_run, raises=(local_done,))
+    proven = Viewer(ALICE, "g1", check_generation=True)
+
+    refused = [
+        Viewer(BOB),
+        # Owners compare exactly, even where the database collation folds them.
+        *(
+            Viewer(lookalike, "g1", check_generation=True)
+            for lookalike in ("ALICE", "alice ", "alicé")
+        ),
+        Viewer(ALICE, "g2", check_generation=True),
+        Viewer(ALICE, "g1", check_generation=False),
+    ]
+    assert [_ack_low(alerts, viewer, run) for viewer in refused] == [0] * len(refused)
+    assert _ack_low(alerts, proven, run, workspace_id=OTHER_WORKSPACE) == 0
+    assert _ack_low(alerts, proven, local_run) == 0
+    assert _statuses(alerts, run) == {done.id: (OPEN, None, None)}
+
+    assert _ack_low(alerts, proven, run) == 1
+    # The local user's run is acked by the local user, however the viewer names it.
+    assert _ack_low(alerts, Viewer(LOCAL_USER_ID), local_run) == 1
+    assert _statuses(alerts, local_run) == {local_done.id: (ACKED, NOW + 5, LOCAL_USER_ID)}
+
+
+def test_a_runs_bulk_ack_marks_at_most_its_limit_per_call(coral_db_uri: str) -> None:
+    runs, alerts = _sql(coral_db_uri)
+    run = start_owned_run(runs, "bulk-limit")
+    commit_alert_changes(runs, run, raises=tuple(_done(run, f"done-{i}") for i in range(3)))
+
+    assert MAX_BULK_ACK == 500
+    assert [_ack_low(alerts, Viewer(ALICE), run, limit=2) for _ in range(3)] == [2, 1, 0]
+    assert {status for status, _at, _by in _statuses(alerts, run).values()} == {ACKED}
+    for limit in (0, MAX_BULK_ACK + 1):
+        with pytest.raises(ValueError, match="limit"):
+            _ack_low(alerts, Viewer(ALICE), run, limit=limit)
+
+
+def test_a_runs_bulk_ack_counts_only_rows_still_open_at_its_update(coral_db_uri: str) -> None:
+    engine = coral_engine(coral_db_uri)
+    runs, alerts = run_store_module.SqlAlchemyCoralRunStore(engine), SqlAlchemyAlertStore(engine)
+    run = start_owned_run(runs, "bulk-loses")
+    done = _done(run)
+    commit_alert_changes(runs, run, raises=(done,))
+    resolved: list[bool] = []
+
+    def resolve_before_the_ack_update(connection: Any, *args: Any) -> None:
+        statement = args[1]
+        if resolved or not statement.lstrip().upper().startswith("UPDATE CORAL_ALERTS"):
+            return
+        resolved.append(True)
+        connection.execute(
+            update(AlertRow)
+            .where(AlertRow.workspace_id == WORKSPACE, AlertRow.id == done.id)
+            .values(status=RESOLVED, resolved_at=NOW + 1)
+        )
+
+    event.listen(engine, "before_cursor_execute", resolve_before_the_ack_update)
+    try:
+        acked = _ack_low(alerts, Viewer(ALICE), run)
+    finally:
+        event.remove(engine, "before_cursor_execute", resolve_before_the_ack_update)
+
+    assert (acked, resolved) == (0, [True])
+    assert _statuses(alerts, run) == {done.id: (RESOLVED, None, None)}
+
+
+def test_racing_bulk_acks_of_one_run_count_each_alert_once(coral_db_uri: str) -> None:
+    runs, alerts = _sql(coral_db_uri)
+    run = start_owned_run(runs, "bulk-race")
+    done = tuple(_done(run, f"done-{index}") for index in range(3))
+    commit_alert_changes(runs, run, raises=done)
+
+    outcomes = run_racing(
+        4,
+        lambda index: alerts.ack_low_for_run(
+            workspace_id=WORKSPACE, viewer=Viewer(ALICE), run_id=run.id, now=NOW + index
+        ),
+    )
+
+    assert [outcome.error for outcome in outcomes] == [None] * 4
+    counts = [outcome.value for outcome in outcomes]
+    # Every alert is counted by exactly one call, however the callers interleave.
+    assert sum(count for count in counts if isinstance(count, int)) == len(done)
+    assert {status for status, _at, _by in _statuses(alerts, run).values()} == {ACKED}
+
+
 def test_alert_statements_run_under_their_query_names(coral_db_uri: str) -> None:
     engine = coral_engine(coral_db_uri)
     runs, alerts = run_store_module.SqlAlchemyCoralRunStore(engine), SqlAlchemyAlertStore(engine)
@@ -853,6 +1004,9 @@ def test_alert_statements_run_under_their_query_names(coral_db_uri: str) -> None
         )
         _inbox(alerts, Viewer(ALICE))
         alerts.ack(workspace_id=WORKSPACE, viewer=Viewer(ALICE), alert_id=pause.id, now=NOW)
+        alerts.ack_low_for_run(
+            workspace_id=WORKSPACE, viewer=Viewer(ALICE), run_id=run.id, now=NOW
+        )
         alerts.list_for_run(workspace_id=WORKSPACE, run_id=run.id)
     finally:
         event.remove(engine, "before_cursor_execute", capture)
@@ -864,5 +1018,6 @@ def test_alert_statements_run_under_their_query_names(coral_db_uri: str) -> None
         "coral.alerts.resolve_kinds",
         "coral.alerts.list_inbox",
         "coral.alerts.ack",
+        "coral.alerts.ack_low_for_run",
         "coral.alerts.list_for_run",
     ]

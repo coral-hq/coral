@@ -3,10 +3,11 @@
 A gate run started through the bridge is listed, read, started again with its start
 key, followed live, paused, resumed and answered through the runs routes until its
 stream ends with ``[DONE]``; a second run is cancelled. After the end, the stream is
-read again from ``Last-Event-ID`` and from ``after_seq``. Another user's request on
-every runs route gets the same 404 bytes. A restart on the same database resumes a
-stream with no gap or repeat, and in accounts mode a deleted account's open stream
-ends at its next re-check and cannot reconnect.
+read again from ``Last-Event-ID`` and from ``after_seq``. Opening the finished run marks
+its run-end alert read and leaves every gate's alert. Another user's request on every
+runs route gets the same 404 bytes and marks none of the owner's alerts read. A restart
+on the same database resumes a stream with no gap or repeat, and in accounts mode a
+deleted account's open stream ends at its next re-check and cannot reconnect.
 
 Live streams are served by the app on the test's event loop with their events taken
 as they are sent (an httpx client holds a body until the response ends), so they pass
@@ -36,6 +37,7 @@ from omnigent.runtime import pending_elicitations
 from omnigent.server import elicitation_hooks
 from omnigent.server.auth import UnifiedAuthProvider
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
 from tests.coral.api._stream_client import (
     DONE,
@@ -52,8 +54,12 @@ from tests.coral.omni._gate_server import (
     AccountsServer,
     CoralServer,
     accounts_server,
+    ack_run,
     coral_server,
     gate_run,
+    inbox,
+    pending_here,
+    pending_prompts,
 )
 
 RUNS = "/v1/coral/runs"
@@ -233,7 +239,7 @@ async def _follow_a_run(
 
     :param foreign_run: The run the intruder tries; the owner's run when not given.
     """
-    world, run, _anchor, prompt = gate_run(
+    world, run, anchor, prompt = gate_run(
         db_uri, "gate-a", user=user, account_generation=generation
     )
     _, other, _, _ = gate_run(db_uri, "gate-b", user=user, account_generation=generation)
@@ -251,6 +257,10 @@ async def _follow_a_run(
 
         listed = await client.get(RUNS, headers=owner)
         detail = await client.get(f"{RUNS}/{run.id}", headers=owner)
+        await poll_until_async(lambda: pending_here(anchor, prompt), timeout_s=TIMEOUT_S)
+        [published] = await pending_prompts(client, anchor, owner)
+        at_gate = await ack_run(client, run.id, owner)
+        feed_at_gate = await inbox(client, owner)
         replayed = await client.post(
             RUNS, json=_start_request(world, run.id, "gate-a"), headers=owner
         )
@@ -289,6 +299,10 @@ async def _follow_a_run(
             await _to_end(stream, live)
 
         final = (await client.get(f"{RUNS}/{run.id}", headers=owner)).json()
+        intruder_acked = await ack_run(client, target, intruder)
+        feed_at_end = await inbox(client, owner)
+        end_acked = await ack_run(client, run.id, owner)
+        feed_after_ack = await inbox(client, owner)
         # After the end: from the snapshot's seq, by header (which beats after_seq) and by query.
         by_header = await client.get(
             f"{RUNS}/{run.id}/stream",
@@ -344,6 +358,25 @@ async def _follow_a_run(
         (gate["node_id"], gate["token"], gate["elicitation_id"], gate["outcomes"])
         for gate in detail.json()["gates"]
     ] == [("approve", APPROVE_TOKEN, prompt, ["approve", "reject"])]
+    # The gate's context is the text its published prompt asks.
+    [gate] = detail.json()["gates"]
+    assert gate["context"] == published["params"]["message"]
+    assert "Ship it?" in gate["context"]
+
+    # Opening a run marks only its low-priority alerts read: an open gate waits for its
+    # answer, and another user's request marks nothing.
+    assert [
+        (response.status_code, response.json())
+        for response in (at_gate, intruder_acked, end_acked)
+    ] == [(200, {"acked": 0}), (200, {"acked": 0}), (200, {"acked": 1})]
+    assert sorted((alert["run_id"], alert["kind"]) for alert in feed_at_gate) == sorted(
+        [(run.id, "gate"), (other.id, "gate")]
+    )
+    assert [(alert["run_id"], alert["kind"]) for alert in feed_at_end] == [
+        (other.id, "gate"),
+        (run.id, "run_completed"),
+    ]
+    assert [(alert["run_id"], alert["kind"]) for alert in feed_after_ack] == [(other.id, "gate")]
 
     # The same start key and request answer the run it started; another request is refused.
     assert (replayed.status_code, replayed.json()["run_id"]) == (200, run.id), replayed.text

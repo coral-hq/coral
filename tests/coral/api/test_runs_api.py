@@ -51,6 +51,7 @@ from coral.bridge.service import GateAnswerResult
 from coral.db.enum_codecs import SLOT_ROLE, SLOT_STATUS, LogKind, RunPauseReason, RunStatus
 from coral.db.models_workflows import CoralBase, WorkflowRow
 from coral.engine.types import HandoffEvaluated, PauseRun
+from coral.gates.prompt import gate_params
 from coral.gates.verdict import GateAnswers
 from coral.model.ids import anchor_session_id, derived_id
 from coral.model.ir import CompiledGraph
@@ -564,6 +565,7 @@ async def test_the_owner_lists_only_their_runs_newest_first_with_the_row_s_actio
         "activation_count": stored.activation_count,
         "allowed_actions": [],
         "spend": None,
+        "run_branch": run_branch_name(cancelled.id),
     }
     assert listed[drift.id]["pause_reason"] == "drift"
     assert bob_ids == [bobs.id]
@@ -696,6 +698,7 @@ async def test_a_running_run_s_detail_holds_its_view_target_slots_and_spend(
     }
     assert detail["anchor_session_id"] == anchor_session_id(WORKSPACE, run.id)
     assert detail["orchestrator_session_id"] is None
+    assert detail["run_branch"] == run_branch_name(run.id)
     assert (detail["causes"], detail["load_error"], detail["gates"]) == ([], None, [])
     assert detail["view"]["status"] == "running"
     assert detail["slots"] == [
@@ -707,8 +710,11 @@ async def test_a_running_run_s_detail_holds_its_view_target_slots_and_spend(
             "status": "pending",
             "session_id": None,
             "session_generation": 1,
+            "engine_slot_id": slot.scope_key,
         }
     ]
+    # The view names a slot by its engine id, as the detail's slot does.
+    assert [view_slot["id"] for view_slot in detail["view"]["slots"]] == [slot.scope_key]
     # The detail waits for the spend read a cold cache starts.
     assert {key: value for key, value in detail["spend"].items() if key != "as_of"} == SPEND_JSON
 
@@ -746,15 +752,28 @@ async def test_a_pause_on_the_row_alone_offers_resume_in_the_detail_and_cancel_i
     assert set(item["allowed_actions"]) <= set(detail["allowed_actions"])
 
 
-async def test_a_run_at_its_gate_lists_the_open_visit_with_its_outcomes(runs_api: Api) -> None:
+async def test_a_run_at_its_gate_lists_the_open_visit_with_its_outcomes_and_prompt(
+    runs_api: Api,
+) -> None:
     world = runs_api.world
     world.clock.advance(1)
     run = start(world, GATE_ONLY, start_key="gate")
     state, _version = world.runs.load_run_state(run.id, workspace_id=WORKSPACE)
     [row] = state.gate_visits
+    snapshot = world.bridge.read(workspace_id=WORKSPACE, run_id=run.id).snapshot
+    assert snapshot is not None
+    [visit] = snapshot.state.gates
+    anchor_prompt = gate_params(snapshot.graph, snapshot.state, world.run(run.id), visit, row)
 
     async with _client(_app(runs_api.api)) as client:
         detail = (await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))).json()
+        # A stored visit the engine state does not hold, as when rows and log disagree.
+        visits = _fake_runs(world).gate_visits
+        visits[(WORKSPACE, run.id, row.id)] = dataclasses.replace(row, token="unmatched")
+        unmatched = (await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))).json()
+        visits[(WORKSPACE, run.id, row.id)] = row
+        _config_missing(world, run)
+        unloadable = (await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))).json()
 
     assert detail["gates"] == [
         {
@@ -765,8 +784,21 @@ async def test_a_run_at_its_gate_lists_the_open_visit_with_its_outcomes(runs_api
             "elicitation_id": row.elicitation_id,
             "opened_at": row.opened_at,
             "outcomes": ["approve", "reject"],
+            # What the anchor's approval prompt asks, so the run view shows the same text.
+            "context": anchor_prompt["message"],
         }
     ]
+    assert "Ship it?" in detail["gates"][0]["context"]
+    # The graph loaded, so the outcomes show; the state has no such visit, so no prompt.
+    [gate] = unmatched["gates"]
+    assert (gate["token"], gate["context"], gate["outcomes"]) == (
+        "unmatched",
+        None,
+        ["approve", "reject"],
+    )
+    # Without the engine state there is no prompt to show, but the visit is still listed.
+    [gate] = unloadable["gates"]
+    assert (gate["token"], gate["context"], gate["outcomes"]) == (row.token, None, [])
 
 
 async def test_a_finished_run_offers_nothing(runs_api: Api) -> None:
@@ -1496,6 +1528,7 @@ async def test_a_start_makes_the_run_on_its_worktree_and_a_retry_replays_it(
     assert (spec.base_ref, spec.base_commit, spec.max_activations) == ("main", HEAD, 50)
     assert (spec.title, spec.request_preview) == ("Ship it", "Make it so.")
     assert ("create", branch, "main") in host.calls
+    assert created["run_branch"] == again.json()["run_branch"] == branch
 
 
 async def test_a_start_without_a_title_takes_the_workflow_s_name(writes: Api) -> None:
@@ -2106,6 +2139,7 @@ async def test_each_action_on_each_run_state(writes: Api, state: str, action: st
         # The answer is the run as its detail now shows it, actions included.
         assert response.json()["status"] == detail["status"] == row_after
         assert response.json()["allowed_actions"] == detail["allowed_actions"]
+        assert response.json()["run_branch"] == detail["run_branch"] == run_branch_name(run.id)
     else:
         error = response.json()["error"]
         assert error["code"] == "illegal_transition"
