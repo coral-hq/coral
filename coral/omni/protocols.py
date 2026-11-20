@@ -206,6 +206,37 @@ class Viewer:
     check_generation: bool = False
 
 
+@dataclass(frozen=True)
+class RunSpendTotals:
+    """
+    What a run's sessions have spent so far: its anchor, steps and their sub-agents.
+
+    :param usd: The display cost, as the anchor's badge shows it; ``None`` when no
+        session was priced. With unpriced models it is a lower bound.
+    :param live_usd: The cost including spend still in flight; ``None`` when unpriced.
+    :param unpriced_models: Models whose tokens carry no cost, sorted.
+    :param sessions: Sessions in the run's tree, archived ones included.
+    """
+
+    usd: float | None
+    live_usd: float | None
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cache_read_tokens: int
+    cache_creation_tokens: int
+    unpriced_models: tuple[str, ...]
+    sessions: int
+
+
+class RunSpendReader(Protocol):
+    """Reads a run's spend from its sessions; blocking, so callers run it on a thread."""
+
+    def run_spend(self, *, workspace_id: int, run_id: str) -> RunSpendTotals | None:
+        """The run's spend, or ``None`` when it has no sessions: unknown, never zero."""
+        ...
+
+
 @runtime_checkable
 class GatePublisher(Protocol):
     """Shows and drops a gate visit's prompt on a session; called in its workspace's scope."""
@@ -535,6 +566,8 @@ __all__ = [
     "PreSendHook",
     "PreSendRequest",
     "RunScopeRunner",
+    "RunSpendReader",
+    "RunSpendTotals",
     "SendReceipt",
     "SessionCreateRequest",
     "SessionDispatch",

@@ -5,16 +5,18 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import Engine, asc, desc, select, text, update
+from sqlalchemy import ColumnElement, Engine, asc, desc, select, text, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
+from coral.alerts.types import LOCAL_USER_ID, is_owner, normalize_owner
 from coral.db import (
     DEFAULT_WORKSPACE_ID,
     ActivationRow,
@@ -37,8 +39,11 @@ from coral.db import (
 )
 from coral.db.enum_codecs import GateVisitStatus, LogKind, RunStatus, WorkStatus
 from coral.model.ids import derived_id
-from coral.stores.alerts import apply_alert_changes, check_alert_raises
+from coral.omni.protocols import Viewer
+from coral.stores.alerts import apply_alert_changes, check_alert_raises, generation_clause
 from coral.stores.protocols import (
+    MAX_OWNED_RUNS_LIMIT,
+    STORED_TEXT_ERRORS,
     UNFINISHED_RUN_STATUSES,
     ActivationState,
     AgentSlotState,
@@ -47,6 +52,7 @@ from coral.stores.protocols import (
     GateVisitState,
     HandoffItemState,
     HandoffState,
+    InvalidRunCursor,
     JoinArrivalState,
     RunLogEntry,
     RunNotFound,
@@ -290,6 +296,13 @@ def _to_gate_visit_state(row: GateVisitRow) -> GateVisitState:
 
 
 def _to_run_log_entry(row: RunLogRow) -> RunLogEntry:
+    return _log_entry(row, body=row.body, view_patch=row.view_patch)
+
+
+def _log_entry(
+    row: RunLogRow, *, body: str, view_patch: str | None, unreadable: bool = False
+) -> RunLogEntry:
+    """The row's entry with its text given apart, so a row whose text failed can still show."""
     return RunLogEntry(
         workspace_id=row.workspace_id,
         run_id=row.run_id,
@@ -298,7 +311,7 @@ def _to_run_log_entry(row: RunLogRow) -> RunLogEntry:
         log_version=row.log_version,
         kind=row.kind,
         actor_kind=row.actor_kind,
-        body=row.body,
+        body=body,
         created_at_us=row.created_at_us,
         audit_only=row.audit_only,
         actor_ref=row.actor_ref,
@@ -307,9 +320,68 @@ def _to_run_log_entry(row: RunLogRow) -> RunLogEntry:
         scope_key=row.scope_key,
         idempotency_cksum=row.idempotency_cksum,
         body_ref=row.body_ref,
-        view_patch=row.view_patch,
+        view_patch=view_patch,
         view_patch_ref=row.view_patch_ref,
+        unreadable=unreadable,
     )
+
+
+# What a tolerant log read shows as a placeholder: stored text that does not decode, and a
+# framed value too short to hold its codec (``ValueError``, as ``UnicodeDecodeError`` is).
+_UNDECODABLE_LOG_TEXT = (*STORED_TEXT_ERRORS, ValueError)
+
+
+def _log_text(
+    session: Session, workspace_id: int, run_id: str, seq: int
+) -> tuple[str, str | None] | None:
+    """One log row's ``body`` and ``view_patch``, each read alone; ``None`` when either fails."""
+    key = (
+        RunLogRow.workspace_id == workspace_id,
+        RunLogRow.run_id == run_id,
+        RunLogRow.seq == seq,
+    )
+    try:
+        body = session.execute(select(RunLogRow.body).where(*key)).scalar_one()
+        view_patch = session.execute(select(RunLogRow.view_patch).where(*key)).scalar_one()
+    except _UNDECODABLE_LOG_TEXT:
+        return None
+    return body, view_patch
+
+
+_MAX_BIGINT = 2**63 - 1
+# A run id as a position: at most the 32 lowercase hex characters every run id has.
+_RUN_ID_POSITION = re.compile(r"[0-9a-f]{0,32}")
+
+
+def check_owned_runs_page(after: tuple[int, str] | None, limit: int) -> None:
+    """Refuse a page no stored run key can bound, before anything is read.
+
+    :raises InvalidRunCursor: ``after`` holds a time outside 0-2**63-1 or an id that is
+        not at most 32 lowercase hex characters.
+    :raises ValueError: ``limit`` is not 1-:data:`MAX_OWNED_RUNS_LIMIT`.
+    """
+    if not 1 <= limit <= MAX_OWNED_RUNS_LIMIT:
+        raise ValueError(f"limit must be 1-{MAX_OWNED_RUNS_LIMIT}, not {limit}")
+    if after is None:
+        return
+    created_at, run_id = after
+    if type(created_at) is not int or not 0 <= created_at <= _MAX_BIGINT:
+        raise InvalidRunCursor("the cursor's time is not a stored run time")
+    if not isinstance(run_id, str) or _RUN_ID_POSITION.fullmatch(run_id) is None:
+        raise InvalidRunCursor("the cursor's run id is not a run id")
+
+
+def _stored_owner_clauses(viewer: Viewer) -> tuple[ColumnElement[bool], ...]:
+    """The owner values a viewer's runs are stored under, one index range each."""
+    owner = normalize_owner(viewer.user_id)
+    if owner is None:
+        # The single local user's runs store no owner, or its reserved id.
+        return (RunRow.user_id.is_(None), RunRow.user_id == LOCAL_USER_ID)
+    return (RunRow.user_id == owner,)
+
+
+def _newest_first_key(run: CoralRun) -> tuple[int, str]:
+    return run.created_at, run.id
 
 
 def _to_run_spec(row: RunSpecRow, run: RunRow) -> RunStartSpec:
@@ -1026,6 +1098,76 @@ class SqlAlchemyCoralRunStore:
             rows = session.execute(stmt).scalars().all()
             return [_to_coral_run(r) for r in rows]
 
+    def list_owned_runs(
+        self,
+        *,
+        workspace_id: int,
+        viewer: Viewer,
+        statuses: Sequence[int] = (),
+        workflow_id: str | None = None,
+        after: tuple[int, str] | None = None,
+        limit: int = 25,
+    ) -> tuple[list[CoralRun], tuple[int, str] | None]:
+        """The viewer's runs in the workspace, newest first, one keyset page at a time.
+
+        Each stored owner value is one ``ix_coral_runs_owner`` range read in order.
+        Rows a folding collation adds are dropped by the exact owner check, and the
+        read goes on past them, so the returned cursor is always one of the viewer's
+        runs (``None`` at the end). Nothing is looked up by ``after``.
+
+        :raises InvalidRunCursor: ``after`` is outside any stored run key.
+        :raises ValueError: ``limit`` is not 1-:data:`MAX_OWNED_RUNS_LIMIT`.
+        """
+        check_owned_runs_page(after, limit)
+        wanted = limit + 1
+        statements = []
+        for owner_clause in _stored_owner_clauses(viewer):
+            statement = select(RunRow).where(
+                RunRow.workspace_id == workspace_id,
+                owner_clause,
+                generation_clause(RunRow.account_generation, viewer),
+            )
+            if statuses:
+                statement = statement.where(RunRow.status.in_(sorted(set(statuses))))
+            if workflow_id is not None:
+                statement = statement.where(RunRow.workflow_id == workflow_id)
+            statements.append(statement)
+        dialect = self._engine.dialect.name
+        kept: list[CoralRun] = []
+        position = after
+        with shared_read_scope(), self._session("list_owned_runs") as session:
+            while True:
+                read: list[CoralRun] = []
+                for statement in statements:
+                    if position is not None:
+                        statement = statement.where(
+                            keyset_after(
+                                (RunRow.created_at, RunRow.id),
+                                position,
+                                descending=True,
+                                dialect_name=dialect,
+                            )
+                        )
+                    statement = statement.order_by(desc(RunRow.created_at), desc(RunRow.id)).limit(
+                        wanted
+                    )
+                    read.extend(_to_coral_run(row) for row in session.scalars(statement))
+                # Each range holds its own newest rows, so the merged first rows are exact.
+                batch = sorted(read, key=_newest_first_key, reverse=True)[:wanted]
+                kept.extend(
+                    run
+                    for run in batch
+                    # Exact comparison: MySQL collations can fold case, accents or spaces.
+                    if is_owner(run.user_id, run.account_generation, viewer)
+                    and (workflow_id is None or run.workflow_id == workflow_id)
+                )
+                if len(kept) >= wanted or len(batch) < wanted:
+                    break
+                position = _newest_first_key(batch[-1])
+        page = kept[:limit]
+        cursor = _newest_first_key(page[-1]) if len(kept) > limit else None
+        return page, cursor
+
     def read_log(
         self,
         run_id: str,
@@ -1033,25 +1175,63 @@ class SqlAlchemyCoralRunStore:
         after_seq: int = 0,
         limit: int = 100,
         workspace_id: int | None = None,
+        tolerant: bool = False,
     ) -> list[RunLogEntry]:
-        """Read append-only event logs for a run starting after after_seq."""
+        """Read append-only event logs for a run starting after after_seq.
+
+        :param tolerant: When a row's stored text does not decode, re-read the page
+            row by row and return that row as an ``unreadable`` placeholder.
+        """
         ws = self._resolve_workspace_id(workspace_id)
-        with shared_read_scope(), self._session("read_log") as session:
-            rows = (
-                session.execute(
-                    select(RunLogRow)
-                    .where(
-                        RunLogRow.workspace_id == ws,
-                        RunLogRow.run_id == run_id,
-                        RunLogRow.seq > after_seq,
+        try:
+            with shared_read_scope(), self._session("read_log") as session:
+                rows = (
+                    session.execute(
+                        select(RunLogRow)
+                        .where(
+                            RunLogRow.workspace_id == ws,
+                            RunLogRow.run_id == run_id,
+                            RunLogRow.seq > after_seq,
+                        )
+                        .order_by(asc(RunLogRow.seq))
+                        .limit(limit)
                     )
-                    .order_by(asc(RunLogRow.seq))
-                    .limit(limit)
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            return [_to_run_log_entry(r) for r in rows]
+                return [_to_run_log_entry(r) for r in rows]
+        except _UNDECODABLE_LOG_TEXT:
+            if not tolerant:
+                raise
+        return self._read_log_isolating_unreadable(ws, run_id, after_seq, limit)
+
+    def _read_log_isolating_unreadable(
+        self, workspace_id: int, run_id: str, after_seq: int, limit: int
+    ) -> list[RunLogEntry]:
+        """The page without its text columns, then each row's text alone."""
+        with shared_read_scope(), self._session("read_log_isolate_unreadable") as session:
+            rows = session.scalars(
+                select(RunLogRow)
+                .options(
+                    defer(RunLogRow.body, raiseload=True),
+                    defer(RunLogRow.view_patch, raiseload=True),
+                )
+                .where(
+                    RunLogRow.workspace_id == workspace_id,
+                    RunLogRow.run_id == run_id,
+                    RunLogRow.seq > after_seq,
+                )
+                .order_by(asc(RunLogRow.seq))
+                .limit(limit)
+            ).all()
+            entries: list[RunLogEntry] = []
+            for row in rows:
+                texts = _log_text(session, workspace_id, run_id, row.seq)
+                if texts is None:
+                    entries.append(_log_entry(row, body="", view_patch=None, unreadable=True))
+                else:
+                    entries.append(_log_entry(row, body=texts[0], view_patch=texts[1]))
+            return entries
 
     def find_receipt(
         self,

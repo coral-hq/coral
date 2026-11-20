@@ -85,6 +85,7 @@ from coral.queue.drainer import FinishedWork
 from coral.queue.run_effects import describe_exception
 from coral.recovery.pause import pause_log_checksum, pause_run_once
 from coral.stores.protocols import (
+    STORED_TEXT_ERRORS,
     UNFINISHED_RUN_STATUSES,
     CommitOutcome,
     CoralRun,
@@ -115,8 +116,6 @@ _LOAD_ERRORS = (
     ValidationError,
     json.JSONDecodeError,
 )
-# Stored text that does not decode while the run's rows load.
-STORED_TEXT_ERRORS = (zstandard.ZstdError, UnicodeDecodeError)
 # Commits that fail the same way every time: the run pauses with this detail instead.
 _UNBUILDABLE: tuple[tuple[type[Exception], str], ...] = (
     (TransitionTooLarge, "transition_too_large"),

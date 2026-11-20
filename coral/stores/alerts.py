@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any, Literal, cast
 
 from sqlalchemy import ColumnElement, CursorResult, Engine, asc, desc, insert, or_, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from coral.alerts.types import LOCAL_USER_ID, generation_matches, normalize_owner
 from coral.db import (
@@ -143,14 +143,13 @@ def _resolve(
     )
 
 
-def _generation_clause(viewer: Viewer) -> ColumnElement[bool]:
+def generation_clause(
+    recorded: InstrumentedAttribute[str | None], viewer: Viewer
+) -> ColumnElement[bool]:
     """``generation_matches`` as SQL: a recorded generation needs the viewer's proven one."""
     if viewer.check_generation and viewer.account_generation is not None:
-        return or_(
-            AlertRow.account_generation.is_(None),
-            AlertRow.account_generation == viewer.account_generation,
-        )
-    return AlertRow.account_generation.is_(None)
+        return or_(recorded.is_(None), recorded == viewer.account_generation)
+    return recorded.is_(None)
 
 
 def _visible_to(viewer: Viewer, owner: str | None, alert: AlertRecord | AlertRow) -> bool:
@@ -272,7 +271,7 @@ class SqlAlchemyAlertStore:
                         AlertRow.owner_user_id == owner,
                         AlertRow.status == int(AlertStatus.OPEN),
                         AlertRow.kind.not_in(_UNACKABLE_KINDS),
-                        _generation_clause(viewer),
+                        generation_clause(AlertRow.account_generation, viewer),
                     )
                     .values(
                         status=int(AlertStatus.ACKED),
@@ -308,4 +307,5 @@ __all__ = [
     "SqlAlchemyAlertStore",
     "apply_alert_changes",
     "check_alert_raises",
+    "generation_clause",
 ]
