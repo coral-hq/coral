@@ -1,0 +1,1701 @@
+{
+  "cases": [
+    {
+      "name": "root replace",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "", "value": { "status": "done" } }],
+      "result": { "status": "done" }
+    },
+    {
+      "name": "root add",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "", "value": { "status": "done" } }],
+      "result": { "status": "done" }
+    },
+    {
+      "name": "root remove",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "remove", "path": "", "value": null }],
+      "error": true
+    },
+    {
+      "name": "root replace by an array",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "", "value": ["a"] }],
+      "error": true
+    },
+    {
+      "name": "root add of a scalar",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "", "value": 1 }],
+      "error": true
+    },
+    {
+      "name": "an array root replaced by an object",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [
+        { "op": "replace", "path": "", "value": ["a"] },
+        { "op": "replace", "path": "", "value": { "k": 1 } }
+      ],
+      "result": { "k": 1 }
+    },
+    {
+      "name": "add a new member",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/added", "value": 1 }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }],
+        "added": 1
+      }
+    },
+    {
+      "name": "add without a value",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/added" }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }],
+        "added": null
+      }
+    },
+    {
+      "name": "add over a member",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/status", "value": "paused" }],
+      "result": {
+        "status": "paused",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "replace a member",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/status", "value": "paused" }],
+      "result": {
+        "status": "paused",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "replace a member with null",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/status", "value": null }],
+      "result": {
+        "status": null,
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "remove a member",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "remove", "path": "/none", "value": null }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "remove without a value",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "remove", "path": "/none" }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "replace a missing member",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/missing", "value": 1 }],
+      "error": true
+    },
+    {
+      "name": "remove a missing member",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "remove", "path": "/missing", "value": null }],
+      "error": true
+    },
+    {
+      "name": "a missing intermediate member",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/missing/x", "value": 1 }],
+      "error": true
+    },
+    {
+      "name": "an inherited member",
+      "view": {},
+      "patch": [{ "op": "replace", "path": "/toString", "value": 1 }],
+      "error": true
+    },
+    {
+      "name": "an own member named toString",
+      "view": { "toString": 1 },
+      "patch": [{ "op": "replace", "path": "/toString", "value": 2 }],
+      "result": { "toString": 2 }
+    },
+    {
+      "name": "a value with a __proto__ key",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/x", "value": { "__proto__": { "a": 1 } } }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }],
+        "x": { "__proto__": { "a": 1 } }
+      }
+    },
+    {
+      "name": "array add at 0",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/items/0", "value": "z" }],
+      "result": {
+        "status": "running",
+        "items": ["z", "a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "array add at its length",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/items/2", "value": "z" }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b", "z"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "array add at -",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/items/-", "value": "z" }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b", "z"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "array add past its length",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/items/3", "value": "z" }],
+      "error": true
+    },
+    {
+      "name": "array replace at its last index",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/1", "value": "z" }],
+      "result": {
+        "status": "running",
+        "items": ["a", "z"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "array replace at its length",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/2", "value": "z" }],
+      "error": true
+    },
+    {
+      "name": "array replace at -",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/-", "value": "z" }],
+      "error": true
+    },
+    {
+      "name": "array remove at 0",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "remove", "path": "/items/0", "value": null }],
+      "result": {
+        "status": "running",
+        "items": ["b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "array remove at its length",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "remove", "path": "/items/2", "value": null }],
+      "error": true
+    },
+    {
+      "name": "- as an intermediate token",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/rows/-/id", "value": "r2" }],
+      "error": true
+    },
+    {
+      "name": "an intermediate index past the end",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/rows/1/id", "value": "r2" }],
+      "error": true
+    },
+    {
+      "name": "a leading zero index",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/01", "value": "z" }],
+      "error": true
+    },
+    {
+      "name": "a negative index",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/-1", "value": "z" }],
+      "error": true
+    },
+    {
+      "name": "an exponent index",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/1e3", "value": "z" }],
+      "error": true
+    },
+    {
+      "name": "an 18-digit index past the end",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/999999999999999999", "value": "z" }],
+      "error": true
+    },
+    {
+      "name": "a 19-digit index",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/1111111111111111111", "value": "z" }],
+      "error": true
+    },
+    {
+      "name": "a member token on an array",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/first", "value": "z" }],
+      "error": true
+    },
+    {
+      "name": "length on an array",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/items/length", "value": 0 }],
+      "error": true
+    },
+    {
+      "name": "a nested path through arrays",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/rows/0/slots/0/status", "value": "x" }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "x" }] }]
+      }
+    },
+    {
+      "name": "add into a nested array",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/rows/0/slots/-", "value": { "status": "x" } }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }, { "status": "x" }] }]
+      }
+    },
+    {
+      "name": "~1 unescapes to /",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/nested/a~1b", "value": 3 }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 3, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "~0 unescapes to ~",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "replace", "path": "/nested/m~0n", "value": 3 }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 3 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "~01 unescapes to ~1",
+      "view": { "~1": 1 },
+      "patch": [{ "op": "replace", "path": "/~01", "value": 2 }],
+      "result": { "~1": 2 }
+    },
+    {
+      "name": "a bad ~2 escape",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/nested/m~2n", "value": 3 }],
+      "error": true
+    },
+    {
+      "name": "a pointer without /",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "status", "value": "paused" }],
+      "error": true
+    },
+    {
+      "name": "an empty token",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/nested/", "value": 3 }],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2, "": 3 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "a scalar parent",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/status/x", "value": 1 }],
+      "error": true
+    },
+    {
+      "name": "an index into a string",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/status/0", "value": "x" }],
+      "error": true
+    },
+    {
+      "name": "a null parent",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "add", "path": "/none/x", "value": 1 }],
+      "error": true
+    },
+    {
+      "name": "operations in order",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [
+        { "op": "add", "path": "/items/-", "value": "c" },
+        { "op": "replace", "path": "/items/2", "value": "d" },
+        { "op": "remove", "path": "/items/0", "value": null }
+      ],
+      "result": {
+        "status": "running",
+        "items": ["b", "d"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "a later operation refused",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [
+        { "op": "replace", "path": "/status", "value": "paused" },
+        { "op": "remove", "path": "/missing", "value": null }
+      ],
+      "error": true
+    },
+    {
+      "name": "an empty patch",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [],
+      "result": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      }
+    },
+    {
+      "name": "the move op",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "move", "from": "/status", "path": "/x" }],
+      "error": true
+    },
+    {
+      "name": "the copy op",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "copy", "from": "/status", "path": "/x" }],
+      "error": true
+    },
+    {
+      "name": "the test op",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "test", "from": "/status", "path": "/x" }],
+      "error": true
+    },
+    {
+      "name": "the unknown op",
+      "view": {
+        "status": "running",
+        "items": ["a", "b"],
+        "nested": { "a/b": 1, "m~n": 2 },
+        "none": null,
+        "rows": [{ "id": "r1", "slots": [{ "status": "working" }] }]
+      },
+      "patch": [{ "op": "unknown", "from": "/status", "path": "/x" }],
+      "error": true
+    },
+    {
+      "name": "add through __proto__",
+      "view": {},
+      "patch": [{ "op": "add", "path": "/__proto__/polluted", "value": true }],
+      "error": true
+    },
+    {
+      "name": "add through constructor",
+      "view": {},
+      "patch": [{ "op": "add", "path": "/constructor/prototype/x", "value": 1 }],
+      "error": true
+    },
+    {
+      "name": "add /__proto__",
+      "view": {},
+      "patch": [{ "op": "add", "path": "/__proto__", "value": { "polluted": true } }],
+      "result": { "__proto__": { "polluted": true } },
+      "client_error": true
+    },
+    {
+      "name": "add /constructor",
+      "view": {},
+      "patch": [{ "op": "add", "path": "/constructor", "value": 1 }],
+      "result": { "constructor": 1 },
+      "client_error": true
+    },
+    {
+      "name": "add /prototype",
+      "view": {},
+      "patch": [{ "op": "add", "path": "/prototype", "value": 1 }],
+      "result": { "prototype": 1 },
+      "client_error": true
+    },
+    {
+      "name": "replace an own __proto__",
+      "view": { "__proto__": 1 },
+      "patch": [{ "op": "replace", "path": "/__proto__", "value": 2 }],
+      "result": { "__proto__": 2 },
+      "client_error": true
+    },
+    {
+      "name": "remove an own constructor",
+      "view": { "constructor": 1 },
+      "patch": [{ "op": "remove", "path": "/constructor", "value": null }],
+      "result": {},
+      "client_error": true
+    },
+    {
+      "name": "add through an own __proto__",
+      "view": { "__proto__": {} },
+      "patch": [{ "op": "add", "path": "/__proto__/x", "value": 1 }],
+      "result": { "__proto__": { "x": 1 } },
+      "client_error": true
+    },
+    {
+      "name": "add through an own constructor",
+      "view": { "constructor": { "prototype": {} } },
+      "patch": [{ "op": "add", "path": "/constructor/prototype/x", "value": 1 }],
+      "result": { "constructor": { "prototype": { "x": 1 } } },
+      "client_error": true
+    },
+    {
+      "name": "a pointer of 16 tokens",
+      "view": {
+        "k": {
+          "k": {
+            "k": {
+              "k": {
+                "k": {
+                  "k": {
+                    "k": { "k": { "k": { "k": { "k": { "k": { "k": { "k": { "k": {} } } } } } } } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": [{ "op": "add", "path": "/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/x", "value": 1 }],
+      "result": {
+        "k": {
+          "k": {
+            "k": {
+              "k": {
+                "k": {
+                  "k": {
+                    "k": {
+                      "k": { "k": { "k": { "k": { "k": { "k": { "k": { "k": { "x": 1 } } } } } } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "a pointer of 17 tokens",
+      "view": {
+        "k": {
+          "k": {
+            "k": {
+              "k": {
+                "k": {
+                  "k": {
+                    "k": {
+                      "k": {
+                        "k": { "k": { "k": { "k": { "k": { "k": { "k": { "k": {} } } } } } } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": [{ "op": "add", "path": "/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/x", "value": 1 }],
+      "result": {
+        "k": {
+          "k": {
+            "k": {
+              "k": {
+                "k": {
+                  "k": {
+                    "k": {
+                      "k": {
+                        "k": {
+                          "k": { "k": { "k": { "k": { "k": { "k": { "k": { "x": 1 } } } } } } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "client_error": true
+    },
+    {
+      "name": "a pointer of 1024 characters",
+      "view": {},
+      "patch": [
+        {
+          "op": "add",
+          "path": "/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "value": 1
+        }
+      ],
+      "result": {
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": 1
+      }
+    },
+    {
+      "name": "a pointer of 1025 characters",
+      "view": {},
+      "patch": [
+        {
+          "op": "add",
+          "path": "/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "value": 1
+        }
+      ],
+      "result": {
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": 1
+      },
+      "client_error": true
+    },
+    {
+      "name": "live entry 2 (engine.effect_completed)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "starting", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "pending", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [{ "op": "replace", "path": "/slots/0/status", "value": "session_created" }],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "starting", "outcome": null }
+        ],
+        "slots": [
+          {
+            "id": "implement||a4:1:0",
+            "status": "session_created",
+            "pending_input": false,
+            "drift": false
+          }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      }
+    },
+    {
+      "name": "live entry 3 (engine.effect_completed)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "starting", "outcome": null }
+        ],
+        "slots": [
+          {
+            "id": "implement||a4:1:0",
+            "status": "session_created",
+            "pending_input": false,
+            "drift": false
+          }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [
+        { "op": "replace", "path": "/activations/1/status", "value": "running" },
+        { "op": "replace", "path": "/slots/0/status", "value": "working" }
+      ],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "working", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      }
+    },
+    {
+      "name": "live entry 4 (engine.handoff_received)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "working", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [
+        { "op": "replace", "path": "/activations/1/status", "value": "evaluating" },
+        { "op": "replace", "path": "/slots/0/status", "value": "evaluating" }
+      ],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "evaluating", "outcome": null }
+        ],
+        "slots": [
+          {
+            "id": "implement||a4:1:0",
+            "status": "evaluating",
+            "pending_input": false,
+            "drift": false
+          }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      }
+    },
+    {
+      "name": "live entry 5 (engine.handoff_evaluated)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "evaluating", "outcome": null }
+        ],
+        "slots": [
+          {
+            "id": "implement||a4:1:0",
+            "status": "evaluating",
+            "pending_input": false,
+            "drift": false
+          }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [{ "op": "replace", "path": "/slots/0/status", "value": "closing" }],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "evaluating", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closing", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      }
+    },
+    {
+      "name": "live entry 6 (engine.effect_completed)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "evaluating", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closing", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [
+        { "op": "replace", "path": "/activations/1/status", "value": "closed" },
+        { "op": "replace", "path": "/activations/1/outcome", "value": "completed" },
+        {
+          "op": "add",
+          "path": "/activations/2",
+          "value": { "id": "approve_change||a4:1", "status": "running", "outcome": null }
+        },
+        { "op": "replace", "path": "/slots/0/status", "value": "closed" },
+        { "op": "add", "path": "/open_gates/0", "value": "approve_change||a4:1:1" },
+        {
+          "op": "add",
+          "path": "/armed_timer_keys/0",
+          "value": "watchdog_remind:approve_change||a4:1"
+        },
+        {
+          "op": "add",
+          "path": "/armed_timer_keys/1",
+          "value": "watchdog_alert:approve_change||a4:1"
+        }
+      ],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": ["approve_change||a4:1:1"],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": [
+          "watchdog_remind:approve_change||a4:1",
+          "watchdog_alert:approve_change||a4:1"
+        ]
+      }
+    },
+    {
+      "name": "live entry 7 (engine.answer_gate)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": ["approve_change||a4:1:1"],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": [
+          "watchdog_remind:approve_change||a4:1",
+          "watchdog_alert:approve_change||a4:1"
+        ]
+      },
+      "patch": [
+        { "op": "replace", "path": "/activations/2/status", "value": "closed" },
+        { "op": "replace", "path": "/activations/2/outcome", "value": "completed" },
+        {
+          "op": "add",
+          "path": "/activations/3",
+          "value": { "id": "implement||a4:2", "status": "starting", "outcome": null }
+        },
+        {
+          "op": "add",
+          "path": "/slots/1",
+          "value": {
+            "id": "implement||a4:2:0",
+            "status": "pending",
+            "pending_input": false,
+            "drift": false
+          }
+        },
+        { "op": "remove", "path": "/open_gates/0", "value": null },
+        { "op": "replace", "path": "/loop_pass_indexes/0/pass_index", "value": 2 },
+        { "op": "remove", "path": "/armed_timer_keys/1", "value": null },
+        { "op": "remove", "path": "/armed_timer_keys/0", "value": null }
+      ],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "starting", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "pending", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      }
+    },
+    {
+      "name": "live entry 8 (engine.effect_completed)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "starting", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "pending", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [{ "op": "replace", "path": "/slots/1/status", "value": "session_created" }],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "starting", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          {
+            "id": "implement||a4:2:0",
+            "status": "session_created",
+            "pending_input": false,
+            "drift": false
+          }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      }
+    },
+    {
+      "name": "live entry 9 (engine.effect_completed)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "starting", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          {
+            "id": "implement||a4:2:0",
+            "status": "session_created",
+            "pending_input": false,
+            "drift": false
+          }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [
+        { "op": "replace", "path": "/activations/3/status", "value": "running" },
+        { "op": "replace", "path": "/slots/1/status", "value": "working" }
+      ],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "working", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      }
+    },
+    {
+      "name": "live entry 10 (engine.handoff_received)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "working", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [
+        { "op": "replace", "path": "/activations/3/status", "value": "evaluating" },
+        { "op": "replace", "path": "/slots/1/status", "value": "evaluating" }
+      ],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "evaluating", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          {
+            "id": "implement||a4:2:0",
+            "status": "evaluating",
+            "pending_input": false,
+            "drift": false
+          }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      }
+    },
+    {
+      "name": "live entry 11 (engine.handoff_evaluated)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "evaluating", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          {
+            "id": "implement||a4:2:0",
+            "status": "evaluating",
+            "pending_input": false,
+            "drift": false
+          }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [{ "op": "replace", "path": "/slots/1/status", "value": "closing" }],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "evaluating", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closing", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      }
+    },
+    {
+      "name": "live entry 12 (engine.effect_completed)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "evaluating", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closing", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      },
+      "patch": [
+        { "op": "replace", "path": "/activations/3/status", "value": "closed" },
+        { "op": "replace", "path": "/activations/3/outcome", "value": "completed" },
+        {
+          "op": "add",
+          "path": "/activations/4",
+          "value": { "id": "approve_change||a4:2", "status": "running", "outcome": null }
+        },
+        { "op": "replace", "path": "/slots/1/status", "value": "closed" },
+        { "op": "add", "path": "/open_gates/0", "value": "approve_change||a4:2:2" },
+        {
+          "op": "add",
+          "path": "/armed_timer_keys/0",
+          "value": "watchdog_remind:approve_change||a4:2"
+        },
+        {
+          "op": "add",
+          "path": "/armed_timer_keys/1",
+          "value": "watchdog_alert:approve_change||a4:2"
+        }
+      ],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:2", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": ["approve_change||a4:2:2"],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": [
+          "watchdog_remind:approve_change||a4:2",
+          "watchdog_alert:approve_change||a4:2"
+        ]
+      }
+    },
+    {
+      "name": "live entry 13 (engine.pause_run)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:2", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": ["approve_change||a4:2:2"],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": [
+          "watchdog_remind:approve_change||a4:2",
+          "watchdog_alert:approve_change||a4:2"
+        ]
+      },
+      "patch": [
+        { "op": "replace", "path": "/status", "value": "paused" },
+        {
+          "op": "add",
+          "path": "/causes/0",
+          "value": { "reason": "user", "detail": "user", "subject": "" }
+        }
+      ],
+      "result": {
+        "status": "paused",
+        "causes": [{ "reason": "user", "detail": "user", "subject": "" }],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:2", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": ["approve_change||a4:2:2"],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": [
+          "watchdog_remind:approve_change||a4:2",
+          "watchdog_alert:approve_change||a4:2"
+        ]
+      }
+    },
+    {
+      "name": "live entry 14 (engine.resume_run)",
+      "view": {
+        "status": "paused",
+        "causes": [{ "reason": "user", "detail": "user", "subject": "" }],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:2", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": ["approve_change||a4:2:2"],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": [
+          "watchdog_remind:approve_change||a4:2",
+          "watchdog_alert:approve_change||a4:2"
+        ]
+      },
+      "patch": [
+        { "op": "replace", "path": "/status", "value": "running" },
+        { "op": "remove", "path": "/causes/0", "value": null }
+      ],
+      "result": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:2", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": ["approve_change||a4:2:2"],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": [
+          "watchdog_remind:approve_change||a4:2",
+          "watchdog_alert:approve_change||a4:2"
+        ]
+      }
+    },
+    {
+      "name": "live entry 15 (engine.answer_gate)",
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:2", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": ["approve_change||a4:2:2"],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": [
+          "watchdog_remind:approve_change||a4:2",
+          "watchdog_alert:approve_change||a4:2"
+        ]
+      },
+      "patch": [
+        { "op": "replace", "path": "/status", "value": "completed" },
+        { "op": "replace", "path": "/activations/4/status", "value": "closed" },
+        { "op": "replace", "path": "/activations/4/outcome", "value": "completed" },
+        {
+          "op": "add",
+          "path": "/activations/5",
+          "value": { "id": "end||", "status": "closed", "outcome": "completed" }
+        },
+        { "op": "remove", "path": "/open_gates/0", "value": null },
+        { "op": "remove", "path": "/armed_timer_keys/1", "value": null },
+        { "op": "remove", "path": "/armed_timer_keys/0", "value": null }
+      ],
+      "result": {
+        "status": "completed",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "end||", "status": "closed", "outcome": "completed" }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+        ],
+        "armed_timer_keys": []
+      }
+    }
+  ]
+}
