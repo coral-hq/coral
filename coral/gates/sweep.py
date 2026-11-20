@@ -3,9 +3,10 @@
 Every process sweeps the prompts it saw published, leader or not, because each
 holds its own index of prompts. A prompt goes stale when its visit was answered
 on another replica, when an answer committed but its reply never reached the
-caller, or when a withdraw was missed; it is withdrawn here. The tracked prompts
-are listed before any run is loaded, so a prompt published after a load is
-never judged by that older load.
+caller, or when a withdraw was missed; it is withdrawn here. A run's ``OPEN`` gate
+rows are exactly its live visits, so the sweep reads those rows and loads no
+engine state. The tracked prompts are listed before any rows are read, so a
+prompt published after a read is never judged by that older read.
 """
 
 from __future__ import annotations
@@ -14,13 +15,11 @@ import asyncio
 import logging
 
 from coral.bridge.executors import BridgeThreads
-from coral.bridge.service import EngineLoadFailed
 from coral.db.enum_codecs import SessionBindingRole
-from coral.gates.ids import live_visit_ids
 from coral.model.ids import anchor_session_id
 from coral.omni.protocols import GatePublisher, PendingGatePrompts, RunScopeRunner, TrackedPrompt
 from coral.queue.run_effects import describe_exception, raise_if_cancelling
-from coral.stores.protocols import RunNotFound
+from coral.stores.protocols import RunStore
 from coral.stores.session_bindings import SessionBindingLookup
 
 _logger = logging.getLogger(__name__)
@@ -35,6 +34,7 @@ class GatePromptSweeper:
         self,
         *,
         threads: BridgeThreads,
+        run_store: RunStore,
         bindings: SessionBindingLookup,
         publisher: GatePublisher,
         prompts: PendingGatePrompts,
@@ -42,6 +42,7 @@ class GatePromptSweeper:
         interval_s: float = SWEEP_INTERVAL_S,
     ) -> None:
         self._threads = threads
+        self._runs = run_store
         self._bindings = bindings
         self._publisher = publisher
         self._prompts = prompts
@@ -53,13 +54,13 @@ class GatePromptSweeper:
         """
         Withdraw each tracked prompt still pending that is no live visit's; untrack the rest.
 
-        A prompt on a session that is not a run's anchor is stale. A run that cannot be
-        loaded keeps its prompts until a later sweep. Each run is loaded once.
+        A prompt on a session that is not a run's anchor is stale. A run whose rows
+        cannot be read keeps its prompts until a later sweep. Each run is read once.
 
         :returns: How many prompts were withdrawn.
         """
         tracked = self._prompts.tracked()
-        live: dict[tuple[int, str], frozenset[str] | None] = {}
+        live: dict[tuple[int, str], frozenset[str]] = {}
         withdrawn = 0
         for prompt in tracked:
             try:
@@ -70,8 +71,7 @@ class GatePromptSweeper:
                     key = (prompt.workspace_id, prompt.session_id)
                     if key not in live:
                         live[key] = await self._live_prompts(prompt)
-                    keep = live[key]
-                    if keep is None or prompt.elicitation_id in keep:
+                    if prompt.elicitation_id in live[key]:
                         continue
                     if await self._publisher.withdraw(
                         session_id=prompt.session_id, elicitation_id=prompt.elicitation_id
@@ -92,12 +92,11 @@ class GatePromptSweeper:
                 raise_if_cancelling(exc)
                 self._log_failure(exc)
 
-    async def _live_prompts(self, prompt: TrackedPrompt) -> frozenset[str] | None:
+    async def _live_prompts(self, prompt: TrackedPrompt) -> frozenset[str]:
         """
         The prompt ids of the live visits of the run whose anchor the session is.
 
-        Empty when the session is no run's anchor or its run is gone; ``None`` when the
-        run cannot be loaded, so nothing of it is judged.
+        Empty when the session is no run's anchor or its run is gone.
         """
         workspace_id, session_id = prompt.workspace_id, prompt.session_id
         binding = await self._threads.run(self._bindings.find_by_session, workspace_id, session_id)
@@ -107,21 +106,10 @@ class GatePromptSweeper:
             or anchor_session_id(workspace_id, binding.run_id) != session_id
         ):
             return frozenset()
-        run_id = binding.run_id
-        try:
-            snapshot = await self._threads.run(
-                self._threads.bridge.load, workspace_id=workspace_id, run_id=run_id
-            )
-        except RunNotFound:
-            return frozenset()
-        except EngineLoadFailed:
-            return None
-        live = live_visit_ids(snapshot.state, run_id)
-        return frozenset(
-            row.elicitation_id
-            for row in snapshot.store.gate_visits
-            if row.id in live and row.elicitation_id is not None
+        gates = await self._threads.run(
+            self._runs.list_open_gates, binding.run_id, workspace_id=workspace_id
         )
+        return frozenset(gate.elicitation_id for gate in gates if gate.elicitation_id is not None)
 
     def _log_failure(self, exc: BaseException) -> None:
         """Log a failure kind once with its cause; later ones of that kind at debug."""

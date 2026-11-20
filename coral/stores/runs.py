@@ -1168,5 +1168,20 @@ class SqlAlchemyCoralRunStore:
             rows = session.execute(stmt).scalars().all()
             return [_to_gate_visit_state(r) for r in rows]
 
+    def list_open_gates(self, run_id: str, *, workspace_id: int) -> list[GateVisitState]:
+        """The run's open gate rows, by id, read through ``ix_coral_gate_visits_open``."""
+        with shared_read_scope(), self._session("list_open_gates") as session:
+            stmt = (
+                select(GateVisitRow)
+                .where(
+                    GateVisitRow.status == int(GateVisitStatus.OPEN),
+                    GateVisitRow.workspace_id == workspace_id,
+                    GateVisitRow.run_id == run_id,
+                )
+                .order_by(asc(GateVisitRow.id))
+            )
+            rows = session.execute(stmt).scalars().all()
+            return [_to_gate_visit_state(r) for r in rows]
+
 
 __all__ = ["SqlAlchemyCoralRunStore"]

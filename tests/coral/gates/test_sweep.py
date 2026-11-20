@@ -13,7 +13,6 @@ import pytest
 import pytest_asyncio
 
 from coral.bridge.executors import BridgeThreads
-from coral.bridge.service import EngineLoadFailed
 from coral.db.enum_codecs import SessionBindingRole, SlotRole
 from coral.gates.sweep import GatePromptSweeper
 from coral.model.ids import anchor_session_id
@@ -77,6 +76,7 @@ async def sweep(tmp_path: Path) -> AsyncIterator[Sweep]:
     prompts = FakeGatePrompts(gates)
     sweeper = GatePromptSweeper(
         threads=threads,
+        run_store=world.runs,
         bindings=bindings,
         publisher=gates,
         prompts=prompts,
@@ -89,8 +89,17 @@ async def sweep(tmp_path: Path) -> AsyncIterator[Sweep]:
         threads.close()
 
 
+def _no_engine_loads(sweep: Sweep, monkeypatch: pytest.MonkeyPatch) -> None:
+    """From here on, loading any run's engine state fails the test."""
+
+    def load(**_kwargs: object) -> None:
+        raise AssertionError("the sweep loaded engine state")
+
+    monkeypatch.setattr(sweep.world.bridge, "load", load)
+
+
 async def test_a_prompt_answered_elsewhere_is_withdrawn_and_a_live_one_stays(
-    sweep: Sweep,
+    sweep: Sweep, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     answered_run, answered_anchor = sweep.open()
     live_run, live_anchor = sweep.open(start_key="start-2")
@@ -98,6 +107,8 @@ async def test_a_prompt_answered_elsewhere_is_withdrawn_and_a_live_one_stays(
     live = sweep.prompts.track(live_anchor, sweep.prompt_of(live_run))
     # Committed on another replica: no fan-out reached this process's prompt.
     assert answer(sweep.world, answered_run, APPROVE_TOKEN, "approve").outcome == "accepted"
+    # WHY: the gate rows alone tell live from dead; the sweep loads no engine state.
+    _no_engine_loads(sweep, monkeypatch)
 
     withdrawn = await sweep.sweeper.sweep_once()
 
@@ -143,26 +154,50 @@ async def test_prompts_off_a_runs_anchor_are_withdrawn(sweep: Sweep) -> None:
     assert sweep.prompts.prompts == [kept]
 
 
-async def test_a_run_that_cannot_be_loaded_keeps_its_prompts(
+async def test_a_cancelled_runs_prompt_is_withdrawn_and_a_paused_runs_stays(
+    sweep: Sweep, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # WHY: a paused run's gate is still live and answerable; a finished run's is not.
+    cancelled_run, cancelled_anchor = sweep.open()
+    paused_run, paused_anchor = sweep.open(start_key="start-2")
+    cancelled = sweep.prompts.track(cancelled_anchor, sweep.prompt_of(cancelled_run))
+    paused = sweep.prompts.track(paused_anchor, sweep.prompt_of(paused_run))
+    sweep.world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=cancelled_run, actor="alice")
+    sweep.world.bridge.pause_for_drift(
+        workspace_id=WORKSPACE,
+        run_id=paused_run,
+        cause="session_archived",
+        body={"kind": "pause_run", "reason": "drift", "cause": "session_archived"},
+        checksum_parts=("coral-drift", paused_run, "session_archived", "s" * 32),
+        now_us=0,
+    )
+    _no_engine_loads(sweep, monkeypatch)
+
+    assert await sweep.sweeper.sweep_once() == 1
+    assert sweep.gates.calls == [("withdraw", cancelled_anchor, cancelled.elicitation_id)]
+    assert sweep.prompts.prompts == [paused]
+
+
+async def test_a_run_whose_gate_rows_cannot_be_read_keeps_its_prompts(
     sweep: Sweep, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_id, anchor = sweep.open()
     prompt = sweep.prompts.track(anchor, sweep.prompt_of(run_id))
 
-    def unloadable(**_kwargs: object) -> None:
-        raise EngineLoadFailed(WORKSPACE, run_id, ValueError("corrupt"))
+    def unreadable(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("database unavailable")
 
-    monkeypatch.setattr(sweep.world.bridge, "load", unloadable)
+    monkeypatch.setattr(sweep.world.runs, "list_open_gates", unreadable)
 
     assert await sweep.sweeper.sweep_once() == 0
     assert sweep.prompts.prompts == [prompt]
     assert sweep.gates.calls == []
 
 
-async def test_the_tracked_prompts_are_listed_before_any_run_is_loaded(
+async def test_the_tracked_prompts_are_listed_before_any_gate_rows_are_read(
     sweep: Sweep, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A prompt published after the run was loaded is never judged by that older load."""
+    """A prompt published after the rows were read is never judged by that older read."""
     run = start(sweep.world, GATED)
     anchor = anchor_session_id(WORKSPACE, run.id)
     sweep.bindings.rows[(WORKSPACE, anchor)] = step_binding(
@@ -174,19 +209,19 @@ async def test_the_tracked_prompts_are_listed_before_any_run_is_loaded(
         slot_role=None,
     )
     stale = sweep.prompts.track(anchor, "coral_gate_" + "e" * 32)
-    load = sweep.world.bridge.load
+    read = sweep.world.runs.list_open_gates
     opened: list[str] = []
 
-    def load_then_open(**kwargs: Any) -> Any:
-        snapshot = load(**kwargs)
+    def read_then_open(*args: Any, **kwargs: Any) -> Any:
+        rows = read(*args, **kwargs)
         if not opened:
             opened.append("")
-            # The gate opens and its prompt is published just after this load.
+            # The gate opens and its prompt is published just after this read.
             hand_off(sweep.world, run.id)
             opened[0] = sweep.prompts.track(anchor, sweep.prompt_of(run.id)).elicitation_id
-        return snapshot
+        return rows
 
-    monkeypatch.setattr(sweep.world.bridge, "load", load_then_open)
+    monkeypatch.setattr(sweep.world.runs, "list_open_gates", read_then_open)
 
     assert await sweep.sweeper.sweep_once() == 1
     assert sweep.gates.calls == [("withdraw", anchor, stale.elicitation_id)]

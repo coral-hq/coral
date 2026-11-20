@@ -472,11 +472,12 @@ branch than `run_branch_name(run_id)`), `graph.leaves_region` (an arrow out of
 a parallel branch), `graph.concurrent_writers` (two implementers at once in one
 worktree), `graph.too_wide` (more than 32 live slots, or 48 live slots, open
 decisions and open gates), `graph.gate_too_large` (a gate with more than 16
-outcomes or an outcome over 128 characters) and `graph.ids_too_long` (an effect
-key over 512 characters, a gate's `withdraw_gate` key included). It then pins
-the graph, starts the run and commits `StartRun`. A repeat with the same key,
-caller fields and YAML returns the same run; anything else is
-`StartKeyConflict`.
+outcomes or an outcome over 128 characters), `graph.gate_label_invalid` (a gate
+outcome with a control or invisible formatting character, such as a bidi
+override or a zero-width space) and `graph.ids_too_long` (an effect key over
+512 characters, a gate's `withdraw_gate` key included). It then pins the graph,
+starts the run and commits `StartRun`. A repeat with the same key, caller
+fields and YAML returns the same run; anything else is `StartKeyConflict`.
 
 **Work.** One row per effect or bridge item, keyed so a repeated commit never
 queues it twice. Slot rows carry the store `slot_id` and the slot's

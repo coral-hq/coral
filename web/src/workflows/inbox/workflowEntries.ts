@@ -135,11 +135,16 @@ export function badgeCount(
   alerts: readonly WorkflowAlert[],
   rows: readonly Pick<Conversation, "id" | "pending_elicitations_count">[],
 ): number {
+  // One pass over the rows, so the cost stays linear at the feed's 1,000-alert cap.
+  const pendingByRow = new Map<string, number>();
+  for (const row of rows) {
+    if (!pendingByRow.has(row.id)) pendingByRow.set(row.id, row.pending_elicitations_count ?? 0);
+  }
   return alerts.filter((alert) => {
     if (alert.priority !== "normal") return false;
     if (alert.kind !== "gate") return true;
-    const anchor = rows.find((row) => row.id === alert.session_id);
-    return (anchor?.pending_elicitations_count ?? 0) === 0;
+    const pending = alert.session_id === null ? 0 : (pendingByRow.get(alert.session_id) ?? 0);
+    return pending === 0;
   }).length;
 }
 

@@ -2,7 +2,8 @@
 
 The graph is never taken from the caller. A workflow is refused when the engine
 could not run it safely: unresolved analysis, a profile without a step stance, a
-gate with more outcomes than an answer and its alert hold, two writers at once in
+gate with more outcomes than an answer and its alert hold or with a hidden
+character in an outcome, two writers at once in
 one worktree, more live slots, decisions and gates than one commit can carry, or
 effect keys longer than an executor accepts, and when an arrow leaves a parallel
 region while its other branches still run.
@@ -35,7 +36,7 @@ from coral.bridge.config import (
 from coral.bridge.graphs import PinnedGraphMismatch, verified_content_hash
 from coral.bridge.keys import decision_rerequest_key
 from coral.bridge.mapping import FED_KINDS, UNMAPPED_KINDS
-from coral.bridge.messages import sanitize
+from coral.bridge.messages import sanitize, strip_format_characters
 from coral.bridge.service import EngineBridge, RunNotRunnable
 from coral.db.enum_codecs import RUN_AUTH_MODE, RUN_EXECUTION_TARGET, RUN_TRIGGER_KIND
 from coral.engine.types import effect_key
@@ -273,6 +274,13 @@ def _graph_refusals(graph: CompiledGraph) -> Iterator[RunNotRunnable]:
             yield RunNotRunnable(
                 "graph.gate_too_large",
                 f"gate {node.id!r} has an outcome over {MAX_GATE_OUTCOME_CHARS} characters",
+            )
+        # An outcome is a button name and the answer's value, so a hidden character
+        # (a bidi override, a zero-width space) is refused rather than removed.
+        if any(strip_format_characters(outcome) != outcome for outcome in node.outcomes):
+            yield RunNotRunnable(
+                "graph.gate_label_invalid",
+                f"gate {node.id!r} has an outcome with a control or invisible format character",
             )
 
 

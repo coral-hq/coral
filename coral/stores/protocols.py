@@ -887,6 +887,10 @@ class RunStore(Protocol):
         limit: int = 100,
     ) -> list[GateVisitState]: ...
 
+    def list_open_gates(self, run_id: str, *, workspace_id: int) -> list[GateVisitState]:
+        """Return the run's ``OPEN`` gate rows (its live visits), by id."""
+        ...
+
     def register_post_commit(
         self,
         callback: Callable[[str, int], None],

@@ -710,6 +710,18 @@ class FakeRunStore:
                 open_gates = [g for g in open_gates if (g.workspace_id, g.run_id, g.id) > cursor]
             return open_gates[:limit]
 
+    def list_open_gates(self, run_id: str, *, workspace_id: int) -> list[GateVisitState]:
+        with self._lock:
+            return sorted(
+                (
+                    gate
+                    for (ws, run, _), gate in self.gate_visits.items()
+                    if (ws, run) == (workspace_id, run_id)
+                    and gate.status == int(GateVisitStatus.OPEN)
+                ),
+                key=lambda gate: gate.id,
+            )
+
 
 def _resolves(resolution: AlertResolution, alert: AlertRecord) -> bool:
     if resolution.subject_id is not None:

@@ -205,4 +205,17 @@ describe("badgeCount", () => {
     // WHY: run-end alerts are listed but not badged until they can be acked on open.
     expect(badgeCount([...ALERTS, lowAlert], [ANCHOR])).toBe(1);
   });
+
+  it("matches each gate alert to its own anchor among many rows", () => {
+    // WHY: rows are looked up by id; one anchor's pending count must not cover another's gate.
+    const otherAnchor = contractAnchorRow({ id: "other_anchor", pending_elicitations_count: 0 });
+    const otherGate = { ...GATE_ALERT, alert_id: "e".repeat(32), session_id: otherAnchor.id };
+    const unrelated = Array.from({ length: 200 }, (_, index) =>
+      contractAnchorRow({ id: `row_${index}`, pending_elicitations_count: 1 }),
+    );
+    const rows = [...unrelated, ANCHOR, otherAnchor];
+    expect(badgeCount([GATE_ALERT, otherGate], rows)).toBe(1);
+    expect(badgeCount([GATE_ALERT, otherGate], [...rows].reverse())).toBe(1);
+    expect(badgeCount([{ ...GATE_ALERT, session_id: null }], rows)).toBe(1);
+  });
 });

@@ -416,6 +416,24 @@ def test_a_gate_with_too_many_or_too_long_outcomes_is_refused(
         assert start(world, yaml_text).status == int(RunStatus.RUNNING)
 
 
+@pytest.mark.parametrize(
+    "hidden",
+    ["‮", "​", "⁦", "\x07", "\t"],
+    ids=["bidi_override", "zero_width_space", "bidi_isolate", "bell", "tab"],
+)
+def test_a_gate_outcome_with_a_hidden_character_is_refused(world: World, hidden: str) -> None:
+    # WHY: an outcome is a button name and the answer's value; a bidi override could
+    # make "reject" read as "approve", and removing it would change the answer.
+    yaml_text = _gate_with(["approve", "reject", f"ship{hidden}it"])
+    assert _refusal(world, yaml_text) == "graph.gate_label_invalid"
+    assert world.runs.get_run(run_id_for(), workspace_id=WORKSPACE) is None
+
+
+def test_a_gate_outcome_with_visible_unicode_starts(world: World) -> None:
+    yaml_text = _gate_with(["approve", "reject", "ändern ✓"])
+    assert start(world, yaml_text).status == int(RunStatus.RUNNING)
+
+
 def _gates_after_one_step(count: int) -> str:
     names = [f"g{index}" for index in range(count)]
     return workflow_text(

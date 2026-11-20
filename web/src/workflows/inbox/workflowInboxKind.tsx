@@ -32,7 +32,8 @@ export function useWorkflowInboxKind(
 ): InboxKind | null {
   const viewerId = useViewerId();
   const { alerts, incomplete, isLoading, isError, refetch, ack } = inbox;
-  const badge = badgeCount(alerts, rows);
+  // The runtime re-renders on every sidebar update; count only when the inputs change.
+  const badge = useMemo(() => badgeCount(alerts, rows), [alerts, rows]);
   return useMemo(() => {
     if (!enabled) return null;
     return {

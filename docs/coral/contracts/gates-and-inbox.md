@@ -12,7 +12,10 @@
   payloads in `coral/alerts/types.py`; the alert store in
   `coral/stores/alerts.py`; the Inbox routes in `coral/api/inbox.py`; the
   Omnigent adapter in `coral/omni/server/gates.py` and
-  `coral/omni/server/access.py`; wiring in `coral/omni/server/plugin.py`.
+  `coral/omni/server/access.py`; wiring in `coral/omni/server/plugin.py`; the
+  web Inbox kind and notifications in `web/src/workflows/inbox/` and
+  `web/src/workflows/notifications/`, mounted by
+  `web/src/workflows/CoralRuntime.tsx`.
 - **Related:** [`session-facade.md`](session-facade.md) (the bridge's work
   rows, run protection), [`persistence.md`](persistence.md) (`coral_0005`),
   [`plugin.md`](plugin.md) (wiring and routes),
@@ -91,8 +94,11 @@ give the same params, so a republish shows what the first publish showed.
 
 The message keeps within an 8,000-character JSON budget. Every line has NUL,
 control, lone-surrogate and Unicode format characters (bidi overrides,
-zero-width characters) removed. `run_owner` is `null` for the single local
-user. `target_session_id` is `null`: a gate prompt is never mirrored.
+zero-width characters) removed. Outcomes are shown as written, because each is
+also the answer's value: a start refuses a gate whose outcome holds any of
+those characters (`graph.gate_label_invalid`). `run_owner` is `null` for the
+single local user. `target_session_id` is `null`: a gate prompt is never
+mirrored.
 
 ## Answers
 
@@ -142,12 +148,18 @@ Prompts live in the memory of the process that published them.
   run scope with a 10 s bound; a failure or timeout is counted for that run
   and the others go on. Every resync tick republishes prompts this process
   lost. A prompt still pending here is never sent again, and a run whose
-  anchor is not created yet is left to its `gate_publish` row.
+  anchor is not created yet is left to its `gate_publish` row. A graceful exit
+  releases the lease, so the next start republishes at once; after a crash the
+  prompts return only once the stale lease expires (120 s,
+  `coral/workers/worker_lease.py`). Meanwhile each gate's alert still lists it
+  in the Inbox, and its card answers through the anchor.
 - **Sweep.** Every process, leader or not, tracks the gate prompts it
   publishes (`LocalGatePrompts`, an S5 observer, at most 10,000) and each
-  minute withdraws any that is not a live visit of its session's run. It
-  covers an answer handled on another replica, a commit whose reply was lost,
-  and a missed withdraw.
+  minute withdraws any that is not a live visit of its session's run. It reads
+  each such run's `OPEN` gate rows once (`list_open_gates`, on
+  `ix_coral_gate_visits_open`), which are exactly its live visits, and loads no
+  engine state. It covers an answer handled on another replica, a commit whose
+  reply was lost, and a missed withdraw.
 - **Answers need no prompt.** The handler finds the visit through the run's
   rows, so an answer works during a republish and on any replica.
 
@@ -212,6 +224,21 @@ database) both routes answer 404 "Coral inbox is not available".
 Admins see only their own alerts. The owner is stored normalized (the single
 local user is `null`) and compared exactly.
 
+**In the web app.** When `GET /v1/coral/info` reports Coral, the web runtime
+registers the `workflow` Inbox kind (S37). It loads the whole feed, up to 10
+pages (1,000 alerts, then the badge count is marked incomplete), every minute
+and whenever a run anchor's pending count changes. It claims a `coral_gate_`
+prompt only on a run anchor and only when it is aimed at the anchor itself, so
+a mirrored or forged prompt stays an ordinary approval. Each gate is one card,
+its prompt joined with its alert by prompt id. A gate alert without a prompt
+is still a card that answers through the anchor's resolve route. Every other
+alert is a card with "Open run" and "Mark as read". The sidebar badge adds the
+normal-priority alerts that no anchor's pending count already counts. While
+the app is open, a gate notifies once, from its alert; a step prompt mirrored
+onto the anchor notifies once; other alerts notify at most once per run every
+10 minutes. Without Coral nothing registers, and a gate prompt shows as an
+ordinary approval that still answers.
+
 ## Account generations
 
 A run and its alerts record the owner's account generation, and only a
@@ -229,7 +256,10 @@ fails and nothing moves: a savepoint could isolate the carrier, but Coral
 aborts instead so a run never silently loses its owner (the old generation is
 recorded nowhere else to repair from). Deleting and re-creating an account
 starts a new registration: it sees none of the old one's alerts, and its
-answers to the old runs' gates are refused `not_permitted`.
+answers to the old runs' gates are refused. Omnigent answers 404 first, since
+the deletion removed the account's grants on the anchor; if a grant survived,
+the gate handler answers 403 `not_permitted`, since the request does not prove
+the generation the run recorded.
 
 ## Seams
 
@@ -263,9 +293,8 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
   it ([`session-facade.md`](session-facade.md), "Same-user steps").
 - **A step that shadows or clears the anchor's prompt** cannot answer the
   gate: answers on any session but the run's anchor are refused, the web
-  Inbox's workflow kind (shipping with the Inbox card) claims only anchor
-  prompts, and the sweep withdraws non-live prompts. The alert still answers
-  through the anchor.
+  Inbox's workflow kind claims only anchor prompts, and the sweep withdraws
+  non-live prompts. The alert still answers through the anchor.
 - **One index per process.** Only the lease holder republishes; each process
   sweeps its own prompts. A replica that loses the lease keeps a live visit's
   prompt until the visit closes.
@@ -281,7 +310,10 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
   (schema drift, missing table privileges, a lock timeout, CockroachDB retries
   running out) fails every password change and admin reset on that server
   until it is fixed or Coral is unloaded. Deleting an account still revokes
-  its access: deletion calls no carrier.
+  its access: deletion calls no carrier. The carrier assumes the account store
+  shares Coral's operational database, as `omnigent server` sets it up; an
+  embedder that keeps accounts in another database fails every password change
+  on Coral's missing tables.
 - **Carry size.** The carry rewrites every row the user owns at the old
   generation under the account lock, finished runs and resolved alerts
   included, so a long-lived heavy user makes a large rotation transaction;
@@ -290,6 +322,11 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
   normal alerts. A watchdog alert on a decision that closes without being
   decided stays until the run ends. A paused run whose reason changes between
   two non-user reasons keeps its first alert's text.
+- **The badge can miss a gate for a while.** The badge leaves out a gate
+  alert whenever its anchor reports any pending prompt. If that count comes
+  only from a mirrored step prompt while the gate's own prompt is missing
+  (after a crash, until the republish), the gate is not counted until its
+  prompt returns. The Inbox page still lists it.
 - **Shared answers pool.** Answers use the bridge's thread pool with the
   drain's feedback; a burst queues behind drain work (four at a time).
 

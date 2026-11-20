@@ -366,6 +366,7 @@ def _wire_gates(
     stack.callback(add_elicitation_observer(prompts.observe))
     sweeper = GatePromptSweeper(
         threads=threads,
+        run_store=run_store,
         bindings=bindings,
         publisher=publisher,
         prompts=prompts,

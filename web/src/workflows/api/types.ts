@@ -55,19 +55,3 @@ export interface WorkflowInboxPage {
   data: WorkflowAlert[];
   next_cursor: string | null;
 }
-
-/** `params.coral` of a gate prompt on a run anchor. */
-export interface GateElicitationCoral {
-  kind: "gate";
-  run_id: string;
-  visit_id: string;
-  node_id: string;
-  visit_no: number;
-  /** Epoch seconds. */
-  opened_at: number;
-  /** `null` is the single local user. */
-  run_owner: string | null;
-  run_title: string;
-  outcomes: string[];
-  deep_link: string;
-}

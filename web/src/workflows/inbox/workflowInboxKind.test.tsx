@@ -32,6 +32,7 @@ import {
   contractAnchorRow,
 } from "../fixtures/workflowInboxContract";
 import type { WorkflowInbox } from "./useWorkflowInbox";
+import * as workflowEntries from "./workflowEntries";
 import { parseWorkflowInboxPage } from "./workflowInboxApi";
 import { useWorkflowInboxKind } from "./workflowInboxKind";
 
@@ -47,6 +48,10 @@ vi.mock("@/hooks/useConversations", async (importActual) => ({
   ...(await importActual<typeof conversationsHook>()),
   useConversations: vi.fn(),
 }));
+vi.mock("./workflowEntries", async (importActual) => {
+  const actual = await importActual<typeof workflowEntries>();
+  return { ...actual, badgeCount: vi.fn(actual.badgeCount) };
+});
 vi.mock("@/hooks/useAutomationInbox", () => ({ useAutomationInbox: vi.fn() }));
 vi.mock("@/hooks/useCommentInbox", () => ({ useCommentInbox: vi.fn() }));
 vi.mock("@/hooks/useViewerId", () => ({
@@ -363,5 +368,19 @@ describe("useWorkflowInboxKind", () => {
     rerender({ current: [] });
     expect(result.current).not.toBe(first);
     expect(result.current?.badgeCount).toBe(2);
+  });
+
+  it("counts the badge again only when the alerts or rows change", () => {
+    // WHY: the runtime re-renders on every sidebar update, with up to 1,000 alerts loaded.
+    const inbox = workflowInbox();
+    const shown = [ANCHOR];
+    const { rerender } = renderHook(
+      ({ current }: { current: Conversation[] }) => useWorkflowInboxKind(inbox, current, true),
+      { initialProps: { current: shown } },
+    );
+    rerender({ current: shown });
+    expect(workflowEntries.badgeCount).toHaveBeenCalledOnce();
+    rerender({ current: [ANCHOR] });
+    expect(workflowEntries.badgeCount).toHaveBeenCalledTimes(2);
   });
 });
