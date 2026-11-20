@@ -4,6 +4,12 @@
 /** The body of a "mark as read": the empty JSON object. */
 export type AckRequest = Record<string, never>;
 
+export interface ActivationView {
+  id: string;
+  outcome: "completed" | "skipped" | "failed" | null;
+  status: "waiting_join" | "ready" | "starting" | "running" | "evaluating" | "closed";
+}
+
 export interface Analysis {
   checked_parts: CheckedPart[];
   join_types: JoinInfo[];
@@ -108,6 +114,17 @@ export interface EvidenceRequirement {
   scope: "per_agent";
 }
 
+/** A gate visit waiting for its answer. */
+export interface GateOut {
+  elicitation_id: string | null;
+  node_id: string;
+  opened_at: number;
+  outcomes: string[];
+  token: string;
+  visit_id: string;
+  visit_no: number;
+}
+
 /** A workflow document that did not load. */
 export interface InvalidResult {
   load_error: LoadError;
@@ -122,6 +139,15 @@ export interface JoinInfo {
   node_id: string;
   split_node_id: string | null;
 }
+
+/** One JSON Patch operation addressed by a JSON pointer. */
+export interface JsonPatch {
+  op: "add" | "remove" | "replace";
+  path: string;
+  value: JsonValue | null;
+}
+
+export type JsonValue = unknown;
 
 /** Labels on the label-selected outgoing arrows of a node. */
 export interface LabelSet {
@@ -146,6 +172,33 @@ export interface LoadIssue {
   yaml_path: string;
 }
 
+/**
+ * One run-log row with its body. ``body`` is ``None`` for a row whose text cannot be
+ * read (``kind`` ``log.unreadable``) and, with ``body_truncated``, for a body too large
+ * to send.
+ */
+export interface LogEntryOut {
+  actor: string | null;
+  actor_kind: "engine" | "orchestrator" | "step_agent" | "user" | "simulator";
+  at_us: number;
+  body: Record<string, JsonValue> | null;
+  body_truncated: boolean;
+  kind: string;
+  node_id: string | null;
+  patch: JsonPatch[];
+  rejected: string | null;
+  run_version: number;
+  scope_key: string | null;
+  seq: number;
+  type: "entry";
+}
+
+/** Log rows in ``seq`` order; ``next_after_seq`` is set when more rows follow. */
+export interface LogPage {
+  data: LogEntryOut[];
+  next_after_seq: number | null;
+}
+
 /** A loop closed by one back-arrow. */
 export interface LoopInfo {
   at_limit_arrow_id: string | null;
@@ -155,6 +208,30 @@ export interface LoopInfo {
   head: string;
   limit: number | null;
   tail: string;
+}
+
+export interface LoopPassView {
+  back_arrow_id: string;
+  item_path: string[];
+  iteration_path: string[];
+  pass_index: number;
+}
+
+export interface PauseCause {
+  detail: string;
+  reason:
+    | "auth"
+    | "plan_limit"
+    | "infra"
+    | "budget"
+    | "liveness"
+    | "failure_path"
+    | "drift"
+    | "rejected_calls"
+    | "authority_revoked"
+    | "engine_upgrade"
+    | "user";
+  subject: string;
 }
 
 /** One finding, anchored to nodes, arrows and a ``yaml_path``. */
@@ -192,6 +269,135 @@ export interface RequiredCommand {
   run: string;
 }
 
+/**
+ * One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that
+ * cannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are
+ * ``None`` when its stored rows cannot be read.
+ */
+export interface RunDetail {
+  activation_count: number;
+  allowed_actions: ("pause" | "resume" | "cancel")[];
+  anchor_session_id: string;
+  causes: PauseCause[];
+  created_at: number;
+  finished_at: number | null;
+  gates: GateOut[];
+  head_seq: number;
+  load_error: "engine.load_failed" | null;
+  max_activations: number | null;
+  orchestrator_session_id: string | null;
+  pause_reason:
+    | "gate"
+    | "budget"
+    | "plan_limit"
+    | "rejected_calls"
+    | "infra"
+    | "liveness"
+    | "user"
+    | "authority_revoked"
+    | "merge_conflict"
+    | "failure_path"
+    | "engine_upgrade"
+    | "drift"
+    | "auth"
+    | null;
+  request_preview: string | null;
+  run_id: string;
+  slots: SlotOut[];
+  spend: RunSpend | null;
+  status: "starting" | "running" | "paused" | "completed" | "failed" | "cancelled";
+  target: RunTarget | null;
+  title: string;
+  updated_at: number;
+  version: number;
+  version_id: string;
+  view: RunView | null;
+  workflow_id: string;
+}
+
+/** One page of runs, newest first; page again with ``next_cursor`` until it is null. */
+export interface RunPage {
+  data: RunSummary[];
+  next_cursor: string | null;
+}
+
+/**
+ * What a run has spent so far, as last read: shown, never capped.
+ *
+ * ``usd`` is the display figure its anchor's badge shows, ``live_usd`` includes
+ * spend still in flight; both are ``None`` when no session was priced and a lower
+ * bound when ``unpriced_models`` is not empty. ``as_of`` is when it was read.
+ */
+export interface RunSpend {
+  as_of: number;
+  estimate: true;
+  live_usd: number | null;
+  sessions: number;
+  tokens: RunSpendTokens;
+  unpriced_models: string[];
+  usd: number | null;
+}
+
+/** Tokens a run's sessions used, summed over its whole session tree. */
+export interface RunSpendTokens {
+  cache_creation: number;
+  cache_read: number;
+  input: number;
+  output: number;
+  total: number;
+}
+
+/** A run as its owner's run list shows it. */
+export interface RunSummary {
+  activation_count: number;
+  allowed_actions: ("pause" | "resume" | "cancel")[];
+  created_at: number;
+  finished_at: number | null;
+  pause_reason:
+    | "gate"
+    | "budget"
+    | "plan_limit"
+    | "rejected_calls"
+    | "infra"
+    | "liveness"
+    | "user"
+    | "authority_revoked"
+    | "merge_conflict"
+    | "failure_path"
+    | "engine_upgrade"
+    | "drift"
+    | "auth"
+    | null;
+  run_id: string;
+  spend: RunSpend | null;
+  status: "starting" | "running" | "paused" | "completed" | "failed" | "cancelled";
+  title: string;
+  updated_at: number;
+  version_id: string;
+  workflow_id: string;
+}
+
+/** Where the run works: its host, repository and worktree branch. */
+export interface RunTarget {
+  base_commit: string | null;
+  base_ref: string | null;
+  host_id: string | null;
+  repo_path: string | null;
+  run_branch: string | null;
+  worktree_path: string | null;
+}
+
+export interface RunView {
+  activations: ActivationView[];
+  armed_timer_keys: string[];
+  causes: PauseCause[];
+  loop_pass_indexes: LoopPassView[];
+  open_decisions: string[];
+  open_gates: string[];
+  slots: SlotView[];
+  status: "running" | "paused" | "completed" | "failed" | "cancelled" | null;
+}
+
 /** The definition a save stored, with the validation of what was saved. */
 export interface SavedWorkflowOut {
   compiled: CompiledGraph;
@@ -204,6 +410,36 @@ export interface SavedWorkflowOut {
   updated_at: number;
   valid: true;
   workflow_key: string;
+}
+
+/** An agent slot of one of the run's steps. */
+export interface SlotOut {
+  activation_id: string;
+  node_id: string;
+  role: "step_agent" | "orchestrator" | "verifier" | "merge_resolver";
+  session_generation: number;
+  session_id: string | null;
+  slot_id: string;
+  status:
+    | "pending"
+    | "session_created"
+    | "briefed"
+    | "working"
+    | "handoff_accepted"
+    | "rejected"
+    | "refreshing"
+    | "restarting"
+    | "closed"
+    | "evaluating"
+    | "closing";
+}
+
+export interface SlotView {
+  drift: boolean;
+  id: string;
+  pending_input: boolean;
+  status:
+    "pending" | "session_created" | "briefed" | "working" | "evaluating" | "closing" | "closed";
 }
 
 /** 1-based inclusive start, exclusive end positions in the YAML text. */
@@ -346,6 +582,89 @@ export interface CoralOperations {
     path: "/v1/coral/info";
     status: 200;
     response: CoralInfoResponse;
+  };
+  /**
+   * GET /v1/coral/runs
+   *
+   * The caller's runs, newest first; spend is what the cache holds, or null.
+   */
+  coral_list_runs: {
+    method: "GET";
+    path: "/v1/coral/runs";
+    query: {
+      after?: string | null;
+      limit?: number;
+      status?: ("starting" | "running" | "paused" | "completed" | "failed" | "cancelled")[];
+      workflow_id?: string | null;
+    };
+    status: 200;
+    response: RunPage;
+    errors: 401 | 403 | 404 | 422 | 503;
+  };
+  /**
+   * GET /v1/coral/runs/{run_id}
+   *
+   * One of the caller's runs in full, with its spend so far.
+   */
+  coral_get_run: {
+    method: "GET";
+    path: "/v1/coral/runs/{run_id}";
+    params: {
+      run_id: string;
+    };
+    status: 200;
+    response: RunDetail;
+    errors: 401 | 403 | 404 | 422 | 503;
+  };
+  /**
+   * GET /v1/coral/runs/{run_id}/graph
+   *
+   * The workflow graph the run is pinned to; ``If-None-Match`` revalidates it.
+   */
+  coral_get_run_graph: {
+    method: "GET";
+    path: "/v1/coral/runs/{run_id}/graph";
+    params: {
+      run_id: string;
+    };
+    status: 200;
+    response: CompiledGraph;
+    errors: 401 | 403 | 404 | 422 | 503;
+  };
+  /**
+   * GET /v1/coral/runs/{run_id}/log
+   *
+   * The run's log rows after ``after_seq``, with their bodies: at most 1 MiB of bodies
+   * and patches a page, then ``next_after_seq``. A body over 256 KiB is left out.
+   */
+  coral_get_run_log: {
+    method: "GET";
+    path: "/v1/coral/runs/{run_id}/log";
+    params: {
+      run_id: string;
+    };
+    query: {
+      after_seq?: number;
+      limit?: number;
+    };
+    status: 200;
+    response: LogPage;
+    errors: 401 | 403 | 404 | 422 | 503;
+  };
+  /**
+   * GET /v1/coral/runs/{run_id}/outcome
+   *
+   * Not served yet: the caller's own run answers 501.
+   */
+  coral_get_run_outcome: {
+    method: "GET";
+    path: "/v1/coral/runs/{run_id}/outcome";
+    params: {
+      run_id: string;
+    };
+    status: never;
+    response: never;
+    errors: 401 | 403 | 404 | 422 | 501 | 503;
   };
   /**
    * GET /v1/coral/workflows

@@ -111,6 +111,10 @@ def _member_line(indent: str, head: str, members: list[str]) -> list[str]:
         if len(single) > _PRINT_WIDTH:
             raise UnsupportedSchema(f"line over {_PRINT_WIDTH} columns: {single.strip()}")
         return [single]
+    hanging = f"{indent}{_INDENT}{' | '.join(members)};"
+    if head.endswith(":") and len(hanging) <= _PRINT_WIDTH:
+        # A property's union that fits on the next line stays on one line there.
+        return [f"{indent}{head}", hanging]
     broken = [f"{indent}{head}"] + [f"{indent}{_INDENT}| {member}" for member in members]
     broken[-1] += ";"
     if any(len(line) > _PRINT_WIDTH for line in broken):
@@ -209,11 +213,18 @@ def _operation(method: str, path: str, operation: Mapping[str, Any]) -> list[str
             raise UnsupportedSchema(f"{operation['operationId']}: a body that is not JSON")
         body += _member_line(indent, "body:", _members(schema))
     statuses = sorted(operation["responses"])
-    (success,) = [status for status in statuses if status.startswith("2")]
-    schema = _json_schema(operation["responses"][success])
-    body.append(f"{indent}status: {success};")
-    body += _member_line(indent, "response:", ["null"] if schema is None else _members(schema))
-    errors = [status for status in statuses if not status.startswith("2")]
+    successes = [status for status in statuses if status.startswith("2")]
+    if len(successes) > 1:
+        raise UnsupportedSchema(f"{operation['operationId']}: more than one success status")
+    if successes:
+        schema = _json_schema(operation["responses"][successes[0]])
+        body.append(f"{indent}status: {successes[0]};")
+        body += _member_line(indent, "response:", ["null"] if schema is None else _members(schema))
+    else:
+        # A route not served yet answers only refusals.
+        body += [f"{indent}status: never;", f"{indent}response: never;"]
+    # A 304 has no body and is not a refusal.
+    errors = [status for status in statuses if status.startswith(("4", "5"))]
     if errors:
         body += _member_line(indent, "errors:", errors)
     return lines + _block(f"{_key(operation['operationId'])}:", body, _INDENT)

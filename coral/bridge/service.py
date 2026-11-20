@@ -81,6 +81,7 @@ from coral.gates.ids import (
     new_gate_elicitation_id,
     receipt_label,
 )
+from coral.model.ir import CompiledGraph
 from coral.queue.drainer import FinishedWork
 from coral.queue.run_effects import describe_exception
 from coral.recovery.pause import pause_log_checksum, pause_run_once
@@ -365,6 +366,16 @@ class EngineBridge:
             )
             return RunRead(run=rows.run, rows=rows, snapshot=None)
         return RunRead(run=rows.run, rows=rows, snapshot=snapshot)
+
+    def pinned_graph(self, *, workspace_id: int, version_id: str) -> CompiledGraph:
+        """
+        The graph of a pinned workflow version, from the cache loads share; never writes.
+
+        :raises PinnedGraphError: when the version is missing or its graph cannot be used.
+        """
+        return self._graphs.load(
+            workspace_id=workspace_id, version_id=version_id, expected_hash=None
+        )
 
     def _load_rows(self, workspace_id: int, run_id: str) -> RunState:
         try:

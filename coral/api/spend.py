@@ -2,8 +2,9 @@
 
 Spend is one session-tree read per run, on its own small thread pool so it never
 holds API threads. Reads are shared per run, failures are remembered briefly, and
-nothing here caps spending. Background refreshes run one at a time, so a detail's
-read always has a thread of its own and never queues behind them.
+nothing here caps spending. Background refreshes run one at a time and detail reads
+are bounded in all and per user, so every read has a thread of its own: neither
+refreshes nor one user's details delay another user's detail.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 
 from coral.bridge.executors import BoundedThreads, PoolClosed
@@ -21,8 +22,13 @@ from coral.queue.run_effects import describe_exception
 
 _logger = logging.getLogger(__name__)
 
-# One thread for background refreshes, the other for the detail's reads.
-SPEND_THREADS = 2
+# Detail reads in flight at once for one user, and in all: one user holds at most half.
+# Past either, a detail gets what the cache holds at once and a refresh is queued.
+MAX_DETAIL_READS_PER_CALLER = 1
+MAX_DETAIL_READS = 2 * MAX_DETAIL_READS_PER_CALLER
+# One thread for background refreshes, which run one at a time, and one per detail read,
+# so no read ever waits for a thread.
+SPEND_THREADS = 1 + MAX_DETAIL_READS
 SPEND_THREAD_NAME = "coral-spend"
 # How long a read stays fresh: an unfinished run still spends, a finished one barely.
 UNFINISHED_SPEND_TTL_S = 15.0
@@ -77,6 +83,8 @@ class SpendCache:
         wall_clock: Callable[[], float] = time.time,
         max_entries: int = MAX_SPEND_ENTRIES,
         max_pending: int = MAX_PENDING_REFRESHES,
+        max_detail_reads: int = MAX_DETAIL_READS,
+        max_detail_reads_per_caller: int = MAX_DETAIL_READS_PER_CALLER,
     ) -> None:
         self._reader = reader
         self._threads = threads
@@ -84,6 +92,10 @@ class SpendCache:
         self._wall_clock = wall_clock
         self._max_entries = max_entries
         self._max_pending = max_pending
+        self._max_detail_reads = max_detail_reads
+        self._max_detail_reads_per_caller = max_detail_reads_per_caller
+        # Reads a detail started, until they end, by the caller that started them.
+        self._detail_reads: dict[Hashable, int] = {}
         self._entries: OrderedDict[_SpendKey, _Entry] = OrderedDict()
         # Reads running, shared by every caller of the key.
         self._reads: dict[_SpendKey, asyncio.Task[None]] = {}
@@ -124,24 +136,49 @@ class SpendCache:
         workspace_id: int,
         run_id: str,
         finished_at: int | None,
+        caller: Hashable,
         wait_s: float = DETAIL_SPEND_WAIT_S,
     ) -> CachedSpend | None:
         """A fresh entry at once; otherwise wait up to ``wait_s`` for a read, then what the
         cache holds. The read starts at once, ahead of queued refreshes, and goes on in
-        the background past ``wait_s``."""
+        the background past ``wait_s``.
+
+        :param caller: Who asks; with :data:`MAX_DETAIL_READS_PER_CALLER` of its reads, or
+            :data:`MAX_DETAIL_READS` in all, running, a new read is only queued, as
+            :meth:`peek` queues one, and what the cache holds is returned at once.
+        """
         key = (workspace_id, run_id)
         entry = self._touch(key)
         if self._fresh(entry, finished_at):
             return None if entry is None else entry.spend
         read = self._reads.get(key)
         if read is None:
+            if (
+                sum(self._detail_reads.values()) >= self._max_detail_reads
+                or self._detail_reads.get(caller, 0) >= self._max_detail_reads_per_caller
+            ):
+                return self.peek(workspace_id=workspace_id, run_id=run_id, finished_at=finished_at)
             self._queued.pop(key, None)
             read = self._start(key, finished_at)
+            if read is not None:
+                self._count_detail_read(caller, read)
         if read is not None:
             # asyncio.wait neither raises on a timeout nor cancels the read.
             await asyncio.wait({read}, timeout=wait_s)
         entry = self._touch(key)
         return None if entry is None else entry.spend
+
+    def _count_detail_read(self, caller: Hashable, read: asyncio.Task[None]) -> None:
+        self._detail_reads[caller] = self._detail_reads.get(caller, 0) + 1
+
+        def ended(_read: asyncio.Task[None]) -> None:
+            held = self._detail_reads.get(caller, 0) - 1
+            if held > 0:
+                self._detail_reads[caller] = held
+            else:
+                self._detail_reads.pop(caller, None)
+
+        read.add_done_callback(ended)
 
     def close(self) -> None:
         """Cancel queued and running reads; the owner closes the thread pool."""
@@ -232,6 +269,8 @@ __all__ = [
     "FAILED_SPEND_TTL_S",
     "FINISHED_SPEND_TTL_S",
     "FINISH_SETTLE_S",
+    "MAX_DETAIL_READS",
+    "MAX_DETAIL_READS_PER_CALLER",
     "MAX_PENDING_REFRESHES",
     "MAX_SPEND_ENTRIES",
     "SPEND_THREADS",

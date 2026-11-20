@@ -135,3 +135,26 @@ def test_plugin_scopes_workflows_to_the_signed_in_caller_and_the_requests_worksp
     assert other.get(f"/v1/coral/workflows/{saved['id']}", headers=alice).status_code == 404
     # The same key is free in another workspace.
     assert other.post("/v1/coral/workflows", json=yaml, headers=bob).status_code == 200
+
+
+def test_plugin_mounts_the_run_reads_behind_authentication_with_one_404_before_the_lifespan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    header = UnifiedAuthProvider(
+        source="header", local_single_user=False, header_name="X-Forwarded-Email"
+    )
+    signed_in = {"X-Forwarded-Email": "alice"}
+    run = "f" * 32
+    routes = ["/v1/coral/runs", *(f"/v1/coral/runs/{run}{route}" for route in ("", "/graph"))]
+    routes += [f"/v1/coral/runs/{run}/log", f"/v1/coral/runs/{run}/outcome"]
+    not_found = b'{"error":{"code":"not_found","message":"Run not found.","details":null}}'
+
+    with_auth = TestClient(_plugin_app(auth_provider=header))
+    without_auth = TestClient(_plugin_app(auth_provider=None))
+
+    for route in routes:
+        assert with_auth.get(route).status_code == 401
+        # The lifespan publishes the runs API; until then no run is found.
+        for response in (with_auth.get(route, headers=signed_in), without_auth.get(route)):
+            assert (response.status_code, response.content) == (404, not_found)

@@ -151,6 +151,50 @@ def test_an_answer_with_no_content_is_null() -> None:
     assert "    status: 204;\n    response: null;\n" in rendered
 
 
+def test_a_property_union_that_fits_on_the_next_line_hangs_there() -> None:
+    names = [f"name_{index}" for index in range(8)]
+    reply = {
+        "type": "object",
+        "properties": {"long_property_name": {"type": "string", "enum": names}},
+    }
+    spec = _spec(Body=BODY, Reply=reply, Tags={"type": "string"})
+
+    rendered = render_coral_api_types(spec)
+
+    union = " | ".join(f'"{name}"' for name in names)
+    assert f"  long_property_name:\n    {union};\n" in rendered
+
+
+def test_a_not_modified_answer_is_neither_the_response_nor_an_error() -> None:
+    spec = _spec(Body=BODY, Reply=BODY, Tags={"type": "string"})
+    responses = spec["paths"]["/v1/coral/things/{thing_id}"]["post"]["responses"]
+    responses["304"] = {"description": "Not Modified"}
+
+    rendered = render_coral_api_types(spec)
+
+    assert "    status: 200;\n    response: Reply;\n    errors: 404 | 422;\n" in rendered
+
+
+def test_an_operation_with_only_refusals_never_answers() -> None:
+    spec = _spec(Body=BODY, Reply=BODY, Tags={"type": "string"})
+    responses = spec["paths"]["/v1/coral/things/{thing_id}"]["post"]["responses"]
+    del responses["200"]
+    responses["501"] = responses["404"]
+
+    rendered = render_coral_api_types(spec)
+
+    assert "    status: never;\n    response: never;\n    errors: 404 | 422 | 501;\n" in rendered
+
+
+def test_two_success_statuses_are_refused() -> None:
+    spec = _spec(Body=BODY, Reply=BODY, Tags={"type": "string"})
+    responses = spec["paths"]["/v1/coral/things/{thing_id}"]["post"]["responses"]
+    responses["201"] = responses["200"]
+
+    with pytest.raises(UnsupportedSchema):
+        render_coral_api_types(spec)
+
+
 @pytest.mark.parametrize(
     "schema",
     [

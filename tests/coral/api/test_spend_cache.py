@@ -11,6 +11,8 @@ import pytest
 
 from coral.api.spend import (
     FINISH_SETTLE_S,
+    MAX_DETAIL_READS,
+    MAX_DETAIL_READS_PER_CALLER,
     MAX_PENDING_REFRESHES,
     MAX_SPEND_ENTRIES,
     SPEND_THREAD_NAME,
@@ -113,14 +115,22 @@ async def _get(
     finished_at: int | None = None,
     wait_s: float = 10.0,
     workspace_id: int = WORKSPACE,
+    caller: str = "alice",
 ) -> CachedSpend | None:
     return await cache.get(
-        workspace_id=workspace_id, run_id=run_id, finished_at=finished_at, wait_s=wait_s
+        workspace_id=workspace_id,
+        run_id=run_id,
+        finished_at=finished_at,
+        caller=caller,
+        wait_s=wait_s,
     )
 
 
 def test_the_cache_limits_are_the_designed_ones() -> None:
-    assert (MAX_SPEND_ENTRIES, MAX_PENDING_REFRESHES, SPEND_THREADS) == (1024, 64, 2)
+    assert (MAX_SPEND_ENTRIES, MAX_PENDING_REFRESHES) == (1024, 64)
+    assert (MAX_DETAIL_READS, MAX_DETAIL_READS_PER_CALLER) == (2, 1)
+    # A thread for the one refresh at a time and one per detail read: none ever queues.
+    assert SPEND_THREADS == 1 + MAX_DETAIL_READS
     assert SPEND_THREAD_NAME == "coral-spend"
 
 
@@ -259,6 +269,34 @@ async def test_a_detail_read_never_waits_behind_background_refreshes(
     reader.gate.set()
     await poll_until_async(lambda: cache.pending == 0)
     assert sorted(run_id for _, run_id in reader.calls) == sorted([*listed, detail])
+
+
+async def test_detail_reads_past_a_caller_s_share_or_the_total_answer_from_the_cache_at_once(
+    reader: _Reader, threads: BoundedThreads, clock: _Clock
+) -> None:
+    cache = _cache(reader, threads, clock)
+    runs = [f"{index:032x}" for index in range(4)]
+    spend = CachedSpend(TOTALS, int(clock.now))
+    reader.held = set(runs)
+    reader.gate.clear()
+
+    alices = asyncio.create_task(_get(cache, runs[0], caller="alice"))
+    await poll_until_async(lambda: len(reader.calls) == 1)
+    # Her second detail is past her share: the cache's null at once, and a refresh queued.
+    assert await _get(cache, runs[1], caller="alice") is None
+    bobs = asyncio.create_task(_get(cache, runs[2], caller="bob"))
+    # Bob's read has a thread of its own beside hers and the refresh.
+    await poll_until_async(lambda: len(reader.calls) == 3)
+    # Two detail reads in flight: a third caller gets the cache at once.
+    assert await _get(cache, runs[3], caller="carol") is None
+    assert sorted(reader.calls) == sorted((WORKSPACE, run_id) for run_id in runs[:3])
+
+    reader.gate.set()
+    assert (await alices, await bobs) == (spend, spend)
+    await poll_until_async(lambda: cache.pending == 0)
+    # The reads ended, so their shares are free again.
+    assert await _get(cache, "e" * 32, caller="carol") == spend
+    assert await _get(cache, "f" * 32, caller="alice") == spend
 
 
 async def test_a_failed_read_is_unknown_for_five_seconds_and_logged_once(

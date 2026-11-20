@@ -14,6 +14,9 @@ from sqlalchemy import Engine, create_engine
 
 from coral.api.inbox import create_inbox_router
 from coral.api.info import create_info_router
+from coral.api.run_service import API_THREAD_NAME, API_THREADS, InFlight, RunsApi
+from coral.api.runs import create_runs_router
+from coral.api.spend import SPEND_THREAD_NAME, SPEND_THREADS, SpendCache
 from coral.api.sub_features import resolve_sub_features
 from coral.api.workflows import create_workflows_router
 from coral.bridge.bound_sessions import BoundSessions
@@ -35,6 +38,7 @@ from coral.omni.protocols import GatePublisher, RunScopeRunner
 from coral.omni.server.access import request_viewer
 from coral.omni.server.observations import ChannelsRef, EvidenceChecker
 from coral.omni.server.scopes import OmnigentRunScopeRunner
+from coral.omni.server.usage import OmnigentRunSpend
 from coral.queue.executors import EffectExecutor
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.stores.protocols import QueueStore, RunStore
@@ -55,6 +59,7 @@ if TYPE_CHECKING:
     from coral.omni.server.gates import GateAnswering, LocalGatePrompts
     from coral.omni.server.turn_facts import BoundSessionRefresher
     from omnigent.server.auth import AuthProvider
+    from omnigent.stores.conversation_store import ConversationStore
 
 _logger = logging.getLogger(__name__)
 
@@ -309,6 +314,29 @@ def _wire_registration_carrier(stack: AsyncExitStack) -> None:
         )
 
     stack.callback(register_registration_carrier(carry))
+
+
+def _runs_api(
+    bridge: EngineBridge,
+    run_store: RunStore,
+    conversation_store: ConversationStore,
+    stack: AsyncExitStack,
+) -> RunsApi:
+    """
+    The runs API over the bridge: route calls on their own pool, spend on another.
+
+    Closing ``stack`` cancels pending spend reads, then closes both pools; a request
+    arriving after that is refused as busy.
+    """
+    api_threads = BoundedThreads(max_workers=API_THREADS, thread_name_prefix=API_THREAD_NAME)
+    stack.callback(api_threads.close)
+    spend_threads = BoundedThreads(max_workers=SPEND_THREADS, thread_name_prefix=SPEND_THREAD_NAME)
+    stack.callback(spend_threads.close)
+    spend = SpendCache(OmnigentRunSpend(conversation_store), spend_threads)
+    stack.callback(spend.close)
+    return RunsApi(
+        bridge=bridge, run_store=run_store, spend=spend, in_flight=InFlight(api_threads)
+    )
 
 
 def _wire_gates(
@@ -623,6 +651,9 @@ async def coral_lifespan(
                 app.state.coral_worker_supervisor = supervisor
                 app.state.coral_engine_bridge = bridge
                 app.state.coral_bound_sessions = bound
+                app.state.coral_runs_api = _runs_api(
+                    bridge, run_store, services.conversation_store, stack
+                )
             evidence_threads = BoundedThreads(
                 max_workers=EVIDENCE_THREADS, thread_name_prefix=EVIDENCE_THREAD_NAME
             )
@@ -692,7 +723,8 @@ def coral_routers(
     OpenAPI export documents them.
 
     Each route resolves its caller through ``auth_provider`` and reads the request's
-    workspace; the Inbox reads the alert store the lifespan publishes.
+    workspace; the Inbox reads the alert store the lifespan publishes, the runs routes
+    its runs API.
     """
     viewer = request_viewer(auth_provider)
     return (
@@ -708,6 +740,13 @@ def coral_routers(
         ),
         (
             create_inbox_router(
+                viewer_dependency=viewer, workspace_id_dependency=current_workspace_id
+            ),
+            CORAL_API_PREFIX,
+            ["coral"],
+        ),
+        (
+            create_runs_router(
                 viewer_dependency=viewer, workspace_id_dependency=current_workspace_id
             ),
             CORAL_API_PREFIX,

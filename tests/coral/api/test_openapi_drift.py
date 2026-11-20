@@ -144,7 +144,7 @@ def test_every_operation_is_named_and_typed() -> None:
             content = response.get("content", {})
             if status.startswith(("4", "5")):
                 assert content["application/json"]["schema"] == ERROR_SCHEMA, (method, path)
-            elif status == "204":
+            elif status in ("204", "304"):
                 assert content == {}, (method, path)
             else:
                 schema = content["application/json"]["schema"]

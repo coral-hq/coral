@@ -1,0 +1,503 @@
+"""The runs API's response models, and how a run's rows become them.
+
+Every response model is frozen and sends every field. Names are the stored codes'
+names; a run's actions come from :func:`coral.runview.actions.allowed_actions`.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Sequence
+from typing import Final, Literal, cast
+
+from pydantic import BaseModel, ConfigDict, JsonValue
+
+from coral.api.errors import CoralApiError
+from coral.api.spend import CachedSpend
+from coral.bridge.service import LOAD_FAILED_DETAIL, RunRead
+from coral.db.enum_codecs import (
+    GateVisitStatus,
+    LogKind,
+    decode_actor_kind,
+    decode_log_kind,
+    decode_run_pause_reason,
+    decode_run_status,
+    decode_slot_role,
+    decode_slot_status,
+)
+from coral.engine.machines.activation import find_node
+from coral.engine.projection import RunView, project
+from coral.engine.types import PauseCause
+from coral.model.ids import anchor_session_id
+from coral.model.ir import CompiledGraph
+from coral.runview.actions import RunViewFacts, allowed_actions
+from coral.runview.patch import stored_view_patch
+from coral.runview.types import (
+    ActorKindName,
+    EntryFrame,
+    LoadError,
+    PauseReasonName,
+    RunAction,
+    RunStatusName,
+)
+from coral.stores.protocols import CoralRun, GateVisitState, RunLogEntry
+
+RUN_ID = re.compile(r"[0-9a-f]{32}")
+WORKFLOW_ID_PATTERN = r"^[0-9a-f]{32}$"
+# ``<created_at>:<run id>`` of the last run a page listed.
+_RUN_CURSOR = re.compile(r"([0-9]{1,19}):([0-9a-f]{32})")
+MAX_RUN_CURSOR_CHARS = 64
+MAX_STORED_INT = 2**63 - 1
+DEFAULT_RUNS_LIMIT = 25
+# Status values one list request may name; there are six statuses.
+MAX_STATUS_FILTERS = 6
+DEFAULT_LOG_LIMIT = 50
+MAX_LOG_LIMIT = 100
+# A log page sends at most this many bytes of bodies and patches; a body over the other
+# cap is left out.
+MAX_LOG_PAGE_BYTES = 1 << 20
+MAX_LOG_BODY_BYTES = 256 << 10
+# The entry kind of a row whose stored text cannot be read.
+UNREADABLE_LOG_KIND = "log.unreadable"
+
+SlotRoleName = Literal["step_agent", "orchestrator", "verifier", "merge_resolver"]
+SlotStatusName = Literal[
+    "pending",
+    "session_created",
+    "briefed",
+    "working",
+    "handoff_accepted",
+    "rejected",
+    "refreshing",
+    "restarting",
+    "closed",
+    "evaluating",
+    "closing",
+]
+
+
+class _Out(BaseModel):
+    # Defaulted fields are always sent, so the schema lists them as required.
+    model_config = ConfigDict(
+        frozen=True, extra="forbid", json_schema_serialization_defaults_required=True
+    )
+
+
+class RunSpendTokens(_Out):
+    """Tokens a run's sessions used, summed over its whole session tree."""
+
+    input: int
+    output: int
+    total: int
+    cache_read: int
+    cache_creation: int
+
+
+class RunSpend(_Out):
+    """
+    What a run has spent so far, as last read: shown, never capped.
+
+    ``usd`` is the display figure its anchor's badge shows, ``live_usd`` includes
+    spend still in flight; both are ``None`` when no session was priced and a lower
+    bound when ``unpriced_models`` is not empty. ``as_of`` is when it was read.
+    """
+
+    estimate: Literal[True] = True
+    usd: float | None
+    live_usd: float | None
+    tokens: RunSpendTokens
+    unpriced_models: tuple[str, ...]
+    sessions: int
+    as_of: int
+
+
+class RunSummary(_Out):
+    """A run as its owner's run list shows it."""
+
+    run_id: str
+    workflow_id: str
+    version_id: str
+    title: str
+    status: RunStatusName
+    pause_reason: PauseReasonName | None
+    created_at: int
+    updated_at: int
+    finished_at: int | None
+    activation_count: int
+    allowed_actions: tuple[RunAction, ...]
+    spend: RunSpend | None
+
+
+class RunTarget(_Out):
+    """Where the run works: its host, repository and worktree branch."""
+
+    host_id: str | None
+    repo_path: str | None
+    worktree_path: str | None
+    run_branch: str | None
+    base_ref: str | None
+    base_commit: str | None
+
+
+class GateOut(_Out):
+    """A gate visit waiting for its answer."""
+
+    visit_id: str
+    node_id: str
+    token: str
+    visit_no: int
+    elicitation_id: str | None
+    opened_at: int
+    outcomes: tuple[str, ...]
+
+
+class SlotOut(_Out):
+    """An agent slot of one of the run's steps."""
+
+    slot_id: str
+    node_id: str
+    activation_id: str
+    role: SlotRoleName
+    status: SlotStatusName
+    session_id: str | None
+    session_generation: int
+
+
+class RunDetail(RunSummary):
+    """
+    One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that
+    cannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are
+    ``None`` when its stored rows cannot be read.
+    """
+
+    version: int
+    head_seq: int
+    max_activations: int | None
+    request_preview: str | None
+    target: RunTarget | None
+    anchor_session_id: str
+    orchestrator_session_id: str | None
+    causes: tuple[PauseCause, ...]
+    load_error: LoadError | None
+    view: RunView | None
+    gates: tuple[GateOut, ...]
+    slots: tuple[SlotOut, ...]
+
+
+class RunPage(_Out):
+    """One page of runs, newest first; page again with ``next_cursor`` until it is null."""
+
+    data: tuple[RunSummary, ...]
+    next_cursor: str | None
+
+
+class LogEntryOut(EntryFrame):
+    """
+    One run-log row with its body. ``body`` is ``None`` for a row whose text cannot be
+    read (``kind`` ``log.unreadable``) and, with ``body_truncated``, for a body too large
+    to send.
+    """
+
+    body: dict[str, JsonValue] | None
+    body_truncated: bool
+
+
+class LogPage(_Out):
+    """Log rows in ``seq`` order; ``next_after_seq`` is set when more rows follow."""
+
+    data: tuple[LogEntryOut, ...]
+    next_after_seq: int | None
+
+
+def parse_run_cursor(after: str) -> tuple[int, str]:
+    """
+    The ``(created_at, run id)`` a page's ``next_cursor`` named.
+
+    :raises ValueError: longer than 64 characters, or not ``<0..2^63-1>:<32 lowercase hex>``.
+    """
+    match = _RUN_CURSOR.fullmatch(after) if len(after) <= MAX_RUN_CURSOR_CHARS else None
+    if match is None or int(match[1]) > MAX_STORED_INT:
+        raise ValueError("invalid run cursor")
+    return int(match[1]), match[2]
+
+
+def format_run_cursor(cursor: tuple[int, str] | None) -> str | None:
+    return None if cursor is None else f"{cursor[0]}:{cursor[1]}"
+
+
+def invalid_run_cursor() -> CoralApiError:
+    """The refusal for a list cursor no page returned."""
+    return CoralApiError("validation_failed", "Invalid run cursor.", 422)
+
+
+def row_status(run: CoralRun) -> RunStatusName:
+    return cast(RunStatusName, decode_run_status(run.status))
+
+
+def row_pause_reason(run: CoralRun) -> PauseReasonName | None:
+    code = run.pause_reason
+    return None if code is None else cast(PauseReasonName, decode_run_pause_reason(code))
+
+
+def run_spend(cached: CachedSpend | None) -> RunSpend | None:
+    if cached is None:
+        return None
+    totals = cached.totals
+    return RunSpend(
+        usd=totals.usd,
+        live_usd=totals.live_usd,
+        tokens=RunSpendTokens(
+            input=totals.input_tokens,
+            output=totals.output_tokens,
+            total=totals.total_tokens,
+            cache_read=totals.cache_read_tokens,
+            cache_creation=totals.cache_creation_tokens,
+        ),
+        unpriced_models=totals.unpriced_models,
+        sessions=totals.sessions,
+        as_of=cached.as_of,
+    )
+
+
+def run_summary(
+    run: CoralRun, *, actions: tuple[RunAction, ...], spend: CachedSpend | None
+) -> RunSummary:
+    return RunSummary(
+        run_id=run.id,
+        workflow_id=run.workflow_id,
+        version_id=run.version_id,
+        title=run.title,
+        status=row_status(run),
+        pause_reason=row_pause_reason(run),
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        finished_at=run.finished_at,
+        activation_count=run.activation_count,
+        allowed_actions=actions,
+        spend=run_spend(spend),
+    )
+
+
+def list_item_actions(run: CoralRun) -> tuple[RunAction, ...]:
+    """What a list item offers: the row alone, a subset of what its detail offers."""
+    return allowed_actions(
+        row_status=row_status(run),
+        row_pause_reason=row_pause_reason(run),
+        view=None,
+        loadable=True,
+    )
+
+
+# Shown for a run that cannot be loaded, whatever its row's pause says.
+_LOAD_FAILED_CAUSE: Final = PauseCause(
+    reason="failure_path", detail=LOAD_FAILED_DETAIL, subject=""
+)
+
+
+def _gate_out(row: GateVisitState, graph: CompiledGraph | None) -> GateOut:
+    node = None if graph is None else find_node(graph, row.node_id)
+    return GateOut(
+        visit_id=row.id,
+        node_id=row.node_id,
+        token=row.token,
+        visit_no=row.visit_no,
+        elicitation_id=row.elicitation_id,
+        opened_at=row.opened_at,
+        outcomes=() if node is None or node.kind != "gate" else node.outcomes,
+    )
+
+
+def run_detail(read: RunRead) -> RunDetail:
+    """The run as its detail shows it, without spend, from a read that never writes."""
+    run, rows, snapshot = read.run, read.rows, read.snapshot
+    view = None if snapshot is None else project(snapshot.state)
+    actions = allowed_actions(
+        row_status=row_status(run),
+        row_pause_reason=row_pause_reason(run),
+        view=None if view is None else RunViewFacts.of(view),
+        loadable=read.loadable,
+    )
+    spec = None if rows is None else rows.spec
+    graph = None if snapshot is None else snapshot.graph
+    gates = (
+        ()
+        if rows is None
+        else tuple(
+            _gate_out(row, graph)
+            for row in sorted(rows.gate_visits, key=lambda row: (row.opened_at, row.id))
+            if row.status == GateVisitStatus.OPEN
+        )
+    )
+    slots = (
+        ()
+        if rows is None
+        else tuple(
+            SlotOut(
+                slot_id=slot.id,
+                node_id=slot.node_id,
+                activation_id=slot.activation_id,
+                role=cast(SlotRoleName, decode_slot_role(slot.role)),
+                status=cast(SlotStatusName, decode_slot_status(slot.status)),
+                session_id=slot.session_id,
+                session_generation=slot.session_generation,
+            )
+            for slot in rows.agent_slots
+        )
+    )
+    summary = run_summary(run, actions=actions, spend=None)
+    return RunDetail(
+        **dict(summary),
+        version=run.version,
+        head_seq=run.next_log_seq - 1,
+        max_activations=None if spec is None else spec.max_activations,
+        request_preview=None if spec is None else spec.request_preview,
+        target=None
+        if spec is None
+        else RunTarget(
+            host_id=spec.host_id,
+            repo_path=spec.repo_path,
+            worktree_path=spec.worktree_path,
+            run_branch=spec.run_branch,
+            base_ref=spec.base_ref,
+            base_commit=spec.base_commit,
+        ),
+        anchor_session_id=anchor_session_id(run.workspace_id, run.id),
+        orchestrator_session_id=run.orchestrator_session_id,
+        causes=(_LOAD_FAILED_CAUSE,) if view is None else view.causes,
+        load_error=None if read.loadable else "engine.load_failed",
+        view=view,
+        gates=gates,
+        slots=slots,
+    )
+
+
+def _json_object(text: str) -> dict[str, JsonValue] | None:
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _engine_facts(body: dict[str, JsonValue] | None) -> tuple[str | None, str | None]:
+    """An engine row's input kind and rejection code, as far as its body names them."""
+    if body is None:
+        return None, None
+    entry_input, rejection = body.get("input"), body.get("rejection")
+    kind = entry_input.get("kind") if isinstance(entry_input, dict) else None
+    code = rejection.get("code") if isinstance(rejection, dict) else None
+    return (
+        kind if isinstance(kind, str) else None,
+        code if isinstance(code, str) else None,
+    )
+
+
+def log_entry(row: RunLogEntry) -> LogEntryOut:
+    """
+    The row as ``/log`` sends it: ``kind`` is ``engine.<input kind>`` for an engine
+    entry, else ``log.<log kind>``; ``rejected`` is a refused input's code.
+    """
+    fields = {
+        "seq": row.seq,
+        "run_version": row.run_version,
+        "actor_kind": cast(ActorKindName, decode_actor_kind(row.actor_kind)),
+        "actor": row.actor_ref,
+        "node_id": row.node_id,
+        "scope_key": row.scope_key,
+        "at_us": row.created_at_us,
+    }
+    try:
+        patch = () if row.unreadable else stored_view_patch(row.view_patch)
+    except ValueError:
+        patch = None
+    if row.unreadable or patch is None:
+        return LogEntryOut(
+            **fields,
+            kind=UNREADABLE_LOG_KIND,
+            rejected=None,
+            body=None,
+            body_truncated=False,
+        )
+    engine_row = row.kind == LogKind.ENGINE
+    too_large = len(row.body.encode("utf-8")) > MAX_LOG_BODY_BYTES
+    # An engine row's kind is in its body, so even one too large to send is parsed.
+    body = None if too_large and not engine_row else _json_object(row.body)
+    kind = f"log.{decode_log_kind(row.kind)}"
+    rejected = None
+    if engine_row:
+        input_kind, code = _engine_facts(body)
+        kind = kind if input_kind is None else f"engine.{input_kind}"
+        rejected = code if row.audit_only else None
+    return LogEntryOut(
+        **fields,
+        kind=kind,
+        rejected=rejected,
+        patch=patch,
+        body=None if too_large else body,
+        body_truncated=too_large,
+    )
+
+
+def _sent_bytes(entry: LogEntryOut, row: RunLogEntry) -> int:
+    body = 0 if entry.body is None else len(row.body.encode("utf-8"))
+    patch = 0 if not entry.patch or row.view_patch is None else len(row.view_patch.encode())
+    return body + patch
+
+
+def log_page(rows: Sequence[RunLogEntry], *, limit: int) -> LogPage:
+    """
+    Up to ``limit`` of ``rows`` (read one past it) and at most :data:`MAX_LOG_PAGE_BYTES`
+    of their bodies and patches; ``next_after_seq`` is the last row sent when more are
+    known to follow.
+    """
+    entries: list[LogEntryOut] = []
+    sent = 0
+    more = len(rows) > limit
+    for row in rows[:limit]:
+        entry = log_entry(row)
+        size = _sent_bytes(entry, row)
+        if entries and sent + size > MAX_LOG_PAGE_BYTES:
+            more = True
+            break
+        entries.append(entry)
+        sent += size
+    return LogPage(data=tuple(entries), next_after_seq=entries[-1].seq if more else None)
+
+
+__all__ = [
+    "DEFAULT_LOG_LIMIT",
+    "DEFAULT_RUNS_LIMIT",
+    "MAX_LOG_BODY_BYTES",
+    "MAX_LOG_LIMIT",
+    "MAX_LOG_PAGE_BYTES",
+    "MAX_RUN_CURSOR_CHARS",
+    "MAX_STATUS_FILTERS",
+    "MAX_STORED_INT",
+    "RUN_ID",
+    "UNREADABLE_LOG_KIND",
+    "WORKFLOW_ID_PATTERN",
+    "GateOut",
+    "LogEntryOut",
+    "LogPage",
+    "RunDetail",
+    "RunPage",
+    "RunSpend",
+    "RunSpendTokens",
+    "RunSummary",
+    "RunTarget",
+    "SlotOut",
+    "SlotRoleName",
+    "SlotStatusName",
+    "format_run_cursor",
+    "invalid_run_cursor",
+    "list_item_actions",
+    "log_entry",
+    "log_page",
+    "parse_run_cursor",
+    "row_pause_reason",
+    "row_status",
+    "run_detail",
+    "run_spend",
+    "run_summary",
+]
