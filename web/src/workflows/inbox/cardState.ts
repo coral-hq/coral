@@ -1,8 +1,10 @@
 import { ApiError } from "@/lib/sessionsApi";
+import { CoralRequestError } from "../api/runsApi";
 import { OFFLINE_TEXT } from "./useOnline";
 
 // The gate card's state, as a pure function of who is looking, connectivity and
-// the last answer sent. Refused answers carry their reason as "[reason] text".
+// the last answer sent. The prompt route's refusals carry their reason as
+// "[reason] text"; the runs route's carry it in `details.reason`.
 
 /** A refused answer: the server's reason slug and its text. */
 export interface GateRefusal {
@@ -12,9 +14,21 @@ export interface GateRefusal {
 
 const REFUSAL = /^\[([a-z_]+)\] ([\s\S]*)$/;
 
+/** A runs-route refusal's reason: `details.reason`, else what its code or status means. */
+function runsRouteReason(error: CoralRequestError): string | null {
+  const reason = error.details?.reason;
+  if (typeof reason === "string") return reason;
+  if (error.code === "stale_visit") return "stale_visit";
+  // A visit the run no longer has answers the run 404.
+  if (error.status === 404) return "no_longer_waiting";
+  return null;
+}
+
 /** The refusal in a failed answer, or `null` when it failed for another reason. */
 export function refusalOf(error: unknown): GateRefusal | null {
   if (!(error instanceof ApiError)) return null;
+  const reason = error instanceof CoralRequestError ? runsRouteReason(error) : null;
+  if (reason !== null) return { reason, text: error.message };
   const match = REFUSAL.exec(error.message);
   if (match) return { reason: match[1]!, text: match[2]! };
   if (error.status === 403) return { reason: "not_permitted", text: error.message };
@@ -75,7 +89,11 @@ export function gateCardState({ isOwner, online, submission }: GateCardInput): G
   }
   if (submission.status === "submitting") return state("submitting", "Sending…", true, false);
   const refusal = submission.status === "failed" ? refusalOf(submission.error) : null;
-  const known = refusal ? REFUSAL_TEXT[refusal.reason] : undefined;
+  // The reason comes off the wire, so a prototype member is never read as its copy.
+  const known =
+    refusal && Object.hasOwn(REFUSAL_TEXT, refusal.reason)
+      ? REFUSAL_TEXT[refusal.reason]
+      : undefined;
   const keepForm = known?.keepForm ?? true;
   const refused = (canSubmit: boolean) =>
     state("refused", known?.text ?? refusal!.text, keepForm, canSubmit, refusal!.reason);

@@ -14,8 +14,9 @@ vi.mock("@/lib/identity", async (importActual) => ({
   ...(await importActual<typeof identityModule>()),
   authenticatedFetch,
 }));
+const viewer = vi.hoisted(() => ({ id: "alice" as string | null }));
 vi.mock("@/hooks/useViewerId", () => ({
-  useViewerId: () => "alice",
+  useViewerId: () => viewer.id,
   useIdentityReady: () => true,
 }));
 
@@ -73,6 +74,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   authenticatedFetch.mockReset();
+  viewer.id = "alice";
 });
 
 describe("useWorkflowInbox", () => {
@@ -86,6 +88,24 @@ describe("useWorkflowInbox", () => {
       isLoading: false,
       isError: false,
     });
+  });
+
+  it("loads nothing until the viewer is known", async () => {
+    // WHY: a feed loaded before identity resolves would be filed under no viewer.
+    viewer.id = null;
+    const { result } = renderInbox();
+    await act(async () => {});
+    expect(authenticatedFetch).not.toHaveBeenCalled();
+    expect(result.current.loaded).toBe(false);
+  });
+
+  it("files the feed under the scope it has always used", async () => {
+    // WHY: the run keys share this string, and a changed shape would orphan cached feeds.
+    const { result, client } = renderInbox();
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    const scope = JSON.stringify([window.location.origin, "/", "alice"]);
+    expect(result.current.scope).toBe(scope);
+    expect(client.getQueryState(["coral-inbox", scope])?.status).toBe("success");
   });
 
   it("loads the contract's page", async () => {

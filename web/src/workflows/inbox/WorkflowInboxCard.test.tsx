@@ -9,12 +9,15 @@ import { ApiError } from "@/lib/sessionsApi";
 import type * as sessionsApiModule from "@/lib/sessionsApi";
 import type { InboxKindUi } from "@/lib/inboxKinds";
 import type { RunDetail, RunSummary } from "../api/generated/coralApi";
+import { runQueryKey } from "../api/runsApi";
 import type { WorkflowAlert } from "../api/types";
 import {
   CONTRACT_INBOX_PAGE,
   CONTRACT_PENDING_ELICITATIONS,
   contractAnchorRow,
 } from "../fixtures/workflowInboxContract";
+import { coralScope } from "../shared/viewerScope";
+import { RunActions, type RunActionsProps } from "./RunActions";
 import { parseWorkflowInboxPage } from "./workflowInboxApi";
 import { workflowEntries, type WorkflowGateEntryData } from "./workflowEntries";
 import { WorkflowAlertCard, WorkflowGateCard } from "./WorkflowInboxCard";
@@ -31,6 +34,8 @@ vi.mock("@/lib/identity", async (importActual) => ({
   ...(await importActual<typeof identityModule>()),
   authenticatedFetch,
 }));
+const viewer = vi.hoisted(() => ({ id: "alice" as string | null }));
+vi.mock("@/hooks/useViewerId", () => ({ useViewerId: () => viewer.id }));
 
 const ALERTS = parseWorkflowInboxPage(CONTRACT_INBOX_PAGE).data;
 const PAUSE_ALERT = ALERTS[0]!;
@@ -128,6 +133,7 @@ afterEach(() => {
   vi.useRealTimers();
   approve.mockReset();
   authenticatedFetch.mockReset();
+  viewer.id = "alice";
 });
 
 /** Answer through the real `approve()`, with the resolve route's responses in order. */
@@ -586,7 +592,8 @@ describe("WorkflowAlertCard", () => {
 describe("WorkflowAlertCard run actions", () => {
   const RUN_ID = PAUSE_ALERT.run_id;
   const RUN_URL = `/v1/coral/runs/${RUN_ID}`;
-  const RUN_KEY = ["coral-run", RUN_ID];
+  // The viewer's scope at the app root, as `useCoralScope` builds it under a MemoryRouter.
+  const RUN_KEY = runQueryKey(coralScope("alice", "/"), RUN_ID);
   const TOGGLE = { name: "Run paused: Ship the bridge" };
 
   type RunActionName = RunDetail["allowed_actions"][number];
@@ -1263,6 +1270,269 @@ describe("WorkflowAlertCard run actions", () => {
     release(wire(200, summaryOf(RUNNING)));
     await waitFor(() => expect(actionNames()).toEqual(["Cancel run", "Mark as read"]));
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeEnabled();
+    expect(posts()).toEqual([[`${RUN_URL}:resume`, {}]]);
+  });
+
+  it("reads no run until the viewer is known", async () => {
+    // WHY: a run read before identity resolves would be cached under no viewer.
+    viewer.id = null;
+    serveRun(RESUMABLE);
+    renderRunCard();
+    await act(async () => {});
+    expect(authenticatedFetch).not.toHaveBeenCalled();
+    expect(actionNames()).toEqual(["Mark as read"]);
+  });
+
+  it("keeps the Inbox's component ids", async () => {
+    // WHY: click analytics read these ids; the run view's prefix must not change the Inbox's.
+    serveRun(RESUMABLE);
+    renderRunCard();
+    expect(await screen.findByRole("button", { name: "Resume" })).toHaveAttribute(
+      "data-component-id",
+      "inbox.workflow_alert.resume",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    expect(screen.getByRole("button", { name: "Cancel run" })).toHaveAttribute(
+      "data-component-id",
+      "inbox.workflow_alert.confirm_cancel",
+    );
+    expect(screen.getByRole("button", { name: "Keep running" })).toHaveAttribute(
+      "data-component-id",
+      "inbox.workflow_alert.keep_running",
+    );
+  });
+
+  describe("with the run view's actions", () => {
+    const PAUSED = runDetail(["resume", "cancel"], { pause_reason: "user" });
+
+    // No `expanded`: with `allowed`, the card has nothing to read when opened.
+    function ViewActions(props: Partial<RunActionsProps>) {
+      return (
+        <RunActions
+          runId={RUN_ID}
+          ui={UI}
+          withPause
+          componentIdPrefix="workflows.run"
+          allowed={["pause", "cancel"]}
+          {...props}
+        />
+      );
+    }
+
+    function renderView(props: Partial<RunActionsProps> = {}) {
+      const queryClient = new QueryClient();
+      const wrap = (node: ReactNode) => (
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>{node}</MemoryRouter>
+        </QueryClientProvider>
+      );
+      const view = render(wrap(<ViewActions {...props} />));
+      return {
+        queryClient,
+        rerender: (next: Partial<RunActionsProps>) =>
+          view.rerender(wrap(<ViewActions {...next} />)),
+      };
+    }
+
+    it("offers what the given actions allow, under the given prefix, without reading the run", async () => {
+      // WHY: the run view's actions come from the stream's header, never from a detail read.
+      serveRun(RUNNING);
+      renderView();
+      await act(async () => {});
+      expect(authenticatedFetch).not.toHaveBeenCalled();
+      expect(actionNames()).toEqual(["Pause", "Cancel run"]);
+      expect(screen.getByRole("button", { name: "Pause" })).toHaveAttribute(
+        "data-component-id",
+        "workflows.run.pause",
+      );
+      expect(screen.getByRole("button", { name: "Cancel run" })).toHaveAttribute(
+        "data-component-id",
+        "workflows.run.cancel",
+      );
+    });
+
+    it("pauses once with an empty body, disabled while pending, and says Paused.", async () => {
+      // WHY: a second click must not post again, and the owner hears that the run paused.
+      let release: (response: Response) => void = () => {};
+      serveRun(
+        PAUSED,
+        () =>
+          new Promise<Response>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const { queryClient } = renderView();
+      const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+      const status = screen.getByRole("status");
+      const pause = screen.getByRole("button", { name: "Pause" });
+      fireEvent.click(pause);
+      fireEvent.click(pause);
+      await waitFor(() => expect(posts()).toHaveLength(1));
+      expect(pause).toBeDisabled();
+      expect(pause).toHaveAttribute("aria-busy", "true");
+      expect(screen.getByRole("button", { name: "Cancel run" })).toBeDisabled();
+
+      release(wire(200, summaryOf(PAUSED)));
+      await waitFor(() => expect(status).toHaveTextContent("Paused."));
+      expect(posts()).toEqual([[`${RUN_URL}:pause`, {}]]);
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: RUN_KEY });
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["coral-inbox"] });
+    });
+
+    it("follows the actions it is given", () => {
+      // WHY: the stream's next header replaces Pause with Resume once the run is paused.
+      const { rerender } = renderView();
+      expect(actionNames()).toEqual(["Pause", "Cancel run"]);
+      rerender({ allowed: ["resume", "cancel"] });
+      expect(actionNames()).toEqual(["Resume", "Cancel run"]);
+      expect(screen.getByRole("button", { name: "Resume" })).toHaveAttribute(
+        "data-component-id",
+        "workflows.run.resume",
+      );
+      rerender({ allowed: [] });
+      expect(actionNames()).toEqual([]);
+    });
+
+    it("confirms a cancel under the given prefix", () => {
+      // WHY: every button the run view shows carries its own page's id.
+      renderView();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+      expect(screen.getByRole("button", { name: "Cancel run" })).toHaveAttribute(
+        "data-component-id",
+        "workflows.run.confirm_cancel",
+      );
+      expect(screen.getByRole("button", { name: "Keep running" })).toHaveAttribute(
+        "data-component-id",
+        "workflows.run.keep_running",
+      );
+    });
+
+    it("offers no Pause unless asked to", () => {
+      // WHY: the Inbox's pause card resumes or cancels; it never pauses.
+      renderView({ withPause: false });
+      expect(actionNames()).toEqual(["Cancel run"]);
+    });
+
+    it("waits for the viewer before acting, so its buttons never stick disabled", async () => {
+      // WHY: the viewer's arrival re-keys the action, which drops a request sent before it.
+      viewer.id = null;
+      const held: ((response: Response) => void)[] = [];
+      const releaseAll = () =>
+        held.splice(0).forEach((resolve) => resolve(wire(200, summaryOf(PAUSED))));
+      authenticatedFetch.mockImplementation((_url: string, init?: RequestInit) =>
+        init?.method === "POST"
+          ? new Promise<Response>((resolve) => {
+              held.push(resolve);
+            })
+          : Promise.resolve(wire(200, PAUSED)),
+      );
+      const { rerender } = renderView();
+      const pause = screen.getByRole("button", { name: "Pause" });
+      fireEvent.click(pause);
+      // The viewer arrives while a request sent without one would still be in flight.
+      viewer.id = "alice";
+      rerender({});
+      await act(async () => releaseAll());
+      expect(pause).toBeEnabled();
+      expect(posts()).toEqual([]);
+
+      const status = screen.getByRole("status");
+      fireEvent.click(pause);
+      await waitFor(() => expect(posts()).toHaveLength(1));
+      await act(async () => releaseAll());
+      await waitFor(() => expect(status).toHaveTextContent("Paused."));
+      expect(pause).toBeEnabled();
+      expect(posts()).toEqual([[`${RUN_URL}:pause`, {}]]);
+    });
+
+    it("keeps its buttons disabled until the viewer is known", () => {
+      // WHY: an action keyed under no viewer would be filed where no view of the run looks.
+      viewer.id = null;
+      renderView();
+      expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Cancel run" })).toBeDisabled();
+    });
+  });
+
+  it("keeps each viewer's run under its own key in one cache", async () => {
+    // WHY: a sign-in as someone else in the same tab must never show or patch the last viewer's run.
+    const BOB_KEY = runQueryKey(coralScope("bob", "/"), RUN_ID);
+    const BOB_RUN = runDetail(["cancel"], { status: "running", pause_reason: null });
+    authenticatedFetch.mockImplementation((_url: string, init?: RequestInit) =>
+      Promise.resolve(
+        init?.method === "POST"
+          ? wire(200, summaryOf(CANCELLED))
+          : wire(200, viewer.id === "alice" ? RESUMABLE : BOB_RUN),
+      ),
+    );
+    const queryClient = new QueryClient();
+    const tree = () => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <ToggledAlert alert={PAUSE_ALERT} initiallyExpanded ui={UI} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const view = render(tree());
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeInTheDocument();
+
+    viewer.id = "bob";
+    view.rerender(tree());
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    await waitFor(() => expect(actionNames()).toEqual(["Cancel run", "Mark as read"]));
+    expect(BOB_KEY).not.toEqual(RUN_KEY);
+    expect(queryClient.getQueryData<RunDetail>(BOB_KEY)?.allowed_actions).toEqual(["cancel"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    fireEvent.click(within(screen.getByRole("group")).getByRole("button", { name: "Cancel run" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Cancelled."));
+    expect(queryClient.getQueryData<RunDetail>(RUN_KEY)).toEqual(RESUMABLE);
+    expect(queryClient.getQueryState(RUN_KEY)?.isInvalidated).toBe(false);
+    expect(reads()).toEqual([RUN_URL, RUN_URL, RUN_URL]);
+  });
+
+  it("shares one run's action between the Inbox card and the run view", async () => {
+    // WHY: both post under one key, so one in flight holds the other's buttons and its result reaches both.
+    let release: (response: Response) => void = () => {};
+    serveRun(
+      [RESUMABLE, RUNNING],
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <MemoryRouter>
+          <section aria-label="Inbox">
+            <ToggledAlert alert={PAUSE_ALERT} initiallyExpanded ui={UI} />
+          </section>
+          <section aria-label="Run">
+            <RunActions
+              runId={RUN_ID}
+              expanded
+              ui={UI}
+              allowed={["resume", "cancel"]}
+              withPause
+              componentIdPrefix="workflows.run"
+            />
+          </section>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const inbox = within(screen.getByRole("region", { name: "Inbox" }));
+    const runView = within(screen.getByRole("region", { name: "Run" }));
+    expect(await inbox.findByRole("button", { name: "Resume" })).toBeEnabled();
+
+    fireEvent.click(runView.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(inbox.getByRole("button", { name: "Resume" })).toBeDisabled());
+    expect(inbox.getByRole("button", { name: "Cancel run" })).toBeDisabled();
+    fireEvent.click(inbox.getByRole("button", { name: "Resume" }));
+
+    release(wire(200, summaryOf(RUNNING)));
+    await waitFor(() => expect(runView.getByRole("status")).toHaveTextContent("Resumed."));
+    await waitFor(() => expect(inbox.queryByRole("button", { name: "Resume" })).toBeNull());
+    expect(inbox.getByRole("button", { name: "Cancel run" })).toBeEnabled();
     expect(posts()).toEqual([[`${RUN_URL}:resume`, {}]]);
   });
 });

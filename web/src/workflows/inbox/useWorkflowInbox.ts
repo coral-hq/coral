@@ -1,10 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
-import { useViewerId } from "@/hooks/useViewerId";
-import { withBasePath } from "@/lib/basePath";
-import { getOmnigentHostGeneration, getOmnigentServerIdentity } from "@/lib/host";
-import { useRebasePath } from "@/lib/routing";
 import type { WorkflowAlert } from "../api/types";
+import { useCoralScope } from "../shared/viewerScope";
 import { ackWorkflowAlert, fetchWorkflowInboxPage, WorkflowInboxError } from "./workflowInboxApi";
 
 export const WORKFLOW_INBOX_QUERY_KEY = ["coral-inbox"] as const;
@@ -76,15 +73,8 @@ function shouldRetry(failureCount: number, error: unknown): boolean {
  */
 export function useWorkflowInbox(enabled: boolean): WorkflowInbox {
   const queryClient = useQueryClient();
-  const viewerId = useViewerId();
-  const rebasePath = useRebasePath();
-  const server = getOmnigentServerIdentity();
-  const scope = JSON.stringify([
-    server ?? `mount:${getOmnigentHostGeneration()}`,
-    withBasePath(rebasePath("/")),
-    viewerId,
-  ]);
-  const active = enabled && viewerId !== null;
+  const { scope, ready } = useCoralScope();
+  const active = enabled && ready;
   const queryKey = useMemo(() => [...WORKFLOW_INBOX_QUERY_KEY, scope], [scope]);
   const query = useQuery({
     queryKey,

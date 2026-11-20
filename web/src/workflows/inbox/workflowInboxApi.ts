@@ -1,4 +1,5 @@
 import { authenticatedFetch } from "@/lib/identity";
+import type { CoralOperations } from "../api/generated/coralApi";
 import type {
   WorkflowAlert,
   WorkflowAlertAction,
@@ -6,10 +7,13 @@ import type {
   WorkflowInboxPage,
 } from "../api/types";
 
-// The workflow Inbox feed (`GET /v1/coral/inbox`) and its ack route. Gate answers
+// The workflow Inbox feed (`GET /v1/coral/inbox`) and its ack routes. Gate answers
 // go through Omnigent's elicitation resolve route (`approve()`), not here.
 
+type BulkAck = CoralOperations["coral_ack_alerts"];
+
 const INBOX_PATH = "/v1/coral/inbox";
+const BULK_ACK_PATH = "/v1/coral/inbox/ack" satisfies BulkAck["path"];
 export const WORKFLOW_INBOX_PAGE_SIZE = 100;
 
 const KINDS: ReadonlySet<string> = new Set<WorkflowAlertKind>([
@@ -131,4 +135,26 @@ export async function ackWorkflowAlert(alertId: string): Promise<void> {
       response.status,
     );
   }
+}
+
+/**
+ * Mark a run's open low-priority alerts read, as opening the run does; alerts that ask
+ * for an answer or an action stay open.
+ *
+ * :raises WorkflowInboxError: The server refused or has no workflow Inbox (404).
+ */
+export async function ackRunAlerts(runId: string): Promise<BulkAck["response"]> {
+  const body: BulkAck["body"] = { run_id: runId };
+  const response = await authenticatedFetch(BULK_ACK_PATH, {
+    method: "POST" satisfies BulkAck["method"],
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new WorkflowInboxError(
+      `Failed to mark the run's alerts read (${response.status})`,
+      response.status,
+    );
+  }
+  return (await response.json()) as BulkAck["response"];
 }
