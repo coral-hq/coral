@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import threading
@@ -24,6 +25,7 @@ from coral.gates.verdict import (
     GateAnswer,
     GateAnswers,
     GateVerdict,
+    VisitAnswer,
     closed_visit_verdict,
     result_verdict,
 )
@@ -464,50 +466,406 @@ async def test_a_store_error_in_the_commit_is_refused_busy_and_logged_without_it
     assert "StatementError" in caplog.text
 
 
-async def test_answers_beyond_the_in_flight_cap_are_refused_busy_at_once(
-    gates: Gates, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A flood of answers cannot take the bridge's threads from the drain."""
-    run_id, prompt = gates.open()
-    held, release = threading.Event(), threading.Event()
-    find = gates.bindings.find_by_session
+CROWDED = GateVerdict(
+    status="refused", reason="run_busy", message="Too many gate answers at once; try again."
+)
 
-    def slow(*args: Any) -> Any:
-        held.set()
-        assert release.wait(30)
-        return find(*args)
 
-    monkeypatch.setattr(gates.bindings, "find_by_session", slow)
+@dataclass
+class _Capped:
+    """
+    Answers that admit one at a time; once ``armed``, a run's load waits for ``release``.
+    """
+
+    answers: GateAnswers
+    armed: threading.Event
+    held: threading.Event
+    release: threading.Event
+
+
+@pytest_asyncio.fixture
+async def capped(gates: Gates, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Capped]:
+    armed, held, release = threading.Event(), threading.Event(), threading.Event()
+    load = gates.world.bridge.load
+
+    def slow(**kwargs: Any) -> Any:
+        if armed.is_set():
+            held.set()
+            assert release.wait(30)
+        return load(**kwargs)
+
+    monkeypatch.setattr(gates.world.bridge, "load", slow)
     threads = BridgeThreads(gates.world.bridge)
-    capped = GateAnswers(
-        threads=threads,
-        bindings=gates.bindings,
-        run_store=gates.world.runs,
-        max_in_flight=1,
-    )
-    answer = GateAnswer(
+    try:
+        yield _Capped(
+            GateAnswers(
+                threads=threads,
+                bindings=gates.bindings,
+                run_store=gates.world.runs,
+                max_in_flight=1,
+            ),
+            armed,
+            held,
+            release,
+        )
+    finally:
+        release.set()
+        threads.close()
+
+
+def _prompt_answer(run_id: str, prompt: str, viewer: Viewer = ALICE) -> GateAnswer:
+    return GateAnswer(
         workspace_id=WORKSPACE,
         session_id=anchor_session_id(WORKSPACE, run_id),
         elicitation_id=prompt,
         action="accept",
         content={"decision": "approve"},
-        viewer=ALICE,
+        viewer=viewer,
     )
-    first = asyncio.create_task(capped.answer(answer))
+
+
+async def test_answers_beyond_the_in_flight_cap_are_refused_busy_at_once(
+    gates: Gates, capped: _Capped
+) -> None:
+    """A flood of answers cannot take the bridge's threads from the drain."""
+    run_id, prompt = gates.open()
+    capped.armed.set()
+    first = asyncio.create_task(capped.answers.answer(_prompt_answer(run_id, prompt)))
+    try:
+        # The first answer holds the one admission while its run loads.
+        await poll_until_async(capped.held.is_set, timeout_s=budget(30))
+        crowded = await capped.answers.answer(_prompt_answer(run_id, prompt))
+    finally:
+        capped.release.set()
+        verdict = await first
+
+    assert crowded == CROWDED
+    assert verdict == ACCEPTED
+
+
+async def test_an_answer_is_identified_before_it_takes_an_admission(
+    gates: Gates, capped: _Capped
+) -> None:
+    """Another user's answers, and answers on no run's anchor, take no admission."""
+    run_id, prompt = gates.open()
+    capped.armed.set()
+    first = asyncio.create_task(capped.answers.answer(_prompt_answer(run_id, prompt)))
+    try:
+        await poll_until_async(capped.held.is_set, timeout_s=budget(30))
+        from_bob = await capped.answers.answer(
+            _prompt_answer(run_id, prompt, viewer=Viewer(user_id="bob"))
+        )
+        unbound = await capped.answers.answer(
+            dataclasses.replace(_prompt_answer(run_id, prompt), session_id="u" * 32)
+        )
+    finally:
+        capped.release.set()
+        verdict = await first
+
+    assert (from_bob, unbound, verdict) == (NOT_PERMITTED, NO_LONGER_WAITING, ACCEPTED)
+
+
+# ── Answers to a visit, through the runs API ────────────────────────────────
+
+
+def _visit_answer(
+    run_id: str,
+    *,
+    outcome: str = "approve",
+    node_id: str = "approve",
+    token: str = APPROVE_TOKEN,
+    note: str = "",
+    viewer: Viewer = ALICE,
+) -> VisitAnswer:
+    return VisitAnswer(
+        workspace_id=WORKSPACE,
+        run_id=run_id,
+        node_id=node_id,
+        token=token,
+        outcome=outcome,
+        note=note,
+        viewer=viewer,
+    )
+
+
+async def test_an_answer_to_a_visit_gets_the_prompt_answers_verdicts(gates: Gates) -> None:
+    run_id, prompt = gates.open()
+
+    first = await gates.answers.answer_visit(_visit_answer(run_id, note="Ship it."))
+    again = await gates.answers.answer_visit(_visit_answer(run_id))
+    other = await gates.answers.answer_visit(_visit_answer(run_id, outcome="reject"))
+
+    assert (first.verdict, again.verdict, other.verdict) == (
+        ACCEPTED,
+        DUPLICATE,
+        already_answered("approve"),
+    )
+    # Each names the visit's row, whose prompt the caller withdraws.
+    assert {result.row.elicitation_id for result in (first, again, other) if result.row} == {
+        prompt
+    }
+    assert _answer_entries(gates.world, run_id) == [
+        {
+            "kind": "answer_gate",
+            "token": APPROVE_TOKEN,
+            "label": "approve",
+            "by": "alice",
+            "note": "Ship it.",
+        }
+    ]
+
+
+@pytest.mark.parametrize("first", ["prompt", "visit"])
+async def test_the_prompt_and_the_runs_api_take_one_answer_between_them(
+    gates: Gates, first: str
+) -> None:
+    run_id, prompt = gates.open()
+
+    async def through(entry: str, label: str) -> GateVerdict | None:
+        if entry == "prompt":
+            return await gates.answer(run_id, prompt, content={"decision": label})
+        return (await gates.answers.answer_visit(_visit_answer(run_id, outcome=label))).verdict
+
+    second = "visit" if first == "prompt" else "prompt"
+    taken = await through(first, "approve")
+    repeat = await through(second, "approve")
+    changed = await through(second, "reject")
+
+    assert (taken, repeat, changed) == (ACCEPTED, DUPLICATE, already_answered("approve"))
+    assert len(_answer_entries(gates.world, run_id)) == 1
+
+
+async def test_an_outcome_the_gate_lacks_is_invalid_only_while_the_visit_is_live(
+    gates: Gates,
+) -> None:
+    run_id, _prompt = gates.open()
+
+    live = await gates.answers.answer_visit(_visit_answer(run_id, outcome="maybe"))
+    long_note = await gates.answers.answer_visit(_visit_answer(run_id, note="x" * 2001))
+    assert (await gates.answers.answer_visit(_visit_answer(run_id))).verdict == ACCEPTED
+    closed = await gates.answers.answer_visit(_visit_answer(run_id, outcome="maybe"))
+
+    assert live.verdict == CHOOSE
+    assert long_note.verdict == GateVerdict(
+        status="refused",
+        reason="invalid_answer",
+        message="The note must be text of at most 2,000 characters.",
+    )
+    # As on the prompt, a visit that can no longer be answered says so first.
+    assert closed.verdict == already_answered("approve")
+
+
+@pytest.mark.parametrize(
+    ("node_id", "token"),
+    [
+        ("review", APPROVE_TOKEN),
+        ("approve", "approve||:9"),
+        ("approve", ""),
+    ],
+    ids=["another_node", "unknown_token", "empty_token"],
+)
+async def test_a_visit_is_named_by_its_gate_and_token(
+    gates: Gates, node_id: str, token: str
+) -> None:
+    run_id, _prompt = gates.open()
+
+    result = await gates.answers.answer_visit(_visit_answer(run_id, node_id=node_id, token=token))
+
+    assert (result.verdict, result.row) == (None, None)
+    assert _answer_entries(gates.world, run_id) == []
+
+
+async def test_a_visit_answer_of_another_user_is_not_permitted(gates: Gates) -> None:
+    run_id, _prompt = gates.open()
+
+    result = await gates.answers.answer_visit(_visit_answer(run_id, viewer=Viewer(user_id="bob")))
+
+    assert result.verdict == NOT_PERMITTED
+    assert _answer_entries(gates.world, run_id) == []
+
+
+async def test_a_visit_answer_to_a_paused_or_unloadable_run_is_refused_as_paused(
+    gates: Gates, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paused, _prompt = gates.open()
+    gates.world.bridge.commit_inputs(
+        workspace_id=WORKSPACE,
+        run_id=paused,
+        inputs=lambda _snapshot: (PauseRun(reason="user", detail="look"),),
+    )
+    broken, _other = gates.open(start_key="start-2")
+    load = gates.world.bridge.load
+
+    def unloadable(**kwargs: Any) -> Any:
+        if kwargs["run_id"] == broken:
+            raise EngineLoadFailed(WORKSPACE, broken, ValueError("corrupt"))
+        return load(**kwargs)
+
+    monkeypatch.setattr(gates.world.bridge, "load", unloadable)
+
+    assert (await gates.answers.answer_visit(_visit_answer(paused))).verdict == RUN_PAUSED
+    assert (await gates.answers.answer_visit(_visit_answer(broken))).verdict == RUN_PAUSED
+    assert visit(gates.world, paused, APPROVE_TOKEN).status == "open"
+
+
+class _CountedLoads:
+    """The bridge's ``load``, counted per run."""
+
+    def __init__(self, world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.runs: list[str] = []
+        load = world.bridge.load
+
+        def counted(**kwargs: Any) -> Any:
+            self.runs.append(kwargs["run_id"])
+            return load(**kwargs)
+
+        monkeypatch.setattr(world.bridge, "load", counted)
+
+
+def _held_answers(
+    gates: Gates, monkeypatch: pytest.MonkeyPatch
+) -> tuple[threading.Event, threading.Event]:
+    """Every commit of an answer waits for the second event; the first is set once one does."""
+    held, release = threading.Event(), threading.Event()
+    answer_gate = gates.world.bridge.answer_gate
+
+    def slow(**kwargs: Any) -> GateAnswerResult:
+        held.set()
+        assert release.wait(30)
+        return answer_gate(**kwargs)
+
+    monkeypatch.setattr(gates.world.bridge, "answer_gate", slow)
+    return held, release
+
+
+async def test_a_visit_answer_past_the_cap_is_refused_before_any_load(
+    gates: Gates, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, _prompt = gates.open()
+    other_run, other_prompt = gates.open(start_key="start-2")
+    held, release = _held_answers(gates, monkeypatch)
+    threads = BridgeThreads(gates.world.bridge)
+    answers = GateAnswers(
+        threads=threads, bindings=gates.bindings, run_store=gates.world.runs, max_in_flight=1
+    )
+    first = asyncio.create_task(answers.answer_visit(_visit_answer(run_id)))
     try:
         await poll_until_async(held.is_set, timeout_s=budget(30))
-        crowded = await capped.answer(answer)
+        loads = _CountedLoads(gates.world, monkeypatch)
+        crowded = await answers.answer_visit(_visit_answer(other_run))
+        # Admitted before the visit is looked up: an unknown one is crowded out too.
+        unknown = await answers.answer_visit(_visit_answer(other_run, token="approve||:9"))
+        prompt = await answers.answer(_prompt_answer(other_run, other_prompt))
+        from_bob = await answers.answer_visit(
+            _visit_answer(other_run, viewer=Viewer(user_id="bob"))
+        )
     finally:
         release.set()
         verdict = await first
         threads.close()
 
-    assert crowded == GateVerdict(
-        status="refused",
-        reason="run_busy",
-        message="Too many gate answers at once; try again.",
+    assert verdict.verdict == ACCEPTED
+    assert (crowded.verdict, unknown.verdict, prompt) == (CROWDED, CROWDED, CROWDED)
+    assert from_bob.verdict == NOT_PERMITTED
+    # A refused answer loads no engine state.
+    assert loads.runs == []
+
+
+async def test_one_user_s_answers_never_hold_every_admission(
+    gates: Gates, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alices, alices_prompt = gates.open()
+    alices_other, _prompt = gates.open(start_key="start-2")
+    bobs, _bobs_prompt = gates.open(owner="bob", start_key="bob-1")
+    held, release = _held_answers(gates, monkeypatch)
+    threads = BridgeThreads(gates.world.bridge)
+    answers = GateAnswers(
+        threads=threads,
+        bindings=gates.bindings,
+        run_store=gates.world.runs,
+        max_in_flight=2,
+        max_per_user=1,
     )
-    assert verdict == ACCEPTED
+    first = asyncio.create_task(answers.answer_visit(_visit_answer(alices_other)))
+    try:
+        await poll_until_async(held.is_set, timeout_s=budget(30))
+        loads = _CountedLoads(gates.world, monkeypatch)
+        # Her one admission is taken, on either route.
+        alice_again = await answers.answer(_prompt_answer(alices, alices_prompt))
+        loads_then = list(loads.runs)
+        bob = asyncio.create_task(
+            answers.answer_visit(_visit_answer(bobs, viewer=Viewer(user_id="bob")))
+        )
+        await poll_until_async(lambda: bobs in loads.runs, timeout_s=budget(30))
+        release.set()
+        bob_verdict = await bob
+    finally:
+        release.set()
+        verdict = await first
+        threads.close()
+
+    assert (alice_again, loads_then) == (CROWDED, [])
+    assert (bob_verdict.verdict, verdict.verdict) == (ACCEPTED, ACCEPTED)
+
+
+async def test_an_answer_to_an_ended_run_that_cannot_load_is_no_longer_waiting(
+    gates: Gates, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, prompt = gates.open()
+    gates.world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=run_id, actor="alice")
+    load = gates.world.bridge.load
+
+    def unloadable(**kwargs: Any) -> Any:
+        if kwargs["run_id"] == run_id:
+            raise EngineLoadFailed(WORKSPACE, run_id, ValueError("corrupt"))
+        return load(**kwargs)
+
+    monkeypatch.setattr(gates.world.bridge, "load", unloadable)
+
+    assert await gates.answer(run_id, prompt) == NO_LONGER_WAITING
+    assert (await gates.answers.answer_visit(_visit_answer(run_id))).verdict == NO_LONGER_WAITING
+
+
+async def test_a_note_holding_nul_is_refused_for_what_it_holds(gates: Gates) -> None:
+    run_id, prompt = gates.open()
+    refused = GateVerdict(
+        status="refused",
+        reason="invalid_answer",
+        message="The note must not hold NUL or unpaired surrogate characters.",
+    )
+
+    on_prompt = await gates.answer(
+        run_id, prompt, content={"decision": "approve", "note": "a\x00"}
+    )
+    on_visit = await gates.answers.answer_visit(_visit_answer(run_id, note="a\x00"))
+
+    assert (on_prompt, on_visit.verdict) == (refused, refused)
+    assert _answer_entries(gates.world, run_id) == []
+
+
+async def test_a_visit_answer_that_outlasts_its_bound_is_refused_as_busy(
+    gates: Gates, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, _prompt = gates.open()
+    release = threading.Event()
+    load = gates.world.bridge.load
+
+    def slow(**kwargs: Any) -> Any:
+        assert release.wait(30)
+        return load(**kwargs)
+
+    monkeypatch.setattr(gates.world.bridge, "load", slow)
+    threads = BridgeThreads(gates.world.bridge)
+    bounded = GateAnswers(
+        threads=threads, bindings=gates.bindings, run_store=gates.world.runs, timeout_s=0.2
+    )
+    try:
+        result = await bounded.answer_visit(_visit_answer(run_id))
+    finally:
+        release.set()
+        threads.close()
+
+    assert result.verdict == RUN_BUSY
 
 
 @pytest.mark.parametrize(

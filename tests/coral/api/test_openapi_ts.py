@@ -186,13 +186,25 @@ def test_an_operation_with_only_refusals_never_answers() -> None:
     assert "    status: never;\n    response: never;\n    errors: 404 | 422 | 501;\n" in rendered
 
 
-def test_two_success_statuses_are_refused() -> None:
+def test_two_success_statuses_with_one_body_share_one_response() -> None:
     spec = _spec(Body=BODY, Reply=BODY, Tags={"type": "string"})
     responses = spec["paths"]["/v1/coral/things/{thing_id}"]["post"]["responses"]
     responses["201"] = responses["200"]
 
-    with pytest.raises(UnsupportedSchema):
-        render_coral_api_types(spec)
+    rendered = render_coral_api_types(spec)
+
+    assert "    status: 200 | 201;\n    response: Reply;\n    errors: 404 | 422;\n" in rendered
+
+
+def test_two_success_statuses_with_other_bodies_answer_either() -> None:
+    spec = _spec(Body=BODY, Reply=BODY, Tags={"type": "string"})
+    responses = spec["paths"]["/v1/coral/things/{thing_id}"]["post"]["responses"]
+    responses["201"] = {"content": {"application/json": {"schema": _ref("Tags")}}}
+    responses["202"] = {"description": "Accepted"}
+
+    rendered = render_coral_api_types(spec)
+
+    assert "    status: 200 | 201 | 202;\n    response: Reply | Tags | null;\n" in rendered
 
 
 @pytest.mark.parametrize(

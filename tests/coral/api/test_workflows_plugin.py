@@ -158,3 +158,39 @@ def test_plugin_mounts_the_run_reads_behind_authentication_with_one_404_before_t
         # The lifespan publishes the runs API; until then no run is found.
         for response in (with_auth.get(route, headers=signed_in), without_auth.get(route)):
             assert (response.status_code, response.content) == (404, not_found)
+
+
+def test_plugin_mounts_the_run_writes_behind_authentication_with_one_404_before_the_lifespan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    header = UnifiedAuthProvider(
+        source="header", local_single_user=False, header_name="X-Forwarded-Email"
+    )
+    signed_in = {"X-Forwarded-Email": "alice"}
+    run = "f" * 32
+    writes = [
+        (
+            "/v1/coral/runs",
+            {"workflow_id": "a" * 32, "start_key": "k", "host_id": "h", "repo_path": "/r"},
+        ),
+        *((f"/v1/coral/runs/{run}:{action}", {}) for action in ("pause", "resume", "cancel")),
+        (f"/v1/coral/runs/{run}/activations/{'a' * 32}:retry", {}),
+        (f"/v1/coral/runs/{run}/gates/approve:answer", {"visit_token": "t", "outcome": "approve"}),
+    ]
+    not_found = b'{"error":{"code":"not_found","message":"Run not found.","details":null}}'
+
+    with_auth = TestClient(_plugin_app(auth_provider=header))
+    without_auth = TestClient(_plugin_app(auth_provider=None))
+
+    for route, body in writes:
+        assert with_auth.post(route, json=body).status_code == 401
+        for response in (
+            with_auth.post(route, json=body, headers=signed_in),
+            without_auth.post(route, json=body),
+        ):
+            assert (response.status_code, response.content) == (404, not_found)
+    # Preflight names no run: it is not served yet for any caller.
+    assert with_auth.post("/v1/coral/runs:preflight", json={}).status_code == 401
+    preflight = without_auth.post("/v1/coral/runs:preflight", json={})
+    assert preflight.json()["error"]["code"] == "not_implemented"

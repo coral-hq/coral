@@ -11,6 +11,7 @@ it, since its generation is not the one the run recorded.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,10 +37,12 @@ from tests.coral.omni._gate_server import (
     pending_here,
     run_status,
 )
+from tests.coral.workflow_builders import fixture_text
 from tests.server.test_accounts import _build_accounts_app, _login
 
 ADMIN_PASSWORD = "admin-pw-12345"
 NOT_PERMITTED = "[not_permitted] Only the run owner can answer this gate."
+RUNS = "/v1/coral/runs"
 
 
 @dataclass
@@ -189,3 +192,36 @@ def test_a_password_change_keeps_the_owner_s_gates_and_alerts(accounts: _Account
     assert run_status(world, run) == int(RunStatus.COMPLETED)
     # The run's end, raised after the change, is hers too.
     assert [alert["kind"] for alert in at_end] == ["run_completed"]
+
+
+def test_an_accounts_server_starts_a_run_only_for_a_request_that_proves_its_account(
+    accounts: _Accounts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The plugin's definitions file is shared by this worker's tests: a key of its own.
+    key = f"accounts-{uuid.uuid4().hex[:12]}"
+    yaml_text = fixture_text("two_steps").replace("id: two-steps", f"id: {key}")
+    saved = accounts.alice.post("/v1/coral/workflows", json={"yaml": yaml_text})
+    assert saved.status_code == 200, saved.text
+    body = {
+        "workflow_id": saved.json()["id"],
+        "start_key": "accounts",
+        "host_id": "host-1",
+        "repo_path": "/repo/coral",
+    }
+
+    proven = accounts.alice.post(RUNS, json=body)
+    # As a request that reached the routes without an account authority would be.
+    monkeypatch.setattr("coral.omni.server.access.current_account_user", lambda: None)
+    unproven = accounts.alice.post(RUNS, json=body)
+
+    # Her request passes the account check and reaches the host's, which knows no such host.
+    assert proven.json()["error"] == {
+        "code": "not_permitted",
+        "message": "Host 'host-1' is not available to this user.",
+        "details": None,
+    }
+    assert unproven.json()["error"] == {
+        "code": "not_permitted",
+        "message": "Starting a run needs a request that proves its account.",
+        "details": None,
+    }

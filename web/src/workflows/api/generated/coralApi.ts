@@ -108,10 +108,25 @@ export interface CoralInfoResponse {
   version: string;
 }
 
+/** The body of an action that takes no arguments: the empty JSON object. */
+export type EmptyRequest = Record<string, never>;
+
 export interface EvidenceRequirement {
   ir_version: number;
   items: RequiredCommand[];
   scope: "per_agent";
+}
+
+/** A taken answer; ``duplicate`` when the same answer was taken before. */
+export interface GateAnswerOut {
+  result: "accepted" | "duplicate";
+}
+
+/** An answer to one visit of a gate: the visit's token, the chosen outcome and a note. */
+export interface GateAnswerRequest {
+  note?: string;
+  outcome: string;
+  visit_token: string;
 }
 
 /** A gate visit waiting for its answer. */
@@ -267,6 +282,11 @@ export interface RequiredCommand {
   item_id: string;
   may_modify: boolean;
   run: string;
+}
+
+/** A resume; ``cap`` raises the activation cap of a run paused at it. */
+export interface ResumeRequest {
+  cap?: number | null;
 }
 
 /**
@@ -450,6 +470,24 @@ export interface SourceRange {
   start_line: number;
 }
 
+/**
+ * A start of one of the caller's workflows on their host's repository.
+ *
+ * ``start_key`` makes the start idempotent: the same key and request answer the run
+ * it started, another request with the key is a conflict. ``title`` defaults to the
+ * workflow's name; ``base_ref`` to the repository's checked-out head.
+ */
+export interface StartRunRequest {
+  base_ref?: string | null;
+  host_id: string;
+  max_activations?: number;
+  repo_path: string;
+  request?: string;
+  start_key: string;
+  title?: string | null;
+  workflow_id: string;
+}
+
 /** Something Analysis could not resolve; blocks running the workflow. */
 export interface UnresolvedFact {
   arrow_ids: string[];
@@ -602,6 +640,20 @@ export interface CoralOperations {
     errors: 401 | 403 | 404 | 422 | 503;
   };
   /**
+   * POST /v1/coral/runs
+   *
+   * Start one of the caller's workflows on their host's repository: 201 with the new
+   * run, or 200 with the run the same ``start_key`` and request started before.
+   */
+  coral_start_run: {
+    method: "POST";
+    path: "/v1/coral/runs";
+    body: StartRunRequest;
+    status: 200 | 201;
+    response: RunSummary;
+    errors: 400 | 401 | 403 | 404 | 409 | 422 | 503;
+  };
+  /**
    * GET /v1/coral/runs/{run_id}
    *
    * One of the caller's runs in full, with its spend so far.
@@ -615,6 +667,41 @@ export interface CoralOperations {
     status: 200;
     response: RunDetail;
     errors: 401 | 403 | 404 | 422 | 503;
+  };
+  /**
+   * POST /v1/coral/runs/{run_id}/activations/{activation_id}:retry
+   *
+   * Not served yet: the caller's own run answers 501.
+   */
+  coral_retry_activation: {
+    method: "POST";
+    path: "/v1/coral/runs/{run_id}/activations/{activation_id}:retry";
+    params: {
+      activation_id: string;
+      run_id: string;
+    };
+    body: EmptyRequest;
+    status: never;
+    response: never;
+    errors: 401 | 403 | 404 | 422 | 501 | 503;
+  };
+  /**
+   * POST /v1/coral/runs/{run_id}/gates/{node_id}:answer
+   *
+   * Answer a visit of one of the caller's run's gates with one of its outcomes, as
+   * its prompt would be answered. A visit the run does not have is the run 404.
+   */
+  coral_answer_gate: {
+    method: "POST";
+    path: "/v1/coral/runs/{run_id}/gates/{node_id}:answer";
+    params: {
+      node_id: string;
+      run_id: string;
+    };
+    body: GateAnswerRequest;
+    status: 200;
+    response: GateAnswerOut;
+    errors: 401 | 403 | 404 | 409 | 422 | 503;
   };
   /**
    * GET /v1/coral/runs/{run_id}/graph
@@ -665,6 +752,68 @@ export interface CoralOperations {
     status: never;
     response: never;
     errors: 401 | 403 | 404 | 422 | 501 | 503;
+  };
+  /**
+   * POST /v1/coral/runs/{run_id}:cancel
+   *
+   * Cancel one of the caller's runs; a cancelled run is left as it is.
+   */
+  coral_cancel_run: {
+    method: "POST";
+    path: "/v1/coral/runs/{run_id}:cancel";
+    params: {
+      run_id: string;
+    };
+    body: EmptyRequest;
+    status: 200;
+    response: RunSummary;
+    errors: 401 | 403 | 404 | 409 | 422 | 503;
+  };
+  /**
+   * POST /v1/coral/runs/{run_id}:pause
+   *
+   * Pause one of the caller's runs; a paused run is left as it is.
+   */
+  coral_pause_run: {
+    method: "POST";
+    path: "/v1/coral/runs/{run_id}:pause";
+    params: {
+      run_id: string;
+    };
+    body: EmptyRequest;
+    status: 200;
+    response: RunSummary;
+    errors: 401 | 403 | 404 | 409 | 422 | 503;
+  };
+  /**
+   * POST /v1/coral/runs/{run_id}:resume
+   *
+   * Resume one of the caller's paused runs; ``cap`` raises the activation cap of one
+   * paused at it. A run not paused is left as it is.
+   */
+  coral_resume_run: {
+    method: "POST";
+    path: "/v1/coral/runs/{run_id}:resume";
+    params: {
+      run_id: string;
+    };
+    body: ResumeRequest;
+    status: 200;
+    response: RunSummary;
+    errors: 401 | 403 | 404 | 409 | 422 | 503;
+  };
+  /**
+   * POST /v1/coral/runs:preflight
+   *
+   * Not served yet.
+   */
+  coral_preflight_run: {
+    method: "POST";
+    path: "/v1/coral/runs:preflight";
+    body: EmptyRequest;
+    status: never;
+    response: never;
+    errors: 401 | 403 | 422 | 501;
   };
   /**
    * GET /v1/coral/workflows

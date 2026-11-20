@@ -1,7 +1,8 @@
-"""The runs API's response models, and how a run's rows become them.
+"""The runs API's request and response models, and how a run's rows become them.
 
 Every response model is frozen and sends every field. Names are the stored codes'
 names; a run's actions come from :func:`coral.runview.actions.allowed_actions`.
+Request models refuse unknown fields, and their refusals never quote the value.
 """
 
 from __future__ import annotations
@@ -9,12 +10,14 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from typing import Final, Literal, cast
+from typing import Annotated, Final, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue
 
 from coral.api.errors import CoralApiError
 from coral.api.spend import CachedSpend
+from coral.bridge.config import MAX_RUN_ACTIVATIONS
+from coral.bridge.messages import sanitize
 from coral.bridge.service import LOAD_FAILED_DETAIL, RunRead
 from coral.db.enum_codecs import (
     GateVisitStatus,
@@ -29,6 +32,7 @@ from coral.db.enum_codecs import (
 from coral.engine.machines.activation import find_node
 from coral.engine.projection import RunView, project
 from coral.engine.types import PauseCause
+from coral.gates.ids import MAX_GATE_NOTE_CHARS, MAX_GATE_OUTCOME_CHARS
 from coral.model.ids import anchor_session_id
 from coral.model.ir import CompiledGraph
 from coral.runview.actions import RunViewFacts, allowed_actions
@@ -60,6 +64,14 @@ MAX_LOG_PAGE_BYTES = 1 << 20
 MAX_LOG_BODY_BYTES = 256 << 10
 # The entry kind of a row whose stored text cannot be read.
 UNREADABLE_LOG_KIND = "log.unreadable"
+# A visit token is an activation id and a visit number, as long as a gate row stores.
+MAX_VISIT_TOKEN_CHARS = 512
+START_KEY_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+ACTIVATION_ID_PATTERN = r"^[0-9a-f]{32}$"
+# C0 and C1 controls and DEL; the bidirectional marks, embeddings, overrides and isolates.
+_CONTROLS = re.compile("[\x00-\x1f\x7f-\x9f]")
+_BIDI_CONTROLS = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+MAX_TITLE_CHARS = 256
 
 SlotRoleName = Literal["step_agent", "orchestrator", "verifier", "merge_resolver"]
 SlotStatusName = Literal[
@@ -82,6 +94,112 @@ class _Out(BaseModel):
     model_config = ConfigDict(
         frozen=True, extra="forbid", json_schema_serialization_defaults_required=True
     )
+
+
+class _In(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+def _storable(value: str) -> str:
+    # The messages name the rule, never the value, which a refusal must not echo.
+    if sanitize(value) != value:
+        raise ValueError("must not hold NUL or unpaired surrogate characters")
+    return value
+
+
+def _not_an_option(value: str) -> str:
+    if value.startswith("-"):
+        raise ValueError("must not start with '-'")
+    return value
+
+
+def _no_control_characters(value: str, *, allowed: str = "") -> str:
+    if any(char not in allowed for char in _CONTROLS.findall(value)):
+        raise ValueError("must not hold control characters")
+    return value
+
+
+def _no_controls(value: str, *, allowed: str = "") -> str:
+    _no_control_characters(value, allowed=allowed)
+    if _BIDI_CONTROLS.search(value):
+        raise ValueError("must not hold bidirectional control characters")
+    return value
+
+
+def _one_line(value: str) -> str:
+    return _no_controls(value)
+
+
+def _lines(value: str) -> str:
+    return _no_controls(value, allowed="\n\t")
+
+
+def default_title(name: str, fallback: str) -> str:
+    """
+    A run's title from its workflow's name, holding nothing a given title may not: the
+    name without control and bidirectional characters, cut to fit; ``fallback`` if empty.
+    """
+    cleaned = " ".join(_BIDI_CONTROLS.sub("", _CONTROLS.sub(" ", sanitize(name))).split())
+    return (cleaned or fallback)[:MAX_TITLE_CHARS]
+
+
+_Text = AfterValidator(_storable)
+_OneLine = AfterValidator(_one_line)
+HostId = Annotated[str, Field(min_length=1, max_length=64), _Text, _OneLine]
+# Paths may hold any other character the host's file system allows.
+RepoPath = Annotated[
+    str, Field(min_length=1, max_length=2048), _Text, AfterValidator(_no_control_characters)
+]
+BaseRef = Annotated[
+    str, Field(min_length=1, max_length=255), _Text, _OneLine, AfterValidator(_not_an_option)
+]
+RunTitle = Annotated[str, Field(min_length=1, max_length=MAX_TITLE_CHARS), _Text, _OneLine]
+RunRequestText = Annotated[str, Field(max_length=512), _Text, AfterValidator(_lines)]
+# Strict: a JSON ``true`` or ``"5"`` is not a count.
+ActivationCap = Annotated[int, Field(ge=1, le=MAX_RUN_ACTIVATIONS, strict=True)]
+
+
+class StartRunRequest(_In):
+    """
+    A start of one of the caller's workflows on their host's repository.
+
+    ``start_key`` makes the start idempotent: the same key and request answer the run
+    it started, another request with the key is a conflict. ``title`` defaults to the
+    workflow's name; ``base_ref`` to the repository's checked-out head.
+    """
+
+    workflow_id: Annotated[str, Field(pattern=WORKFLOW_ID_PATTERN)]
+    start_key: Annotated[str, Field(pattern=START_KEY_PATTERN)]
+    host_id: HostId
+    repo_path: RepoPath
+    base_ref: BaseRef | None = None
+    title: RunTitle | None = None
+    request: RunRequestText = ""
+    max_activations: ActivationCap = 100
+
+
+class ResumeRequest(_In):
+    """A resume; ``cap`` raises the activation cap of a run paused at it."""
+
+    cap: ActivationCap | None = None
+
+
+class EmptyRequest(_In):
+    """The body of an action that takes no arguments: the empty JSON object."""
+
+
+class GateAnswerRequest(_In):
+    """An answer to one visit of a gate: the visit's token, the chosen outcome and a note."""
+
+    visit_token: Annotated[str, Field(min_length=1, max_length=MAX_VISIT_TOKEN_CHARS), _Text]
+    outcome: Annotated[str, Field(min_length=1, max_length=MAX_GATE_OUTCOME_CHARS), _Text]
+    note: Annotated[str, Field(max_length=MAX_GATE_NOTE_CHARS), _Text] = ""
+
+
+class GateAnswerOut(_Out):
+    """A taken answer; ``duplicate`` when the same answer was taken before."""
+
+    result: Literal["accepted", "duplicate"]
 
 
 class RunSpendTokens(_Out):
@@ -308,16 +426,27 @@ def _gate_out(row: GateVisitState, graph: CompiledGraph | None) -> GateOut:
     )
 
 
+def _read_actions(read: RunRead, view: RunView | None) -> tuple[RunAction, ...]:
+    """What the run offers, judged from its row and, when it loaded, its engine."""
+    return allowed_actions(
+        row_status=row_status(read.run),
+        row_pause_reason=row_pause_reason(read.run),
+        view=None if view is None else RunViewFacts.of(view),
+        loadable=read.loadable,
+    )
+
+
+def read_summary(read: RunRead) -> RunSummary:
+    """The run as a write answers it, without spend: the row, with its detail's actions."""
+    view = None if read.snapshot is None else project(read.snapshot.state)
+    return run_summary(read.run, actions=_read_actions(read, view), spend=None)
+
+
 def run_detail(read: RunRead) -> RunDetail:
     """The run as its detail shows it, without spend, from a read that never writes."""
     run, rows, snapshot = read.run, read.rows, read.snapshot
     view = None if snapshot is None else project(snapshot.state)
-    actions = allowed_actions(
-        row_status=row_status(run),
-        row_pause_reason=row_pause_reason(run),
-        view=None if view is None else RunViewFacts.of(view),
-        loadable=read.loadable,
-    )
+    actions = _read_actions(read, view)
     spec = None if rows is None else rows.spec
     graph = None if snapshot is None else snapshot.graph
     gates = (
@@ -466,6 +595,7 @@ def log_page(rows: Sequence[RunLogEntry], *, limit: int) -> LogPage:
 
 
 __all__ = [
+    "ACTIVATION_ID_PATTERN",
     "DEFAULT_LOG_LIMIT",
     "DEFAULT_RUNS_LIMIT",
     "MAX_LOG_BODY_BYTES",
@@ -474,12 +604,19 @@ __all__ = [
     "MAX_RUN_CURSOR_CHARS",
     "MAX_STATUS_FILTERS",
     "MAX_STORED_INT",
+    "MAX_TITLE_CHARS",
+    "MAX_VISIT_TOKEN_CHARS",
     "RUN_ID",
+    "START_KEY_PATTERN",
     "UNREADABLE_LOG_KIND",
     "WORKFLOW_ID_PATTERN",
+    "EmptyRequest",
+    "GateAnswerOut",
+    "GateAnswerRequest",
     "GateOut",
     "LogEntryOut",
     "LogPage",
+    "ResumeRequest",
     "RunDetail",
     "RunPage",
     "RunSpend",
@@ -489,12 +626,15 @@ __all__ = [
     "SlotOut",
     "SlotRoleName",
     "SlotStatusName",
+    "StartRunRequest",
+    "default_title",
     "format_run_cursor",
     "invalid_run_cursor",
     "list_item_actions",
     "log_entry",
     "log_page",
     "parse_run_cursor",
+    "read_summary",
     "row_pause_reason",
     "row_status",
     "run_detail",

@@ -214,12 +214,17 @@ def _operation(method: str, path: str, operation: Mapping[str, Any]) -> list[str
         body += _member_line(indent, "body:", _members(schema))
     statuses = sorted(operation["responses"])
     successes = [status for status in statuses if status.startswith("2")]
-    if len(successes) > 1:
-        raise UnsupportedSchema(f"{operation['operationId']}: more than one success status")
     if successes:
-        schema = _json_schema(operation["responses"][successes[0]])
-        body.append(f"{indent}status: {successes[0]};")
-        body += _member_line(indent, "response:", ["null"] if schema is None else _members(schema))
+        # A route with several success statuses answers any of their bodies.
+        members: list[str] = []
+        for status in successes:
+            schema = _json_schema(operation["responses"][status])
+            members.extend(["null"] if schema is None else _members(schema))
+        unique = list(dict.fromkeys(members))
+        response = [member for member in unique if member != "null"]
+        response += ["null"] if "null" in unique else []
+        body += _member_line(indent, "status:", successes)
+        body += _member_line(indent, "response:", response)
     else:
         # A route not served yet answers only refusals.
         body += [f"{indent}status: never;", f"{indent}response: never;"]

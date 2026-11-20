@@ -1,28 +1,35 @@
-"""Answers to gate prompts: who may answer, which visit it is, and what the engine said.
+"""Answers to gate visits: who may answer, which visit it is, and what the engine said.
 
-An answer names a session and a prompt id; everything else comes from the
+A prompt's answer names a session and a prompt id; everything else comes from the
 server: the run from the session's anchor binding, the visit from the run's row
 holding that prompt id, and the actor from the caller's identity once it is
 proven to be the run owner. The owner is checked on the run row before any
-engine state is loaded. A visit that can no longer be answered is classified
-without the engine; a live one is committed once through the bridge. Only a few
-answers are in flight at once, so a flood of them cannot take the bridge's
-threads from the drain. Logs carry the run, the prompt id and the reason, never
-a note or an answer's content, and store errors are described without their
-statement's parameters.
+engine state is loaded. An answer through the runs API names the run, the gate
+and the visit's token instead; its owner is checked on the run row the same way.
+A visit that can no longer be answered is classified without the engine; a live
+one is committed once through the bridge. Only a few answers are in flight at
+once, in all and per user, so a flood of them cannot take the bridge's threads
+from the drain and one user's answers cannot keep another's out. An answer is
+admitted once its run and owner are known and before any engine state is loaded,
+so nobody else's answers use up an owner's admissions, and a refused answer loads
+nothing. Logs carry the run, the prompt or visit id and the reason, never a note or an
+answer's content, and store errors are described without their statement's
+parameters.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypeVar
 
-from coral.alerts.types import LOCAL_USER_ID, is_owner
+from coral.alerts.types import LOCAL_USER_ID, is_owner, normalize_owner
+from coral.bridge.commit import EngineSnapshot
 from coral.bridge.executors import BridgeThreads, PoolClosed
-from coral.bridge.messages import strip_format_characters
+from coral.bridge.messages import sanitize, strip_format_characters
 from coral.bridge.service import EngineLoadFailed, GateAnswerResult
 from coral.db.enum_codecs import SessionBindingRole
 from coral.engine import types as engine
@@ -31,6 +38,7 @@ from coral.gates.ids import (
     MAX_GATE_NOTE_CHARS,
     find_visit,
     gate_node,
+    gate_visit_id,
     is_binary_gate,
     live_visit,
     receipt_label,
@@ -40,15 +48,23 @@ from coral.model.ids import anchor_session_id
 from coral.model.ir import CompiledNode
 from coral.omni.protocols import Viewer
 from coral.queue.run_effects import describe_exception, raise_if_cancelling
-from coral.stores.protocols import CoralRun, RunNotFound, RunStore
+from coral.stores.protocols import (
+    UNFINISHED_RUN_STATUSES,
+    CoralRun,
+    GateVisitState,
+    RunNotFound,
+    RunStore,
+)
 from coral.stores.session_bindings import SessionBindingLookup
 
 _logger = logging.getLogger(__name__)
 
 # How long one answer may wait on the store, the bridge's threads and its commit.
 ANSWER_TIMEOUT_S = 30.0
-# Answers in flight at once in one process; half the bridge's smallest pool.
+# Answers in flight at once in one process (half the bridge's smallest pool), and for
+# one user (half of those), so one user's answers never hold every admission.
 MAX_ANSWERS_IN_FLIGHT = 4
+MAX_ANSWERS_PER_USER = 2
 
 GateRefusal = Literal[
     "not_permitted",
@@ -69,7 +85,10 @@ _TEXT: dict[GateRefusal, str] = {
     "run_busy": "The run is busy; try again.",
 }
 _NOTE_TEXT = f"The note must be text of at most {MAX_GATE_NOTE_CHARS:,} characters."
+_NOTE_CHARACTERS_TEXT = "The note must not hold NUL or unpaired surrogate characters."
 _CROWDED_TEXT = "Too many gate answers at once; try again."
+
+_V = TypeVar("_V")
 
 
 @dataclass(frozen=True)
@@ -120,8 +139,73 @@ def gate_refusal(
     )
 
 
+@dataclass(frozen=True)
+class VisitAnswer:
+    """
+    An answer to one visit of a gate, posted through the runs API.
+
+    :param token: The visit's engine token, as the run's detail lists it.
+    :param outcome: The outcome chosen; one the gate does not have chooses none.
+    :param viewer: The caller, built where the request was authenticated; it must own
+        the run, checked on its row before the answer is admitted.
+    """
+
+    workspace_id: int
+    run_id: str
+    node_id: str
+    token: str
+    outcome: str
+    note: str
+    viewer: Viewer
+
+
+@dataclass(frozen=True)
+class VisitVerdict:
+    """
+    What an answer to a visit got.
+
+    :param verdict: ``None`` when the run has no visit with that token at that gate.
+    :param row: The visit's gate row, whose prompt the caller may withdraw.
+    """
+
+    verdict: GateVerdict | None
+    row: GateVisitState | None = None
+
+
 _ACCEPTED = GateVerdict(status="accepted")
 _DUPLICATE = GateVerdict(status="duplicate", clear_pending=True)
+_CROWDED = GateVerdict(status="refused", reason="run_busy", message=_CROWDED_TEXT)
+# A caller's share of the admissions: its normalized owner id and account generation.
+_CallerKey = tuple[str | None, str | None]
+
+
+class _Admissions:
+    """Answers admitted at once, at most so many in all and per caller; use on one loop."""
+
+    def __init__(self, *, total: int, per_caller: int) -> None:
+        self._total = total
+        self._per_caller = per_caller
+        self._admitted = 0
+        self._by_caller: dict[_CallerKey, int] = {}
+
+    @contextmanager
+    def admit(self, viewer: Viewer) -> Iterator[bool]:
+        """Whether ``viewer``'s answer is admitted; an admission is held for the block."""
+        key = (normalize_owner(viewer.user_id), viewer.account_generation)
+        held = self._by_caller.get(key, 0)
+        if self._admitted >= self._total or held >= self._per_caller:
+            yield False
+            return
+        self._admitted += 1
+        self._by_caller[key] = held + 1
+        try:
+            yield True
+        finally:
+            self._admitted -= 1
+            if held:
+                self._by_caller[key] = held
+            else:
+                self._by_caller.pop(key, None)
 
 
 class GateAnswers:
@@ -135,6 +219,7 @@ class GateAnswers:
         run_store: RunStore,
         timeout_s: float = ANSWER_TIMEOUT_S,
         max_in_flight: int = MAX_ANSWERS_IN_FLIGHT,
+        max_per_user: int = MAX_ANSWERS_PER_USER,
     ) -> None:
         """
         :param threads: Runs the store reads and bridge calls.
@@ -143,12 +228,13 @@ class GateAnswers:
             then a duplicate.
         :param max_in_flight: Answers taken at once; one more is refused ``run_busy``
             at once, so the caller retries.
+        :param max_per_user: Answers of one user (and account generation) taken at once.
         """
         self._threads = threads
         self._bindings = bindings
         self._runs = run_store
         self._timeout_s = timeout_s
-        self._in_flight = asyncio.Semaphore(max_in_flight)
+        self._admissions = _Admissions(total=max_in_flight, per_caller=max_per_user)
 
     async def answer(self, answer: GateAnswer) -> GateVerdict:
         """
@@ -157,27 +243,57 @@ class GateAnswers:
         Anything that goes wrong on the way (a timeout, a closing pool, a store error)
         is refused ``run_busy``: nothing was committed, or a retry is a duplicate.
         """
-        if self._in_flight.locked():
-            _logger.debug("Coral refused gate prompt %s: too many answers", answer.elicitation_id)
-            return gate_refusal("run_busy", message=_CROWDED_TEXT)
-        async with self._in_flight:
-            try:
-                async with asyncio.timeout(self._timeout_s):
-                    return await self._answer(answer)
-            except (TimeoutError, PoolClosed):
-                _logger.warning(
-                    "Coral could not answer gate prompt %s in time; refused as busy",
-                    answer.elicitation_id,
-                )
-            except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- logged
-                raise_if_cancelling(exc)
-                # A statement error's text holds its parameters, the note among them.
-                _logger.error(
-                    "Coral could not answer gate prompt %s; refused as busy: %s",
-                    answer.elicitation_id,
-                    describe_exception(exc),
-                )
-        return gate_refusal("run_busy")
+        return await self._bounded(
+            answer.elicitation_id, self._answer(answer), gate_refusal("run_busy")
+        )
+
+    async def answer_visit(self, answer: VisitAnswer) -> VisitVerdict:
+        """
+        Answer the run's visit ``answer.token`` of the gate ``answer.node_id`` once.
+
+        The owner is checked on the run row, then the answer is admitted, and only then
+        is the run loaded, so another user's answer and one past the caller's share
+        load nothing. The verdicts are the prompt's, decided in the same order: a visit
+        that can no longer be answered says so before an outcome the gate lacks is
+        refused. Errors on the way are refused ``run_busy``, as :meth:`answer` refuses
+        them.
+        """
+        return await self._bounded(
+            answer.run_id, self._answer_visit(answer), VisitVerdict(gate_refusal("run_busy"))
+        )
+
+    async def _bounded(self, subject: str, call: Awaitable[_V], busy: _V) -> _V:
+        """``call`` within the answer's timeout; ``busy`` when anything goes wrong."""
+        try:
+            async with asyncio.timeout(self._timeout_s):
+                return await call
+        except (TimeoutError, PoolClosed):
+            _logger.warning("Coral could not answer gate %s in time; refused as busy", subject)
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- logged
+            raise_if_cancelling(exc)
+            # A statement error's text holds its parameters, the note among them.
+            _logger.error(
+                "Coral could not answer gate %s; refused as busy: %s",
+                subject,
+                describe_exception(exc),
+            )
+        return busy
+
+    @staticmethod
+    def _crowded(subject: str) -> GateVerdict:
+        """The refusal of an answer past the admissions; the caller retries."""
+        _logger.debug("Coral refused an answer to gate %s: too many answers", subject)
+        return _CROWDED
+
+    async def _unloadable(self, workspace_id: int, run_id: str) -> GateVerdict:
+        """
+        The refusal of an answer to a run that cannot be loaded: an ended run's gates
+        no longer wait; an unfinished one is paused, as the failed load paused it.
+        """
+        run = await self._threads.run(self._runs.get_run, run_id, workspace_id=workspace_id)
+        if run is None or run.status not in UNFINISHED_RUN_STATUSES:
+            return gate_refusal("no_longer_waiting", clear_pending=True)
+        return gate_refusal("run_paused")
 
     async def _answer(self, answer: GateAnswer) -> GateVerdict:
         workspace_id, elicitation_id = answer.workspace_id, answer.elicitation_id
@@ -198,20 +314,21 @@ class GateAnswers:
         if run is None:
             return gone
         if not _is_owner(run, answer.viewer):
-            _logger.info(
-                "Coral refused an answer to gate prompt %s of run %s from %s: not the run owner",
-                elicitation_id,
-                run_id,
-                answer.viewer.user_id or LOCAL_USER_ID,
-            )
-            return gate_refusal("not_permitted")
-        bridge = self._threads.bridge
+            return self._not_permitted(elicitation_id, run_id, answer.viewer)
+        with self._admissions.admit(answer.viewer) as admitted:
+            if not admitted:
+                return self._crowded(elicitation_id)
+            return await self._answer_prompt(answer, run_id)
+
+    async def _answer_prompt(self, answer: GateAnswer, run_id: str) -> GateVerdict:
+        workspace_id, elicitation_id = answer.workspace_id, answer.elicitation_id
+        gone = gate_refusal("no_longer_waiting", clear_pending=True)
         try:
             snapshot = await self._threads.run(
-                bridge.load, workspace_id=workspace_id, run_id=run_id
+                self._threads.bridge.load, workspace_id=workspace_id, run_id=run_id
             )
         except EngineLoadFailed:
-            return gate_refusal("run_paused")
+            return await self._unloadable(workspace_id, run_id)
         except RunNotFound:
             return gone
         row = row_by_elicitation(snapshot.store.gate_visits, elicitation_id)
@@ -219,41 +336,119 @@ class GateAnswers:
         if visit is None:
             return gone
         node = gate_node(snapshot.graph, visit)
+        return await self._conclude(
+            snapshot,
+            visit,
+            node,
+            label=answer_label(node, answer.action, answer.content),
+            note=answer_note(answer.content),
+            viewer=answer.viewer,
+            subject=elicitation_id,
+        )
+
+    async def _answer_visit(self, answer: VisitAnswer) -> VisitVerdict:
+        workspace_id, run_id = answer.workspace_id, answer.run_id
+        visit_id = gate_visit_id(run_id, answer.token)
+        run = await self._threads.run(self._runs.get_run, run_id, workspace_id=workspace_id)
+        if run is None:
+            return VisitVerdict(None)
+        if not _is_owner(run, answer.viewer):
+            return VisitVerdict(self._not_permitted(visit_id, run_id, answer.viewer))
+        with self._admissions.admit(answer.viewer) as admitted:
+            if not admitted:
+                return VisitVerdict(self._crowded(visit_id))
+            return await self._visit_verdict(answer, visit_id)
+
+    async def _visit_verdict(self, answer: VisitAnswer, visit_id: str) -> VisitVerdict:
+        workspace_id, run_id = answer.workspace_id, answer.run_id
+        try:
+            snapshot = await self._threads.run(
+                self._threads.bridge.load, workspace_id=workspace_id, run_id=run_id
+            )
+        except EngineLoadFailed:
+            return VisitVerdict(await self._unloadable(workspace_id, run_id))
+        except RunNotFound:
+            return VisitVerdict(None)
+        # The owner's account generation may have moved since the row was read.
+        if not _is_owner(snapshot.store.run, answer.viewer):
+            return VisitVerdict(self._not_permitted(visit_id, run_id, answer.viewer))
+        visit = find_visit(snapshot.state, run_id, visit_id)
+        node = None if visit is None else gate_node(snapshot.graph, visit)
+        if visit is None or node is None or node.id != answer.node_id:
+            return VisitVerdict(None)
+        row = next((item for item in snapshot.store.gate_visits if item.id == visit_id), None)
+        verdict = await self._conclude(
+            snapshot,
+            visit,
+            node,
+            label=answer.outcome if answer.outcome in node.outcomes else None,
+            note=answer_note({"note": answer.note}),
+            viewer=answer.viewer,
+            subject=visit_id,
+        )
+        return VisitVerdict(verdict, row)
+
+    async def _conclude(
+        self,
+        snapshot: EngineSnapshot,
+        visit: engine.GateVisit,
+        node: CompiledNode | None,
+        *,
+        label: str | None,
+        note: str | None,
+        viewer: Viewer,
+        subject: str,
+    ) -> GateVerdict:
+        """
+        Classify a visit that can no longer be answered, else commit ``label`` once.
+
+        :param label: The outcome the answer chose, ``None`` when it chose none.
+        :param note: The answer's note, ``None`` when it is not text a row can hold.
+        :param subject: The prompt or visit id the logs name.
+        """
+        run_id = snapshot.store.run_id
         outcomes = tuple(node.outcomes) if node is not None else ()
-        label = answer_label(node, answer.action, answer.content)
         if not live_visit(snapshot.state, visit):
             verdict = closed_visit_verdict(
                 visit, receipt_label(snapshot.state, visit.token), label
             )
-            return self._logged(verdict, run_id, elicitation_id)
+            return self._logged(verdict, run_id, subject)
         if label is None:
             return gate_refusal("invalid_answer", message=_choose(outcomes))
-        note = answer_note(answer.content)
         if note is None:
             return gate_refusal("invalid_answer", message=_NOTE_TEXT)
+        if sanitize(note) != note:
+            return gate_refusal("invalid_answer", message=_NOTE_CHARACTERS_TEXT)
         try:
             result = await self._threads.run(
-                bridge.answer_gate,
-                workspace_id=workspace_id,
+                self._threads.bridge.answer_gate,
+                workspace_id=snapshot.store.workspace_id,
                 run_id=run_id,
                 token=visit.token,
                 label=label,
                 note=note,
-                actor=answer.viewer.user_id or LOCAL_USER_ID,
+                actor=viewer.user_id or LOCAL_USER_ID,
             )
         except EngineLoadFailed:
-            return gate_refusal("run_paused")
+            return await self._unloadable(snapshot.store.workspace_id, run_id)
         except RunNotFound:
-            return gone
-        return self._logged(result_verdict(result, label, outcomes), run_id, elicitation_id)
+            return gate_refusal("no_longer_waiting", clear_pending=True)
+        return self._logged(result_verdict(result, label, outcomes), run_id, subject)
 
     @staticmethod
-    def _logged(verdict: GateVerdict, run_id: str, elicitation_id: str) -> GateVerdict:
+    def _not_permitted(subject: str, run_id: str, viewer: Viewer) -> GateVerdict:
         _logger.info(
-            "Gate prompt %s of run %s answered: %s",
-            elicitation_id,
+            "Coral refused an answer to gate %s of run %s from %s: not the run owner",
+            subject,
             run_id,
-            verdict.reason or verdict.status,
+            viewer.user_id or LOCAL_USER_ID,
+        )
+        return gate_refusal("not_permitted")
+
+    @staticmethod
+    def _logged(verdict: GateVerdict, run_id: str, subject: str) -> GateVerdict:
+        _logger.info(
+            "Gate %s of run %s answered: %s", subject, run_id, verdict.reason or verdict.status
         )
         return verdict
 
@@ -360,10 +555,13 @@ def _choose(outcomes: Sequence[str]) -> str:
 __all__ = [
     "ANSWER_TIMEOUT_S",
     "MAX_ANSWERS_IN_FLIGHT",
+    "MAX_ANSWERS_PER_USER",
     "GateAnswer",
     "GateAnswers",
     "GateRefusal",
     "GateVerdict",
+    "VisitAnswer",
+    "VisitVerdict",
     "answer_label",
     "answer_note",
     "closed_visit_verdict",

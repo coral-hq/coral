@@ -1,29 +1,36 @@
-"""The owner's runs: list, detail, pinned graph and log.
+"""The owner's runs: start, list, detail, pinned graph, log, actions and gate answers.
 
 Unmounted: the Coral server plugin mounts it under ``/v1/coral`` with its own caller
 and workspace dependencies. The runs API is read per request from
 ``app.state.coral_runs_api``, which the lifespan publishes; without it every route
-answers the run 404. Every route names the caller's run through
-:meth:`RunsApi.owned_run` before anything else.
+answers the run 404. Every route that names a run checks it is the caller's through
+:meth:`RunsApi.owned_run` before anything else. Every POST takes a JSON body.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, Path, Query, Request, Response
 
 from coral.api.errors import CoralApiError, CoralRoute, error_responses, run_not_found
 from coral.api.run_models import (
+    ACTIVATION_ID_PATTERN,
     DEFAULT_LOG_LIMIT,
     DEFAULT_RUNS_LIMIT,
     MAX_LOG_LIMIT,
     MAX_STATUS_FILTERS,
     MAX_STORED_INT,
     WORKFLOW_ID_PATTERN,
+    EmptyRequest,
+    GateAnswerOut,
+    GateAnswerRequest,
     LogPage,
+    ResumeRequest,
     RunDetail,
     RunPage,
+    RunSummary,
+    StartRunRequest,
     invalid_run_cursor,
     parse_run_cursor,
 )
@@ -32,6 +39,7 @@ from coral.model.ir import CompiledGraph
 from coral.omni.protocols import Viewer
 from coral.runview.types import RunStatusName
 from coral.stores.protocols import MAX_OWNED_RUNS_LIMIT
+from coral.stores.workflows import WorkflowDefinitionStore
 
 # Run reads carry prompts, paths and step output: never kept by a cache.
 _NO_STORE = "private, no-store"
@@ -40,6 +48,15 @@ _REVALIDATE = "private, no-cache"
 _NOT_MODIFIED = {304: {"description": "Not Modified"}}
 # Repeated ``status`` values: a run in any of them is listed.
 _STATUS_FILTER = Query(default=[], alias="status")
+_RUNS_PATH = "/v1/coral/runs"
+_REPLAYED = {
+    200: {
+        "model": RunSummary,
+        "description": "The run this start key already started, for the same request",
+    }
+}
+# Refusals of an action on one of the caller's runs.
+_ACTION_REFUSALS = error_responses(401, 403, 404, 409, 422, 503)
 
 
 def _runs_api(request: Request) -> RunsApi:
@@ -51,12 +68,14 @@ def _runs_api(request: Request) -> RunsApi:
 
 def create_runs_router(
     *,
+    definitions: WorkflowDefinitionStore,
     viewer_dependency: Callable[..., Viewer] | Callable[..., Awaitable[Viewer]],
     workspace_id_dependency: Callable[..., int],
 ) -> APIRouter:
     """
-    The runs read routes, mounted by the caller under ``/v1/coral``.
+    The runs routes, mounted by the caller under ``/v1/coral``.
 
+    :param definitions: The workflows a start reads; only the caller's own start.
     :param viewer_dependency: Resolves the caller, refusing with 401 or 403 before any
         run is read.
     :param workspace_id_dependency: The request's workspace.
@@ -64,6 +83,148 @@ def create_runs_router(
     router = APIRouter(route_class=CoralRoute)
     caller = Depends(viewer_dependency)
     workspace = Depends(workspace_id_dependency)
+
+    @router.post(
+        "/runs",
+        operation_id="coral_start_run",
+        status_code=201,
+        response_model=RunSummary,
+        responses={**_REPLAYED, **error_responses(400, 401, 403, 404, 409, 422, 503)},
+    )
+    async def start_run(
+        request: Request,
+        response: Response,
+        body: StartRunRequest,
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> RunSummary:
+        """
+        Start one of the caller's workflows on their host's repository: 201 with the new
+        run, or 200 with the run the same ``start_key`` and request started before.
+        """
+        started = await _runs_api(request).start(
+            viewer, workspace_id, body, definitions=definitions
+        )
+        response.status_code = 201 if started.created else 200
+        response.headers["Location"] = f"{_RUNS_PATH}/{started.summary.run_id}"
+        response.headers["Cache-Control"] = _NO_STORE
+        return started.summary
+
+    @router.post(
+        "/runs:preflight",
+        operation_id="coral_preflight_run",
+        status_code=501,
+        response_class=Response,
+        responses=error_responses(401, 403, 422, 501),
+        dependencies=[caller],
+    )
+    async def preflight_run(_body: EmptyRequest) -> Response:
+        """Not served yet."""
+        raise CoralApiError("not_implemented", "Run preflight is not available yet.", 501)
+
+    @router.post(
+        "/runs/{run_id}:pause",
+        operation_id="coral_pause_run",
+        response_model=RunSummary,
+        responses=_ACTION_REFUSALS,
+    )
+    async def pause_run(
+        request: Request,
+        response: Response,
+        run_id: str,
+        _body: EmptyRequest,
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> RunSummary:
+        """Pause one of the caller's runs; a paused run is left as it is."""
+        summary = await _runs_api(request).pause(viewer, workspace_id, run_id)
+        response.headers["Cache-Control"] = _NO_STORE
+        return summary
+
+    @router.post(
+        "/runs/{run_id}:resume",
+        operation_id="coral_resume_run",
+        response_model=RunSummary,
+        responses=_ACTION_REFUSALS,
+    )
+    async def resume_run(
+        request: Request,
+        response: Response,
+        run_id: str,
+        body: ResumeRequest,
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> RunSummary:
+        """
+        Resume one of the caller's paused runs; ``cap`` raises the activation cap of one
+        paused at it. A run not paused is left as it is.
+        """
+        summary = await _runs_api(request).resume(viewer, workspace_id, run_id, cap=body.cap)
+        response.headers["Cache-Control"] = _NO_STORE
+        return summary
+
+    @router.post(
+        "/runs/{run_id}:cancel",
+        operation_id="coral_cancel_run",
+        response_model=RunSummary,
+        responses=_ACTION_REFUSALS,
+    )
+    async def cancel_run(
+        request: Request,
+        response: Response,
+        run_id: str,
+        _body: EmptyRequest,
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> RunSummary:
+        """Cancel one of the caller's runs; a cancelled run is left as it is."""
+        summary = await _runs_api(request).cancel(viewer, workspace_id, run_id)
+        response.headers["Cache-Control"] = _NO_STORE
+        return summary
+
+    @router.post(
+        "/runs/{run_id}/activations/{activation_id}:retry",
+        operation_id="coral_retry_activation",
+        status_code=501,
+        response_class=Response,
+        responses=error_responses(401, 403, 404, 422, 501, 503),
+    )
+    async def retry_activation(
+        request: Request,
+        run_id: str,
+        _body: EmptyRequest,
+        # Checked as a format only: the id is never looked up, echoed or logged.
+        activation_id: str = Path(pattern=ACTIVATION_ID_PATTERN),  # noqa: ARG001
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> Response:
+        """Not served yet: the caller's own run answers 501."""
+        await _runs_api(request).retry(viewer, workspace_id, run_id)
+
+    @router.post(
+        "/runs/{run_id}/gates/{node_id}:answer",
+        operation_id="coral_answer_gate",
+        response_model=GateAnswerOut,
+        responses=_ACTION_REFUSALS,
+    )
+    async def answer_gate(
+        request: Request,
+        response: Response,
+        run_id: str,
+        node_id: str,
+        body: GateAnswerRequest,
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> GateAnswerOut:
+        """
+        Answer a visit of one of the caller's run's gates with one of its outcomes, as
+        its prompt would be answered. A visit the run does not have is the run 404.
+        """
+        answered = await _runs_api(request).answer_gate(
+            viewer, workspace_id, run_id, node_id, body
+        )
+        response.headers["Cache-Control"] = _NO_STORE
+        return answered
 
     @router.get(
         "/runs",

@@ -7,6 +7,7 @@ import logging
 import threading
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, FastAPI
@@ -56,10 +57,11 @@ from omnigent.server.server_plugins import ServerPluginRegistration, ServerServi
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+    from coral.api.run_service import HostConnector
+    from coral.gates.verdict import GateAnswers
     from coral.omni.server.gates import GateAnswering, LocalGatePrompts
     from coral.omni.server.turn_facts import BoundSessionRefresher
     from omnigent.server.auth import AuthProvider
-    from omnigent.stores.conversation_store import ConversationStore
 
 _logger = logging.getLogger(__name__)
 
@@ -316,26 +318,51 @@ def _wire_registration_carrier(stack: AsyncExitStack) -> None:
     stack.callback(register_registration_carrier(carry))
 
 
+def _host_connector(services: ServerServices) -> HostConnector | None:
+    """Reaches a start's host through the server's host registry; ``None`` without one."""
+    from coral.omni.server.worktrees import connect_run_worktree_host
+
+    host_store = getattr(services, "host_store", None)
+    host_registry = getattr(services, "host_registry", None)
+    if host_store is None or host_registry is None:
+        return None
+    return partial(connect_run_worktree_host, host_registry=host_registry, host_store=host_store)
+
+
 def _runs_api(
     bridge: EngineBridge,
     run_store: RunStore,
-    conversation_store: ConversationStore,
+    services: ServerServices,
     stack: AsyncExitStack,
+    *,
+    gate_answers: GateAnswers,
+    gate_publisher: GatePublisher,
 ) -> RunsApi:
     """
     The runs API over the bridge: route calls on their own pool, spend on another.
 
-    Closing ``stack`` cancels pending spend reads, then closes both pools; a request
-    arriving after that is refused as busy.
+    Starts reach the owner's host through the server's registry, and need a proven
+    account generation where users sign in to accounts. Closing ``stack`` cancels
+    pending spend reads, then closes both pools; a request arriving after that is
+    refused as busy.
     """
+    from omnigent.server.auth import auth_mode
+
     api_threads = BoundedThreads(max_workers=API_THREADS, thread_name_prefix=API_THREAD_NAME)
     stack.callback(api_threads.close)
     spend_threads = BoundedThreads(max_workers=SPEND_THREADS, thread_name_prefix=SPEND_THREAD_NAME)
     stack.callback(spend_threads.close)
-    spend = SpendCache(OmnigentRunSpend(conversation_store), spend_threads)
+    spend = SpendCache(OmnigentRunSpend(services.conversation_store), spend_threads)
     stack.callback(spend.close)
     return RunsApi(
-        bridge=bridge, run_store=run_store, spend=spend, in_flight=InFlight(api_threads)
+        bridge=bridge,
+        run_store=run_store,
+        spend=spend,
+        in_flight=InFlight(api_threads),
+        gate_answers=gate_answers,
+        gate_publisher=gate_publisher,
+        connect_host=_host_connector(services),
+        requires_generation=auth_mode(services.auth_provider) == "accounts",
     )
 
 
@@ -352,7 +379,7 @@ def _wire_gates(
     answering: GateAnswering,
     prompts: LocalGatePrompts,
     stack: AsyncExitStack,
-) -> None:
+) -> GateAnswers:
     """
     Register gate delivery and gate answers, whether or not the session engine is wired.
 
@@ -363,6 +390,8 @@ def _wire_gates(
     ``prompts`` observes every publish, and the sweep task withdraws this process's
     stale prompts until exit. Every undo goes on ``stack``. The server's auth
     provider is required: a services object without one is not taken as auth off.
+
+    :returns: The answers the verdict handler takes, which the runs API shares.
     """
     from coral.gates.executors import gate_publish_executor, gate_withdraw_executor
     from coral.gates.ids import GATE_ELICITATION_PREFIX, GATE_PUBLISH, GATE_WITHDRAW
@@ -405,6 +434,7 @@ def _wire_gates(
         app.state.coral_gate_publisher = publisher
         app.state.coral_gate_prompts = prompts
         app.state.coral_alert_store = SqlAlchemyAlertStore(db_uri)
+    return answers
 
 
 async def _stop_task(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
@@ -651,9 +681,6 @@ async def coral_lifespan(
                 app.state.coral_worker_supervisor = supervisor
                 app.state.coral_engine_bridge = bridge
                 app.state.coral_bound_sessions = bound
-                app.state.coral_runs_api = _runs_api(
-                    bridge, run_store, services.conversation_store, stack
-                )
             evidence_threads = BoundedThreads(
                 max_workers=EVIDENCE_THREADS, thread_name_prefix=EVIDENCE_THREAD_NAME
             )
@@ -673,7 +700,7 @@ async def coral_lifespan(
             )
             _wire_bridge(threads, stack)
             _wire_registration_carrier(stack)
-            _wire_gates(
+            answers = _wire_gates(
                 app,
                 services,
                 db_uri=storage_location,
@@ -686,6 +713,16 @@ async def coral_lifespan(
                 prompts=prompts,
                 stack=stack,
             )
+            if hasattr(app, "state"):
+                # Its pools close before the gates are unregistered.
+                app.state.coral_runs_api = _runs_api(
+                    bridge,
+                    run_store,
+                    services,
+                    stack,
+                    gate_answers=answers,
+                    gate_publisher=publisher,
+                )
             missing = _missing_engine_input(app, services)
             if missing is None:
                 refresher = _wire_session_engine(
@@ -724,7 +761,7 @@ def coral_routers(
 
     Each route resolves its caller through ``auth_provider`` and reads the request's
     workspace; the Inbox reads the alert store the lifespan publishes, the runs routes
-    its runs API.
+    its runs API, and a start the caller's workflow from ``definitions``.
     """
     viewer = request_viewer(auth_provider)
     return (
@@ -747,7 +784,9 @@ def coral_routers(
         ),
         (
             create_runs_router(
-                viewer_dependency=viewer, workspace_id_dependency=current_workspace_id
+                definitions=definitions,
+                viewer_dependency=viewer,
+                workspace_id_dependency=current_workspace_id,
             ),
             CORAL_API_PREFIX,
             ["coral"],
