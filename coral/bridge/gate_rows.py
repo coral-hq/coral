@@ -58,7 +58,7 @@ def project_gates(
     for visit in state.gates:
         row_id = gate_visit_id(run.id, visit.token)
         row = rows.get(row_id)
-        stored = _as_draft(row) if row is not None else None
+        stored = gate_visit_draft(row) if row is not None else None
         status = _ENGINE_STATUSES.get(
             visit.status,
             GateVisitStatus.OPEN if live_visit(state, visit) else GateVisitStatus.CANCELLED,
@@ -131,13 +131,15 @@ def _gate_draft(ctx: MapContext, effect: engine.Effect, effect_type: str) -> Wor
     )
 
 
-def _as_draft(row: GateVisitState) -> GateVisitDraft:
+def gate_visit_draft(row: GateVisitState) -> GateVisitDraft:
+    """The draft that writes ``row`` back as it is."""
     names = {field.name for field in dataclasses.fields(GateVisitDraft)}
     return GateVisitDraft(**{name: getattr(row, name) for name in names})
 
 
 __all__ = [
     "gate_publish_draft",
+    "gate_visit_draft",
     "gate_withdraw_draft",
     "live_publish_effects",
     "project_gates",

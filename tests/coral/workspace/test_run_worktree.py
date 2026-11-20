@@ -250,6 +250,8 @@ async def test_a_locked_run_worktree_is_refused_not_adopted(
     failure = await _failure(host)
 
     assert failure.code == "worktree_failed"
+    # WHY: a start that meets a lock is another start's twin, which the caller replays.
+    assert failure.locked
     assert "run worktree is locked; it may still be being created" in failure.message
     assert host.calls == [("stat", _ROOT), ("list", _ROOT)]
 
@@ -268,6 +270,7 @@ async def test_a_locked_worktree_listed_after_the_retry_fails_is_refused() -> No
     failure = await _failure(host)
 
     assert failure.code == "worktree_failed"
+    assert failure.locked
     assert "run worktree is locked; it may still be being created" in failure.message
     assert host.calls[-1] == ("list", _ROOT)
 
@@ -285,7 +288,7 @@ async def test_failure_reports_both_host_messages_cut_to_size() -> None:
 
     failure = await _failure(host)
 
-    assert failure.code == "worktree_failed"
+    assert (failure.code, failure.locked) == ("worktree_failed", False)
     assert "cannot lock ref: 'refs/heads/coral' exists" in failure.message
     assert "branch does not exist; cannot recreate its worktree" in failure.message
     assert long_detail not in failure.message
@@ -323,7 +326,7 @@ async def test_a_live_detached_run_worktree_is_refused_not_forked(dirname_suffix
 
     failure = await _failure(host)
 
-    assert failure.code == "worktree_failed"
+    assert (failure.code, failure.locked) == ("worktree_failed", False)
     assert "run worktree is detached; repair it" in failure.message
     assert host.calls == [
         ("stat", _ROOT),

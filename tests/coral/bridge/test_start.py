@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import json
 import random
@@ -9,6 +10,7 @@ import string
 from pathlib import Path
 
 import pytest
+import zstandard
 
 from coral.bridge.config import (
     ENGINE_VERSION,
@@ -19,6 +21,7 @@ from coral.bridge.config import (
 from coral.bridge.service import EngineBridge
 from coral.bridge.start import (
     RunNotRunnable,
+    check_startable,
     live_slot_bound,
     live_work_bound,
     worst_effect_key_length,
@@ -28,7 +31,8 @@ from coral.engine.types import EngineConfig
 from coral.model.canonical import canonical_bytes, content_hash
 from coral.model.ir import Analysis, CompiledGraph, LoopInfo, UnresolvedFact
 from coral.model.loader import MAX_DOCUMENT_BYTES
-from coral.stores.protocols import StartKeyConflict
+from coral.stores.fakes import FakeRunStore
+from coral.stores.protocols import CoralRun, RunStartSpec, StartKeyConflict
 from coral.stores.workflow_versions import pinned_version_id
 from coral.validate.pipeline import CheckResult
 from coral.validate.problems import ValidationReport
@@ -56,6 +60,9 @@ from tests.coral.workflow_builders import (
 from tests.coral.workflow_builders import start as start_node
 
 TWO_STEPS = fixture_text("two_steps")
+# Codes ``check_startable`` refuses with before any host or store is touched; a workflow
+# too large to pin is refused only by the pin.
+_WORKFLOW_REFUSALS = ("graph.", "profile.", "workflow.invalid")
 
 
 @pytest.fixture
@@ -90,9 +97,17 @@ def _region(*branches: dict[str, object], from_start: bool = False) -> str:
 
 
 def _refusal(world: World, yaml_text: str = TWO_STEPS, **options: object) -> str:
+    """The code a start refuses with; the pre-check agrees on every workflow refusal."""
     with pytest.raises(RunNotRunnable) as raised:
         start(world, yaml_text, **options)  # type: ignore[arg-type]
-    return raised.value.code
+    code = raised.value.code
+    if code.startswith(_WORKFLOW_REFUSALS):
+        with pytest.raises(RunNotRunnable) as checked:
+            check_startable(
+                yaml_text, run_id=run_id_for(start_key=str(options.get("start_key", START_KEY)))
+            )
+        assert checked.value.code == code
+    return code
 
 
 def test_a_start_commits_start_run_with_the_actor_and_a_frozen_config(world: World) -> None:
@@ -202,6 +217,14 @@ def test_a_workflow_that_cannot_run_safely_is_refused(
 ) -> None:
     assert _refusal(world, yaml_text) == code
     assert world.runs.get_run(run_id_for(), workspace_id=WORKSPACE) is None
+
+
+def test_the_pre_check_returns_the_graph_a_start_would_pin() -> None:
+    graph = check_startable(TWO_STEPS, run_id=run_id_for())
+    assert graph == compile_text(TWO_STEPS)[0]
+    with pytest.raises(RunNotRunnable) as oversized:
+        check_startable("#" * (MAX_DOCUMENT_BYTES + 1), run_id=run_id_for())
+    assert oversized.value.code == "workflow.too_large"
 
 
 def test_a_workflow_too_large_to_pin_is_refused_before_anything_is_written(
@@ -555,8 +578,9 @@ def test_a_start_retried_after_a_deploy_returns_the_same_run(
         {"spec": run_spec(title="Another title")},
         {"yaml_text": _linear(step("implement", ["implementer"]))},
         {"rejected_call_limit": 4},
+        {"yaml_text": "nodes: ["},
     ],
-    ids=["title", "workflow", "rejected_call_limit"],
+    ids=["title", "workflow", "rejected_call_limit", "workflow_that_no_longer_loads"],
 )
 def test_a_retry_with_other_caller_fields_or_another_workflow_conflicts(
     world: World, change: dict[str, object]
@@ -564,6 +588,117 @@ def test_a_retry_with_other_caller_fields_or_another_workflow_conflicts(
     start(world)
     with pytest.raises(StartKeyConflict):
         start(world, **change)  # type: ignore[arg-type]
+
+
+def test_a_retry_whose_workflow_differs_only_in_comments_returns_the_same_run(
+    world: World,
+) -> None:
+    first = start(world)
+    rows = world.work(first.id)
+    reworded = f"# Reworded after the first start.\n{TWO_STEPS}\n# The end.\n"
+    assert compile_text(reworded)[0].content_hash == compile_text(TWO_STEPS)[0].content_hash
+
+    assert start(world, reworded) == first
+    assert world.work(first.id) == rows
+    assert len(world.engine_log(first.id)) == 1
+
+
+def test_a_retry_is_replayed_before_the_workflow_checks_a_deploy_added(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = start(world)
+    graph = compile_text(TWO_STEPS)[0]
+    fact = UnresolvedFact(code="deadlock", message="a newer analyzer refuses it")
+    _checked_as(monkeypatch, graph.model_copy(update={"analysis": Analysis(unresolved=(fact,))}))
+    assert _refusal(world, start_key="another") == "graph.unresolved"
+
+    assert start(world) == first
+
+
+def test_a_retry_keeps_the_stored_worktree_target(world: World) -> None:
+    # An adopted worktree cannot report the commit its creation started from.
+    first = start(world, spec=run_spec(base_commit="a" * 40))
+
+    assert start(world, spec=run_spec(base_commit=None)) == first
+    state, _version = world.runs.load_run_state(first.id, workspace_id=WORKSPACE)
+    assert state.spec.base_commit == "a" * 40
+
+
+def test_a_first_start_that_loses_the_race_replays_the_winner(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = world.runs
+    insert = runs.start_run
+
+    def raced(spec: RunStartSpec, **options: object) -> CoralRun:
+        # A concurrent first start, which created the worktree, inserts the run first.
+        insert(dataclasses.replace(spec, base_commit="b" * 40), **options)  # type: ignore[arg-type]
+        return insert(spec, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runs, "start_run", raced)
+
+    run = start(world, spec=run_spec(base_commit=None))
+
+    assert (run.id, run.status) == (run_id_for(), int(RunStatus.RUNNING))
+    assert len(world.engine_log(run.id)) == 1
+    state, _version = runs.load_run_state(run.id, workspace_id=WORKSPACE)
+    assert state.spec.base_commit == "b" * 40
+    world.assert_fold_matches(run.id)
+
+
+def _config_missing(world: World, run_id: str) -> None:
+    runs = world.runs
+    assert isinstance(runs, FakeRunStore)
+    key = (WORKSPACE, run_id)
+    runs.specs[key] = dataclasses.replace(runs.specs[key], engine_config=None)
+
+
+@pytest.mark.parametrize("started", [True, False], ids=["running", "starting"])
+def test_a_retry_of_a_run_that_cannot_be_loaded_returns_it_without_pausing(
+    world: World, started: bool
+) -> None:
+    first = start(world) if started else start_without_engine(world, start_key=START_KEY)
+    _config_missing(world, first.id)
+    assert not world.bridge.read(workspace_id=WORKSPACE, run_id=first.id).loadable
+    before = world.run(first.id)
+
+    assert start(world) == before
+    # WHY: a replayed start must never pause a run, not even one it cannot load.
+    assert world.run(first.id) == before
+    assert len(world.runs.read_log(first.id, workspace_id=WORKSPACE)) == int(started)
+
+
+def test_a_retry_whose_pinned_version_does_not_decode_conflicts_and_writes_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = start(world)
+
+    def undecodable(**_options: object) -> object:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(world.versions, "load", undecodable)
+
+    with pytest.raises(StartKeyConflict, match="cannot be read back"):
+        start(world)
+    assert world.run(first.id) == first
+
+
+def test_a_retry_of_a_run_whose_rows_do_not_decode_conflicts_and_writes_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = start(world)
+    load = world.runs.load_run_state
+
+    def undecodable(run_id: str, **options: object) -> object:
+        if run_id == first.id:
+            raise zstandard.ZstdError("not a zstd frame")
+        return load(run_id, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(world.runs, "load_run_state", undecodable)
+
+    with pytest.raises(StartKeyConflict):
+        start(world)
+    assert world.run(first.id) == first
 
 
 def test_the_format_versions_are_the_bridge_s(world: World) -> None:
@@ -654,3 +789,22 @@ def test_a_start_key_is_the_run_s_idempotency_key(world: World) -> None:
     second = start(world, spec=run_spec(start_key="start-2"), start_key="start-2")
     assert first.id != second.id
     assert first.id == run_id_for(start_key=START_KEY)
+
+
+def test_another_user_s_start_with_the_same_key_starts_that_user_s_own_run(
+    world: World,
+) -> None:
+    alice = start(world)
+    other_workflow = _linear(step("implement", ["implementer"]))
+
+    bob = start(world, other_workflow, spec=run_spec(user="bob", title="Bob's run"), actor="bob")
+
+    assert bob.id == run_id_for("bob") != alice.id
+    assert (bob.user_id, bob.title) == ("bob", "Bob's run")
+    assert world.run(alice.id) == alice
+    assert world.engine_log(bob.id)[0].actor_ref == "bob"
+    # Each user's retry finds only that user's run.
+    assert start(world) == alice
+    with pytest.raises(StartKeyConflict):
+        start(world, spec=run_spec(user="bob"), actor="bob")
+    assert world.run(bob.id) == bob

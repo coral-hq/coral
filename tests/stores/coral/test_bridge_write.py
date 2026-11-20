@@ -20,11 +20,19 @@ from coral.db.enum_codecs import (
     WorkKind,
     WorkStatus,
 )
-from coral.stores.protocols import WorkItem
-from tests.coral.bridge._world import IMPLEMENT, WORKSPACE, World, finished, start
+from coral.stores.protocols import CoralRun, WorkItem
+from tests.coral.bridge._world import (
+    IMPLEMENT,
+    WORKSPACE,
+    World,
+    finished,
+    run_id_for,
+    run_spec,
+    start,
+)
 from tests.coral.workflow_builders import arrow, end, step, workflow_text
 from tests.coral.workflow_builders import start as start_node
-from tests.stores.coral._faults import fresh_process
+from tests.stores.coral._faults import fresh_process, run_racing
 
 WORKER = "worker-1"
 
@@ -92,6 +100,25 @@ def test_a_start_commits_its_log_rows_and_outbox_together(coral_db_uri: str) -> 
     (slot,) = state.agent_slots
     assert (slot.id, slot.status) == (store_slot_id(run.id, IMPLEMENT), int(SlotStatus.PENDING))
     reopened.assert_fold_matches(run.id)
+
+
+def test_racing_first_starts_of_one_key_make_one_run(coral_db_uri: str) -> None:
+    world = World.sql(coral_db_uri)
+    # Some starts created the worktree; the others adopted it and cannot know its start commit.
+    specs = [run_spec(base_commit="a" * 40 if index % 2 else None) for index in range(8)]
+
+    outcomes = run_racing(8, lambda index: start(world, spec=specs[index]))
+
+    assert [outcome.error for outcome in outcomes] == [None] * 8
+    runs = [outcome.value for outcome in outcomes]
+    assert all(isinstance(run, CoralRun) for run in runs)
+    assert {(run.id, run.status) for run in runs if isinstance(run, CoralRun)} == {
+        (run_id_for(), int(RunStatus.RUNNING))
+    }
+    reopened = _reopened(coral_db_uri)
+    (log,) = reopened.engine_log(run_id_for())
+    assert json.loads(log.body)["input"]["kind"] == "start_run"
+    reopened.assert_fold_matches(run_id_for())
 
 
 def test_a_resume_releases_and_revives_in_the_same_commit(coral_db_uri: str) -> None:

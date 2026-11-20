@@ -37,8 +37,13 @@ from coral.bridge.graphs import PinnedGraphMismatch, verified_content_hash
 from coral.bridge.keys import decision_rerequest_key
 from coral.bridge.mapping import FED_KINDS, UNMAPPED_KINDS
 from coral.bridge.messages import sanitize, strip_format_characters
-from coral.bridge.service import EngineBridge, RunNotRunnable
-from coral.db.enum_codecs import RUN_AUTH_MODE, RUN_EXECUTION_TARGET, RUN_TRIGGER_KIND
+from coral.bridge.service import STORED_TEXT_ERRORS, EngineBridge, RunNotRunnable, RunRead
+from coral.db.enum_codecs import (
+    RUN_AUTH_MODE,
+    RUN_EXECUTION_TARGET,
+    RUN_TRIGGER_KIND,
+    RunStatus,
+)
 from coral.engine.types import effect_key
 from coral.gates.ids import MAX_GATE_OUTCOME_CHARS, MAX_GATE_OUTCOMES
 from coral.model.ids import derived_id
@@ -103,7 +108,11 @@ def start_engine_run(
     Start a run of ``yaml_text`` on ``spec``'s target; a repeat with the same key and
     spec returns the same run and commits nothing.
 
-    The spec's version, rejected-call limit and frozen engine config are set here.
+    The spec's version, rejected-call limit and frozen engine config are set here. A
+    repeat is replayed before the workflow is checked, so rules added since the run
+    started do not refuse it, and it does not pause a run it cannot load (see
+    :func:`replay_start`).
+    A first start that a concurrent one of the same key beat is replayed the same way.
 
     :param actor: Who starts it, recorded on the run's first engine row; ``None`` only
         on a server without authentication.
@@ -112,13 +121,12 @@ def start_engine_run(
         is refused ``session.invalid``.
     :raises RunNotRunnable: for the first rule the workflow or spec breaks.
     :raises StartKeyConflict: when the key started a run with other caller fields or
-        another YAML.
+        another workflow, or one whose stored spec cannot be read back to compare.
     """
     existing = _existing_run(bridge, spec, start_key, allow_ownerless)
     if existing is not None:
         # A retry, perhaps after a deploy changed what the bridge derives: the run stands.
-        _check_retry(bridge, existing, spec, yaml_text, rejected_call_limit)
-        return _commit_start(bridge, existing, actor)
+        return _replay(bridge, existing, spec, yaml_text, rejected_call_limit, validate_ctx, actor)
     graph = _checked_graph(yaml_text, validate_ctx)
     _refuse(_graph_refusals(graph))
     if spec.user_id is None and not allow_ownerless:
@@ -151,7 +159,53 @@ def start_engine_run(
         state_version=STATE_VERSION,
         log_version=LOG_VERSION,
     )
-    run = bridge.run_store.start_run(frozen, start_key=start_key, now=epoch_seconds(bridge.now()))
+    try:
+        run = bridge.run_store.start_run(
+            frozen, start_key=start_key, now=epoch_seconds(bridge.now())
+        )
+    except StartKeyConflict:
+        # A concurrent first start of this key stored the run first.
+        raced = bridge.run_store.get_run(run_id, workspace_id=workspace_id)
+        if raced is None:
+            raise
+        return _replay(bridge, raced, spec, yaml_text, rejected_call_limit, validate_ctx, actor)
+    return _commit_start(bridge, run, actor)
+
+
+def check_startable(
+    yaml_text: str, *, run_id: str, validate_ctx: ValidateContext | None = None
+) -> CompiledGraph:
+    """
+    Refuse a workflow ``start_engine_run`` would refuse, before any host or store is touched.
+
+    The checks need only the workflow and the run id, so a caller can make them before
+    it creates the run's worktree. A workflow too large to pin is refused by the start.
+
+    :returns: The compiled graph a start would pin.
+    :raises RunNotRunnable: for the first workflow rule the graph breaks.
+    """
+    graph = _checked_graph(yaml_text, validate_ctx)
+    _refuse(_graph_refusals(graph))
+    _refuse(_shape_refusals(graph, run_id))
+    return graph
+
+
+def replay_start(bridge: EngineBridge, read: RunRead, *, actor: str | None) -> CoralRun:
+    """
+    Finish a replayed start, and return the run's row.
+
+    Only a run still starting whose engine ``read`` loaded unstarted commits its
+    ``StartRun`` (a crash came between storing the run and starting it); a run that
+    cannot be loaded, or one past starting, commits nothing, so it is never paused.
+    That commit pauses a run whose stored data stopped decoding since ``read``.
+    """
+    run = read.run
+    if (
+        run.status != int(RunStatus.STARTING)
+        or read.snapshot is None
+        or read.snapshot.state.status is not None
+    ):
+        return run
     return _commit_start(bridge, run, actor)
 
 
@@ -181,27 +235,65 @@ def _existing_run(
     return bridge.run_store.get_run(run_id, workspace_id=spec.workspace_id)
 
 
-def _check_retry(
+def _replay(
     bridge: EngineBridge,
     run: CoralRun,
     spec: RunStartSpec,
     yaml_text: str,
     rejected_call_limit: int,
+    validate_ctx: ValidateContext | None,
+    actor: str | None,
+) -> CoralRun:
+    """The run this key started, once the retry is shown to be the same start."""
+    read = bridge.read(workspace_id=run.workspace_id, run_id=run.id)
+    _check_retry(bridge, read, spec, yaml_text, rejected_call_limit, validate_ctx)
+    return replay_start(bridge, read, actor=actor)
+
+
+def _check_retry(
+    bridge: EngineBridge,
+    read: RunRead,
+    spec: RunStartSpec,
+    yaml_text: str,
+    rejected_call_limit: int,
+    validate_ctx: ValidateContext | None,
 ) -> None:
-    """Refuse a retry whose caller fields or YAML differ from the run's first start."""
-    stored, _version = bridge.run_store.load_run_state(run.id, workspace_id=run.workspace_id)
-    pinned = bridge.versions.load(workspace_id=run.workspace_id, version_id=run.version_id)
+    """
+    Refuse a retry whose caller fields or workflow differ from the run's first start.
+
+    The workflow is compared by its content hash, so an edit of comments or layout
+    is the same workflow; one that no longer compiles is another.
+    """
+    run = read.run
+    if read.rows is None:
+        raise StartKeyConflict(f"run {run.id} cannot be read back to compare this start")
+    stored = read.rows.spec
     if (
-        _caller_owned(stored.spec) != _caller_owned(spec)
-        or stored.spec.rejected_call_limit != rejected_call_limit
-        or pinned is None
-        or pinned.yaml_text != yaml_text
+        _caller_owned(stored) != _caller_owned(spec)
+        or stored.rejected_call_limit != rejected_call_limit
     ):
-        raise StartKeyConflict(f"run {run.id} was started with other fields or another workflow")
+        raise StartKeyConflict(f"run {run.id} was started with other fields")
+    try:
+        pinned = bridge.versions.load(workspace_id=run.workspace_id, version_id=run.version_id)
+    except (ValueError, *STORED_TEXT_ERRORS):
+        # A row stored by reference only, or whose text does not decode.
+        pinned = None
+    if pinned is None:
+        raise StartKeyConflict(f"run {run.id} cannot be read back to compare this start")
+    if pinned.yaml_text == yaml_text:
+        return
+    checked = check_text(yaml_text, validate_ctx)
+    if checked.graph is None or checked.graph.content_hash != pinned.content_hash:
+        raise StartKeyConflict(f"run {run.id} was started with another workflow")
 
 
 def _caller_owned(spec: RunStartSpec) -> RunStartSpec:
-    """``spec`` without the fields the bridge derives or writes later."""
+    """
+    ``spec`` without the fields the bridge derives or writes later.
+
+    The base commit is left out too: only the worktree's creation reports it, and a
+    start that adopted the worktree cannot, so the stored target stands.
+    """
     return dataclasses.replace(
         spec,
         version_id="",
@@ -211,6 +303,7 @@ def _caller_owned(spec: RunStartSpec) -> RunStartSpec:
         state_version=0,
         log_version=0,
         orchestrator_session_id=None,
+        base_commit=None,
     )
 
 
@@ -436,8 +529,10 @@ def _pass_digits(limit: int | None) -> int:
 
 __all__ = [
     "RunNotRunnable",
+    "check_startable",
     "live_slot_bound",
     "live_work_bound",
+    "replay_start",
     "start_engine_run",
     "worst_effect_key_length",
 ]
