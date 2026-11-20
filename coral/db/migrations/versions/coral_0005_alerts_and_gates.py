@@ -1,7 +1,7 @@
 """Workflow alerts, and gate visit tokens wide enough for every engine token.
 
-Revision ID: coral_0004_alerts_and_gates
-Revises: coral_0003_engine_bridge
+Revision ID: coral_0005_alerts_and_gates
+Revises: coral_0004_observations
 
 Downgrade refuses while any alert exists or any gate token is longer than 64 characters.
 Stop Coral servers before downgrading. On CockroachDB the downgrade leaves the token column
@@ -20,8 +20,8 @@ from alembic import context, op
 from coral.db.types import CAPPED_TEXT, CaseSensitiveString
 from omnigent.db.utils import is_cockroachdb
 
-revision: str = "coral_0004_alerts_and_gates"
-down_revision: str | None = "coral_0003_engine_bridge"
+revision: str = "coral_0005_alerts_and_gates"
+down_revision: str | None = "coral_0004_observations"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -79,7 +79,7 @@ def upgrade() -> None:
 
 
 def _downgrade_blockers(bind: sa.Connection) -> list[str]:
-    """Name each kind of stored data the coral_0003 schema cannot hold."""
+    """Name each kind of stored data the previous revision's schema cannot hold."""
     alerts = sa.table(_ALERTS, sa.column("id"))
     visits = sa.table(_GATE_VISITS, sa.column("id"), sa.column("token"))
     probes = {

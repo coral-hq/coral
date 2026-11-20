@@ -1,4 +1,4 @@
-"""coral_0004 on every DB lane: alerts, full engine gate tokens, and a guarded downgrade."""
+"""coral_0005 on every DB lane: alerts, full engine gate tokens, and a guarded downgrade."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from tests.db.coral._migration_support import (
 )
 
 _ENGINE_BRIDGE = "coral_0003_engine_bridge"
-_ALERTS_AND_GATES = "coral_0004_alerts_and_gates"
+_ALERTS_AND_GATES = "coral_0005_alerts_and_gates"
 _WORKSPACE = 1
 _RUN = "r" * 32
 _ALERTS = AlertRow.__table__

@@ -33,6 +33,7 @@ from coral.db.models_workflows import CoralBase
 from coral.gates.republish import GateRepublisher
 from coral.omni.protocols import GatePublisher, RunScopeRunner
 from coral.omni.server.access import request_viewer
+from coral.omni.server.observations import ChannelsRef, EvidenceChecker
 from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.queue.executors import EffectExecutor
 from coral.queue.store import SqlAlchemyCoralQueueStore
@@ -66,6 +67,9 @@ STATUS_EDGE_OBSERVER = "coral"
 CONFIRMED_STOPS_OBSERVER = "coral.confirmed_stops"
 # The name Coral's policies for bound sessions are registered under (S52).
 REQUIRED_POLICY_PROVIDER = "coral"
+# Recording step commands and judging handoffs; apart from the decision pool, so neither starves.
+EVIDENCE_THREADS = 4
+EVIDENCE_THREAD_NAME = "coral-evidence"
 # Server config: drain workers, at most one item per run in flight each, so this many
 # runs advance at once (1 to MAX_DRAIN_CONCURRENCY).
 DRAIN_CONCURRENCY_CONFIG_KEY = "coral_drain_concurrency"
@@ -174,6 +178,7 @@ def _wire_guards(
     stack: AsyncExitStack,
     run_in_thread: ThreadRunner = asyncio.to_thread,
     gate_answering: Callable[[], bool] | None = None,
+    evidence: EvidenceChecker | None = None,
 ) -> None:
     """
     Register what protects bound sessions, whether or not the session engine is wired.
@@ -185,8 +190,8 @@ def _wire_guards(
     through a cache each run-store commit clears. The S53 mutation guard reads
     the same cache of found rows and refuses clients' changes to bound sessions
     and engine agents; a run's anchor takes approvals while ``gate_answering``
-    says gate answers reach their handler. Every registration's undo goes on
-    ``stack``.
+    says gate answers reach their handler. A ``done`` handoff is judged by
+    ``evidence`` when given. Every registration's undo goes on ``stack``.
     """
     from coral.omni.policies.bindings_cache import CachedBindingLookup
     from coral.omni.policies.provider import CoralPolicyProvider
@@ -198,7 +203,12 @@ def _wire_guards(
     from omnigent.server.mutation_guards import register_mutation_guard
 
     register_engine_tools(
-        catalog=CATALOG, port=port, bindings=bindings, stack=stack, run_in_thread=run_in_thread
+        catalog=CATALOG,
+        port=port,
+        bindings=bindings,
+        stack=stack,
+        run_in_thread=run_in_thread,
+        evidence=evidence,
     )
     statuses = RunStatusCache(run_store)
     stack.callback(run_store.register_post_commit(statuses.invalidate))
@@ -212,6 +222,47 @@ def _wire_guards(
         else CoralMutationGuard(found_bindings, gate_answering=gate_answering)
     )
     stack.callback(register_mutation_guard(MUTATION_GUARD, guard))
+
+
+def _wire_evidence(
+    db_uri: str,
+    bridge: EngineBridge,
+    bound: BoundSessions,
+    channels: ChannelsRef,
+    threads: BoundedThreads,
+    stack: AsyncExitStack,
+) -> EvidenceChecker:
+    """Register the observer that records step commands; return the handoff's checker."""
+    from coral.omni.server.observations import (
+        OBSERVER_NAME,
+        EvidenceCapture,
+        InFlightCalls,
+        StepEvidenceLookup,
+    )
+    from coral.stores.observations import SqlAlchemyObservationStore
+    from omnigent.server.tool_result_observers import register_tool_call_observer
+
+    observations = SqlAlchemyObservationStore(db_uri)
+    steps = StepEvidenceLookup(
+        lambda workspace_id, run_id: bridge.load(workspace_id=workspace_id, run_id=run_id)
+    )
+    in_flight = InFlightCalls()
+    capture = EvidenceCapture(
+        bound=bound,
+        steps=steps,
+        observations=observations,
+        in_flight=in_flight,
+        read_l1=channels.read_l1,
+        run_in_thread=threads.run,
+    )
+    stack.callback(register_tool_call_observer(OBSERVER_NAME, capture))
+    return EvidenceChecker(
+        steps=steps,
+        observations=observations,
+        in_flight=in_flight,
+        read_l1=channels.read_l1,
+        run_in_thread=threads.run,
+    )
 
 
 def _register_executors(
@@ -245,7 +296,7 @@ def _wire_bridge(threads: BridgeThreads, stack: AsyncExitStack) -> None:
 
 def _wire_registration_carrier(stack: AsyncExitStack) -> None:
     """
-    Carry the owner's Coral rows across a password change (S105).
+    Carry the owner's Coral rows across a password change (S106).
 
     Omnigent calls the carrier inside the rotation's transaction on the operational
     database, which holds Coral's tables; an error aborts the rotation. Its undo goes
@@ -347,6 +398,7 @@ def _wire_session_engine(
     scope_runner: RunScopeRunner,
     threads: BridgeThreads,
     stack: AsyncExitStack,
+    evidence_channels: ChannelsRef | None = None,
 ) -> BoundSessionRefresher:
     """
     Build the session engine and register its executors, then its status-edge observers.
@@ -356,6 +408,8 @@ def _wire_session_engine(
     from the stance, and drift pauses go through the engine on ``threads``.
     The turn-fact recorder writes a signal for each turn end of a session in
     ``bound``; the returned refresher, which the caller starts, rebuilds it.
+    The evidence check reads worktree fingerprints through the same host
+    channels, set on ``evidence_channels``.
     """
     from coral.bridge.executors import turn_fact_executor
     from coral.bridge.mapping import TURN_FACT
@@ -415,6 +469,8 @@ def _wire_session_engine(
     channels = OmnigentHostWorkspaceChannels(
         host_registry=services.host_registry, host_store=host_store
     )
+    if evidence_channels is not None:
+        evidence_channels.channels = channels
     edges = CoralStatusEdges(asyncio.get_running_loop())
     # One record: the close writes each confirmed stop, workspace.commit reads it.
     stops = ConfirmedStops()
@@ -568,6 +624,14 @@ async def coral_lifespan(
                 app.state.coral_worker_supervisor = supervisor
                 app.state.coral_engine_bridge = bridge
                 app.state.coral_bound_sessions = bound
+            evidence_threads = BoundedThreads(
+                max_workers=EVIDENCE_THREADS, thread_name_prefix=EVIDENCE_THREAD_NAME
+            )
+            stack.callback(evidence_threads.close)
+            evidence_channels = ChannelsRef()
+            evidence = _wire_evidence(
+                storage_location, bridge, bound, evidence_channels, evidence_threads, stack
+            )
             _wire_guards(
                 run_store=run_store,
                 bindings=bindings,
@@ -575,6 +639,7 @@ async def coral_lifespan(
                 stack=stack,
                 run_in_thread=decisions.run,
                 gate_answering=answering,
+                evidence=evidence,
             )
             _wire_bridge(threads, stack)
             _wire_registration_carrier(stack)
@@ -604,6 +669,7 @@ async def coral_lifespan(
                     scope_runner=scope_runner,
                     threads=threads,
                     stack=stack,
+                    evidence_channels=evidence_channels,
                 )
                 stack.push_async_callback(refresher.stop)
                 await refresher.start()

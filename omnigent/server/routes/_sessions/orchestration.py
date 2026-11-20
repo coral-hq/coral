@@ -423,6 +423,10 @@ from omnigent.server.subagent_activity import (
     record_claude_subagent_return,
     record_subagent_activity,
 )
+from omnigent.server.tool_result_observers import (  # CORAL(S105)
+    complete_tool_call,
+    tool_call_scope,
+)
 from omnigent.spec.types import (
     AgentSpec,
     Phase,
@@ -12946,6 +12950,36 @@ async def _handle_mcp_tools_call(
     execute_tool: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     credential_user: str | None = None,
 ) -> Response:
+    """Run :func:`_mcp_tools_call` inside a tool-call observer scope."""
+    # CORAL(S105): tool-call observers see the call start and end, on every path.
+    with tool_call_scope(session_id, params.get("name"), params.get(MCP_OPERATION_ID_PARAM)):
+        return await _mcp_tools_call(
+            rpc_id,
+            session_id,
+            params,
+            conversation_store,
+            agent_store,
+            runner_router,
+            actor=actor,
+            request=request,
+            execute_tool=execute_tool,
+            credential_user=credential_user,
+        )
+
+
+async def _mcp_tools_call(
+    rpc_id: int | str | None,
+    session_id: str,
+    params: dict[str, Any],
+    conversation_store: ConversationStore,
+    agent_store: AgentStore,
+    runner_router: RunnerRouter | None,
+    *,
+    actor: dict[str, str] | None = None,
+    request: Request | None = None,
+    execute_tool: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    credential_user: str | None = None,
+) -> Response:
     """
     Handle a ``tools/call`` JSON-RPC request for the MCP proxy endpoint.
 
@@ -13408,6 +13442,16 @@ async def _handle_mcp_tools_call(
         namespaced_name,
         len(output),
         extra={"session_id": session_id},
+    )
+
+    # CORAL(S105): observers record the raw result before the agent sees it.
+    await complete_tool_call(
+        session_id,
+        namespaced_name,
+        arguments,
+        output,
+        is_error=exec_data.get("isError") is True,
+        operation_id=operation_id,
     )
 
     # ── TOOL_RESULT policy ───────────────────────────────────────────

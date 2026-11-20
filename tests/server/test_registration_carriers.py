@@ -1,4 +1,4 @@
-# CORAL(S105): registration carriers move a plugin's rows when a generation rotates.
+# CORAL(S106): registration carriers move a plugin's rows when a generation rotates.
 """Registration carriers run inside a password change's rotation, never on re-creation."""
 
 from __future__ import annotations

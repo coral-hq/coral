@@ -55,7 +55,7 @@ from omnigent.server.auth import RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC
 
 _HIDDEN_LIST_USERS = frozenset({RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL})
 
-# CORAL(S105): server plugins move their own registration work when a generation rotates.
+# CORAL(S106): server plugins move their own registration work when a generation rotates.
 RegistrationCarrier = Callable[[Session, str, str, str], None]
 _registration_carriers: tuple[tuple[object, RegistrationCarrier], ...] = ()
 _registration_carriers_lock = threading.Lock()
@@ -212,7 +212,7 @@ def _carry_registration_work(session: Session, user_id: str, *, old: str, new: s
         )
         .values(account_generation=new)
     )
-    # CORAL(S105): registered carriers move their rows in this transaction; an error aborts it.
+    # CORAL(S106): registered carriers move their rows in this transaction; an error aborts it.
     for _token, carrier in _registration_carriers:
         carrier(session, user_id, old, new)
 

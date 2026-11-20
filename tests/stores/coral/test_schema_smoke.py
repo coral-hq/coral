@@ -40,6 +40,7 @@ def test_ensure_coral_schema_creates_all_tables_and_allows_row_insertion(db_uri:
         "coral_stable_ids",
         "coral_workspace_op_intents",
         "coral_tool_replies",
+        "coral_command_observations",
         "coral_alerts",
     }
 
@@ -49,11 +50,11 @@ def test_ensure_coral_schema_creates_all_tables_and_allows_row_insertion(db_uri:
         if name.startswith("coral_") and name != "coral_alembic_version"
     }
     assert coral_tables == expected_tables
-    assert len(coral_tables) == 21
+    assert len(coral_tables) == 22
     assert "coral_alembic_version" in existing_tables
 
     current, head = current_coral_revision(db_uri)
-    assert current == head == "coral_0004_alerts_and_gates"
+    assert current == head == "coral_0005_alerts_and_gates"
 
     # Insert a WorkflowRow
     with Session(engine) as session:
@@ -138,4 +139,4 @@ def test_s31_truncation_preserves_coral_version_and_clears_data(db_uri: str) -> 
     assert "alembic_version" in all_tables
 
     current, head = current_coral_revision(db_uri)
-    assert current == head == "coral_0004_alerts_and_gates"
+    assert current == head == "coral_0005_alerts_and_gates"

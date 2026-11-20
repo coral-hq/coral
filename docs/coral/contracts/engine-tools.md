@@ -59,9 +59,11 @@ result, keys sorted:
 | `decision_closed` | choose | no | the decision was made with another label, or the run finished |
 | `not_orchestrator` | choose | no | the caller is not the run's current orchestrator |
 
-`evidence.missing`, `run.taken_over` and `recipient_closing` are reserved and
-never produced. Only `handoff.invalid` counts toward a slot's rejected-call
-streak; the third in a row pauses the run, and that reply already says stop.
+`evidence.missing` answers a `done` handoff whose `done_when` commands did not
+pass; it spends one of the step's attempts, not a rejected call
+([`evidence.md`](evidence.md)). `run.taken_over` and `recipient_closing` are
+reserved and never produced. Only `handoff.invalid` counts toward a slot's
+rejected-call streak; the third in a row pauses the run, and that reply already says stop.
 Every other refusal writes nothing and is logged as one info line with the
 tool, session, run and reason, never the arguments. No text for a paused,
 cancelled or finished run, or a replaced session, asks for another call.
@@ -249,7 +251,8 @@ second one entered while one runs raises before it registers anything
 
 Counting orchestrator rejections (ENG-06); replacing an orchestrator (the
 generation stays 1; the restart ladder); `items` (ENG-08); `refresh_note`
-(SES-07); the evidence check (EVD-04). Owners are in
+(SES-07); evidence scopes other than `per_agent` and native steps' commands
+(HRN-03). Owners are in
 [`session-facade.md`](session-facade.md), "Deferred work and owners".
 
 ### What the bridge does

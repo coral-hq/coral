@@ -14,7 +14,7 @@
   Omnigent adapter in `coral/omni/server/gates.py` and
   `coral/omni/server/access.py`; wiring in `coral/omni/server/plugin.py`.
 - **Related:** [`session-facade.md`](session-facade.md) (the bridge's work
-  rows, run protection), [`persistence.md`](persistence.md) (`coral_0004`),
+  rows, run protection), [`persistence.md`](persistence.md) (`coral_0005`),
   [`plugin.md`](plugin.md) (wiring and routes),
   [`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md)
   (probe (e), probe 15).
@@ -218,7 +218,7 @@ A run and its alerts record the owner's account generation, and only a
 request that proves it answers the run's gates or lists its alerts. A password
 change or an admin reset rotates the generation; Omnigent moves the account's
 registration work to the new one in the same transaction, and Coral's carrier
-(S105, `coral/stores/registration.py`) moves every Coral row the user owns at
+(S106, `coral/stores/registration.py`) moves every Coral row the user owns at
 the old generation with it: runs (finished ones too), their alerts, and
 `coral_workflows` rows in the operational database (none records a generation
 yet; the workflow definitions the routes serve live in a separate file). A
@@ -244,7 +244,7 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
 | S37 | `web/src/lib/inboxKinds.ts`, `InboxPage.tsx`, `useSidebarData.tsx` | Inbox extension kinds: a kind claims prompts, renders its own cards and adds to the badge |
 | S36 | `web/src/hooks/useIdleNotifications.ts` | The idle notifier skips rows a kind silences |
 | S85 | `web/src/main.tsx` | Mounts Coral's web runtime, which renders nothing without Coral |
-| S105 | `omnigent/server/accounts_store.py` | Registration carriers: a password change's rotation transaction also calls them, so Coral's runs and alerts keep their owner's generation; an error aborts the rotation |
+| S106 | `omnigent/server/accounts_store.py` | Registration carriers: a password change's rotation transaction also calls them, so Coral's runs and alerts keep their owner's generation; an error aborts the rotation |
 
 ## Residuals
 
