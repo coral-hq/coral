@@ -11,13 +11,12 @@ it, since its generation is not the one the run recorded.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from coral.db.enum_codecs import RunStatus
@@ -25,67 +24,33 @@ from omnigent.db.db_models import DEFAULT_WORKSPACE_ID
 from omnigent.runtime import pending_elicitations
 from omnigent.server import elicitation_hooks
 from omnigent.server.auth import LEVEL_EDIT
-from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from tests._helpers.polling import poll_until
 from tests.budgets import budget
 from tests.coral.omni._gate_server import (
-    CORAL_SERVER_PLUGIN,
+    ALICE_PASSWORD,
     INBOX,
+    AccountsServer,
+    accounts_server,
     gate_answers,
     gate_run,
     pending_here,
+    register,
     run_status,
 )
-from tests.server.test_accounts import _build_accounts_app, _login
+from tests.coral.workflow_builders import fixture_text
 
-ADMIN_PASSWORD = "admin-pw-12345"
 NOT_PERMITTED = "[not_permitted] Only the run owner can answer this gate."
-
-
-@dataclass
-class _Accounts:
-    admin: TestClient
-    alice: TestClient
-    # ``create_app``'s keyword arguments: the server's stores and auth provider.
-    stores: dict[str, Any]
-
-
-def _register(admin: TestClient, username: str, password: str) -> TestClient:
-    """A new client signed in as ``username``, registered through an admin's invite."""
-    invite = admin.post("/auth/invite", json={}).json()["token"]
-    client = TestClient(admin.app)
-    response = client.post(
-        "/auth/register", json={"invite": invite, "username": username, "password": password}
-    )
-    assert response.status_code == 200, response.text
-    return client
+RUNS = "/v1/coral/runs"
 
 
 @pytest.fixture
 def accounts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, coral_policy_registry: None
-) -> Iterator[_Accounts]:
-    import omnigent.server.app as app_module
-
-    original = app_module.create_app
-    captured: dict[str, Any] = {}
-
-    def with_coral(**kwargs: Any) -> FastAPI:
-        # Run anchors are filed in their owner's project, so the session engine needs one.
-        db_uri = kwargs["conversation_store"].storage_location
-        kwargs["project_store"] = SqlAlchemyProjectStore(db_uri)
-        captured.update(kwargs)
-        return original(**kwargs, server_plugins=[CORAL_SERVER_PLUGIN])
-
-    monkeypatch.setattr(app_module, "create_app", with_coral)
-    clients = _build_accounts_app(tmp_path, monkeypatch, init_admin_password=ADMIN_PASSWORD)
-    admin = next(clients)
+) -> Iterator[AccountsServer]:
     try:
-        _login(admin, "admin", ADMIN_PASSWORD)
-        yield _Accounts(admin, _register(admin, "alice", "alice-pw-1234"), captured)
+        with accounts_server(tmp_path, monkeypatch) as server:
+            yield server
     finally:
-        # Resuming the builder past its yield shuts the app down.
-        next(clients, None)
         # Prompts and the verdict handler outlive a lifespan in this process's registries.
         pending_elicitations.reset_for_tests()
         elicitation_hooks.reset_for_tests()
@@ -106,7 +71,7 @@ def _feed(client: TestClient) -> list[dict[str, Any]]:
 
 
 def test_a_re_created_account_is_refused_the_gates_and_alerts_of_the_one_before(
-    accounts: _Accounts,
+    accounts: AccountsServer,
 ) -> None:
     account_store = accounts.stores["account_store"]
     db_uri = account_store.storage_location
@@ -128,7 +93,7 @@ def test_a_re_created_account_is_refused_the_gates_and_alerts_of_the_one_before(
     before = {alert["kind"]: alert["alert_id"] for alert in _feed(accounts.alice)}
 
     assert accounts.admin.delete("/auth/users/alice").status_code == 204
-    replacement = _register(accounts.admin, "alice", "alice-new-pw-1234")
+    replacement = register(accounts.admin, "alice", "alice-new-pw-1234")
     assert account_store.get_user("alice").account_generation != generation
     feed = _feed(replacement)
     acks = [
@@ -158,7 +123,7 @@ def test_a_re_created_account_is_refused_the_gates_and_alerts_of_the_one_before(
     )
 
 
-def test_a_password_change_keeps_the_owner_s_gates_and_alerts(accounts: _Accounts) -> None:
+def test_a_password_change_keeps_the_owner_s_gates_and_alerts(accounts: AccountsServer) -> None:
     account_store = accounts.stores["account_store"]
     db_uri = account_store.storage_location
     generation = account_store.get_user("alice").account_generation
@@ -170,7 +135,7 @@ def test_a_password_change_keeps_the_owner_s_gates_and_alerts(accounts: _Account
 
     changed = accounts.alice.post(
         "/auth/users/me/password",
-        json={"old_password": "alice-pw-1234", "new_password": "alice-new-pw-1234"},
+        json={"old_password": ALICE_PASSWORD, "new_password": "alice-new-pw-1234"},
     )
     rotated = account_store.get_user("alice").account_generation
     carried = world.runs.get_run(run.id, workspace_id=DEFAULT_WORKSPACE_ID)
@@ -189,3 +154,36 @@ def test_a_password_change_keeps_the_owner_s_gates_and_alerts(accounts: _Account
     assert run_status(world, run) == int(RunStatus.COMPLETED)
     # The run's end, raised after the change, is hers too.
     assert [alert["kind"] for alert in at_end] == ["run_completed"]
+
+
+def test_an_accounts_server_starts_a_run_only_for_a_request_that_proves_its_account(
+    accounts: AccountsServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The plugin's definitions file is shared by this worker's tests: a key of its own.
+    key = f"accounts-{uuid.uuid4().hex[:12]}"
+    yaml_text = fixture_text("two_steps").replace("id: two-steps", f"id: {key}")
+    saved = accounts.alice.post("/v1/coral/workflows", json={"yaml": yaml_text})
+    assert saved.status_code == 200, saved.text
+    body = {
+        "workflow_id": saved.json()["id"],
+        "start_key": "accounts",
+        "host_id": "host-1",
+        "repo_path": "/repo/coral",
+    }
+
+    proven = accounts.alice.post(RUNS, json=body)
+    # As a request that reached the routes without an account authority would be.
+    monkeypatch.setattr("coral.omni.server.access.current_account_user", lambda: None)
+    unproven = accounts.alice.post(RUNS, json=body)
+
+    # Her request passes the account check and reaches the host's, which knows no such host.
+    assert proven.json()["error"] == {
+        "code": "not_permitted",
+        "message": "Host 'host-1' is not available to this user.",
+        "details": None,
+    }
+    assert unproven.json()["error"] == {
+        "code": "not_permitted",
+        "message": "Starting a run needs a request that proves its account.",
+        "details": None,
+    }

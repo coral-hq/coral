@@ -21,6 +21,14 @@ test-split:
 test-crdb:
     cd .. && OMNIGENT_TEST_DB_URI="cockroachdb+psycopg://root@localhost:26323/defaultdb?sslmode=disable" uv run --extra all --extra cockroachdb pytest tests/stores/coral --reruns 0 -n 4 --dist=loadfile
 
+# Regenerate coral/api/openapi.json from the Coral routers, then the web's TypeScript types from it.
+openapi:
+    cd .. && uv run --no-sync python -m coral.omni.server.openapi
+
+# Fail when coral/api/openapi.json or the web's generated Coral API types are stale.
+openapi-check:
+    cd .. && uv run --no-sync python -m coral.omni.server.openapi --check
+
 # Run Tier B: the real claude CLI against mock_llm_server. Skips without the claude CLI;
 # the stack sample also needs CORAL_TIER_B_STACK_SAMPLE=1.
 test-e2e:

@@ -13,6 +13,7 @@ from coral.alerts.types import (
     AlertKindName,
     AlertPayload,
     generation_matches,
+    is_owner,
     normalize_owner,
 )
 from coral.db.enum_codecs import ALERT_KIND
@@ -116,3 +117,25 @@ def test_generation_matches_fails_closed(
     recorded: str | None, viewer: Viewer, matches: bool
 ) -> None:
     assert generation_matches(recorded, viewer) is matches
+
+
+@pytest.mark.parametrize(
+    ("owner", "recorded", "viewer", "owns"),
+    [
+        ("alice", None, Viewer("alice"), True),
+        ("alice", None, Viewer("bob"), False),
+        (None, None, Viewer(None), True),
+        (LOCAL_USER_ID, None, Viewer(None), True),
+        (None, None, Viewer(LOCAL_USER_ID), True),
+        (None, None, Viewer("alice"), False),
+        ("alice", None, Viewer(None), False),
+        ("alice", "g1", Viewer("alice", "g1", check_generation=True), True),
+        ("alice", "g1", Viewer("alice", "g2", check_generation=True), False),
+        ("alice", "g1", Viewer("alice", "g1"), False),
+        ("alice", "g1", Viewer("bob", "g1", check_generation=True), False),
+    ],
+)
+def test_is_owner_folds_the_local_user_and_fails_closed_on_a_recorded_generation(
+    owner: str | None, recorded: str | None, viewer: Viewer, owns: bool
+) -> None:
+    assert is_owner(owner, recorded, viewer) is owns

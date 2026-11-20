@@ -7,13 +7,18 @@ import logging
 import threading
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from sqlalchemy import Engine, create_engine
 
 from coral.api.inbox import create_inbox_router
 from coral.api.info import create_info_router
+from coral.api.run_service import API_THREAD_NAME, API_THREADS, InFlight, RunsApi
+from coral.api.runs import create_runs_router
+from coral.api.spend import SPEND_THREAD_NAME, SPEND_THREADS, SpendCache
+from coral.api.stream import STREAM_THREAD_NAME, STREAM_THREADS, RunStreamHub
 from coral.api.sub_features import resolve_sub_features
 from coral.api.workflows import create_workflows_router
 from coral.bridge.bound_sessions import BoundSessions
@@ -32,16 +37,17 @@ from coral.db.migrate import ensure_coral_schema
 from coral.db.models_workflows import CoralBase
 from coral.gates.republish import GateRepublisher
 from coral.omni.protocols import GatePublisher, RunScopeRunner
-from coral.omni.server.access import request_viewer
+from coral.omni.server.access import account_still_valid, request_viewer
 from coral.omni.server.observations import ChannelsRef, EvidenceChecker
 from coral.omni.server.scopes import OmnigentRunScopeRunner
+from coral.omni.server.usage import OmnigentRunSpend
 from coral.queue.executors import EffectExecutor
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.stores.protocols import QueueStore, RunStore
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import FreshBindingLookup, SqlAlchemySessionBindingStore
 from coral.stores.workflow_versions import SqlAlchemyWorkflowVersionStore
-from coral.stores.workflows import SqlWorkflowDefinitionStore
+from coral.stores.workflows import SqlWorkflowDefinitionStore, WorkflowDefinitionStore
 from coral.tools.dispatch import ThreadRunner
 from coral.tools.port import RunDecisionPort
 from coral.workers.supervisor import MAX_DRAIN_CONCURRENCY, WorkerSupervisor
@@ -52,13 +58,17 @@ from omnigent.server.server_plugins import ServerPluginRegistration, ServerServi
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+    from coral.api.run_service import HostConnector
+    from coral.gates.verdict import GateAnswers
     from coral.omni.server.gates import GateAnswering, LocalGatePrompts
     from coral.omni.server.turn_facts import BoundSessionRefresher
+    from omnigent.server.auth import AuthProvider
 
 _logger = logging.getLogger(__name__)
 
-# Workspaces are not modelled yet, so every request shares one workflow library.
-_SINGLE_WORKSPACE_ID = 0
+# A router, the prefix it is mounted under, and its OpenAPI tags.
+RouterSpec = tuple[APIRouter, str, list[str]]
+CORAL_API_PREFIX = "/v1/coral"
 _CORAL_DB_FILENAME = "coral.db"
 # The task that withdraws this process's stale gate prompts.
 GATE_SWEEP_TASK = "coral-gate-prompt-sweep"
@@ -114,10 +124,6 @@ class _ProcessLifespan:
 
 
 _PROCESS_LIFESPAN = _ProcessLifespan()
-
-
-def _single_workspace_id() -> int:
-    return _SINGLE_WORKSPACE_ID
 
 
 def drain_concurrency(server_config: Mapping[str, Any] | None) -> int:
@@ -313,6 +319,84 @@ def _wire_registration_carrier(stack: AsyncExitStack) -> None:
     stack.callback(register_registration_carrier(carry))
 
 
+def _host_connector(services: ServerServices) -> HostConnector | None:
+    """Reaches a start's host through the server's host registry; ``None`` without one."""
+    from coral.omni.server.worktrees import connect_run_worktree_host
+
+    host_store = getattr(services, "host_store", None)
+    host_registry = getattr(services, "host_registry", None)
+    if host_store is None or host_registry is None:
+        return None
+    return partial(connect_run_worktree_host, host_registry=host_registry, host_store=host_store)
+
+
+def _runs_api(
+    bridge: EngineBridge,
+    run_store: RunStore,
+    services: ServerServices,
+    stack: AsyncExitStack,
+    *,
+    gate_answers: GateAnswers,
+    gate_publisher: GatePublisher,
+) -> RunsApi:
+    """
+    The runs API over the bridge: route calls on their own pool, spend on another.
+
+    Starts reach the owner's host through the server's registry, and need a proven
+    account generation where users sign in to accounts. Closing ``stack`` cancels
+    pending spend reads, then closes both pools; a request arriving after that is
+    refused as busy.
+    """
+    from omnigent.server.auth import auth_mode
+
+    api_threads = BoundedThreads(max_workers=API_THREADS, thread_name_prefix=API_THREAD_NAME)
+    stack.callback(api_threads.close)
+    spend_threads = BoundedThreads(max_workers=SPEND_THREADS, thread_name_prefix=SPEND_THREAD_NAME)
+    stack.callback(spend_threads.close)
+    spend = SpendCache(OmnigentRunSpend(services.conversation_store), spend_threads)
+    stack.callback(spend.close)
+    return RunsApi(
+        bridge=bridge,
+        run_store=run_store,
+        spend=spend,
+        in_flight=InFlight(api_threads),
+        gate_answers=gate_answers,
+        gate_publisher=gate_publisher,
+        connect_host=_host_connector(services),
+        requires_generation=auth_mode(services.auth_provider) == "accounts",
+    )
+
+
+def _run_stream_hub(
+    bridge: EngineBridge,
+    run_store: RunStore,
+    services: ServerServices,
+    stack: AsyncExitStack,
+) -> RunStreamHub:
+    """
+    The run streams over the bridge's reads, on their own pool.
+
+    Each run-store commit wakes the streams of its run; a caller who proved an account
+    generation is re-checked against the server's accounts; a server shutting down ends
+    them. Closing ``stack`` closes the hub first, which ends every stream, then
+    unregisters the hook and closes the pool.
+    """
+    from omnigent.server.shutdown_state import server_shutting_down
+
+    threads = BoundedThreads(max_workers=STREAM_THREADS, thread_name_prefix=STREAM_THREAD_NAME)
+    stack.callback(threads.close)
+    hub = RunStreamHub(
+        bridge=bridge,
+        run_store=run_store,
+        threads=threads,
+        still_valid=account_still_valid(services.auth_provider),
+        shutting_down=server_shutting_down,
+    )
+    stack.callback(run_store.register_post_commit(hub.notify))
+    stack.push_async_callback(hub.close)
+    return hub
+
+
 def _wire_gates(
     app: Any,
     services: ServerServices,
@@ -326,7 +410,7 @@ def _wire_gates(
     answering: GateAnswering,
     prompts: LocalGatePrompts,
     stack: AsyncExitStack,
-) -> None:
+) -> GateAnswers:
     """
     Register gate delivery and gate answers, whether or not the session engine is wired.
 
@@ -337,6 +421,8 @@ def _wire_gates(
     ``prompts`` observes every publish, and the sweep task withdraws this process's
     stale prompts until exit. Every undo goes on ``stack``. The server's auth
     provider is required: a services object without one is not taken as auth off.
+
+    :returns: The answers the verdict handler takes, which the runs API shares.
     """
     from coral.gates.executors import gate_publish_executor, gate_withdraw_executor
     from coral.gates.ids import GATE_ELICITATION_PREFIX, GATE_PUBLISH, GATE_WITHDRAW
@@ -379,6 +465,7 @@ def _wire_gates(
         app.state.coral_gate_publisher = publisher
         app.state.coral_gate_prompts = prompts
         app.state.coral_alert_store = SqlAlchemyAlertStore(db_uri)
+    return answers
 
 
 async def _stop_task(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
@@ -644,7 +731,7 @@ async def coral_lifespan(
             )
             _wire_bridge(threads, stack)
             _wire_registration_carrier(stack)
-            _wire_gates(
+            answers = _wire_gates(
                 app,
                 services,
                 db_uri=storage_location,
@@ -657,6 +744,19 @@ async def coral_lifespan(
                 prompts=prompts,
                 stack=stack,
             )
+            if hasattr(app, "state"):
+                # Its pools close before the gates are unregistered.
+                app.state.coral_runs_api = _runs_api(
+                    bridge,
+                    run_store,
+                    services,
+                    stack,
+                    gate_answers=answers,
+                    gate_publisher=publisher,
+                )
+                app.state.coral_run_stream_hub = _run_stream_hub(
+                    bridge, run_store, services, stack
+                )
             missing = _missing_engine_input(app, services)
             if missing is None:
                 refresher = _wire_session_engine(
@@ -683,23 +783,58 @@ async def coral_lifespan(
         yield
 
 
+def coral_routers(
+    *,
+    sub_features: Mapping[str, bool],
+    definitions: WorkflowDefinitionStore,
+    auth_provider: AuthProvider | None,
+) -> tuple[RouterSpec, ...]:
+    """
+    Every Coral router with its prefix and tags: the plugin mounts these, and the
+    OpenAPI export documents them.
+
+    Each route resolves its caller through ``auth_provider`` and reads the request's
+    workspace; the Inbox reads the alert store the lifespan publishes, the runs routes
+    its runs API and run-stream hub, and a start the caller's workflow from ``definitions``.
+    """
+    viewer = request_viewer(auth_provider)
+    return (
+        (create_info_router(sub_features=sub_features), "", ["coral"]),
+        (
+            create_workflows_router(
+                definitions,
+                viewer_dependency=viewer,
+                workspace_id_dependency=current_workspace_id,
+            ),
+            CORAL_API_PREFIX,
+            ["coral"],
+        ),
+        (
+            create_inbox_router(
+                viewer_dependency=viewer, workspace_id_dependency=current_workspace_id
+            ),
+            CORAL_API_PREFIX,
+            ["coral"],
+        ),
+        (
+            create_runs_router(
+                definitions=definitions,
+                viewer_dependency=viewer,
+                workspace_id_dependency=current_workspace_id,
+            ),
+            CORAL_API_PREFIX,
+            ["coral"],
+        ),
+    )
+
+
 def register(services: ServerServices) -> ServerPluginRegistration:
     """Register Coral routers, policy modules, and lifespan hooks."""
     if services.host_sharded:
         raise RuntimeError("Coral server plugin does not support host_sharded=True")
 
     sub_features = resolve_sub_features(services.server_config)
-    info_router = create_info_router(sub_features=sub_features)
     engine = _create_workflow_engine()
-    workflows_router = create_workflows_router(
-        SqlWorkflowDefinitionStore(engine),
-        workspace_id_dependency=_single_workspace_id,
-    )
-    # The feed reads the alert store the lifespan publishes; the caller is the owner.
-    inbox_router = create_inbox_router(
-        viewer_dependency=request_viewer(services.auth_provider),
-        workspace_id_dependency=current_workspace_id,
-    )
 
     @asynccontextmanager
     async def workflow_engine_lifespan(
@@ -712,10 +847,10 @@ def register(services: ServerServices) -> ServerPluginRegistration:
             engine.dispose()
 
     return ServerPluginRegistration(
-        routers=(
-            (info_router, "", ["coral"]),
-            (workflows_router, "/v1/coral", ["coral"]),
-            (inbox_router, "/v1/coral", ["coral"]),
+        routers=coral_routers(
+            sub_features=sub_features,
+            definitions=SqlWorkflowDefinitionStore(engine),
+            auth_provider=services.auth_provider,
         ),
         lifespan_hooks=(coral_lifespan, workflow_engine_lifespan),
         policy_modules=("coral.omni.policies.hygiene", "coral.omni.policies.guards"),

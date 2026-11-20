@@ -594,8 +594,9 @@ permanent effect failure such as `dispatch.policy_denied` or
 `session.host_unsupported`, a permanent anchor or orchestrator failure, a
 commit that cannot be built) and `liveness` need a retry (CRL-137); until then
 such a run can only be cancelled. A run paused `failure_path` with detail
-`engine.load_failed` can be neither resumed nor cancelled (see the deferred
-table). `engine_upgrade` is cleared by neither.
+`engine.load_failed` cannot be resumed; the runs API's `:cancel` cancels it on
+its row alone ([`runs-api.md`](runs-api.md), "Actions"). `engine_upgrade` is
+cleared by neither.
 
 **The orchestrator.** The commit that opens a run's first decision names
 `orchestrator_session_id` and queues the orchestrator's create (bundle
@@ -971,12 +972,24 @@ handoffs (still refused, and re-prompted on resume); and one lifespan per
 process (see "The engine bridge" and
 [`engine-tools.md`](engine-tools.md)).
 
+The runs API settled its rows ([`runs-api.md`](runs-api.md),
+[`run-stream.md`](run-stream.md)): routes that start, pause, resume and cancel
+runs, answer their gates and stream them, each checking the owner first and
+taking the owner, credentials, workflow and run target from the server; a
+read that never writes and shows an unloadable run's `engine.load_failed`
+cause whatever its row's pause; a cancel on the run row alone for a run the
+bridge cannot load; Resume, and Cancel only for a run no resume can clear,
+through one `allowed_actions` rule; and Resume and Cancel on the Inbox's pause
+card. Activation rows are not projected: the engine state and the run's view
+carry them.
+
 | Work | Owner |
 |---|---|
-| Runs API and SSE: the routes that start, resume and cancel runs, and their authorization (the bridge authorizes nothing). Take the owner from the authenticated user, never the request (an ownerless run's agents are the local user's on a single-user server; use `allow_ownerless` only there: anywhere else its first create is refused `session.invalid`), and the host, worktree and branch from `coral/workspace/run_worktree.py`. Show stalls, pause causes and a step a person typed into, and offer only cancel for a run paused `failure_path` by anything but a step's `agent.failed` (see "What a resume clears"). Project activation rows (gate rows are projected by the bridge). Store the full run request: briefs carry only `request_preview`, at most 512 characters. The workflow Inbox's run actions: Resume and Cancel, the run view, marking a run's alerts read when it is opened, and bulk ack ([`gates-and-inbox.md`](gates-and-inbox.md)). | CRL-135 |
-| Unloadable runs: one already paused for another reason shows no load-failure cause, and none can be cancelled, because cancel goes through the engine and no store-only cancel exists | CRL-135 |
-| A pause made on the run row alone has no durable marker: a resync repair between the engine's own pause and its plan probe can take over the row's reason, and the probe then lifts the row | CRL-135 |
-| Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)), which must check the host token; `runner_lost` and `retry_step` work (a retry clears every `failure_path` cause, and a resume then stops clearing a step's `agent.failed`), binding a retried slot's new session with the slot's current `session_generation` (port rule (a), [`engine-tools.md`](engine-tools.md)); replacing an orchestrator, with keys and a fence scoped to its generation; backoff for an orchestrator's transient failures, which pause the run at once; winding down the anchor and orchestrator sessions after a run ends | CRL-137 |
+| The run view: stalls, pause causes and a step a person typed into; the run outcome (`GET /v1/coral/runs/{id}/outcome` answers 501) and `diff_stat`; start-dialog wiring; marking a run's alerts read when it is opened; bulk ack ([`runs-api.md`](runs-api.md), [`gates-and-inbox.md`](gates-and-inbox.md)) | CRL-136 |
+| Run requests over 512 characters: a start refuses them today, and briefs carry only `request_preview` | CRL-137 |
+| A pause made on the run row alone has no durable marker: a resync repair between the engine's own pause and its plan probe can take over the row's reason, and the probe then lifts the row | CRL-137 |
+| Run preflight (`POST /v1/coral/runs:preflight` answers 501): the CRL-132 facts need an `AgentSpec` per step, and only `materialize` builds them | CRL-137 |
+| Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)), which must check the host token; `runner_lost` and `retry_step` work (a retry clears every `failure_path` cause, and a resume then stops clearing a step's `agent.failed`; the runs API's `:retry` answers 501 until then), binding a retried slot's new session with the slot's current `session_generation` (port rule (a), [`engine-tools.md`](engine-tools.md)); replacing an orchestrator, with keys and a fence scoped to its generation; backoff for an orchestrator's transient failures, which pause the run at once; winding down the anchor and orchestrator sessions after a run ends | CRL-137 |
 | Tier B: the real 529, 429 and 401 texts the classifier reads, and worktree fingerprint noise on real hosts, which pauses writer steps `drift` (`pending_input`) | CRL-137 |
 | ADR-05 probe 15 residuals: the sandbox probe on macOS seatbelt and Linux bwrap (sibling harness sockets, sibling runners' environments, bridge dirs, the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials), before the walking skeleton is done | CRL-137 |
 | Label a gate Enforced only when that probe passes and the server requires identity, with steps holding no owner credential; never on single-user or auth-off servers. No gate is labelled Enforced today | RUL-02 |

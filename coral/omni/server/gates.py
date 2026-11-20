@@ -18,6 +18,7 @@ from typing import Any
 
 from coral.gates.ids import GATE_ELICITATION_ID
 from coral.gates.verdict import GateAnswer, GateAnswers, GateVerdict, gate_refusal
+from coral.limits import WarnOnce
 from coral.omni.protocols import TrackedPrompt
 from coral.omni.server.access import viewer_for
 from omnigent.db.db_models import current_workspace_id
@@ -70,7 +71,7 @@ class LocalGatePrompts:
         self._limit = limit
         self._lock = threading.Lock()
         self._prompts: OrderedDict[TrackedPrompt, None] = OrderedDict()
-        self._full_warned = False
+        self._full = WarnOnce()
 
     def observe(self, conversation_id: str, event: dict[str, Any]) -> None:
         """The S5 observer; reads the event and never changes it."""
@@ -90,13 +91,12 @@ class LocalGatePrompts:
             return
         if params.get("target_session_id") is not None:
             return
-        warn = False
         with self._lock:
             self._prompts[prompt] = None
-            if len(self._prompts) > self._limit:
+            dropped = len(self._prompts) > self._limit
+            if dropped:
                 self._prompts.popitem(last=False)
-                warn, self._full_warned = not self._full_warned, True
-        if warn:
+        if dropped and self._full.first():
             _logger.warning(
                 "Coral tracks at most %d gate prompts per process; the oldest are no longer swept",
                 self._limit,

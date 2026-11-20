@@ -36,10 +36,12 @@ def start_owned_run(
     user_id: str | None = ALICE,
     generation: str | None = None,
     workspace_id: int = WORKSPACE,
+    workflow_id: str = "wf",
+    now: int = NOW,
 ) -> CoralRun:
-    """A run of ``user_id`` recorded under ``generation``, started at :data:`NOW`."""
+    """A run of ``user_id`` recorded under ``generation``, started at ``now``."""
     spec = RunStartSpec(
-        "wf",
+        workflow_id,
         "v1",
         f"Run {key}",
         "p",
@@ -47,7 +49,7 @@ def start_owned_run(
         user_id=user_id,
         account_generation=generation,
     )
-    return runs.start_run(spec, start_key=key, now=NOW)
+    return runs.start_run(spec, start_key=key, now=now)
 
 
 def alert_payload(title: str = "Run paused") -> str:

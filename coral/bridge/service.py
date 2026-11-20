@@ -16,6 +16,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import Literal
 
 import zstandard
@@ -81,10 +82,12 @@ from coral.gates.ids import (
     new_gate_elicitation_id,
     receipt_label,
 )
+from coral.model.ir import CompiledGraph
 from coral.queue.drainer import FinishedWork
 from coral.queue.run_effects import describe_exception
 from coral.recovery.pause import pause_log_checksum, pause_run_once
 from coral.stores.protocols import (
+    STORED_TEXT_ERRORS,
     UNFINISHED_RUN_STATUSES,
     CommitOutcome,
     CoralRun,
@@ -115,8 +118,9 @@ _LOAD_ERRORS = (
     ValidationError,
     json.JSONDecodeError,
 )
-# Stored text that does not decode while the run's rows load.
-_STORED_TEXT_ERRORS = (zstandard.ZstdError, UnicodeDecodeError)
+# Stored text that does not decode in the fold or a commit's reducer. Of the ValueErrors
+# only UnicodeDecodeError counts there: another may be a reducer defect.
+_FOLD_TEXT_ERRORS = (zstandard.ZstdError, UnicodeDecodeError)
 # Commits that fail the same way every time: the run pauses with this detail instead.
 _UNBUILDABLE: tuple[tuple[type[Exception], str], ...] = (
     (TransitionTooLarge, "transition_too_large"),
@@ -125,6 +129,8 @@ _UNBUILDABLE: tuple[tuple[type[Exception], str], ...] = (
 )
 UNBUILDABLE_ERRORS = tuple(kind for kind, _detail in _UNBUILDABLE)
 LOAD_FAILED_DETAIL = "engine.load_failed"
+# The detail of the pause a run's owner asks for.
+USER_PAUSE_DETAIL = "user"
 # Rows read at a time while looking for a run's start entry.
 _START_SCAN_ROWS = 8
 
@@ -201,6 +207,41 @@ class GateAnswerResult:
     code: str | None = None
     allowed: tuple[str, ...] = ()
     answered_label: str | None = None
+
+
+@dataclass(frozen=True)
+class PauseResult:
+    """
+    What a user pause did.
+
+    :param outcome: ``paused`` when the engine took the pause, ``unchanged`` when it
+        held it already, ``refused`` otherwise.
+    :param code: For a refusal, the engine's code (``run_terminal`` for a finished
+        run, a row cancelled without its engine included) or ``unbuildable`` (the run
+        was paused ``failure_path`` instead).
+    """
+
+    outcome: Literal["paused", "unchanged", "refused"]
+    commit: BridgeCommit
+    code: str | None = None
+
+
+@dataclass(frozen=True)
+class RunRead:
+    """
+    A run as a read sees it, without the pause a failed load makes.
+
+    :param rows: ``None`` when its stored rows cannot be decoded.
+    :param snapshot: ``None`` when its engine state cannot be loaded.
+    """
+
+    run: CoralRun
+    rows: RunState | None
+    snapshot: EngineSnapshot | None
+
+    @property
+    def loadable(self) -> bool:
+        return self.snapshot is not None
 
 
 @dataclass(frozen=True)
@@ -295,12 +336,60 @@ class EngineBridge:
             self._pause_unloadable(exc)
             raise
 
-    def _load_rows(self, workspace_id: int, run_id: str) -> RunState:
+    def read(self, *, workspace_id: int, run_id: str) -> RunRead:
+        """
+        The run's row, rows and engine state, as far as they load; never writes.
+
+        Unlike :meth:`load`, a run that cannot be loaded is not paused: reads run on
+        every view of a run, and a view must not change it.
+
+        A run row whose other rows are missing or do not decode reads as the row alone.
+
+        :raises RunNotFound: when the workspace has no such run.
+        """
         try:
-            state, _version = self._runs.load_run_state(run_id, workspace_id=workspace_id)
-        except _STORED_TEXT_ERRORS as exc:
+            rows = self._load_rows(workspace_id, run_id)
+        except (EngineLoadFailed, RunNotFound) as exc:
+            run = self._runs.get_run(run_id, workspace_id=workspace_id)
+            if run is None:
+                raise RunNotFound(
+                    f"Run {run_id!r} not found in workspace {workspace_id}"
+                ) from None
+            _logger.debug(
+                "Coral reads run %s without its rows: %s", run_id, describe_exception(exc)
+            )
+            return RunRead(run=run, rows=None, snapshot=None)
+        try:
+            snapshot = self._snapshot(rows)
+        except (EngineLoadFailed, *_FOLD_TEXT_ERRORS) as exc:
+            # A log or pinned version that is not UTF-8 fails below the load errors.
+            _logger.debug(
+                "Coral reads run %s without its engine state: %s",
+                run_id,
+                describe_exception(exc),
+            )
+            return RunRead(run=rows.run, rows=rows, snapshot=None)
+        return RunRead(run=rows.run, rows=rows, snapshot=snapshot)
+
+    def pinned_graph(self, *, workspace_id: int, version_id: str) -> CompiledGraph:
+        """
+        The graph of a pinned workflow version, from the cache loads share; never writes.
+
+        :raises PinnedGraphError: when the version is missing or its graph cannot be used.
+        """
+        return self._graphs.load(
+            workspace_id=workspace_id, version_id=version_id, expected_hash=None
+        )
+
+    def _load_rows(self, workspace_id: int, run_id: str) -> RunState:
+        return self._load_state(workspace_id, run_id)[0]
+
+    def _load_state(self, workspace_id: int, run_id: str) -> tuple[RunState, int]:
+        """The run's rows and version; rows whose stored text does not decode fail the load."""
+        try:
+            return self._runs.load_run_state(run_id, workspace_id=workspace_id)
+        except STORED_TEXT_ERRORS as exc:
             raise EngineLoadFailed(workspace_id, run_id, exc) from exc
-        return state
 
     def _snapshot(self, rows: RunState) -> EngineSnapshot:
         workspace_id, run_id = rows.workspace_id, rows.run_id
@@ -379,7 +468,8 @@ class EngineBridge:
         A refused input is skipped and the next sees the state unchanged; a result that
         changes nothing is not written. A commit that cannot be built pauses the run
         ``failure_path`` in a separate commit instead, which the result's
-        ``unbuildable`` names.
+        ``unbuildable`` names. On a row cancelled without its engine, a running or
+        paused engine is cancelled first, and one never started takes no input.
 
         :param actor: Who asked: a user id, the calling session, or ``None`` for the engine.
         :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
@@ -426,7 +516,11 @@ class EngineBridge:
 
         def reduce(rows: RunState) -> Transition:
             snapshot = self._snapshot(rows)
-            applied = self._apply(snapshot, inputs(snapshot), now)
+            commands = _converging(snapshot, inputs)
+            if commands is None:
+                latest[0] = ()
+                return Transition.empty()
+            applied = self._apply(snapshot, commands, now)
             latest[0] = applied
             extras = extra(snapshot, applied) if extra is not None else CommitExtras()
             try:
@@ -456,10 +550,11 @@ class EngineBridge:
                 workspace_id=workspace_id,
                 run_id=run_id,
                 reduce_fn=reduce,
+                load_state=partial(self._load_state, workspace_id, run_id),
                 now=epoch_seconds(now),
                 lock_timeout_s=LOCK_TIMEOUT_S,
             )
-        except _STORED_TEXT_ERRORS as exc:
+        except _FOLD_TEXT_ERRORS as exc:
             raise EngineLoadFailed(workspace_id, run_id, exc) from exc
         return BridgeCommit(outcome=outcome, entries=tuple(item.entry for item in latest[0]))
 
@@ -553,6 +648,43 @@ class EngineBridge:
             actor=actor,
             lift_store_pause=True,
         )
+
+    def pause_run(self, *, workspace_id: int, run_id: str, actor: str | None) -> PauseResult:
+        """
+        Pause the run for its owner through the engine, starting it first if it has not.
+
+        Decided by the pause's own entry, not by whether the commit applied: on a row
+        cancelled without its engine, the commit cancels the engine and the pause is
+        refused.
+
+        :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
+        :raises RunContended: when other commits kept winning.
+        """
+        pauses: list[Applied] = []
+
+        def observe(_snapshot: EngineSnapshot, applied: Sequence[Applied]) -> CommitExtras:
+            pauses[:] = [item for item in applied if isinstance(item.entry.input, engine.PauseRun)]
+            return CommitExtras()
+
+        commit = self.commit_inputs(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            inputs=lambda snapshot: (
+                *self._start_first(snapshot),
+                engine.PauseRun(reason="user", detail=USER_PAUSE_DETAIL),
+            ),
+            actor=actor,
+            extra=observe,
+        )
+        if commit.unbuildable is not None:
+            return PauseResult(outcome="refused", commit=commit, code="unbuildable")
+        if not commit.entries or not pauses:
+            # A row cancelled before its engine started takes no input.
+            return PauseResult(outcome="refused", commit=commit, code="run_terminal")
+        (pause,) = pauses
+        if pause.entry.rejection is not None:
+            return PauseResult(outcome="refused", commit=commit, code=pause.entry.rejection.code)
+        return PauseResult(outcome="paused" if pause.accepted else "unchanged", commit=commit)
 
     def cancel_run(self, *, workspace_id: int, run_id: str, actor: str | None) -> BridgeCommit:
         """
@@ -1014,6 +1146,25 @@ class EngineBridge:
         return repaired
 
 
+def _converging(snapshot: EngineSnapshot, inputs: Inputs) -> Sequence[engine.Input] | None:
+    """
+    The inputs to apply; ``None`` refuses them all.
+
+    A run cancelled on its row alone (it could not be loaded then) leads a running or
+    paused engine to its cancel before anything else, so the row stays cancelled. An
+    engine that never started stays unstarted, so a start and a cancel never share
+    one commit.
+    """
+    if snapshot.store.status != int(RunStatus.CANCELLED):
+        return inputs(snapshot)
+    status = snapshot.state.status
+    if status is None:
+        return None
+    if status in engine.TERMINAL_STATUSES:
+        return inputs(snapshot)
+    return (engine.CancelRun(), *inputs(snapshot))
+
+
 def _unbuildable_detail(exc: Exception) -> str:
     return next(detail for kind, detail in _UNBUILDABLE if isinstance(exc, kind))
 
@@ -1026,11 +1177,14 @@ def _storable(text: str, limit: int) -> bool:
 __all__ = [
     "LOAD_FAILED_DETAIL",
     "UNBUILDABLE_ERRORS",
+    "USER_PAUSE_DETAIL",
     "BridgeCommit",
     "EngineBridge",
     "EngineLoadFailed",
     "GateAnswerResult",
+    "PauseResult",
     "ResyncReport",
     "RunNotRunnable",
+    "RunRead",
     "TurnFactResult",
 ]

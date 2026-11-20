@@ -689,10 +689,11 @@ async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifes
         store: SqlAlchemyCoralRunStore, callback: Callable[[str, int], None]
     ) -> Callable[[], None]:
         unregister = register_post_commit(store, callback)
-        hooks.append("registered")
+        name = getattr(callback, "__qualname__", repr(callback))
+        hooks.append(f"registered {name}")
 
         def recording_unregister() -> None:
-            hooks.append("unregistered")
+            hooks.append(f"unregistered {name}")
             unregister()
 
         return recording_unregister
@@ -707,10 +708,14 @@ async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifes
         # Bound sessions are guarded whether or not the session engine is wired.
         assert _coral_policies_registered()
         assert isinstance(_coral_mutation_guard(), CoralMutationGuard)
-        assert hooks == ["registered"]
+        # The policies' run-status cache, and the run streams' wake-up.
+        assert hooks == ["registered RunStatusCache.invalidate", "registered RunStreamHub.notify"]
     assert not _coral_policies_registered()
     assert _coral_mutation_guard() is None
-    assert hooks == ["registered", "unregistered"]
+    assert hooks[2:] == [
+        "unregistered RunStreamHub.notify",
+        "unregistered RunStatusCache.invalidate",
+    ]
 
 
 async def test_the_mutation_guard_refuses_changes_to_a_bound_session_while_the_lifespan_runs(

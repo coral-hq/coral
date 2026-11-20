@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Literal
 
 from coral.alerts.types import (
     MAX_ALERT_MESSAGE_CHARS,
@@ -62,6 +63,22 @@ PAUSE_MESSAGES: Mapping[str, str] = MappingProxyType(
     }
 )
 _UNKNOWN_PAUSE = "The run paused."
+# Which step sessions a cancel made on the run row alone may have left running.
+UnstoppedSessions = Literal["all", "some"]
+# What its alert says: ``all`` when none could be named, ``some`` when more were open
+# than one cancel stops or a session was still being created.
+UNSTOPPED_SESSIONS_MESSAGES: Mapping[UnstoppedSessions, str] = MappingProxyType(
+    {
+        "all": (
+            "Coral could not stop this run's step sessions; their tool calls are refused. "
+            "Stop them from the session list."
+        ),
+        "some": (
+            "Coral may not have stopped all of this run's step sessions; their tool calls "
+            "are refused. Stop any still open from the session list."
+        ),
+    }
+)
 _RUN_ENDS: Mapping[int, tuple[AlertKindName, str, str]] = MappingProxyType(
     {
         int(RunStatus.COMPLETED): ("run_completed", "Run completed", "The run finished."),
@@ -149,11 +166,35 @@ def commit_alerts(
         resolutions.append(AlertResolution(subject_id=alert_subject(run.id, "pause")))
     raises.extend(_watchdog_alerts(run, graph, final, effects))
     resolutions.extend(_decided(run.id, first, final))
-    end = _RUN_ENDS.get(status)
-    if end is not None and run.status not in _RUN_ENDS:
-        raises.append(_run_end_alert(run, *end))
-        resolutions.append(AlertResolution(kinds=_RESOLVED_AT_RUN_END))
+    end = run_end_alerts(run, status)
+    raises.extend(end.raises)
+    resolutions.extend(end.resolutions)
     return AlertChanges(raises=tuple(raises), resolutions=tuple(resolutions))
+
+
+def run_end_alerts(
+    run: CoralRun, status: int, *, unstopped: UnstoppedSessions | None = None
+) -> AlertChanges:
+    """
+    The run-end alert of a commit that leaves ``run`` at ``status``, and what it resolves.
+
+    Nothing when the run does not end in the commit or had ended before it.
+
+    :param run: The run row as loaded, before the commit.
+    :param unstopped: A cancel may have left these step sessions running; its alert
+        says so and, since it asks the owner to act, has normal priority.
+    """
+    end = _RUN_ENDS.get(status)
+    if end is None or run.status in _RUN_ENDS:
+        return AlertChanges()
+    kind, title, message = end
+    priority = AlertPriority.LOW
+    if unstopped is not None and status == int(RunStatus.CANCELLED):
+        message, priority = UNSTOPPED_SESSIONS_MESSAGES[unstopped], AlertPriority.NORMAL
+    return AlertChanges(
+        raises=(_run_end_alert(run, kind, title, message, priority),),
+        resolutions=(AlertResolution(kinds=_RESOLVED_AT_RUN_END),),
+    )
 
 
 def row_pause_alert(run: CoralRun, pause_reason: int | None) -> AlertDraft | None:
@@ -254,7 +295,9 @@ def _watchdog_alert(
     return _draft(run, "watchdog", effect.effect_key, subject, payload, AlertPriority.NORMAL)
 
 
-def _run_end_alert(run: CoralRun, kind: AlertKindName, title: str, message: str) -> AlertDraft:
+def _run_end_alert(
+    run: CoralRun, kind: AlertKindName, title: str, message: str, priority: AlertPriority
+) -> AlertDraft:
     payload = AlertPayload(
         title=title,
         message=message,
@@ -262,7 +305,7 @@ def _run_end_alert(run: CoralRun, kind: AlertKindName, title: str, message: str)
         actions=_READ_ONLY,
         deep_link=run_link(run.id),
     )
-    return _draft(run, kind, kind, alert_subject(run.id, "run"), payload, AlertPriority.LOW)
+    return _draft(run, kind, kind, alert_subject(run.id, "run"), payload, priority)
 
 
 def _draft(
@@ -313,10 +356,13 @@ def _clean(text: str, limit: int) -> str:
 
 __all__ = [
     "PAUSE_MESSAGES",
+    "UNSTOPPED_SESSIONS_MESSAGES",
     "AlertChanges",
+    "UnstoppedSessions",
     "alert_id",
     "alert_subject",
     "commit_alerts",
     "row_pause_alert",
+    "run_end_alerts",
     "run_link",
 ]

@@ -1,0 +1,4934 @@
+{
+  "components": {
+    "schemas": {
+      "AckRequest": {
+        "additionalProperties": false,
+        "description": "The body of a \"mark as read\": the empty JSON object.",
+        "properties": {},
+        "title": "AckRequest",
+        "type": "object"
+      },
+      "ActivationView": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "enum": [
+                  "completed",
+                  "skipped",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "status": {
+            "enum": [
+              "waiting_join",
+              "ready",
+              "starting",
+              "running",
+              "evaluating",
+              "closed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "ActivationView",
+        "type": "object"
+      },
+      "Analysis": {
+        "additionalProperties": false,
+        "properties": {
+          "checked_parts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CheckedPart"
+            },
+            "title": "Checked Parts",
+            "type": "array"
+          },
+          "join_types": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/JoinInfo"
+            },
+            "title": "Join Types",
+            "type": "array"
+          },
+          "label_sets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LabelSet"
+            },
+            "title": "Label Sets",
+            "type": "array"
+          },
+          "loops": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LoopInfo"
+            },
+            "title": "Loops",
+            "type": "array"
+          },
+          "regions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Region"
+            },
+            "title": "Regions",
+            "type": "array"
+          },
+          "unresolved": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/UnresolvedFact"
+            },
+            "title": "Unresolved",
+            "type": "array"
+          }
+        },
+        "title": "Analysis",
+        "type": "object"
+      },
+      "CheckedPart": {
+        "additionalProperties": false,
+        "description": "Resolution of a ``list_from`` reference.",
+        "properties": {
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "part_is_list": {
+            "title": "Part Is List",
+            "type": "boolean"
+          },
+          "part_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Name"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          },
+          "source_exists": {
+            "title": "Source Exists",
+            "type": "boolean"
+          },
+          "source_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Node Id"
+          },
+          "source_upstream": {
+            "title": "Source Upstream",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "node_id",
+          "reference",
+          "source_node_id",
+          "part_name",
+          "source_exists",
+          "source_upstream",
+          "part_is_list"
+        ],
+        "title": "CheckedPart",
+        "type": "object"
+      },
+      "CompiledArrow": {
+        "additionalProperties": false,
+        "properties": {
+          "at_limit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At Limit"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "forward",
+            "enum": [
+              "forward",
+              "back",
+              "at_limit",
+              "failure"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "target"
+        ],
+        "title": "CompiledArrow",
+        "type": "object"
+      },
+      "CompiledGraph": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis": {
+            "$ref": "#/components/schemas/Analysis",
+            "default": {
+              "checked_parts": [],
+              "join_types": [],
+              "label_sets": [],
+              "loops": [],
+              "regions": [],
+              "unresolved": []
+            }
+          },
+          "arrows": {
+            "items": {
+              "$ref": "#/components/schemas/CompiledArrow"
+            },
+            "title": "Arrows",
+            "type": "array"
+          },
+          "content_hash": {
+            "default": "",
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "ir_version": {
+            "default": 1,
+            "title": "Ir Version",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/CompiledNode"
+            },
+            "title": "Nodes",
+            "type": "array"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "name",
+          "nodes",
+          "arrows"
+        ],
+        "title": "CompiledGraph",
+        "type": "object"
+      },
+      "CompiledNode": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempts"
+          },
+          "concurrency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concurrency"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceRequirement"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal"
+          },
+          "harness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harness"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "start",
+              "end",
+              "step",
+              "decision",
+              "gate"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "list_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "List From"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "outcomes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Outcomes",
+            "type": "array"
+          },
+          "parts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CompiledPart"
+            },
+            "title": "Parts",
+            "type": "array"
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          },
+          "roster": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Roster",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "kind"
+        ],
+        "title": "CompiledNode",
+        "type": "object"
+      },
+      "CompiledPart": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "text",
+              "list"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "title": "CompiledPart",
+        "type": "object"
+      },
+      "CoralError": {
+        "additionalProperties": false,
+        "description": "What was refused: a stable ``code``, a message for people, and machine-readable details.",
+        "properties": {
+          "code": {
+            "enum": [
+              "unauthenticated",
+              "not_permitted",
+              "not_found",
+              "validation_failed",
+              "not_runnable",
+              "not_a_git_repo",
+              "start_key_conflict",
+              "workflow_key_taken",
+              "illegal_transition",
+              "stale_visit",
+              "worktree_failed",
+              "payload_too_large",
+              "stream_limit",
+              "not_implemented",
+              "host_offline",
+              "server_busy"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "title": "CoralError",
+        "type": "object"
+      },
+      "CoralErrorResponse": {
+        "additionalProperties": false,
+        "description": "The body of every Coral refusal.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/CoralError"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "CoralErrorResponse",
+        "type": "object"
+      },
+      "CoralInfoResponse": {
+        "description": "Response payload for ``GET /v1/coral/info``.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "sub_features": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Sub Features",
+            "type": "object"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "version",
+          "sub_features"
+        ],
+        "title": "CoralInfoResponse",
+        "type": "object"
+      },
+      "EmptyRequest": {
+        "additionalProperties": false,
+        "description": "The body of an action that takes no arguments: the empty JSON object.",
+        "properties": {},
+        "title": "EmptyRequest",
+        "type": "object"
+      },
+      "EntryFrame": {
+        "additionalProperties": false,
+        "description": "One run-log row without its body; ``patch`` is the stored view patch, or empty.",
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "actor_kind": {
+            "enum": [
+              "engine",
+              "orchestrator",
+              "step_agent",
+              "user",
+              "simulator"
+            ],
+            "title": "Actor Kind",
+            "type": "string"
+          },
+          "at_us": {
+            "title": "At Us",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "patch": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/JsonPatch"
+            },
+            "title": "Patch",
+            "type": "array"
+          },
+          "rejected": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejected"
+          },
+          "run_version": {
+            "minimum": 0.0,
+            "title": "Run Version",
+            "type": "integer"
+          },
+          "scope_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Key"
+          },
+          "seq": {
+            "minimum": 1.0,
+            "title": "Seq",
+            "type": "integer"
+          },
+          "type": {
+            "const": "entry",
+            "default": "entry",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "seq",
+          "run_version",
+          "kind",
+          "actor_kind",
+          "actor",
+          "node_id",
+          "scope_key",
+          "at_us",
+          "rejected",
+          "patch"
+        ],
+        "title": "EntryFrame",
+        "type": "object"
+      },
+      "EvidenceRequirement": {
+        "additionalProperties": false,
+        "properties": {
+          "ir_version": {
+            "default": 1,
+            "title": "Ir Version",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RequiredCommand"
+            },
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "scope": {
+            "const": "per_agent",
+            "default": "per_agent",
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "EvidenceRequirement",
+        "type": "object"
+      },
+      "GateAnswerOut": {
+        "additionalProperties": false,
+        "description": "A taken answer; ``duplicate`` when the same answer was taken before.",
+        "properties": {
+          "result": {
+            "enum": [
+              "accepted",
+              "duplicate"
+            ],
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "GateAnswerOut",
+        "type": "object"
+      },
+      "GateAnswerRequest": {
+        "additionalProperties": false,
+        "description": "An answer to one visit of a gate: the visit's token, the chosen outcome and a note.",
+        "properties": {
+          "note": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Note",
+            "type": "string"
+          },
+          "outcome": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Outcome",
+            "type": "string"
+          },
+          "visit_token": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Visit Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "visit_token",
+          "outcome"
+        ],
+        "title": "GateAnswerRequest",
+        "type": "object"
+      },
+      "GateOut": {
+        "additionalProperties": false,
+        "description": "A gate visit waiting for its answer.",
+        "properties": {
+          "elicitation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elicitation Id"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "opened_at": {
+            "title": "Opened At",
+            "type": "integer"
+          },
+          "outcomes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Outcomes",
+            "type": "array"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "visit_id": {
+            "title": "Visit Id",
+            "type": "string"
+          },
+          "visit_no": {
+            "title": "Visit No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "visit_id",
+          "node_id",
+          "token",
+          "visit_no",
+          "elicitation_id",
+          "opened_at",
+          "outcomes"
+        ],
+        "title": "GateOut",
+        "type": "object"
+      },
+      "HeartbeatFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "heartbeat",
+            "default": "heartbeat",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "HeartbeatFrame",
+        "type": "object"
+      },
+      "InvalidResult": {
+        "description": "A workflow document that did not load.",
+        "properties": {
+          "load_error": {
+            "$ref": "#/components/schemas/LoadError"
+          },
+          "runnable": {
+            "const": false,
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "valid": {
+            "const": false,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "valid",
+          "runnable",
+          "load_error"
+        ],
+        "title": "InvalidResult",
+        "type": "object"
+      },
+      "JoinInfo": {
+        "additionalProperties": false,
+        "description": "How a node with several incoming arrows combines them.",
+        "properties": {
+          "arrow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Arrow Ids",
+            "type": "array"
+          },
+          "join_type": {
+            "enum": [
+              "none",
+              "and",
+              "xor"
+            ],
+            "title": "Join Type",
+            "type": "string"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "split_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Split Node Id"
+          }
+        },
+        "required": [
+          "node_id",
+          "join_type",
+          "arrow_ids"
+        ],
+        "title": "JoinInfo",
+        "type": "object"
+      },
+      "JsonPatch": {
+        "additionalProperties": false,
+        "description": "One JSON Patch operation addressed by a JSON pointer.",
+        "properties": {
+          "op": {
+            "enum": [
+              "add",
+              "remove",
+              "replace"
+            ],
+            "title": "Op",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "op",
+          "path"
+        ],
+        "title": "JsonPatch",
+        "type": "object"
+      },
+      "JsonValue": {},
+      "LabelSet": {
+        "additionalProperties": false,
+        "description": "Labels on the label-selected outgoing arrows of a node.",
+        "properties": {
+          "labelled_arrow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labelled Arrow Ids",
+            "type": "array"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "unlabelled_arrow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unlabelled Arrow Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "node_id",
+          "labels",
+          "labelled_arrow_ids",
+          "unlabelled_arrow_ids"
+        ],
+        "title": "LabelSet",
+        "type": "object"
+      },
+      "LoadError": {
+        "description": "A document that could not be loaded; ``issues`` lists every schema error.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "issues": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LoadIssue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "yaml_path": {
+            "title": "Yaml Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "yaml_path",
+          "range",
+          "message"
+        ],
+        "title": "LoadError",
+        "type": "object"
+      },
+      "LoadIssue": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "yaml_path": {
+            "title": "Yaml Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "yaml_path",
+          "range",
+          "message"
+        ],
+        "title": "LoadIssue",
+        "type": "object"
+      },
+      "LogEntryOut": {
+        "additionalProperties": false,
+        "description": "One run-log row with its body: the stream's entry frame plus ``body``. ``body`` is\n``None`` for a row that cannot be read (``kind`` ``log.unreadable``) and, with\n``body_truncated``, for a body too large to send. ``actor_kind`` is ``None`` only on\nsuch a row, for a code this server does not know.",
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "actor_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "engine",
+                  "orchestrator",
+                  "step_agent",
+                  "user",
+                  "simulator"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Kind"
+          },
+          "at_us": {
+            "title": "At Us",
+            "type": "integer"
+          },
+          "body": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "body_truncated": {
+            "title": "Body Truncated",
+            "type": "boolean"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "patch": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/JsonPatch"
+            },
+            "title": "Patch",
+            "type": "array"
+          },
+          "rejected": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejected"
+          },
+          "run_version": {
+            "minimum": 0.0,
+            "title": "Run Version",
+            "type": "integer"
+          },
+          "scope_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Key"
+          },
+          "seq": {
+            "minimum": 1.0,
+            "title": "Seq",
+            "type": "integer"
+          },
+          "type": {
+            "const": "entry",
+            "default": "entry",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "seq",
+          "run_version",
+          "kind",
+          "actor_kind",
+          "actor",
+          "node_id",
+          "scope_key",
+          "at_us",
+          "rejected",
+          "patch",
+          "body",
+          "body_truncated"
+        ],
+        "title": "LogEntryOut",
+        "type": "object"
+      },
+      "LogPage": {
+        "additionalProperties": false,
+        "description": "Log rows in ``seq`` order; ``next_after_seq`` is set when more rows follow.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/LogEntryOut"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "next_after_seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next After Seq"
+          }
+        },
+        "required": [
+          "data",
+          "next_after_seq"
+        ],
+        "title": "LogPage",
+        "type": "object"
+      },
+      "LoopInfo": {
+        "additionalProperties": false,
+        "description": "A loop closed by one back-arrow.",
+        "properties": {
+          "at_limit_arrow_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At Limit Arrow Id"
+          },
+          "back_arrow_id": {
+            "title": "Back Arrow Id",
+            "type": "string"
+          },
+          "body": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Body",
+            "type": "array"
+          },
+          "entry_arrow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Entry Arrow Ids",
+            "type": "array"
+          },
+          "head": {
+            "title": "Head",
+            "type": "string"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "tail": {
+            "title": "Tail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "back_arrow_id",
+          "head",
+          "tail",
+          "body",
+          "limit",
+          "at_limit_arrow_id",
+          "entry_arrow_ids"
+        ],
+        "title": "LoopInfo",
+        "type": "object"
+      },
+      "LoopPassView": {
+        "additionalProperties": false,
+        "properties": {
+          "back_arrow_id": {
+            "title": "Back Arrow Id",
+            "type": "string"
+          },
+          "item_path": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Item Path",
+            "type": "array"
+          },
+          "iteration_path": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Iteration Path",
+            "type": "array"
+          },
+          "pass_index": {
+            "title": "Pass Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "back_arrow_id",
+          "pass_index"
+        ],
+        "title": "LoopPassView",
+        "type": "object"
+      },
+      "PauseCause": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "auth",
+              "plan_limit",
+              "infra",
+              "budget",
+              "liveness",
+              "failure_path",
+              "drift",
+              "rejected_calls",
+              "authority_revoked",
+              "engine_upgrade",
+              "user"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "detail",
+          "subject"
+        ],
+        "title": "PauseCause",
+        "type": "object"
+      },
+      "Problem": {
+        "description": "One finding, anchored to nodes, arrows and a ``yaml_path``.",
+        "properties": {
+          "arrow_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Arrow Ids",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "node_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Ids",
+            "type": "array"
+          },
+          "range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rule": {
+            "title": "Rule",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning",
+              "info"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "yaml_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Yaml Path"
+          }
+        },
+        "required": [
+          "rule",
+          "severity",
+          "message"
+        ],
+        "title": "Problem",
+        "type": "object"
+      },
+      "Region": {
+        "additionalProperties": false,
+        "description": "Parallel region between an unlabelled split and its AND-join.",
+        "properties": {
+          "join_node_id": {
+            "title": "Join Node Id",
+            "type": "string"
+          },
+          "node_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Ids",
+            "type": "array"
+          },
+          "split_node_id": {
+            "title": "Split Node Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "split_node_id",
+          "join_node_id",
+          "node_ids"
+        ],
+        "title": "Region",
+        "type": "object"
+      },
+      "RequiredCommand": {
+        "additionalProperties": false,
+        "description": "One command that must pass after the step's last change.\n\n:param run: One plain command, e.g. ``pytest -q``, matched as the last command\n    of an ``&&`` chain (``coral.evidence.match``).\n:param may_modify: The command may change the tree (a formatter); its own\n    changes do not count as the step's last change when it runs on its own.\n:param allow_args: A run may add arguments after ``run``; by default the\n    argv must be exactly ``run``'s.",
+        "properties": {
+          "allow_args": {
+            "default": false,
+            "title": "Allow Args",
+            "type": "boolean"
+          },
+          "item_id": {
+            "title": "Item Id",
+            "type": "string"
+          },
+          "may_modify": {
+            "default": false,
+            "title": "May Modify",
+            "type": "boolean"
+          },
+          "run": {
+            "title": "Run",
+            "type": "string"
+          }
+        },
+        "required": [
+          "item_id",
+          "run"
+        ],
+        "title": "RequiredCommand",
+        "type": "object"
+      },
+      "ResumeRequest": {
+        "additionalProperties": false,
+        "description": "A resume; ``cap`` raises the activation cap of a run paused at it.",
+        "properties": {
+          "cap": {
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cap"
+          }
+        },
+        "title": "ResumeRequest",
+        "type": "object"
+      },
+      "ResyncFrame": {
+        "additionalProperties": false,
+        "description": "The cursor cannot be replayed; a fresh ``snapshot`` follows.",
+        "properties": {
+          "reason": {
+            "enum": [
+              "cursor_unknown",
+              "cursor_invalid",
+              "replay_too_long",
+              "row_unreadable"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "type": {
+            "const": "resync",
+            "default": "resync",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "title": "ResyncFrame",
+        "type": "object"
+      },
+      "RunDetail": {
+        "additionalProperties": false,
+        "description": "One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that\ncannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are\n``None`` when its stored rows cannot be read.",
+        "properties": {
+          "activation_count": {
+            "title": "Activation Count",
+            "type": "integer"
+          },
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "pause",
+                "resume",
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "title": "Allowed Actions",
+            "type": "array"
+          },
+          "anchor_session_id": {
+            "title": "Anchor Session Id",
+            "type": "string"
+          },
+          "causes": {
+            "items": {
+              "$ref": "#/components/schemas/PauseCause"
+            },
+            "title": "Causes",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "gates": {
+            "items": {
+              "$ref": "#/components/schemas/GateOut"
+            },
+            "title": "Gates",
+            "type": "array"
+          },
+          "head_seq": {
+            "title": "Head Seq",
+            "type": "integer"
+          },
+          "load_error": {
+            "anyOf": [
+              {
+                "const": "engine.load_failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Error"
+          },
+          "max_activations": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Activations"
+          },
+          "orchestrator_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Orchestrator Session Id"
+          },
+          "pause_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "gate",
+                  "budget",
+                  "plan_limit",
+                  "rejected_calls",
+                  "infra",
+                  "liveness",
+                  "user",
+                  "authority_revoked",
+                  "merge_conflict",
+                  "failure_path",
+                  "engine_upgrade",
+                  "drift",
+                  "auth"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Reason"
+          },
+          "request_preview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Preview"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/SlotOut"
+            },
+            "title": "Slots",
+            "type": "array"
+          },
+          "spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunSpend"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "starting",
+              "running",
+              "paused",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "view": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "workflow_id",
+          "version_id",
+          "title",
+          "status",
+          "pause_reason",
+          "created_at",
+          "updated_at",
+          "finished_at",
+          "activation_count",
+          "allowed_actions",
+          "spend",
+          "version",
+          "head_seq",
+          "max_activations",
+          "request_preview",
+          "target",
+          "anchor_session_id",
+          "orchestrator_session_id",
+          "causes",
+          "load_error",
+          "view",
+          "gates",
+          "slots"
+        ],
+        "title": "RunDetail",
+        "type": "object"
+      },
+      "RunFrame": {
+        "additionalProperties": false,
+        "description": "The run header again, sent when the row changes without a view patch.",
+        "properties": {
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "pause",
+                "resume",
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "title": "Allowed Actions",
+            "type": "array"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "load_error": {
+            "anyOf": [
+              {
+                "const": "engine.load_failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Error"
+          },
+          "pause_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "gate",
+                  "budget",
+                  "plan_limit",
+                  "rejected_calls",
+                  "infra",
+                  "liveness",
+                  "user",
+                  "authority_revoked",
+                  "merge_conflict",
+                  "failure_path",
+                  "engine_upgrade",
+                  "drift",
+                  "auth"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Reason"
+          },
+          "status": {
+            "enum": [
+              "starting",
+              "running",
+              "paused",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "type": {
+            "const": "run",
+            "default": "run",
+            "title": "Type",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 0.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "pause_reason",
+          "version",
+          "finished_at",
+          "allowed_actions",
+          "load_error",
+          "type"
+        ],
+        "title": "RunFrame",
+        "type": "object"
+      },
+      "RunHeader": {
+        "additionalProperties": false,
+        "description": "The run row as clients see it; a finished row wins over what the view says.",
+        "properties": {
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "pause",
+                "resume",
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "title": "Allowed Actions",
+            "type": "array"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "load_error": {
+            "anyOf": [
+              {
+                "const": "engine.load_failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Error"
+          },
+          "pause_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "gate",
+                  "budget",
+                  "plan_limit",
+                  "rejected_calls",
+                  "infra",
+                  "liveness",
+                  "user",
+                  "authority_revoked",
+                  "merge_conflict",
+                  "failure_path",
+                  "engine_upgrade",
+                  "drift",
+                  "auth"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Reason"
+          },
+          "status": {
+            "enum": [
+              "starting",
+              "running",
+              "paused",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 0.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "pause_reason",
+          "version",
+          "finished_at",
+          "allowed_actions",
+          "load_error"
+        ],
+        "title": "RunHeader",
+        "type": "object"
+      },
+      "RunPage": {
+        "additionalProperties": false,
+        "description": "One page of runs, newest first; page again with ``next_cursor`` until it is null.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/RunSummary"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "title": "RunPage",
+        "type": "object"
+      },
+      "RunSpend": {
+        "additionalProperties": false,
+        "description": "What a run has spent so far, as last read: shown, never capped.\n\n``usd`` is the display figure its anchor's badge shows, ``live_usd`` includes\nspend still in flight; both are ``None`` when no session was priced and a lower\nbound when ``unpriced_models`` is not empty. ``as_of`` is when it was read.",
+        "properties": {
+          "as_of": {
+            "title": "As Of",
+            "type": "integer"
+          },
+          "estimate": {
+            "const": true,
+            "default": true,
+            "title": "Estimate",
+            "type": "boolean"
+          },
+          "live_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live Usd"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/RunSpendTokens"
+          },
+          "unpriced_models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unpriced Models",
+            "type": "array"
+          },
+          "usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usd"
+          }
+        },
+        "required": [
+          "estimate",
+          "usd",
+          "live_usd",
+          "tokens",
+          "unpriced_models",
+          "sessions",
+          "as_of"
+        ],
+        "title": "RunSpend",
+        "type": "object"
+      },
+      "RunSpendTokens": {
+        "additionalProperties": false,
+        "description": "Tokens a run's sessions used, summed over its whole session tree.",
+        "properties": {
+          "cache_creation": {
+            "title": "Cache Creation",
+            "type": "integer"
+          },
+          "cache_read": {
+            "title": "Cache Read",
+            "type": "integer"
+          },
+          "input": {
+            "title": "Input",
+            "type": "integer"
+          },
+          "output": {
+            "title": "Output",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "total",
+          "cache_read",
+          "cache_creation"
+        ],
+        "title": "RunSpendTokens",
+        "type": "object"
+      },
+      "RunStreamFrame": {
+        "discriminator": {
+          "mapping": {
+            "entry": "#/components/schemas/EntryFrame",
+            "heartbeat": "#/components/schemas/HeartbeatFrame",
+            "resync": "#/components/schemas/ResyncFrame",
+            "run": "#/components/schemas/RunFrame",
+            "snapshot": "#/components/schemas/SnapshotFrame"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SnapshotFrame"
+          },
+          {
+            "$ref": "#/components/schemas/EntryFrame"
+          },
+          {
+            "$ref": "#/components/schemas/RunFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ResyncFrame"
+          },
+          {
+            "$ref": "#/components/schemas/HeartbeatFrame"
+          }
+        ]
+      },
+      "RunSummary": {
+        "additionalProperties": false,
+        "description": "A run as its owner's run list shows it.",
+        "properties": {
+          "activation_count": {
+            "title": "Activation Count",
+            "type": "integer"
+          },
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "pause",
+                "resume",
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "title": "Allowed Actions",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "pause_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "gate",
+                  "budget",
+                  "plan_limit",
+                  "rejected_calls",
+                  "infra",
+                  "liveness",
+                  "user",
+                  "authority_revoked",
+                  "merge_conflict",
+                  "failure_path",
+                  "engine_upgrade",
+                  "drift",
+                  "auth"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Reason"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunSpend"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "starting",
+              "running",
+              "paused",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "workflow_id",
+          "version_id",
+          "title",
+          "status",
+          "pause_reason",
+          "created_at",
+          "updated_at",
+          "finished_at",
+          "activation_count",
+          "allowed_actions",
+          "spend"
+        ],
+        "title": "RunSummary",
+        "type": "object"
+      },
+      "RunTarget": {
+        "additionalProperties": false,
+        "description": "Where the run works: its host, repository and worktree branch.",
+        "properties": {
+          "base_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Commit"
+          },
+          "base_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Ref"
+          },
+          "host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
+          },
+          "repo_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Path"
+          },
+          "run_branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Branch"
+          },
+          "worktree_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worktree Path"
+          }
+        },
+        "required": [
+          "host_id",
+          "repo_path",
+          "worktree_path",
+          "run_branch",
+          "base_ref",
+          "base_commit"
+        ],
+        "title": "RunTarget",
+        "type": "object"
+      },
+      "RunView": {
+        "additionalProperties": false,
+        "properties": {
+          "activations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ActivationView"
+            },
+            "title": "Activations",
+            "type": "array"
+          },
+          "armed_timer_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Armed Timer Keys",
+            "type": "array"
+          },
+          "causes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PauseCause"
+            },
+            "title": "Causes",
+            "type": "array"
+          },
+          "loop_pass_indexes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LoopPassView"
+            },
+            "title": "Loop Pass Indexes",
+            "type": "array"
+          },
+          "open_decisions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Open Decisions",
+            "type": "array"
+          },
+          "open_gates": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Open Gates",
+            "type": "array"
+          },
+          "slots": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SlotView"
+            },
+            "title": "Slots",
+            "type": "array"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "running",
+                  "paused",
+                  "completed",
+                  "failed",
+                  "cancelled"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "title": "RunView",
+        "type": "object"
+      },
+      "SavedWorkflowOut": {
+        "description": "The definition a save stored, with the validation of what was saved.",
+        "properties": {
+          "compiled": {
+            "$ref": "#/components/schemas/CompiledGraph"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "valid": {
+            "const": true,
+            "title": "Valid",
+            "type": "boolean"
+          },
+          "workflow_key": {
+            "title": "Workflow Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_key",
+          "name",
+          "content_hash",
+          "runnable",
+          "created_at",
+          "updated_at",
+          "valid",
+          "problems",
+          "compiled"
+        ],
+        "title": "SavedWorkflowOut",
+        "type": "object"
+      },
+      "SlotOut": {
+        "additionalProperties": false,
+        "description": "An agent slot of one of the run's steps.",
+        "properties": {
+          "activation_id": {
+            "title": "Activation Id",
+            "type": "string"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "step_agent",
+              "orchestrator",
+              "verifier",
+              "merge_resolver"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "session_generation": {
+            "title": "Session Generation",
+            "type": "integer"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "slot_id": {
+            "title": "Slot Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "session_created",
+              "briefed",
+              "working",
+              "handoff_accepted",
+              "rejected",
+              "refreshing",
+              "restarting",
+              "closed",
+              "evaluating",
+              "closing"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_id",
+          "node_id",
+          "activation_id",
+          "role",
+          "status",
+          "session_id",
+          "session_generation"
+        ],
+        "title": "SlotOut",
+        "type": "object"
+      },
+      "SlotView": {
+        "additionalProperties": false,
+        "properties": {
+          "drift": {
+            "title": "Drift",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "pending_input": {
+            "title": "Pending Input",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "session_created",
+              "briefed",
+              "working",
+              "evaluating",
+              "closing",
+              "closed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "pending_input",
+          "drift"
+        ],
+        "title": "SlotView",
+        "type": "object"
+      },
+      "SnapshotFrame": {
+        "additionalProperties": false,
+        "description": "The whole view at head ``seq``; ``view`` is ``None`` only for a run that cannot load.",
+        "properties": {
+          "log_version": {
+            "minimum": 0.0,
+            "title": "Log Version",
+            "type": "integer"
+          },
+          "protocol": {
+            "const": 1,
+            "default": 1,
+            "title": "Protocol",
+            "type": "integer"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunHeader"
+          },
+          "run_version": {
+            "minimum": 0.0,
+            "title": "Run Version",
+            "type": "integer"
+          },
+          "seq": {
+            "minimum": 0.0,
+            "title": "Seq",
+            "type": "integer"
+          },
+          "type": {
+            "const": "snapshot",
+            "default": "snapshot",
+            "title": "Type",
+            "type": "string"
+          },
+          "view": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "view_error": {
+            "anyOf": [
+              {
+                "const": "engine.load_failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "View Error"
+          },
+          "view_version": {
+            "const": 1,
+            "default": 1,
+            "title": "View Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "type",
+          "protocol",
+          "view_version",
+          "seq",
+          "run_version",
+          "log_version",
+          "run",
+          "view",
+          "view_error"
+        ],
+        "title": "SnapshotFrame",
+        "type": "object"
+      },
+      "SourceRange": {
+        "description": "1-based inclusive start, exclusive end positions in the YAML text.",
+        "properties": {
+          "end_column": {
+            "title": "End Column",
+            "type": "integer"
+          },
+          "end_line": {
+            "title": "End Line",
+            "type": "integer"
+          },
+          "start_column": {
+            "title": "Start Column",
+            "type": "integer"
+          },
+          "start_line": {
+            "title": "Start Line",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_line",
+          "start_column",
+          "end_line",
+          "end_column"
+        ],
+        "title": "SourceRange",
+        "type": "object"
+      },
+      "StartRunRequest": {
+        "additionalProperties": false,
+        "description": "A start of one of the caller's workflows on their host's repository.\n\n``start_key`` makes the start idempotent: the same key and request answer the run\nit started, another request with the key is a conflict. ``title`` defaults to the\nworkflow's name; ``base_ref`` to the repository's checked-out head.",
+        "properties": {
+          "base_ref": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Ref"
+          },
+          "host_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Host Id",
+            "type": "string"
+          },
+          "max_activations": {
+            "default": 100,
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Max Activations",
+            "type": "integer"
+          },
+          "repo_path": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Repo Path",
+            "type": "string"
+          },
+          "request": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Request",
+            "type": "string"
+          },
+          "start_key": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Start Key",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "workflow_id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "start_key",
+          "host_id",
+          "repo_path"
+        ],
+        "title": "StartRunRequest",
+        "type": "object"
+      },
+      "UnresolvedFact": {
+        "additionalProperties": false,
+        "description": "Something Analysis could not resolve; blocks running the workflow.",
+        "properties": {
+          "arrow_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Arrow Ids",
+            "type": "array"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "node_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "UnresolvedFact",
+        "type": "object"
+      },
+      "ValidResult": {
+        "description": "A workflow that loaded and compiled, with what validation found.",
+        "properties": {
+          "compiled": {
+            "$ref": "#/components/schemas/CompiledGraph"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "valid": {
+            "const": true,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "valid",
+          "runnable",
+          "content_hash",
+          "problems",
+          "compiled"
+        ],
+        "title": "ValidResult",
+        "type": "object"
+      },
+      "WorkflowAlertOut": {
+        "additionalProperties": false,
+        "description": "One open alert as the Inbox lists it: its row's fields merged with its payload.",
+        "properties": {
+          "actions": {
+            "items": {
+              "enum": [
+                "answer",
+                "open_run",
+                "mark_read",
+                "resume",
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "alert_id": {
+            "title": "Alert Id",
+            "type": "string"
+          },
+          "approve_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approve Link"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "deep_link": {
+            "title": "Deep Link",
+            "type": "string"
+          },
+          "elicitation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elicitation Id"
+          },
+          "kind": {
+            "enum": [
+              "gate",
+              "question",
+              "pause",
+              "watchdog",
+              "overdue",
+              "reaction",
+              "run_completed",
+              "run_failed",
+              "run_cancelled"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "outcomes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Outcomes",
+            "type": "array"
+          },
+          "pause_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Reason"
+          },
+          "priority": {
+            "enum": [
+              "normal",
+              "low"
+            ],
+            "title": "Priority",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "run_title": {
+            "title": "Run Title",
+            "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "step_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Label"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alert_id",
+          "run_id",
+          "run_title",
+          "kind",
+          "priority",
+          "created_at",
+          "title",
+          "message",
+          "step_label",
+          "node_id",
+          "actions",
+          "deep_link",
+          "approve_link",
+          "elicitation_id",
+          "session_id",
+          "outcomes",
+          "pause_reason"
+        ],
+        "title": "WorkflowAlertOut",
+        "type": "object"
+      },
+      "WorkflowDetailOut": {
+        "description": "A stored workflow definition with its YAML and compiled graph.",
+        "properties": {
+          "compiled": {
+            "$ref": "#/components/schemas/CompiledGraph"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "workflow_key": {
+            "title": "Workflow Key",
+            "type": "string"
+          },
+          "yaml": {
+            "title": "Yaml",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_key",
+          "name",
+          "content_hash",
+          "runnable",
+          "created_at",
+          "updated_at",
+          "yaml",
+          "compiled"
+        ],
+        "title": "WorkflowDetailOut",
+        "type": "object"
+      },
+      "WorkflowInboxPage": {
+        "description": "One feed page. A page can be empty and still carry ``next_cursor``: keep paging\nuntil it is null.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowAlertOut"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "title": "WorkflowInboxPage",
+        "type": "object"
+      },
+      "WorkflowSummaryOut": {
+        "description": "A stored workflow definition as lists show it.",
+        "properties": {
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "workflow_key": {
+            "title": "Workflow Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_key",
+          "name",
+          "content_hash",
+          "runnable",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "WorkflowSummaryOut",
+        "type": "object"
+      },
+      "WorkflowYaml": {
+        "description": "A workflow document as YAML text.",
+        "properties": {
+          "yaml": {
+            "title": "Yaml",
+            "type": "string"
+          }
+        },
+        "required": [
+          "yaml"
+        ],
+        "title": "WorkflowYaml",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Coral API",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/coral/inbox": {
+      "get": {
+        "description": "The caller's open alerts: normal priority first, newest first within each.",
+        "operationId": "coral_list_inbox",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowInboxPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "List Inbox",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/inbox/{alert_id}/ack": {
+      "post": {
+        "description": "Mark one of the caller's alerts read; marking it again changes nothing.",
+        "operationId": "coral_ack_alert",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alert_id",
+            "required": true,
+            "schema": {
+              "title": "Alert Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Ack Alert",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/info": {
+      "get": {
+        "description": "Report whether Coral is enabled on this server and its sub-feature map.",
+        "operationId": "coral_get_info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralInfoResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coral Info",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs": {
+      "get": {
+        "description": "The caller's runs, newest first; spend is what the cache holds, or null.",
+        "operationId": "coral_list_runs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "enum": [
+                  "starting",
+                  "running",
+                  "paused",
+                  "completed",
+                  "failed",
+                  "cancelled"
+                ],
+                "type": "string"
+              },
+              "title": "Status",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workflow_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{32}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workflow Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Runs",
+        "tags": [
+          "coral"
+        ]
+      },
+      "post": {
+        "description": "Start one of the caller's workflows on their host's repository: 201 with the new\nrun, or 200 with the run the same ``start_key`` and request started before.",
+        "operationId": "coral_start_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            },
+            "description": "The run this start key already started, for the same request"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Start Run",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}": {
+      "get": {
+        "description": "One of the caller's runs in full, with its spend so far.",
+        "operationId": "coral_get_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Run",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}/activations/{activation_id}:retry": {
+      "post": {
+        "description": "Not served yet: the caller's own run answers 501.",
+        "operationId": "coral_retry_activation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "activation_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Activation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Retry Activation",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}/gates/{node_id}:answer": {
+      "post": {
+        "description": "Answer a visit of one of the caller's run's gates with one of its outcomes, as\nits prompt would be answered. A visit the run does not have is the run 404.",
+        "operationId": "coral_answer_gate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node_id",
+            "required": true,
+            "schema": {
+              "title": "Node Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GateAnswerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateAnswerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Answer Gate",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}/graph": {
+      "get": {
+        "description": "The workflow graph the run is pinned to; ``If-None-Match`` revalidates it.",
+        "operationId": "coral_get_run_graph",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "if-none-match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-None-Match"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompiledGraph"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "Not Modified"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Run Graph",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}/log": {
+      "get": {
+        "description": "The run's log rows after ``after_seq``, with their bodies: at most 1 MiB of bodies\nand patches a page, then ``next_after_seq``. A body over 256 KiB is left out.",
+        "operationId": "coral_get_run_log",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_seq",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "title": "After Seq",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Run Log",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}/outcome": {
+      "get": {
+        "description": "Not served yet: the caller's own run answers 501.",
+        "operationId": "coral_get_run_outcome",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Run Outcome",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}/stream": {
+      "get": {
+        "description": "Follow one of the caller's runs: a snapshot of its view, then one entry per log\nrow with the row's view patch. ``Last-Event-ID`` (else ``after_seq``) resumes\nafter the last seq the client holds. A stream ends after five minutes; the\nclient resumes from its last seq. Past the stream caps, poll ``/log`` instead.",
+        "operationId": "coral_stream_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_seq",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 9223372036854775807,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After Seq"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStreamFrame"
+                }
+              }
+            },
+            "description": "Server-sent events: each event's data is a RunStreamFrame, or `[DONE]` once a finished run's rows are all sent"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Stream Run",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}:cancel": {
+      "post": {
+        "description": "Cancel one of the caller's runs; a cancelled run is left as it is.",
+        "operationId": "coral_cancel_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Cancel Run",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}:pause": {
+      "post": {
+        "description": "Pause one of the caller's runs; a paused run is left as it is.",
+        "operationId": "coral_pause_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Pause Run",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}:resume": {
+      "post": {
+        "description": "Resume one of the caller's paused runs; ``cap`` raises the activation cap of one\npaused at it. A run not paused is left as it is.",
+        "operationId": "coral_resume_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Resume Run",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs:preflight": {
+      "post": {
+        "description": "Not served yet.",
+        "operationId": "coral_preflight_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          }
+        },
+        "summary": "Preflight Run",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/workflows": {
+      "get": {
+        "description": "The caller's workflows, by key.",
+        "operationId": "coral_list_workflows",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WorkflowSummaryOut"
+                  },
+                  "title": "Response Coral List Workflows",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          }
+        },
+        "summary": "List Workflows",
+        "tags": [
+          "coral"
+        ]
+      },
+      "post": {
+        "description": "Store the caller's workflow under its key, replacing their earlier version.",
+        "operationId": "coral_save_workflow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowYaml"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedWorkflowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Save Workflow",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/workflows/{workflow_id}": {
+      "get": {
+        "description": "One of the caller's workflows with its YAML and compiled graph.",
+        "operationId": "coral_get_workflow",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Get Workflow",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/workflows:validate": {
+      "post": {
+        "description": "Load, compile and validate a workflow without storing it.",
+        "operationId": "coral_validate_workflow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowYaml"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ValidResult"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidResult"
+                    }
+                  ],
+                  "title": "Response Coral Validate Workflow"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Validate Workflow",
+        "tags": [
+          "coral"
+        ]
+      }
+    }
+  }
+}

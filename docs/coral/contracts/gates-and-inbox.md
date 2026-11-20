@@ -11,13 +11,16 @@
   `coral/bridge/service.py`; alert rules in `coral/alerts/rules.py` and
   payloads in `coral/alerts/types.py`; the alert store in
   `coral/stores/alerts.py`; the Inbox routes in `coral/api/inbox.py`; the
+  runs API's answer route in `coral/api/runs.py`; the
   Omnigent adapter in `coral/omni/server/gates.py` and
   `coral/omni/server/access.py`; wiring in `coral/omni/server/plugin.py`; the
-  web Inbox kind and notifications in `web/src/workflows/inbox/` and
+  web Inbox kind, its cards' Resume and Cancel, and notifications in
+  `web/src/workflows/inbox/` and
   `web/src/workflows/notifications/`, mounted by
   `web/src/workflows/CoralRuntime.tsx`.
 - **Related:** [`session-facade.md`](session-facade.md) (the bridge's work
-  rows, run protection), [`persistence.md`](persistence.md) (`coral_0005`),
+  rows, run protection), [`runs-api.md`](runs-api.md) (the runs API, its
+  gate answers and its actions), [`persistence.md`](persistence.md) (`coral_0005`),
   [`plugin.md`](plugin.md) (wiring and routes),
   [`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md)
   (probe (e), probe 15).
@@ -33,17 +36,22 @@
    closed meanwhile.
 3. The owner answers through
    `POST /v1/sessions/{anchor}/elicitations/{id}/resolve` (or an `approval`
-   event). The verdict handler checks the anchor, the owner and the visit,
-   then commits `AnswerGate` through `EngineBridge.answer_gate`. That commit
-   resolves V's row and its alert and queues the next work.
-4. A repeat of the same answer is 202 `duplicate` with no second commit.
+   event), or through the runs API's
+   `POST /v1/coral/runs/{run}/gates/{node}:answer` with the visit's token.
+   The verdict handler checks the anchor (on the prompt route), the owner and
+   the visit, then commits `AnswerGate` through `EngineBridge.answer_gate`.
+   That commit resolves V's row and its alert and queues the next work.
+4. A repeat of the same answer is a duplicate with no second commit: 202
+   `duplicate` on the prompt route, 200 `{"result": "duplicate"}` on the runs
+   route.
 5. After a restart the lease holder shows every open visit's prompt again
    from its row, with the same id and params. The alert never left the feed.
 
 `tests/coral/omni/test_gate_end_to_end.py` (auth off),
 `test_gate_routes_auth.py` (header auth) and `test_gate_routes_accounts.py`
 (accounts, across a password change and a re-created account) run this
-through the real routes.
+through the real routes. `test_runs_end_to_end.py` answers through the runs
+API in all three modes.
 
 ## The live rule
 
@@ -112,13 +120,18 @@ and the actor come from the server. Its order:
 4. The caller is the run owner: the same normalized user, and, when the run
    recorded an account generation, a request that proves that generation.
    This runs before any engine state is loaded.
-5. The run's engine state loads.
-6. The run's row holding the prompt id names a visit of that run.
-7. The label: `accept` with `content.decision` among the gate's outcomes;
+5. The answer takes one of the caller's admissions: 4 in all and 2 per user
+   (normalized owner and generation), shared by both answer routes. Past
+   either it is refused `run_busy`, "Too many gate answers at once; try
+   again.", before anything is loaded.
+6. The run's engine state loads. A run that cannot be loaded answers
+   `no_longer_waiting` when it has ended, else `run_paused`.
+7. The run's row holding the prompt id names a visit of that run.
+8. The label: `accept` with `content.decision` among the gate's outcomes;
    `accept` with no decision on an approve or approve/reject gate is
    `approve`; `decline` on a gate with `reject` is `reject`. A `note` is text
    of at most 2,000 characters.
-8. A visit that is not live is classified without the engine; a live one is
+9. A visit that is not live is classified without the engine; a live one is
    committed once through `EngineBridge.answer_gate`.
 
 | Result | Status | Body or message | Drops a still-pending local prompt |
@@ -136,8 +149,25 @@ and the actor come from the server. Its order:
 
 Refusals travel as `"[<reason>] <text>"` in Omnigent's error message.
 `not_permitted` is logged at INFO with the run, prompt and actor ids. Logs
-never carry a note or the answer's content. One answer waits at most 30 s;
-four answers run at once per process and the next is refused `run_busy`.
+never carry a note or the answer's content. One answer takes at most 30 s in
+all; past that, or on an error on the way, it is refused `run_busy`.
+The prompt route refuses a note holding NUL or lone surrogates: "The note must
+not hold NUL or unpaired surrogate characters."
+
+**The runs API's answer route** (`GateAnswers.answer_visit`) takes the run, the
+gate's node id, the visit's token, an outcome and a note. Its owner check comes
+first, in the runs API (`owned_run`), and again on the run row; then the
+admission; then the load, the owner on the loaded row, and the visit, whose
+gate must be the named node. `outcome` is the label only when it is one of the
+gate's outcomes, and the closed-visit checks run before `invalid_answer`, as on
+the prompt route. It answers 200 `{"result": "accepted" | "duplicate"}`; no
+such visit and `not_permitted` are the runs API's one 404; `stale_visit` is 409
+`stale_visit`; `already_answered`, `no_longer_waiting` and `run_paused` are 409
+`illegal_transition`; `invalid_answer` is 422 `validation_failed`; `run_busy`
+is 503 `server_busy`, with `details.reason` on each refusal
+([`runs-api.md`](runs-api.md), "Gate answers"). After an answer that closes the
+visit it withdraws this process's prompt; other replicas' prompts go with
+their sweep.
 
 ## Restart, republish and the prompt sweep
 
@@ -195,11 +225,14 @@ agent-written report text, tokens or host paths.
 
 ## Workflow Inbox (K7 subset)
 
-Mounted at `/v1/coral` by the Coral plugin. The caller is resolved in the
-request's task: 401 "Authentication required" when the server's provider
-finds no user, 403 "Not permitted" when the account context names another
-user or no identity is given where one is required. Without the alert store (no operational
-database) both routes answer 404 "Coral inbox is not available".
+Mounted at `/v1/coral` by the Coral plugin. Refusals use the Coral error
+shape, `{"error": {"code", "message", "details"}}` ([`runs-api.md`](runs-api.md),
+"Errors"); the statuses are unchanged. The caller is resolved in the
+request's task: 401 `unauthenticated` "Authentication required" when the
+server's provider finds no user, 403 `not_permitted` "Not permitted" when the
+account context names another user or no identity is given where one is
+required. Without the alert store (no operational database) both routes answer
+404 `not_found` "Coral inbox is not available".
 
 - **`GET /v1/coral/inbox?limit=1..100&after=<cursor>`** → 200
   `{"data": [...], "next_cursor": ...}`, `Cache-Control: private, no-store`.
@@ -209,17 +242,18 @@ database) both routes answer 404 "Coral inbox is not available".
   `run_title`, `kind`, `priority`, `created_at`, `title`, `message`,
   `step_label`, `node_id`, `actions`, `deep_link`, `approve_link`,
   `elicitation_id`, `session_id`, `outcomes`, `pause_reason`). The cursor is
-  `<1|2>:<created_at>:<32 hex>`, else 422. Rows of a look-alike owner (a
-  database collation can fold case or accents) or of another account
-  generation are dropped after paging, so a page can be empty and still carry
+  `<1|2>:<created_at>:<32 hex>`, else 422 `validation_failed` "Invalid
+  workflow inbox cursor". Rows of a look-alike owner (a database collation can
+  fold case or accents) or of another account generation are dropped after
+  paging, so a page can be empty and still carry
   a cursor: clients page until `next_cursor` is `null`. An unreadable payload
   is skipped and logged once.
 - **`POST /v1/coral/inbox/{alert_id}/ack`** with the JSON body `{}`
   (`application/json`; any other body or media type is 422, so a cross-site
   form cannot post it) → 204 for a marked or already-marked alert; 404
-  "alert not found" for another user's, another generation's, an unknown or a
-  malformed id; 409 "Answer the gate to clear this alert." for an open gate
-  alert.
+  `not_found` "alert not found" for another user's, another generation's, an
+  unknown or a malformed id; 409 `illegal_transition` "Answer the gate to clear
+  this alert." for an open gate alert.
 
 Admins see only their own alerts. The owner is stored normalized (the single
 local user is `null`) and compared exactly.
@@ -238,6 +272,35 @@ the app is open, a gate notifies once, from its alert; a step prompt mirrored
 onto the anchor notifies once; other alerts notify at most once per run every
 10 minutes. Without Coral nothing registers, and a gate prompt shows as an
 ordinary approval that still answers.
+
+**Resume and Cancel on a pause card** (`RunActions.tsx`, through
+`web/src/workflows/api/runsApi.ts`). Only a `pause` alert's card has them, and
+only while it is expanded, which is when it reads the run:
+`GET /v1/coral/runs/{id}` under the query key `["coral-run", run_id]`, fresh for
+10 s, and retried once only for a failure a retry can fix (never a 404).
+
+- **Resume** (primary) and **Cancel run** (outline) appear only when the run's
+  `allowed_actions` list them. Pause is never offered here. "Open run" is an
+  outline button on this card, so Resume is its one filled button. A run that
+  cannot be loaded shows Cancel only; a finished run shows neither; a failed
+  read shows neither and keeps "Open run".
+- **Cancel run** opens an inline question, "Cancel this run? Its steps stop.",
+  with **Cancel run** (destructive) and **Keep running**. Only the question's
+  Cancel run posts. Keep running, or Escape, closes it. A reread that no longer
+  offers Cancel closes it for good.
+- Resume posts `{}` to `:resume`; the question's Cancel run posts `{}` to
+  `:cancel`. On success the card patches the cached run's `status` and
+  `allowed_actions`, rereads the run and the Inbox, and says "Resumed.", "The
+  run is still paused." (a resume that left another cause) or "Cancelled." in
+  its `aria-live="polite"` status line.
+- Errors: a 409 with Coral's error shape shows the server's message and
+  rereads the run, but not the Inbox; a 404 says "This run is no longer
+  available." and rereads the run, which hides the buttons; a 503 says "The
+  server is busy; try again."; anything else says "Couldn’t update the run.".
+- Both buttons are disabled while an action is in flight, also on a card
+  reopened meanwhile (the actions share the mutation key
+  `["coral-run-action", run_id]`), and while offline, with "You’re offline."
+  beside the result.
 
 ## Account generations
 
@@ -328,7 +391,23 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
   (after a crash, until the republish), the gate is not counted until its
   prompt returns. The Inbox page still lists it.
 - **Shared answers pool.** Answers use the bridge's thread pool with the
-  drain's feedback; a burst queues behind drain work (four at a time).
+  drain's feedback; a burst queues behind drain work (four at a time, two per
+  user). The prompt route's binding and run-row reads run on that pool before
+  the admission; they are single-row reads by callers who already reach the
+  anchor's prompt route.
+- **An answer to a running run that cannot be loaded** pauses its row
+  `failure_path` (the load does, as every bridge write does), and answers any
+  token, an unknown one included, `run_paused` rather than the runs API's 404.
+  Only the owner gets that far.
+- **The Inbox's run cache is shared and unscoped.** The key
+  `["coral-run", run_id]` names no viewer or server; scope it, or clear it when
+  the viewer changes, before the run view (CRL-136) shares it. After an action
+  the cached run holds the new `status` and `allowed_actions` but the old
+  `pause_reason`, causes and view until the reread lands.
+- **A resumed or cancelled pause card leaves the list.** The action resolves
+  its alert, so the next Inbox read drops the card, and its status line and
+  focus go with it. The line is announced first. A card reopened while its
+  action is in flight shows no result text; its buttons follow the reread.
 
 ## Enforced gates
 
@@ -341,7 +420,7 @@ single-user or auth-off servers are never Enforced.
 
 | Work | Owner |
 |---|---|
-| Runs API actions from the Inbox: Resume and Cancel, the run view, marking a run's alerts read when it is opened, bulk ack (`POST /v1/coral/inbox/ack`) | CRL-135 |
+| The run view, marking a run's alerts read when it is opened, bulk ack (`POST /v1/coral/inbox/ack`); scoping the `["coral-run", id]` query key to the viewer | CRL-136 |
 | The sandbox probe also tests, from the step shell, HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials | CRL-137 |
 | Label gates Enforced under the rule above | RUL-02 |
 | Retention of marked-read and resolved alerts | DUR-06 |

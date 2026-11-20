@@ -154,12 +154,17 @@ class RepoBinding:
 
 
 class RunWorktreeError(Exception):
-    """A run worktree could not be created, adopted or bound."""
+    """
+    A run worktree could not be created, adopted or bound.
 
-    def __init__(self, code: RunWorktreeErrorCode, message: str) -> None:
+    :param locked: The run's worktree is locked: another start may still be creating it.
+    """
+
+    def __init__(self, code: RunWorktreeErrorCode, message: str, *, locked: bool = False) -> None:
         super().__init__(f"{code}: {message}")
         self.code: RunWorktreeErrorCode = code
         self.message = message
+        self.locked = locked
 
 
 class WorktreeCreateFailed(Exception):
@@ -328,6 +333,7 @@ async def _adoptable(
                 "worktree_failed",
                 "run worktree is locked; it may still be being created — retry later or "
                 f"repair it: {truncate_host_message(path)}",
+                locked=True,
             )
     # Recreating the branch elsewhere would strand the detached worktree's work.
     if detached is not None and await _is_live_worktree(host, detached.path):

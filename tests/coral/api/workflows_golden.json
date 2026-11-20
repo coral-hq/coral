@@ -1,0 +1,721 @@
+{
+  "get": {
+    "compiled": {
+      "analysis": {
+        "checked_parts": [],
+        "join_types": [],
+        "label_sets": [
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "start",
+            "unlabelled_arrow_ids": [
+              "a1"
+            ]
+          },
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "work",
+            "unlabelled_arrow_ids": [
+              "a2"
+            ]
+          }
+        ],
+        "loops": [],
+        "regions": [],
+        "unresolved": []
+      },
+      "arrows": [
+        {
+          "at_limit": null,
+          "id": "a1",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "start",
+          "target": "work"
+        },
+        {
+          "at_limit": null,
+          "id": "a2",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "work",
+          "target": "end"
+        }
+      ],
+      "content_hash": "089c34c39d4d33f82e0bedd2ad98a778c2dea158a79633f70ba87d6bbac51f0b",
+      "description": null,
+      "ir_version": 1,
+      "name": "Demo",
+      "nodes": [
+        {
+          "attempts": null,
+          "concurrency": null,
+          "evidence": null,
+          "goal": null,
+          "harness": null,
+          "id": "start",
+          "kind": "start",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": []
+        },
+        {
+          "attempts": 3,
+          "concurrency": 1,
+          "evidence": null,
+          "goal": "Do the thing",
+          "harness": null,
+          "id": "work",
+          "kind": "step",
+          "list_from": null,
+          "name": "Work",
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": [
+            "implementer"
+          ]
+        },
+        {
+          "attempts": null,
+          "concurrency": null,
+          "evidence": null,
+          "goal": null,
+          "harness": null,
+          "id": "end",
+          "kind": "end",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": []
+        }
+      ],
+      "workflow_id": "demo"
+    },
+    "content_hash": "089c34c39d4d33f82e0bedd2ad98a778c2dea158a79633f70ba87d6bbac51f0b",
+    "created_at": 1000,
+    "id": "<definition id>",
+    "name": "Demo",
+    "runnable": true,
+    "updated_at": 1000,
+    "workflow_key": "demo",
+    "yaml": "id: demo\nname: Demo\nnodes:\n  - id: start\n    kind: start\n  - id: work\n    kind: step\n    name: Work\n    goal: Do the thing\n    roster: [implementer]\n  - id: end\n    kind: end\narrows:\n  - id: a1\n    from: start\n    to: work\n  - id: a2\n    from: work\n    to: end\n"
+  },
+  "list": [
+    {
+      "content_hash": "089c34c39d4d33f82e0bedd2ad98a778c2dea158a79633f70ba87d6bbac51f0b",
+      "created_at": 1000,
+      "id": "<definition id>",
+      "name": "Demo",
+      "runnable": true,
+      "updated_at": 1000,
+      "workflow_key": "demo"
+    }
+  ],
+  "save": {
+    "compiled": {
+      "analysis": {
+        "checked_parts": [],
+        "join_types": [],
+        "label_sets": [
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "start",
+            "unlabelled_arrow_ids": [
+              "a1"
+            ]
+          },
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "work",
+            "unlabelled_arrow_ids": [
+              "a2"
+            ]
+          }
+        ],
+        "loops": [],
+        "regions": [],
+        "unresolved": []
+      },
+      "arrows": [
+        {
+          "at_limit": null,
+          "id": "a1",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "start",
+          "target": "work"
+        },
+        {
+          "at_limit": null,
+          "id": "a2",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "work",
+          "target": "end"
+        }
+      ],
+      "content_hash": "089c34c39d4d33f82e0bedd2ad98a778c2dea158a79633f70ba87d6bbac51f0b",
+      "description": null,
+      "ir_version": 1,
+      "name": "Demo",
+      "nodes": [
+        {
+          "attempts": null,
+          "concurrency": null,
+          "evidence": null,
+          "goal": null,
+          "harness": null,
+          "id": "start",
+          "kind": "start",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": []
+        },
+        {
+          "attempts": 3,
+          "concurrency": 1,
+          "evidence": null,
+          "goal": "Do the thing",
+          "harness": null,
+          "id": "work",
+          "kind": "step",
+          "list_from": null,
+          "name": "Work",
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": [
+            "implementer"
+          ]
+        },
+        {
+          "attempts": null,
+          "concurrency": null,
+          "evidence": null,
+          "goal": null,
+          "harness": null,
+          "id": "end",
+          "kind": "end",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": []
+        }
+      ],
+      "workflow_id": "demo"
+    },
+    "content_hash": "089c34c39d4d33f82e0bedd2ad98a778c2dea158a79633f70ba87d6bbac51f0b",
+    "created_at": 1000,
+    "id": "<definition id>",
+    "name": "Demo",
+    "problems": [],
+    "runnable": true,
+    "updated_at": 1000,
+    "valid": true,
+    "workflow_key": "demo"
+  },
+  "validate_load_error": {
+    "load_error": {
+      "code": "duplicate_key",
+      "issues": [],
+      "message": "duplicate key 'a'; each key may appear once in a mapping",
+      "range": {
+        "end_column": 2,
+        "end_line": 2,
+        "start_column": 1,
+        "start_line": 2
+      },
+      "yaml_path": "a"
+    },
+    "runnable": false,
+    "valid": false
+  },
+  "validate_runnable": {
+    "compiled": {
+      "analysis": {
+        "checked_parts": [],
+        "join_types": [],
+        "label_sets": [
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "start",
+            "unlabelled_arrow_ids": [
+              "a1"
+            ]
+          },
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "work",
+            "unlabelled_arrow_ids": [
+              "a2"
+            ]
+          }
+        ],
+        "loops": [],
+        "regions": [],
+        "unresolved": []
+      },
+      "arrows": [
+        {
+          "at_limit": null,
+          "id": "a1",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "start",
+          "target": "work"
+        },
+        {
+          "at_limit": null,
+          "id": "a2",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "work",
+          "target": "end"
+        }
+      ],
+      "content_hash": "089c34c39d4d33f82e0bedd2ad98a778c2dea158a79633f70ba87d6bbac51f0b",
+      "description": null,
+      "ir_version": 1,
+      "name": "Demo",
+      "nodes": [
+        {
+          "attempts": null,
+          "concurrency": null,
+          "evidence": null,
+          "goal": null,
+          "harness": null,
+          "id": "start",
+          "kind": "start",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": []
+        },
+        {
+          "attempts": 3,
+          "concurrency": 1,
+          "evidence": null,
+          "goal": "Do the thing",
+          "harness": null,
+          "id": "work",
+          "kind": "step",
+          "list_from": null,
+          "name": "Work",
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": [
+            "implementer"
+          ]
+        },
+        {
+          "attempts": null,
+          "concurrency": null,
+          "evidence": null,
+          "goal": null,
+          "harness": null,
+          "id": "end",
+          "kind": "end",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": []
+        }
+      ],
+      "workflow_id": "demo"
+    },
+    "content_hash": "089c34c39d4d33f82e0bedd2ad98a778c2dea158a79633f70ba87d6bbac51f0b",
+    "problems": [],
+    "runnable": true,
+    "valid": true
+  },
+  "validate_with_problems": {
+    "compiled": {
+      "analysis": {
+        "checked_parts": [],
+        "join_types": [
+          {
+            "arrow_ids": [
+              "a5",
+              "a7"
+            ],
+            "join_type": "and",
+            "node_id": "publish",
+            "split_node_id": "fork"
+          },
+          {
+            "arrow_ids": [
+              "a8",
+              "a9"
+            ],
+            "join_type": "xor",
+            "node_id": "end",
+            "split_node_id": null
+          }
+        ],
+        "label_sets": [
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "start",
+            "unlabelled_arrow_ids": [
+              "a1"
+            ]
+          },
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "fork",
+            "unlabelled_arrow_ids": [
+              "a2",
+              "a3"
+            ]
+          },
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "build",
+            "unlabelled_arrow_ids": [
+              "a4"
+            ]
+          },
+          {
+            "labelled_arrow_ids": [
+              "a5",
+              "a6"
+            ],
+            "labels": [
+              "ship",
+              "stop"
+            ],
+            "node_id": "triage",
+            "unlabelled_arrow_ids": []
+          },
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "docs",
+            "unlabelled_arrow_ids": [
+              "a7"
+            ]
+          },
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "publish",
+            "unlabelled_arrow_ids": [
+              "a8"
+            ]
+          },
+          {
+            "labelled_arrow_ids": [],
+            "labels": [],
+            "node_id": "abandon",
+            "unlabelled_arrow_ids": [
+              "a9"
+            ]
+          }
+        ],
+        "loops": [],
+        "regions": [],
+        "unresolved": [
+          {
+            "arrow_ids": [],
+            "code": "region_not_closed",
+            "message": "parallel branches from 'fork' do not all meet at 'publish': 'end' ends inside the region without reaching 'publish'; arrow 'a8' enters the region at 'end' from outside. Every path from the split must reach the join and nothing else may enter the branches.",
+            "node_ids": [
+              "fork",
+              "publish"
+            ]
+          }
+        ]
+      },
+      "arrows": [
+        {
+          "at_limit": null,
+          "id": "a1",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "start",
+          "target": "fork"
+        },
+        {
+          "at_limit": null,
+          "id": "a2",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "fork",
+          "target": "build"
+        },
+        {
+          "at_limit": null,
+          "id": "a3",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "fork",
+          "target": "docs"
+        },
+        {
+          "at_limit": null,
+          "id": "a4",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "build",
+          "target": "triage"
+        },
+        {
+          "at_limit": null,
+          "id": "a5",
+          "kind": "forward",
+          "label": "ship",
+          "limit": null,
+          "source": "triage",
+          "target": "publish"
+        },
+        {
+          "at_limit": null,
+          "id": "a6",
+          "kind": "forward",
+          "label": "stop",
+          "limit": null,
+          "source": "triage",
+          "target": "abandon"
+        },
+        {
+          "at_limit": null,
+          "id": "a7",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "docs",
+          "target": "publish"
+        },
+        {
+          "at_limit": null,
+          "id": "a8",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "publish",
+          "target": "end"
+        },
+        {
+          "at_limit": null,
+          "id": "a9",
+          "kind": "forward",
+          "label": null,
+          "limit": null,
+          "source": "abandon",
+          "target": "end"
+        }
+      ],
+      "content_hash": "f2d7d73e6ddaad4a45836df372b5067320318ee5039aa6c3642282e76f182263",
+      "description": null,
+      "ir_version": 1,
+      "name": "Deadlock join",
+      "nodes": [
+        {
+          "attempts": null,
+          "concurrency": null,
+          "evidence": null,
+          "goal": null,
+          "harness": null,
+          "id": "start",
+          "kind": "start",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": []
+        },
+        {
+          "attempts": 3,
+          "concurrency": 1,
+          "evidence": null,
+          "goal": "Kick off both tracks",
+          "harness": null,
+          "id": "fork",
+          "kind": "step",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": [
+            "planner"
+          ]
+        },
+        {
+          "attempts": 3,
+          "concurrency": 1,
+          "evidence": null,
+          "goal": "Build it",
+          "harness": null,
+          "id": "build",
+          "kind": "step",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": [
+            "implementer"
+          ]
+        },
+        {
+          "attempts": null,
+          "concurrency": null,
+          "evidence": null,
+          "goal": null,
+          "harness": null,
+          "id": "triage",
+          "kind": "decision",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": []
+        },
+        {
+          "attempts": 3,
+          "concurrency": 1,
+          "evidence": null,
+          "goal": "Write docs",
+          "harness": null,
+          "id": "docs",
+          "kind": "step",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": [
+            "writer"
+          ]
+        },
+        {
+          "attempts": 3,
+          "concurrency": 1,
+          "evidence": null,
+          "goal": "Publish",
+          "harness": null,
+          "id": "publish",
+          "kind": "step",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": [
+            "implementer"
+          ]
+        },
+        {
+          "attempts": 3,
+          "concurrency": 1,
+          "evidence": null,
+          "goal": "Clean up",
+          "harness": null,
+          "id": "abandon",
+          "kind": "step",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": [
+            "implementer"
+          ]
+        },
+        {
+          "attempts": null,
+          "concurrency": null,
+          "evidence": null,
+          "goal": null,
+          "harness": null,
+          "id": "end",
+          "kind": "end",
+          "list_from": null,
+          "name": null,
+          "outcomes": [],
+          "parts": [],
+          "prompt": null,
+          "question": null,
+          "roster": []
+        }
+      ],
+      "workflow_id": "deadlock-join"
+    },
+    "content_hash": "f2d7d73e6ddaad4a45836df372b5067320318ee5039aa6c3642282e76f182263",
+    "problems": [
+      {
+        "arrow_ids": [],
+        "message": "parallel branches from 'fork' do not all meet at 'publish': 'end' ends inside the region without reaching 'publish'; arrow 'a8' enters the region at 'end' from outside. Every path from the split must reach the join and nothing else may enter the branches.",
+        "node_ids": [
+          "fork",
+          "publish"
+        ],
+        "range": {
+          "end_column": 3,
+          "end_line": 11,
+          "start_column": 5,
+          "start_line": 7
+        },
+        "rule": "V2",
+        "severity": "error",
+        "yaml_path": "nodes[1]"
+      }
+    ],
+    "runnable": false,
+    "valid": true
+  }
+}

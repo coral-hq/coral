@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +18,15 @@ from coral.bridge.commit import (
     EngineSnapshot,
     build_commit,
 )
-from coral.bridge.config import ceil_epoch_seconds
+from coral.bridge.config import LOCK_TIMEOUT_S, ceil_epoch_seconds
 from coral.bridge.keys import anchor_effect_key, effect_work_id
 from coral.bridge.mapping import UnsupportedStance
-from coral.bridge.service import EngineBridge, EngineLoadFailed, RunNotRunnable
+from coral.bridge.service import (
+    USER_PAUSE_DETAIL,
+    EngineBridge,
+    EngineLoadFailed,
+    RunNotRunnable,
+)
 from coral.db.enum_codecs import (
     ActorKind,
     LogKind,
@@ -43,6 +49,7 @@ from coral.engine.types import (
     Timer,
     TimerDue,
 )
+from coral.recovery.cancel import cancel_run_row
 from coral.recovery.drift import DriftFinding, drift_log_checksum
 from coral.stores.fakes import FakeRunStore
 from coral.stores.protocols import (
@@ -572,10 +579,14 @@ def test_a_start_whose_commit_cannot_be_built_pauses_the_run_row(
     assert json.loads(paused.body)["detail"] == "unsupported_stance"
 
 
-def _logs(world: World, run_id: str) -> list[RunLogEntry]:
+def _runs(world: World) -> FakeRunStore:
     runs = world.runs
     assert isinstance(runs, FakeRunStore)
-    return runs.logs[(WORKSPACE, run_id)]
+    return runs
+
+
+def _logs(world: World, run_id: str) -> list[RunLogEntry]:
+    return _runs(world).logs[(WORKSPACE, run_id)]
 
 
 def test_a_corrupt_engine_row_pauses_the_run_once(world: World) -> None:
@@ -669,6 +680,113 @@ def test_a_drift_pause_of_a_run_the_engine_has_not_started_starts_it_first(
     assert _causes(world, run.id) == [("drift", "anchor_archived")]
     world.bridge.resume_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
     assert world.run(run.id).status == int(RunStatus.RUNNING)
+
+
+@pytest.mark.parametrize("started", [True, False], ids=["running", "not_started"])
+def test_a_user_pause_pauses_through_the_engine_once(world: World, started: bool) -> None:
+    run = start(world) if started else start_without_engine(world)
+
+    paused = world.bridge.pause_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
+
+    assert (paused.outcome, paused.code, paused.commit.outcome.applied) == ("paused", None, True)
+    row = world.run(run.id)
+    assert (row.status, row.pause_reason) == (int(RunStatus.PAUSED), int(RunPauseReason.USER))
+    assert _causes(world, run.id) == [("user", USER_PAUSE_DETAIL)]
+    kinds = [json.loads(entry.body)["input"]["kind"] for entry in world.engine_log(run.id)]
+    # A run whose engine never started starts first, in the same commit.
+    assert kinds == ["start_run", "pause_run"]
+    assert {entry.actor_ref for entry in world.engine_log(run.id)[-1:]} == {"user:alice"}
+    # The owner's own pause raises no alert.
+    assert _runs(world).list_alerts(run.id, workspace_id=WORKSPACE) == []
+
+    again = world.bridge.pause_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
+    assert (again.outcome, again.commit.outcome.applied) == ("unchanged", False)
+    assert world.run(run.id).version == row.version
+
+
+def test_a_user_pause_of_a_finished_run_is_refused_and_writes_nothing(world: World) -> None:
+    run = start(world)
+    world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
+    version = world.run(run.id).version
+
+    refused = world.bridge.pause_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
+
+    assert (refused.outcome, refused.code) == ("refused", "run_terminal")
+    assert not refused.commit.outcome.applied
+    assert world.run(run.id).version == version
+
+
+@pytest.mark.parametrize("started", [True, False], ids=["engine_running", "engine_not_started"])
+def test_a_user_pause_of_a_run_cancelled_on_its_row_is_refused(
+    world: World, started: bool
+) -> None:
+    run = start(world) if started else start_without_engine(world)
+    cancel_run_row(
+        world.runs,
+        workspace_id=WORKSPACE,
+        run_id=run.id,
+        actor="alice",
+        now_us=world.clock.epoch * 1_000_000,
+        lock_timeout_s=LOCK_TIMEOUT_S,
+    )
+
+    refused = world.bridge.pause_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
+
+    # WHY: the commit may apply (it cancels a running engine first), yet the pause did not.
+    assert (refused.outcome, refused.code) == ("refused", "run_terminal")
+    assert refused.commit.outcome.applied == started
+    assert world.run(run.id).status == int(RunStatus.CANCELLED)
+
+
+def _paused_by_engine(reason: str) -> Callable[[World, str], None]:
+    def pause(world: World, run_id: str) -> None:
+        _commit(world, run_id, PauseRun(reason=reason, detail="cause"))  # type: ignore[arg-type]
+
+    return pause
+
+
+def _paused_on_its_row(world: World, run_id: str) -> None:
+    """A failed load pauses the row alone; the engine runs on once the run loads again."""
+    key = (WORKSPACE, run_id)
+    spec = _runs(world).specs[key]
+    _runs(world).specs[key] = dataclasses.replace(spec, engine_config=None)
+    with pytest.raises(EngineLoadFailed):
+        world.bridge.load(workspace_id=WORKSPACE, run_id=run_id)
+    _runs(world).specs[key] = spec
+
+
+@pytest.mark.parametrize(
+    ("pause", "left"),
+    [
+        (_paused_by_engine("drift"), []),
+        (_paused_by_engine("failure_path"), [("failure_path", "cause")]),
+        (_paused_by_engine("budget"), [("budget", "cause")]),
+        (_paused_on_its_row, []),
+    ],
+    ids=["drift", "failure_path", "budget", "row_only"],
+)
+def test_a_user_pause_of_a_run_paused_for_another_cause_keeps_it_until_resumed(
+    world: World, pause: Callable[[World, str], None], left: list[tuple[str, str]]
+) -> None:
+    run = start(world)
+    pause(world, run.id)
+    shown = world.run(run.id)
+    assert shown.status == int(RunStatus.PAUSED)
+
+    assert (
+        world.bridge.pause_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice").outcome
+        == "paused"
+    )
+
+    assert ("user", USER_PAUSE_DETAIL) in _causes(world, run.id)
+    # The row keeps showing the pause it had.
+    assert world.run(run.id).pause_reason == shown.pause_reason
+    world.bridge.resume_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
+    # A resume lifts the user's pause; a cause only a retry or a higher cap clears stays.
+    assert _causes(world, run.id) == left
+    row = world.run(run.id)
+    still = (int(RunStatus.PAUSED), shown.pause_reason)
+    assert (row.status, row.pause_reason) == (still if left else (int(RunStatus.RUNNING), None))
 
 
 def test_a_timer_fires_at_the_bridge_clock(world: World) -> None:

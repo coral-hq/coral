@@ -8,12 +8,21 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+import zstandard
+
 from coral.db import MAX_STORED_BYTES, encode
 from coral.db.enum_codecs import RunStatus, WorkKind, WorkStatus
 from coral.model.ids import derived_id
+from coral.omni.protocols import Viewer
 
 # Runs not yet completed, failed or cancelled.
 UNFINISHED_RUN_STATUSES = (int(RunStatus.STARTING), int(RunStatus.RUNNING), int(RunStatus.PAUSED))
+# Stored text that does not decode when its row is read: a bad zstd frame, or a
+# ``ValueError`` for text that is not UTF-8 or a frame cut short, of an unknown codec or
+# too large.
+STORED_TEXT_ERRORS = (zstandard.ZstdError, ValueError)
+# Most runs one page of a caller's run list holds.
+MAX_OWNED_RUNS_LIMIT = 50
 
 # ── Domain Exceptions ────────────────────────────────────────────────────────
 
@@ -58,6 +67,10 @@ class RunContended(RuntimeError):
 
 class ToolReplyTooLarge(ValueError):
     """A tool reply would exceed the inline storage cap."""
+
+
+class InvalidRunCursor(ValueError):
+    """A run-list cursor outside what a stored run's key can be; nothing was read."""
 
 
 # ── Frozen Domain Dataclasses ────────────────────────────────────────────────
@@ -499,6 +512,9 @@ class RunLogEntry:
     body_ref: str | None = None
     view_patch: str | None = None
     view_patch_ref: str | None = None
+    # A tolerant read's placeholder for a row whose stored text does not decode: its
+    # ``body`` is empty and its ``view_patch`` ``None``.
+    unreadable: bool = False
 
 
 @dataclass(frozen=True)
@@ -839,6 +855,28 @@ class RunStore(Protocol):
         descending: bool = True,
     ) -> list[CoralRun]: ...
 
+    def list_owned_runs(
+        self,
+        *,
+        workspace_id: int,
+        viewer: Viewer,
+        statuses: Sequence[int] = (),
+        workflow_id: str | None = None,
+        after: tuple[int, str] | None = None,
+        limit: int = 25,
+    ) -> tuple[list[CoralRun], tuple[int, str] | None]:
+        """The viewer's runs in the workspace, newest first, one keyset page at a time.
+
+        Owners and generations compare exactly, as :func:`coral.alerts.types.is_owner`
+        does. ``after`` is the ``(created_at, id)`` a previous page returned; the
+        returned cursor is always the last run of this page, or ``None`` at the end.
+
+        :raises InvalidRunCursor: ``after`` holds a time outside 0-2**63-1 or an id that
+            is not at most 32 lowercase hex characters.
+        :raises ValueError: ``limit`` is not 1-:data:`MAX_OWNED_RUNS_LIMIT`.
+        """
+        ...
+
     def read_log(
         self,
         run_id: str,
@@ -846,7 +884,16 @@ class RunStore(Protocol):
         after_seq: int = 0,
         limit: int = 100,
         workspace_id: int | None = None,
-    ) -> list[RunLogEntry]: ...
+        tolerant: bool = False,
+    ) -> list[RunLogEntry]:
+        """The run's log rows after ``after_seq``, in ``seq`` order.
+
+        :param tolerant: Return a row whose stored text does not decode, or is too
+            short to decode, as an ``unreadable`` placeholder instead of raising.
+        :raises zstandard.ZstdError, ValueError: a row's text does not decode and
+            ``tolerant`` is false.
+        """
+        ...
 
     def find_receipt(
         self,
@@ -1064,6 +1111,8 @@ class QueueStore(Protocol):
 
 
 __all__ = [
+    "MAX_OWNED_RUNS_LIMIT",
+    "STORED_TEXT_ERRORS",
     "UNFINISHED_RUN_STATUSES",
     "ActivationDraft",
     "ActivationState",
@@ -1080,6 +1129,7 @@ __all__ = [
     "HandoffItemDraft",
     "HandoffItemState",
     "HandoffState",
+    "InvalidRunCursor",
     "JoinArrivalDraft",
     "JoinArrivalState",
     "LogEntryDraft",

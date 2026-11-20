@@ -25,6 +25,7 @@ import { registerInboxKind, resetInboxKindsForTests } from "@/lib/inboxKinds";
 import { resetLocalElicitationResolutionsForTests } from "@/lib/localElicitationResolutions";
 import * as sessionsApi from "@/lib/sessionsApi";
 import { InboxPage } from "@/pages/InboxPage";
+import * as runsApi from "../api/runsApi";
 import type { WorkflowAlert } from "../api/types";
 import {
   CONTRACT_INBOX_PAGE,
@@ -52,6 +53,11 @@ vi.mock("./workflowEntries", async (importActual) => {
   const actual = await importActual<typeof workflowEntries>();
   return { ...actual, badgeCount: vi.fn(actual.badgeCount) };
 });
+// A pause card reads its run; these tests stay off the network.
+vi.mock("../api/runsApi", async (importActual) => ({
+  ...(await importActual<typeof runsApi>()),
+  getRun: vi.fn(),
+}));
 vi.mock("@/hooks/useAutomationInbox", () => ({ useAutomationInbox: vi.fn() }));
 vi.mock("@/hooks/useCommentInbox", () => ({ useCommentInbox: vi.fn() }));
 vi.mock("@/hooks/useViewerId", () => ({
@@ -167,6 +173,9 @@ beforeEach(() => {
   });
   vi.mocked(sessionsApi.approve).mockResolvedValue({ queued: false });
   vi.mocked(sessionsApi.fetchSessionItemsPage).mockResolvedValue({ items: [], hasMore: false });
+  vi.mocked(runsApi.getRun).mockRejectedValue(
+    new sessionsApi.ApiError("Run not found.", 404, "not_found"),
+  );
 });
 
 afterEach(() => {
@@ -309,6 +318,11 @@ describe("the workflow Inbox kind", () => {
     fireEvent.click(within(card).getByRole("button", { name: "Run paused: Ship the bridge" }));
     fireEvent.click(within(card).getByRole("button", { name: "Mark as read" }));
     expect(inbox.ack).toHaveBeenCalledWith(PAUSE_ALERT.alert_id);
+    // The opened pause card reads its run for Resume and Cancel; a run not found shows neither.
+    await waitFor(() =>
+      expect(runsApi.getRun).toHaveBeenCalledWith(PAUSE_ALERT.run_id, expect.any(AbortSignal)),
+    );
+    expect(within(card).queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
   });
 
   it("leaves low-priority alerts out of the badge and marks it incomplete with the feed", async () => {

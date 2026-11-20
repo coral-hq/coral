@@ -10,16 +10,17 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from coral.alerts.types import AlertAction, AlertKindName, AlertPayload
+from coral.api.errors import CoralApiError, CoralRoute, error_responses
 from coral.db.enum_codecs import decode_alert_kind, decode_alert_priority
+from coral.limits import WarnOnce
 from coral.omni.protocols import Viewer
 from coral.queue.run_effects import describe_exception
 from coral.stores.alerts import MAX_INBOX_LIMIT, InboxCursor, SqlAlchemyAlertStore
@@ -116,12 +117,10 @@ class _UnreadableAlerts:
     """Warns about the first alert the feed cannot read; the later ones go to debug."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._warned = False
+        self._warned = WarnOnce()
 
     def skipped(self, alert: AlertRecord, exc: Exception) -> None:
-        with self._lock:
-            first, self._warned = not self._warned, True
+        first = self._warned.first()
         # Only ids and error locations: payloads hold run titles and prompts.
         _logger.log(
             logging.WARNING if first else logging.DEBUG,
@@ -136,19 +135,8 @@ class _UnreadableAlerts:
 def _alert_store(request: Request) -> SqlAlchemyAlertStore:
     store = getattr(request.app.state, "coral_alert_store", None)
     if store is None:
-        raise HTTPException(status_code=404, detail="Coral inbox is not available")
+        raise CoralApiError("not_found", "Coral inbox is not available", 404)
     return store
-
-
-def _json_body(request: Request) -> None:
-    """
-    Refuse a body that is not declared JSON: a cross-site form can post text, form and
-    multipart bodies, and a body with no media type, without a preflight.
-    """
-    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-    subtype = media_type.removeprefix("application/")
-    if subtype == media_type or not (subtype == "json" or subtype.endswith("+json")):
-        raise HTTPException(status_code=422, detail="The body must be the JSON object {}")
 
 
 def create_inbox_router(
@@ -165,14 +153,19 @@ def create_inbox_router(
     :param workspace_id_dependency: The request's workspace.
     :param clock: Epoch seconds an alert is marked read at.
     """
-    router = APIRouter()
+    # The route class refuses a body that is not JSON, as a cross-site form could send.
+    router = APIRouter(route_class=CoralRoute)
     unreadable = _UnreadableAlerts()
     # Built once: each route's caller and workspace come from these.
     caller = Depends(viewer_dependency)
     workspace = Depends(workspace_id_dependency)
-    json_body = Depends(_json_body)
 
-    @router.get("/inbox", response_model=WorkflowInboxPage)
+    @router.get(
+        "/inbox",
+        operation_id="coral_list_inbox",
+        response_model=WorkflowInboxPage,
+        responses=error_responses(401, 403, 404, 422),
+    )
     def list_inbox(
         request: Request,
         response: Response,
@@ -188,7 +181,7 @@ def create_inbox_router(
         try:
             cursor = None if after is None else parse_inbox_cursor(after)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail="Invalid workflow inbox cursor") from exc
+            raise CoralApiError("validation_failed", "Invalid workflow inbox cursor", 422) from exc
         alerts, next_cursor = _alert_store(request).list_inbox(
             workspace_id=workspace_id, viewer=viewer, after=cursor, limit=limit
         )
@@ -200,15 +193,19 @@ def create_inbox_router(
                 unreadable.skipped(alert, exc)
         return WorkflowInboxPage(data=items, next_cursor=format_inbox_cursor(next_cursor))
 
-    @router.post("/inbox/{alert_id}/ack", status_code=204, response_class=Response)
+    @router.post(
+        "/inbox/{alert_id}/ack",
+        operation_id="coral_ack_alert",
+        status_code=204,
+        response_class=Response,
+        responses=error_responses(401, 403, 404, 409, 422),
+    )
     def ack_alert(
         request: Request,
         alert_id: str,
         _body: AckRequest,
         viewer: Viewer = caller,
         workspace_id: int = workspace,
-        # After the caller: an unauthenticated request is refused as such first.
-        _json: None = json_body,
     ) -> Response:
         """Mark one of the caller's alerts read; marking it again changes nothing."""
         store = _alert_store(request)
@@ -218,9 +215,9 @@ def create_inbox_router(
             else "not_found"
         )
         if outcome == "not_found":
-            raise HTTPException(status_code=404, detail="alert not found")
+            raise CoralApiError("not_found", "alert not found", 404)
         if outcome == "not_ackable":
-            raise HTTPException(status_code=409, detail="Answer the gate to clear this alert.")
+            raise CoralApiError("illegal_transition", "Answer the gate to clear this alert.", 409)
         return Response(status_code=204)
 
     return router

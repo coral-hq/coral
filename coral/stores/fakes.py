@@ -10,9 +10,10 @@ import uuid
 from collections.abc import Callable, Collection, Sequence
 from typing import Any
 
+import zstandard
 from sqlalchemy.exc import IntegrityError
 
-from coral.alerts.types import normalize_owner
+from coral.alerts.types import LOCAL_USER_ID, generation_matches, is_owner, normalize_owner
 from coral.db.enum_codecs import (
     AlertStatus,
     GateVisitStatus,
@@ -22,6 +23,7 @@ from coral.db.enum_codecs import (
     WorkStatus,
 )
 from coral.model.ids import derived_id
+from coral.omni.protocols import Viewer
 from coral.stores.alerts import check_alert_raises
 from coral.stores.protocols import (
     UNFINISHED_RUN_STATUSES,
@@ -48,7 +50,7 @@ from coral.stores.protocols import (
     WorkItemDraft,
     require_checksum32,
 )
-from coral.stores.runs import PostCommitHooks, _compute_spec_digest
+from coral.stores.runs import PostCommitHooks, _compute_spec_digest, check_owned_runs_page
 from coral.stores.work_rows import FINISHED_WORK_STATUSES, MIN_HOLD_DELAY_S, repended_values
 
 
@@ -70,6 +72,8 @@ class FakeRunStore:
         self.logs: dict[tuple[int, str], list[RunLogEntry]] = {}
         self.work: dict[tuple[int, str], WorkItem] = {}
         self.tool_replies: dict[tuple[int, str, bytes], str] = {}
+        # (workspace, run, seq) of log rows whose stored text a SQL store could not decode.
+        self.undecodable_logs: set[tuple[int, str, int]] = set()
         self.post_commit_hooks = PostCommitHooks()
         self.before_apply_hook: Callable[[str, int], None] | None = None
 
@@ -607,6 +611,40 @@ class FakeRunStore:
                     all_runs = [r for r in all_runs if (r.created_at, r.id) > (c_created, c_id)]
             return all_runs[:limit]
 
+    def list_owned_runs(
+        self,
+        *,
+        workspace_id: int,
+        viewer: Viewer,
+        statuses: Sequence[int] = (),
+        workflow_id: str | None = None,
+        after: tuple[int, str] | None = None,
+        limit: int = 25,
+    ) -> tuple[list[CoralRun], tuple[int, str] | None]:
+        check_owned_runs_page(after, limit)
+        owner = normalize_owner(viewer.user_id)
+        stored_owners = (None, LOCAL_USER_ID) if owner is None else (owner,)
+        with self._lock:
+            # What the SQL store's owner, generation and filter clauses select.
+            selected = sorted(
+                (
+                    run
+                    for (ws, _), run in self.runs.items()
+                    if ws == workspace_id
+                    and run.user_id in stored_owners
+                    and generation_matches(run.account_generation, viewer)
+                    and (not statuses or run.status in statuses)
+                    and (workflow_id is None or run.workflow_id == workflow_id)
+                    and (after is None or (run.created_at, run.id) < after)
+                ),
+                key=lambda run: (run.created_at, run.id),
+                reverse=True,
+            )
+        kept = [run for run in selected if is_owner(run.user_id, run.account_generation, viewer)]
+        page = kept[:limit]
+        cursor = (page[-1].created_at, page[-1].id) if len(kept) > limit else None
+        return page, cursor
+
     def read_log(
         self,
         run_id: str,
@@ -614,13 +652,23 @@ class FakeRunStore:
         after_seq: int = 0,
         limit: int = 100,
         workspace_id: int | None = None,
+        tolerant: bool = False,
     ) -> list[RunLogEntry]:
         ws = self._resolve_ws(workspace_id)
         with self._lock:
             entries = self.logs.get((ws, run_id), [])
             filtered = [e for e in entries if e.seq > after_seq]
             filtered.sort(key=lambda e: e.seq)
-            return filtered[:limit]
+            page = filtered[:limit]
+            undecodable = {e.seq for e in page if (ws, run_id, e.seq) in self.undecodable_logs}
+        if undecodable and not tolerant:
+            raise zstandard.ZstdError("stored log text does not decode")
+        return [
+            dataclasses.replace(e, body="", view_patch=None, unreadable=True)
+            if e.seq in undecodable
+            else e
+            for e in page
+        ]
 
     def find_receipt(
         self,
@@ -665,8 +713,10 @@ class FakeRunStore:
                     and entry.run_version <= max_run_version
                 ),
                 key=lambda entry: entry.seq,
-            )
-            return entries[:limit]
+            )[:limit]
+            if any((workspace_id, run_id, e.seq) in self.undecodable_logs for e in entries):
+                raise zstandard.ZstdError("stored log text does not decode")
+            return entries
 
     def find_tool_reply(self, run_id: str, cksum: bytes, *, workspace_id: int) -> str | None:
         require_checksum32(cksum)

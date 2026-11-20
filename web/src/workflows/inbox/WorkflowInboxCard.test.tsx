@@ -1,12 +1,14 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as identityModule from "@/lib/identity";
 import { ApiError } from "@/lib/sessionsApi";
 import type * as sessionsApiModule from "@/lib/sessionsApi";
 import type { InboxKindUi } from "@/lib/inboxKinds";
+import type { RunDetail, RunSummary } from "../api/generated/coralApi";
 import type { WorkflowAlert } from "../api/types";
 import {
   CONTRACT_INBOX_PAGE,
@@ -578,5 +580,686 @@ describe("WorkflowAlertCard", () => {
       '<img src=x onerror="alert(1)">',
     );
     expect(document.querySelector("img")).toBeNull();
+  });
+});
+
+describe("WorkflowAlertCard run actions", () => {
+  const RUN_ID = PAUSE_ALERT.run_id;
+  const RUN_URL = `/v1/coral/runs/${RUN_ID}`;
+  const RUN_KEY = ["coral-run", RUN_ID];
+  const TOGGLE = { name: "Run paused: Ship the bridge" };
+
+  type RunActionName = RunDetail["allowed_actions"][number];
+  /** A POST's answer: a response, or a call that yields one (a rejection is a network failure). */
+  type Answer = Response | (() => Promise<Response>);
+
+  function runDetail(
+    allowedActions: RunActionName[],
+    overrides: Partial<RunDetail> = {},
+  ): RunDetail {
+    return {
+      run_id: RUN_ID,
+      workflow_id: "a".repeat(32),
+      version_id: "b".repeat(32),
+      title: "Ship the bridge",
+      status: "paused",
+      pause_reason: "infra",
+      created_at: 1_767_268_000,
+      updated_at: 1_767_268_860,
+      finished_at: null,
+      activation_count: 3,
+      allowed_actions: allowedActions,
+      spend: null,
+      version: 7,
+      head_seq: 12,
+      max_activations: 100,
+      request_preview: null,
+      target: null,
+      anchor_session_id: "c".repeat(32),
+      orchestrator_session_id: null,
+      causes: [],
+      load_error: null,
+      view: null,
+      gates: [],
+      slots: [],
+      ...overrides,
+    };
+  }
+
+  const RESUMABLE = runDetail(["resume", "cancel"]);
+  const RUNNING = runDetail(["pause", "cancel"], { status: "running", pause_reason: null });
+  const CANCELLED = runDetail([], { status: "cancelled", pause_reason: null });
+  const COMPLETED = runDetail([], { status: "completed", pause_reason: null });
+
+  function summaryOf(run: RunDetail): RunSummary {
+    const { run_id, workflow_id, version_id, title, status, pause_reason } = run;
+    const { created_at, updated_at, finished_at, activation_count, allowed_actions, spend } = run;
+    return {
+      run_id,
+      workflow_id,
+      version_id,
+      title,
+      status,
+      pause_reason,
+      created_at,
+      updated_at,
+      finished_at,
+      activation_count,
+      allowed_actions,
+      spend,
+    };
+  }
+
+  /** The runs API: GETs read `details` in turn (the last repeats), POSTs take `answers` in turn. */
+  function serveRun(details: RunDetail | RunDetail[], ...answers: Answer[]) {
+    const reads = Array.isArray(details) ? [...details] : [details];
+    authenticatedFetch.mockImplementation((_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        const answer = answers.shift() ?? wire(500, {});
+        return answer instanceof Response ? Promise.resolve(answer) : answer();
+      }
+      const run = reads.length > 1 ? reads.shift()! : reads[0]!;
+      return Promise.resolve(wire(200, run));
+    });
+  }
+
+  const reads = () =>
+    authenticatedFetch.mock.calls
+      .filter(([, init]) => (init as RequestInit | undefined)?.method !== "POST")
+      .map(([url]) => url as string);
+
+  const posts = () =>
+    authenticatedFetch.mock.calls
+      .filter(([, init]) => (init as RequestInit | undefined)?.method === "POST")
+      .map(([url, init]) => [url as string, JSON.parse((init as RequestInit).body as string)]);
+
+  const envelope = (code: string, message: string) => ({ error: { code, message, details: null } });
+
+  /** A card that keeps its body mounted while collapsed, so only the query's gate stops a read. */
+  const KEEP_MOUNTED_UI: InboxKindUi = {
+    ...UI,
+    InboxCard: (props) => UI.InboxCard({ ...props, expanded: true }),
+  };
+
+  function ToggledAlert({
+    alert,
+    initiallyExpanded,
+    ui,
+  }: {
+    alert: WorkflowAlert;
+    initiallyExpanded: boolean;
+    ui: InboxKindUi;
+  }) {
+    const [expanded, setExpanded] = useState(initiallyExpanded);
+    return (
+      <WorkflowAlertCard
+        alert={alert}
+        at={alert.created_at}
+        expanded={expanded}
+        onToggle={() => setExpanded((open) => !open)}
+        ui={ui}
+        onMarkRead={() => {}}
+      />
+    );
+  }
+
+  function renderRunCard({
+    alert = PAUSE_ALERT,
+    expanded = true,
+    ui = UI,
+  }: { alert?: WorkflowAlert; expanded?: boolean; ui?: InboxKindUi } = {}) {
+    return renderCard(<ToggledAlert alert={alert} initiallyExpanded={expanded} ui={ui} />);
+  }
+
+  const actionNames = () =>
+    within(screen.getByTestId("actions"))
+      .queryAllByRole("button")
+      .map((button) => button.textContent?.trim());
+
+  async function runLoaded(queryClient: QueryClient) {
+    await waitFor(() => expect(queryClient.getQueryState(RUN_KEY)?.status).toBe("success"));
+  }
+
+  it("reads the run only while its pause card is expanded", async () => {
+    // WHY: a long Inbox must not read every paused run; opening one card reads one run.
+    serveRun(RESUMABLE);
+    const { queryClient } = renderRunCard({ expanded: false, ui: KEEP_MOUNTED_UI });
+    await act(async () => {});
+    expect(authenticatedFetch).not.toHaveBeenCalled();
+    expect(queryClient.getQueryState(RUN_KEY)?.fetchStatus ?? "idle").toBe("idle");
+
+    cleanup();
+    renderRunCard({ expanded: false });
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", TOGGLE));
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(reads()).toEqual([RUN_URL]);
+  });
+
+  it.each<WorkflowAlert["kind"]>(["watchdog", "overdue", "run_completed", "run_failed"])(
+    "reads no run for an expanded %s alert",
+    async (kind) => {
+      // WHY: only a pause can be resumed or cancelled from the Inbox.
+      serveRun(RESUMABLE);
+      renderRunCard({ alert: { ...PAUSE_ALERT, kind } });
+      await act(async () => {});
+      expect(authenticatedFetch).not.toHaveBeenCalled();
+      expect(actionNames()).toEqual(["Mark as read"]);
+    },
+  );
+
+  it.each<[string, RunDetail, string[]]>([
+    ["a resumable pause", RESUMABLE, ["Resume", "Cancel run"]],
+    [
+      "a run that cannot be loaded",
+      runDetail(["cancel"], {
+        pause_reason: "failure_path",
+        load_error: "engine.load_failed",
+        causes: [{ reason: "failure_path", detail: "engine.load_failed", subject: "" }],
+      }),
+      ["Cancel run"],
+    ],
+    ["a running run", RUNNING, ["Cancel run"]],
+    ["a finished run", COMPLETED, []],
+  ])("offers exactly what %s allows", async (_name, run, buttons) => {
+    // WHY: the server's allowed_actions decide the buttons; the card never guesses.
+    serveRun(run);
+    const { queryClient } = renderRunCard();
+    await runLoaded(queryClient);
+    expect(actionNames()).toEqual([...buttons, "Mark as read"]);
+    expect(screen.getByRole("link", { name: /Open run/ })).toHaveAttribute(
+      "href",
+      `/workflows/runs/${RUN_ID}`,
+    );
+  });
+
+  it("makes Resume the primary action of a pause card", async () => {
+    // WHY: one filled button per card; Open run steps back beside Resume.
+    serveRun(RESUMABLE);
+    renderRunCard();
+    expect(await screen.findByRole("button", { name: "Resume" })).toHaveClass("primary-action");
+    expect(screen.getByRole("button", { name: "Cancel run" })).toHaveClass("outline-action");
+    expect(screen.getByRole("link", { name: /Open run/ })).toHaveClass("outline-action");
+  });
+
+  it("resumes with an empty body, announces it and refreshes the Inbox and the run", async () => {
+    // WHY: the owner resumes from the Inbox and sees the result without leaving it.
+    serveRun([RESUMABLE, RUNNING], wire(200, summaryOf(RUNNING)));
+    const { queryClient } = renderRunCard();
+    const inboxKey = ["coral-inbox", "viewer-scope"];
+    queryClient.setQueryData(inboxKey, { alerts: [] });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    // Taken before the click: the pending button's spinner is a status too.
+    const status = screen.getByRole("status");
+    fireEvent.click(resume);
+
+    await waitFor(() => expect(status).toHaveTextContent("Resumed."));
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveFocus();
+    expect(posts()).toEqual([[`${RUN_URL}:resume`, {}]]);
+    const [, init] = authenticatedFetch.mock.calls.find(([url]) => url === `${RUN_URL}:resume`)!;
+    expect(new Headers((init as RequestInit).headers).get("Content-Type")).toBe("application/json");
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["coral-inbox"] });
+    expect(queryClient.getQueryState(inboxKey)?.isInvalidated).toBe(true);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: RUN_KEY });
+    await waitFor(() => expect(actionNames()).toEqual(["Cancel run", "Mark as read"]));
+    await waitFor(() => expect(reads()).toEqual([RUN_URL, RUN_URL]));
+  });
+
+  it("asks before cancelling, and Keep running or Escape posts nothing", async () => {
+    // WHY: cancelling stops the run's steps for good, so it takes a second, explicit click.
+    serveRun(RESUMABLE);
+    renderRunCard();
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }));
+
+    const confirm = screen.getByRole("group", { name: "Cancel this run? Its steps stop." });
+    expect(within(confirm).getByRole("button", { name: "Keep running" })).toHaveFocus();
+    expect(
+      within(within(confirm).getByTestId("actions"))
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["Cancel run", "Keep running"]);
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    fireEvent.click(within(confirm).getByRole("button", { name: "Keep running" }));
+    expect(screen.queryByRole("group")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel run" })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    fireEvent.keyDown(screen.getByRole("button", { name: "Keep running" }), { key: "Escape" });
+    expect(screen.queryByRole("group")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel run" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Resume" })).toBeEnabled();
+    expect(posts()).toEqual([]);
+  });
+
+  it("cancels once confirmed, announces it and refreshes the Inbox and the run", async () => {
+    // WHY: the confirmed cancel posts once and the card shows the run's new state.
+    serveRun([RESUMABLE, CANCELLED], wire(200, summaryOf(CANCELLED)));
+    const { queryClient } = renderRunCard();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }));
+    const confirm = screen.getByRole("group", { name: "Cancel this run? Its steps stop." });
+    const status = screen.getByRole("status");
+    fireEvent.click(within(confirm).getByRole("button", { name: "Cancel run" }));
+
+    await waitFor(() => expect(status).toHaveTextContent("Cancelled."));
+    expect(status).toHaveFocus();
+    expect(posts()).toEqual([[`${RUN_URL}:cancel`, {}]]);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["coral-inbox"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: RUN_KEY });
+    expect(screen.queryByRole("group")).not.toBeInTheDocument();
+    expect(actionNames()).toEqual(["Mark as read"]);
+  });
+
+  it("disables the run's buttons while an action is pending and posts it once", async () => {
+    // WHY: a second click must not send a second action while the first is in flight.
+    serveRun(RESUMABLE, () => new Promise<Response>(() => {}));
+    renderRunCard();
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    fireEvent.click(resume);
+    fireEvent.click(resume);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    expect(resume).toBeDisabled();
+    expect(resume).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeDisabled();
+    expect(screen.queryByRole("group")).not.toBeInTheDocument();
+    await waitFor(() => expect(posts()).toEqual([[`${RUN_URL}:resume`, {}]]));
+  });
+
+  it.each<[string, Answer, string]>([
+    [
+      "a 503",
+      new Response(JSON.stringify(envelope("server_busy", "Busy.")), {
+        status: 503,
+        headers: { "Retry-After": "1" },
+      }),
+      "The server is busy; try again.",
+    ],
+    [
+      "a 503 with an HTML body and a non-numeric Retry-After",
+      new Response("<html>busy</html>", { status: 503, headers: { "Retry-After": "soon" } }),
+      "The server is busy; try again.",
+    ],
+    [
+      "a 503 without a code",
+      wire(503, { error: { message: "Busy." } }),
+      "The server is busy; try again.",
+    ],
+    ["a 429", wire(429, envelope("stream_limit", "Too many.")), "Couldn’t update the run."],
+    ["a 500", wire(500, {}), "Couldn’t update the run."],
+    ["a 422", wire(422, envelope("validation_failed", "Bad body.")), "Couldn’t update the run."],
+    [
+      "a network failure",
+      () => Promise.reject(new TypeError("Failed to fetch")),
+      "Couldn’t update the run.",
+    ],
+  ])("shows %s as its text and keeps the buttons for a retry", async (_name, answer, text) => {
+    // WHY: each failure says what happened in the owner's terms; trying again stays one click away.
+    serveRun(RESUMABLE, answer);
+    renderRunCard();
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    const status = screen.getByRole("status");
+    fireEvent.click(resume);
+    await waitFor(() => expect(status).toHaveTextContent(text));
+    expect(status).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Resume" })).toBeEnabled();
+    expect(reads()).toEqual([RUN_URL]);
+  });
+
+  it("shows a conflict's own message and refetches the run", async () => {
+    // WHY: a 409 means the run moved on; the server says how and the buttons follow it.
+    serveRun(
+      [RESUMABLE, COMPLETED],
+      wire(409, envelope("illegal_transition", "The run is completed.")),
+    );
+    const { queryClient } = renderRunCard();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    const status = screen.getByRole("status");
+    fireEvent.click(resume);
+    await waitFor(() => expect(status).toHaveTextContent("The run is completed."));
+    expect(status).toHaveFocus();
+    await waitFor(() => expect(actionNames()).toEqual(["Mark as read"]));
+    await waitFor(() => expect(reads()).toEqual([RUN_URL, RUN_URL]));
+    // Reloading the Inbox now could drop the card, and the message with it.
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["coral-inbox"] });
+  });
+
+  it("renders a conflict's message as text, never as markup", async () => {
+    // WHY: the server's message reaches the page; it must not become HTML.
+    const markup = '<img src=x onerror="alert(1)">';
+    serveRun(RESUMABLE, wire(409, envelope("illegal_transition", markup)));
+    renderRunCard();
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    const status = screen.getByRole("status");
+    fireEvent.click(resume);
+    await waitFor(() => expect(status).toHaveTextContent(markup));
+    expect(document.querySelector("img")).toBeNull();
+  });
+
+  it("cancels from the keyboard, and a retried cancel posts once per confirm", async () => {
+    // WHY: keyboard users reach every step, each result takes focus, and a double click posts once.
+    let release: (response: Response) => void = () => {};
+    serveRun(
+      [RESUMABLE, CANCELLED],
+      wire(503, envelope("server_busy", "Busy.")),
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    renderRunCard();
+    await screen.findByRole("button", { name: "Resume" });
+    const status = screen.getByRole("status");
+    await user.tab();
+    await user.tab();
+    await user.tab();
+    expect(screen.getByRole("button", { name: "Cancel run" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: "Keep running" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: "Cancel run" })).toHaveFocus();
+    await user.keyboard(" ");
+    await user.tab({ shift: true });
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(status).toHaveTextContent("The server is busy; try again."));
+    expect(status).toHaveFocus();
+    expect(screen.queryByRole("group")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel run" }));
+    const confirm = within(screen.getByRole("group")).getByRole("button", { name: "Cancel run" });
+    await user.dblClick(confirm);
+    expect(confirm).toBeDisabled();
+    expect(posts()).toEqual([
+      [`${RUN_URL}:cancel`, {}],
+      [`${RUN_URL}:cancel`, {}],
+    ]);
+    release(wire(200, summaryOf(CANCELLED)));
+    await waitFor(() => expect(status).toHaveTextContent("Cancelled."));
+    expect(status).toHaveFocus();
+  });
+
+  it("refreshes the Inbox and the run when the card closes before the action returns", async () => {
+    // WHY: the Inbox may drop or fold the card mid-request; the result must still land.
+    let release: (response: Response) => void = () => {};
+    serveRun(
+      [RESUMABLE, RUNNING],
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const { queryClient } = renderRunCard();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    fireEvent.click(await screen.findByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", TOGGLE));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+    release(wire(200, summaryOf(RUNNING)));
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["coral-inbox"] }));
+    expect(queryClient.getQueryData<RunDetail>(RUN_KEY)?.allowed_actions).toEqual([
+      "pause",
+      "cancel",
+    ]);
+    fireEvent.click(screen.getByRole("button", TOGGLE));
+    await waitFor(() => expect(actionNames()).toEqual(["Cancel run", "Mark as read"]));
+    expect(posts()).toEqual([[`${RUN_URL}:resume`, {}]]);
+  });
+
+  it("shows an action's result once back online when it returned while offline", async () => {
+    // WHY: going offline mid-request must not lose what the server did.
+    let release: (response: Response) => void = () => {};
+    serveRun(
+      [RESUMABLE, RUNNING],
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    renderRunCard();
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    const status = screen.getByRole("status");
+    fireEvent.click(resume);
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    act(() => setOnline(false));
+    release(wire(200, summaryOf(RUNNING)));
+    // The returned summary drops Resume, so its absence shows the result has landed.
+    await waitFor(() => expect(resume).not.toBeInTheDocument());
+    expect(status).toHaveTextContent("You’re offline.");
+    act(() => setOnline(true));
+    expect(status).toHaveTextContent("Resumed.");
+    expect(posts()).toEqual([[`${RUN_URL}:resume`, {}]]);
+  });
+
+  it("hides the run's buttons when a reread finds the run gone", async () => {
+    // WHY: a run deleted or no longer the caller's must not keep stale buttons.
+    serveRun(RESUMABLE);
+    const { queryClient } = renderRunCard();
+    await screen.findByRole("button", { name: "Resume" });
+    authenticatedFetch.mockImplementation(() =>
+      Promise.resolve(wire(404, envelope("not_found", "Run not found."))),
+    );
+    await act(() => queryClient.invalidateQueries({ queryKey: RUN_KEY }));
+    await waitFor(() => expect(actionNames()).toEqual(["Mark as read"]));
+    expect(screen.getByRole("link", { name: /Open run/ })).toBeInTheDocument();
+  });
+
+  it("hides the run's buttons when the run cannot be read, keeping Open run", async () => {
+    // WHY: without allowed_actions the card cannot know what the run allows.
+    authenticatedFetch.mockResolvedValue(wire(404, envelope("not_found", "Run not found.")));
+    const { queryClient } = renderRunCard();
+    await waitFor(() => expect(queryClient.getQueryState(RUN_KEY)?.status).toBe("error"));
+    expect(actionNames()).toEqual(["Mark as read"]);
+    expect(screen.getByRole("link", { name: /Open run/ })).toBeInTheDocument();
+    expect(reads()).toEqual([RUN_URL]);
+  });
+
+  it("disables the run's buttons while offline and says why", async () => {
+    // WHY: an action sent offline would only fail.
+    serveRun(RESUMABLE);
+    renderRunCard();
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    act(() => setOnline(false));
+    expect(resume).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("You’re offline.");
+    act(() => setOnline(true));
+    expect(resume).toBeEnabled();
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  });
+
+  it("says the run is still paused when a resume leaves another cause", async () => {
+    // WHY: a resume that clears one cause of several answers 200 with the run still paused.
+    const stillPaused = runDetail(["cancel"], { pause_reason: "budget" });
+    serveRun([RESUMABLE, stillPaused], wire(200, summaryOf(stillPaused)));
+    renderRunCard();
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    const status = screen.getByRole("status");
+    fireEvent.click(resume);
+    await waitFor(() => expect(status).toHaveTextContent("The run is still paused."));
+    expect(status).not.toHaveTextContent("Resumed.");
+    expect(status).toHaveFocus();
+    await waitFor(() => expect(actionNames()).toEqual(["Cancel run", "Mark as read"]));
+  });
+
+  it("patches only the run's status and actions into the cached detail", async () => {
+    // WHY: an action's summary has no view, causes or awaited spend; the reread brings those.
+    const detail = runDetail(["resume", "cancel"], {
+      causes: [{ reason: "infra", detail: "host lost", subject: "" }],
+      spend: {
+        estimate: true,
+        usd: 1.25,
+        live_usd: 1.5,
+        tokens: { input: 10, output: 20, total: 30, cache_read: 0, cache_creation: 0 },
+        unpriced_models: [],
+        sessions: 2,
+        as_of: 1_767_268_900,
+      },
+    });
+    let read = false;
+    authenticatedFetch.mockImplementation((_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") return Promise.resolve(wire(200, summaryOf(RUNNING)));
+      if (read) return new Promise<Response>(() => {});
+      read = true;
+      return Promise.resolve(wire(200, detail));
+    });
+    const { queryClient } = renderRunCard();
+    fireEvent.click(await screen.findByRole("button", { name: "Resume" }));
+    await waitFor(() =>
+      expect(queryClient.getQueryData<RunDetail>(RUN_KEY)?.status).toBe("running"),
+    );
+    expect(queryClient.getQueryData<RunDetail>(RUN_KEY)).toEqual({
+      ...detail,
+      status: "running",
+      allowed_actions: ["pause", "cancel"],
+    });
+  });
+
+  it.each<[string, () => Response]>([
+    ["a 404", () => wire(404, envelope("not_found", "Run not found."))],
+    ["a 404 with no body", () => new Response(null, { status: 404 })],
+  ])(
+    "shows %s as gone and hides the buttons once the reread finds no run",
+    async (_name, answer) => {
+      // WHY: a run that is gone cannot be retried; its buttons must not invite another try.
+      let gone = false;
+      authenticatedFetch.mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          gone = true;
+          return Promise.resolve(answer());
+        }
+        return Promise.resolve(
+          gone ? wire(404, envelope("not_found", "Run not found.")) : wire(200, RESUMABLE),
+        );
+      });
+      renderRunCard();
+      const resume = await screen.findByRole("button", { name: "Resume" });
+      const status = screen.getByRole("status");
+      fireEvent.click(resume);
+      await waitFor(() => expect(status).toHaveTextContent("This run is no longer available."));
+      expect(status).toHaveFocus();
+      await waitFor(() => expect(actionNames()).toEqual(["Mark as read"]));
+      expect(reads()).toEqual([RUN_URL, RUN_URL]);
+    },
+  );
+
+  it.each<[string, () => Response]>([
+    ["no body", () => new Response(null, { status: 409 })],
+    [
+      "an HTML body",
+      () => new Response("<html>proxy</html>", { status: 409, statusText: "Conflict" }),
+    ],
+  ])("shows a conflict with %s as a failed update and rereads the run", async (_name, answer) => {
+    // WHY: only Coral's envelope explains a conflict; a bare "409" tells the owner nothing.
+    serveRun([RESUMABLE, COMPLETED], answer());
+    renderRunCard();
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    const status = screen.getByRole("status");
+    fireEvent.click(resume);
+    await waitFor(() => expect(status).toHaveTextContent("Couldn’t update the run."));
+    expect(status.textContent).toBe("Couldn’t update the run.");
+    await waitFor(() => expect(actionNames()).toEqual(["Mark as read"]));
+    expect(reads()).toEqual([RUN_URL, RUN_URL]);
+  });
+
+  it("shows a refused cancel's message, rereads the run and leaves the Inbox alone", async () => {
+    // WHY: the confirmed cancel takes the same conflict path as Resume.
+    serveRun(
+      [RESUMABLE, COMPLETED],
+      wire(409, envelope("illegal_transition", "The run is completed.")),
+    );
+    const { queryClient } = renderRunCard();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }));
+    const confirm = screen.getByRole("group", { name: "Cancel this run? Its steps stop." });
+    const status = screen.getByRole("status");
+    fireEvent.click(within(confirm).getByRole("button", { name: "Cancel run" }));
+    await waitFor(() => expect(status).toHaveTextContent("The run is completed."));
+    expect(status).toHaveFocus();
+    expect(screen.queryByRole("group")).not.toBeInTheDocument();
+    await waitFor(() => expect(actionNames()).toEqual(["Mark as read"]));
+    expect(posts()).toEqual([[`${RUN_URL}:cancel`, {}]]);
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["coral-inbox"] });
+  });
+
+  it("ignores Escape while a confirmed cancel is in flight", async () => {
+    // WHY: the question stays until the server answers the cancel it already sent.
+    serveRun(RESUMABLE, () => new Promise<Response>(() => {}));
+    renderRunCard();
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }));
+    const confirm = screen.getByRole("group", { name: "Cancel this run? Its steps stop." });
+    fireEvent.click(within(confirm).getByRole("button", { name: "Cancel run" }));
+    const keep = within(confirm).getByRole("button", { name: "Keep running" });
+    fireEvent.keyDown(keep, { key: "Escape" });
+    expect(screen.getByRole("group")).toBe(confirm);
+    expect(keep).toBeDisabled();
+    await waitFor(() => expect(posts()).toEqual([[`${RUN_URL}:cancel`, {}]]));
+  });
+
+  it("keeps a result in place through an offline spell, without saying it again", async () => {
+    // WHY: the offline notice comes and goes beside the result; the result node never changes.
+    serveRun([RESUMABLE, RUNNING], wire(200, summaryOf(RUNNING)));
+    renderRunCard();
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    const status = screen.getByRole("status");
+    fireEvent.click(resume);
+    await waitFor(() => expect(status).toHaveTextContent("Resumed."));
+    const result = within(status).getByText("Resumed.");
+
+    act(() => setOnline(false));
+    expect(status).toHaveTextContent("Resumed. You’re offline.");
+    expect(within(status).getByText("Resumed.")).toBe(result);
+    act(() => setOnline(true));
+    expect(status.textContent).toBe("Resumed.");
+    expect(within(status).getByText("Resumed.")).toBe(result);
+  });
+
+  it("closes the cancel question for good when the run stops allowing a cancel", async () => {
+    // WHY: a reread can take Cancel away; the question must not linger or come back unasked.
+    let allowed: RunActionName[] = ["resume", "cancel"];
+    authenticatedFetch.mockImplementation(() => Promise.resolve(wire(200, runDetail(allowed))));
+    const { queryClient } = renderRunCard();
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }));
+    expect(screen.getByRole("group")).toBeInTheDocument();
+
+    allowed = [];
+    await act(() => queryClient.invalidateQueries({ queryKey: RUN_KEY }));
+    await waitFor(() => expect(screen.queryByRole("group")).not.toBeInTheDocument());
+    expect(screen.getByRole("status")).toHaveFocus();
+
+    allowed = ["resume", "cancel"];
+    await act(() => queryClient.invalidateQueries({ queryKey: RUN_KEY }));
+    await waitFor(() => expect(actionNames()).toEqual(["Resume", "Cancel run", "Mark as read"]));
+    expect(screen.queryByRole("group")).not.toBeInTheDocument();
+    expect(posts()).toEqual([]);
+  });
+
+  it("keeps the run's buttons disabled when the card is reopened mid-request", async () => {
+    // WHY: the Inbox unmounts a closed card; reopening it must not allow a second action.
+    let release: (response: Response) => void = () => {};
+    serveRun(
+      [RESUMABLE, RUNNING],
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    renderRunCard();
+    fireEvent.click(await screen.findByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", TOGGLE));
+    fireEvent.click(screen.getByRole("button", TOGGLE));
+
+    const resume = await screen.findByRole("button", { name: "Resume" });
+    expect(resume).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeDisabled();
+    fireEvent.click(resume);
+    release(wire(200, summaryOf(RUNNING)));
+    await waitFor(() => expect(actionNames()).toEqual(["Cancel run", "Mark as read"]));
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeEnabled();
+    expect(posts()).toEqual([[`${RUN_URL}:resume`, {}]]);
   });
 });
