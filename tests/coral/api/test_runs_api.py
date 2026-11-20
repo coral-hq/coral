@@ -1009,6 +1009,38 @@ async def test_an_unreadable_log_row_is_a_placeholder_between_readable_ones(
     )
 
 
+@pytest.mark.parametrize("field", ["kind", "actor_kind"])
+async def test_a_log_row_with_a_code_this_server_cannot_read_is_a_placeholder(
+    runs_api: Api, field: str
+) -> None:
+    world = runs_api.world
+    run = _start(world, "log")
+    _add_rows(world, run, ['{"n": 1}', '{"n": 2}', '{"n": 3}'])
+    rows = _log_rows(world, run)
+    # A code a newer server wrote, which this one does not know.
+    rows[2] = dataclasses.replace(rows[2], **{field: 250})
+    url = f"{RUNS}/{run.id}/log"
+
+    async with _client(_app(runs_api.api)) as client:
+        page = (await client.get(url, headers=_as(ALICE))).json()
+        after = (
+            await client.get(url, headers=_as(ALICE), params={"after_seq": 2, "limit": 2})
+        ).json()
+
+    assert [(row["seq"], row["kind"]) for row in page["data"]] == [
+        (1, "engine.start_run"),
+        (2, "log.alert"),
+        (3, "log.unreadable"),
+        (4, "log.alert"),
+    ]
+    placeholder = page["data"][2]
+    assert (placeholder["body"], placeholder["patch"], placeholder["rejected"]) == (None, [], None)
+    readable_actor = page["data"][1]["actor_kind"]
+    assert placeholder["actor_kind"] == (None if field == "actor_kind" else readable_actor)
+    # Paging goes on past it.
+    assert [row["seq"] for row in after["data"]] == [3, 4]
+
+
 async def test_the_log_leaves_out_a_body_too_large_and_stops_at_its_byte_cap(
     runs_api: Api,
 ) -> None:

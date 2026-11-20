@@ -128,8 +128,8 @@ _WORKTREE_REFUSALS: Mapping[str, tuple[Any, int]] = {
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
-# A caller's share of the calls in flight: its normalized owner id and generation.
-_CallerKey = tuple[str | None, str | None]
+# Whose share a call or stream takes: the caller's normalized owner id and generation.
+CallerKey = tuple[str | None, str | None]
 
 
 def server_busy(
@@ -175,7 +175,8 @@ def _write_errors(action: str, run_id: str) -> Iterator[None]:
         raise RuntimeError(f"Coral could not {action} the run.") from None
 
 
-def _caller_key(viewer: Viewer) -> _CallerKey:
+def caller_key(viewer: Viewer) -> CallerKey:
+    """The share of the server ``viewer`` uses: one per user and account generation."""
     return normalize_owner(viewer.user_id), viewer.account_generation
 
 
@@ -202,7 +203,7 @@ class InFlight:
         self._max_calls = threads.max_workers if max_calls is None else max_calls
         self._max_per_caller = max_per_caller
         self._timeout_s = timeout_s
-        self._by_caller: dict[_CallerKey, int] = {}
+        self._by_caller: dict[CallerKey, int] = {}
         # Calls whose threads still run, held so none is collected before it ends.
         self._calls: set[asyncio.Task[Any]] = set()
 
@@ -224,7 +225,7 @@ class InFlight:
         :raises CoralApiError: 503 ``server_busy`` when the pool is closed or full, the
             caller has its share in flight, or the call runs past its timeout.
         """
-        key = _caller_key(viewer)
+        key = caller_key(viewer)
         held = self._by_caller.get(key, 0)
         if self._threads.closed or len(self._calls) >= self._max_calls:
             raise server_busy()
@@ -250,7 +251,7 @@ class InFlight:
                 raise server_busy() from None
             raise
 
-    def _finished(self, key: _CallerKey, call: asyncio.Task[Any]) -> None:
+    def _finished(self, key: CallerKey, call: asyncio.Task[Any]) -> None:
         self._calls.discard(call)
         held = self._by_caller.get(key, 0) - 1
         if held > 0:
@@ -303,7 +304,7 @@ class StartSlots:
     ) -> None:
         self._max_starts = max_starts
         self._max_per_caller = max_per_caller
-        self._by_caller: dict[_CallerKey, int] = {}
+        self._by_caller: dict[CallerKey, int] = {}
         self._in_flight = 0
         self._locks: dict[tuple[int, str], _KeyLock] = {}
 
@@ -319,7 +320,7 @@ class StartSlots:
 
         :raises CoralApiError: 503 ``server_busy`` when the limits are reached.
         """
-        key = _caller_key(viewer)
+        key = caller_key(viewer)
         held = self._by_caller.get(key, 0)
         if self._in_flight >= self._max_starts or held >= self._max_per_caller:
             _logger.debug(
@@ -492,7 +493,7 @@ class RunsApi:
             workspace_id=workspace_id,
             run_id=run_id,
             finished_at=detail.finished_at,
-            caller=_caller_key(viewer),
+            caller=caller_key(viewer),
             wait_s=DETAIL_SPEND_WAIT_S,
         )
         return detail.model_copy(update={"spend": run_spend(spend)})
@@ -1016,6 +1017,7 @@ __all__ = [
     "MAX_API_CALLS_PER_USER",
     "MAX_STARTS",
     "MAX_STARTS_PER_USER",
+    "CallerKey",
     "GraphRead",
     "HostConnector",
     "InFlight",
@@ -1023,5 +1025,6 @@ __all__ = [
     "RunsApi",
     "StartSlots",
     "StartedRun",
+    "caller_key",
     "server_busy",
 ]

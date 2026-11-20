@@ -35,6 +35,7 @@ from coral.api.run_models import (
     parse_run_cursor,
 )
 from coral.api.run_service import RunsApi
+from coral.api.stream import CoralEventStream, RunStreamHub, stream_cursor
 from coral.model.ir import CompiledGraph
 from coral.omni.protocols import Viewer
 from coral.runview.types import RunStatusName
@@ -57,6 +58,19 @@ _REPLAYED = {
 }
 # Refusals of an action on one of the caller's runs.
 _ACTION_REFUSALS = error_responses(401, 403, 404, 409, 422, 503)
+# The stream is never cached and never buffered by a proxy on its way.
+_STREAM_HEADERS = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+_EVENT_STREAM = {
+    200: {
+        "description": (
+            "Server-sent events: each event's data is a RunStreamFrame, or `[DONE]` once a "
+            "finished run's rows are all sent"
+        ),
+        "content": {
+            "text/event-stream": {"schema": {"$ref": "#/components/schemas/RunStreamFrame"}}
+        },
+    }
+}
 
 
 def _runs_api(request: Request) -> RunsApi:
@@ -64,6 +78,13 @@ def _runs_api(request: Request) -> RunsApi:
     if api is None:
         raise run_not_found()
     return api
+
+
+def _stream_hub(request: Request) -> RunStreamHub:
+    hub = getattr(request.app.state, "coral_run_stream_hub", None)
+    if hub is None:
+        raise run_not_found()
+    return hub
 
 
 def create_runs_router(
@@ -328,6 +349,41 @@ def create_runs_router(
         )
         response.headers["Cache-Control"] = _NO_STORE
         return page
+
+    @router.get(
+        "/runs/{run_id}/stream",
+        operation_id="coral_stream_run",
+        response_model=None,
+        responses={**_EVENT_STREAM, **error_responses(401, 403, 404, 422, 429, 503)},
+    )
+    async def stream_run(
+        request: Request,
+        run_id: str,
+        after_seq: int | None = Query(default=None, ge=0, le=MAX_STORED_INT),
+        # A malformed one is answered with a resync, never refused.
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> Response:
+        """
+        Follow one of the caller's runs: a snapshot of its view, then one entry per log
+        row with the row's view patch. ``Last-Event-ID`` (else ``after_seq``) resumes
+        after the last seq the client holds. A stream ends after five minutes; the
+        client resumes from its last seq. Past the stream caps, poll ``/log`` instead.
+        """
+        api = _runs_api(request)
+        hub = _stream_hub(request)
+        await api.owned_run(viewer, workspace_id, run_id)
+        reservation = hub.reserve(viewer, workspace_id, run_id)
+        stream = hub.stream(
+            viewer,
+            workspace_id,
+            run_id,
+            cursor=stream_cursor(last_event_id, after_seq),
+            is_disconnected=request.is_disconnected,
+            reservation=reservation,
+        )
+        return CoralEventStream(stream.frames(), reservation=reservation, headers=_STREAM_HEADERS)
 
     @router.get(
         "/runs/{run_id}/outcome",

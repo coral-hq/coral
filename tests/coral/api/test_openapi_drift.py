@@ -20,6 +20,7 @@ from sqlalchemy import create_engine
 from coral.api.schemas import CORAL_API_VERSION
 from coral.api.sub_features import resolve_sub_features
 from coral.omni.server import openapi as coral_openapi
+from coral.omni.server.openapi import EVENT_STREAM, add_schemas, stream_frame_schemas
 from coral.omni.server.openapi_ts import TS_PATH, render_coral_api_types
 from coral.omni.server.plugin import RouterSpec, coral_routers, register
 from coral.stores.workflows import SqlWorkflowDefinitionStore
@@ -28,6 +29,7 @@ from omnigent.process_logging import DATA_DIR_ENV_VAR
 
 SPEC_PATH = Path(__file__).resolve().parents[3] / "coral" / "api" / "openapi.json"
 ERROR_SCHEMA = {"$ref": "#/components/schemas/CoralErrorResponse"}
+FRAME_SCHEMA = {"$ref": "#/components/schemas/RunStreamFrame"}
 HTTP_METHODS = {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
 MAX_DIFF_LINES = 60
 # Top-level lines a module of type declarations may hold.
@@ -146,9 +148,47 @@ def test_every_operation_is_named_and_typed() -> None:
                 assert content["application/json"]["schema"] == ERROR_SCHEMA, (method, path)
             elif status in ("204", "304"):
                 assert content == {}, (method, path)
+            elif EVENT_STREAM in content:
+                # A stream of events answers nothing else.
+                assert content == {EVENT_STREAM: {"schema": FRAME_SCHEMA}}, (method, path)
             else:
                 schema = content["application/json"]["schema"]
                 assert _is_typed(schema), (method, path, status, schema)
+
+
+def test_the_run_stream_is_its_only_event_stream_and_its_frames_are_the_api_s_own_schemas() -> (
+    None
+):
+    spec = _spec()
+    frames = stream_frame_schemas()
+    streams = [
+        operation["operationId"]
+        for operation in _operations(spec).values()
+        if EVENT_STREAM in operation["responses"].get("200", {}).get("content", {})
+    ]
+
+    assert streams == ["coral_stream_run"]
+    assert {"RunStreamFrame", "SnapshotFrame", "EntryFrame", "RunHeader"} <= set(frames)
+    # Schemas FastAPI also writes for the run detail and the log are the same ones.
+    assert {"RunView", "PauseCause", "JsonPatch"} <= set(frames)
+    for name, schema in frames.items():
+        assert spec["components"]["schemas"][name] == schema, name
+    assert spec["components"]["schemas"]["RunStreamFrame"]["discriminator"]["propertyName"] == (
+        "type"
+    )
+
+
+def test_an_added_schema_unlike_the_document_s_own_of_its_name_is_refused() -> None:
+    spec = {"components": {"schemas": {"RunView": {"type": "object"}}}}
+
+    with pytest.raises(ValueError, match="RunView"):
+        add_schemas(spec, {"RunView": {"type": "string"}})
+    add_schemas(spec, {"RunView": {"type": "object"}, "Other": {"type": "string"}})
+
+    assert spec["components"]["schemas"] == {
+        "RunView": {"type": "object"},
+        "Other": {"type": "string"},
+    }
 
 
 def _is_typed(schema: dict[str, Any]) -> bool:

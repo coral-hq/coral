@@ -7,6 +7,9 @@ mounts) on a bare app with no data directory and no authentication, and then
 ``web/src/workflows/api/generated/coralApi.ts`` from that document. ``--check`` fails
 when either checked-in file is stale. Omnigent's own ``openapi.json`` never lists
 Coral routes and is left alone.
+
+The run stream's frames are not response models, so their schemas are added here, as
+FastAPI writes components; one that FastAPI already wrote must be the same.
 """
 
 from __future__ import annotations
@@ -20,17 +23,23 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.encoders import jsonable_encoder
+from fastapi.openapi.models import OpenAPI
+from pydantic import TypeAdapter
 from sqlalchemy import create_engine
 
 from coral.api.schemas import CORAL_API_VERSION
 from coral.api.sub_features import resolve_sub_features
 from coral.omni.server.openapi_ts import TS_PATH, render_coral_api_types
 from coral.omni.server.plugin import coral_routers
+from coral.runview.types import RunStreamFrame
 from coral.stores.workflows import SqlWorkflowDefinitionStore
 
 SPEC_PATH = Path(__file__).resolve().parents[2] / "api" / "openapi.json"
 REGENERATE = "just coral openapi"
 _MAX_DIFF_LINES = 60
+EVENT_STREAM = "text/event-stream"
+_REF_TEMPLATE = "#/components/schemas/{model}"
 
 
 def coral_openapi() -> dict[str, Any]:
@@ -46,9 +55,52 @@ def coral_openapi() -> dict[str, Any]:
         app = FastAPI(title="Coral API", version=CORAL_API_VERSION)
         for router, prefix, tags in routers:
             app.include_router(router, prefix=prefix, tags=[*tags])
-        return app.openapi()
+        spec = app.openapi()
     finally:
         engine.dispose()
+    _event_streams_only(spec)
+    add_schemas(spec, stream_frame_schemas())
+    return spec
+
+
+def _event_streams_only(spec: dict[str, Any]) -> None:
+    """A success that streams events answers nothing else: drop FastAPI's JSON entry."""
+    for item in spec["paths"].values():
+        for operation in item.values():
+            for status, response in operation.get("responses", {}).items():
+                content = response.get("content", {})
+                if status.startswith("2") and EVENT_STREAM in content:
+                    content.pop("application/json", None)
+
+
+def stream_frame_schemas() -> dict[str, Any]:
+    """``RunStreamFrame`` and the schemas it uses, as FastAPI writes components."""
+    generated = TypeAdapter(RunStreamFrame).json_schema(
+        ref_template=_REF_TEMPLATE, mode="serialization"
+    )
+    schemas = {**generated.pop("$defs"), "RunStreamFrame": generated}
+    # FastAPI drops null members, such as a ``default`` of None, when it writes a document.
+    document = OpenAPI.model_validate(
+        {
+            "openapi": "3.1.0",
+            "info": {"title": "", "version": ""},
+            "components": {"schemas": schemas},
+        }
+    )
+    return jsonable_encoder(document, by_alias=True, exclude_none=True)["components"]["schemas"]
+
+
+def add_schemas(spec: dict[str, Any], schemas: dict[str, Any]) -> None:
+    """
+    Add ``schemas`` to the document's components.
+
+    :raises ValueError: when one has the name of a different schema already there.
+    """
+    components = spec.setdefault("components", {}).setdefault("schemas", {})
+    for name, schema in schemas.items():
+        if name in components and components[name] != schema:
+            raise ValueError(f"The added schema {name} differs from the document's own")
+        components[name] = schema
 
 
 def render_openapi(spec: dict[str, Any]) -> str:

@@ -83,6 +83,22 @@ def request_viewer(
     return viewer
 
 
+def account_still_valid(auth_provider: AuthProvider | None) -> Callable[[Viewer], bool]:
+    """
+    Whether a caller's proven account generation is still current, read uncached: the
+    account still exists and its generation has not moved. A provider that cannot tell
+    answers no, so a stream relying on it ends rather than outlives a revocation.
+    """
+    check = getattr(auth_provider, "accepts_account_generation", None)
+
+    def still_valid(viewer: Viewer) -> bool:
+        if check is None or viewer.user_id is None:
+            return False
+        return bool(check(viewer.user_id, viewer.account_generation))
+
+    return still_valid
+
+
 def has_session_access(
     user_id: str | None,
     conversation_id: str,

@@ -147,7 +147,7 @@ def test_plugin_mounts_the_run_reads_behind_authentication_with_one_404_before_t
     signed_in = {"X-Forwarded-Email": "alice"}
     run = "f" * 32
     routes = ["/v1/coral/runs", *(f"/v1/coral/runs/{run}{route}" for route in ("", "/graph"))]
-    routes += [f"/v1/coral/runs/{run}/log", f"/v1/coral/runs/{run}/outcome"]
+    routes += [f"/v1/coral/runs/{run}/{route}" for route in ("log", "outcome", "stream")]
     not_found = b'{"error":{"code":"not_found","message":"Run not found.","details":null}}'
 
     with_auth = TestClient(_plugin_app(auth_provider=header))

@@ -570,6 +570,114 @@
         "title": "EmptyRequest",
         "type": "object"
       },
+      "EntryFrame": {
+        "additionalProperties": false,
+        "description": "One run-log row without its body; ``patch`` is the stored view patch, or empty.",
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "actor_kind": {
+            "enum": [
+              "engine",
+              "orchestrator",
+              "step_agent",
+              "user",
+              "simulator"
+            ],
+            "title": "Actor Kind",
+            "type": "string"
+          },
+          "at_us": {
+            "title": "At Us",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "patch": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/JsonPatch"
+            },
+            "title": "Patch",
+            "type": "array"
+          },
+          "rejected": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejected"
+          },
+          "run_version": {
+            "minimum": 0.0,
+            "title": "Run Version",
+            "type": "integer"
+          },
+          "scope_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Key"
+          },
+          "seq": {
+            "minimum": 1.0,
+            "title": "Seq",
+            "type": "integer"
+          },
+          "type": {
+            "const": "entry",
+            "default": "entry",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "seq",
+          "run_version",
+          "kind",
+          "actor_kind",
+          "actor",
+          "node_id",
+          "scope_key",
+          "at_us",
+          "rejected",
+          "patch"
+        ],
+        "title": "EntryFrame",
+        "type": "object"
+      },
       "EvidenceRequirement": {
         "additionalProperties": false,
         "properties": {
@@ -701,6 +809,22 @@
           "outcomes"
         ],
         "title": "GateOut",
+        "type": "object"
+      },
+      "HeartbeatFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "heartbeat",
+            "default": "heartbeat",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "HeartbeatFrame",
         "type": "object"
       },
       "InvalidResult": {
@@ -921,7 +1045,7 @@
       },
       "LogEntryOut": {
         "additionalProperties": false,
-        "description": "One run-log row with its body. ``body`` is ``None`` for a row whose text cannot be\nread (``kind`` ``log.unreadable``) and, with ``body_truncated``, for a body too large\nto send.",
+        "description": "One run-log row with its body: the stream's entry frame plus ``body``. ``body`` is\n``None`` for a row that cannot be read (``kind`` ``log.unreadable``) and, with\n``body_truncated``, for a body too large to send. ``actor_kind`` is ``None`` only on\nsuch a row, for a code this server does not know.",
         "properties": {
           "actor": {
             "anyOf": [
@@ -935,15 +1059,22 @@
             "title": "Actor"
           },
           "actor_kind": {
-            "enum": [
-              "engine",
-              "orchestrator",
-              "step_agent",
-              "user",
-              "simulator"
+            "anyOf": [
+              {
+                "enum": [
+                  "engine",
+                  "orchestrator",
+                  "step_agent",
+                  "user",
+                  "simulator"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ],
-            "title": "Actor Kind",
-            "type": "string"
+            "title": "Actor Kind"
           },
           "at_us": {
             "title": "At Us",
@@ -1359,6 +1490,34 @@
         "title": "ResumeRequest",
         "type": "object"
       },
+      "ResyncFrame": {
+        "additionalProperties": false,
+        "description": "The cursor cannot be replayed; a fresh ``snapshot`` follows.",
+        "properties": {
+          "reason": {
+            "enum": [
+              "cursor_unknown",
+              "cursor_invalid",
+              "replay_too_long",
+              "row_unreadable"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "type": {
+            "const": "resync",
+            "default": "resync",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "title": "ResyncFrame",
+        "type": "object"
+      },
       "RunDetail": {
         "additionalProperties": false,
         "description": "One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that\ncannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are\n``None`` when its stored rows cannot be read.",
@@ -1590,6 +1749,201 @@
         "title": "RunDetail",
         "type": "object"
       },
+      "RunFrame": {
+        "additionalProperties": false,
+        "description": "The run header again, sent when the row changes without a view patch.",
+        "properties": {
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "pause",
+                "resume",
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "title": "Allowed Actions",
+            "type": "array"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "load_error": {
+            "anyOf": [
+              {
+                "const": "engine.load_failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Error"
+          },
+          "pause_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "gate",
+                  "budget",
+                  "plan_limit",
+                  "rejected_calls",
+                  "infra",
+                  "liveness",
+                  "user",
+                  "authority_revoked",
+                  "merge_conflict",
+                  "failure_path",
+                  "engine_upgrade",
+                  "drift",
+                  "auth"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Reason"
+          },
+          "status": {
+            "enum": [
+              "starting",
+              "running",
+              "paused",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "type": {
+            "const": "run",
+            "default": "run",
+            "title": "Type",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 0.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "pause_reason",
+          "version",
+          "finished_at",
+          "allowed_actions",
+          "load_error",
+          "type"
+        ],
+        "title": "RunFrame",
+        "type": "object"
+      },
+      "RunHeader": {
+        "additionalProperties": false,
+        "description": "The run row as clients see it; a finished row wins over what the view says.",
+        "properties": {
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "pause",
+                "resume",
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "title": "Allowed Actions",
+            "type": "array"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "load_error": {
+            "anyOf": [
+              {
+                "const": "engine.load_failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Error"
+          },
+          "pause_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "gate",
+                  "budget",
+                  "plan_limit",
+                  "rejected_calls",
+                  "infra",
+                  "liveness",
+                  "user",
+                  "authority_revoked",
+                  "merge_conflict",
+                  "failure_path",
+                  "engine_upgrade",
+                  "drift",
+                  "auth"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Reason"
+          },
+          "status": {
+            "enum": [
+              "starting",
+              "running",
+              "paused",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 0.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "pause_reason",
+          "version",
+          "finished_at",
+          "allowed_actions",
+          "load_error"
+        ],
+        "title": "RunHeader",
+        "type": "object"
+      },
       "RunPage": {
         "additionalProperties": false,
         "description": "One page of runs, newest first; page again with ``next_cursor`` until it is null.",
@@ -1717,6 +2071,35 @@
         ],
         "title": "RunSpendTokens",
         "type": "object"
+      },
+      "RunStreamFrame": {
+        "discriminator": {
+          "mapping": {
+            "entry": "#/components/schemas/EntryFrame",
+            "heartbeat": "#/components/schemas/HeartbeatFrame",
+            "resync": "#/components/schemas/ResyncFrame",
+            "run": "#/components/schemas/RunFrame",
+            "snapshot": "#/components/schemas/SnapshotFrame"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SnapshotFrame"
+          },
+          {
+            "$ref": "#/components/schemas/EntryFrame"
+          },
+          {
+            "$ref": "#/components/schemas/RunFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ResyncFrame"
+          },
+          {
+            "$ref": "#/components/schemas/HeartbeatFrame"
+          }
+        ]
       },
       "RunSummary": {
         "additionalProperties": false,
@@ -2171,6 +2554,83 @@
           "drift"
         ],
         "title": "SlotView",
+        "type": "object"
+      },
+      "SnapshotFrame": {
+        "additionalProperties": false,
+        "description": "The whole view at head ``seq``; ``view`` is ``None`` only for a run that cannot load.",
+        "properties": {
+          "log_version": {
+            "minimum": 0.0,
+            "title": "Log Version",
+            "type": "integer"
+          },
+          "protocol": {
+            "const": 1,
+            "default": 1,
+            "title": "Protocol",
+            "type": "integer"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunHeader"
+          },
+          "run_version": {
+            "minimum": 0.0,
+            "title": "Run Version",
+            "type": "integer"
+          },
+          "seq": {
+            "minimum": 0.0,
+            "title": "Seq",
+            "type": "integer"
+          },
+          "type": {
+            "const": "snapshot",
+            "default": "snapshot",
+            "title": "Type",
+            "type": "string"
+          },
+          "view": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "view_error": {
+            "anyOf": [
+              {
+                "const": "engine.load_failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "View Error"
+          },
+          "view_version": {
+            "const": 1,
+            "default": 1,
+            "title": "View Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "type",
+          "protocol",
+          "view_version",
+          "seq",
+          "run_version",
+          "log_version",
+          "run",
+          "view",
+          "view_error"
+        ],
+        "title": "SnapshotFrame",
         "type": "object"
       },
       "SourceRange": {
@@ -3698,6 +4158,133 @@
           }
         },
         "summary": "Get Run Outcome",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}/stream": {
+      "get": {
+        "description": "Follow one of the caller's runs: a snapshot of its view, then one entry per log\nrow with the row's view patch. ``Last-Event-ID`` (else ``after_seq``) resumes\nafter the last seq the client holds. A stream ends after five minutes; the\nclient resumes from its last seq. Past the stream caps, poll ``/log`` instead.",
+        "operationId": "coral_stream_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_seq",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 9223372036854775807,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After Seq"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStreamFrame"
+                }
+              }
+            },
+            "description": "Server-sent events: each event's data is a RunStreamFrame, or `[DONE]` once a finished run's rows are all sent"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Stream Run",
         "tags": [
           "coral"
         ]

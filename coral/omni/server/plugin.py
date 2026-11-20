@@ -18,6 +18,7 @@ from coral.api.info import create_info_router
 from coral.api.run_service import API_THREAD_NAME, API_THREADS, InFlight, RunsApi
 from coral.api.runs import create_runs_router
 from coral.api.spend import SPEND_THREAD_NAME, SPEND_THREADS, SpendCache
+from coral.api.stream import STREAM_THREAD_NAME, STREAM_THREADS, RunStreamHub
 from coral.api.sub_features import resolve_sub_features
 from coral.api.workflows import create_workflows_router
 from coral.bridge.bound_sessions import BoundSessions
@@ -36,7 +37,7 @@ from coral.db.migrate import ensure_coral_schema
 from coral.db.models_workflows import CoralBase
 from coral.gates.republish import GateRepublisher
 from coral.omni.protocols import GatePublisher, RunScopeRunner
-from coral.omni.server.access import request_viewer
+from coral.omni.server.access import account_still_valid, request_viewer
 from coral.omni.server.observations import ChannelsRef, EvidenceChecker
 from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.omni.server.usage import OmnigentRunSpend
@@ -364,6 +365,36 @@ def _runs_api(
         connect_host=_host_connector(services),
         requires_generation=auth_mode(services.auth_provider) == "accounts",
     )
+
+
+def _run_stream_hub(
+    bridge: EngineBridge,
+    run_store: RunStore,
+    services: ServerServices,
+    stack: AsyncExitStack,
+) -> RunStreamHub:
+    """
+    The run streams over the bridge's reads, on their own pool.
+
+    Each run-store commit wakes the streams of its run; a caller who proved an account
+    generation is re-checked against the server's accounts; a server shutting down ends
+    them. Closing ``stack`` closes the hub first, which ends every stream, then
+    unregisters the hook and closes the pool.
+    """
+    from omnigent.server.shutdown_state import server_shutting_down
+
+    threads = BoundedThreads(max_workers=STREAM_THREADS, thread_name_prefix=STREAM_THREAD_NAME)
+    stack.callback(threads.close)
+    hub = RunStreamHub(
+        bridge=bridge,
+        run_store=run_store,
+        threads=threads,
+        still_valid=account_still_valid(services.auth_provider),
+        shutting_down=server_shutting_down,
+    )
+    stack.callback(run_store.register_post_commit(hub.notify))
+    stack.push_async_callback(hub.close)
+    return hub
 
 
 def _wire_gates(
@@ -723,6 +754,9 @@ async def coral_lifespan(
                     gate_answers=answers,
                     gate_publisher=publisher,
                 )
+                app.state.coral_run_stream_hub = _run_stream_hub(
+                    bridge, run_store, services, stack
+                )
             missing = _missing_engine_input(app, services)
             if missing is None:
                 refresher = _wire_session_engine(
@@ -761,7 +795,7 @@ def coral_routers(
 
     Each route resolves its caller through ``auth_provider`` and reads the request's
     workspace; the Inbox reads the alert store the lifespan publishes, the runs routes
-    its runs API, and a start the caller's workflow from ``definitions``.
+    its runs API and run-stream hub, and a start the caller's workflow from ``definitions``.
     """
     viewer = request_viewer(auth_provider)
     return (

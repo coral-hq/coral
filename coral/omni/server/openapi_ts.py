@@ -4,7 +4,8 @@ TypeScript types for the web, generated from the Coral OpenAPI document.
 :func:`render_coral_api_types` turns ``coral/api/openapi.json`` into one module of
 ``export interface`` and ``export type`` declarations: one per component schema, and
 ``CoralOperations``, each operation's method, path, parameters, body, response and
-refusal statuses by ``operationId``.
+refusal statuses by ``operationId``. An operation answering server-sent events has no
+JSON response; its ``events`` are the type of each event's data.
 
 A schema no request body uses is response-only. The server sends every field of a
 response (no Coral route excludes unset, default or null fields), so none of its
@@ -36,6 +37,8 @@ _OPERATIONS_DOC = (
     "Each status in `errors` answers a `CoralErrorResponse` body."
 )
 _PRIMITIVES = {"string": "string", "integer": "number", "number": "number", "boolean": "boolean"}
+_EVENT_STREAM = "text/event-stream"
+_EVENTS_DOC = "Server-sent events: each event's `data` is one of these, or `[DONE]` at the end."
 
 
 class UnsupportedSchema(ValueError):
@@ -217,14 +220,23 @@ def _operation(method: str, path: str, operation: Mapping[str, Any]) -> list[str
     if successes:
         # A route with several success statuses answers any of their bodies.
         members: list[str] = []
+        events: list[str] = []
         for status in successes:
+            content = operation["responses"][status].get("content", {})
+            if _EVENT_STREAM in content:
+                events.extend(_members(content[_EVENT_STREAM]["schema"]))
+                continue
             schema = _json_schema(operation["responses"][status])
             members.extend(["null"] if schema is None else _members(schema))
         unique = list(dict.fromkeys(members))
         response = [member for member in unique if member != "null"]
         response += ["null"] if "null" in unique else []
         body += _member_line(indent, "status:", successes)
-        body += _member_line(indent, "response:", response)
+        # A stream of events answers no JSON body.
+        body += _member_line(indent, "response:", response or ["never"])
+        if events:
+            body += _comment(_EVENTS_DOC, indent)
+            body += _member_line(indent, "events:", list(dict.fromkeys(events)))
     else:
         # A route not served yet answers only refusals.
         body += [f"{indent}status: never;", f"{indent}response: never;"]

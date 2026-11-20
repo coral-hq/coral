@@ -207,6 +207,29 @@ def test_two_success_statuses_with_other_bodies_answer_either() -> None:
     assert "    status: 200 | 201 | 202;\n    response: Reply | Tags | null;\n" in rendered
 
 
+def test_a_stream_of_events_answers_no_json_and_types_its_events() -> None:
+    spec = _spec(
+        Body=BODY,
+        Reply=BODY,
+        Tags={"type": "string"},
+        Frame={"oneOf": [_ref("Reply"), _ref("Tags")], "discriminator": {"propertyName": "x"}},
+    )
+    responses = spec["paths"]["/v1/coral/things/{thing_id}"]["post"]["responses"]
+    responses["200"] = {"content": {"text/event-stream": {"schema": _ref("Frame")}}}
+
+    rendered = render_coral_api_types(spec)
+
+    assert "export type Frame = Reply | Tags;\n" in rendered
+    assert (
+        "    status: 200;\n"
+        "    response: never;\n"
+        "    /** Server-sent events: each event's `data` is one of these, or `[DONE]` at the end."
+        " */\n"
+        "    events: Frame;\n"
+        "    errors: 404 | 422;\n"
+    ) in rendered
+
+
 @pytest.mark.parametrize(
     "schema",
     [

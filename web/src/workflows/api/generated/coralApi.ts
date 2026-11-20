@@ -111,6 +111,21 @@ export interface CoralInfoResponse {
 /** The body of an action that takes no arguments: the empty JSON object. */
 export type EmptyRequest = Record<string, never>;
 
+/** One run-log row without its body; ``patch`` is the stored view patch, or empty. */
+export interface EntryFrame {
+  actor: string | null;
+  actor_kind: "engine" | "orchestrator" | "step_agent" | "user" | "simulator";
+  at_us: number;
+  kind: string;
+  node_id: string | null;
+  patch: JsonPatch[];
+  rejected: string | null;
+  run_version: number;
+  scope_key: string | null;
+  seq: number;
+  type: "entry";
+}
+
 export interface EvidenceRequirement {
   ir_version: number;
   items: RequiredCommand[];
@@ -138,6 +153,10 @@ export interface GateOut {
   token: string;
   visit_id: string;
   visit_no: number;
+}
+
+export interface HeartbeatFrame {
+  type: "heartbeat";
 }
 
 /** A workflow document that did not load. */
@@ -188,13 +207,14 @@ export interface LoadIssue {
 }
 
 /**
- * One run-log row with its body. ``body`` is ``None`` for a row whose text cannot be
- * read (``kind`` ``log.unreadable``) and, with ``body_truncated``, for a body too large
- * to send.
+ * One run-log row with its body: the stream's entry frame plus ``body``. ``body`` is
+ * ``None`` for a row that cannot be read (``kind`` ``log.unreadable``) and, with
+ * ``body_truncated``, for a body too large to send. ``actor_kind`` is ``None`` only on
+ * such a row, for a code this server does not know.
  */
 export interface LogEntryOut {
   actor: string | null;
-  actor_kind: "engine" | "orchestrator" | "step_agent" | "user" | "simulator";
+  actor_kind: "engine" | "orchestrator" | "step_agent" | "user" | "simulator" | null;
   at_us: number;
   body: Record<string, JsonValue> | null;
   body_truncated: boolean;
@@ -289,6 +309,12 @@ export interface ResumeRequest {
   cap?: number | null;
 }
 
+/** The cursor cannot be replayed; a fresh ``snapshot`` follows. */
+export interface ResyncFrame {
+  reason: "cursor_unknown" | "cursor_invalid" | "replay_too_long" | "row_unreadable";
+  type: "resync";
+}
+
 /**
  * One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that
  * cannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are
@@ -335,6 +361,55 @@ export interface RunDetail {
   workflow_id: string;
 }
 
+/** The run header again, sent when the row changes without a view patch. */
+export interface RunFrame {
+  allowed_actions: ("pause" | "resume" | "cancel")[];
+  finished_at: number | null;
+  load_error: "engine.load_failed" | null;
+  pause_reason:
+    | "gate"
+    | "budget"
+    | "plan_limit"
+    | "rejected_calls"
+    | "infra"
+    | "liveness"
+    | "user"
+    | "authority_revoked"
+    | "merge_conflict"
+    | "failure_path"
+    | "engine_upgrade"
+    | "drift"
+    | "auth"
+    | null;
+  status: "starting" | "running" | "paused" | "completed" | "failed" | "cancelled";
+  type: "run";
+  version: number;
+}
+
+/** The run row as clients see it; a finished row wins over what the view says. */
+export interface RunHeader {
+  allowed_actions: ("pause" | "resume" | "cancel")[];
+  finished_at: number | null;
+  load_error: "engine.load_failed" | null;
+  pause_reason:
+    | "gate"
+    | "budget"
+    | "plan_limit"
+    | "rejected_calls"
+    | "infra"
+    | "liveness"
+    | "user"
+    | "authority_revoked"
+    | "merge_conflict"
+    | "failure_path"
+    | "engine_upgrade"
+    | "drift"
+    | "auth"
+    | null;
+  status: "starting" | "running" | "paused" | "completed" | "failed" | "cancelled";
+  version: number;
+}
+
 /** One page of runs, newest first; page again with ``next_cursor`` until it is null. */
 export interface RunPage {
   data: RunSummary[];
@@ -366,6 +441,8 @@ export interface RunSpendTokens {
   output: number;
   total: number;
 }
+
+export type RunStreamFrame = SnapshotFrame | EntryFrame | RunFrame | ResyncFrame | HeartbeatFrame;
 
 /** A run as its owner's run list shows it. */
 export interface RunSummary {
@@ -460,6 +537,19 @@ export interface SlotView {
   pending_input: boolean;
   status:
     "pending" | "session_created" | "briefed" | "working" | "evaluating" | "closing" | "closed";
+}
+
+/** The whole view at head ``seq``; ``view`` is ``None`` only for a run that cannot load. */
+export interface SnapshotFrame {
+  log_version: number;
+  protocol: 1;
+  run: RunHeader;
+  run_version: number;
+  seq: number;
+  type: "snapshot";
+  view: RunView | null;
+  view_error: "engine.load_failed" | null;
+  view_version: 1;
 }
 
 /** 1-based inclusive start, exclusive end positions in the YAML text. */
@@ -752,6 +842,29 @@ export interface CoralOperations {
     status: never;
     response: never;
     errors: 401 | 403 | 404 | 422 | 501 | 503;
+  };
+  /**
+   * GET /v1/coral/runs/{run_id}/stream
+   *
+   * Follow one of the caller's runs: a snapshot of its view, then one entry per log
+   * row with the row's view patch. ``Last-Event-ID`` (else ``after_seq``) resumes
+   * after the last seq the client holds. A stream ends after five minutes; the
+   * client resumes from its last seq. Past the stream caps, poll ``/log`` instead.
+   */
+  coral_stream_run: {
+    method: "GET";
+    path: "/v1/coral/runs/{run_id}/stream";
+    params: {
+      run_id: string;
+    };
+    query: {
+      after_seq?: number | null;
+    };
+    status: 200;
+    response: never;
+    /** Server-sent events: each event's `data` is one of these, or `[DONE]` at the end. */
+    events: RunStreamFrame;
+    errors: 401 | 403 | 404 | 422 | 429 | 503;
   };
   /**
    * POST /v1/coral/runs/{run_id}:cancel

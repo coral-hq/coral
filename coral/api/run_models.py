@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
-from typing import Annotated, Final, Literal, cast
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Annotated, Any, Final, Literal, cast
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue
 
@@ -31,7 +32,7 @@ from coral.db.enum_codecs import (
 )
 from coral.engine.machines.activation import find_node
 from coral.engine.projection import RunView, project
-from coral.engine.types import PauseCause
+from coral.engine.types import JsonPatch, PauseCause
 from coral.gates.ids import MAX_GATE_NOTE_CHARS, MAX_GATE_OUTCOME_CHARS
 from coral.model.ids import anchor_session_id
 from coral.model.ir import CompiledGraph
@@ -43,6 +44,7 @@ from coral.runview.types import (
     LoadError,
     PauseReasonName,
     RunAction,
+    RunHeader,
     RunStatusName,
 )
 from coral.stores.protocols import CoralRun, GateVisitState, RunLogEntry
@@ -310,13 +312,25 @@ class RunPage(_Out):
     next_cursor: str | None
 
 
-class LogEntryOut(EntryFrame):
+class LogEntryOut(_Out):
     """
-    One run-log row with its body. ``body`` is ``None`` for a row whose text cannot be
-    read (``kind`` ``log.unreadable``) and, with ``body_truncated``, for a body too large
-    to send.
+    One run-log row with its body: the stream's entry frame plus ``body``. ``body`` is
+    ``None`` for a row that cannot be read (``kind`` ``log.unreadable``) and, with
+    ``body_truncated``, for a body too large to send. ``actor_kind`` is ``None`` only on
+    such a row, for a code this server does not know.
     """
 
+    type: Literal["entry"] = "entry"
+    seq: int = Field(ge=1)
+    run_version: int = Field(ge=0)
+    kind: str
+    actor_kind: ActorKindName | None
+    actor: str | None
+    node_id: str | None
+    scope_key: str | None
+    at_us: int
+    rejected: str | None
+    patch: tuple[JsonPatch, ...] = ()
     body: dict[str, JsonValue] | None
     body_truncated: bool
 
@@ -436,6 +450,24 @@ def _read_actions(read: RunRead, view: RunView | None) -> tuple[RunAction, ...]:
     )
 
 
+def run_header(run: CoralRun, view: RunViewFacts | None) -> RunHeader:
+    """
+    The run row as the stream shows it. What it allows is judged with the stream's own
+    copy of the view; ``view`` is ``None`` for a run whose view cannot be loaded.
+    """
+    status, reason = row_status(run), row_pause_reason(run)
+    return RunHeader(
+        status=status,
+        pause_reason=reason,
+        version=run.version,
+        finished_at=run.finished_at,
+        allowed_actions=allowed_actions(
+            row_status=status, row_pause_reason=reason, view=view, loadable=view is not None
+        ),
+        load_error=None if view is not None else "engine.load_failed",
+    )
+
+
 def read_summary(read: RunRead) -> RunSummary:
     """The run as a write answers it, without spend: the row, with its detail's actions."""
     view = None if read.snapshot is None else project(read.snapshot.state)
@@ -522,27 +554,96 @@ def _engine_facts(body: dict[str, JsonValue] | None) -> tuple[str | None, str | 
     )
 
 
-def log_entry(row: RunLogEntry) -> LogEntryOut:
-    """
-    The row as ``/log`` sends it: ``kind`` is ``engine.<input kind>`` for an engine
-    entry, else ``log.<log kind>``; ``rejected`` is a refused input's code.
-    """
-    fields = {
+def _decoded(code: int, decode: Callable[[int], str]) -> str | None:
+    """A stored code's name, or ``None`` for a code this server does not know."""
+    try:
+        return decode(code)
+    except ValueError:
+        return None
+
+
+def _row_fields(row: RunLogEntry, actor_kind: ActorKindName | None) -> dict[str, Any]:
+    return {
         "seq": row.seq,
         "run_version": row.run_version,
-        "actor_kind": cast(ActorKindName, decode_actor_kind(row.actor_kind)),
+        "actor_kind": actor_kind,
         "actor": row.actor_ref,
         "node_id": row.node_id,
         "scope_key": row.scope_key,
         "at_us": row.created_at_us,
     }
+
+
+@dataclass(frozen=True)
+class _Readable:
+    """What a row needs to be shown: its patch and the names of its codes."""
+
+    patch: tuple[JsonPatch, ...]
+    log_kind: str
+    actor_kind: ActorKindName
+
+
+def _readable(row: RunLogEntry) -> _Readable | None:
+    """
+    The row's stored view patch and code names; ``None`` when its stored text cannot be
+    read or a code is one this server does not know (a newer server wrote it).
+    """
+    if row.unreadable:
+        return None
+    log_kind = _decoded(row.kind, decode_log_kind)
+    actor_kind = _decoded(row.actor_kind, decode_actor_kind)
+    if log_kind is None or actor_kind is None:
+        return None
     try:
-        patch = () if row.unreadable else stored_view_patch(row.view_patch)
+        patch = stored_view_patch(row.view_patch)
     except ValueError:
-        patch = None
-    if row.unreadable or patch is None:
+        return None
+    return _Readable(patch=patch, log_kind=log_kind, actor_kind=cast(ActorKindName, actor_kind))
+
+
+def _entry_kind(
+    row: RunLogEntry, log_kind: str, body: dict[str, JsonValue] | None
+) -> tuple[str, str | None]:
+    """
+    ``engine.<input kind>`` for an engine entry, else ``log.<log kind>``, and a refused
+    input's rejection code.
+    """
+    kind = f"log.{log_kind}"
+    if row.kind != LogKind.ENGINE:
+        return kind, None
+    input_kind, code = _engine_facts(body)
+    return (
+        kind if input_kind is None else f"engine.{input_kind}",
+        code if row.audit_only else None,
+    )
+
+
+def entry_frame(row: RunLogEntry) -> EntryFrame | None:
+    """
+    The row as the run stream sends it, without its body; ``None`` for a row that cannot
+    be read (:func:`_readable`). Only an engine row's body is parsed, for its kind.
+    """
+    readable = _readable(row)
+    if readable is None:
+        return None
+    body = _json_object(row.body) if row.kind == LogKind.ENGINE else None
+    kind, rejected = _entry_kind(row, readable.log_kind, body)
+    return EntryFrame(
+        **_row_fields(row, readable.actor_kind), kind=kind, rejected=rejected, patch=readable.patch
+    )
+
+
+def log_entry(row: RunLogEntry) -> LogEntryOut:
+    """
+    The row as ``/log`` sends it: the stream's entry with its body; ``kind`` is
+    ``log.unreadable`` for a row that cannot be read, whose ``actor_kind`` is ``None``
+    when it is a code this server does not know.
+    """
+    readable = _readable(row)
+    if readable is None:
+        actor_kind = _decoded(row.actor_kind, decode_actor_kind)
         return LogEntryOut(
-            **fields,
+            **_row_fields(row, cast(ActorKindName | None, actor_kind)),
             kind=UNREADABLE_LOG_KIND,
             rejected=None,
             body=None,
@@ -552,17 +653,12 @@ def log_entry(row: RunLogEntry) -> LogEntryOut:
     too_large = len(row.body.encode("utf-8")) > MAX_LOG_BODY_BYTES
     # An engine row's kind is in its body, so even one too large to send is parsed.
     body = None if too_large and not engine_row else _json_object(row.body)
-    kind = f"log.{decode_log_kind(row.kind)}"
-    rejected = None
-    if engine_row:
-        input_kind, code = _engine_facts(body)
-        kind = kind if input_kind is None else f"engine.{input_kind}"
-        rejected = code if row.audit_only else None
+    kind, rejected = _entry_kind(row, readable.log_kind, body)
     return LogEntryOut(
-        **fields,
+        **_row_fields(row, readable.actor_kind),
         kind=kind,
         rejected=rejected,
-        patch=patch,
+        patch=readable.patch,
         body=None if too_large else body,
         body_truncated=too_large,
     )
@@ -628,6 +724,7 @@ __all__ = [
     "SlotStatusName",
     "StartRunRequest",
     "default_title",
+    "entry_frame",
     "format_run_cursor",
     "invalid_run_cursor",
     "list_item_actions",
@@ -638,6 +735,7 @@ __all__ = [
     "row_pause_reason",
     "row_status",
     "run_detail",
+    "run_header",
     "run_spend",
     "run_summary",
 ]
