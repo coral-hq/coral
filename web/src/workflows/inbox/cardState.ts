@@ -1,4 +1,5 @@
 import { ApiError } from "@/lib/sessionsApi";
+import { OFFLINE_TEXT } from "./useOnline";
 
 // The gate card's state, as a pure function of who is looking, connectivity and
 // the last answer sent. Refused answers carry their reason as "[reason] text".
@@ -79,7 +80,7 @@ export function gateCardState({ isOwner, online, submission }: GateCardInput): G
   const refused = (canSubmit: boolean) =>
     state("refused", known?.text ?? refusal!.text, keepForm, canSubmit, refusal!.reason);
   if (refusal && !keepForm) return refused(false);
-  if (!online) return state("offline", "You’re offline.", true, false);
+  if (!online) return state("offline", OFFLINE_TEXT, true, false);
   if (refusal) return refused(true);
   if (submission.status === "failed") {
     return state("error", "Couldn’t send your answer. Try again.", true);

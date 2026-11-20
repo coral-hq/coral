@@ -11,38 +11,25 @@ import {
   TimerIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ElicitationMessage } from "@/components/blocks/ElicitationMessage";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { InboxKindUi, InboxTileTone } from "@/lib/inboxKinds";
 import { Link } from "@/lib/routing";
 import { approve } from "@/lib/sessionsApi";
-import { cn } from "@/lib/utils";
 import type { WorkflowAlert, WorkflowAlertKind } from "../api/types";
 import { runPath } from "../nav/coralPaths";
+import { CardStatusLine } from "./CardStatusLine";
 import { gateCardState, type GateSubmission } from "./cardState";
+import { RunActions } from "./RunActions";
+import { useOnline } from "./useOnline";
 import { WORKFLOW_INBOX_QUERY_KEY } from "./useWorkflowInbox";
 import { gateView, type WorkflowGateEntryData } from "./workflowEntries";
 
 const PROMPT_PREVIEW_CHARS = 600;
 const PROMPT_MAX_CHARS = 8_000;
 const MAX_NOTE_CHARS = 2_000;
-
-function subscribeOnline(listener: () => void): () => void {
-  window.addEventListener("online", listener);
-  window.addEventListener("offline", listener);
-  return () => {
-    window.removeEventListener("online", listener);
-    window.removeEventListener("offline", listener);
-  };
-}
-
-const readOnline = () => navigator.onLine !== false;
-
-function useOnline(): boolean {
-  return useSyncExternalStore(subscribeOnline, readOnline, () => true);
-}
 
 /** The gate's prompt as plain text; a long one is cut behind "Show more". */
 function GatePrompt({ message }: { message: string }) {
@@ -161,22 +148,11 @@ export function WorkflowGateCard({
           />
         </div>
       )}
-      <p
+      <CardStatusLine
         ref={statusRef}
-        tabIndex={-1}
-        role="status"
-        aria-live="polite"
-        // Kept in the accessibility tree while empty, so its first message is announced.
-        className={cn(
-          "text-sm outline-none",
-          state.message === null && "sr-only",
-          state.kind === "refused" || state.kind === "error"
-            ? "text-destructive"
-            : "text-muted-foreground",
-        )}
-      >
-        {state.message}
-      </p>
+        message={state.message}
+        failed={state.kind === "refused" || state.kind === "error"}
+      />
       <p className="text-xs text-muted-foreground">Coral notifies you while the app is open.</p>
       <ui.InboxActions>
         {view.runId && (
@@ -243,6 +219,36 @@ export function WorkflowAlertCard({
   onMarkRead,
 }: WorkflowAlertCardProps) {
   const look = ALERT_LOOKS[alert.kind];
+  // A pause card's primary action is Resume, so Open run steps back there.
+  const paused = alert.kind === "pause";
+  const cardActions = (
+    <>
+      <Button
+        asChild
+        variant={paused ? "outline" : "default"}
+        size="xs"
+        className={paused ? ui.outlineAction : ui.primaryAction}
+      >
+        <Link
+          to={runPath(alert.run_id, { node: alert.node_id ?? undefined })}
+          componentId="inbox.workflow_alert.open_run"
+        >
+          Open run <ArrowRightIcon className="size-3.5" />
+        </Link>
+      </Button>
+      {alert.actions.includes("mark_read") && (
+        <Button
+          variant="outline"
+          size="xs"
+          className={ui.outlineAction}
+          onClick={() => onMarkRead(alert.alert_id)}
+          componentId="inbox.workflow_alert.mark_read"
+        >
+          <CheckIcon className="size-3.5" /> Mark as read
+        </Button>
+      )}
+    </>
+  );
   return (
     <ui.InboxCard
       testId="inbox-workflow-alert"
@@ -265,27 +271,13 @@ export function WorkflowAlertCard({
       <p className="text-ui break-words whitespace-pre-wrap text-muted-foreground">
         {alert.message}
       </p>
-      <ui.InboxActions>
-        <Button asChild size="xs" className={ui.primaryAction}>
-          <Link
-            to={runPath(alert.run_id, { node: alert.node_id ?? undefined })}
-            componentId="inbox.workflow_alert.open_run"
-          >
-            Open run <ArrowRightIcon className="size-3.5" />
-          </Link>
-        </Button>
-        {alert.actions.includes("mark_read") && (
-          <Button
-            variant="outline"
-            size="xs"
-            className={ui.outlineAction}
-            onClick={() => onMarkRead(alert.alert_id)}
-            componentId="inbox.workflow_alert.mark_read"
-          >
-            <CheckIcon className="size-3.5" /> Mark as read
-          </Button>
-        )}
-      </ui.InboxActions>
+      {paused ? (
+        <RunActions runId={alert.run_id} expanded={expanded} ui={ui}>
+          {cardActions}
+        </RunActions>
+      ) : (
+        <ui.InboxActions>{cardActions}</ui.InboxActions>
+      )}
     </ui.InboxCard>
   );
 }
