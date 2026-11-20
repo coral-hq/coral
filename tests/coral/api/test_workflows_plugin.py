@@ -81,7 +81,13 @@ def test_plugin_mounts_the_inbox_behind_the_servers_authentication_and_workspace
     ):
         assert (response.status_code, response.json()) == (
             404,
-            {"detail": "Coral inbox is not available"},
+            {
+                "error": {
+                    "code": "not_found",
+                    "message": "Coral inbox is not available",
+                    "details": None,
+                }
+            },
         )
 
     # Once the store is published, each request reads only its own workspace's alerts.
@@ -104,3 +110,28 @@ def test_plugin_mounts_the_inbox_behind_the_servers_authentication_and_workspace
         assert [item["alert_id"] for item in listed] == [own]
         refused = scoped.post(f"/v1/coral/inbox/{other}/ack", headers=signed_in, json={})
         assert refused.status_code == 404
+
+
+def test_plugin_scopes_workflows_to_the_signed_in_caller_and_the_requests_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    auth = UnifiedAuthProvider(
+        source="header", local_single_user=False, header_name="X-Forwarded-Email"
+    )
+    app = _plugin_app(auth_provider=auth)
+    alice, bob = {"X-Forwarded-Email": "alice"}, {"X-Forwarded-Email": "bob"}
+    yaml = {"yaml": fixture_text("minimal")}
+    assert TestClient(app).post("/v1/coral/workflows", json=yaml).status_code == 401
+
+    home, other = TestClient(app), TestClient(_in_workspace(app, OTHER_WORKSPACE))
+    saved = home.post("/v1/coral/workflows", json=yaml, headers=alice).json()
+
+    assert [item["id"] for item in home.get("/v1/coral/workflows", headers=alice).json()] == [
+        saved["id"]
+    ]
+    assert home.get("/v1/coral/workflows", headers=bob).json() == []
+    assert other.get("/v1/coral/workflows", headers=alice).json() == []
+    assert other.get(f"/v1/coral/workflows/{saved['id']}", headers=alice).status_code == 404
+    # The same key is free in another workspace.
+    assert other.post("/v1/coral/workflows", json=yaml, headers=bob).status_code == 200

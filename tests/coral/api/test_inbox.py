@@ -279,7 +279,13 @@ def test_a_bad_cursor_is_refused_as_invalid(coral_uri: str, after: str) -> None:
 
     assert (response.status_code, response.json()) == (
         422,
-        {"detail": "Invalid workflow inbox cursor"},
+        {
+            "error": {
+                "code": "validation_failed",
+                "message": "Invalid workflow inbox cursor",
+                "details": None,
+            }
+        },
     )
 
 
@@ -327,7 +333,13 @@ def test_an_open_gate_alert_is_answered_not_marked_read(coral_uri: str) -> None:
 
     assert (refused.status_code, refused.json()) == (
         409,
-        {"detail": "Answer the gate to clear this alert."},
+        {
+            "error": {
+                "code": "illegal_transition",
+                "message": "Answer the gate to clear this alert.",
+                "details": None,
+            }
+        },
     )
     assert _ids(client, _as(ALICE)) == [gate.id]
     assert _status(coral_uri, run)[gate.id][0] == int(AlertStatus.OPEN)
@@ -372,7 +384,13 @@ def test_a_body_with_no_media_type_is_refused_where_fastapi_would_read_it_as_jso
 
     assert (response.status_code, response.json()) == (
         422,
-        {"detail": "The body must be the JSON object {}"},
+        {
+            "error": {
+                "code": "validation_failed",
+                "message": "The request body must be JSON.",
+                "details": None,
+            }
+        },
     )
     assert _status(coral_uri, run)[pause.id][0] == int(AlertStatus.OPEN)
 
@@ -407,7 +425,10 @@ def test_another_users_alerts_are_neither_listed_nor_found(coral_uri: str) -> No
     # alert of another user is not found either, never "answer the gate".
     for target in (pause.id, gate.id, UNKNOWN_ID, "not-an-alert", pause.id.upper()):
         refused = _ack(client, target, user=BOB, json={})
-        assert (refused.status_code, refused.json()) == (404, {"detail": "alert not found"})
+        assert (refused.status_code, refused.json()) == (
+            404,
+            {"error": {"code": "not_found", "message": "alert not found", "details": None}},
+        )
     assert _ids(client, _as(ALICE)) == [pause.id, gate.id]
     assert {status for status, _at, _by in _status(coral_uri, run).values()} == {
         int(AlertStatus.OPEN)
@@ -424,7 +445,13 @@ def test_a_request_with_no_identity_is_unauthenticated(coral_uri: str) -> None:
     for response in (listed, acked):
         assert (response.status_code, response.json()) == (
             401,
-            {"detail": "Authentication required"},
+            {
+                "error": {
+                    "code": "unauthenticated",
+                    "message": "Authentication required",
+                    "details": None,
+                }
+            },
         )
 
 
@@ -468,7 +495,10 @@ def test_a_request_whose_account_names_another_user_is_refused(coral_uri: str) -
     acked = client.post(f"{INBOX}/{pause.id}/ack", headers=crossed, json={})
 
     for response in (listed, acked):
-        assert (response.status_code, response.json()) == (403, {"detail": "Not permitted"})
+        assert (response.status_code, response.json()) == (
+            403,
+            {"error": {"code": "not_permitted", "message": "Not permitted", "details": None}},
+        )
 
 
 def test_without_the_alert_store_both_routes_are_not_found() -> None:
@@ -480,5 +510,11 @@ def test_without_the_alert_store_both_routes_are_not_found() -> None:
     ):
         assert (response.status_code, response.json()) == (
             404,
-            {"detail": "Coral inbox is not available"},
+            {
+                "error": {
+                    "code": "not_found",
+                    "message": "Coral inbox is not available",
+                    "details": None,
+                }
+            },
         )

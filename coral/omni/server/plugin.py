@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from sqlalchemy import Engine, create_engine
 
 from coral.api.inbox import create_inbox_router
@@ -41,7 +41,7 @@ from coral.stores.protocols import QueueStore, RunStore
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import FreshBindingLookup, SqlAlchemySessionBindingStore
 from coral.stores.workflow_versions import SqlAlchemyWorkflowVersionStore
-from coral.stores.workflows import SqlWorkflowDefinitionStore
+from coral.stores.workflows import SqlWorkflowDefinitionStore, WorkflowDefinitionStore
 from coral.tools.dispatch import ThreadRunner
 from coral.tools.port import RunDecisionPort
 from coral.workers.supervisor import MAX_DRAIN_CONCURRENCY, WorkerSupervisor
@@ -54,11 +54,13 @@ if TYPE_CHECKING:
 
     from coral.omni.server.gates import GateAnswering, LocalGatePrompts
     from coral.omni.server.turn_facts import BoundSessionRefresher
+    from omnigent.server.auth import AuthProvider
 
 _logger = logging.getLogger(__name__)
 
-# Workspaces are not modelled yet, so every request shares one workflow library.
-_SINGLE_WORKSPACE_ID = 0
+# A router, the prefix it is mounted under, and its OpenAPI tags.
+RouterSpec = tuple[APIRouter, str, list[str]]
+CORAL_API_PREFIX = "/v1/coral"
 _CORAL_DB_FILENAME = "coral.db"
 # The task that withdraws this process's stale gate prompts.
 GATE_SWEEP_TASK = "coral-gate-prompt-sweep"
@@ -114,10 +116,6 @@ class _ProcessLifespan:
 
 
 _PROCESS_LIFESPAN = _ProcessLifespan()
-
-
-def _single_workspace_id() -> int:
-    return _SINGLE_WORKSPACE_ID
 
 
 def drain_concurrency(server_config: Mapping[str, Any] | None) -> int:
@@ -683,23 +681,48 @@ async def coral_lifespan(
         yield
 
 
+def coral_routers(
+    *,
+    sub_features: Mapping[str, bool],
+    definitions: WorkflowDefinitionStore,
+    auth_provider: AuthProvider | None,
+) -> tuple[RouterSpec, ...]:
+    """
+    Every Coral router with its prefix and tags: the plugin mounts these, and the
+    OpenAPI export documents them.
+
+    Each route resolves its caller through ``auth_provider`` and reads the request's
+    workspace; the Inbox reads the alert store the lifespan publishes.
+    """
+    viewer = request_viewer(auth_provider)
+    return (
+        (create_info_router(sub_features=sub_features), "", ["coral"]),
+        (
+            create_workflows_router(
+                definitions,
+                viewer_dependency=viewer,
+                workspace_id_dependency=current_workspace_id,
+            ),
+            CORAL_API_PREFIX,
+            ["coral"],
+        ),
+        (
+            create_inbox_router(
+                viewer_dependency=viewer, workspace_id_dependency=current_workspace_id
+            ),
+            CORAL_API_PREFIX,
+            ["coral"],
+        ),
+    )
+
+
 def register(services: ServerServices) -> ServerPluginRegistration:
     """Register Coral routers, policy modules, and lifespan hooks."""
     if services.host_sharded:
         raise RuntimeError("Coral server plugin does not support host_sharded=True")
 
     sub_features = resolve_sub_features(services.server_config)
-    info_router = create_info_router(sub_features=sub_features)
     engine = _create_workflow_engine()
-    workflows_router = create_workflows_router(
-        SqlWorkflowDefinitionStore(engine),
-        workspace_id_dependency=_single_workspace_id,
-    )
-    # The feed reads the alert store the lifespan publishes; the caller is the owner.
-    inbox_router = create_inbox_router(
-        viewer_dependency=request_viewer(services.auth_provider),
-        workspace_id_dependency=current_workspace_id,
-    )
 
     @asynccontextmanager
     async def workflow_engine_lifespan(
@@ -712,10 +735,10 @@ def register(services: ServerServices) -> ServerPluginRegistration:
             engine.dispose()
 
     return ServerPluginRegistration(
-        routers=(
-            (info_router, "", ["coral"]),
-            (workflows_router, "/v1/coral", ["coral"]),
-            (inbox_router, "/v1/coral", ["coral"]),
+        routers=coral_routers(
+            sub_features=sub_features,
+            definitions=SqlWorkflowDefinitionStore(engine),
+            auth_provider=services.auth_provider,
         ),
         lifespan_hooks=(coral_lifespan, workflow_engine_lifespan),
         policy_modules=("coral.omni.policies.hygiene", "coral.omni.policies.guards"),

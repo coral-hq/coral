@@ -1,0 +1,1868 @@
+{
+  "components": {
+    "schemas": {
+      "AckRequest": {
+        "additionalProperties": false,
+        "description": "The body of a \"mark as read\": the empty JSON object.",
+        "properties": {},
+        "title": "AckRequest",
+        "type": "object"
+      },
+      "Analysis": {
+        "additionalProperties": false,
+        "properties": {
+          "checked_parts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CheckedPart"
+            },
+            "title": "Checked Parts",
+            "type": "array"
+          },
+          "join_types": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/JoinInfo"
+            },
+            "title": "Join Types",
+            "type": "array"
+          },
+          "label_sets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LabelSet"
+            },
+            "title": "Label Sets",
+            "type": "array"
+          },
+          "loops": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LoopInfo"
+            },
+            "title": "Loops",
+            "type": "array"
+          },
+          "regions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Region"
+            },
+            "title": "Regions",
+            "type": "array"
+          },
+          "unresolved": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/UnresolvedFact"
+            },
+            "title": "Unresolved",
+            "type": "array"
+          }
+        },
+        "title": "Analysis",
+        "type": "object"
+      },
+      "CheckedPart": {
+        "additionalProperties": false,
+        "description": "Resolution of a ``list_from`` reference.",
+        "properties": {
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "part_is_list": {
+            "title": "Part Is List",
+            "type": "boolean"
+          },
+          "part_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Name"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          },
+          "source_exists": {
+            "title": "Source Exists",
+            "type": "boolean"
+          },
+          "source_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Node Id"
+          },
+          "source_upstream": {
+            "title": "Source Upstream",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "node_id",
+          "reference",
+          "source_node_id",
+          "part_name",
+          "source_exists",
+          "source_upstream",
+          "part_is_list"
+        ],
+        "title": "CheckedPart",
+        "type": "object"
+      },
+      "CompiledArrow": {
+        "additionalProperties": false,
+        "properties": {
+          "at_limit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At Limit"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "forward",
+            "enum": [
+              "forward",
+              "back",
+              "at_limit",
+              "failure"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "target"
+        ],
+        "title": "CompiledArrow",
+        "type": "object"
+      },
+      "CompiledGraph": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis": {
+            "$ref": "#/components/schemas/Analysis",
+            "default": {
+              "checked_parts": [],
+              "join_types": [],
+              "label_sets": [],
+              "loops": [],
+              "regions": [],
+              "unresolved": []
+            }
+          },
+          "arrows": {
+            "items": {
+              "$ref": "#/components/schemas/CompiledArrow"
+            },
+            "title": "Arrows",
+            "type": "array"
+          },
+          "content_hash": {
+            "default": "",
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "ir_version": {
+            "default": 1,
+            "title": "Ir Version",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/CompiledNode"
+            },
+            "title": "Nodes",
+            "type": "array"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "name",
+          "nodes",
+          "arrows"
+        ],
+        "title": "CompiledGraph",
+        "type": "object"
+      },
+      "CompiledNode": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempts"
+          },
+          "concurrency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concurrency"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceRequirement"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal"
+          },
+          "harness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harness"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "start",
+              "end",
+              "step",
+              "decision",
+              "gate"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "list_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "List From"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "outcomes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Outcomes",
+            "type": "array"
+          },
+          "parts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CompiledPart"
+            },
+            "title": "Parts",
+            "type": "array"
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          },
+          "roster": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Roster",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "kind"
+        ],
+        "title": "CompiledNode",
+        "type": "object"
+      },
+      "CompiledPart": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "text",
+              "list"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "title": "CompiledPart",
+        "type": "object"
+      },
+      "CoralError": {
+        "additionalProperties": false,
+        "description": "What was refused: a stable ``code``, a message for people, and machine-readable details.",
+        "properties": {
+          "code": {
+            "enum": [
+              "unauthenticated",
+              "not_permitted",
+              "not_found",
+              "validation_failed",
+              "not_runnable",
+              "not_a_git_repo",
+              "start_key_conflict",
+              "workflow_key_taken",
+              "illegal_transition",
+              "stale_visit",
+              "worktree_failed",
+              "payload_too_large",
+              "stream_limit",
+              "not_implemented",
+              "host_offline",
+              "server_busy"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "title": "CoralError",
+        "type": "object"
+      },
+      "CoralErrorResponse": {
+        "additionalProperties": false,
+        "description": "The body of every Coral refusal.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/CoralError"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "CoralErrorResponse",
+        "type": "object"
+      },
+      "CoralInfoResponse": {
+        "description": "Response payload for ``GET /v1/coral/info``.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "sub_features": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Sub Features",
+            "type": "object"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "version",
+          "sub_features"
+        ],
+        "title": "CoralInfoResponse",
+        "type": "object"
+      },
+      "EvidenceRequirement": {
+        "additionalProperties": false,
+        "properties": {
+          "ir_version": {
+            "default": 1,
+            "title": "Ir Version",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RequiredCommand"
+            },
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "scope": {
+            "const": "per_agent",
+            "default": "per_agent",
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "EvidenceRequirement",
+        "type": "object"
+      },
+      "InvalidResult": {
+        "description": "A workflow document that did not load.",
+        "properties": {
+          "load_error": {
+            "$ref": "#/components/schemas/LoadError"
+          },
+          "runnable": {
+            "const": false,
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "valid": {
+            "const": false,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "valid",
+          "runnable",
+          "load_error"
+        ],
+        "title": "InvalidResult",
+        "type": "object"
+      },
+      "JoinInfo": {
+        "additionalProperties": false,
+        "description": "How a node with several incoming arrows combines them.",
+        "properties": {
+          "arrow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Arrow Ids",
+            "type": "array"
+          },
+          "join_type": {
+            "enum": [
+              "none",
+              "and",
+              "xor"
+            ],
+            "title": "Join Type",
+            "type": "string"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "split_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Split Node Id"
+          }
+        },
+        "required": [
+          "node_id",
+          "join_type",
+          "arrow_ids"
+        ],
+        "title": "JoinInfo",
+        "type": "object"
+      },
+      "LabelSet": {
+        "additionalProperties": false,
+        "description": "Labels on the label-selected outgoing arrows of a node.",
+        "properties": {
+          "labelled_arrow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labelled Arrow Ids",
+            "type": "array"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "unlabelled_arrow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unlabelled Arrow Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "node_id",
+          "labels",
+          "labelled_arrow_ids",
+          "unlabelled_arrow_ids"
+        ],
+        "title": "LabelSet",
+        "type": "object"
+      },
+      "LoadError": {
+        "description": "A document that could not be loaded; ``issues`` lists every schema error.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "issues": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LoadIssue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "yaml_path": {
+            "title": "Yaml Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "yaml_path",
+          "range",
+          "message"
+        ],
+        "title": "LoadError",
+        "type": "object"
+      },
+      "LoadIssue": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "yaml_path": {
+            "title": "Yaml Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "yaml_path",
+          "range",
+          "message"
+        ],
+        "title": "LoadIssue",
+        "type": "object"
+      },
+      "LoopInfo": {
+        "additionalProperties": false,
+        "description": "A loop closed by one back-arrow.",
+        "properties": {
+          "at_limit_arrow_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At Limit Arrow Id"
+          },
+          "back_arrow_id": {
+            "title": "Back Arrow Id",
+            "type": "string"
+          },
+          "body": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Body",
+            "type": "array"
+          },
+          "entry_arrow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Entry Arrow Ids",
+            "type": "array"
+          },
+          "head": {
+            "title": "Head",
+            "type": "string"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "tail": {
+            "title": "Tail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "back_arrow_id",
+          "head",
+          "tail",
+          "body",
+          "limit",
+          "at_limit_arrow_id",
+          "entry_arrow_ids"
+        ],
+        "title": "LoopInfo",
+        "type": "object"
+      },
+      "Problem": {
+        "description": "One finding, anchored to nodes, arrows and a ``yaml_path``.",
+        "properties": {
+          "arrow_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Arrow Ids",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "node_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Ids",
+            "type": "array"
+          },
+          "range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rule": {
+            "title": "Rule",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning",
+              "info"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "yaml_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Yaml Path"
+          }
+        },
+        "required": [
+          "rule",
+          "severity",
+          "message"
+        ],
+        "title": "Problem",
+        "type": "object"
+      },
+      "Region": {
+        "additionalProperties": false,
+        "description": "Parallel region between an unlabelled split and its AND-join.",
+        "properties": {
+          "join_node_id": {
+            "title": "Join Node Id",
+            "type": "string"
+          },
+          "node_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Ids",
+            "type": "array"
+          },
+          "split_node_id": {
+            "title": "Split Node Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "split_node_id",
+          "join_node_id",
+          "node_ids"
+        ],
+        "title": "Region",
+        "type": "object"
+      },
+      "RequiredCommand": {
+        "additionalProperties": false,
+        "description": "One command that must pass after the step's last change.\n\n:param run: One plain command, e.g. ``pytest -q``, matched as the last command\n    of an ``&&`` chain (``coral.evidence.match``).\n:param may_modify: The command may change the tree (a formatter); its own\n    changes do not count as the step's last change when it runs on its own.\n:param allow_args: A run may add arguments after ``run``; by default the\n    argv must be exactly ``run``'s.",
+        "properties": {
+          "allow_args": {
+            "default": false,
+            "title": "Allow Args",
+            "type": "boolean"
+          },
+          "item_id": {
+            "title": "Item Id",
+            "type": "string"
+          },
+          "may_modify": {
+            "default": false,
+            "title": "May Modify",
+            "type": "boolean"
+          },
+          "run": {
+            "title": "Run",
+            "type": "string"
+          }
+        },
+        "required": [
+          "item_id",
+          "run"
+        ],
+        "title": "RequiredCommand",
+        "type": "object"
+      },
+      "SavedWorkflowOut": {
+        "description": "The definition a save stored, with the validation of what was saved.",
+        "properties": {
+          "compiled": {
+            "$ref": "#/components/schemas/CompiledGraph"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "valid": {
+            "const": true,
+            "title": "Valid",
+            "type": "boolean"
+          },
+          "workflow_key": {
+            "title": "Workflow Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_key",
+          "name",
+          "content_hash",
+          "runnable",
+          "created_at",
+          "updated_at",
+          "valid",
+          "problems",
+          "compiled"
+        ],
+        "title": "SavedWorkflowOut",
+        "type": "object"
+      },
+      "SourceRange": {
+        "description": "1-based inclusive start, exclusive end positions in the YAML text.",
+        "properties": {
+          "end_column": {
+            "title": "End Column",
+            "type": "integer"
+          },
+          "end_line": {
+            "title": "End Line",
+            "type": "integer"
+          },
+          "start_column": {
+            "title": "Start Column",
+            "type": "integer"
+          },
+          "start_line": {
+            "title": "Start Line",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_line",
+          "start_column",
+          "end_line",
+          "end_column"
+        ],
+        "title": "SourceRange",
+        "type": "object"
+      },
+      "UnresolvedFact": {
+        "additionalProperties": false,
+        "description": "Something Analysis could not resolve; blocks running the workflow.",
+        "properties": {
+          "arrow_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Arrow Ids",
+            "type": "array"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "node_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "UnresolvedFact",
+        "type": "object"
+      },
+      "ValidResult": {
+        "description": "A workflow that loaded and compiled, with what validation found.",
+        "properties": {
+          "compiled": {
+            "$ref": "#/components/schemas/CompiledGraph"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "valid": {
+            "const": true,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "valid",
+          "runnable",
+          "content_hash",
+          "problems",
+          "compiled"
+        ],
+        "title": "ValidResult",
+        "type": "object"
+      },
+      "WorkflowAlertOut": {
+        "additionalProperties": false,
+        "description": "One open alert as the Inbox lists it: its row's fields merged with its payload.",
+        "properties": {
+          "actions": {
+            "items": {
+              "enum": [
+                "answer",
+                "open_run",
+                "mark_read",
+                "resume",
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "alert_id": {
+            "title": "Alert Id",
+            "type": "string"
+          },
+          "approve_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approve Link"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "deep_link": {
+            "title": "Deep Link",
+            "type": "string"
+          },
+          "elicitation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elicitation Id"
+          },
+          "kind": {
+            "enum": [
+              "gate",
+              "question",
+              "pause",
+              "watchdog",
+              "overdue",
+              "reaction",
+              "run_completed",
+              "run_failed",
+              "run_cancelled"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "outcomes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Outcomes",
+            "type": "array"
+          },
+          "pause_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Reason"
+          },
+          "priority": {
+            "enum": [
+              "normal",
+              "low"
+            ],
+            "title": "Priority",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "run_title": {
+            "title": "Run Title",
+            "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "step_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Label"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alert_id",
+          "run_id",
+          "run_title",
+          "kind",
+          "priority",
+          "created_at",
+          "title",
+          "message",
+          "step_label",
+          "node_id",
+          "actions",
+          "deep_link",
+          "approve_link",
+          "elicitation_id",
+          "session_id",
+          "outcomes",
+          "pause_reason"
+        ],
+        "title": "WorkflowAlertOut",
+        "type": "object"
+      },
+      "WorkflowDetailOut": {
+        "description": "A stored workflow definition with its YAML and compiled graph.",
+        "properties": {
+          "compiled": {
+            "$ref": "#/components/schemas/CompiledGraph"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "workflow_key": {
+            "title": "Workflow Key",
+            "type": "string"
+          },
+          "yaml": {
+            "title": "Yaml",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_key",
+          "name",
+          "content_hash",
+          "runnable",
+          "created_at",
+          "updated_at",
+          "yaml",
+          "compiled"
+        ],
+        "title": "WorkflowDetailOut",
+        "type": "object"
+      },
+      "WorkflowInboxPage": {
+        "description": "One feed page. A page can be empty and still carry ``next_cursor``: keep paging\nuntil it is null.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowAlertOut"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "title": "WorkflowInboxPage",
+        "type": "object"
+      },
+      "WorkflowSummaryOut": {
+        "description": "A stored workflow definition as lists show it.",
+        "properties": {
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "workflow_key": {
+            "title": "Workflow Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_key",
+          "name",
+          "content_hash",
+          "runnable",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "WorkflowSummaryOut",
+        "type": "object"
+      },
+      "WorkflowYaml": {
+        "description": "A workflow document as YAML text.",
+        "properties": {
+          "yaml": {
+            "title": "Yaml",
+            "type": "string"
+          }
+        },
+        "required": [
+          "yaml"
+        ],
+        "title": "WorkflowYaml",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Coral API",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/coral/inbox": {
+      "get": {
+        "description": "The caller's open alerts: normal priority first, newest first within each.",
+        "operationId": "coral_list_inbox",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowInboxPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "List Inbox",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/inbox/{alert_id}/ack": {
+      "post": {
+        "description": "Mark one of the caller's alerts read; marking it again changes nothing.",
+        "operationId": "coral_ack_alert",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alert_id",
+            "required": true,
+            "schema": {
+              "title": "Alert Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Ack Alert",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/info": {
+      "get": {
+        "description": "Report whether Coral is enabled on this server and its sub-feature map.",
+        "operationId": "coral_get_info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralInfoResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coral Info",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/workflows": {
+      "get": {
+        "description": "The caller's workflows, by key.",
+        "operationId": "coral_list_workflows",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WorkflowSummaryOut"
+                  },
+                  "title": "Response Coral List Workflows",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          }
+        },
+        "summary": "List Workflows",
+        "tags": [
+          "coral"
+        ]
+      },
+      "post": {
+        "description": "Store the caller's workflow under its key, replacing their earlier version.",
+        "operationId": "coral_save_workflow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowYaml"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedWorkflowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Save Workflow",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/workflows/{workflow_id}": {
+      "get": {
+        "description": "One of the caller's workflows with its YAML and compiled graph.",
+        "operationId": "coral_get_workflow",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Get Workflow",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/workflows:validate": {
+      "post": {
+        "description": "Load, compile and validate a workflow without storing it.",
+        "operationId": "coral_validate_workflow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowYaml"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ValidResult"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidResult"
+                    }
+                  ],
+                  "title": "Response Coral Validate Workflow"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Validate Workflow",
+        "tags": [
+          "coral"
+        ]
+      }
+    }
+  }
+}
