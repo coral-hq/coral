@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from coral.engine.facts import TurnFact
+from coral.signals.turn_facts import edge_origin, edge_response_id
 
 
 def observe_status_edge(edge: Mapping[str, object]) -> TurnFact | None:
@@ -25,17 +26,9 @@ def observe_status_edge(edge: Mapping[str, object]) -> TurnFact | None:
         live_status=_text(edge.get("status")),
         turn_outcome=_optional_text(edge, "turn_outcome"),
         failure_origin=_optional_text(edge, "failure_origin"),
-        origin=_origin(edge),
-        response_id=_response_id(edge),
+        origin=edge_origin(edge),
+        response_id=edge_response_id(edge),
     )
-
-
-def _response_id(edge: Mapping[str, object]) -> str | None:
-    for name in ("turn_response_id", "response_id"):
-        value = edge.get(name)
-        if isinstance(value, str) and value != "":
-            return value
-    return None
 
 
 def _slot_id(value: object) -> str:
@@ -55,15 +48,3 @@ def _optional_text(edge: Mapping[str, object], name: str) -> str | None:
     if name not in edge:
         return None
     return _text(edge[name])
-
-
-def _origin(edge: Mapping[str, object]) -> str | None:
-    """Store ``archive`` when the origin text contains it. A missing origin stays missing."""
-    if "origin" not in edge:
-        return None
-    value = edge["origin"]
-    if not isinstance(value, str):
-        return None
-    if "archive" in value:
-        return "archive"
-    return value

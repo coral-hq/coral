@@ -3,9 +3,11 @@
 Checks run in a fixed order, first match wins: membership, session
 generation, a closed slot (the receipt of an earlier handoff), run status,
 slot readiness, a handoff already being evaluated, then the arguments one
-field at a time. Only an argument error is counted against the slot; the
-other refusals write nothing. A valid handoff commits ``HandoffReceived`` and
-``HandoffEvaluated`` together.
+field at a time, then the server's verdict on a ``done`` handoff's
+``done_when`` commands. An argument error is counted against the slot, and
+missing evidence against the step's attempts; the other refusals write
+nothing. A valid handoff commits ``HandoffReceived`` and ``HandoffEvaluated``
+together.
 """
 
 from __future__ import annotations
@@ -15,10 +17,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole, SlotRole
-from coral.engine.lifecycle import REJECTED_CALL_LIMIT
-from coral.engine.machines.activation import choosable_labels, find_activation, routes_by_label
+from coral.engine.machines.activation import (
+    choosable_labels,
+    find_activation,
+    find_node,
+    routes_by_label,
+)
 from coral.engine.machines.slot import find_slot
 from coral.engine.types import HandoffEvaluated, HandoffReceived, RejectionObserved, Slot
+from coral.evidence.ir import InProgress, Missing
+from coral.evidence.messages import item_message, verdict_message
+from coral.model.ir import DEFAULT_ATTEMPTS
 from coral.tools import replies
 from coral.tools.dispatch import EngineToolCall
 from coral.tools.handlers.common import (
@@ -94,20 +103,39 @@ def plan(snapshot: RunSnapshot, *, call: EngineToolCall) -> Plan:
         return Reply(replies.evaluating(), log="a handoff is being evaluated")
     handoff = _checked(snapshot, slot, call.arguments)
     if isinstance(handoff, ToolReply):
-        if _streak(snapshot, slot) + 1 >= REJECTED_CALL_LIMIT:
+        if _streak(snapshot, slot) + 1 >= snapshot.state.rejected_call_limit:
             # This observation pauses the run, so the reply says stop.
             handoff = replies.stopping(handoff, "rejected_calls")
         observed = RejectionObserved(slot_id=slot.id, code=HANDOFF_INVALID)
         return Commit((observed,), handoff, observation=True)
     generation = binding.session_generation
+    received = HandoffReceived(
+        slot_id=slot.id,
+        body=handoff.body,
+        session_generation=generation,
+        label=handoff.label,
+    )
+    verdict = call.evidence if handoff.status == "done" else None
+    if isinstance(verdict, InProgress):
+        return Reply(replies.evidence_in_progress(), log=f"evidence: {verdict.reason}")
+    if isinstance(verdict, Missing):
+        missing = HandoffEvaluated(
+            slot_id=slot.id,
+            outcome="evidence_missing",
+            missing=tuple(item.item_id for item in verdict.items),
+            session_generation=generation,
+        )
+        final = _last_attempt(snapshot, slot)
+        message = (
+            "\n".join(item_message(item) for item in verdict.items)
+            if final
+            else verdict_message(verdict)
+        )
+        reply = replies.evidence_missing(message, final=final)
+        return Commit((received, missing), reply)
     return Commit(
         (
-            HandoffReceived(
-                slot_id=slot.id,
-                body=handoff.body,
-                session_generation=generation,
-                label=handoff.label,
-            ),
+            received,
             HandoffEvaluated(
                 slot_id=slot.id,
                 outcome="accepted" if handoff.status == "done" else "blocked",
@@ -116,6 +144,16 @@ def plan(snapshot: RunSnapshot, *, call: EngineToolCall) -> Plan:
         ),
         replies.accepted(handoff.status),
     )
+
+
+def _last_attempt(snapshot: RunSnapshot, slot: Slot) -> bool:
+    """Whether one more missing-evidence evaluation reaches the step's attempt cap."""
+    owner = find_activation(snapshot.state, slot.activation_id)
+    node = find_node(snapshot.graph, owner.node_id) if owner is not None else None
+    cap = node.attempts if node is not None and node.attempts is not None else DEFAULT_ATTEMPTS
+    counts = {item.activation_id: item.used for item in snapshot.state.attempts}
+    used = counts.get(slot.activation_id, 0)
+    return used + 1 >= cap
 
 
 def _member_slot(snapshot: RunSnapshot, call: EngineToolCall) -> Slot | None:

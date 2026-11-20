@@ -55,6 +55,10 @@ from omnigent.server.routes._session_harness_readiness import validate_create_ha
 
 # Event types, used by coral/omni/server/mutation_guard.py.
 from omnigent.server.routes._sessions.common import (
+    # omnigent/server/routes/_sessions/common.py: the event a prompt's answer is posted as.
+    _APPROVAL_TYPE as APPROVAL_EVENT_TYPE,
+)
+from omnigent.server.routes._sessions.common import (
     # omnigent/server/routes/_sessions/common.py: the event types only runners post.
     _RUNNER_SESSION_EVENT_TYPES as RUNNER_SESSION_EVENT_TYPES,
 )
@@ -95,6 +99,7 @@ from omnigent.server.routes.sessions import (
 from omnigent.version import VERSION as OMNIGENT_VERSION
 
 __all__ = [
+    "APPROVAL_EVENT_TYPE",
     "CLIENT_SESSION_EVENT_TYPES",
     "OMNIGENT_VERSION",
     "RUNNER_SESSION_EVENT_TYPES",

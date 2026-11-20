@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+import zstandard
+
+from coral.db import MAX_STORED_BYTES, encode
 from coral.db.enum_codecs import RunStatus, WorkKind, WorkStatus
 from coral.model.ids import derived_id
+from coral.omni.protocols import Viewer
+
+# Runs not yet completed, failed or cancelled.
+UNFINISHED_RUN_STATUSES = (int(RunStatus.STARTING), int(RunStatus.RUNNING), int(RunStatus.PAUSED))
+# Stored text that does not decode when its row is read: a bad zstd frame, or a
+# ``ValueError`` for text that is not UTF-8 or a frame cut short, of an unknown codec or
+# too large.
+STORED_TEXT_ERRORS = (zstandard.ZstdError, ValueError)
+# Most runs one page of a caller's run list holds.
+MAX_OWNED_RUNS_LIMIT = 50
 
 # ── Domain Exceptions ────────────────────────────────────────────────────────
 
@@ -45,11 +58,19 @@ class RunVersionConflict(Exception):
 
 
 class TransitionTooLarge(ValueError):
-    """Transition exceeds the per-commit cap (64 logs or 64 outbox items)."""
+    """Transition exceeds a per-commit cap (64 logs, 64 outbox items or 64 alert raises)."""
 
 
 class RunContended(RuntimeError):
     """Optimistic concurrency retry attempts were exhausted without committing."""
+
+
+class ToolReplyTooLarge(ValueError):
+    """A tool reply would exceed the inline storage cap."""
+
+
+class InvalidRunCursor(ValueError):
+    """A run-list cursor outside what a stored run's key can be; nothing was read."""
 
 
 # ── Frozen Domain Dataclasses ────────────────────────────────────────────────
@@ -110,6 +131,8 @@ class RunStartSpec:
     state_version: int = 1
     log_version: int = 1
     orchestrator_session_id: str | None = None
+    # JSON of the engine config a run's log is replayed with, frozen at start.
+    engine_config: str | None = None
 
 
 @dataclass(frozen=True)
@@ -387,6 +410,68 @@ class GateVisitState:
 
 
 @dataclass(frozen=True)
+class AlertDraft:
+    """Alert a transition raises: inserted when its id is absent, never reopened.
+
+    :raises ValueError: when ``payload`` would not fit its column.
+    """
+
+    id: str
+    run_id: str
+    kind: int
+    priority: int
+    subject_id: str
+    payload: str
+    owner_user_id: str | None = None
+    account_generation: str | None = None
+    # 0: the commit's time.
+    created_at: int = 0
+
+    def __post_init__(self) -> None:
+        framed = encode(self.payload)
+        if framed is not None and len(framed) > MAX_STORED_BYTES:
+            raise ValueError(
+                f"alert payload is {len(framed)} bytes after compression; "
+                f"the limit is {MAX_STORED_BYTES}"
+            )
+
+
+@dataclass(frozen=True)
+class AlertResolution:
+    """Resolves the run's open or acked alerts about one subject, or of the given kinds.
+
+    :raises ValueError: unless exactly one of ``subject_id`` and ``kinds`` is given.
+    """
+
+    subject_id: str | None = None
+    kinds: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (self.subject_id is None) == (not self.kinds):
+            raise ValueError("an alert resolution names exactly one of subject_id and kinds")
+
+
+@dataclass(frozen=True)
+class AlertRecord:
+    """Frozen state of a stored alert."""
+
+    workspace_id: int
+    id: str
+    run_id: str
+    owner_user_id: str | None
+    account_generation: str | None
+    kind: int
+    priority: int
+    subject_id: str
+    status: int
+    payload: str
+    created_at: int
+    acked_at: int | None = None
+    acked_by: str | None = None
+    resolved_at: int | None = None
+
+
+@dataclass(frozen=True)
 class LogEntryDraft:
     """Draft append-only event log row to persist."""
 
@@ -427,6 +512,9 @@ class RunLogEntry:
     body_ref: str | None = None
     view_patch: str | None = None
     view_patch_ref: str | None = None
+    # A tolerant read's placeholder for a row whose stored text does not decode: its
+    # ``body`` is empty and its ``view_patch`` ``None``.
+    unreadable: bool = False
 
 
 @dataclass(frozen=True)
@@ -575,6 +663,35 @@ class WorkItem:
     result_ref: str | None = None
     error_code: str | None = None
     finished_at: int | None = None
+    # Epoch seconds of the first refusal of the current hold; None when not held.
+    held_since: int | None = None
+
+
+@dataclass(frozen=True)
+class ToolReplyDraft:
+    """Reply an engine tool call commits, stored under the call's checksum.
+
+    :raises ValueError: when ``cksum`` is not 32 bytes.
+    :raises ToolReplyTooLarge: when ``reply`` would not fit its column.
+    """
+
+    cksum: bytes
+    reply: str
+
+    def __post_init__(self) -> None:
+        require_checksum32(self.cksum)
+        framed = encode(self.reply)
+        if framed is not None and len(framed) > MAX_STORED_BYTES:
+            raise ToolReplyTooLarge(
+                f"tool reply is {len(framed)} bytes after compression; "
+                f"the limit is {MAX_STORED_BYTES}"
+            )
+
+
+def require_checksum32(cksum: bytes) -> None:
+    """Refuse a checksum that is not 32 bytes, which MySQL would pad or cut."""
+    if len(cksum) != 32:
+        raise ValueError(f"a tool call checksum is 32 bytes, not {len(cksum)}")
 
 
 @dataclass(frozen=True)
@@ -623,9 +740,20 @@ class Transition:
     handoffs: Sequence[HandoffDraft] = ()
     handoff_items: Sequence[HandoffItemDraft] = ()
     gate_visits: Sequence[GateVisitDraft] = ()
+    # Raises are written first, so a resolution in the same commit also matches them.
+    alert_raises: Sequence[AlertDraft] = ()
+    alert_resolutions: Sequence[AlertResolution] = ()
     logs: Sequence[LogEntryDraft] = ()
     outbox_work: Sequence[WorkItemDraft] = ()
     consumed_work_ids: Sequence[str] = ()
+    # A second reply under the same checksum fails the whole transition.
+    tool_reply: ToolReplyDraft | None = None
+    # FAILED rows of the run among these ids become PENDING: attempts 0, available now,
+    # error code, result, finish time and hold start cleared.
+    revive_work_ids: Sequence[str] = ()
+    # PENDING rows of the run held with one of these error codes: available now,
+    # hold start cleared.
+    release_held_codes: Sequence[str] = ()
 
     @classmethod
     def empty(cls) -> Transition:
@@ -646,9 +774,14 @@ class Transition:
             and len(self.handoffs) == 0
             and len(self.handoff_items) == 0
             and len(self.gate_visits) == 0
+            and len(self.alert_raises) == 0
+            and len(self.alert_resolutions) == 0
             and len(self.logs) == 0
             and len(self.outbox_work) == 0
             and len(self.consumed_work_ids) == 0
+            and self.tool_reply is None
+            and len(self.revive_work_ids) == 0
+            and len(self.release_held_codes) == 0
         )
 
 
@@ -694,7 +827,17 @@ class RunStore(Protocol):
         *,
         workspace_id: int | None = None,
         now: int | None = None,
-    ) -> CommitOutcome: ...
+        lock_timeout_s: float | None = None,
+    ) -> CommitOutcome:
+        """Apply ``transition`` if the run is still at ``expected_version``.
+
+        :param lock_timeout_s: Bounds the wait for row locks where the database
+            supports it; must be positive.
+        :raises RunVersionConflict: when the run moved past ``expected_version``.
+        :raises IntegrityError: when ``transition.tool_reply`` repeats a stored
+            checksum; nothing of the transition is written.
+        """
+        ...
 
     def get_run(
         self,
@@ -712,6 +855,28 @@ class RunStore(Protocol):
         descending: bool = True,
     ) -> list[CoralRun]: ...
 
+    def list_owned_runs(
+        self,
+        *,
+        workspace_id: int,
+        viewer: Viewer,
+        statuses: Sequence[int] = (),
+        workflow_id: str | None = None,
+        after: tuple[int, str] | None = None,
+        limit: int = 25,
+    ) -> tuple[list[CoralRun], tuple[int, str] | None]:
+        """The viewer's runs in the workspace, newest first, one keyset page at a time.
+
+        Owners and generations compare exactly, as :func:`coral.alerts.types.is_owner`
+        does. ``after`` is the ``(created_at, id)`` a previous page returned; the
+        returned cursor is always the last run of this page, or ``None`` at the end.
+
+        :raises InvalidRunCursor: ``after`` holds a time outside 0-2**63-1 or an id that
+            is not at most 32 lowercase hex characters.
+        :raises ValueError: ``limit`` is not 1-:data:`MAX_OWNED_RUNS_LIMIT`.
+        """
+        ...
+
     def read_log(
         self,
         run_id: str,
@@ -719,7 +884,16 @@ class RunStore(Protocol):
         after_seq: int = 0,
         limit: int = 100,
         workspace_id: int | None = None,
-    ) -> list[RunLogEntry]: ...
+        tolerant: bool = False,
+    ) -> list[RunLogEntry]:
+        """The run's log rows after ``after_seq``, in ``seq`` order.
+
+        :param tolerant: Return a row whose stored text does not decode, or is too
+            short to decode, as an ``unreadable`` placeholder instead of raising.
+        :raises zstandard.ZstdError, ValueError: a row's text does not decode and
+            ``tolerant`` is false.
+        """
+        ...
 
     def find_receipt(
         self,
@@ -728,6 +902,23 @@ class RunStore(Protocol):
         *,
         workspace_id: int | None = None,
     ) -> RunReceipt | None: ...
+
+    def read_engine_log(
+        self,
+        run_id: str,
+        *,
+        workspace_id: int,
+        after_seq: int = 0,
+        max_run_version: int,
+        limit: int = 500,
+    ) -> list[RunLogEntry]:
+        """Return the run's ENGINE rows after ``after_seq`` committed at or below
+        ``max_run_version``, in ``seq`` order; audit-only rows included."""
+        ...
+
+    def find_tool_reply(self, run_id: str, cksum: bytes, *, workspace_id: int) -> str | None:
+        """Return the reply a transition stored under ``cksum``, else ``None``."""
+        ...
 
     def list_active_runs_all_workspaces(
         self,
@@ -742,6 +933,10 @@ class RunStore(Protocol):
         cursor: tuple[int, str, str] | None = None,
         limit: int = 100,
     ) -> list[GateVisitState]: ...
+
+    def list_open_gates(self, run_id: str, *, workspace_id: int) -> list[GateVisitState]:
+        """Return the run's ``OPEN`` gate rows (its live visits), by id."""
+        ...
 
     def register_post_commit(
         self,
@@ -776,6 +971,7 @@ class QueueStore(Protocol):
         lease_seconds: int = 60,
         workspace_id: int | None = None,
         now_fn: Callable[[], float] | None = None,
+        exclude_run_ids: Collection[str] = (),
     ) -> WorkItem | None: ...
 
     def renew_lease(
@@ -800,7 +996,39 @@ class QueueStore(Protocol):
         next_available_at: int | None = None,
         workspace_id: int | None = None,
         now_fn: Callable[[], float] | None = None,
-    ) -> bool: ...
+        hold: bool = False,
+    ) -> bool:
+        """Finish a claimed item; ``hold`` re-pends it without spending an attempt.
+
+        A hold needs ``status`` PENDING and keeps the first hold's start in
+        ``held_since``; any other finish clears it.
+        """
+        ...
+
+    def get_work(self, work_ids: Sequence[str], *, workspace_id: int) -> list[WorkItem]:
+        """Return the workspace's items among ``work_ids``, ordered by id."""
+        ...
+
+    def has_held_work(self, run_id: str, codes: Sequence[str], *, workspace_id: int) -> bool:
+        """Whether a PENDING row of the run is held (``held_since`` set) with one of ``codes``."""
+        ...
+
+    def reschedule_work(
+        self, draft: WorkItemDraft, *, workspace_id: int, available_at: int
+    ) -> None:
+        """Make ``draft``'s one row due at ``available_at``.
+
+        Inserts it when absent; a finished row becomes PENDING with no attempts; a
+        PENDING row keeps the earlier time; a CLAIMED row is left to its worker.
+        """
+        ...
+
+    def purge_finished(
+        self, *, kinds: Sequence[int], finished_before: int, limit: int = 500
+    ) -> int:
+        """Delete up to ``limit`` finished rows of ``kinds`` in every workspace that
+        finished before ``finished_before``; returns how many were deleted."""
+        ...
 
     def reclaim_expired_work(
         self,
@@ -883,10 +1111,16 @@ class QueueStore(Protocol):
 
 
 __all__ = [
+    "MAX_OWNED_RUNS_LIMIT",
+    "STORED_TEXT_ERRORS",
+    "UNFINISHED_RUN_STATUSES",
     "ActivationDraft",
     "ActivationState",
     "AgentSlotDraft",
     "AgentSlotState",
+    "AlertDraft",
+    "AlertRecord",
+    "AlertResolution",
     "CommitOutcome",
     "CoralRun",
     "GateVisitDraft",
@@ -895,6 +1129,7 @@ __all__ = [
     "HandoffItemDraft",
     "HandoffItemState",
     "HandoffState",
+    "InvalidRunCursor",
     "JoinArrivalDraft",
     "JoinArrivalState",
     "LogEntryDraft",
@@ -909,10 +1144,13 @@ __all__ = [
     "RunStore",
     "RunVersionConflict",
     "StartKeyConflict",
+    "ToolReplyDraft",
+    "ToolReplyTooLarge",
     "Transition",
     "TransitionTooLarge",
     "WorkItem",
     "WorkItemDraft",
     "WorkKind",
     "WorkStatus",
+    "require_checksum32",
 ]

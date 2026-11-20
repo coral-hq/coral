@@ -6,11 +6,18 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
+from coral.alerts.rules import PAUSE_MESSAGES, alert_id
+from coral.alerts.types import AlertPayload
+from coral.bridge.executors import BridgeThreads
 from coral.db.enum_codecs import (
     ActorKind,
+    AlertKind,
+    AlertStatus,
     LogKind,
     RunPauseReason,
     RunStatus,
@@ -27,12 +34,16 @@ from coral.recovery.drift import (
     DriftPreSendHook,
     classify_anchor,
     classify_step,
+    drift_log_checksum,
     find_drift,
     pause_run_for_drift,
 )
 from coral.stores.fakes import FakeRunStore
-from coral.stores.protocols import CoralRun, RunNotFound, Transition
+from coral.stores.protocols import AlertRecord, CoralRun, RunLogEntry, RunNotFound, Transition
 from coral.stores.session_bindings import SessionBinding, effect_checksum
+from tests.coral.bridge._world import WORKSPACE as ENGINE_WORKSPACE
+from tests.coral.bridge._world import World
+from tests.coral.bridge._world import start as start_engine_run
 from tests.coral.omni.fakes import FakeSessionFacade, present
 from tests.coral.workspace._executor_fakes import FakeBindings, start_run, step_binding
 
@@ -93,6 +104,16 @@ def _drift_logs(store: FakeRunStore, run: CoralRun) -> list[dict[str, object]]:
         json.loads(entry.body)
         for entry in store.logs[(WORKSPACE, run.id)]
         if entry.kind == int(LogKind.PAUSED)
+    ]
+
+
+def _pause_alerts(
+    store: FakeRunStore, run: CoralRun, workspace_id: int = WORKSPACE
+) -> list[AlertRecord]:
+    return [
+        alert
+        for alert in store.list_alerts(run.id, workspace_id=workspace_id)
+        if alert.kind == int(AlertKind.PAUSE)
     ]
 
 
@@ -184,6 +205,16 @@ def test_drift_pauses_a_live_run_with_one_paused_log(status: RunStatus) -> None:
         ).encode()
     ).digest()
     assert entry.idempotency_cksum == expected_cksum
+    # The pause raises one alert for its epoch, owned as the run is.
+    [alert] = store.list_alerts(run.id, workspace_id=WORKSPACE)
+    assert (alert.id, alert.kind, alert.status) == (
+        alert_id(WORKSPACE, run.id, "pause", str(version + 1)),
+        int(AlertKind.PAUSE),
+        int(AlertStatus.OPEN),
+    )
+    assert (alert.owner_user_id, alert.account_generation) == ("alice", "gen-1")
+    payload = AlertPayload.model_validate_json(alert.payload)
+    assert (payload.pause_reason, payload.message) == ("drift", PAUSE_MESSAGES["drift"])
 
 
 def test_a_second_detection_in_one_pause_epoch_adds_nothing() -> None:
@@ -202,6 +233,7 @@ def test_a_second_detection_in_one_pause_epoch_adds_nothing() -> None:
     assert not again.applied
     assert store.load_run_state(run.id, workspace_id=WORKSPACE)[1] == version
     assert len(_drift_logs(store, run)) == 1
+    assert len(_pause_alerts(store, run)) == 1
 
 
 def test_resume_without_unarchive_pauses_again() -> None:
@@ -265,6 +297,7 @@ def test_a_finished_run_is_never_paused(status: RunStatus) -> None:
     assert not outcome.applied
     assert state.run.status == status
     assert _drift_logs(store, run) == []
+    assert store.list_alerts(run.id, workspace_id=WORKSPACE) == []
 
 
 def test_concurrent_detectors_pause_the_run_once() -> None:
@@ -289,6 +322,7 @@ def test_concurrent_detectors_pause_the_run_once() -> None:
     assert raced == [True]
     assert not outcome.applied
     assert len(_drift_logs(store, run)) == 1
+    assert len(_pause_alerts(store, run)) == 1
 
 
 async def test_drift_pauser_pauses_with_its_clock() -> None:
@@ -551,3 +585,101 @@ async def test_the_pre_send_hook_lets_an_undrifted_send_through() -> None:
     state, _ = store.load_run_state(run.id, workspace_id=WORKSPACE)
     assert state.run.status == RunStatus.RUNNING
     assert _drift_logs(store, run) == []
+
+
+# ── through the engine ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def engine_world(tmp_path: Path) -> AsyncIterator[tuple[World, BridgeThreads]]:
+    world = World.fake(tmp_path)
+    threads = BridgeThreads(world.bridge)
+    try:
+        yield world, threads
+    finally:
+        threads.close()
+
+
+def _rows(world: World, run_id: str, kind: LogKind) -> list[RunLogEntry]:
+    runs = world.runs
+    assert isinstance(runs, FakeRunStore)
+    return [row for row in runs.logs[(ENGINE_WORKSPACE, run_id)] if row.kind == int(kind)]
+
+
+async def test_a_drift_pause_goes_through_the_engine_and_a_resume_resumes_it(
+    engine_world: tuple[World, BridgeThreads],
+) -> None:
+    world, threads = engine_world
+    run = start_engine_run(world)
+    finding = DriftFinding(
+        "anchor_archived", anchor_session_id(ENGINE_WORKSPACE, run.id), ARCHIVED_AT
+    )
+    pauser = DriftPauser(world.runs, engine=threads, now_us=lambda: NOW_US)
+    version = world.run(run.id).version
+
+    first = await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
+    again = await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
+
+    assert first.applied and not again.applied
+    paused = world.run(run.id)
+    assert (paused.status, paused.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
+    state = world.assert_fold_matches(run.id)
+    assert [(cause.reason, cause.detail) for cause in state.causes] == [
+        ("drift", "anchor_archived")
+    ]
+    # The engine's pause and the drift entry are one commit.
+    [marker] = _rows(world, run.id, LogKind.PAUSED)
+    engine_pause = _rows(world, run.id, LogKind.ENGINE)[-1]
+    assert json.loads(engine_pause.body)["input"] == {
+        "kind": "pause_run",
+        "reason": "drift",
+        "detail": "anchor_archived",
+    }
+    assert marker.run_version == engine_pause.run_version == version + 1
+    assert json.loads(marker.body) == {
+        "kind": "pause_run",
+        "reason": "drift",
+        "cause": "anchor_archived",
+        "session_id": finding.session_id,
+        "detail": ARCHIVED_AT,
+    }
+    assert marker.idempotency_cksum == drift_log_checksum(run.id, finding, version)
+    assert marker.created_at_us == NOW_US
+    runs = world.runs
+    assert isinstance(runs, FakeRunStore)
+    [paused_alert] = _pause_alerts(runs, run, ENGINE_WORKSPACE)
+    assert paused_alert.status == int(AlertStatus.OPEN)
+
+    world.bridge.resume_run(workspace_id=ENGINE_WORKSPACE, run_id=run.id, actor="user:alice")
+    assert world.run(run.id).status == RunStatus.RUNNING
+    assert world.assert_fold_matches(run.id).causes == ()
+    assert [alert.status for alert in _pause_alerts(runs, run, ENGINE_WORKSPACE)] == [
+        int(AlertStatus.RESOLVED)
+    ]
+    # Resumed while the drift persists: the next detection pauses the run again.
+    world.clock.advance(60)
+    assert (
+        await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
+    ).applied
+    assert len(_rows(world, run.id, LogKind.PAUSED)) == 2
+    first, again = _pause_alerts(runs, run, ENGINE_WORKSPACE)
+    assert first.id == paused_alert.id != again.id
+    assert (first.status, again.status) == (int(AlertStatus.RESOLVED), int(AlertStatus.OPEN))
+
+
+async def test_an_anchor_bound_pause_through_the_engine_still_stops_the_anchor(
+    engine_world: tuple[World, BridgeThreads],
+) -> None:
+    world, threads = engine_world
+    run = start_engine_run(world)
+    anchor = anchor_session_id(ENGINE_WORKSPACE, run.id)
+    hook = _StopHook()
+    pauser = DriftPauser(world.runs, engine=threads, now_us=lambda: NOW_US, on_anchor_bound=hook)
+    finding = DriftFinding("anchor_bound", anchor, "runner-1")
+
+    for _ in range(2):
+        await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
+
+    assert hook.calls == [(ENGINE_WORKSPACE, run.id, anchor)] * 2
+    assert world.run(run.id).pause_reason == RunPauseReason.DRIFT
+    assert len(_rows(world, run.id, LogKind.PAUSED)) == 1

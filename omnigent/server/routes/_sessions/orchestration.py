@@ -130,6 +130,7 @@ from omnigent.runtime.policies.builder import (
 from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.runtime.workflow import _find_spec_by_name
 from omnigent.scheduled_context import scheduled_run_scope
+from omnigent.server import elicitation_hooks as _elicitation_hooks  # CORAL(S6b)
 from omnigent.server import session_live_state, shutdown_state
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
@@ -421,6 +422,10 @@ from omnigent.server.subagent_activity import (
     claude_subagent_completion_markers,
     record_claude_subagent_return,
     record_subagent_activity,
+)
+from omnigent.server.tool_result_observers import (  # CORAL(S105)
+    complete_tool_call,
+    tool_call_scope,
 )
 from omnigent.spec.types import (
     AgentSpec,
@@ -2474,7 +2479,9 @@ async def _resolve_elicitation(
     data: dict[str, Any],
     runner_router: RunnerRouter | None,
     conversation_store: ConversationStore | None = None,
-) -> None:
+    *,  # CORAL(S6b): who answers; the default names no one
+    resolved_by: str | _elicitation_hooks.NoCaller | None = _elicitation_hooks.NO_CALLER,
+) -> _elicitation_hooks.VerdictDecision | None:
     """
     Resolve one outstanding elicitation from an approval payload.
 
@@ -2518,7 +2525,16 @@ async def _resolve_elicitation(
     :param conversation_store: Optional store used to mirror the
         resolved signal into ancestor streams when ``session_id`` is
         a child session. ``None`` keeps the signal scoped locally.
+    :param resolved_by: The answering user (``None`` when the request carried no
+        identity). The ``NO_CALLER`` default names no one, so it never answers a claimed id.
+    :returns: The verdict handler's decision for a claimed id, else ``None``.
     """
+    # CORAL(S6b): an id a verdict handler claims is answered by that handler alone.
+    claimed = await _elicitation_hooks.resolve_claimed_elicitation(
+        session_id, data, resolved_by=resolved_by
+    )
+    if claimed is not None:
+        return claimed
     # Empty-string default is intentional, NOT a fail-loud miss: the
     # resolve-URL caller always supplies the id (it comes from the URL
     # path), but the public ``approval`` event caller may post a
@@ -2529,7 +2545,7 @@ async def _resolve_elicitation(
     if isinstance(elicitation_id, str) and await _resolve_native_delivery(
         session_id, elicitation_id, data, conversation_store
     ):
-        return
+        return None  # CORAL(S6b)
     harness_future = _harness_elicitation_registry.get(elicitation_id)
     if harness_future is not None and not harness_future.done():
         # Only the session that owns this elicitation
@@ -2630,6 +2646,7 @@ async def _resolve_elicitation(
     # Runner-side elicitations (policy approvals, scaffold dispatch)
     # resolve when the canonical approval event reaches the runner.
     await _forward_approval_to_runner(session_id, data, runner_router)
+    return None  # CORAL(S6b)
 
 
 def _spawn_native_approval_popup_forward(
@@ -12933,6 +12950,36 @@ async def _handle_mcp_tools_call(
     execute_tool: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     credential_user: str | None = None,
 ) -> Response:
+    """Run :func:`_mcp_tools_call` inside a tool-call observer scope."""
+    # CORAL(S105): tool-call observers see the call start and end, on every path.
+    with tool_call_scope(session_id, params.get("name"), params.get(MCP_OPERATION_ID_PARAM)):
+        return await _mcp_tools_call(
+            rpc_id,
+            session_id,
+            params,
+            conversation_store,
+            agent_store,
+            runner_router,
+            actor=actor,
+            request=request,
+            execute_tool=execute_tool,
+            credential_user=credential_user,
+        )
+
+
+async def _mcp_tools_call(
+    rpc_id: int | str | None,
+    session_id: str,
+    params: dict[str, Any],
+    conversation_store: ConversationStore,
+    agent_store: AgentStore,
+    runner_router: RunnerRouter | None,
+    *,
+    actor: dict[str, str] | None = None,
+    request: Request | None = None,
+    execute_tool: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    credential_user: str | None = None,
+) -> Response:
     """
     Handle a ``tools/call`` JSON-RPC request for the MCP proxy endpoint.
 
@@ -13395,6 +13442,16 @@ async def _handle_mcp_tools_call(
         namespaced_name,
         len(output),
         extra={"session_id": session_id},
+    )
+
+    # CORAL(S105): observers record the raw result before the agent sees it.
+    await complete_tool_call(
+        session_id,
+        namespaced_name,
+        arguments,
+        output,
+        is_error=exec_data.get("isError") is True,
+        operation_id=operation_id,
     )
 
     # ── TOOL_RESULT policy ───────────────────────────────────────────

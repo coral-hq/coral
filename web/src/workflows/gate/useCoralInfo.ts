@@ -54,11 +54,13 @@ export function isCoralAvailable(info: CoralInfo | undefined, subFeature?: strin
   return subFeature === undefined || info.sub_features[subFeature] === true;
 }
 
-export function useCoralInfo() {
+/** `enabled: false` asks nothing (cached info is still returned). */
+export function useCoralInfo({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery<CoralInfo, Error>({
     queryKey: CORAL_INFO_QUERY_KEY,
     queryFn: ({ signal }) => fetchCoralInfo(signal),
     staleTime: CORAL_INFO_STALE_TIME_MS,
     retry: shouldRetryCoralInfo,
+    enabled,
   });
 }

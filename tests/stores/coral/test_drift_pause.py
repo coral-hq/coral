@@ -8,19 +8,41 @@ import json
 import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from coral.alerts.rules import alert_id
+from coral.bridge.codec import decode_entries
+from coral.bridge.executors import BridgeThreads
 from coral.db.enum_codecs import (
     ActorKind,
+    AlertKind,
+    AlertStatus,
     LogKind,
     RunPauseReason,
     RunStatus,
     decode_run_pause_reason,
     encode_run_pause_reason,
 )
+from coral.engine.types import PauseRun
+from coral.model.ids import anchor_session_id
+from coral.recovery.drift import DriftFinding, DriftPauser
+from coral.stores.alerts import SqlAlchemyAlertStore
 from coral.stores.protocols import LogEntryDraft, RunStartSpec, Transition
 from coral.stores.runs import SqlAlchemyCoralRunStore
+from tests.coral.bridge._world import WORKSPACE as ENGINE_WORKSPACE
+from tests.coral.bridge._world import World, start
 from tests.stores.coral._faults import fresh_process
 
 WORKSPACE = 7
+
+
+def _pause_alerts(coral_db_uri: str, run_id: str, workspace_id: int) -> list[tuple[str, int]]:
+    """The run's committed pause alerts: id and status, oldest first."""
+    return [
+        (alert.id, alert.status)
+        for alert in SqlAlchemyAlertStore(coral_db_uri).list_for_run(
+            workspace_id=workspace_id, run_id=run_id
+        )
+        if alert.kind == int(AlertKind.PAUSE)
+    ]
 
 
 def test_drift_pause_persists_on_every_lane(coral_db_uri: str) -> None:
@@ -75,7 +97,7 @@ def test_drift_pause_persists_on_every_lane(coral_db_uri: str) -> None:
         reopened.apply_transition(
             run.id,
             version,
-            Transition(pause_reason=int(RunPauseReason.DRIFT) + 1),
+            Transition(pause_reason=max(RunPauseReason) + 1),
             workspace_id=WORKSPACE,
         )
     _, unchanged_version = reopened.load_run_state(run.id, workspace_id=WORKSPACE)
@@ -132,6 +154,16 @@ def test_drift_pauses_once_per_epoch_on_every_lane(coral_db_uri: str) -> None:
         drift_log_checksum(run.id, finding, paused_version - 1),
         drift_log_checksum(run.id, finding, paused_version + 1),
     ]
+    # Each pause epoch raised its own alert with its entry. The raw resume above skips the
+    # alert rules (a bridge resume resolves the first), so only the ids are compared.
+    assert sorted(alert for alert, _status in _pause_alerts(coral_db_uri, run.id, WORKSPACE)) == (
+        sorted(
+            [
+                alert_id(WORKSPACE, run.id, "pause", str(paused_version)),
+                alert_id(WORKSPACE, run.id, "pause", str(paused_version + 2)),
+            ]
+        )
+    )
     # Without the epoch, the second pause would repeat the first entry's identity: refused.
     with pytest.raises((IntegrityError, OperationalError)):
         reopened.apply_transition(
@@ -149,3 +181,50 @@ def test_drift_pauses_once_per_epoch_on_every_lane(coral_db_uri: str) -> None:
             ),
             workspace_id=WORKSPACE,
         )
+
+
+async def test_a_drift_pause_through_the_engine_resumes_on_every_lane(coral_db_uri: str) -> None:
+    """The engine's pause and the drift entry commit together; a resume lifts both."""
+    world = World.sql(coral_db_uri)
+    run = start(world)
+    finding = DriftFinding(
+        "session_archived", anchor_session_id(ENGINE_WORKSPACE, run.id), "1700000000"
+    )
+    threads = BridgeThreads(world.bridge)
+    try:
+        pauser = DriftPauser(world.runs, engine=threads, now_us=lambda: 1_700_000_000_000_000)
+        assert (
+            await pauser.pause(workspace_id=ENGINE_WORKSPACE, run_id=run.id, finding=finding)
+        ).applied
+
+        reopened = SqlAlchemyCoralRunStore(fresh_process(coral_db_uri))
+        state, version = reopened.load_run_state(run.id, workspace_id=ENGINE_WORKSPACE)
+        assert (state.run.status, state.run.pause_reason) == (
+            RunStatus.PAUSED,
+            RunPauseReason.DRIFT,
+        )
+        logs = reopened.read_log(run.id, workspace_id=ENGINE_WORKSPACE)
+        [marker] = [entry for entry in logs if entry.kind == int(LogKind.PAUSED)]
+        engine_rows = reopened.read_engine_log(
+            run.id, workspace_id=ENGINE_WORKSPACE, max_run_version=version
+        )
+        pause = decode_entries(engine_rows)[-1].input
+        assert pause == PauseRun(reason="drift", detail="session_archived")
+        assert marker.run_version == engine_rows[-1].run_version == version
+        assert json.loads(marker.body)["cause"] == "session_archived"
+        assert _pause_alerts(coral_db_uri, run.id, ENGINE_WORKSPACE) == [
+            (alert_id(ENGINE_WORKSPACE, run.id, "pause", str(version)), int(AlertStatus.OPEN))
+        ]
+
+        world.bridge.resume_run(workspace_id=ENGINE_WORKSPACE, run_id=run.id, actor="user:alice")
+        resumed = SqlAlchemyCoralRunStore(fresh_process(coral_db_uri)).get_run(
+            run.id, workspace_id=ENGINE_WORKSPACE
+        )
+        assert resumed is not None
+        assert (resumed.status, resumed.pause_reason) == (RunStatus.RUNNING, None)
+        assert world.assert_fold_matches(run.id).causes == ()
+        assert _pause_alerts(coral_db_uri, run.id, ENGINE_WORKSPACE) == [
+            (alert_id(ENGINE_WORKSPACE, run.id, "pause", str(version)), int(AlertStatus.RESOLVED))
+        ]
+    finally:
+        threads.close()

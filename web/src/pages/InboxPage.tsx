@@ -98,6 +98,14 @@ import {
   writeInboxFilter,
   type InboxFilter,
 } from "@/lib/inboxFilterPreferences";
+// CORAL(S37): Inbox extension kinds.
+import {
+  InboxKindEntryView,
+  partitionElicitations,
+  useInboxKinds,
+  type InboxKindEntry,
+  type InboxKindUi,
+} from "@/lib/inboxKinds";
 import { clearAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 import {
   isComposerAltNewlineKey,
@@ -191,7 +199,9 @@ type InboxEntry =
   | { kind: "approval"; key: string; at: number; item: InboxItem }
   | { kind: "comment"; key: string; at: number; item: CommentInboxItem }
   | { kind: "unread"; key: string; at: number; item: UnreadInboxItem }
-  | { kind: "automation"; key: string; at: number; item: AutomationFailure };
+  | { kind: "automation"; key: string; at: number; item: AutomationFailure }
+  // CORAL(S37): an entry an extension kind renders.
+  | { kind: "extension"; key: string; at: number; kindId: string; entry: InboxKindEntry };
 
 const TILE_TONES = {
   yellow: "bg-status-yellow/12 text-status-yellow",
@@ -204,6 +214,15 @@ const OUTLINE_ACTION =
   "mobile-touch-target mobile-app:h-auto mobile-app:whitespace-normal rounded-md border-button-border bg-transparent text-ui text-muted-foreground hover:text-foreground";
 const PRIMARY_ACTION =
   "mobile-touch-target mobile-app:h-auto mobile-app:whitespace-normal rounded-md bg-foreground text-ui text-card hover:bg-foreground/80 [&_svg]:text-card";
+
+// CORAL(S37): the card primitives an extension kind renders its entries with.
+const KIND_UI: InboxKindUi = {
+  InboxCard,
+  KindTile,
+  InboxActions,
+  outlineAction: OUTLINE_ACTION,
+  primaryAction: PRIMARY_ACTION,
+};
 
 export function InboxPage() {
   const queryClient = useQueryClient();
@@ -220,6 +239,7 @@ export function InboxPage() {
     automationInbox,
   } = useSidebarData();
   const taskDetailsEnabled = isFeatureEnabled(useServerInfo(), "automations_v2");
+  const kinds = useInboxKinds(); // CORAL(S37)
   const [filter, setFilter] = useState<InboxFilter>(readInboxFilter);
   const [responded, setResponded] = useState<RespondedMap>({});
   const pendingSubmissions = useRef(new Map<string, RespondedMap[string]>());
@@ -268,7 +288,12 @@ export function InboxPage() {
     const snapshot = snapshotQueries[i]?.data;
     if (snapshot) sources.push({ row, pendingElicitations: snapshot.pendingElicitations ?? [] });
   });
-  const items = collectInboxItems(sources);
+  // CORAL(S37): kinds take the prompts they render; the rest stay approvals.
+  const { unclaimed, claimed } = partitionElicitations(kinds, sources);
+  const items = collectInboxItems(unclaimed);
+  const kindEntries = kinds.flatMap((kind) =>
+    kind.entries(claimed.get(kind.id) ?? []).map((entry) => ({ kind, entry })),
+  );
 
   // Subscribed to the read-state mirror so "Mark as read" (here or in the
   // sidebar) drops the row immediately instead of on the next list poll.
@@ -327,13 +352,22 @@ export function InboxPage() {
   const visibleComments = showUnread ? commentInbox.items : [];
   const visibleUnread = showUnread ? unreadItems : [];
   const visibleAutomations = showUnread ? automationInbox.items : [];
+  // CORAL(S37): kind entries list under their tab and under All, and count in the header.
+  const visibleKindEntries = kindEntries.filter(
+    ({ entry }) => filter === "all" || entry.tab === filter,
+  );
   const visibleCount =
     visibleApprovals.length +
     visibleComments.length +
     visibleUnread.length +
-    visibleAutomations.length;
+    visibleAutomations.length +
+    visibleKindEntries.length; // CORAL(S37)
   const totalCount =
-    items.length + commentInbox.items.length + unreadItems.length + automationInbox.items.length;
+    items.length +
+    commentInbox.items.length +
+    unreadItems.length +
+    automationInbox.items.length +
+    kindEntries.length; // CORAL(S37)
   const summary = [
     items.length > 0 && (items.length === 1 ? "1 approval" : `${items.length} approvals`),
     commentInbox.items.length > 0 &&
@@ -343,6 +377,11 @@ export function InboxPage() {
       (automationInbox.items.length === 1
         ? "1 failed automation"
         : `${automationInbox.items.length} failed automations`),
+    // CORAL(S37): one summary part per kind with entries.
+    ...kinds.map((kind) => {
+      const count = kindEntries.filter((kindEntry) => kindEntry.kind === kind).length;
+      return count > 0 && kind.summary(count);
+    }),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -373,8 +412,27 @@ export function InboxPage() {
       at: item.row.updated_at,
       item,
     })),
+    // CORAL(S37)
+    ...visibleKindEntries.map(({ kind, entry }) => ({
+      kind: "extension" as const,
+      key: entry.key,
+      at: entry.at,
+      kindId: kind.id,
+      entry,
+    })),
   ]);
-  const defaultExpandedKey = items[0] && `approval:${items[0].elicitation.elicitationId}`;
+  // CORAL(S37): the newest awaiting kind entry starts expanded when newer than the approval.
+  const newestAwaitingKindEntry = kindEntries
+    .map(({ entry }) => entry)
+    .filter((entry) => entry.tab === "awaiting")
+    .reduce<InboxKindEntry | undefined>(
+      (newest, entry) => (newest === undefined || entry.at > newest.at ? entry : newest),
+      undefined,
+    );
+  const defaultExpandedKey =
+    newestAwaitingKindEntry && (!items[0] || newestAwaitingKindEntry.at > items[0].row.updated_at)
+      ? newestAwaitingKindEntry.key
+      : items[0] && `approval:${items[0].elicitation.elicitationId}`;
 
   // A newer delivery attempt supersedes optimistic sending, even if the
   // old POST is still in flight. Other prompts retain their refresh behavior.
@@ -415,7 +473,8 @@ export function InboxPage() {
     isFetchingNextPage ||
     snapshotQueries.some((q) => q.isLoading) ||
     commentInbox.isLoading ||
-    (showUnread && automationInbox.isLoading);
+    (showUnread && automationInbox.isLoading) ||
+    kinds.some((kind) => kind.loading); // CORAL(S37)
   const failedSnapshots = snapshotQueries.filter((q) => q.isError);
   const failedSessionCount =
     failedSnapshots.length + commentInbox.failedCount + Number(Boolean(conversationsQuery.isError));
@@ -485,6 +544,22 @@ export function InboxPage() {
       trackClick(`inbox.${entry.kind}.toggle_expanded`, "button");
       setExpandedOverrides((prev) => ({ ...prev, [entry.key]: !expanded }));
     };
+    // CORAL(S37): an extension kind renders its own entries.
+    if (entry.kind === "extension") {
+      const kind = kinds.find((candidate) => candidate.id === entry.kindId);
+      return (
+        kind && (
+          <InboxKindEntryView
+            key={entry.key}
+            kind={kind}
+            entry={entry.entry}
+            expanded={expanded}
+            onToggle={onToggle}
+            ui={KIND_UI}
+          />
+        )
+      );
+    }
     if (entry.kind === "automation") {
       const { item } = entry;
       const failure = describeRunFailure(item.errorCode, "failed");
@@ -955,6 +1030,28 @@ export function InboxPage() {
         </div>
       )}
 
+      {/* CORAL(S37): one error row per extension kind; approvals still render. */}
+      {kinds.map(
+        (kind) =>
+          kind.error && (
+            <div
+              key={kind.id}
+              role="alert"
+              className="mb-4 flex items-center gap-2 text-ui text-destructive"
+            >
+              {kind.error.message}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={kind.error.retry}
+                componentId={`inbox.retry_${kind.id}`}
+              >
+                Retry
+              </Button>
+            </div>
+          ),
+      )}
+
       {assembling && visibleCount === 0 && (
         <div className="flex items-center gap-2 py-12 text-ui text-muted-foreground">
           <Loader2Icon className="size-4 animate-spin" />
@@ -965,6 +1062,7 @@ export function InboxPage() {
       {!assembling &&
         failedSessionCount === 0 &&
         !(showUnread && automationInbox.isError) &&
+        !kinds.some((kind) => kind.error) && // CORAL(S37)
         visibleCount === 0 && (
           <div className="flex flex-col items-center gap-2 py-16 text-center">
             <InboxIcon className="size-8 text-muted-foreground/50" />

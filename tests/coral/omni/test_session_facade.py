@@ -35,8 +35,10 @@ from coral.db.enum_codecs import LogKind, RunPauseReason, RunStatus, SessionBind
 from coral.db.migrate import ensure_coral_schema
 from coral.model.ids import anchor_session_id, derived_id, effect_session_id
 from coral.omni.process_map import CORAL_RUNNER_TOKEN
+from coral.omni.protocols import CoralSessionError
 from coral.omni.runner.tool_provider import tool_provider
 from coral.omni.server import sessions as facade_module
+from coral.omni.server import step_agents as step_agents_module
 from coral.omni.server.bundles import materialize, pack_bundle
 from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.omni.server.sessions import (
@@ -45,6 +47,7 @@ from coral.omni.server.sessions import (
     TITLE_ID_SUFFIX_CHARS,
     OmnigentSessionFacade,
 )
+from coral.omni.server.step_agents import OmnigentStepAgents
 from coral.profiles.bundle_spec import Stance, StepRef, build_step_bundle_yaml
 from coral.queue import StartupLeaseLost
 from coral.queue.conformance import run_executor_conformance
@@ -108,13 +111,15 @@ from tests.server.integration.test_session_host_launch import (
     _runner_hello,
 )
 from tests.server.routes.test_host_worktree import _FakeWebSocket
-from tests.stores.coral._faults import SimulatedCrash, crash_around
+from tests.stores.coral._faults import SimulatedCrash, crash_around, crash_around_async
 from tests.tools.test_extensions import installed_tool_providers
 
 WORKSPACE = DEFAULT_WORKSPACE_ID
 STEP_AGENT_NAME = "coral-test-step"
 NATIVE_AGENT_NAME = "coral-test-native"
 SLOT = "review/item-0/m0"
+# Each slot holds one session per generation, so a second step session needs its own slot.
+OTHER_SLOT = "review/item-1/m0"
 
 
 @dataclass
@@ -395,13 +400,13 @@ class _Coral:
             "role": "anchor",
         }
 
-    def step_payload(self, seq: int = 2, **fields: object) -> dict[str, Any]:
+    def step_payload(self, seq: int = 2, subject: str = SLOT, **fields: object) -> dict[str, Any]:
         return {
             "effect_type": CREATE_SESSION,
-            "effect_key": self.key(seq, SLOT),
+            "effect_key": self.key(seq, subject),
             "role": "step",
             "agent_id": self.step_agent,
-            "engine_slot_id": SLOT,
+            "engine_slot_id": subject,
             "slot_role": "step_agent",
             "node_id": "review",
             **fields,
@@ -731,14 +736,14 @@ async def test_squatted_title_is_a_title_conflict_and_nothing_launches(
     )
     _completed(await unlaunched.deliver(unlaunched.step_payload()))
     # Only the exact title, with that id part, can still be taken first.
-    later = unlaunched.step_id(seq=3)
+    later = unlaunched.step_id(seq=3, subject=OTHER_SLOT)
     store.create_conversation(
         kind="sub_agent",
-        title=f"{SLOT} · {later[:TITLE_ID_SUFFIX_CHARS]}",
+        title=f"{OTHER_SLOT} · {later[:TITLE_ID_SUFFIX_CHARS]}",
         parent_conversation_id=unlaunched.anchor_id,
     )
 
-    failure = _failed(await unlaunched.deliver(unlaunched.step_payload(seq=3)))
+    failure = _failed(await unlaunched.deliver(unlaunched.step_payload(seq=3, subject=OTHER_SLOT)))
 
     assert (failure.error_code, failure.retryable) == ("session.title_conflict", False)
     assert unlaunched.conversation(later) is None
@@ -761,8 +766,8 @@ async def test_native_harness_step_is_refused_before_anything_is_created(
 
 @pytest.mark.parametrize(
     "capabilities",
-    [None, ["coral_runner:2", "os_sandbox:none"], ["CORAL_RUNNER:1"]],
-    ids=["none", "another-version", "other-case"],
+    [None, ["coral_runner:1", "os_sandbox:none"], ["coral_runner:3"], ["CORAL_RUNNER:2"]],
+    ids=["none", "before-engine-tools", "another-version", "other-case"],
 )
 async def test_a_host_without_the_coral_runner_token_is_refused(
     unlaunched: _Coral, launcher: _RecordingLauncher, app: FastAPI, capabilities: list[str] | None
@@ -978,7 +983,10 @@ async def test_orchestrator_slot_needs_an_orchestrator_bundle(
     assert launcher.calls == []
 
     for seq, (stance, slot_role) in enumerate(accepted, start=10):
-        payload = unlaunched.step_payload(seq, agent_id=agents[stance], slot_role=slot_role)
+        # One session per slot and generation: each accepted role gets its own slot.
+        payload = unlaunched.step_payload(
+            seq, f"{SLOT}/{slot_role}", agent_id=agents[stance], slot_role=slot_role
+        )
         _completed(await unlaunched.deliver(payload))
     assert [
         (call["conv"].agent_id, call["conv"].labels["coral.role"]) for call in launcher.calls
@@ -1069,6 +1077,23 @@ async def test_a_redelivery_that_rebinds_the_session_is_a_binding_conflict(
     assert (failure.error_code, failure.retryable) == ("session.binding_conflict", False)
     assert "slot_role" in failure.message
     assert host.launches_for(coral.step_id()) == 0
+
+
+async def test_a_second_session_for_one_slot_and_generation_is_a_binding_conflict(
+    coral: _Coral, host: _Host, runner: _Runner
+) -> None:
+    await coral.anchor()
+    _completed(await coral.deliver(coral.step_payload()))
+
+    # Another effect for the same slot and generation would bind a second session to it.
+    failure = _failed(await coral.deliver(coral.step_payload(seq=3)))
+
+    assert (failure.error_code, failure.retryable) == ("session.binding_conflict", False)
+    assert f"slot {SLOT} generation 1" in failure.message
+    assert "already bound to another session of this run" in failure.message
+    assert coral.step_id() not in failure.message
+    assert coral.progress(coral.step_id(seq=3)) is None
+    assert host.launches_for(coral.step_id(seq=3)) == 0
 
 
 async def test_a_step_before_its_anchor_is_retryable(
@@ -1244,17 +1269,6 @@ async def test_launch_failures_are_typed_and_resume_from_the_written_row(
     assert coral.children() == [coral.step_id()]
 
 
-def _crash_after_async(patched: pytest.MonkeyPatch, owner: object, attr: str) -> None:
-    """Make the coroutine ``owner.attr`` finish its real work, then die."""
-    real = getattr(owner, attr)
-
-    async def crashing(*args: Any, **kwargs: Any) -> Any:
-        await real(*args, **kwargs)
-        raise SimulatedCrash(f"crash after {attr}")
-
-    patched.setattr(owner, attr, crashing)
-
-
 def _crash_after_progress(
     patched: pytest.MonkeyPatch, coral: _Coral, progress: SessionBindingProgress
 ) -> None:
@@ -1278,9 +1292,11 @@ def _install_crash(phase: str, patched: pytest.MonkeyPatch, coral: _Coral) -> No
     elif phase == "announce":
         crash_around(patched, facade_module, "_announce_session_added", when="after")
     elif phase == "launch":
-        _crash_after_async(patched, facade_module, "ensure_runner_connected")
+        crash_around_async(patched, facade_module, "ensure_runner_connected", when="after")
     elif phase == "init":
-        _crash_after_async(patched, facade_module, "_ensure_runner_session_initialized")
+        crash_around_async(
+            patched, facade_module, "_ensure_runner_session_initialized", when="after"
+        )
     else:
         _crash_after_progress(patched, coral, SessionBindingProgress.INITIALIZED)
 
@@ -1474,7 +1490,7 @@ async def test_a_crash_inside_the_torn_row_repair_recreates_the_row_once(
 
     # The repair deletes the torn row, then dies before writing it again.
     with monkeypatch.context() as crash:
-        _crash_after_async(crash, store, "delete_conversation")
+        crash_around_async(crash, store, "delete_conversation", when="after")
         with pytest.raises(SimulatedCrash):
             await coral.deliver(coral.step_payload())
     assert coral.conversation(step_id) is None
@@ -1837,9 +1853,11 @@ async def test_with_auth_on_the_owner_holds_the_grants_and_omnigent_checks_them_
 
     # Without the anchor's grant, that check refuses the launch of the next step.
     permission.revoke(OWNER, coral.anchor_id)
-    refused = _failed(await coral.deliver(coral.step_payload(seq=3)))
+    refused = _failed(await coral.deliver(coral.step_payload(seq=3, subject=OTHER_SLOT)))
     assert (refused.error_code, refused.retryable) == ("session.host_not_permitted", False)
-    assert coral.progress(coral.step_id(seq=3)) == SessionBindingProgress.ROW_CREATED
+    assert coral.progress(coral.step_id(seq=3, subject=OTHER_SLOT)) == (
+        SessionBindingProgress.ROW_CREATED
+    )
     assert len(owned_host.launch_frames) == 1
 
     # A connection held by another registration of the owner is refused before any write.
@@ -1885,10 +1903,174 @@ async def test_a_bundle_the_owner_materialized_runs_as_a_step(
     assert coral.progress(step) == SessionBindingProgress.INITIALIZED
 
 
-async def test_with_auth_on_a_run_without_an_owner_is_refused(
-    app: FastAPI, stores: _Stores, db_uri: str
+@pytest.mark.usefixtures("coral_policy_registry")
+async def test_stance_creates_run_the_owners_bundles_and_enable_no_routing(
+    app: FastAPI,
+    stores: _Stores,
+    db_uri: str,
+    owned_host: _OwnedHost,
+    runner: _Runner,
 ) -> None:
-    coral = _Coral(app, stores, db_uri, auth_on=True)
+    """A step or orchestrator create sets no cost control, subagent routing or auto harness."""
+    coral = _Coral(app, stores, db_uri, owner=OWNER, generation=OWNER_GENERATION, auth_on=True)
+    coral.executor = create_session_executor(
+        coral.facade,
+        coral.run_store,
+        DriftPauser(coral.run_store),
+        OmnigentRunScopeRunner(),
+        agents=OmnigentStepAgents(stores.agent, stores.artifact),
+    )
+    await coral.anchor()
+    step = {
+        "effect_type": CREATE_SESSION,
+        "effect_key": coral.key(2, SLOT),
+        "role": "step",
+        "stance": "reviewer",
+        "workflow_slug": "demo-flow",
+        "node_id": "review",
+        "roster_index": 0,
+        "engine_slot_id": SLOT,
+        "slot_role": "verifier",
+        "generation": 1,
+    }
+    orchestrator = {
+        "effect_type": CREATE_SESSION,
+        "effect_key": f"{coral.run.id}:orchestrator:1:create_session",
+        "role": "step",
+        "stance": "orchestrator",
+        "engine_slot_id": "orchestrator",
+        "slot_role": "orchestrator",
+        "generation": 1,
+        "title": "Review the parser · orchestrator",
+    }
+
+    created = [
+        _completed(await coral.deliver(payload))["session_id"] for payload in (step, orchestrator)
+    ]
+
+    names = []
+    for session_id in created:
+        conv = coral.conversation(session_id)
+        assert conv is not None and conv.agent_id is not None
+        assert (
+            conv.cost_control_mode_override,
+            conv.subagent_routing_override,
+            conv.harness_override,
+        ) == (None, None, None)
+        agent = stores.agent.get(conv.agent_id)
+        assert agent is not None and (agent.kind, agent.created_by) == ("user", OWNER)
+        names.append(agent.name)
+    assert names == ["coral__demo-flow__review__m0", "coral__orchestrator"]
+    assert [frame.session_id for frame in owned_host.launch_frames] == created
+
+
+def _stance_create(coral: _Coral) -> dict[str, Any]:
+    """The implementer's create as the bridge maps it: a stance, no agent id."""
+    return {
+        "effect_type": CREATE_SESSION,
+        "effect_key": coral.key(2, "implement||:0"),
+        "role": "step",
+        "stance": "implementer",
+        "workflow_slug": "demo-flow",
+        "node_id": "implement",
+        "roster_index": 0,
+        "engine_slot_id": "implement||:0",
+        "slot_role": "step_agent",
+        "generation": 1,
+    }
+
+
+def _stance_executor(coral: _Coral) -> None:
+    stores = coral.stores
+    coral.executor = create_session_executor(
+        coral.facade,
+        coral.run_store,
+        DriftPauser(coral.run_store),
+        OmnigentRunScopeRunner(),
+        agents=OmnigentStepAgents(
+            stores.agent, stores.artifact, conversation_store=stores.conversation
+        ),
+    )
+
+
+@pytest.mark.usefixtures("coral_policy_registry", "host")
+@pytest.mark.parametrize("auth_on", [False, True], ids=["no_auth_provider", "auth_provider"])
+async def test_an_ownerless_runs_stance_create_works_on_a_single_user_server(
+    app: FastAPI,
+    stores: _Stores,
+    db_uri: str,
+    launcher: _RecordingLauncher,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_on: bool,
+) -> None:
+    """
+    Omnigent reads no user as the local user there; the agent is stored and matched so.
+
+    A served single-user server has an auth provider too, which changes nothing here.
+    """
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    unlaunched = _Coral(app, stores, db_uri, launcher=launcher, auth_on=auth_on)
+    _stance_executor(unlaunched)
+    await unlaunched.anchor()
+
+    session_id = _completed(await unlaunched.deliver(_stance_create(unlaunched)))["session_id"]
+
+    conv = unlaunched.conversation(session_id)
+    assert conv is not None and conv.agent_id is not None
+    agent = unlaunched.stores.agent.get(conv.agent_id)
+    assert agent is not None and (agent.kind, agent.created_by) == ("user", "local")
+
+
+class _FailsFirstLaunch(_RecordingLauncher):
+    """A launcher whose first launch fails retryably, after the step's row was written."""
+
+    async def launch(self, conv: Conversation, *, user_id: str | None) -> None:
+        await super().launch(conv, user_id=user_id)
+        if len(self.calls) == 1:
+            raise CoralSessionError("session.host_offline", "offline", retryable=True)
+
+
+@pytest.mark.usefixtures("coral_policy_registry", "host")
+async def test_a_create_retried_after_a_bundle_change_keeps_the_agent_it_wrote(
+    app: FastAPI, stores: _Stores, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upgrade between a create's tries changes the bundle; the retry adopts its session."""
+    coral = _Coral(app, stores, db_uri, launcher=_FailsFirstLaunch())
+    _stance_executor(coral)
+    await coral.anchor()
+    payload = _stance_create(coral)
+    failure = _failed(await coral.deliver(payload))
+    assert (failure.error_code, failure.retryable) == ("session.host_offline", True)
+    session_id = coral.step_id(2, "implement||:0")
+    written = coral.conversation(session_id)
+    assert written is not None and written.agent_id is not None
+
+    # The next release builds another bundle for the same step; a new process resolves it.
+    build = step_agents_module.build_step_bundle_yaml
+    monkeypatch.setattr(
+        step_agents_module,
+        "build_step_bundle_yaml",
+        lambda *args, **kwargs: build(*args, **kwargs) + b"description: the next seed\n",
+    )
+    _stance_executor(coral)
+    result = _completed(await coral.deliver(payload))
+
+    assert result["session_id"] == session_id
+    adopted = coral.conversation(session_id)
+    assert adopted is not None and adopted.agent_id == written.agent_id
+    assert coral.progress(session_id) == SessionBindingProgress.INITIALIZED
+
+
+@pytest.mark.parametrize("auth_on", [False, True], ids=["no_auth_provider", "auth_provider"])
+async def test_outside_a_single_user_server_a_run_without_an_owner_is_refused(
+    app: FastAPI,
+    stores: _Stores,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_on: bool,
+) -> None:
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    coral = _Coral(app, stores, db_uri, auth_on=auth_on)
 
     failure = _failed(await coral.deliver(coral.anchor_payload()))
 

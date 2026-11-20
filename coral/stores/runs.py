@@ -4,20 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
+import re
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
 
-from sqlalchemy import Engine, asc, desc, select, update
-from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import ColumnElement, Engine, asc, desc, select, text, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
+from coral.alerts.types import LOCAL_USER_ID, is_owner, normalize_owner
 from coral.db import (
     DEFAULT_WORKSPACE_ID,
     ActivationRow,
@@ -29,6 +28,7 @@ from coral.db import (
     RunLogRow,
     RunRow,
     RunSpecRow,
+    ToolReplyRow,
     WorkRow,
     coral_engine,
     current_workspace_id,
@@ -37,9 +37,14 @@ from coral.db import (
     run_write_transaction,
     shared_read_scope,
 )
-from coral.db.enum_codecs import GateVisitStatus, RunStatus, WorkStatus
+from coral.db.enum_codecs import GateVisitStatus, LogKind, RunStatus, WorkStatus
 from coral.model.ids import derived_id
+from coral.omni.protocols import Viewer
+from coral.stores.alerts import apply_alert_changes, check_alert_raises, generation_clause
 from coral.stores.protocols import (
+    MAX_OWNED_RUNS_LIMIT,
+    STORED_TEXT_ERRORS,
+    UNFINISHED_RUN_STATUSES,
     ActivationState,
     AgentSlotState,
     CommitOutcome,
@@ -47,6 +52,7 @@ from coral.stores.protocols import (
     GateVisitState,
     HandoffItemState,
     HandoffState,
+    InvalidRunCursor,
     JoinArrivalState,
     RunLogEntry,
     RunNotFound,
@@ -57,7 +63,9 @@ from coral.stores.protocols import (
     StartKeyConflict,
     Transition,
     TransitionTooLarge,
+    require_checksum32,
 )
+from coral.stores.work_rows import insert_pending_if_absent, repended_values
 
 _logger = logging.getLogger(__name__)
 
@@ -89,6 +97,7 @@ def _compute_spec_digest(spec: RunStartSpec) -> bytes:
         str(spec.state_version),
         str(spec.log_version),
         spec.orchestrator_session_id or "",
+        spec.engine_config or "",
     )
     return hashlib.sha256("\0".join(fields).encode()).digest()
 
@@ -120,6 +129,7 @@ def _compute_stored_spec_digest(run: RunRow, spec: RunSpecRow) -> bytes:
         str(run.state_version),
         str(run.log_version),
         run.orchestrator_session_id or "",
+        spec.engine_config or "",
     )
     return hashlib.sha256("\0".join(fields).encode()).digest()
 
@@ -286,6 +296,13 @@ def _to_gate_visit_state(row: GateVisitRow) -> GateVisitState:
 
 
 def _to_run_log_entry(row: RunLogRow) -> RunLogEntry:
+    return _log_entry(row, body=row.body, view_patch=row.view_patch)
+
+
+def _log_entry(
+    row: RunLogRow, *, body: str, view_patch: str | None, unreadable: bool = False
+) -> RunLogEntry:
+    """The row's entry with its text given apart, so a row whose text failed can still show."""
     return RunLogEntry(
         workspace_id=row.workspace_id,
         run_id=row.run_id,
@@ -294,7 +311,7 @@ def _to_run_log_entry(row: RunLogRow) -> RunLogEntry:
         log_version=row.log_version,
         kind=row.kind,
         actor_kind=row.actor_kind,
-        body=row.body,
+        body=body,
         created_at_us=row.created_at_us,
         audit_only=row.audit_only,
         actor_ref=row.actor_ref,
@@ -303,9 +320,63 @@ def _to_run_log_entry(row: RunLogRow) -> RunLogEntry:
         scope_key=row.scope_key,
         idempotency_cksum=row.idempotency_cksum,
         body_ref=row.body_ref,
-        view_patch=row.view_patch,
+        view_patch=view_patch,
         view_patch_ref=row.view_patch_ref,
+        unreadable=unreadable,
     )
+
+
+def _log_text(
+    session: Session, workspace_id: int, run_id: str, seq: int
+) -> tuple[str, str | None] | None:
+    """One log row's ``body`` and ``view_patch``, each read alone; ``None`` when either fails."""
+    key = (
+        RunLogRow.workspace_id == workspace_id,
+        RunLogRow.run_id == run_id,
+        RunLogRow.seq == seq,
+    )
+    try:
+        body = session.execute(select(RunLogRow.body).where(*key)).scalar_one()
+        view_patch = session.execute(select(RunLogRow.view_patch).where(*key)).scalar_one()
+    except STORED_TEXT_ERRORS:
+        return None
+    return body, view_patch
+
+
+_MAX_BIGINT = 2**63 - 1
+# A run id as a position: at most the 32 lowercase hex characters every run id has.
+_RUN_ID_POSITION = re.compile(r"[0-9a-f]{0,32}")
+
+
+def check_owned_runs_page(after: tuple[int, str] | None, limit: int) -> None:
+    """Refuse a page no stored run key can bound, before anything is read.
+
+    :raises InvalidRunCursor: ``after`` holds a time outside 0-2**63-1 or an id that is
+        not at most 32 lowercase hex characters.
+    :raises ValueError: ``limit`` is not 1-:data:`MAX_OWNED_RUNS_LIMIT`.
+    """
+    if not 1 <= limit <= MAX_OWNED_RUNS_LIMIT:
+        raise ValueError(f"limit must be 1-{MAX_OWNED_RUNS_LIMIT}, not {limit}")
+    if after is None:
+        return
+    created_at, run_id = after
+    if type(created_at) is not int or not 0 <= created_at <= _MAX_BIGINT:
+        raise InvalidRunCursor("the cursor's time is not a stored run time")
+    if not isinstance(run_id, str) or _RUN_ID_POSITION.fullmatch(run_id) is None:
+        raise InvalidRunCursor("the cursor's run id is not a run id")
+
+
+def _stored_owner_clauses(viewer: Viewer) -> tuple[ColumnElement[bool], ...]:
+    """The owner values a viewer's runs are stored under, one index range each."""
+    owner = normalize_owner(viewer.user_id)
+    if owner is None:
+        # The single local user's runs store no owner, or its reserved id.
+        return (RunRow.user_id.is_(None), RunRow.user_id == LOCAL_USER_ID)
+    return (RunRow.user_id == owner,)
+
+
+def _newest_first_key(run: CoralRun) -> tuple[int, str]:
+    return run.created_at, run.id
 
 
 def _to_run_spec(row: RunSpecRow, run: RunRow) -> RunStartSpec:
@@ -336,7 +407,24 @@ def _to_run_spec(row: RunSpecRow, run: RunRow) -> RunStartSpec:
         state_version=run.state_version,
         log_version=run.log_version,
         orchestrator_session_id=run.orchestrator_session_id,
+        engine_config=row.engine_config,
     )
+
+
+# Dialects whose transactions take SET LOCAL lock and statement timeouts.
+_LOCK_TIMEOUT_DIALECTS = frozenset({"postgresql", "cockroachdb"})
+_MIN_STATEMENT_TIMEOUT_MS = 1000
+
+
+def _bound_lock_waits(session: Session, lock_timeout_s: float) -> None:
+    """Bound this transaction's row-lock waits, and each statement at 1.5 times that (min 1 s)."""
+    # At least 1 ms: 0 would turn both timeouts off.
+    lock_ms = max(1, math.ceil(lock_timeout_s * 1000))
+    # A statement needs real time to run even when lock waits are tiny.
+    statement_ms = max(_MIN_STATEMENT_TIMEOUT_MS, lock_ms * 3 // 2)
+    # SET takes no bind parameters; both values are ints computed here (milliseconds).
+    session.execute(text(f"SET LOCAL lock_timeout = {lock_ms}"))
+    session.execute(text(f"SET LOCAL statement_timeout = {statement_ms}"))
 
 
 @dataclass(eq=False)
@@ -497,6 +585,7 @@ class SqlAlchemyCoralRunStore:
             max_activations=spec.max_activations,
             refresh_threshold_bp=spec.refresh_threshold_bp,
             rejected_call_limit=spec.rejected_call_limit,
+            engine_config=spec.engine_config,
             created_at=now_s,
         )
 
@@ -620,20 +709,34 @@ class SqlAlchemyCoralRunStore:
         *,
         workspace_id: int | None = None,
         now: int | None = None,
+        lock_timeout_s: float | None = None,
     ) -> CommitOutcome:
-        """Apply state mutations against run_id at expected_version atomically."""
+        """Apply state mutations against run_id at expected_version atomically.
+
+        :param lock_timeout_s: Bounds the wait for row locks on PostgreSQL and
+            CockroachDB; MySQL keeps its lock wait timeout and SQLite its busy timeout.
+        :raises IntegrityError: when ``transition.tool_reply`` repeats a stored
+            checksum; nothing of the transition is written.
+        """
+        if lock_timeout_s is not None and lock_timeout_s <= 0:
+            raise ValueError("lock_timeout_s must be positive")
         if len(transition.logs) > 64:
             raise TransitionTooLarge(f"Transition contains {len(transition.logs)} logs (limit 64)")
         if len(transition.outbox_work) > 64:
             raise TransitionTooLarge(
                 f"Transition contains {len(transition.outbox_work)} outbox items (limit 64)"
             )
+        check_alert_raises(run_id, transition.alert_raises)
 
         ws = self._resolve_workspace_id(workspace_id)
         now_s = int(time.time()) if now is None else now
         now_us = now_s * 1_000_000
 
+        dialect = self._engine.dialect.name
+
         def write(session: Session) -> CommitOutcome:
+            if lock_timeout_s is not None and dialect in _LOCK_TIMEOUT_DIALECTS:
+                _bound_lock_waits(session, lock_timeout_s)
             row = session.get(RunRow, (ws, run_id), with_for_update=True)
             if row is None:
                 raise RunNotFound(f"Run {run_id!r} not found in workspace {ws}")
@@ -860,43 +963,23 @@ class SqlAlchemyCoralRunStore:
                     )
                 )
 
-            dialect = self._engine.dialect.name
+            apply_alert_changes(
+                session,
+                workspace_id=ws,
+                run_id=run_id,
+                raises=transition.alert_raises,
+                resolutions=transition.alert_resolutions,
+                now=now_s,
+            )
+
             outbox_ids: list[str] = []
             for w in transition.outbox_work:
                 outbox_ids.append(w.id)
-                values: dict[str, Any] = {
-                    "workspace_id": ws,
-                    "id": w.id,
-                    "run_id": run_id,
-                    "kind": w.kind,
-                    "status": int(WorkStatus.PENDING),
-                    "node_id": w.node_id,
-                    "scope_key": w.scope_key,
-                    "slot_generation": w.slot_generation,
-                    "payload": w.payload,
-                    "owner_key": w.owner_key,
-                    "attempts": 0,
-                    "available_at": w.available_at,
-                    "lease_expires_at": None,
-                    "lease_holder": None,
-                    "result": None,
-                    "result_ref": None,
-                    "error_code": None,
-                    "idempotency_cksum": w.idempotency_cksum,
-                    "created_at_us": now_us,
-                    "finished_at": None,
-                }
-                if dialect == "mysql":
-                    stmt = (
-                        mysql_insert(WorkRow)
-                        .values(**values)
-                        .on_duplicate_key_update(workspace_id=WorkRow.workspace_id)
+                session.execute(
+                    insert_pending_if_absent(
+                        dialect, ws, w, run_id=run_id, available_at=w.available_at, now_us=now_us
                     )
-                elif dialect == "sqlite":
-                    stmt = sqlite_insert(WorkRow).values(**values).on_conflict_do_nothing()
-                else:
-                    stmt = pg_insert(WorkRow).values(**values).on_conflict_do_nothing()
-                session.execute(stmt)
+                )
 
             if transition.consumed_work_ids:
                 session.execute(
@@ -911,8 +994,47 @@ class SqlAlchemyCoralRunStore:
                         finished_at=now_s,
                         lease_holder=None,
                         lease_expires_at=None,
+                        held_since=None,
                     )
                 )
+
+            if transition.revive_work_ids:
+                session.execute(
+                    update(WorkRow)
+                    .where(
+                        WorkRow.workspace_id == ws,
+                        WorkRow.run_id == run_id,
+                        WorkRow.id.in_(transition.revive_work_ids),
+                        WorkRow.status == int(WorkStatus.FAILED),
+                    )
+                    .values(**repended_values(now_s))
+                )
+
+            if transition.release_held_codes:
+                session.execute(
+                    update(WorkRow)
+                    .where(
+                        WorkRow.workspace_id == ws,
+                        WorkRow.run_id == run_id,
+                        WorkRow.status == int(WorkStatus.PENDING),
+                        WorkRow.error_code.in_(transition.release_held_codes),
+                    )
+                    .values(available_at=now_s, held_since=None)
+                )
+
+            if transition.tool_reply is not None:
+                # Last, so a repeated checksum fails after every other write and undoes it.
+                session.add(
+                    ToolReplyRow(
+                        workspace_id=ws,
+                        run_id=run_id,
+                        cksum=transition.tool_reply.cksum,
+                        reply=transition.tool_reply.reply,
+                        run_version=new_version,
+                        created_at_us=now_us,
+                    )
+                )
+                session.flush()
 
             return CommitOutcome(
                 run_id=run_id,
@@ -971,6 +1093,76 @@ class SqlAlchemyCoralRunStore:
             rows = session.execute(stmt).scalars().all()
             return [_to_coral_run(r) for r in rows]
 
+    def list_owned_runs(
+        self,
+        *,
+        workspace_id: int,
+        viewer: Viewer,
+        statuses: Sequence[int] = (),
+        workflow_id: str | None = None,
+        after: tuple[int, str] | None = None,
+        limit: int = 25,
+    ) -> tuple[list[CoralRun], tuple[int, str] | None]:
+        """The viewer's runs in the workspace, newest first, one keyset page at a time.
+
+        Each stored owner value is one ``ix_coral_runs_owner`` range read in order.
+        Rows a folding collation adds are dropped by the exact owner check, and the
+        read goes on past them, so the returned cursor is always one of the viewer's
+        runs (``None`` at the end). Nothing is looked up by ``after``.
+
+        :raises InvalidRunCursor: ``after`` is outside any stored run key.
+        :raises ValueError: ``limit`` is not 1-:data:`MAX_OWNED_RUNS_LIMIT`.
+        """
+        check_owned_runs_page(after, limit)
+        wanted = limit + 1
+        statements = []
+        for owner_clause in _stored_owner_clauses(viewer):
+            statement = select(RunRow).where(
+                RunRow.workspace_id == workspace_id,
+                owner_clause,
+                generation_clause(RunRow.account_generation, viewer),
+            )
+            if statuses:
+                statement = statement.where(RunRow.status.in_(sorted(set(statuses))))
+            if workflow_id is not None:
+                statement = statement.where(RunRow.workflow_id == workflow_id)
+            statements.append(statement)
+        dialect = self._engine.dialect.name
+        kept: list[CoralRun] = []
+        position = after
+        with shared_read_scope(), self._session("list_owned_runs") as session:
+            while True:
+                read: list[CoralRun] = []
+                for statement in statements:
+                    if position is not None:
+                        statement = statement.where(
+                            keyset_after(
+                                (RunRow.created_at, RunRow.id),
+                                position,
+                                descending=True,
+                                dialect_name=dialect,
+                            )
+                        )
+                    statement = statement.order_by(desc(RunRow.created_at), desc(RunRow.id)).limit(
+                        wanted
+                    )
+                    read.extend(_to_coral_run(row) for row in session.scalars(statement))
+                # Each range holds its own newest rows, so the merged first rows are exact.
+                batch = sorted(read, key=_newest_first_key, reverse=True)[:wanted]
+                kept.extend(
+                    run
+                    for run in batch
+                    # Exact comparison: MySQL collations can fold case, accents or spaces.
+                    if is_owner(run.user_id, run.account_generation, viewer)
+                    and (workflow_id is None or run.workflow_id == workflow_id)
+                )
+                if len(kept) >= wanted or len(batch) < wanted:
+                    break
+                position = _newest_first_key(batch[-1])
+        page = kept[:limit]
+        cursor = _newest_first_key(page[-1]) if len(kept) > limit else None
+        return page, cursor
+
     def read_log(
         self,
         run_id: str,
@@ -978,25 +1170,63 @@ class SqlAlchemyCoralRunStore:
         after_seq: int = 0,
         limit: int = 100,
         workspace_id: int | None = None,
+        tolerant: bool = False,
     ) -> list[RunLogEntry]:
-        """Read append-only event logs for a run starting after after_seq."""
+        """Read append-only event logs for a run starting after after_seq.
+
+        :param tolerant: When a row's stored text does not decode, re-read the page
+            row by row and return that row as an ``unreadable`` placeholder.
+        """
         ws = self._resolve_workspace_id(workspace_id)
-        with shared_read_scope(), self._session("read_log") as session:
-            rows = (
-                session.execute(
-                    select(RunLogRow)
-                    .where(
-                        RunLogRow.workspace_id == ws,
-                        RunLogRow.run_id == run_id,
-                        RunLogRow.seq > after_seq,
+        try:
+            with shared_read_scope(), self._session("read_log") as session:
+                rows = (
+                    session.execute(
+                        select(RunLogRow)
+                        .where(
+                            RunLogRow.workspace_id == ws,
+                            RunLogRow.run_id == run_id,
+                            RunLogRow.seq > after_seq,
+                        )
+                        .order_by(asc(RunLogRow.seq))
+                        .limit(limit)
                     )
-                    .order_by(asc(RunLogRow.seq))
-                    .limit(limit)
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            return [_to_run_log_entry(r) for r in rows]
+                return [_to_run_log_entry(r) for r in rows]
+        except STORED_TEXT_ERRORS:
+            if not tolerant:
+                raise
+        return self._read_log_isolating_unreadable(ws, run_id, after_seq, limit)
+
+    def _read_log_isolating_unreadable(
+        self, workspace_id: int, run_id: str, after_seq: int, limit: int
+    ) -> list[RunLogEntry]:
+        """The page without its text columns, then each row's text alone."""
+        with shared_read_scope(), self._session("read_log_isolate_unreadable") as session:
+            rows = session.scalars(
+                select(RunLogRow)
+                .options(
+                    defer(RunLogRow.body, raiseload=True),
+                    defer(RunLogRow.view_patch, raiseload=True),
+                )
+                .where(
+                    RunLogRow.workspace_id == workspace_id,
+                    RunLogRow.run_id == run_id,
+                    RunLogRow.seq > after_seq,
+                )
+                .order_by(asc(RunLogRow.seq))
+                .limit(limit)
+            ).all()
+            entries: list[RunLogEntry] = []
+            for row in rows:
+                texts = _log_text(session, workspace_id, run_id, row.seq)
+                if texts is None:
+                    entries.append(_log_entry(row, body="", view_patch=None, unreadable=True))
+                else:
+                    entries.append(_log_entry(row, body=texts[0], view_patch=texts[1]))
+            return entries
 
     def find_receipt(
         self,
@@ -1028,6 +1258,41 @@ class SqlAlchemyCoralRunStore:
                 created_at_us=row.created_at_us,
             )
 
+    def read_engine_log(
+        self,
+        run_id: str,
+        *,
+        workspace_id: int,
+        after_seq: int = 0,
+        max_run_version: int,
+        limit: int = 500,
+    ) -> list[RunLogEntry]:
+        """Return the run's ENGINE rows after ``after_seq`` committed at or below
+        ``max_run_version``, in ``seq`` order; audit-only rows included."""
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        with shared_read_scope(), self._session("read_engine_log") as session:
+            rows = session.scalars(
+                select(RunLogRow)
+                .where(
+                    RunLogRow.workspace_id == workspace_id,
+                    RunLogRow.run_id == run_id,
+                    RunLogRow.kind == int(LogKind.ENGINE),
+                    RunLogRow.seq > after_seq,
+                    RunLogRow.run_version <= max_run_version,
+                )
+                .order_by(asc(RunLogRow.seq))
+                .limit(limit)
+            ).all()
+            return [_to_run_log_entry(r) for r in rows]
+
+    def find_tool_reply(self, run_id: str, cksum: bytes, *, workspace_id: int) -> str | None:
+        """Return the reply a transition stored under ``cksum``, else ``None``."""
+        require_checksum32(cksum)
+        with shared_read_scope(), self._session("find_tool_reply") as session:
+            row = session.get(ToolReplyRow, (workspace_id, run_id, cksum))
+            return None if row is None else row.reply
+
     def list_active_runs_all_workspaces(
         self,
         *,
@@ -1036,13 +1301,8 @@ class SqlAlchemyCoralRunStore:
     ) -> list[CoralRun]:
         """List runs across all workspaces in non-terminal states."""
         dialect = self._engine.dialect.name
-        active_statuses = (
-            int(RunStatus.STARTING),
-            int(RunStatus.RUNNING),
-            int(RunStatus.PAUSED),
-        )
         with shared_read_scope(), self._session("list_active_runs_all_workspaces") as session:
-            stmt = select(RunRow).where(RunRow.status.in_(active_statuses))
+            stmt = select(RunRow).where(RunRow.status.in_(UNFINISHED_RUN_STATUSES))
             if cursor is not None:
                 stmt = stmt.where(
                     keyset_after(
@@ -1080,6 +1340,21 @@ class SqlAlchemyCoralRunStore:
                 asc(GateVisitRow.run_id),
                 asc(GateVisitRow.id),
             ).limit(limit)
+            rows = session.execute(stmt).scalars().all()
+            return [_to_gate_visit_state(r) for r in rows]
+
+    def list_open_gates(self, run_id: str, *, workspace_id: int) -> list[GateVisitState]:
+        """The run's open gate rows, by id, read through ``ix_coral_gate_visits_open``."""
+        with shared_read_scope(), self._session("list_open_gates") as session:
+            stmt = (
+                select(GateVisitRow)
+                .where(
+                    GateVisitRow.status == int(GateVisitStatus.OPEN),
+                    GateVisitRow.workspace_id == workspace_id,
+                    GateVisitRow.run_id == run_id,
+                )
+                .order_by(asc(GateVisitRow.id))
+            )
             rows = session.execute(stmt).scalars().all()
             return [_to_gate_visit_state(r) for r in rows]
 

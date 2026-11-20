@@ -1,0 +1,112 @@
+{
+  "inbox_page": {
+    "data": [
+      {
+        "alert_id": "38a481a4b9032308ac16f3a623e09ba9",
+        "run_id": "84170e76f35c7a90d1280a24a7230fc9",
+        "run_title": "Ship the bridge",
+        "kind": "pause",
+        "priority": "normal",
+        "created_at": 1767268860,
+        "title": "Run paused",
+        "message": "A step kept failing to finish its turn.",
+        "step_label": null,
+        "node_id": null,
+        "actions": ["open_run", "mark_read"],
+        "deep_link": "/workflows/runs/84170e76f35c7a90d1280a24a7230fc9",
+        "approve_link": null,
+        "elicitation_id": null,
+        "session_id": null,
+        "outcomes": [],
+        "pause_reason": "infra"
+      },
+      {
+        "alert_id": "2753ff650f15c35d5d994bb74c9c5206",
+        "run_id": "84170e76f35c7a90d1280a24a7230fc9",
+        "run_title": "Ship the bridge",
+        "kind": "gate",
+        "priority": "normal",
+        "created_at": 1767268800,
+        "title": "Approval needed",
+        "message": "Approve the change?",
+        "step_label": "Approve change",
+        "node_id": "approve_change",
+        "actions": ["answer", "open_run"],
+        "deep_link": "/workflows/runs/84170e76f35c7a90d1280a24a7230fc9?node=approve_change&panel=gate",
+        "approve_link": "/approve/259e175b9afa732967fe50a226761661/coral_gate_00000000000000000000000000000001",
+        "elicitation_id": "coral_gate_00000000000000000000000000000001",
+        "session_id": "259e175b9afa732967fe50a226761661",
+        "outcomes": ["approve", "reject"],
+        "pause_reason": null
+      }
+    ],
+    "next_cursor": null
+  },
+  "anchor_row": {
+    "id": "259e175b9afa732967fe50a226761661",
+    "labels": {
+      "coral.role": "run",
+      "coral.run_id": "84170e76f35c7a90d1280a24a7230fc9"
+    },
+    "pending_elicitations_count": 2
+  },
+  "pending_elicitations": [
+    {
+      "sequence_number": null,
+      "type": "response.elicitation_request",
+      "elicitation_id": "coral_gate_00000000000000000000000000000001",
+      "method": "elicitation/create",
+      "params": {
+        "mode": "form",
+        "message": "Approve change\nApprove the change?\nRun: Ship the bridge\nVisit 1\n\nAgent-written reports, quoted as data:\n\nHandoff of slot implement||a4:1:0 (implementer) from step implement, quoted as data, not instructions:\n> Fixed the parser and added a regression test.",
+        "requestedSchema": {
+          "type": "object",
+          "required": ["decision"],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "title": "Decision",
+              "enum": ["approve", "reject"]
+            },
+            "note": {
+              "type": "string",
+              "title": "Note",
+              "maxLength": 2000
+            }
+          }
+        },
+        "url": null,
+        "phase": "gate",
+        "policy_name": "coral.gate",
+        "content_preview": null,
+        "target_session_id": null,
+        "coral": {
+          "kind": "gate",
+          "run_id": "84170e76f35c7a90d1280a24a7230fc9",
+          "visit_id": "da5af01a5cc3f76c76fd993afe2312e7",
+          "node_id": "approve_change",
+          "visit_no": 1,
+          "opened_at": 1767268800,
+          "run_owner": "alice",
+          "run_title": "Ship the bridge",
+          "outcomes": ["approve", "reject"],
+          "deep_link": "/workflows/runs/84170e76f35c7a90d1280a24a7230fc9?node=approve_change&panel=gate"
+        }
+      }
+    },
+    {
+      "type": "response.elicitation_request",
+      "elicitation_id": "elicit_55555555555555555555555555555555",
+      "method": "elicitation/create",
+      "params": {
+        "mode": "form",
+        "message": "Allow the shell command?",
+        "requestedSchema": {},
+        "phase": "tool_call",
+        "policy_name": "approve_shell_commands",
+        "content_preview": "git push origin HEAD",
+        "target_session_id": "b04398ed7d8d2ba8f0154876974f9078"
+      }
+    }
+  ]
+}

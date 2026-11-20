@@ -118,8 +118,9 @@ sample also carries `compat_smoke`, so the compat PR gate selects it with
 `-m compat_smoke`.
 
 The version is a heuristic. 0.22.0 is the first version line that carries
-Coral. An upstream 0.22.0 tag without Coral would not skip. The real guard is a
-runner that advertises the `coral_runner:1` token, which no runner sends yet.
+Coral. An upstream 0.22.0 tag without Coral would not skip. The real guard is
+the `coral_runner:2` token, which a host with Coral installed advertises in its
+hello; the Tier B gate does not check it yet.
 
 ## What Tier B cannot prove yet
 
@@ -134,8 +135,8 @@ runner that advertises the `coral_runner:1` token, which no runner sends yet.
   `mcp__omnigent__*` tools are gated on the server and are not affected.
 - The timeout on in-process `mcp__omnigent__*` tool calls. The probe measured
   only stdio connector tools.
-- The missing-token case and the assertion that an unpinned runner advertises
-  `coral_runner:1`. Both wait until runners send that token.
+- The missing-token case and the assertion that an unpinned host advertises
+  `coral_runner:2`. Neither is written yet.
 
 ## Add a Tier B test
 

@@ -9,9 +9,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import Callable
-from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -22,15 +20,42 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from coral.bridge.bound_sessions import BoundSessions
+from coral.bridge.codec import decode_entries
+from coral.bridge.executors import (
+    DECISION_THREAD_NAME,
+    BoundedThreads,
+    BridgeThreads,
+    bridge_hold_policy,
+)
+from coral.bridge.keys import effect_work_id
+from coral.bridge.mapping import RUN_RESYNC, TIMER, TURN_FACT
+from coral.bridge.port import StoreDecisionPort
+from coral.bridge.service import EngineBridge
 from coral.db import WorkRow
-from coral.db.enum_codecs import RunPauseReason, RunStatus, SessionBindingProgress, WorkStatus
+from coral.db.enum_codecs import (
+    AlertKind,
+    AlertStatus,
+    RunPauseReason,
+    RunStatus,
+    SessionBindingProgress,
+    WorkStatus,
+)
+from coral.db.migrate import ensure_coral_schema
+from coral.gates import sweep as sweep_module
+from coral.gates.ids import GATE_ELICITATION_PREFIX, GATE_PUBLISH, GATE_WITHDRAW
+from coral.gates.republish import GateRepublisher
+from coral.gates.sweep import GatePromptSweeper
 from coral.model.ids import anchor_session_id
 from coral.omni.policies.state import RunStatusCache
-from coral.omni.protocols import CoralSessionError
+from coral.omni.protocols import CoralSessionError, SendReceipt, SessionCreateRequest, SessionRef
 from coral.omni.server import OmnigentRunScopeRunner, coral_lifespan
+from coral.omni.server import plugin as plugin_module
 from coral.omni.server.dispatch import OmnigentSessionDispatch
+from coral.omni.server.gates import GateAnswering, OmnigentGatePublisher
 from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
-from coral.omni.server.sessions import RUN_ID_LABEL_KEY
+from coral.omni.server.sessions import RUN_ID_LABEL_KEY, OmnigentSessionFacade
+from coral.omni.server.turn_facts import BoundSessionRefresher, TurnFactRecorder
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue import executors as queue_executors
 from coral.queue.executors import (
@@ -43,40 +68,64 @@ from coral.queue.executors import (
 )
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.slots.executors import CANCEL_SESSIONS, CLOSE_SLOT, CREATE_SESSION, SEND_INPUT
+from coral.stores.alerts import SqlAlchemyAlertStore
 from coral.stores.protocols import RunStartSpec, Transition, WorkItemDraft
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import SessionBindingDraft, SqlAlchemySessionBindingStore
 from coral.tools import catalog as tool_catalog
 from coral.tools.catalog import ENGINE_TOOLS, SUBMIT_HANDOFF
+from coral.tools.replies import not_run_member
+from coral.tools.schemas import ToolReply
 from coral.workers.supervisor import WorkerSupervisor
 from coral.workspace.executors import WORKSPACE_COMMIT, WORKSPACE_RESET, WORKSPACE_SALVAGE
 from omnigent.db.account_authority import account_generation, current_account_user
-from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, current_workspace_id
+from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, current_workspace_id, workspace_scope
 from omnigent.db.utils import _run_migrations as run_omni_migrations
 from omnigent.db.utils import create_db_engine, get_or_create_engine
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.policies.types import EvaluationContext, PolicyResult
-from omnigent.runtime.agent_cache import AgentCache
+from omnigent.runtime import pending_elicitations
 from omnigent.runtime.policies.builder import build_policy_engine
 from omnigent.runtime.policies.required_providers import required_policies_apply
-from omnigent.server import mutation_guards, session_live_state
-from omnigent.server.app import create_app
+from omnigent.server import accounts_store, elicitation_hooks, mutation_guards, session_live_state
 from omnigent.server.host_registry import _expected_host_owner
-from omnigent.server.mutation_guards import SESSION_UPDATE, MutationAttempt, check_mutation
+from omnigent.server.mutation_guards import (
+    SESSION_EVENT,
+    SESSION_UPDATE,
+    MutationAttempt,
+    check_mutation,
+)
 from omnigent.server.routes._sessions import helpers as session_helpers
 from omnigent.server.server_plugins import ServerServices
-from omnigent.server.server_tools import ServerToolCall, ServerToolResult, server_tool
+from omnigent.server.server_tools import ServerToolCall, server_tool
 from omnigent.spec import AgentSpec
 from omnigent.spec.types import Phase, PolicyAction
-from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
-from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
-from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
-from omnigent.stores.host_store import HostStore
-from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
+from tests.coral.bridge._gates import APPROVE_TOKEN
+from tests.coral.bridge._world import (
+    USER,
+    BindingFacade,
+    World,
+    activation_in,
+    run_spec,
+    start,
+    start_without_engine,
+)
+from tests.coral.omni._gate_server import (
+    CoralServer,
+    coral_server,
+    gate_answers,
+    gate_run,
+    pending_here,
+    pending_prompts,
+    prompt_shown,
+    resolve_gate,
+    run_status,
+)
+from tests.coral.slots._close_fakes import FakeDispatch
 from tests.coral.workspace._executor_fakes import (
     FakeHostChannel,
     add_slot,
@@ -95,10 +144,13 @@ ENGINE_EFFECT_TYPES = frozenset(
         WORKSPACE_COMMIT,
         WORKSPACE_SALVAGE,
         WORKSPACE_RESET,
+        TURN_FACT,
     }
 )
-# The status-edge observer and the confirmed-stop record's observer.
-ENGINE_OBSERVERS = frozenset({"coral", "coral.confirmed_stops"})
+# The bridge's own executors and gate delivery: they need only the Coral stores.
+BRIDGE_EFFECT_TYPES = frozenset({TIMER, RUN_RESYNC, GATE_PUBLISH, GATE_WITHDRAW})
+# The status-edge observer, the confirmed-stop record's observer and the turn-fact recorder.
+ENGINE_OBSERVERS = frozenset({"coral", "coral.confirmed_stops", "coral.turn_facts"})
 NOTHING: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
 ENGINE_TOOL_NAMES = frozenset(decl.name for decl in ENGINE_TOOLS)
 
@@ -107,6 +159,11 @@ def _engine_registrations() -> tuple[frozenset[str], frozenset[str]]:
     """The session engine's effect executors and status-edge observers registered now."""
     observers = frozenset(session_live_state._status_edge_observers) & ENGINE_OBSERVERS
     return registered_executor_kinds() & ENGINE_EFFECT_TYPES, observers
+
+
+def _bridge_registrations() -> frozenset[str]:
+    """The bridge's executors registered now."""
+    return registered_executor_kinds() & BRIDGE_EFFECT_TYPES
 
 
 def _engine_tools() -> frozenset[str]:
@@ -124,55 +181,25 @@ def _coral_mutation_guard() -> object | None:
     return dict(mutation_guards._registered()).get(MUTATION_GUARD)
 
 
-@dataclass
-class _Server:
-    """A real app with the stores the session engine needs, and its plugin services."""
-
-    app: FastAPI
-    services: ServerServices
-    db_uri: str
+def _registration_carriers() -> int:
+    """How many S106 carriers a password change would call now."""
+    return len(accounts_store._registration_carriers)
 
 
 @pytest.fixture
-def server(db_uri: str, tmp_path: Path) -> _Server:
-    artifact = LocalArtifactStore(str(tmp_path / "artifacts"))
-    conversation = SqlAlchemyConversationStore(db_uri)
-    agent = SqlAlchemyAgentStore(db_uri)
-    agent_cache = AgentCache(artifact_store=artifact, cache_dir=tmp_path / "cache")
-    host = HostStore(db_uri)
-    project = SqlAlchemyProjectStore(db_uri)
-    file = SqlAlchemyFileStore(db_uri)
-    app = create_app(
-        agent_store=agent,
-        file_store=file,
-        conversation_store=conversation,
-        artifact_store=artifact,
-        agent_cache=agent_cache,
-        host_store=host,
-        project_store=project,
-    )
-    services = ServerServices(
-        agent_store=agent,
-        file_store=file,
-        conversation_store=conversation,
-        artifact_store=artifact,
-        agent_cache=agent_cache,
-        comment_store=None,
-        policy_store=None,
-        permission_store=None,
-        scheduled_task_store=None,
-        project_store=project,
-        preference_store=None,
-        host_store=host,
-        account_store=None,
-        auth_provider=None,
-        runner_router=app.state.runner_router,
-        host_registry=app.state.host_registry,
-        tunnel_registry=app.state.tunnel_registry,
-        server_config={},
-        host_sharded=False,
-    )
-    return _Server(app=app, services=services, db_uri=db_uri)
+def no_engine_resync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Keep the supervisor's resync off the test's runs.
+
+    These tests start runs on the store alone, or time an engine start themselves; the
+    resync would start or pause them (a run without a frozen config cannot be loaded).
+    """
+    monkeypatch.setattr(EngineBridge, "schedule_resync", lambda _bridge, _run: None)
+
+
+@pytest.fixture
+def server(db_uri: str, tmp_path: Path) -> CoralServer:
+    return coral_server(db_uri, tmp_path)
 
 
 async def test_omnigent_run_scope_runner_sets_all_three_ambient_scopes() -> None:
@@ -213,6 +240,7 @@ async def test_coral_lifespan_skips_in_memory_or_d1_and_boots_on_operational_db(
     async with coral_lifespan(app, in_mem_services):
         assert not hasattr(app.state, "coral_worker_supervisor")
         assert _engine_registrations() == NOTHING
+        assert _registration_carriers() == 0
 
     # 2. Cloudflare D1 is skipped cleanly
     d1_services = cast(
@@ -225,6 +253,7 @@ async def test_coral_lifespan_skips_in_memory_or_d1_and_boots_on_operational_db(
     async with coral_lifespan(app, d1_services):
         assert not hasattr(app.state, "coral_worker_supervisor")
         assert _engine_registrations() == NOTHING
+        assert _registration_carriers() == 0
 
     # 3. Host-sharded raises RuntimeError
     sharded_services = cast(
@@ -248,6 +277,7 @@ async def test_coral_lifespan_skips_in_memory_or_d1_and_boots_on_operational_db(
     real_services: Any = SimpleNamespace(
         host_sharded=False,
         conversation_store=SimpleNamespace(storage_location=db_uri),
+        auth_provider=None,
     )
     async with coral_lifespan(app, cast(ServerServices, real_services)):
         sup = app.state.coral_worker_supervisor
@@ -256,11 +286,14 @@ async def test_coral_lifespan_skips_in_memory_or_d1_and_boots_on_operational_db(
         assert sup.is_leader
         # Without the server's stores the session engine stays unwired.
         assert _engine_registrations() == NOTHING
+        # A password change carries the owner's Coral rows only while Coral runs.
+        assert _registration_carriers() == 1
     assert not sup.is_leader
+    assert _registration_carriers() == 0
 
 
 async def test_coral_lifespan_registers_and_unregisters_engine_executors(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     at_stop: list[tuple[frozenset[str], frozenset[str]]] = []
     stop = WorkerSupervisor.stop
@@ -279,6 +312,7 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
             state = server.app.state
             assert observers["coral"] == state.coral_status_edges.observe
             assert observers["coral.confirmed_stops"] == state.coral_confirmed_stops.observe
+            assert observers["coral.turn_facts"] == state.coral_turn_fact_recorder.observe
             # Only cancel_sessions runs for a run that already ended (cancel_run ends it).
             registrations = {kind: get_registration(kind) for kind in ENGINE_EFFECT_TYPES}
             assert {
@@ -296,50 +330,152 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
         assert _engine_registrations() == NOTHING
 
 
-async def test_an_overlapping_lifespan_takes_over_and_outlives_the_earlier_exit(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+async def test_a_second_concurrent_lifespan_raises_before_registering_anything(
+    server: CoralServer,
 ) -> None:
-    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
+    kinds = ENGINE_EFFECT_TYPES | BRIDGE_EFFECT_TYPES
     with installed_tool_providers():
-        async with AsyncExitStack() as later:
-            async with coral_lifespan(server.app, server.services):
-                # Entered while the first still runs: it replaces the registrations, no conflict.
-                await later.enter_async_context(coral_lifespan(server.app, server.services))
-                edges = server.app.state.coral_status_edges
-                handler = server_tool(SUBMIT_HANDOFF.name)
-            # The earlier exit removes only its own registrations.
-            assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
-            assert session_live_state._status_edge_observers["coral"] == edges.observe
-            assert _engine_tools() == ENGINE_TOOL_NAMES
+        async with coral_lifespan(server.app, server.services):
+            state = server.app.state
+            first = (
+                state.coral_engine_bridge,
+                state.coral_worker_supervisor,
+                state.coral_run_store,
+            )
+            executors = {kind: get_executor(kind) for kind in kinds}
+            handler = server_tool(SUBMIT_HANDOFF.name)
+
+            with pytest.raises(RuntimeError, match="already running in this process"):
+                async with coral_lifespan(server.app, server.services):
+                    pass
+
+            # The first lifespan keeps every registration and its state.
+            assert {kind: get_executor(kind) for kind in kinds} == executors
+            assert session_live_state._status_edge_observers["coral"] == (
+                state.coral_status_edges.observe
+            )
             assert server_tool(SUBMIT_HANDOFF.name) is handler
             assert _coral_policies_registered()
-    assert _engine_registrations() == NOTHING
-    assert _engine_tools() == frozenset()
-    assert not _coral_policies_registered()
-    assert _coral_mutation_guard() is None
-
-
-@pytest.mark.parametrize("engine", ["wired", "unwired"])
-async def test_the_production_catalog_registers_no_engine_tool(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
-) -> None:
-    assert tool_catalog.CATALOG == ()
-    if engine == "unwired":
-        monkeypatch.delattr(server.app.state, "session_event_dispatch")
-    async with coral_lifespan(server.app, server.services):
-        assert _engine_registrations() == (
-            (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS) if engine == "wired" else NOTHING
-        )
+            assert (
+                state.coral_engine_bridge,
+                state.coral_worker_supervisor,
+                state.coral_run_store,
+            ) == first
+            await poll_until_async(first[1].leader_ready_event.is_set, timeout_s=budget(30))
+        assert _engine_registrations() == NOTHING
+        assert _bridge_registrations() == frozenset()
         assert _engine_tools() == frozenset()
-        assert all(server_tool(f"mcp__omnigent__{name}") is None for name in ENGINE_TOOL_NAMES)
+        assert not _coral_policies_registered()
+        assert _coral_mutation_guard() is None
+
+        # Once the first exits, a lifespan starts again.
+        async with coral_lifespan(server.app, server.services):
+            assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
+            assert server.app.state.coral_engine_bridge is not first[0]
+    assert _engine_registrations() == NOTHING
+
+
+@pytest.mark.parametrize(
+    ("server_config", "workers"),
+    [({}, 4), ({"coral_drain_concurrency": 2}, 2), ({"coral_drain_concurrency": 16}, 16)],
+)
+async def test_the_lifespan_wires_the_bridge_into_the_supervisor_and_unwires_it_on_exit(
+    server: CoralServer,
+    monkeypatch: pytest.MonkeyPatch,
+    server_config: dict[str, Any],
+    workers: int,
+) -> None:
+    built: list[dict[str, Any]] = []
+
+    class RecordingSupervisor(WorkerSupervisor):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            built.append(kwargs)
+            super().__init__(*args, **kwargs)
+
+    at_stop: list[frozenset[str]] = []
+    stop = WorkerSupervisor.stop
+
+    async def recording_stop(supervisor: WorkerSupervisor) -> None:
+        at_stop.append(_bridge_registrations())
+        await stop(supervisor)
+
+    monkeypatch.setattr(plugin_module, "WorkerSupervisor", RecordingSupervisor)
+    monkeypatch.setattr(WorkerSupervisor, "stop", recording_stop)
+
+    services = dataclasses.replace(server.services, server_config=server_config)
+    async with coral_lifespan(server.app, services):
+        bridge = server.app.state.coral_engine_bridge
+        assert isinstance(bridge, EngineBridge)
+        assert bridge.run_store is server.app.state.coral_run_store
+        assert _bridge_registrations() == BRIDGE_EFFECT_TYPES
+        assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
+        [wiring] = built
+        threads = wiring["on_finished"].__self__
+        assert isinstance(threads, BridgeThreads) and threads.bridge is bridge
+        assert wiring["on_finished"] == threads.feed
+        assert wiring["run_reconciler"] == threads.schedule_resync
+        assert wiring["hold_policy"] is bridge_hold_policy
+        assert (wiring["drain_concurrency"], wiring["resync_interval_s"]) == (workers, 60)
+        # Never fewer bridge threads than drain workers.
+        assert threads.max_workers == max(8, workers)
+        assert not threads.closed
+
+    # The supervisor stopped first, so no timer or resync item found its executor missing.
+    assert at_stop == [BRIDGE_EFFECT_TYPES]
+    assert _bridge_registrations() == frozenset()
+    assert threads.closed
+
+
+@pytest.mark.parametrize("value", [0, 65, True, "4", 2.0])
+async def test_a_drain_concurrency_outside_1_to_64_fails_the_start_and_wires_nothing(
+    server: CoralServer, value: object
+) -> None:
+    services = dataclasses.replace(
+        server.services, server_config={"coral_drain_concurrency": value}
+    )
+
+    with pytest.raises(ValueError, match="coral_drain_concurrency"):
+        async with coral_lifespan(server.app, services):
+            pass
+
+    assert _engine_registrations() == NOTHING
+    assert _bridge_registrations() == frozenset()
+    # The process is free again: a lifespan with a valid config starts.
+    async with coral_lifespan(server.app, server.services):
+        assert _bridge_registrations() == BRIDGE_EFFECT_TYPES
+
+
+def test_the_drain_concurrency_defaults_to_four() -> None:
+    assert plugin_module.drain_concurrency(None) == 4
+    assert plugin_module.drain_concurrency({}) == 4
+    assert plugin_module.drain_concurrency({"coral_drain_concurrency": None}) == 4
+    assert plugin_module.drain_concurrency({"coral_drain_concurrency": 64}) == 64
+
+
+async def test_the_supervisor_starts_a_run_whose_engine_start_was_lost(
+    server: CoralServer,
+) -> None:
+    """The startup sweep schedules the run's resync; the pool drains it on the bridge."""
+    ensure_coral_schema(server.db_uri)
+    world = World.sql(server.db_uri)
+    run = start_without_engine(world, workspace_id=DEFAULT_WORKSPACE_ID, user=None)
+
+    def started() -> bool:
+        return bool(
+            world.runs.read_engine_log(
+                run.id, workspace_id=DEFAULT_WORKSPACE_ID, max_run_version=2**31
+            )
+        )
+
+    async with coral_lifespan(server.app, server.services):
+        await poll_until_async(started, timeout_s=budget(30))
 
 
 @pytest.mark.parametrize("engine", ["wired", "unwired", "no_database"])
-async def test_engine_tools_are_wired_without_the_session_engine_and_removed_on_exit(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+async def test_engine_tools_are_wired_with_the_decision_port_and_removed_on_exit(
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, engine: str
 ) -> None:
-    # A catalog that lists the tools; without a decision port each answers "not running".
-    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
+    assert tool_catalog.CATALOG == ENGINE_TOOLS
     services: Any = server.services
     if engine == "unwired":
         monkeypatch.delattr(server.app.state, "session_event_dispatch")
@@ -366,18 +502,185 @@ async def test_engine_tools_are_wired_without_the_session_engine_and_removed_on_
             if engine == "no_database":
                 assert _engine_tools() == frozenset()
             else:
+                # Registered with or without the session engine; the runner's prefixed name
+                # finds the same handler.
                 assert _engine_tools() == ENGINE_TOOL_NAMES
                 handler = server_tool(SUBMIT_HANDOFF.name)
                 assert handler is not None
-                assert await handler(call) == ServerToolResult(
-                    "Coral's workflow engine is not running on this server", is_error=True
-                )
+                assert server_tool(f"mcp__omnigent__{SUBMIT_HANDOFF.name}") is handler
+                # The call passes the port check and the binding lookup; an unbound session is
+                # not a run member.
+                result = await handler(call)
+                assert not result.is_error
+                assert ToolReply.from_json(result.text) == not_run_member()
     assert _engine_tools() == frozenset()
+
+
+@pytest.mark.parametrize(
+    "exit_while_deciding", [False, True], ids=["call_then_exit", "exit_mid_call"]
+)
+@pytest.mark.usefixtures("coral_policy_registry")
+async def test_a_live_handoff_call_commits_on_a_run_the_supervisor_started(
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, exit_while_deciding: bool
+) -> None:
+    """
+    The supervisor creates the anchor and the step and sends the brief; the step hands off.
+
+    This server has no host or runner for the step, so its create and its brief stop at the
+    facade's and the dispatch's boundary; the anchor is created for real. A decision still
+    running when the lifespan exits finishes on its thread, commits and answers.
+    """
+    ensure_coral_schema(server.db_uri)
+    world = World.sql(server.db_uri)
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    sessions = FakeDispatch([], owner=USER)
+    steps = BindingFacade(bindings=bindings, dispatch=sessions)
+    anchors: list[SessionRef] = []
+    create = OmnigentSessionFacade.create_session
+
+    async def create_session(
+        facade: OmnigentSessionFacade,
+        request: SessionCreateRequest,
+        *,
+        ensure_lease: Callable[[], Awaitable[None]],
+    ) -> SessionRef:
+        if request.role == "step":
+            return await steps.create_session(request, ensure_lease=ensure_lease)
+        anchors.append(await create(facade, request, ensure_lease=ensure_lease))
+        return anchors[-1]
+
+    async def send_message(_dispatch: OmnigentSessionDispatch, **message: Any) -> SendReceipt:
+        return await sessions.send_message(**message)
+
+    monkeypatch.setattr(OmnigentSessionFacade, "create_session", create_session)
+    monkeypatch.setattr(OmnigentSessionDispatch, "send_message", send_message)
+    # Where the tool call's store reads and decisions run.
+    deciding = threading.Event()
+    threads_used: list[str] = []
+    for owner, name in (
+        (SqlAlchemySessionBindingStore, "find_by_session"),
+        (StoreDecisionPort, "find_reply"),
+        (StoreDecisionPort, "decide"),
+    ):
+        monkeypatch.setattr(
+            owner, name, _thread_recording(getattr(owner, name), deciding, threads_used)
+        )
+    held, release = threading.Event(), threading.Event()
+    if exit_while_deciding:
+        decide = StoreDecisionPort.decide
+
+        def held_decide(port: StoreDecisionPort, *args: Any, **kwargs: Any) -> ToolReply:
+            held.set()
+            assert release.wait(budget(30))
+            return decide(port, *args, **kwargs)
+
+        monkeypatch.setattr(StoreDecisionPort, "decide", held_decide)
+    pools: list[BoundedThreads] = []
+    # The engine tools registered when the decision pool closed.
+    tools_at_close: list[frozenset[str]] = []
+
+    class RecordingPool(BoundedThreads):
+        """Records the decision pool; the evidence pool is another ``BoundedThreads``."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.decisions = kwargs.get("thread_name_prefix") == DECISION_THREAD_NAME
+            if self.decisions:
+                pools.append(self)
+
+        def close(self) -> None:
+            if self.decisions:
+                tools_at_close.append(_engine_tools())
+            super().close()
+
+    monkeypatch.setattr(plugin_module, "BoundedThreads", RecordingPool)
+    run = start(world, spec=run_spec(workspace_id=DEFAULT_WORKSPACE_ID))
+
+    def briefed() -> bool:
+        state = world.bridge.load(workspace_id=DEFAULT_WORKSPACE_ID, run_id=run.id).state
+        return [slot.status for slot in state.slots] == ["working"]
+
+    try:
+        with installed_tool_providers():
+            async with coral_lifespan(server.app, server.services):
+                await poll_until_async(briefed, timeout_s=budget(30))
+                [brief] = sessions.sends
+                session_id = str(brief["session_id"])
+                handler = server_tool(SUBMIT_HANDOFF.name)
+                assert handler is not None
+                deciding.set()
+                call = asyncio.ensure_future(
+                    handler(
+                        ServerToolCall(
+                            session_id=session_id,
+                            name=SUBMIT_HANDOFF.name,
+                            arguments={
+                                "activation_id": activation_in(str(brief["text"])),
+                                "status": "done",
+                                "report": "Implemented the change.",
+                            },
+                            operation_id="op-1",
+                            runner_proven=True,
+                            actor=None,
+                        )
+                    )
+                )
+                if exit_while_deciding:
+                    assert await asyncio.to_thread(held.wait, budget(30))
+                else:
+                    await call
+                assert [pool.closed for pool in pools] == [False]
+        assert [pool.closed for pool in pools] == [True]
+        # The tools were unregistered first, so no new call reached the closing pool.
+        assert tools_at_close == [frozenset()]
+    finally:
+        release.set()
+    result = await call
+    deciding.clear()
+
+    assert not result.is_error
+    assert ToolReply.from_json(result.text).accepted
+    # The supervisor ran the anchor's create and the step's, as the run owner's agent.
+    assert [anchor.session_id for anchor in anchors] == [
+        anchor_session_id(DEFAULT_WORKSPACE_ID, run.id)
+    ]
+    [step] = steps.requests
+    assert (step.engine_slot_id, step.user_id) == ("implement||:0", USER)
+    agent = server.services.agent_store.get(step.agent_id or "")
+    assert agent is not None and agent.created_by == USER
+    # The handoff committed with the calling session as its actor.
+    rows = world.runs.read_engine_log(
+        run.id, workspace_id=DEFAULT_WORKSPACE_ID, max_run_version=2**31
+    )
+    entries = decode_entries(rows)
+    assert [
+        (entry.input.kind, row.actor_ref)
+        for row, entry in zip(rows, entries, strict=True)
+        if entry.input.kind.startswith("handoff_")
+    ] == [("handoff_received", session_id), ("handoff_evaluated", session_id)]
+    # The lookup, the reply check and the decision ran on the decision pool.
+    assert threads_used and all(name.startswith(DECISION_THREAD_NAME) for name in threads_used)
+    assert {"find_by_session", "find_reply", "decide"} == {
+        name.split("@", 1)[1] for name in threads_used
+    }
+
+
+def _thread_recording(
+    method: Callable[..., Any], recording: threading.Event, threads_used: list[str]
+) -> Callable[..., Any]:
+    """``method``, recording the thread it ran on while ``recording`` is set."""
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        if recording.is_set():
+            threads_used.append(f"{threading.current_thread().name}@{method.__name__}")
+        return method(*args, **kwargs)
+
+    return recorded
 
 
 @pytest.mark.parametrize("engine", ["wired", "unwired"])
 async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifespan(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, engine: str
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, engine: str
 ) -> None:
     hooks: list[str] = []
     register_post_commit = SqlAlchemyCoralRunStore.register_post_commit
@@ -386,10 +689,11 @@ async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifes
         store: SqlAlchemyCoralRunStore, callback: Callable[[str, int], None]
     ) -> Callable[[], None]:
         unregister = register_post_commit(store, callback)
-        hooks.append("registered")
+        name = getattr(callback, "__qualname__", repr(callback))
+        hooks.append(f"registered {name}")
 
         def recording_unregister() -> None:
-            hooks.append("unregistered")
+            hooks.append(f"unregistered {name}")
             unregister()
 
         return recording_unregister
@@ -404,14 +708,18 @@ async def test_the_policy_provider_and_its_commit_hook_last_as_long_as_the_lifes
         # Bound sessions are guarded whether or not the session engine is wired.
         assert _coral_policies_registered()
         assert isinstance(_coral_mutation_guard(), CoralMutationGuard)
-        assert hooks == ["registered"]
+        # The policies' run-status cache, and the run streams' wake-up.
+        assert hooks == ["registered RunStatusCache.invalidate", "registered RunStreamHub.notify"]
     assert not _coral_policies_registered()
     assert _coral_mutation_guard() is None
-    assert hooks == ["registered", "unregistered"]
+    assert hooks[2:] == [
+        "unregistered RunStreamHub.notify",
+        "unregistered RunStatusCache.invalidate",
+    ]
 
 
 async def test_the_mutation_guard_refuses_changes_to_a_bound_session_while_the_lifespan_runs(
-    server: _Server,
+    server: CoralServer,
 ) -> None:
     """The registered guard reads the real binding store in the request's workspace."""
     bindings = SqlAlchemySessionBindingStore(server.db_uri)
@@ -448,8 +756,9 @@ async def test_the_mutation_guard_refuses_changes_to_a_bound_session_while_the_l
     await check_mutation(model_change(bound))
 
 
+@pytest.mark.usefixtures("no_engine_resync")
 async def test_each_lifespan_guards_bound_sessions_through_its_own_run_store_only(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     heard: list[tuple[int, str]] = []
     invalidate = RunStatusCache.invalidate
@@ -526,9 +835,78 @@ async def test_each_lifespan_guards_bound_sessions_through_its_own_run_store_onl
         assert unguarded.action == PolicyAction.ALLOW
 
 
+@pytest.mark.usefixtures("no_engine_resync")
+async def test_the_lifespan_records_the_turn_ends_of_bound_sessions_from_a_refreshed_index(
+    server: CoralServer,
+) -> None:
+    await asyncio.to_thread(ensure_coral_schema, server.db_uri)
+    run_store = SqlAlchemyCoralRunStore(server.db_uri)
+    run = run_store.start_run(
+        RunStartSpec("wf", "v1", "Run", "", workspace_id=DEFAULT_WORKSPACE_ID)
+    )
+    _, version = run_store.load_run_state(run.id, workspace_id=DEFAULT_WORKSPACE_ID)
+    run_store.apply_transition(
+        run.id,
+        version,
+        Transition(status=int(RunStatus.RUNNING)),
+        workspace_id=DEFAULT_WORKSPACE_ID,
+    )
+    session_id = "f" * 32
+    bindings = SqlAlchemySessionBindingStore(server.db_uri)
+    bindings.reserve(
+        SessionBindingDraft(
+            workspace_id=DEFAULT_WORKSPACE_ID,
+            session_id=session_id,
+            run_id=run.id,
+            role="step",
+            effect_key=f"{run.id}:2:create_session:work||:0",
+            slot_id="work||:0",
+            slot_role="step_agent",
+            session_generation=1,
+        )
+    )
+    bindings.record_progress(DEFAULT_WORKSPACE_ID, session_id, SessionBindingProgress.ROW_CREATED)
+    queue_store = SqlAlchemyCoralQueueStore(server.db_uri)
+
+    async with coral_lifespan(server.app, server.services):
+        state = server.app.state
+        index = state.coral_bound_sessions
+        recorder = state.coral_turn_fact_recorder
+        refresher = state.coral_bound_session_refresher
+        assert isinstance(index, BoundSessions) and isinstance(recorder, TurnFactRecorder)
+        assert isinstance(refresher, BoundSessionRefresher) and not refresher.stopped
+        assert state.coral_engine_bridge.bound_sessions is index
+        # The index was filled at start, before any create fed it.
+        bound = index.lookup(DEFAULT_WORKSPACE_ID, session_id)
+        assert bound is not None and (bound.run_id, bound.engine_slot_id) == (run.id, "work||:0")
+        session_live_state.notify_status_edge(
+            session_live_state.SessionStatusEdge(
+                session_id=session_id,
+                status="idle",
+                previous_status="running",
+                turn_outcome="completed",
+                workspace_id=DEFAULT_WORKSPACE_ID,
+                observed_at_ms=1_700_000_000_000,
+            )
+        )
+        await asyncio.to_thread(recorder.wait_idle)
+        signal = WorkItemDraft.signal(
+            run_id=run.id,
+            idempotency_key=f"sig:{session_id}:unknown:idle:1700000000000",
+            payload="",
+        )
+        assert recorder.written == 1
+
+    assert refresher.stopped and recorder.closed
+    assert "coral.turn_facts" not in session_live_state._status_edge_observers
+    [row] = queue_store.get_work([signal.id], workspace_id=DEFAULT_WORKSPACE_ID)
+    payload = json.loads(row.payload)
+    assert (payload["effect_type"], payload["session_id"]) == ("turn_fact", session_id)
+
+
 @pytest.mark.parametrize("missing", ["session_event_dispatch", "project_store"])
 async def test_a_server_without_an_engine_input_wires_nothing(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, missing: str
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, missing: str
 ) -> None:
     services = server.services
     if missing == "session_event_dispatch":
@@ -537,17 +915,21 @@ async def test_a_server_without_an_engine_input_wires_nothing(
         services = dataclasses.replace(services, project_store=None)
     async with coral_lifespan(server.app, services):
         assert _engine_registrations() == NOTHING
-        # Only the session engine is left out; the supervisor still runs.
+        # Only the session engine is left out; the bridge and the supervisor still run.
+        assert _bridge_registrations() == BRIDGE_EFFECT_TYPES
         supervisor = server.app.state.coral_worker_supervisor
         await poll_until_async(supervisor.leader_ready_event.is_set, timeout_s=budget(30))
 
 
-@pytest.mark.parametrize("failing", ["executor", "observer", "supervisor_start"])
-async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, failing: str
-) -> None:
-    monkeypatch.setattr(tool_catalog, "CATALOG", ENGINE_TOOLS)
-    if failing == "executor":
+def _fail_lifespan_start(patch: pytest.MonkeyPatch, failing: str) -> None:
+    """Make the lifespan's start fail at ``failing``."""
+    if failing == "schema":
+
+        def failing_schema(_db_uri: str) -> None:
+            raise RuntimeError("schema check failed")
+
+        patch.setattr(plugin_module, "ensure_coral_schema", failing_schema)
+    elif failing == "executor":
         register_executor = queue_executors.register_executor
         registered: list[str] = []
 
@@ -557,7 +939,7 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
             register_executor(effect_type, fn, **kwargs)
             registered.append(effect_type)
 
-        monkeypatch.setattr(queue_executors, "register_executor", failing_register_executor)
+        patch.setattr(queue_executors, "register_executor", failing_register_executor)
     elif failing == "observer":
         register = session_live_state.register_status_edge_observer
 
@@ -566,26 +948,41 @@ async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
                 raise RuntimeError("observer registration failed")
             return register(name, fn)
 
-        monkeypatch.setattr(session_live_state, "register_status_edge_observer", failing_register)
+        patch.setattr(session_live_state, "register_status_edge_observer", failing_register)
     else:
 
         async def failing_start(_supervisor: WorkerSupervisor) -> None:
             raise RuntimeError("supervisor start failed")
 
-        monkeypatch.setattr(WorkerSupervisor, "start", failing_start)
+        patch.setattr(WorkerSupervisor, "start", failing_start)
 
-    with installed_tool_providers(), pytest.raises(RuntimeError, match="failed"):
-        async with coral_lifespan(server.app, server.services):
-            pass
+
+@pytest.mark.parametrize("failing", ["schema", "executor", "observer", "supervisor_start"])
+async def test_a_lifespan_that_fails_part_way_unregisters_what_it_registered(
+    server: CoralServer, failing: str
+) -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        _fail_lifespan_start(patch, failing)
+        with installed_tool_providers(), pytest.raises(RuntimeError, match="failed"):
+            async with coral_lifespan(server.app, server.services):
+                pass
 
     assert _engine_registrations() == NOTHING
+    assert _bridge_registrations() == frozenset()
     assert _engine_tools() == frozenset()
     assert not _coral_policies_registered()
     assert _coral_mutation_guard() is None
+    assert elicitation_hooks.claimed_handler(GATE_PROMPT) is None
+    assert _registration_carriers() == 0
+    # The failed start released the process: the next lifespan starts.
+    async with coral_lifespan(server.app, server.services):
+        assert _engine_registrations() == (ENGINE_EFFECT_TYPES, ENGINE_OBSERVERS)
+        assert _bridge_registrations() == BRIDGE_EFFECT_TYPES
 
 
+@pytest.mark.usefixtures("no_engine_resync")
 async def test_item_claimed_during_exit_is_retried_not_failed(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_store = SqlAlchemyCoralRunStore(server.db_uri)
     queue = SqlAlchemyCoralQueueStore(server.db_uri)
@@ -654,8 +1051,9 @@ async def test_item_claimed_during_exit_is_retried_not_failed(
     assert done.result is not None and json.loads(done.result) == {"session_id": None}
 
 
+@pytest.mark.usefixtures("no_engine_resync")
 async def test_a_close_and_a_commit_share_one_stop_record(
-    server: _Server, monkeypatch: pytest.MonkeyPatch
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A close's confirmed stop lets a later commit past its turn check, until the step runs."""
     workspace_id = DEFAULT_WORKSPACE_ID
@@ -745,8 +1143,9 @@ async def test_a_close_and_a_commit_share_one_stop_record(
     assert (after_rerun.error_code, after_rerun.retryable) == ("session.turn_state_unknown", True)
 
 
+@pytest.mark.usefixtures("no_engine_resync")
 async def test_an_anchor_bound_send_stops_the_anchor_runner_through_the_lifespans_dispatch(
-    server: _Server, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The drift pause's stop reaches the dispatch the lifespan built, which holds the pauser."""
     stops: list[tuple[str, str | None]] = []
@@ -761,16 +1160,9 @@ async def test_an_anchor_bound_send_stops_the_anchor_runner_through_the_lifespan
     monkeypatch.setattr(OmnigentSessionDispatch, "stop", recording_stop)
     workspace_id = DEFAULT_WORKSPACE_ID
     run_store = SqlAlchemyCoralRunStore(server.db_uri)
-    run = start_run(
-        run_store,
-        workspace_id=workspace_id,
-        user_id=None,
-        account_generation=None,
-        host_id=None,
-        repo_path=None,
-        worktree_path=None,
-        run_branch=None,
-    )
+    # An engine run whose start has not committed: the drift pause starts it first.
+    ensure_coral_schema(server.db_uri)
+    run = start_without_engine(World.sql(server.db_uri), workspace_id=workspace_id, user=None)
     # Someone attached a runner to the run's anchor.
     anchor = anchor_session_id(workspace_id, run.id)
     server.services.conversation_store.create_conversation(
@@ -809,3 +1201,407 @@ async def test_an_anchor_bound_send_stops_the_anchor_runner_through_the_lifespan
     stored = run_store.get_run(run.id, workspace_id=workspace_id)
     assert stored is not None
     assert (stored.status, stored.pause_reason) == (RunStatus.PAUSED, RunPauseReason.DRIFT)
+    # The pause went through the engine: its state is paused for the same drift.
+    state = World.sql(server.db_uri).bridge.load(workspace_id=workspace_id, run_id=run.id).state
+    assert [(cause.reason, cause.detail) for cause in state.causes] == [("drift", "anchor_bound")]
+
+
+# A prompt id the gate verdict handler claims.
+GATE_PROMPT = GATE_ELICITATION_PREFIX + "0" * 32
+GATE_SWEEP_TASK = "coral-gate-prompt-sweep"
+
+
+@pytest.fixture
+def clean_elicitations() -> Iterator[None]:
+    """Gate prompts a lifespan published stay in the process's index; drop them after."""
+    yield
+    pending_elicitations.reset_for_tests()
+    elicitation_hooks.reset_for_tests()
+
+
+def _recorded(events: list[str], name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    """``fn``, appending ``name`` to ``events`` before each call."""
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        events.append(name)
+        return fn(*args, **kwargs)
+
+    return recorded
+
+
+def _record_gate_wiring(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> None:
+    """Record the verdict handler's, the admission flag's and the prompt observer's changes."""
+    register = elicitation_hooks.register_elicitation_verdict_handler
+    add_observer = pending_elicitations.add_elicitation_observer
+
+    def recording_register(prefix: str, handler: Any) -> Callable[[], None]:
+        unregister = register(prefix, handler)
+        events.append(f"handler registered for {prefix}")
+        return _recorded(events, "handler unregistered", unregister)
+
+    def recording_add(observer: Any) -> Callable[[], None]:
+        remove = add_observer(observer)
+        events.append("observer added")
+        return _recorded(events, "observer removed", remove)
+
+    monkeypatch.setattr(
+        elicitation_hooks, "register_elicitation_verdict_handler", recording_register
+    )
+    monkeypatch.setattr(pending_elicitations, "add_elicitation_observer", recording_add)
+    for name in ("enable", "disable"):
+        monkeypatch.setattr(
+            GateAnswering,
+            name,
+            _recorded(events, f"admission {name}d", getattr(GateAnswering, name)),
+        )
+    stop = WorkerSupervisor.stop
+
+    async def recording_stop(supervisor: WorkerSupervisor) -> None:
+        events.append("supervisor stopped")
+        await stop(supervisor)
+
+    monkeypatch.setattr(WorkerSupervisor, "stop", recording_stop)
+
+
+def _anchor_approval(server: CoralServer) -> MutationAttempt:
+    """An approval posted to a run's anchor, whose binding row the store holds."""
+    conversations = cast(SqlAlchemyConversationStore, server.services.conversation_store)
+    anchor = conversations.create_conversation(
+        conversation_id=anchor_session_id(DEFAULT_WORKSPACE_ID, "run-1"),
+        labels={RUN_ID_LABEL_KEY: "run-1"},
+    )
+    SqlAlchemySessionBindingStore(server.db_uri).reserve(
+        SessionBindingDraft(
+            workspace_id=DEFAULT_WORKSPACE_ID,
+            session_id=anchor.id,
+            run_id="run-1",
+            role="anchor",
+            effect_key="run-1:0:create_session:anchor",
+        )
+    )
+    return MutationAttempt(
+        SESSION_EVENT, session_id=anchor.id, conversation=anchor, event_type="approval"
+    )
+
+
+@pytest.mark.usefixtures("clean_elicitations")
+@pytest.mark.parametrize("engine", ["wired", "unwired"])
+async def test_the_lifespan_wires_gate_delivery_and_answers_and_unwires_them_in_order(
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    """Gates are wired with or without the session engine, each lifespan again."""
+    ensure_coral_schema(server.db_uri)
+    if engine == "unwired":
+        monkeypatch.delattr(server.app.state, "session_event_dispatch")
+    events: list[str] = []
+    _record_gate_wiring(monkeypatch, events)
+    built: list[dict[str, Any]] = []
+
+    class RecordingSupervisor(WorkerSupervisor):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            built.append(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(plugin_module, "WorkerSupervisor", RecordingSupervisor)
+    approval = _anchor_approval(server)
+
+    for _ in range(2):
+        events.clear()
+        async with coral_lifespan(server.app, server.services):
+            state = server.app.state
+            registrations = {
+                kind: get_registration(kind) for kind in (GATE_PUBLISH, GATE_WITHDRAW)
+            }
+            assert {
+                kind: registration is not None and registration.runs_after_terminal
+                for kind, registration in registrations.items()
+            } == {GATE_PUBLISH: False, GATE_WITHDRAW: True}
+            assert elicitation_hooks.claimed_handler(GATE_PROMPT) is not None
+            # The anchor takes the approval while the gate handler is registered.
+            await check_mutation(approval)
+            assert isinstance(built[-1]["gate_republisher"], GateRepublisher)
+            assert isinstance(state.coral_gate_publisher, OmnigentGatePublisher)
+            assert isinstance(state.coral_alert_store, SqlAlchemyAlertStore)
+            [sweep] = [task for task in asyncio.all_tasks() if task.get_name() == GATE_SWEEP_TASK]
+            assert not sweep.done()
+        assert sweep.done()
+        assert registered_executor_kinds() & {GATE_PUBLISH, GATE_WITHDRAW} == set()
+        assert elicitation_hooks.claimed_handler(GATE_PROMPT) is None
+        assert events == [
+            f"handler registered for {GATE_ELICITATION_PREFIX}",
+            "admission enabled",
+            "observer added",
+            "supervisor stopped",
+            "observer removed",
+            "admission disabled",
+            "handler unregistered",
+        ]
+    # Without the lifespan nothing guards the anchor.
+    await check_mutation(approval)
+
+
+def _publish_finished(world: World, run_id: str) -> bool:
+    """Whether the run's ``gate_publish`` rows succeeded, so no publish re-check is to come."""
+    state = world.bridge.load(workspace_id=DEFAULT_WORKSPACE_ID, run_id=run_id).state
+    keys = [effect.effect_key for effect in state.effects if effect.kind == "publish_gate"]
+    rows = world.queue.get_work(
+        [effect_work_id(run_id, key) for key in keys], workspace_id=DEFAULT_WORKSPACE_ID
+    )
+    return bool(rows) and all(row.status == int(WorkStatus.SUCCEEDED) for row in rows)
+
+
+def _alerts(server: CoralServer, run_id: str) -> list[tuple[int, int]]:
+    """The run's alerts as sorted ``(kind, status)`` pairs."""
+    alerts = SqlAlchemyAlertStore(server.db_uri).list_for_run(
+        workspace_id=DEFAULT_WORKSPACE_ID, run_id=run_id
+    )
+    return sorted((alert.kind, alert.status) for alert in alerts)
+
+
+@pytest.mark.usefixtures("clean_elicitations")
+@pytest.mark.parametrize(
+    ("labels", "outcomes"),
+    [
+        (
+            ("approve", "approve"),
+            [(202, {"queued": False}), (202, {"queued": False, "duplicate": True})],
+        ),
+        (("approve", "reject"), None),
+    ],
+    ids=["same_label", "other_label"],
+)
+async def test_two_answers_at_once_through_the_resolve_route_advance_the_gate_once(
+    server: CoralServer, labels: tuple[str, str], outcomes: list[tuple[int, dict[str, Any]]] | None
+) -> None:
+    """Auth off: the prompt is on the anchor; one answer commits, the other is told why."""
+    world, run, anchor, prompt = gate_run(server.db_uri)
+    transport = httpx.ASGITransport(app=server.app)
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+        coral_lifespan(server.app, server.services),
+    ):
+        await poll_until_async(lambda: prompt_shown(server, anchor, prompt), timeout_s=budget(30))
+        [shown] = await pending_prompts(client, anchor)
+        responses = await asyncio.gather(
+            *(resolve_gate(client, anchor, prompt, label) for label in labels)
+        )
+        after = await pending_prompts(client, anchor)
+
+    assert shown["elicitation_id"] == prompt
+    assert shown["params"]["coral"]["run_id"] == run.id
+    assert shown["params"]["requestedSchema"]["properties"]["decision"]["enum"] == [
+        "approve",
+        "reject",
+    ]
+    answered = sorted(
+        ((response.status_code, response.json()) for response in responses),
+        key=lambda item: (item[0], "error" in item[1], "duplicate" in item[1]),
+    )
+    [winner] = gate_answers(world, run.id)
+    if outcomes is not None:
+        assert answered == outcomes
+    else:
+        assert [status for status, _body in answered] == [202, 409]
+        assert answered[1][1]["error"]["message"] == (
+            f"[already_answered] Already answered: {winner.label}."
+        )
+    assert (winner.by, run_status(world, run)) == ("local", int(RunStatus.COMPLETED))
+    assert after == []
+    alerts = SqlAlchemyAlertStore(server.db_uri).list_for_run(
+        workspace_id=DEFAULT_WORKSPACE_ID, run_id=run.id
+    )
+    assert [alert.status for alert in alerts if alert.kind == int(AlertKind.GATE)] == [
+        int(AlertStatus.RESOLVED)
+    ]
+
+
+@pytest.mark.usefixtures("clean_elicitations")
+async def test_the_prompt_relayed_onto_another_session_cannot_answer_the_gate(
+    server: CoralServer,
+) -> None:
+    world, run, anchor, prompt = gate_run(server.db_uri)
+    transport = httpx.ASGITransport(app=server.app)
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+        coral_lifespan(server.app, server.services),
+    ):
+        agent = await create_test_agent(client)
+        other = await create_session_for_agent(client, agent["id"])
+        await poll_until_async(lambda: prompt_shown(server, anchor, prompt), timeout_s=budget(30))
+        [shown] = await pending_prompts(client, anchor)
+        with workspace_scope(DEFAULT_WORKSPACE_ID):
+            await elicitation_hooks.publish_form_elicitation(
+                other, shown["params"], elicitation_id=prompt
+            )
+        relayed = await resolve_gate(client, other, prompt)
+        relayed_left = pending_here(other, prompt)
+        still_waiting = run_status(world, run)
+        answered = await resolve_gate(client, anchor, prompt)
+
+    assert relayed.status_code == 409, relayed.text
+    assert relayed.json()["error"]["message"] == (
+        "[no_longer_waiting] This gate is no longer waiting."
+    )
+    # The relayed copy is dropped; the anchor's prompt still answered the gate.
+    assert not relayed_left
+    assert still_waiting == int(RunStatus.RUNNING)
+    assert answered.status_code == 202, answered.text
+    assert [answer.label for answer in gate_answers(world, run.id)] == ["approve"]
+
+
+@pytest.mark.usefixtures("clean_elicitations")
+async def test_a_restarted_server_shows_the_same_prompt_and_takes_its_answer(
+    server: CoralServer,
+) -> None:
+    world, run, anchor, prompt = gate_run(server.db_uri)
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with coral_lifespan(server.app, server.services):
+            await poll_until_async(
+                lambda: prompt_shown(server, anchor, prompt), timeout_s=budget(30)
+            )
+            [before] = await pending_prompts(client, anchor)
+        # The process died: its index of prompts went with it.
+        pending_elicitations.reset_for_tests()
+        assert await pending_prompts(client, anchor) == []
+
+        async with coral_lifespan(server.app, server.services):
+            await poll_until_async(lambda: pending_here(anchor, prompt), timeout_s=budget(30))
+            [after] = await pending_prompts(client, anchor)
+            answered = await resolve_gate(client, anchor, prompt)
+
+    assert after == before
+    assert answered.status_code == 202, answered.text
+    assert run_status(world, run) == int(RunStatus.COMPLETED)
+
+
+@pytest.mark.usefixtures("clean_elicitations")
+async def test_answers_after_the_gate_moved_on_reach_the_handler_without_its_prompt(
+    server: CoralServer,
+) -> None:
+    """A retry is a duplicate by either route; another answer is refused; one commit."""
+    world, run, anchor, prompt = gate_run(server.db_uri)
+    transport = httpx.ASGITransport(app=server.app)
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+        coral_lifespan(server.app, server.services),
+    ):
+        await poll_until_async(lambda: prompt_shown(server, anchor, prompt), timeout_s=budget(30))
+        shown = await pending_prompts(client, anchor)
+        first = await resolve_gate(client, anchor, prompt)
+        after = await pending_prompts(client, anchor)
+        approval = {
+            "elicitation_id": prompt,
+            "action": "accept",
+            "content": {"decision": "approve"},
+        }
+        later = [
+            await resolve_gate(client, anchor, prompt),
+            await client.post(
+                f"/v1/sessions/{anchor}/events", json={"type": "approval", "data": approval}
+            ),
+            await resolve_gate(client, anchor, prompt, "reject"),
+            await client.post(
+                f"/v1/sessions/{anchor}/elicitations/{prompt}/resolve", json={"action": "decline"}
+            ),
+        ]
+
+    assert [item["elicitation_id"] for item in shown] == [prompt]
+    assert (first.status_code, first.json(), after) == (202, {"queued": False}, [])
+    duplicate = (202, {"queued": False, "duplicate": True})
+    refused = (409, "[already_answered] Already answered: approve.")
+    assert [(response.status_code, response.json()) for response in later[:2]] == [duplicate] * 2
+    assert [
+        (response.status_code, response.json()["error"]["message"]) for response in later[2:]
+    ] == [refused] * 2
+    assert [(answer.label, answer.by) for answer in gate_answers(world, run.id)] == [
+        ("approve", "local")
+    ]
+    assert _alerts(server, run.id) == sorted(
+        [
+            (int(AlertKind.GATE), int(AlertStatus.RESOLVED)),
+            (int(AlertKind.RUN_COMPLETED), int(AlertStatus.OPEN)),
+        ]
+    )
+
+
+@pytest.mark.usefixtures("clean_elicitations")
+async def test_a_cancel_withdraws_the_shown_prompt_after_the_run_ended(
+    server: CoralServer,
+) -> None:
+    world, run, anchor, prompt = gate_run(server.db_uri)
+    transport = httpx.ASGITransport(app=server.app)
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+        coral_lifespan(server.app, server.services),
+    ):
+        await poll_until_async(
+            lambda: prompt_shown(server, anchor, prompt) and _publish_finished(world, run.id),
+            timeout_s=budget(30),
+        )
+        await asyncio.to_thread(
+            world.bridge.cancel_run,
+            workspace_id=DEFAULT_WORKSPACE_ID,
+            run_id=run.id,
+            actor="local",
+        )
+        await poll_until_async(lambda: not pending_here(anchor, prompt), timeout_s=budget(30))
+        after = await pending_prompts(client, anchor)
+        answered = await resolve_gate(client, anchor, prompt)
+
+    assert after == []
+    assert (answered.status_code, answered.json()["error"]["message"]) == (
+        409,
+        "[no_longer_waiting] This gate is no longer waiting.",
+    )
+    assert (gate_answers(world, run.id), run_status(world, run)) == ([], int(RunStatus.CANCELLED))
+    assert _alerts(server, run.id) == sorted(
+        [
+            (int(AlertKind.GATE), int(AlertStatus.RESOLVED)),
+            (int(AlertKind.RUN_CANCELLED), int(AlertStatus.OPEN)),
+        ]
+    )
+
+
+class _EagerSweeper(GatePromptSweeper):
+    """The lifespan's prompt sweep, every 50 ms instead of every minute."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs, interval_s=0.05)
+
+
+@pytest.mark.usefixtures("clean_elicitations")
+async def test_the_sweep_withdraws_a_prompt_whose_gate_was_answered_elsewhere(
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another replica committed the answer, so no resolve reached this process."""
+    monkeypatch.setattr(sweep_module, "GatePromptSweeper", _EagerSweeper)
+    world, run, anchor, prompt = gate_run(server.db_uri)
+    transport = httpx.ASGITransport(app=server.app)
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+        coral_lifespan(server.app, server.services),
+    ):
+        await poll_until_async(
+            lambda: prompt_shown(server, anchor, prompt) and _publish_finished(world, run.id),
+            timeout_s=budget(30),
+        )
+        tracked = server.app.state.coral_gate_prompts.tracked()
+        elsewhere = await asyncio.to_thread(
+            world.bridge.answer_gate,
+            workspace_id=DEFAULT_WORKSPACE_ID,
+            run_id=run.id,
+            token=APPROVE_TOKEN,
+            label="approve",
+            note="",
+            actor="local",
+        )
+        await poll_until_async(lambda: not pending_here(anchor, prompt), timeout_s=budget(30))
+        tracked_after = server.app.state.coral_gate_prompts.tracked()
+        retried = await resolve_gate(client, anchor, prompt)
+
+    assert [item.elicitation_id for item in tracked] == [prompt]
+    assert (elsewhere.outcome, tracked_after) == ("accepted", [])
+    assert (retried.status_code, retried.json()) == (202, {"queued": False, "duplicate": True})
+    assert len(gate_answers(world, run.id)) == 1
+    assert (int(AlertKind.GATE), int(AlertStatus.RESOLVED)) in _alerts(server, run.id)

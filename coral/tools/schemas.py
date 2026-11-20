@@ -114,7 +114,7 @@ EVALUATION_IN_PROGRESS = "evaluation_in_progress"
 SLOT_SUPERSEDED = "slot.superseded"
 DECISION_CLOSED = "decision_closed"
 NOT_ORCHESTRATOR = "not_orchestrator"
-# Reserved for the evidence check, take-over and messaging tools; nothing produces them yet.
+# The evidence check produces evidence.missing; take-over and messaging are reserved.
 EVIDENCE_MISSING = "evidence.missing"
 RUN_TAKEN_OVER = "run.taken_over"
 RECIPIENT_CLOSING = "recipient_closing"

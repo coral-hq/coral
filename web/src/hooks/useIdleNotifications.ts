@@ -61,6 +61,7 @@ import {
 } from "@/lib/idleTransitions";
 import { isConversationUnseen, useUnseenTick } from "@/hooks/useUnseenConversations";
 import { conversationDisplayLabel } from "@/shell/sidebarNav";
+import { useInboxKinds } from "@/lib/inboxKinds"; // CORAL(S36)
 
 const IDLE_BODY = "Agent finished and is ready for your input.";
 const ELICITATION_BODY = "Agent is asking for your input.";
@@ -152,6 +153,10 @@ export function useIdleNotifications(activeConversationId?: string): void {
   // then reporting back) into one beep. Cleared when the user views the session
   // or it drops off the list, so a later finish can notify again.
   const notifiedSessions = useRef<Set<string>>(new Set());
+  // CORAL(S36): rows an Inbox kind silences notify through that kind instead.
+  const inboxKinds = useInboxKinds();
+  const kindsRef = useRef(inboxKinds);
+  kindsRef.current = inboxKinds;
 
   useLazyPermissionRequest();
 
@@ -328,6 +333,7 @@ export function useIdleNotifications(activeConversationId?: string): void {
     if (grantedOrNative) {
       for (const conversation of idle) {
         if (windowFocused && conversation.id === activeConversationId) continue;
+        if (kindsRef.current.some((kind) => kind.silences(conversation))) continue; // CORAL(S36)
         // Skip sessions whose runner is offline. When nothing is actively
         // running, the only thing that flips a session to a terminal status is
         // the server reconciling a dead-runner session (a stale `running`
@@ -354,6 +360,8 @@ export function useIdleNotifications(activeConversationId?: string): void {
             // Re-check suppression at fire time — the user may have opened the
             // session (or refocused the window) during the settle window.
             if (windowFocusedRef.current && id === activeIdRef.current) return;
+            // CORAL(S36): a kind registered during the settle window silences it too.
+            if (kindsRef.current.some((kind) => kind.silences(conversation))) return;
             // Mark it beeped so a later finish stays silent until the user has
             // viewed this session.
             notifiedSessions.current.add(id);
@@ -364,6 +372,7 @@ export function useIdleNotifications(activeConversationId?: string): void {
       }
       for (const conversation of newElicitations) {
         if (windowFocused && conversation.id === activeConversationId) continue;
+        if (kindsRef.current.some((kind) => kind.silences(conversation))) continue; // CORAL(S36)
         // Same offline-runner guard: a prompt on a dead-runner session can't be
         // acted on and is almost always stale reconciliation.
         if (conversation.runner_online === false) continue;

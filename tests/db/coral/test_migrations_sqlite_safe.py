@@ -134,7 +134,22 @@ def test_coral_migration_chain_revisions_and_lineage() -> None:
     script = ScriptDirectory.from_config(config)
 
     heads = script.get_heads()
-    assert heads == ["coral_0002_session_facade"]
+    assert heads == ["coral_0005_alerts_and_gates"]
+
+    rev_alerts = script.get_revision("coral_0005_alerts_and_gates")
+    assert rev_alerts is not None
+    assert rev_alerts.down_revision == "coral_0004_observations"
+    assert len(rev_alerts.revision) <= 32
+
+    rev_observations = script.get_revision("coral_0004_observations")
+    assert rev_observations is not None
+    assert rev_observations.down_revision == "coral_0003_engine_bridge"
+    assert len(rev_observations.revision) <= 32
+
+    rev_engine_bridge = script.get_revision("coral_0003_engine_bridge")
+    assert rev_engine_bridge is not None
+    assert rev_engine_bridge.down_revision == "coral_0002_session_facade"
+    assert len(rev_engine_bridge.revision) <= 32
 
     rev_sessions = script.get_revision("coral_0002_session_facade")
     assert rev_sessions is not None

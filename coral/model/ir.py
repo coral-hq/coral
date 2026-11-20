@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from coral.evidence.ir import EvidenceRequirement
+
 IR_VERSION = 1
 
 # Defaults filled in at compile time; part of the content hash.
@@ -44,6 +46,8 @@ class CompiledNode(_Frozen):
     list_from: str | None = None
     parts: tuple[CompiledPart, ...] = ()
     outcomes: tuple[str, ...] = ()
+    # A step's done-when commands; ``None`` when the step has none.
+    evidence: EvidenceRequirement | None = None
 
 
 class CompiledArrow(_Frozen):
@@ -51,7 +55,7 @@ class CompiledArrow(_Frozen):
     source: str
     target: str
     label: str | None = None
-    # Derived from the authoring fields; excluded from the content hash.
+    # Derived from the authoring fields, and hashed: ``back: true`` is recorded only here.
     kind: ArrowKind = "forward"
     limit: int | None = None
     at_limit: str | None = None

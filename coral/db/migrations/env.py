@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Collection, Mapping
 from logging.config import fileConfig
+from typing import Any
 
 from alembic import context
+from alembic.runtime.migration import MigrationContext, MigrationInfo
 from sqlalchemy import Connection, engine_from_config, pool
 
 import coral.db.models  # noqa: F401
 from coral.db.base import CoralBase
+from coral.db.migrate import commit_crdb_revision
+from omnigent.db.utils import is_cockroachdb
 
 config = context.config
 
@@ -65,13 +70,30 @@ def run_migrations_online() -> None:
             _run_with_connection(conn)
 
 
+def _commit_crdb_revision(
+    ctx: MigrationContext,
+    step: MigrationInfo,
+    heads: Collection[Any],
+    run_args: Mapping[str, Any],
+) -> None:
+    del step, heads, run_args
+    assert ctx.connection is not None
+    commit_crdb_revision(ctx.connection)
+
+
 def _run_with_connection(connection: Connection) -> None:
+    # The CockroachDB runner opens its SERIALIZABLE schema transaction before Alembic starts,
+    # so Alembic leaves that transaction open across revisions; commit it after each one.
+    runner_transaction = is_cockroachdb(connection.dialect.name) and connection.in_transaction()
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
         version_table="coral_alembic_version",
         render_as_batch=True,
         include_name=_include_name,
+        # Each revision commits with its version stamp, so the next one sees its schema.
+        transaction_per_migration=True,
+        on_version_apply=_commit_crdb_revision if runner_transaction else None,
     )
     with context.begin_transaction():
         context.run_migrations()

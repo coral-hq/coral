@@ -13,10 +13,15 @@ def fold(
     graph: CompiledGraph,
     log: Sequence[LogEntry],
     config: EngineConfig | None = None,
+    *,
+    start: RunState | None = None,
 ) -> RunState:
-    """Replay accepted log entries. Entries with a rejection are skipped."""
+    """Replay accepted log entries onto ``start`` (an empty run by default).
+
+    Entries with a rejection are skipped.
+    """
     cfg = config if config is not None else EngineConfig()
-    state = empty_state()
+    state = start if start is not None else empty_state()
     for entry in log:
         if entry.rejection is not None:
             continue

@@ -10,6 +10,7 @@ from coral.engine.types import (
     ChooseArrow,
     Effect,
     EffectCompleted,
+    EffectFailed,
     EngineConfig,
     HandoffEvaluated,
     HandoffReceived,
@@ -20,6 +21,7 @@ from coral.engine.types import (
     Rejection,
     RejectionObserved,
     RejectStreak,
+    ResumeRun,
     RunState,
     StartRun,
     TimerDue,
@@ -437,6 +439,7 @@ def test_evidence_miss_then_turn_end_then_handoff_is_accepted() -> None:
     "command",
     [
         EffectCompleted(effect_key="missing"),
+        EffectFailed(effect_key="missing", code="session.not_ready", retryable=True),
         HandoffReceived(slot_id="work||:0", body="nope"),
         HandoffEvaluated(slot_id="work||:0", outcome="accepted"),
         HandoffEvaluated(slot_id="work||:0", outcome="blocked"),
@@ -486,3 +489,137 @@ def test_start_rejects_unresolved_graph() -> None:
     assert result.entry.rejection.code == "graph.unresolved"
     assert result.entry.effects == ()
     assert fold(graph, (result.entry,), CONFIG) == state
+
+
+def test_a_retryable_effect_failure_pauses_infra_without_a_receipt() -> None:
+    graph = _graph(fixture_text("minimal"))
+    pending = drive(graph, [RUN], config=CONFIG, auto_ack=False)
+    create = _last_effect(pending.state, "create_session")
+    exhausted = EffectFailed(
+        effect_key=create.effect_key, code="session.host_offline", retryable=True
+    )
+    failed = drive(graph, [exhausted], after=pending, auto_ack=False)
+    entry = failed.log[-1]
+    assert (entry.rejection, entry.effects, entry.receipt_key) == (None, (), None)
+    assert failed.state.status == "paused"
+    assert failed.state.causes == (
+        PauseCause(reason="infra", detail="session.host_offline", subject=SLOT),
+    )
+    assert failed.state.slots[0].status == "pending"
+    assert all(item.key != create.effect_key for item in failed.state.receipts)
+    assert entry.patch
+
+    repeat = transition(graph, failed.state, exhausted, NOW, CONFIG)
+    assert repeat.state == failed.state
+    assert (repeat.entry.rejection, repeat.entry.effects, repeat.entry.patch) == (None, (), ())
+
+    # No receipt, so the same effect still completes once the resumed run retries it.
+    resumed = drive(
+        graph,
+        [ResumeRun(), EffectCompleted(effect_key=create.effect_key)],
+        after=failed,
+        auto_ack=False,
+    )
+    assert resumed.state.status == "running"
+    assert resumed.state.slots[0].status == "session_created"
+
+
+def test_a_permanent_effect_failure_receipts_and_pauses_failure_path() -> None:
+    graph = _graph(fixture_text("minimal"))
+    pending = drive(graph, [RUN], config=CONFIG, auto_ack=False)
+    create = _last_effect(pending.state, "create_session")
+    created = drive(
+        graph, [EffectCompleted(effect_key=create.effect_key)], after=pending, auto_ack=False
+    )
+    brief = _last_effect(created.state, "send_input")
+    refused = EffectFailed(effect_key=brief.effect_key, code="effect.invalid_payload")
+    failed = drive(graph, [refused], after=created, auto_ack=False)
+    entry = failed.log[-1]
+    assert (entry.rejection, entry.effects, entry.receipt_key) == (None, (), brief.effect_key)
+    assert failed.state.status == "paused"
+    assert failed.state.causes == (
+        PauseCause(reason="failure_path", detail="effect.invalid_payload", subject=SLOT),
+    )
+    assert failed.state.slots[0].status == "session_created"
+    assert Receipt(key=brief.effect_key, payload={"failed": "effect.invalid_payload"}) in (
+        failed.state.receipts
+    )
+
+    for command in (refused, EffectCompleted(effect_key=brief.effect_key)):
+        repeat = transition(graph, failed.state, command, NOW, CONFIG)
+        assert repeat.state == failed.state
+        assert repeat.entry.receipt_key == brief.effect_key
+        assert (repeat.entry.rejection, repeat.entry.effects) == (None, ())
+
+
+def test_an_effect_failure_is_refused_on_a_terminal_run_or_an_unknown_key() -> None:
+    graph = _graph(fixture_text("minimal"))
+    pending = drive(graph, [RUN], config=CONFIG, auto_ack=False)
+    create = _last_effect(pending.state, "create_session")
+    unknown = transition(
+        graph, pending.state, EffectFailed(effect_key="run-1:9:nudge:x", code="c"), NOW, CONFIG
+    )
+    assert unknown.entry.rejection is not None
+    assert unknown.entry.rejection.code == "rejected"
+    assert "effect_failed" in unknown.entry.rejection.allowed_values
+    assert unknown.state == pending.state
+
+    cancelled = drive(graph, [CancelRun()], after=pending, auto_ack=False)
+    done = drive(graph, [RUN, *_finish(SLOT)], config=CONFIG)
+    assert done.state.status == "completed"
+    unreceipted = (
+        (cancelled.state, create.effect_key),
+        (done.state, f"run-1:{done.state.seq}:nudge:{SLOT}"),
+    )
+    for state, key in unreceipted:
+        for retryable in (True, False):
+            late = EffectFailed(effect_key=key, code="c", retryable=retryable)
+            terminal = transition(graph, state, late, NOW, CONFIG)
+            assert terminal.entry.rejection == Rejection(code="run_terminal")
+            assert terminal.state == state
+    # A receipted key answers with its receipt before the terminal check.
+    receipted = transition(
+        graph, done.state, EffectFailed(effect_key=create.effect_key, code="c"), NOW, CONFIG
+    )
+    assert (receipted.entry.rejection, receipted.entry.receipt_key) == (None, create.effect_key)
+    assert receipted.state == done.state
+
+
+def test_a_close_with_pending_input_pauses_drift_and_resume_finishes_it() -> None:
+    graph = _graph(
+        workflow_text(
+            [start(), step("work"), step("ship"), end()],
+            [
+                arrow("a1", "start", "work"),
+                arrow("a2", "work", "ship"),
+                arrow("a3", "ship", "end"),
+            ],
+        )
+    )
+    closing = drive(graph, _finish(SLOT), after=drive(graph, [RUN]), auto_ack=False)
+    close = _last_effect(closing.state, "close_slot")
+    held = drive(
+        graph,
+        [EffectCompleted(effect_key=close.effect_key, payload={"pending_input": True})],
+        after=closing,
+        auto_ack=False,
+    )
+    slot = held.state.slots[0]
+    assert (slot.status, slot.pending_input) == ("closing", True)
+    assert held.state.status == "paused"
+    assert held.state.causes == (PauseCause(reason="drift", detail="pending_input", subject=SLOT),)
+    assert "ship" not in _node_statuses(held.state)
+
+    resumed = drive(graph, [ResumeRun()], after=held, auto_ack=False)
+    assert resumed.state.status == "running"
+    slot = resumed.state.slots[0]
+    assert (slot.status, slot.pending_input) == ("closed", False)
+    assert _node_statuses(resumed.state)["work"] == "closed"
+    assert [(effect.kind, effect.subject) for effect in resumed.log[-1].effects] == [
+        ("create_session", "ship||:0")
+    ]
+    again = drive(
+        graph, [PauseRun(reason="user", detail="hold"), ResumeRun()], after=resumed, auto_ack=False
+    )
+    assert again.log[-1].effects == ()
+    assert [item.node_id for item in again.state.activations].count("ship") == 1

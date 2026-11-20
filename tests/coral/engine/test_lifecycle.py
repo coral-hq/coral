@@ -5,14 +5,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import pytest
+from pydantic import ValidationError
 
 from coral.engine import fold, transition
-from coral.engine.lifecycle import REJECTED_CALL_LIMIT
 from coral.engine.types import (
     AnswerGate,
     CancelRun,
     ChooseArrow,
     EffectCompleted,
+    EffectFailed,
     EngineConfig,
     HandoffEvaluated,
     HandoffReceived,
@@ -23,6 +24,7 @@ from coral.engine.types import (
     PauseReason,
     PauseRun,
     PostCloseActivity,
+    Rejection,
     RejectionObserved,
     RejectStreak,
     ResumeRun,
@@ -841,10 +843,12 @@ def test_retry_and_plan_probe_also_route_a_step_that_closed_while_paused(pause: 
     assert all(item.node_id != "fix" for item in paused.state.activations)
 
     unpause: Input = RetryStep(node_id="side")
+    at = NOW
     if isinstance(pause, UsageLimited):
         probe = next(timer for timer in paused.state.timers if timer.kind == "plan_probe")
         unpause = TimerDue(timer_key=probe.key)
-    resumed = drive(graph, [unpause], after=paused, auto_ack=False)
+        at = probe.due_at
+    resumed = drive(graph, [unpause], after=paused, auto_ack=False, now=at)
     assert resumed.log[-1].rejection is None
     assert resumed.state.status == "running"
     created = [
@@ -1111,11 +1115,21 @@ def test_three_tool_illegal_observations_pause() -> None:
 def test_the_rejected_call_limit_is_the_count_that_pauses() -> None:
     graph = _step_graph()
     observed = RejectionObserved(slot_id=SLOT, code="handoff.invalid")
-    below = drive(graph, [RUN, *[observed] * (REJECTED_CALL_LIMIT - 1)])
+    assert drive(graph, [RUN]).state.rejected_call_limit == 3
+    config = EngineConfig(rejected_call_limit=2)
+    below = drive(graph, [RUN, observed], config=config)
+    assert below.state.rejected_call_limit == 2
     assert below.state.status == "running"
+    # The limit the run started with counts, not the config a later input sees.
     at = transition(graph, below.state, observed, NOW)
     assert at.state.status == "paused"
-    assert at.state.reject_streaks == (RejectStreak(slot_id=SLOT, count=REJECTED_CALL_LIMIT),)
+    assert at.state.reject_streaks == (RejectStreak(slot_id=SLOT, count=2),)
+
+
+@pytest.mark.parametrize("field", ["rejected_call_limit", "nudge_limit"])
+def test_the_limits_must_be_at_least_one(field: str) -> None:
+    with pytest.raises(ValidationError):
+        EngineConfig.model_validate({field: 0})
 
 
 def test_evidence_missing_does_not_increment_and_accept_resets() -> None:
@@ -1190,6 +1204,7 @@ def test_only_start_run_has_version_hash() -> None:
         TimerDue,
         RejectionObserved,
         SessionFailed,
+        EffectFailed,
         InfraBackoffExhausted,
         HandoffReceived,
         HandoffEvaluated,
@@ -1214,6 +1229,7 @@ def test_unstarted_run_rejects_lifecycle_commands() -> None:
         SessionFailed(slot_id=SLOT, failure_class="infra.transient", cause="down", fact_key="f"),
         InfraBackoffExhausted(slot_id=SLOT),
         RejectionObserved(slot_id=SLOT, code="tool.illegal"),
+        EffectFailed(effect_key="run-1:1:create_session:work||:0", code="session.not_ready"),
     )
     for command in commands:
         result = transition(graph, drive(graph, []).state, command, NOW)
@@ -1221,3 +1237,444 @@ def test_unstarted_run_rejects_lifecycle_commands() -> None:
         assert result.entry.rejection.code == "rejected"
         assert result.entry.rejection.allowed_values == ("start_run",)
         assert result.state.status is None
+
+
+PAIR = "work||:1"
+FACT_A = "turn:sess-1:1:msg:a"
+FACT_B = "turn:sess-2:1:msg:b"
+
+
+def _pair_graph() -> CompiledGraph:
+    return _graph(
+        workflow_text(
+            [start(), step("work", roster=["implementer", "reviewer"]), end()],
+            [arrow("a1", "start", "work"), arrow("a2", "work", "end")],
+        )
+    )
+
+
+def _turn_end_and_nudge(graph: CompiledGraph, driven: Driven, fact_key: str) -> Driven:
+    """End a turn without a handoff, then deliver the nudge it emitted."""
+    ended = drive(graph, [TurnEnded(slot_id=SLOT, fact_key=fact_key)], after=driven)
+    (nudge,) = ended.log[-1].effects
+    return drive(graph, [EffectCompleted(effect_key=nudge.effect_key)], after=ended)
+
+
+def test_a_second_identical_pause_changes_nothing() -> None:
+    graph = _step_graph()
+    paused = drive(graph, [RUN, PauseRun(reason="user", detail="hold")])
+    again = transition(graph, paused.state, PauseRun(reason="user", detail="hold"), NOW)
+    assert again.state == paused.state
+    assert (again.entry.rejection, again.entry.effects, again.entry.patch) == (None, (), ())
+    assert fold(graph, (*paused.log, again.entry)) == paused.state
+
+    other = transition(graph, paused.state, PauseRun(reason="user", detail="later"), NOW)
+    assert other.state.causes == (
+        PauseCause(reason="user", detail="hold", subject=""),
+        PauseCause(reason="user", detail="later", subject=""),
+    )
+    assert other.state.seq == paused.state.seq + 1
+
+
+def test_resume_reprompts_failed_and_stopped_slots_once() -> None:
+    graph = _pair_graph()
+    paused = drive(
+        graph,
+        [
+            RUN,
+            TurnEnded(slot_id=PAIR, fact_key=FACT_B, origin="user"),
+            SessionFailed(slot_id=SLOT, failure_class="auth", cause="401", fact_key=FACT_A),
+        ],
+    )
+    assert paused.state.status == "paused"
+    assert [slot.status for slot in paused.state.slots] == ["working", "evaluating"]
+    assert paused.state.slots[0].failed_turn == FACT_A
+
+    resumed = drive(graph, [ResumeRun()], after=paused)
+    assert resumed.state.status == "running"
+    assert [
+        (effect.kind, effect.subject, effect.payload) for effect in resumed.log[-1].effects
+    ] == [
+        ("nudge", SLOT, {"fact_key": FACT_A, "reason": "resume"}),
+        ("nudge", PAIR, {"fact_key": "", "reason": "resume"}),
+    ]
+    assert [slot.failed_turn for slot in resumed.state.slots] == [None, None]
+
+    # Their nudges are still undelivered, so a second resume adds none.
+    again = drive(graph, [PauseRun(reason="user", detail="hold"), ResumeRun()], after=resumed)
+    assert again.log[-1].effects == ()
+    delivered = drive(
+        graph,
+        [EffectCompleted(effect_key=effect.effect_key) for effect in resumed.log[-1].effects],
+        after=again,
+    )
+    assert [slot.status for slot in delivered.state.slots] == ["working", "working"]
+    third = drive(graph, [PauseRun(reason="user", detail="hold"), ResumeRun()], after=delivered)
+    assert third.log[-1].effects == ()
+
+
+def test_a_resume_that_leaves_the_run_paused_reprompts_nothing() -> None:
+    graph = _pair_graph()
+    paused = drive(
+        graph,
+        [
+            RUN,
+            SessionFailed(slot_id=SLOT, failure_class="auth", cause="401", fact_key=FACT_A),
+            # A permanent failure only a retry clears.
+            PauseRun(reason="failure_path", detail="dispatch.policy_denied"),
+        ],
+    )
+    resumed = drive(graph, [ResumeRun()], after=paused)
+    assert resumed.log[-1].rejection is None
+    assert resumed.log[-1].effects == ()
+    assert resumed.state.status == "paused"
+    assert [cause.reason for cause in resumed.state.causes] == ["failure_path"]
+    assert [slot.failed_turn for slot in resumed.state.slots] == [FACT_A, None]
+
+
+def test_resume_clears_a_steps_unnamed_turn_failure_and_re_prompts_it_once() -> None:
+    graph = _pair_graph()
+    paused = drive(
+        graph,
+        [
+            RUN,
+            SessionFailed(
+                slot_id=PAIR, failure_class="agent.failed", cause="agent.failed", fact_key=FACT_B
+            ),
+        ],
+    )
+    assert paused.state.causes == (
+        PauseCause(reason="failure_path", detail="agent.failed", subject=PAIR),
+    )
+
+    resumed = drive(graph, [ResumeRun()], after=paused)
+
+    assert resumed.log[-1].rejection is None
+    assert (resumed.state.status, resumed.state.causes) == ("running", ())
+    assert [
+        (effect.kind, effect.subject, effect.payload) for effect in resumed.log[-1].effects
+    ] == [("nudge", PAIR, {"fact_key": FACT_B, "reason": "resume"})]
+    assert [slot.failed_turn for slot in resumed.state.slots] == [None, None]
+    assert fold(graph, resumed.log) == resumed.state
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        # A run-level cause with the same detail is not a step's failed turn.
+        PauseRun(reason="failure_path", detail="agent.failed"),
+        PauseRun(reason="failure_path", detail="transition_too_large"),
+    ],
+    ids=["run_level_same_detail", "unbuildable_commit"],
+)
+def test_resume_leaves_every_other_failure_path_cause_to_a_retry(other: PauseRun) -> None:
+    graph = _pair_graph()
+    paused = drive(
+        graph,
+        [
+            RUN,
+            SessionFailed(
+                slot_id=PAIR, failure_class="agent.failed", cause="agent.failed", fact_key=FACT_B
+            ),
+            other,
+        ],
+    )
+
+    resumed = drive(graph, [ResumeRun()], after=paused)
+
+    assert resumed.state.status == "paused"
+    assert resumed.state.causes == (
+        PauseCause(reason="failure_path", detail=other.detail, subject=""),
+    )
+    assert resumed.log[-1].effects == ()
+    only_other = transition(graph, resumed.state, ResumeRun(), NOW)
+    assert only_other.entry.rejection is not None
+    assert only_other.entry.rejection.code == "resume_not_allowed"
+
+
+def test_the_nudge_cap_pauses_rejected_calls_and_resume_resets_it() -> None:
+    graph = _step_graph()
+    nudged = drive(graph, [RUN])
+    for index in range(3):
+        nudged = _turn_end_and_nudge(graph, nudged, f"turn:sess-1:1:msg:{index}")
+    assert nudged.state.slots[0].nudges == 3
+    assert nudged.state.status == "running"
+
+    capped = drive(graph, [TurnEnded(slot_id=SLOT, fact_key="turn:sess-1:1:msg:3")], after=nudged)
+    assert capped.log[-1].rejection is None
+    assert capped.log[-1].effects == ()
+    assert capped.state.status == "paused"
+    assert capped.state.causes == (
+        PauseCause(reason="rejected_calls", detail="nudge_limit", subject=SLOT),
+    )
+    assert capped.state.slots[0].status == "evaluating"
+
+    resumed = drive(graph, [ResumeRun()], after=capped)
+    assert resumed.state.status == "running"
+    assert resumed.state.slots[0].nudges == 0
+    assert [(effect.kind, effect.payload) for effect in resumed.log[-1].effects] == [
+        ("nudge", {"fact_key": "", "reason": "resume"})
+    ]
+
+
+def test_a_handoff_resets_the_nudge_count_and_paused_turn_ends_do_not_count() -> None:
+    graph = _step_graph()
+    nudged = drive(graph, [RUN])
+    for index in range(2):
+        nudged = _turn_end_and_nudge(graph, nudged, f"turn:sess-1:1:msg:{index}")
+    assert nudged.state.slots[0].nudges == 2
+
+    missed = drive(
+        graph,
+        [
+            HandoffReceived(slot_id=SLOT, body="partial"),
+            HandoffEvaluated(slot_id=SLOT, outcome="evidence_missing", missing=("spec",)),
+        ],
+        after=nudged,
+    )
+    assert (missed.state.slots[0].status, missed.state.slots[0].nudges) == ("working", 0)
+
+    paused = drive(graph, [PauseRun(reason="user", detail="hold")], after=missed)
+    held = drive(graph, [TurnEnded(slot_id=SLOT, fact_key="turn:sess-1:1:msg:9")], after=paused)
+    assert [effect.kind for effect in held.log[-1].effects] == ["nudge"]
+    assert held.state.slots[0].nudges == 0
+
+
+@pytest.mark.parametrize(
+    "failure_class",
+    ["agent.failed", "infra.transient", "plan.usage_limit", "auth", "infra.runner_lost"],
+)
+@pytest.mark.parametrize("closed", [False, True], ids=["closing", "closed"])
+def test_a_failed_turn_after_an_accepted_handoff_is_refused(
+    failure_class: str, closed: bool
+) -> None:
+    graph = _graph(_PLAIN)
+    accepted = drive(graph, _finish(SLOT), after=drive(graph, [RUN]), auto_ack=closed)
+    assert accepted.state.slots[0].status == ("closed" if closed else "closing")
+    assert accepted.state.status == "running"
+    for command in (
+        SessionFailed(slot_id=SLOT, failure_class=failure_class, cause="x", fact_key=FACT_A),
+        UsageLimited(slot_id=SLOT, fact_key=FACT_A),
+    ):
+        refused = transition(graph, accepted.state, command, NOW)
+        assert refused.entry.rejection == Rejection(code="slot.closed")
+        assert refused.state == accepted.state
+        assert refused.entry.effects == ()
+
+
+def test_infra_stages_of_a_slot_that_handed_off_only_disarm() -> None:
+    graph = _graph(_PLAIN)
+    failed = drive(
+        graph,
+        [
+            RUN,
+            SessionFailed(
+                slot_id=SLOT, failure_class="infra.transient", cause="529", fact_key=FACT_A
+            ),
+        ],
+    )
+    first, _second, third = failed.state.timers
+    closing = drive(graph, _finish(SLOT), after=failed, auto_ack=False)
+    assert closing.state.slots[0].status == "closing"
+    fired = drive(
+        graph, [TimerDue(timer_key=first.key)], after=closing, auto_ack=False, now=first.due_at
+    )
+    last = drive(
+        graph, [TimerDue(timer_key=third.key)], after=fired, auto_ack=False, now=third.due_at
+    )
+    assert [entry.effects for entry in last.log[-2:]] == [(), ()]
+    assert last.state.status == "running"
+    assert last.state.causes == ()
+    assert [timer.stage for timer in last.state.timers] == [2]
+
+
+def test_a_pending_close_waits_for_every_cause_and_a_retry_finishes_it() -> None:
+    graph = _graph(
+        workflow_text(
+            [start(), step("side"), step("work"), step("ship"), end()],
+            [
+                arrow("a1", "start", "side"),
+                arrow("a2", "start", "work"),
+                arrow("a3", "work", "ship"),
+                arrow("a4", "side", "end"),
+                arrow("a5", "ship", "end"),
+            ],
+        )
+    )
+    closing = drive(graph, _finish(SLOT), after=drive(graph, [RUN]), auto_ack=False)
+    close = next(effect for effect in closing.state.effects if effect.kind == "close_slot")
+    paused = drive(
+        graph,
+        [
+            # A permanent failure only a retry clears.
+            PauseRun(reason="failure_path", detail="dispatch.policy_denied"),
+            EffectCompleted(effect_key=close.effect_key, payload={"pending_input": True}),
+        ],
+        after=closing,
+        auto_ack=False,
+    )
+    assert [(cause.reason, cause.detail) for cause in paused.state.causes] == [
+        ("failure_path", "dispatch.policy_denied"),
+        ("drift", "pending_input"),
+    ]
+
+    resumed = drive(graph, [ResumeRun()], after=paused, auto_ack=False)
+    assert resumed.log[-1].effects == ()
+    assert resumed.state.status == "paused"
+    work = next(slot for slot in resumed.state.slots if slot.id == SLOT)
+    assert (work.status, work.pending_input) == ("closing", True)
+    assert all(item.node_id != "ship" for item in resumed.state.activations)
+
+    retried = drive(graph, [RetryStep(node_id="side")], after=resumed, auto_ack=False)
+    assert retried.state.status == "running"
+    assert [(effect.kind, effect.subject) for effect in retried.log[-1].effects] == [
+        ("retry_step", "side||:0"),
+        ("create_session", "ship||:0"),
+    ]
+    work = next(slot for slot in retried.state.slots if slot.id == SLOT)
+    assert (work.status, work.pending_input) == ("closed", False)
+    owner = next(item for item in retried.state.activations if item.node_id == "work")
+    assert (owner.status, owner.outcome) == ("closed", "completed")
+
+
+_SIDE_WORK = workflow_text(
+    [start(), step("side"), step("work"), step("ship"), end()],
+    [
+        arrow("a1", "start", "side"),
+        arrow("a2", "start", "work"),
+        arrow("a3", "work", "ship"),
+        arrow("a4", "side", "end"),
+        arrow("a5", "ship", "end"),
+    ],
+)
+
+
+def test_re_fed_causes_of_one_reason_write_nothing_and_keep_their_order() -> None:
+    graph = _graph(_SIDE_WORK)
+    pending = drive(graph, [RUN], auto_ack=False)
+    creates = {effect.subject: effect.effect_key for effect in pending.log[-1].effects}
+    feeds: list[Input] = [
+        EffectFailed(effect_key=creates[SLOT], code="session.not_ready", retryable=True),
+        EffectFailed(effect_key=creates["side||:0"], code="session.host_offline", retryable=True),
+        PauseRun(reason="infra", detail="orchestrator:c2"),
+        PauseRun(reason="infra", detail="anchor:c1"),
+    ]
+    expected = (
+        PauseCause(reason="infra", detail="anchor:c1", subject=""),
+        PauseCause(reason="infra", detail="orchestrator:c2", subject=""),
+        PauseCause(reason="infra", detail="session.host_offline", subject="side||:0"),
+        PauseCause(reason="infra", detail="session.not_ready", subject=SLOT),
+    )
+    for order in (feeds, feeds[::-1]):
+        fed = drive(graph, order, after=pending, auto_ack=False)
+        assert all(entry.rejection is None and entry.patch for entry in fed.log[-4:])
+        assert fed.state.causes == expected
+        state = fed.state
+        # The resync feeds the same failures again and again: nothing changes.
+        for round_no in range(6):
+            refeed = transition(graph, state, order[round_no % len(order)], NOW)
+            assert refeed.state == state
+            assert (refeed.entry.rejection, refeed.entry.effects, refeed.entry.patch) == (
+                None,
+                (),
+                (),
+            )
+
+
+def test_a_retry_that_returns_the_run_to_running_reprompts_failed_slots() -> None:
+    graph = _graph(_SIDE_WORK)
+    paused = drive(
+        graph,
+        [
+            RUN,
+            SessionFailed(slot_id=SLOT, failure_class="auth", cause="401", fact_key=FACT_A),
+            # A permanent failure only a retry clears.
+            PauseRun(reason="failure_path", detail="dispatch.policy_denied"),
+            ResumeRun(),
+        ],
+    )
+    assert paused.state.status == "paused"
+    assert paused.log[-1].effects == ()
+
+    retried = drive(graph, [RetryStep(node_id="side")], after=paused, auto_ack=False)
+    assert retried.state.status == "running"
+    assert [(effect.kind, effect.subject) for effect in retried.log[-1].effects] == [
+        ("retry_step", "side||:0"),
+        ("nudge", SLOT),
+    ]
+    assert retried.log[-1].effects[1].payload == {"fact_key": FACT_A, "reason": "resume"}
+    work = next(slot for slot in retried.state.slots if slot.id == SLOT)
+    assert work.failed_turn is None
+
+
+def test_a_retry_clears_the_pending_input_of_the_slot_it_replaces() -> None:
+    graph = _graph(_PLAIN)
+    closing = drive(graph, _finish(SLOT), after=drive(graph, [RUN]), auto_ack=False)
+    close = next(effect for effect in closing.state.effects if effect.kind == "close_slot")
+    held = drive(
+        graph,
+        [
+            PauseRun(reason="failure_path", detail="stuck"),
+            EffectCompleted(effect_key=close.effect_key, payload={"pending_input": True}),
+            RetryStep(node_id="work"),
+        ],
+        after=closing,
+        auto_ack=False,
+    )
+    slot = held.state.slots[0]
+    assert (slot.status, slot.session_generation, slot.pending_input) == ("pending", 2, False)
+    resumed = drive(graph, [ResumeRun()], after=held, auto_ack=False)
+    assert resumed.state.status == "running"
+    assert resumed.state.slots[0].status == "pending"
+    assert all(item.node_id != "ship" for item in resumed.state.activations)
+
+
+def test_a_retry_drops_the_pending_input_pause_of_the_slot_it_replaces() -> None:
+    graph = _graph(_PLAIN)
+    closing = drive(graph, _finish(SLOT), after=drive(graph, [RUN]), auto_ack=False)
+    close = next(effect for effect in closing.state.effects if effect.kind == "close_slot")
+    held = drive(
+        graph,
+        [
+            PauseRun(reason="failure_path", detail="stuck"),
+            EffectCompleted(effect_key=close.effect_key, payload={"pending_input": True}),
+        ],
+        after=closing,
+        auto_ack=False,
+    )
+    assert {cause.reason for cause in held.state.causes} == {"failure_path", "drift"}
+    retried = drive(graph, [RetryStep(node_id="work")], after=held, auto_ack=False)
+    # The retried slot's pending input is gone, so its drift cause goes with it.
+    assert (retried.state.status, retried.state.causes) == ("running", ())
+
+
+def test_a_retry_keeps_the_pending_input_pause_of_another_slot() -> None:
+    graph = _graph(_PLAIN)
+    closing = drive(graph, _finish(SLOT), after=drive(graph, [RUN]), auto_ack=False)
+    close = next(effect for effect in closing.state.effects if effect.kind == "close_slot")
+    other = PauseCause(reason="drift", detail="pending_input", subject="elsewhere||:0")
+    held = drive(
+        graph,
+        [
+            PauseRun(reason="failure_path", detail="stuck"),
+            EffectCompleted(effect_key=close.effect_key, payload={"pending_input": True}),
+        ],
+        after=closing,
+        auto_ack=False,
+    )
+    with_other = held.state.model_copy(update={"causes": (*held.state.causes, other)})
+    retried = transition(graph, with_other, RetryStep(node_id="work"), NOW)
+    assert (retried.state.status, retried.state.causes) == ("paused", (other,))
+
+
+@pytest.mark.parametrize("failure_class", ["infra.transient", "infra.runner_lost"])
+def test_a_failure_receipted_before_the_handoff_answers_with_its_receipt(
+    failure_class: str,
+) -> None:
+    graph = _graph(_PLAIN)
+    failure = SessionFailed(slot_id=SLOT, failure_class=failure_class, cause="x", fact_key=FACT_A)
+    failed = drive(graph, [RUN, failure])
+    closing = drive(graph, _finish(SLOT), after=failed, auto_ack=False)
+    refeed = transition(graph, closing.state, failure, NOW)
+    assert (refeed.entry.rejection, refeed.entry.receipt_key) == (None, FACT_A)
+    assert refeed.state == closing.state

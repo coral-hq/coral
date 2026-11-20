@@ -27,6 +27,7 @@ from omnigent.server.auth import (
     LEVEL_EDIT,
     AuthProvider,
 )
+from omnigent.server.elicitation_hooks import verdict_response  # CORAL(S6b)
 from omnigent.server.mutation_guards import (  # CORAL(S53)
     SESSION_EVENT,
     MutationAttempt,
@@ -144,7 +145,11 @@ def register_elicitations_routes(
             )
         )
         _resolve_data = {"elicitation_id": elicitation_id, **body.model_dump(exclude_none=True)}
-        await _resolve_elicitation(session_id, _resolve_data, runner_router, conversation_store)
+        decision = await _resolve_elicitation(
+            session_id, _resolve_data, runner_router, conversation_store, resolved_by=user_id
+        )
+        if decision is not None:  # CORAL(S6b): a claimed id's handler answered
+            return verdict_response(decision)
         # Apply any policy writes deferred by the relay tool-call ASK gate
         # (e.g. a cost-budget checkpoint) now that the verdict is in.
         await _apply_pending_policy_ask_writes(

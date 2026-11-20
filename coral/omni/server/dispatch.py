@@ -26,7 +26,7 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from typing import Any, override
 
 from coral.model.ids import fallback_message_id
@@ -46,12 +46,16 @@ from coral.omni.protocols import (
     SendReceipt,
     SessionDispatch,
     TranscriptItem,
+    TurnTranscript,
+    TurnTranscripts,
     engine_message_text,
     queued_input_decision,
+    turn_transcript_of,
 )
+from coral.signals.turn_facts import UNDECIDED
 from coral.stores.stable_ids import content_checksum
 from omnigent.db.db_models import workspace_scope
-from omnigent.entities import Conversation, ConversationItem, MessageData
+from omnigent.entities import Conversation, ConversationItem, ErrorData, MessageData
 from omnigent.errors import ErrorCode, OmnigentError, StaleCursorError
 from omnigent.runtime import pending_inputs
 from omnigent.server.routes.sessions import ensure_runner_connected
@@ -75,6 +79,12 @@ QUEUED_INPUT_SCAN_LIMIT = 1_000
 _RUNNER_AT_WORK = frozenset({"running", "waiting"})
 # Items only a person creates, whoever is recorded as their author.
 _CLIENT_COMMAND_TYPES = frozenset({"slash_command", "terminal_command"})
+# Items a turn writes besides its replies; the error is the one a failed turn records.
+_RUNNER_ITEM_TYPES = frozenset(
+    {"reasoning", "function_call", "function_call_output", "native_tool", "error"}
+)
+# Runner bookkeeping, which is no evidence of a reply.
+_BOOKKEEPING_TYPES = frozenset({"resource_event", "routing_decision", "compaction"})
 _NOT_PERMITTED = frozenset({ErrorCode.FORBIDDEN, ErrorCode.UNAUTHORIZED})
 _UNAVAILABLE = frozenset(
     {
@@ -144,6 +154,38 @@ def _client_input(item: ConversationItem) -> bool:
     )
 
 
+def _transcript_item(
+    item: ConversationItem, author: str | None, candidates: Mapping[str, bytes]
+) -> TranscriptItem:
+    """How the queued-input check and the turn transcript read one item."""
+    client_input = _client_input(item)
+    assistant = (
+        item.type == "message"
+        and isinstance(item.data, MessageData)
+        and item.data.role == "assistant"
+    )
+    # A server notice, such as a recreated workspace, says nothing about the turn.
+    notice = (
+        item.type == "error" and isinstance(item.data, ErrorData) and item.data.level == "info"
+    )
+    return TranscriptItem(
+        item.id,
+        engine=_engine_item(item, author, candidates.get(item.id)),
+        client_input=client_input,
+        runner=not client_input and not notice and (assistant or item.type in _RUNNER_ITEM_TYPES),
+        assistant=assistant,
+        bookkeeping=notice or item.type in _BOOKKEEPING_TYPES,
+    )
+
+
+def _engine_candidates(engine_messages: Mapping[str, bytes]) -> dict[str, bytes]:
+    """The engine's ids and their fallbacks: a message sent under a fallback carries its text."""
+    candidates = dict(engine_messages)
+    for stable_id, checksum in engine_messages.items():
+        candidates.setdefault(fallback_message_id(stable_id), checksum)
+    return candidates
+
+
 def _pending_entry(session_id: str, stable_id: str) -> Mapping[str, Any] | None:
     """The queued (not yet persisted) entry under ``stable_id``, if any."""
     pending_id = pending_inputs.pending_id_for_stable_id(session_id, stable_id)
@@ -155,7 +197,7 @@ def _pending_entry(session_id: str, stable_id: str) -> Mapping[str, Any] | None:
     return None
 
 
-class OmnigentSessionDispatch(SessionDispatch):
+class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
     """
     The engine's session events on this server.
 
@@ -449,64 +491,111 @@ class OmnigentSessionDispatch(SessionDispatch):
             return None
         return item.response_id or None
 
+    async def _newest_first(
+        self, session_id: str, author: str | None, candidates: Mapping[str, bytes]
+    ) -> AsyncGenerator[list[TranscriptItem]]:
+        """
+        The session's items newest first, a page at a time, up to the scan limit.
+
+        :raises StaleCursorError: when the transcript changed under the walk's cursor.
+        """
+        cursor: str | None = None
+        scanned = 0
+        while scanned < QUEUED_INPUT_SCAN_LIMIT:
+            page = await asyncio.to_thread(
+                self._store.list_items,
+                session_id,
+                limit=min(QUEUED_INPUT_PAGE, QUEUED_INPUT_SCAN_LIMIT - scanned),
+                after=cursor,
+                order="desc",
+            )
+            yield [_transcript_item(item, author, candidates) for item in page.data]
+            if not page.has_more or not page.data:
+                return
+            scanned += len(page.data)
+            cursor = page.last_id
+
     @override
     async def queued_user_input(
         self, *, session_id: str, user_id: str | None, engine_messages: Mapping[str, bytes]
     ) -> bool:
         author = attribution_user(user_id)
-        # A message the engine sent under a fallback id carries its primary's text.
-        candidates = dict(engine_messages)
-        for stable_id, checksum in engine_messages.items():
-            candidates.setdefault(fallback_message_id(stable_id), checksum)
-        if self._client_entry_queued(session_id, candidates, author):
+        candidates = _engine_candidates(engine_messages)
+        if any(item.client_input for item in self._queued_items(session_id, candidates, author)):
             return True
-        cursor: str | None = None
-        scanned = 0
-        while scanned < QUEUED_INPUT_SCAN_LIMIT:
-            try:
-                page = await asyncio.to_thread(
-                    self._store.list_items,
-                    session_id,
-                    limit=min(QUEUED_INPUT_PAGE, QUEUED_INPUT_SCAN_LIMIT - scanned),
-                    after=cursor,
-                    order="desc",
-                )
-            except StaleCursorError:
-                return True
-            decision = queued_input_decision(
-                TranscriptItem(
-                    item.id,
-                    engine=_engine_item(item, author, candidates.get(item.id)),
-                    client_input=_client_input(item),
-                )
-                for item in page.data
-            )
-            if decision is not None:
-                return decision
-            if not page.has_more or not page.data:
-                break
-            scanned += len(page.data)
-            cursor = page.last_id
+        try:
+            async with contextlib.aclosing(
+                self._newest_first(session_id, author, candidates)
+            ) as pages:
+                async for page in pages:
+                    decision = queued_input_decision(page)
+                    if decision is not None:
+                        return decision
+        except StaleCursorError:
+            return True
         # No engine message found where one should be: assume input is waiting.
         return True
 
+    @override
+    async def turn_transcript(
+        self, *, session_id: str, user_id: str | None, engine_messages: Mapping[str, bytes]
+    ) -> TurnTranscript:
+        """
+        The turn the newest input started: queued messages first, then pages of items.
+
+        A walk that loses its cursor is undecided. One that reads its whole reach
+        without an engine message or client input is ``beyond_reach``. A message the
+        engine sent under a fallback id is reported by its primary id.
+        """
+        author = attribution_user(user_id)
+        candidates = _engine_candidates(engine_messages)
+        items = self._queued_items(session_id, candidates, author)
+        read = 0
+        if not any(item.engine for item in items):
+            try:
+                async with contextlib.aclosing(
+                    self._newest_first(session_id, author, candidates)
+                ) as pages:
+                    async for page in pages:
+                        items.extend(page)
+                        read += len(page)
+                        if any(item.engine for item in page):
+                            break
+            except StaleCursorError:
+                return UNDECIDED
+        transcript = turn_transcript_of(items)
+        if transcript.newest_input is None and read >= QUEUED_INPUT_SCAN_LIMIT:
+            transcript = dataclasses.replace(transcript, beyond_reach=True)
+        primary = {fallback_message_id(stable_id): stable_id for stable_id in engine_messages}
+        found = transcript.newest_engine_input_id
+        if found in primary:
+            return dataclasses.replace(transcript, newest_engine_input_id=primary[found])
+        return transcript
+
     @staticmethod
-    def _client_entry_queued(
+    def _queued_items(
         session_id: str, candidates: Mapping[str, bytes], author: str | None
-    ) -> bool:
-        """A queued entry that is not the engine's own, by author and text, is client input."""
-        engine_entries = {
-            pending_id: candidates[stable_id]
+    ) -> list[TranscriptItem]:
+        """Messages queued for the session, newest first; an engine one names its stable id."""
+        engine_ids = {
+            pending_id: stable_id
             for stable_id in candidates
             if (pending_id := pending_inputs.pending_id_for_stable_id(session_id, stable_id))
         }
-        return any(
-            not (
-                entry.get("pending_id") in engine_entries
-                and _engine_entry(entry, author, engine_entries[entry["pending_id"]])
+        items: list[TranscriptItem] = []
+        for entry in reversed(pending_inputs.snapshot_for(session_id)):
+            pending_id = str(entry.get("pending_id"))
+            stable_id = engine_ids.get(pending_id)
+            engine = stable_id is not None and _engine_entry(entry, author, candidates[stable_id])
+            items.append(
+                TranscriptItem(
+                    stable_id if engine and stable_id is not None else pending_id,
+                    engine=engine,
+                    client_input=not engine,
+                    pending=True,
+                )
             )
-            for entry in pending_inputs.snapshot_for(session_id)
-        )
+        return items
 
 
 __all__ = [

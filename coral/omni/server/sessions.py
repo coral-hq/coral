@@ -52,7 +52,13 @@ from coral.omni.protocols import (
     SessionRef,
     SessionState,
 )
-from coral.omni.server.bundles import StepBundleRejected, check_hygiene, pack_bundle
+from coral.omni.server.bundles import (
+    StepBundleRejected,
+    agent_owner,
+    check_hygiene,
+    ownerless_runs_allowed,
+    pack_bundle,
+)
 from coral.omni.server.host_access import HostAccessError, OwnerHost, authorize_owner_host
 from coral.omni.server.worktrees import connect_run_worktree_host
 from coral.profiles.bundle_spec import ENGINE_PREFIX, Stance, build_seed_bundle_yaml
@@ -329,7 +335,7 @@ class OmnigentSessionFacade(SessionFacade):
         *,
         ensure_lease: Callable[[], Awaitable[None]],
     ) -> SessionRef:
-        if self._auth_on and request.user_id is None:
+        if request.user_id is None and not ownerless_runs_allowed():
             raise _refused(
                 "session.invalid",
                 f"run {request.run_id} has no owner, and this server requires one",
@@ -651,6 +657,9 @@ class OmnigentSessionFacade(SessionFacade):
         """
         The step's agent, if the server or the run owner authored it.
 
+        An ownerless run's own agents are its server's local user's on a single-user
+        server, as Omnigent reads them (:func:`agent_owner`).
+
         Never a copy of another user's agent (the facade does not mint one), and
         never the run anchor's agent.
         """
@@ -665,7 +674,7 @@ class OmnigentSessionFacade(SessionFacade):
         if (
             agent is None
             or agent.name.lower() == ANCHOR_AGENT_NAME
-            or not (agent.operator_authored or agent.created_by == request.user_id)
+            or not (agent.operator_authored or agent.created_by == agent_owner(request.user_id))
         ):
             raise _agent_not_permitted(agent_id)
         try:
@@ -815,11 +824,8 @@ class OmnigentSessionFacade(SessionFacade):
         try:
             return await asyncio.to_thread(self._bindings.reserve, draft)
         except BindingConflict as exc:
-            raise _refused(
-                "session.binding_conflict",
-                f"session {session_id} is already bound with a different "
-                f"{', '.join(exc.fields) or 'effect'}",
-            ) from exc
+            # The store's message names only this session and its own slot and generation.
+            raise _refused("session.binding_conflict", str(exc)) from exc
 
     async def _require_torn(
         self, request: SessionCreateRequest, session_id: str, conv: Conversation, new: _NewSession

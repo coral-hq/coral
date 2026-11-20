@@ -65,6 +65,7 @@ import {
   seedReadState,
 } from "@/hooks/useUnseenConversations";
 import { useIdleNotifications } from "./useIdleNotifications";
+import { registerInboxKind, type InboxKind } from "@/lib/inboxKinds"; // CORAL(S36)
 
 const useConvMock = vi.mocked(useConversations);
 const getPermMock = vi.mocked(getNotificationPermission);
@@ -771,4 +772,134 @@ it("cancels a deferred notification when its scope leaves the loaded rows", asyn
   expect(showMock).not.toHaveBeenCalled();
   expect(fetchPreviewMock).not.toHaveBeenCalled();
   expect(setBadgeMock).toHaveBeenLastCalledWith(0);
+});
+
+// CORAL(S36): a kind that notifies for some rows itself silences the generic notifier for them.
+it("stays silent for rows a registered kind silences, in both notifier loops", async () => {
+  const kind: InboxKind = {
+    id: "fake",
+    claims: () => false,
+    entries: () => [],
+    badgeCount: 0,
+    incomplete: false,
+    loading: false,
+    error: null,
+    summary: (count) => `${count} fake`,
+    silences: (row) => row.labels["fake.silenced"] === "true",
+    render: () => null,
+  };
+  const silenced = (status: Conversation["status"], pending: number): Conversation => ({
+    ...conv("silenced", status, pending),
+    labels: { "fake.silenced": "true" },
+  });
+  const unregister = registerInboxKind(kind);
+  try {
+    setConversations([silenced("running", 0), conv("plain", "running", 0)]);
+    const { rerender } = renderHook(() => useIdleNotifications());
+    // A new prompt on both rows, then a turn end on both.
+    setConversations([silenced("running", 1), conv("plain", "running", 1)]);
+    rerender();
+    setConversations([silenced("idle", 1), conv("plain", "idle", 1)]);
+    rerender();
+    await settle();
+
+    expect(showMock.mock.calls.map(([options]) => options.tag)).toEqual([
+      "omnigent:session:plain",
+      "omnigent:session:plain",
+    ]);
+  } finally {
+    unregister();
+  }
+});
+
+// CORAL(S36): the kind registers after the notifier mounted, as an app runtime does.
+it("silences a row from a kind registered after mount until that kind unregisters", () => {
+  const kind: InboxKind = {
+    id: "late",
+    claims: () => false,
+    entries: () => [],
+    badgeCount: 0,
+    incomplete: false,
+    loading: false,
+    error: null,
+    summary: (count) => `${count} late`,
+    silences: () => true,
+    render: () => null,
+  };
+  setConversations([conv("a", "running", 0)]);
+  const { rerender } = renderHook(() => useIdleNotifications());
+  let unregister = () => {};
+  act(() => {
+    unregister = registerInboxKind(kind);
+  });
+  try {
+    setConversations([conv("a", "running", 1)]);
+    rerender();
+    expect(showMock).not.toHaveBeenCalled();
+
+    act(() => unregister());
+    setConversations([conv("a", "running", 2)]);
+    rerender();
+    expect(showMock.mock.calls.map(([options]) => options.tag)).toEqual(["omnigent:session:a"]);
+  } finally {
+    unregister();
+  }
+});
+
+// CORAL(S36): a kind whose `silences` throws silences nothing; the notifier keeps working.
+it("keeps notifying when a kind's silences throws", () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const unregister = registerInboxKind({
+    id: "faulty-silences",
+    claims: () => false,
+    entries: () => [],
+    badgeCount: 0,
+    incomplete: false,
+    loading: false,
+    error: null,
+    summary: () => "",
+    silences: () => {
+      throw new Error("kind bug");
+    },
+    render: () => null,
+  });
+  try {
+    setConversations([conv("a", "running", 0)]);
+    const { rerender } = renderHook(() => useIdleNotifications());
+    setConversations([conv("a", "running", 1)]);
+    rerender();
+    expect(showMock.mock.calls.map(([options]) => options.tag)).toEqual(["omnigent:session:a"]);
+    expect(warn).toHaveBeenCalledOnce();
+  } finally {
+    unregister();
+  }
+});
+
+// CORAL(S36): a kind registered while a turn end settles silences it when it fires.
+it("drops a deferred turn end for a row a kind silenced during the settle window", async () => {
+  setConversations([conv("a", "running")]);
+  const { rerender } = renderHook(() => useIdleNotifications());
+  setConversations([conv("a", "idle")]);
+  rerender();
+  let unregister = () => {};
+  act(() => {
+    unregister = registerInboxKind({
+      id: "settling",
+      claims: () => false,
+      entries: () => [],
+      badgeCount: 0,
+      incomplete: false,
+      loading: false,
+      error: null,
+      summary: () => "",
+      silences: () => true,
+      render: () => null,
+    });
+  });
+  try {
+    await settle();
+    expect(showMock).not.toHaveBeenCalled();
+  } finally {
+    unregister();
+  }
 });

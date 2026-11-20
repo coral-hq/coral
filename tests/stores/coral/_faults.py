@@ -32,14 +32,42 @@ def crash_around(
     attr: str,
     *,
     when: Literal["before", "after"],
+    matching: Callable[..., bool] | None = None,
 ) -> None:
-    """Make ``owner.attr`` raise SimulatedCrash before or after the real call runs."""
+    """Make ``owner.attr`` raise SimulatedCrash before or after the real call runs.
+
+    With ``matching``, only calls whose arguments it accepts crash; the others run unchanged.
+    """
     original = getattr(owner, attr)
 
     def crashing(*args: Any, **kwargs: Any) -> Any:
+        if matching is not None and not matching(*args, **kwargs):
+            return original(*args, **kwargs)
         if when == "before":
             raise SimulatedCrash(f"crash before {attr}")
         original(*args, **kwargs)
+        raise SimulatedCrash(f"crash after {attr}")
+
+    monkeypatch.setattr(owner, attr, crashing)
+
+
+def crash_around_async(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: object,
+    attr: str,
+    *,
+    when: Literal["before", "after"],
+    matching: Callable[..., bool] | None = None,
+) -> None:
+    """:func:`crash_around` for a coroutine function: the crash comes when it is awaited."""
+    original = getattr(owner, attr)
+
+    async def crashing(*args: Any, **kwargs: Any) -> Any:
+        if matching is not None and not matching(*args, **kwargs):
+            return await original(*args, **kwargs)
+        if when == "before":
+            raise SimulatedCrash(f"crash before {attr}")
+        await original(*args, **kwargs)
         raise SimulatedCrash(f"crash after {attr}")
 
     monkeypatch.setattr(owner, attr, crashing)

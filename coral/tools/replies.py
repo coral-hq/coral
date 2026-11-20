@@ -15,6 +15,7 @@ from coral.tools.port import EngineRefused
 from coral.tools.schemas import (
     DECISION_CLOSED,
     EVALUATION_IN_PROGRESS,
+    EVIDENCE_MISSING,
     HANDOFF_INVALID,
     NOT_ORCHESTRATOR,
     NOT_RUN_MEMBER,
@@ -41,6 +42,14 @@ NOT_A_MEMBER = (
     "This session is not a Coral step that can make this call. Stop now and end your turn."
 )
 BUSY = "Coral is busy; make the same call again in a moment."
+EVIDENCE_RERUN = "Run the commands named above, then call coral_submit_handoff again."
+EVIDENCE_FINAL = (
+    "This step is out of attempts, so Coral did not take the handoff. Stop now and end your turn."
+)
+EVIDENCE_WAIT = (
+    "Coral is still checking the commands this step ran; call coral_submit_handoff again "
+    "in a moment."
+)
 NOT_THE_ORCHESTRATOR = (
     "Only the run's current orchestrator can choose arrows. Stop now and end your turn."
 )
@@ -85,6 +94,21 @@ def stopping(reply: ToolReply, reason: str) -> ToolReply:
 def busy() -> ToolReply:
     """Too many decisions in flight; uncounted, and the same call may be made again."""
     return ToolReply(accepted=False, reason=EVALUATION_IN_PROGRESS, next=BUSY)
+
+
+def evidence_missing(message: str, *, final: bool) -> ToolReply:
+    """A ``done`` handoff whose commands did not pass; counted against the step's attempts."""
+    return ToolReply(
+        accepted=False,
+        reason=EVIDENCE_MISSING,
+        next=EVIDENCE_FINAL if final else EVIDENCE_RERUN,
+        message=message,
+    )
+
+
+def evidence_in_progress() -> ToolReply:
+    """Coral cannot judge the commands yet; uncounted, and the same call may be made again."""
+    return ToolReply(accepted=False, reason=EVALUATION_IN_PROGRESS, next=EVIDENCE_WAIT)
 
 
 def not_run_member() -> ToolReply:

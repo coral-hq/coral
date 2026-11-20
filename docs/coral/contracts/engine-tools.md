@@ -1,14 +1,14 @@
-# Contract K6 v0: Coral engine tools
+# Contract K6 v1: Coral engine tools
 
-- **Status:** Draft v0, dark. The production catalog (`CATALOG` in
-  `coral/tools/catalog.py`) is empty and no server has a decision port, so no
-  agent is offered an engine tool and the bridge registers nothing. The
-  engine-to-store bridge (ENG-04/DUR-04) supplies a `RunDecisionPort` and fills
-  the catalog; this page is its input.
+- **Status:** Draft v1, live. The production catalog (`CATALOG` in
+  `coral/tools/catalog.py`) lists both tools, and every server with a usable
+  operational database answers them through `StoreDecisionPort`, the engine
+  bridge's port over the run store.
 - **Code:** declarations in `coral/tools/catalog.py`; argument schemas and the
   reply in `coral/tools/schemas.py`; reply texts in `coral/tools/replies.py`;
-  the port in `coral/tools/port.py`; dedup in `coral/tools/dispatch.py`; the
-  planners in `coral/tools/handlers/`; the server side in
+  the port protocol in `coral/tools/port.py` and the store port in
+  `coral/bridge/port.py`; dedup in `coral/tools/dispatch.py`; the planners in
+  `coral/tools/handlers/`; the server side in
   `coral/omni/server/tool_bridge.py`; the runner side in
   `coral/omni/runner/tool_provider.py`.
 - **Related:** [`session-facade.md`](session-facade.md) (bindings, the run's
@@ -25,6 +25,10 @@
 Both schemas set `additionalProperties: false`. The anchor gets no tool. A
 spec on a native harness gets none either. Each tool adds one instruction
 sentence to the prompt (S12), after the authored text.
+
+The tools are offered by the bundle's stance (`params.coral.generated.stance`);
+only the session's binding authorizes a call. A session no run binds is
+offered them too, and every call it makes gets `not_run_member`.
 
 ## Reply
 
@@ -55,9 +59,11 @@ result, keys sorted:
 | `decision_closed` | choose | no | the decision was made with another label, or the run finished |
 | `not_orchestrator` | choose | no | the caller is not the run's current orchestrator |
 
-`evidence.missing`, `run.taken_over` and `recipient_closing` are reserved and
-never produced. Only `handoff.invalid` counts toward a slot's rejected-call
-streak; the third in a row pauses the run, and that reply already says stop.
+`evidence.missing` answers a `done` handoff whose `done_when` commands did not
+pass; it spends one of the step's attempts, not a rejected call
+([`evidence.md`](evidence.md)). `run.taken_over` and `recipient_closing` are
+reserved and never produced. Only `handoff.invalid` counts toward a slot's
+rejected-call streak; the third in a row pauses the run, and that reply already says stop.
 Every other refusal writes nothing and is logged as one info line with the
 tool, session, run and reason, never the arguments. No text for a paused,
 cancelled or finished run, or a replaced session, asks for another call.
@@ -104,32 +110,38 @@ orchestrator has none.
 
 | Seam | Role |
 |---|---|
-| S50 | `omnigent.tool_providers` entry point; Coral's provider gives each stance its tools, lists every catalog tool as server-dispatched and adds `coral_runner:1` to the host hello |
+| S50 | `omnigent.tool_providers` entry point; Coral's provider gives each stance its tools, lists every catalog tool as server-dispatched and adds `coral_runner:2` to the host hello |
 | S7 | the runner's `ToolManager` registers the provider's tools |
 | S8 | the runner forwards server-dispatched names to the server's `/mcp` |
 | S12 | the tools' instruction text is appended to the prompt |
 | S10 | `POST /v1/sessions/{id}/mcp` runs a registered server tool after TOOL_CALL policy, only for a session whose spec a provider gave the tool |
 | S49 | `runner_proven`: the caller holds a tunnel token bound to the session's runner, or one the server allows |
 
-The bridge (`register_engine_tools`) registers one S10 handler per catalog
-tool. S10 has already loaded the session and its spec and run TOOL_CALL policy.
-Each call is then checked in this order; the first three are transport faults
-(JSON-RPC `-32000`), each logged as a warning naming the session (never the
-arguments or the operation id), and the bridge reads nothing before them:
+The tool bridge (`register_engine_tools`) registers one S10 handler per
+catalog tool. S10 has already loaded the session and its spec and run
+TOOL_CALL policy. Each call is then checked in this order; the first three are
+transport faults (JSON-RPC `-32000`), each logged as a warning naming the
+session (never the arguments or the operation id), and nothing is read before
+them:
 
 1. No operation id: "Coral tools need the runner's operation id".
 2. Not runner-proven, on every server: "Coral tools can be called only by the
    session's own runner".
 3. No decision port: "Coral's workflow engine is not running on this server".
-4. `find_by_session(current_workspace_id(), session_id)` in a worker thread.
-   A store error is `-32000` "could not look up this session; retry"; no
-   binding is a `not_run_member` reply. The read is fresh on every call (the
-   planners read the binding's progress), never a cache of found rows, and
-   never a `coral.*` label: `register_engine_tools` takes a
-   `FreshBindingLookup` and raises `TypeError`, even for an empty catalog,
-   unless its `reads_fresh` is true. A cache that keeps found rows must not
-   set it, or a binding cached at `reserved` would answer `not_run_member`.
-5. The dispatcher: its `TransportError`s are `-32000`.
+   A server passes `port=None` only in tests.
+4. `find_by_session(current_workspace_id(), session_id)` on the decision
+   pool. A store error, or no answer within 10 s, is `-32000` "could not look
+   up this session; retry"; no binding is a `not_run_member` reply. The read
+   is fresh on every call (the planners read the binding's progress), never a
+   cache of found rows, and never a `coral.*` label: `register_engine_tools`
+   takes a `FreshBindingLookup` and raises `TypeError`, even for an empty
+   catalog, unless its `reads_fresh` is true. A cache that keeps found rows
+   must not set it, or a binding cached at `reserved` would answer
+   `not_run_member`.
+5. The dispatcher: its `TransportError`s are `-32000`. Any other failure of
+   the port or the store (a lock timeout, a run that cannot be loaded) is
+   logged without SQL text or parameters (`describe_exception`) and answered
+   "Coral could not answer this call; retry shortly".
 
 TOOL_RESULT policy is skipped for these results, as for `sys_advise_models`.
 Runner proof is runner-granular: anything holding the runner's token can call
@@ -144,31 +156,38 @@ as any session that runner serves.
   goes away does not cancel it). A caller waits at most 30 s, then gets a
   retryable `-32000`; the decision goes on and the next resend gets its reply.
 - Decisions on one run run one at a time per process. At most 64 run or wait at
-  once; a new call past that gets an uncounted `evaluation_in_progress` "busy"
-  reply.
+  once, and at most 4 on one run; a new call past either gets an uncounted
+  `evaluation_in_progress` "busy" reply. A resend of a call in flight joins it
+  and is not counted.
+- The binding lookup, `find_reply` and `decide` run on a pool of 4 threads of
+  their own (`coral-decision`), never on the event loop's default executor or
+  the bridge's pool. A call still waiting for a thread when the server stops
+  is answered with a retryable `-32000`; nothing was decided.
 - Across processes and restarts, the port's stored reply (below).
 
-## `RunDecisionPort` (the bridge implements it)
+## `RunDecisionPort`
 
 `find_reply(workspace_id, run_id, cksum)` returns the stored reply or `None`.
-`decide(workspace_id, run_id, planner, cksum)` must, on every attempt:
+`decide(workspace_id, run_id, planner, cksum, *, actor)` must, on every
+attempt:
 
 1. Return the reply stored under `cksum`, if any.
 2. Load a snapshot: the run row and its folded engine state, with the graph
    pinned to the run's version hash. A missing run raises `RunNotFound`.
-3. Run the planner. A `Reply` is returned as it is; nothing is written.
+3. Run the planner. A `Reply` is returned as it is, unless a reply was stored
+   under `cksum` since step 1 (another server committed the same call), which
+   is returned instead; nothing is written.
 4. For a `Commit`, apply each input with `transition` in order. If one is
    refused, write nothing: return the reply for an observation (a counted
    refusal), else raise `EngineRefused` (the dispatcher maps the code with the
    call's tool; a code with no reply is a logged `-32000`).
 5. Otherwise write every log entry, its effects and the reply under `cksum` in
-   one `apply_transition`, compare-and-swap on the snapshot's run version.
+   one `apply_transition`, compare-and-swap on the snapshot's run version. The
+   entries record `actor`, the calling session.
 6. On a version conflict start again; after 5 attempts raise `RunContended`
    (`-32000`, "busy").
 
-The port does not log; it bounds each `decide` with database statement and
-lock timeouts. The planners' fences hold only if the bridge also keeps these
-rules:
+The planners' fences hold only if the bridge also keeps these rules:
 
 - a retried slot's new session is bound with the slot's current
   `session_generation`, or every handoff from it is `slot.superseded`;
@@ -177,54 +196,98 @@ rules:
   `orchestrator_session_id`) bumps the compare-and-swap version;
 - a slot's handoff body is stored and read back byte for byte.
 
+### `StoreDecisionPort`
+
+`coral/bridge/port.py` implements the port over the run store, through the
+engine bridge:
+
+- **Replies** live in `coral_tool_replies`, keyed by workspace, run and
+  checksum, and are written in the decision's own commit
+  ([`persistence.md`](persistence.md)).
+- **The snapshot** is the bridge's `load`: the run's rows, the graph pinned in
+  `coral_workflow_versions`, the engine config frozen in the run spec, and the
+  state folded from the run's engine log. Inputs are applied with that frozen
+  config.
+- **The commit** is built by the bridge's `build_commit`: the entries as
+  engine log rows (actor kind `STEP_AGENT` for a handoff or a counted
+  refusal, `ORCHESTRATOR` for a choice; `actor_ref` the calling session), the
+  work their effects queue (a close, for example), the run and slot
+  projections, and the reply.
+- **A retry** follows a version conflict, or an `IntegrityError` on the reply
+  key when another writer stored a reply under the same checksum, after a
+  jittered wait of about 10 ms. Any other `IntegrityError` is raised.
+- **A commit that cannot be built** (more rows than one commit holds, an
+  oversized payload) pauses the run `failure_path` visibly; the call is
+  planned again and answered `run.paused`. A run that cannot be loaded is
+  paused once and the call fails as a retryable transport error.
+- **Rules.** (a) holds trivially: no step is retried yet, because the
+  `retry_step` effect queues no work; the restart ladder that adds retries
+  must keep it. (b) is the unique index
+  `uq_coral_session_bindings_slot_generation`. (c) holds because every
+  `apply_transition` bumps the version. (d) holds because the body is stored
+  inside the `HandoffReceived` entry's JSON.
+- **Bounds.** The port does not log. Each write waits at most 10 s for the
+  run row's lock, and 15 s for its statement, on PostgreSQL and CockroachDB;
+  MySQL and SQLite keep their own lock waits, and the reads have no statement
+  timeout. The dispatcher bounds the caller's wait (30 s), and the tool bridge
+  the binding lookup's (10 s).
+
 ## Wiring
 
 On a usable operational database `coral_lifespan` builds one binding store,
 shared by the session engine and `_wire_guards`, which runs whether or not the
 session engine is wired. `_wire_guards` calls
-`register_engine_tools(catalog=CATALOG, port=None, ...)`: with the empty
-catalog it registers nothing; once the catalog lists a tool, every call
-answers "the engine is not running" until a port is passed. Registering loads
-the installed tool providers first, so S10's grant check never scans entry
-points on the event loop. Each registration's unregister is on the lifespan's
-exit stack. A catalog tool that no planner answers fails registration with
-`ValueError`. One lifespan per process: a later one replaces the registrations.
+`register_engine_tools(catalog=CATALOG, port=StoreDecisionPort(bridge), ...)`
+with the decision pool's `run` as the thread runner. Without a usable
+database nothing registers. Registering loads the installed tool providers
+first, so S10's grant check never scans entry points on the event loop. Each
+registration's unregister is on the lifespan's exit stack, and the decision
+pool closes after the tools are removed. A catalog tool that no planner
+answers fails registration with `ValueError`. One lifespan per process: a
+second one entered while one runs raises before it registers anything
+([`plugin.md`](plugin.md)).
 
-## Not in v0
+## Not in this version
 
-The bridge and its port; lazy orchestrator creation, decision requests,
-reminders and re-briefs; counting orchestrator rejections; `items` (ENG-08);
-`refresh_note`; the evidence check.
+Counting orchestrator rejections (ENG-06); replacing an orchestrator (the
+generation stays 1; the restart ladder); `items` (ENG-08); `refresh_note`
+(SES-07); evidence scopes other than `per_agent` and native steps' commands
+(HRN-03). Owners are in
+[`session-facade.md`](session-facade.md), "Deferred work and owners".
 
-### Left to the bridge
+### What the bridge does
 
-The bridge's ticket (ENG-04/DUR-04) must also settle these before it fills the
-catalog. Each has a row in [`session-facade.md`](session-facade.md), "Deferred
-work and owners", which also holds one lifespan per process.
+Each item below was left to the bridge in v0; each has its line in
+[`session-facade.md`](session-facade.md), "The engine bridge".
 
-- **Stored replies.** No table stores a reply under its checksum yet, so
-  `find_reply` and step 5 need a schema change (a migration). The snapshot
-  must load the graph pinned to the run's version.
-- **Orchestrator bindings.** The binding store requires a `slot_id` for every
-  step binding, but the engine has no orchestrator slot, so the bridge must
-  choose a stable value. Nothing writes `CoralRun.orchestrator_session_id`
-  yet, so until the bridge does, `coral_choose_arrow` answers
-  `not_orchestrator`.
+- **Stored replies.** `coral_tool_replies` stores each reply under its
+  checksum, in the same commit as the decision. The snapshot loads the graph
+  pinned to the run's version.
+- **Orchestrator bindings.** The orchestrator's binding uses
+  `slot_id="orchestrator"`, which no engine slot id can take (they all contain
+  `|`), slot role `orchestrator` and generation 1. The commit that opens a
+  run's first decision writes `CoralRun.orchestrator_session_id` and queues
+  the orchestrator's create and the decision's request, so `coral_choose_arrow`
+  works end to end. Each later decision gets a request; an unanswered one gets
+  a reminder at 30 and at 60 minutes, and every return to running asks again.
+  At 60 minutes the run owner also gets a `watchdog` alert in the workflow
+  Inbox, resolved once the decision is made
+  ([`gates-and-inbox.md`](gates-and-inbox.md)).
 - **Early submit.** A handoff sent before the brief's `send_input` completes
-  is refused with `evaluation_in_progress` (retry). The bridge may keep that,
-  or accept it early by making a late `send_input` completion a receipt.
-- **Paused handoffs.** The run guard lets engine tools through on a stopped
-  run, but the reducer refuses a handoff while the run is paused, so a paused
-  step gets `run.paused` with a stop `next`. The roadmap's RUL-01 line "a
-  paused step can still hand off" holds only at the policy layer. Whether the
-  engine should accept and hold such a handoff is decided with ENG-06.
-- **Stopped turns.** Every run-guard and `[run.state_unavailable]` deny
-  tells the agent to stop and end its turn, which leaves its slot `evaluating`
-  with no handoff. The paused text promises "Coral resumes this step when the
-  run resumes", so on resume, and after the store recovers, the bridge must
-  nudge or re-brief such slots.
-- **Nudge lease.** Reconcile leases only `send_input` and `create_session`
-  (`_LEASED_KINDS` in `coral/engine/reconcile.py`). A nudged turn's
-  `TurnEnded` that arrives before the nudge's completion is folded is refused
-  until a later reconcile emits it again. Add `nudge` when mapping effects to
-  work.
+  is still refused with `evaluation_in_progress` (retry). The brief's row is
+  fed back as soon as it finishes, so the window is short, and the retry is
+  accepted.
+- **Paused handoffs.** The engine still refuses a handoff while the run is
+  paused, so the step gets `run.paused` with a stop `next`. The resume
+  re-prompts the step with one nudge, and it hands off again. RUL-01's "a
+  paused step can still hand off" holds only at the policy layer.
+- **Stopped turns.** A resume, or a plan-limit probe that clears its pause,
+  re-prompts with one nudge every slot that is `evaluating` with no handoff or
+  whose last turn failed; a resume also clears a step's failed turn no rule
+  names (`agent.failed`), so that slot is re-prompted too (see
+  [`session-facade.md`](session-facade.md), "What a resume clears"). After a store outage the resync re-gathers the turn
+  of each working slot of a running run every five minutes, so a turn end
+  lost then is folded and nudged.
+- **Nudge lease.** `nudge` is a leased kind (`_LEASED_KINDS` in
+  `coral/engine/machines/slot.py`). A turn-end signal for a slot whose send or
+  nudge has no receipt yet is held and applied after the receipt.

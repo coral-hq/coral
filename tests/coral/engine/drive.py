@@ -36,8 +36,9 @@ def drive(
     config: EngineConfig | None = None,
     auto_ack: bool = True,
     after: Driven | None = None,
+    now: datetime = NOW,
 ) -> Driven:
-    """Apply ``steps``, continuing ``after`` when given.
+    """Apply ``steps`` at ``now``, continuing ``after`` when given.
 
     When ``auto_ack`` is set, complete session, brief, and close.
     """
@@ -47,8 +48,8 @@ def drive(
     pending: list[Input] = list(steps)
     while pending:
         command = pending.pop(0)
-        result = transition(graph, state, command, NOW, cfg)
-        assert result.entry.now == NOW
+        result = transition(graph, state, command, now, cfg)
+        assert result.entry.now == now
         log.append(result.entry)
         assert fold(graph, log, cfg) == result.state
         assert_handoff_bodies_settled(result.state)

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import dataclass
 
 import pytest
 from sqlalchemy import event
 
-from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole, SlotRole
+from coral.db.enum_codecs import RunStatus, SessionBindingProgress, SessionBindingRole, SlotRole
 from coral.model.ids import anchor_session_id
+from coral.stores.fakes import FakeRunStore
+from coral.stores.protocols import RunStartSpec, RunStore, Transition
+from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import (
     BindingConflict,
     BindingNotFound,
@@ -18,9 +22,11 @@ from coral.stores.session_bindings import (
     SessionBindingLookup,
     SessionBindings,
     SqlAlchemySessionBindingStore,
+    binding_from_draft,
     effect_checksum,
 )
 from omnigent.db import current_query_name
+from tests.coral.workspace._executor_fakes import FakeBindings
 from tests.stores.coral._faults import fresh_process, run_racing
 
 WORKSPACE = 7
@@ -284,3 +290,168 @@ def test_find_by_session_reads_only_the_callers_workspace(coral_db_uri: str) -> 
     assert reopened.find_by_session(WORKSPACE, STEP_SESSION) == mine
     found = reopened.find_by_session(WORKSPACE + 1, STEP_SESSION)
     assert found is not None and found.progress is SessionBindingProgress.INITIALIZED
+
+
+# ── Rule (b) and the bound-session listing, on SQL and on FakeBindings ─────────
+
+
+@dataclass(frozen=True)
+class _BindingWorld:
+    bindings: SqlAlchemySessionBindingStore | FakeBindings
+    runs: RunStore
+
+
+@pytest.fixture(params=["sql", "fake"])
+def world(request: pytest.FixtureRequest) -> _BindingWorld:
+    if request.param == "sql":
+        uri = request.getfixturevalue("coral_db_uri")
+        return _BindingWorld(_store(uri), SqlAlchemyCoralRunStore(uri))
+    runs = FakeRunStore()
+    return _BindingWorld(FakeBindings(run_store=runs, clock=_clock, reservable=True), runs)
+
+
+def _run(runs: RunStore, workspace_id: int, start_key: str, status: RunStatus) -> str:
+    run = runs.start_run(
+        RunStartSpec(
+            workflow_id="f" * 32,
+            version_id="e" * 32,
+            title=start_key,
+            request_preview="",
+            workspace_id=workspace_id,
+        ),
+        start_key=start_key,
+    )
+    if status is not RunStatus.STARTING:
+        runs.apply_transition(
+            run.id, run.version, Transition(status=int(status)), workspace_id=workspace_id
+        )
+    return run.id
+
+
+def test_second_session_for_one_slot_and_generation_conflicts(world: _BindingWorld) -> None:
+    bindings = world.bindings
+    stored = bindings.reserve(_step())
+
+    with pytest.raises(BindingConflict) as raised:
+        bindings.reserve(_step(session_id="f" * 32, effect_key="step-effect-2"))
+    assert raised.value.fields == ("slot_id", "session_generation")
+    assert "slot Review/0:reviewer generation 2" in str(raised.value)
+    assert STEP_SESSION not in str(raised.value)
+    assert bindings.get(WORKSPACE, "f" * 32, run_id=RUN) is None
+
+    # The same effect for another session names the effect, as before.
+    with pytest.raises(BindingConflict) as raised:
+        bindings.reserve(_step(session_id="f" * 32))
+    assert raised.value.fields == ("effect_cksum",)
+
+    # The slot's next generation, and the same slot in another run, are other slots.
+    next_generation = bindings.reserve(
+        _step(session_id="f" * 32, effect_key="step-effect-2", session_generation=3)
+    )
+    other_run = bindings.reserve(
+        _step(session_id="c" * 32, effect_key="step-effect-3", run_id=OTHER_RUN)
+    )
+    assert bindings.list_for_run(WORKSPACE, RUN) == [stored, next_generation]
+    assert bindings.list_for_run(WORKSPACE, OTHER_RUN) == [other_run]
+
+
+def test_list_bound_sessions_returns_created_step_sessions_of_unfinished_runs(
+    world: _BindingWorld,
+) -> None:
+    runs = {status: _run(world.runs, WORKSPACE, status.name, status) for status in RunStatus}
+    other_workspace_run = _run(world.runs, WORKSPACE + 1, "elsewhere", RunStatus.RUNNING)
+    created = SessionBindingProgress.ROW_CREATED
+
+    def step(session: str, run_id: str, **changes: object) -> SessionBinding:
+        fields: dict[str, object] = {
+            "session_id": session * 32,
+            "run_id": run_id,
+            "effect_key": f"create {session}",
+            "slot_id": f"slot {session}",
+            "progress": created,
+        }
+        return world.bindings.reserve(_step(**{**fields, **changes}))
+
+    listed = [
+        step("1", runs[RunStatus.STARTING]),
+        step("2", runs[RunStatus.RUNNING], progress=SessionBindingProgress.INITIALIZED),
+        step("3", runs[RunStatus.PAUSED]),
+        step(
+            "4",
+            runs[RunStatus.RUNNING],
+            slot_id="orchestrator",
+            slot_role=SlotRole.ORCHESTRATOR,
+            session_generation=1,
+        ),
+        step("5", other_workspace_run, workspace_id=WORKSPACE + 1),
+    ]
+    step("6", runs[RunStatus.RUNNING], progress=SessionBindingProgress.RESERVED)
+    for status, session in (
+        (RunStatus.COMPLETED, "7"),
+        (RunStatus.FAILED, "8"),
+        (RunStatus.CANCELLED, "9"),
+    ):
+        step(session, runs[status])
+    step("c", "0" * 32)
+    world.bindings.reserve(
+        _anchor(
+            run_id=runs[RunStatus.RUNNING],
+            session_id=anchor_session_id(WORKSPACE, runs[RunStatus.RUNNING]),
+            progress=SessionBindingProgress.INITIALIZED,
+        )
+    )
+    expected = sorted(listed, key=lambda binding: (binding.workspace_id, binding.session_id))
+
+    assert world.bindings.list_bound_sessions() == expected
+    pages: list[SessionBinding] = []
+    cursor: tuple[int, str] | None = None
+    while page := world.bindings.list_bound_sessions(cursor=cursor, limit=2):
+        pages.extend(page)
+        cursor = (page[-1].workspace_id, page[-1].session_id)
+    assert pages == expected
+    with pytest.raises(ValueError, match="limit"):
+        world.bindings.list_bound_sessions(limit=0)
+
+
+def test_bound_session_listing_reads_the_run_of_the_bindings_own_workspace(
+    world: _BindingWorld,
+) -> None:
+    # The same user and start key give the same run id in both workspaces.
+    running = _run(world.runs, WORKSPACE, "shared key", RunStatus.RUNNING)
+    completed = _run(world.runs, WORKSPACE + 1, "shared key", RunStatus.COMPLETED)
+    assert running == completed
+    created = SessionBindingProgress.ROW_CREATED
+    listed = world.bindings.reserve(_step(run_id=running, progress=created))
+    world.bindings.reserve(_step(workspace_id=WORKSPACE + 1, run_id=completed, progress=created))
+
+    assert world.bindings.list_bound_sessions() == [listed]
+
+
+def test_racing_sessions_for_one_slot_and_generation_bind_one(coral_db_uri: str) -> None:
+    store = _store(coral_db_uri)
+
+    outcomes = run_racing(
+        4,
+        lambda index: store.reserve(
+            _step(session_id=str(index) * 32, effect_key=f"step-effect-{index}")
+        ),
+    )
+
+    errors = [outcome.error for outcome in outcomes]
+    assert sum(error is None for error in errors) == 1
+    for error in errors:
+        assert error is None or (
+            isinstance(error, BindingConflict)
+            and error.fields == ("slot_id", "session_generation")
+        )
+    assert len(store.list_for_run(WORKSPACE, RUN)) == 1
+
+
+def test_fake_bindings_refuse_writes_unless_the_test_allows_them() -> None:
+    # Executor tests keep the default, so an executor that writes a binding fails.
+    bindings = FakeBindings([binding_from_draft(_step(), 0)])
+
+    with pytest.raises(AssertionError, match="never write a binding"):
+        bindings.reserve(_step(session_id="f" * 32, effect_key="step-effect-2"))
+    with pytest.raises(AssertionError, match="never write a binding"):
+        bindings.record_progress(WORKSPACE, STEP_SESSION, SessionBindingProgress.ROW_CREATED)

@@ -1,4 +1,4 @@
-"""Failure classes. Spend-cap text wins over 429 and over 403."""
+"""Failure classes. Spend-cap text wins over 429 and over 403. Causes are fixed tokens."""
 
 from __future__ import annotations
 
@@ -21,20 +21,12 @@ _RUNNER_CODES = (
     [
         ({"error_code": "budget_exhausted", "status_code": 429}, "budget_exhausted"),
         ({"error_text": "budget_exhausted", "status_code": 403}, "budget_exhausted"),
-        (
-            {"error_text": "spend limit hit", "error_code": "budget_exhausted"},
-            "spend limit hit",
-        ),
-        ({"error_text": "spend limit", "status_code": 429}, "spend limit"),
-        (
-            {"error_text": "credit balance is too low", "status_code": 403},
-            "credit balance is too low",
-        ),
-        (
-            {"error_text": "team has reached its limit", "status_code": 429},
-            "team has reached its limit",
-        ),
-        ({"error_code": "has reached its limit", "status_code": 403}, "has reached its limit"),
+        ({"error_text": "spend limit hit", "error_code": "budget_exhausted"}, "spend_phrase"),
+        ({"error_text": "spend limit", "status_code": 429}, "spend_phrase"),
+        ({"error_text": "credit balance is too low", "status_code": 403}, "spend_phrase"),
+        ({"error_text": "team has reached its limit", "status_code": 429}, "spend_phrase"),
+        ({"error_code": "has reached its limit", "status_code": 403}, "spend_phrase"),
+        ({"error_text": "API Error: 429 credit balance is too low"}, "spend_phrase"),
     ],
 )
 def test_spend_cap_wins_over_429_and_403(fields: dict[str, object], cause: str) -> None:
@@ -98,3 +90,202 @@ def test_anything_else_is_agent_failed(fields: dict[str, object]) -> None:
     assert classify_failure(TurnSnapshot.model_validate(fields)) == Class(
         name="agent.failed", cause="agent.failed"
     )
+
+
+# Synthetic claude-sdk texts: the shapes are traced in code, not yet captured from the real CLI.
+_SDK_TEXT = "inner executor error: "
+
+
+@pytest.mark.parametrize(
+    ("fields", "name", "cause"),
+    [
+        (
+            {
+                "error_code": "RuntimeError",
+                "error_text": _SDK_TEXT
+                + 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}',
+            },
+            "infra.transient",
+            "529",
+        ),
+        (
+            {"error_code": "RuntimeError", "error_text": _SDK_TEXT + "API Error: 529 busy"},
+            "infra.transient",
+            "529",
+        ),
+        ({"error_text": "Error code: 529 - overloaded"}, "infra.transient", "529"),
+        ({"error_text": "status_code=503 from upstream"}, "infra.transient", "503"),
+        ({"error_text": _SDK_TEXT + "status code 502 from upstream"}, "infra.transient", "502"),
+        (
+            {"error_text": '{"type":"error","error":{"type":"overloaded_error","message":"x"}}'},
+            "infra.transient",
+            "overloaded_error",
+        ),
+        ({"error_code": "overloaded_error"}, "infra.transient", "overloaded_error"),
+        ({"error_code": "edge_lost"}, "infra.transient", "edge_lost"),
+        (
+            {"error_code": "RuntimeError", "error_text": _SDK_TEXT + "API Error: 429 slow down"},
+            "plan.usage_limit",
+            "429",
+        ),
+        (
+            {"error_text": _SDK_TEXT + '{"type": "error", "error": {"type": "rate_limit_error"}}'},
+            "plan.usage_limit",
+            "rate_limit_error",
+        ),
+        (
+            {"error_text": "Claude AI usage limit reached|1760000000"},
+            "plan.usage_limit",
+            "usage_limit_phrase",
+        ),
+        ({"error_text": _SDK_TEXT + "API Error: 401 invalid x-api-key"}, "auth", "401"),
+        # Omnigent's runner, for a harness that refused the turn over HTTP.
+        (
+            {"error_code": "runner_error", "error_text": "turn failed (status 529)"},
+            "infra.transient",
+            "529",
+        ),
+        (
+            {"error_code": "RuntimeError", "error_text": "turn failed (status 502)"},
+            "infra.transient",
+            "502",
+        ),
+        (
+            {"error_code": "runner_error", "error_text": "turn failed (status 429)"},
+            "plan.usage_limit",
+            "429",
+        ),
+        ({"error_code": "runner_error", "error_text": "turn failed (status 401)"}, "auth", "401"),
+        ({"error_code": "runner_error", "error_text": "turn failed (status 403)"}, "auth", "403"),
+        ({"error_text": "runner returned status 503"}, "infra.transient", "503"),
+        (
+            {
+                "error_text": "Could not load the agent spec (RuntimeError HTTP 503). "
+                "Request failed on the runner; see the runner log for details."
+            },
+            "infra.transient",
+            "503",
+        ),
+        ({"error_code": "claude_sdk_auth_failed"}, "auth", "claude_sdk_auth_failed"),
+        (
+            {"error_code": "coral_subscription_auth_refused"},
+            "auth",
+            "coral_subscription_auth_refused",
+        ),
+    ],
+)
+def test_claude_sdk_shapes_map_to_their_class(
+    fields: dict[str, object], name: str, cause: str
+) -> None:
+    assert classify_failure(TurnSnapshot.model_validate(fields)) == Class(name=name, cause=cause)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the call took 529 ms",
+        "line 401 of the patch",
+        "api error: 529",
+        "Error code:529",
+        "status: 503",
+        "API Error: 5290",
+        # Shapes quoted after the start, as a tool's output would be.
+        "Command failed: tool printed 'API Error: 401' in its output",
+        "Tool hook error: see status_code=429 in log",
+        "bash: grep usage limit reached in file",
+        "upstream failed: status_code=503",
+        'body {"type":"error","error":{"type":"overloaded_error"}}',
+        _SDK_TEXT + "the tool said API Error: 529",
+        "the tool said turn failed (status 529)",
+        "turn failed (status 204)",
+        "turn failed",
+        "Could not load the agent spec (ConnectError). Request failed on the runner.",
+        # A status the shapes name but no class reads: the body's type is not read then.
+        'API Error: 400 {"type":"error","error":{"type":"rate_limit_error"}}',
+    ],
+)
+def test_a_status_is_read_only_from_the_anchored_shapes(text: str) -> None:
+    assert classify_failure(TurnSnapshot(error_text=text)) == Class(
+        name="agent.failed", cause="agent.failed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("fields", "name", "cause"),
+    [
+        ({"status_code": 529, "error_text": "API Error: 401"}, "infra.transient", "529"),
+        (
+            {"status_code": 503, "error_text": "Claude AI usage limit reached"},
+            "infra.transient",
+            "503",
+        ),
+        (
+            {"status_code": 400, "error_text": "API Error: 529 overloaded_error"},
+            "agent.failed",
+            "agent.failed",
+        ),
+        (
+            {"error_code": "overloaded", "error_text": "Claude AI usage limit reached"},
+            "infra.transient",
+            "overloaded",
+        ),
+        (
+            {"error_code": "usage_limited", "error_text": "API Error: 529 overloaded_error"},
+            "plan.usage_limit",
+            "usage_limited",
+        ),
+        (
+            {"error_code": "claude_sdk_auth_failed", "error_text": "API Error: 529"},
+            "auth",
+            "claude_sdk_auth_failed",
+        ),
+        (
+            {"failure_origin": "host_launch_failed", "error_text": "API Error: 401"},
+            "infra.transient",
+            "host_launch_failed",
+        ),
+    ],
+)
+def test_an_explicit_status_or_code_wins_over_the_text(
+    fields: dict[str, object], name: str, cause: str
+) -> None:
+    assert classify_failure(TurnSnapshot.model_validate(fields)) == Class(name=name, cause=cause)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _SDK_TEXT + "LLM response denied by policy: matched 'Error code: 403'",
+        "LLM call denied by policy: credit balance is too low",
+        "LLM call denied by policy: API Error: 529 overloaded_error",
+        "memory usage limit exceeded",
+    ],
+)
+def test_policy_denials_and_unrelated_limit_text_are_agent_failed(text: str) -> None:
+    assert classify_failure(TurnSnapshot(error_text=text)) == Class(
+        name="agent.failed", cause="agent.failed"
+    )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"error_text": "spend limit"},
+        {"error_text": "API Error: 529"},
+        {"error_text": "Claude AI usage limit reached"},
+        {"error_text": "rate_limit_error"},
+        {"error_text": "overloaded_error"},
+        {"error_code": "claude_sdk_auth_failed"},
+        {"error_code": "runner_disconnected"},
+        {"failure_origin": "host_launch_failed"},
+        {"status_code": 503},
+        {},
+    ],
+)
+def test_the_cause_is_a_fixed_token_never_the_error_text(fields: dict[str, object]) -> None:
+    noisy = dict(fields)
+    noisy["error_text"] = f"{fields.get('error_text', '')} {'secret-' * 700}"
+    cause = classify_failure(TurnSnapshot.model_validate(noisy)).cause
+    assert len(cause) <= 64
+    assert "secret" not in cause
+    assert " " not in cause

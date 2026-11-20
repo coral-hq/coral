@@ -6,15 +6,18 @@ inside the run's own scopes. Results hold only what a repeat reproduces;
 whether a try created a session, sent a message or forced a stop is logged.
 
 ``create_session`` asks the session facade, so a redelivered effect reuses one
-session. Drift the facade finds (the anchor archived, deleted or bound, or
-this step deleted) pauses the run, and the effect fails permanently as
-``drift.<cause>``. ``send_input`` records the message's stable id before
-sending, so a redelivery never sends twice; the dispatch's drift hook pauses a
-drifted run the same way. ``close_slot`` and ``cancel_sessions`` act only on a
-step session this run bound; a send or close waits (retryable
-``session.not_ready``) until the session's row exists, and a writer's close
-also until a slot of the run names the session. A close commits only for its
-slot's current writer session, and a writer's close must set the closed label.
+session. A step create names its agent, or the stance and step whose bundle
+the executor resolves as the run owner's agent. Drift the facade finds (the
+anchor archived, deleted or bound, or this step deleted) pauses the run, and
+the effect fails permanently as ``drift.<cause>``. ``send_input`` records the
+message's stable id before sending, so a redelivery never sends twice; the
+dispatch's drift hook pauses a drifted run the same way. ``close_slot`` and
+``cancel_sessions`` act only on a step session this run bound, and a cancel
+counts a session this run never bound as cancelled; a send or close waits
+(retryable ``session.not_ready``) until the session's row exists, and a
+writer's close also until a slot of the run names the session. A close commits
+only for its slot's current writer session, and a writer's close must set the
+closed label.
 
 A paused run holds ``create_session`` and ``send_input`` (retryable
 ``run.paused``); a close still finishes an accepted handoff, and a cancel is
@@ -31,7 +34,13 @@ from collections.abc import Mapping
 from typing import Any, get_args
 
 from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole
-from coral.model.ids import derived_id, effect_message_id, effect_op_key
+from coral.model.ids import (
+    MAX_SLUG_LENGTH,
+    derived_id,
+    effect_message_id,
+    effect_op_key,
+    effect_session_id,
+)
 from coral.omni.protocols import (
     MAX_ENGINE_MESSAGE_BYTES,
     CoralSessionError,
@@ -42,6 +51,7 @@ from coral.omni.protocols import (
     SessionEdgeWatcher,
     SessionFacade,
     SlotRoleName,
+    StepAgentResolver,
     engine_message_text,
 )
 from coral.queue.executors import EffectExecutor, EffectOutcome, ExecutionContext
@@ -69,6 +79,7 @@ from coral.stores.protocols import RunState, RunStore
 from coral.stores.session_bindings import SessionBinding, SessionBindings
 from coral.stores.stable_ids import StableIdConflict, StableIds
 from coral.stores.workspace_op_intents import WorkspaceOpIntents
+from coral.tools.catalog import ORCHESTRATOR_STANCE, TOOL_STANCES
 from coral.workspace.executors import (
     WRITER_SLOT_ROLES,
     attempt_id_field,
@@ -96,6 +107,8 @@ MAX_TITLE_CHARS = 200
 MAX_NODE_ID_CHARS = 128
 # A session generation is stored as a small integer.
 MAX_GENERATION = 32_767
+# A roster position; start refuses more than 32 live slots, so far fewer are used.
+MAX_ROSTER_INDEX = 999
 _AGENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
@@ -104,20 +117,26 @@ def create_session_executor(
     run_store: RunStore,
     drift: DriftPauser,
     scope_runner: RunScopeRunner,
+    *,
+    agents: StepAgentResolver | None = None,
 ) -> EffectExecutor:
     """
     The ``create_session`` executor.
 
     Payload: ``effect_key`` and ``role`` (``anchor`` or ``step``); a step also
-    carries ``agent_id``, ``engine_slot_id`` and ``slot_role``, and optionally
-    ``title``, ``node_id`` and ``generation``. Result: ``{session_id, role,
-    generation}``.
+    carries ``engine_slot_id`` and ``slot_role``, and optionally ``title``,
+    ``node_id`` and ``generation``. Its agent is ``agent_id``, or else
+    ``stance`` with ``workflow_slug``, ``node_id`` and ``roster_index`` (the
+    orchestrator's stance alone), resolved by ``agents``. Result:
+    ``{session_id, role, generation}``.
 
     :param drift: Pauses the run when the facade finds drift.
+    :param agents: Resolves a stance to the run owner's agent; without it a
+        stance payload is invalid.
     """
 
     async def execute(ctx: ExecutionContext) -> EffectOutcome:
-        body = functools.partial(_create, ctx, facade=facade, drift=drift)
+        body = functools.partial(_create, ctx, facade=facade, drift=drift, agents=agents)
         return await run_effect(ctx, run_store, scope_runner, _create_payload, body)
 
     return execute
@@ -130,8 +149,13 @@ async def _create(
     *,
     facade: SessionFacade,
     drift: DriftPauser,
+    agents: StepAgentResolver | None,
 ) -> dict[str, Any]:
     refuse_paused_run(state)
+    if payload["role"] == "step":
+        _require_run_worktree(state)
+        if payload["agent_id"] is None:
+            payload = {**payload, "agent_id": await _resolved_agent(agents, state, payload)}
     request = _request(state, payload)
     try:
         ref = await facade.create_session(request, ensure_lease=ctx.ensure_lease)
@@ -160,10 +184,6 @@ def _request(state: RunState, payload: Mapping[str, Any]) -> SessionCreateReques
     if payload["role"] == "anchor":
         return SessionCreateRequest(**identity, role="anchor", title=state.run.title)
     spec = state.spec
-    if not (spec.host_id and spec.worktree_path):
-        raise EffectRefused(
-            "session.invalid", f"run {state.run_id} has no run worktree on a host for its steps"
-        )
     generation = payload["generation"]
     return SessionCreateRequest(
         **identity,
@@ -179,6 +199,32 @@ def _request(state: RunState, payload: Mapping[str, Any]) -> SessionCreateReques
     )
 
 
+def _require_run_worktree(state: RunState) -> None:
+    """:raises EffectRefused: Permanent ``session.invalid`` when steps have no worktree."""
+    if not (state.spec.host_id and state.spec.worktree_path):
+        raise EffectRefused(
+            "session.invalid", f"run {state.run_id} has no run worktree on a host for its steps"
+        )
+
+
+async def _resolved_agent(
+    agents: StepAgentResolver | None, state: RunState, payload: Mapping[str, Any]
+) -> str:
+    """The run owner's agent for the payload's stance, resolved inside the run's scopes."""
+    if agents is None:
+        raise invalid_payload("a step needs agent_id: this server resolves no stance")
+    return await agents.resolve(
+        workspace_id=state.workspace_id,
+        owner=state.run.user_id,
+        stance=payload["stance"],
+        workflow_slug=payload["workflow_slug"],
+        node_id=payload["node_id"],
+        roster_index=payload["roster_index"],
+        # The facade derives the same id, so a retry keeps the agent its session runs.
+        session_id=effect_session_id(state.workspace_id, payload["effect_key"]),
+    )
+
+
 def _slot_title(engine_slot_id: str, generation: int) -> str:
     """A step's default title: unique under the anchor, so a later generation adds its attempt."""
     return engine_slot_id if generation == 1 else f"{engine_slot_id} (attempt {generation})"
@@ -190,15 +236,11 @@ def _create_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return {"role": "anchor"}
     if role != "step":
         raise invalid_payload("role must be 'anchor' or 'step'")
-    agent_id = required_text(payload, "agent_id")
-    if not _AGENT_ID.fullmatch(agent_id):
-        raise invalid_payload("agent_id must be 1-64 of A-Z, a-z, 0-9, '_' or '-'")
     slot_role = payload.get("slot_role")
     if slot_role not in SLOT_ROLE_NAMES:
         raise invalid_payload(f"slot_role must be one of {', '.join(sorted(SLOT_ROLE_NAMES))}")
-    return {
+    step = {
         "role": "step",
-        "agent_id": agent_id,
         "engine_slot_id": _bounded_text(
             payload, "engine_slot_id", max_chars=MAX_ENGINE_SLOT_ID_CHARS, required=True
         ),
@@ -206,6 +248,39 @@ def _create_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         "title": _bounded_text(payload, "title", max_chars=MAX_TITLE_CHARS),
         "node_id": _bounded_text(payload, "node_id", max_chars=MAX_NODE_ID_CHARS),
         "generation": _generation(payload),
+    }
+    agent_id = optional_text(payload, "agent_id")
+    if agent_id is not None:
+        if not _AGENT_ID.fullmatch(agent_id):
+            raise invalid_payload("agent_id must be 1-64 of A-Z, a-z, 0-9, '_' or '-'")
+        return {**step, "agent_id": agent_id}
+    return {**step, **_stance_fields(payload, node_id=step["node_id"]), "agent_id": None}
+
+
+def _stance_fields(payload: Mapping[str, Any], *, node_id: str | None) -> dict[str, Any]:
+    """The stance and step a step's agent is resolved from, when no ``agent_id`` names it."""
+    stance = payload.get("stance")
+    if not isinstance(stance, str) or stance not in TOOL_STANCES:
+        raise invalid_payload(
+            f"a step needs agent_id or a stance: one of {', '.join(sorted(TOOL_STANCES))}"
+        )
+    if stance == ORCHESTRATOR_STANCE:
+        return {"stance": stance, "workflow_slug": None, "roster_index": None}
+    if node_id is None:
+        raise invalid_payload("a step stance needs node_id")
+    roster_index = payload.get("roster_index")
+    if (
+        isinstance(roster_index, bool)
+        or not isinstance(roster_index, int)
+        or not 0 <= roster_index <= MAX_ROSTER_INDEX
+    ):
+        raise invalid_payload(f"roster_index must be an integer from 0 to {MAX_ROSTER_INDEX}")
+    return {
+        "stance": stance,
+        "workflow_slug": _bounded_text(
+            payload, "workflow_slug", max_chars=MAX_SLUG_LENGTH, required=True
+        ),
+        "roster_index": roster_index,
     }
 
 
@@ -314,7 +389,8 @@ def cancel_sessions_executor(
 
     Payload: ``effect_key``, ``session_id`` (required; ``null`` for a slot with
     no session yet), optional ``closed_label`` (default ``true``). Result:
-    ``{session_id}``. A session already deleted counts as cancelled.
+    ``{session_id}``. A session already deleted, or never bound in this run,
+    counts as cancelled.
     """
 
     async def execute(ctx: ExecutionContext) -> EffectOutcome:
@@ -491,7 +567,16 @@ async def _cancel(
     session_id = payload["session_id"]
     if session_id is None:
         return {"session_id": None}
-    binding = await _bound_step(bindings, state, session_id)
+    found = await asyncio.to_thread(
+        bindings.get, state.workspace_id, session_id, run_id=state.run_id
+    )
+    if found is None:
+        # The slot's create never bound it in this run: nothing was created to cancel.
+        _logger.info(
+            "cancel_sessions for run %s: session %s was never bound", state.run_id, session_id
+        )
+        return {"session_id": session_id}
+    binding = _step_binding(found, state, session_id)
     try:
         await cancel_session(
             workspace_id=ctx.workspace_id,
@@ -519,11 +604,26 @@ async def _bound_step(
 
     :param created: Also require the session's row: its create got past ``reserved``.
     :raises EffectRefused: Permanent ``session.identity_conflict`` for any other
-        session; retryable ``session.not_ready`` while its create is unfinished.
+        session; retryable ``session.not_ready`` while its create is unfinished,
+        including the run's orchestrator before its create bound it.
     """
     binding = await asyncio.to_thread(
         bindings.get, state.workspace_id, session_id, run_id=state.run_id
     )
+    return _step_binding(binding, state, session_id, created=created)
+
+
+def _step_binding(
+    binding: SessionBinding | None, state: RunState, session_id: str, *, created: bool = False
+) -> SessionBinding:
+    """``binding`` when it is a step session of the run, past ``reserved`` if ``created``."""
+    if binding is None and session_id == state.run.orchestrator_session_id:
+        # The bridge names the run's orchestrator before its create binds the session.
+        raise EffectRefused(
+            "session.not_ready",
+            f"orchestrator session {session_id} is still being created",
+            retryable=True,
+        )
     if binding is None or binding.role is not SessionBindingRole.STEP:
         raise EffectRefused(
             "session.identity_conflict",
@@ -585,6 +685,7 @@ __all__ = [
     "CANCEL_SESSIONS",
     "CLOSE_SLOT",
     "CREATE_SESSION",
+    "MAX_ROSTER_INDEX",
     "MESSAGE_KINDS",
     "SEND_INPUT",
     "cancel_sessions_executor",

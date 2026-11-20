@@ -131,10 +131,10 @@ async def guarded(db_uri: str, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
         monkeypatch.setattr(sessions_mod, "_load_agent_spec_for_session", lambda *_: mcp.spec)
         monkeypatch.setattr(sessions_mod, "_get_runner_client", get_runner)
         stack.enter_context(installed_tool_providers(CoralToolProvider(ENGINE_TOOLS)))
-        mcp.register(mcp.port)
         runs = FakeRunStore(default_workspace_id=WORKSPACE)
-        # The provider and the commit hook, exactly as the lifespan registers them.
-        _wire_guards(run_store=runs, bindings=mcp.lookup, stack=stack)
+        # The engine tools, the provider and the commit hook, exactly as the lifespan
+        # registers them.
+        _wire_guards(run_store=runs, bindings=mcp.lookup, port=mcp.port, stack=stack)
         yield _Guarded(mcp=mcp, runs=runs)
         mcp.port.assert_folds()
 

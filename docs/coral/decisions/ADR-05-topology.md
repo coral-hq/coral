@@ -173,7 +173,7 @@ CI proof. The live probe adds real processes.
 | (e) | Does an anchor gate count once in the Inbox, resolve once, and resolve after `omnigent.closed`? | **not run** | Needs Inbox and gates (GTE). Owner: CRL-134. |
 | (f) | Do children relaunch after a host or runner restart? | **not run** | Needs the relauncher (SES-06). Owner: CRL-128. |
 | 14 | What does a post to an archived session do? | **not run** | Owner: CRL-128 (with SES-09). |
-| 15 | Can a step agent use a sibling's bridge-dir bearer on its loopback router? | **not run** | Owner: CRL-128. |
+| 15 | Can a step agent use a sibling's bridge-dir bearer on its loopback router? | **decided: not blocking for claude-sdk steps** | No such bearer exists for Coral steps; same-user residuals remain. See "Addendum: probe 15". |
 
 ### Live probe
 
@@ -316,9 +316,10 @@ the turn-to-completion half of (b).
    - Non-native children created with `POST /v1/sessions` have no work entry,
      so nothing is delivered.
    - S51 does not cover this path.
-2. **Probes (a), (e), (f), 14 and 15**, and the turn-to-completion half of
-   (b), with the owners in the table above. The ADR-05 addendum records their
-   verdicts.
+2. **Probes (a), (e), (f) and 14**, and the turn-to-completion half of (b),
+   with the owners in the table above. The ADR-05 addenda record their
+   verdicts. Probe 15 is decided, and its residual probes have owners
+   ("Addendum: probe 15").
 3. **Facade guards (SES-03).**
    - Re-check the anchor before each step create (rule 1).
    - Never give the anchor a `host_id`. An anchor that has the steps' host but
@@ -380,7 +381,7 @@ is archived, deleted or bound to a runner
 | (e) | **not run** | Needs Inbox and gates. | CRL-134 (unchanged) |
 | (f) | **not run** | Needs the engine relauncher. Steps are created only through the facade, which never relaunches a step the owner archived or deleted. | CRL-137 (SES-06) |
 | 14 | **pass for engine sends** | An engine send to a run whose anchor or step is archived or deleted is refused before anything is saved or forwarded, and the run pauses as `paused(drift, <cause>)`: `tests/coral/omni/test_drift.py::test_archived_anchor_pauses_the_run_and_refuses_the_send` (archived anchor, real `PATCH`), `tests/coral/recovery/test_drift.py::test_the_pre_send_hook_pauses_the_run_and_refuses_the_send` (archived anchor, archived step, deleted step). A user's post to an archived session was not probed. | user posts: full SES-09 drift, no live ticket |
-| 15 | **not run** | Outside CRL-128's deliverables. | unassigned (security); decide before ENG-04 enables runs |
+| 15 | **not run** | Outside CRL-128's deliverables. | decided by the engine bridge, see "Addendum: probe 15" |
 
 Also found or decided in CRL-128:
 
@@ -409,3 +410,116 @@ Also found or decided in CRL-128:
   best effort and without unbinding it, unless another session uses that
   runner ([`../contracts/session-facade.md`](../contracts/session-facade.md),
   "Anchor runner").
+
+## Addendum: probe 15 (2026-11-18)
+
+The engine bridge enables claude-sdk runs, so probe 15 had to be decided
+first. It was decided by reading the code; no live probe ran.
+
+**Question.** Can a step agent use a sibling's bridge-dir bearer on its
+loopback router?
+
+**Findings.**
+
+- **No bridge-dir bearer exists for a Coral step.** The turn router serves
+  only the `codex-native` and `claude-native` harnesses
+  (`_TURN_HOOK_HARNESSES` in `omnigent/runner/turn_routing.py`), and native
+  harnesses are refused as steps (`session.harness_not_supported`). For an SDK
+  harness the subagent router starts only when the session's routing class has
+  routing on (`ensure_session_router_quietly` in
+  `omnigent/runner/subagent_routing.py`). `routing_class_from_snapshot` turns
+  it on for `cost_control_mode_override == "on"`, `harness_override == "auto"`
+  or the label `omnigent.routing.auto_harness == "1"`. Step and orchestrator
+  creates set no `cost_control_mode_override`, no `subagent_routing_override`
+  and no harness override, which
+  `tests/coral/omni/test_session_facade.py::test_stance_creates_run_the_owners_bundles_and_enable_no_routing`
+  pins. The mutation guard refuses every `PATCH` field of a bound session but
+  `title`, `archived`, `delete_worktree`, `family_pinned`, `silent` and
+  `labels`, and every `omnigent.*` label but `omnigent.pinned`
+  (`coral/omni/server/mutation_guard.py`), so `omnigent.routing.auto_harness`
+  cannot be set and routing cannot be turned on later.
+- **Even with a bearer the router is narrow.** It listens on loopback for its
+  own session's path and relays spawn verdicts to an EDIT-checked route; step
+  bundles set `spawn: false` (`coral/profiles/bundle_spec.py`).
+- **Engine tools need runner proof.** Each step has its own runner (rule 1 and
+  test (A)), and the harness child's environment has the runner's
+  authentication secrets removed (`strip_runner_auth_secrets` in
+  `omnigent/runner/identity.py`, applied by `_build_harness_spawn_env` in
+  `omnigent/runtime/harnesses/process_manager.py`).
+
+**Residuals.** Each needs a step shell running as the same OS user that the
+sandbox does not confine.
+
+- **(a) The harness socket.** On POSIX each conversation's harness listens on
+  a Unix socket that file permissions isolate by user but nothing
+  authenticates: the per-spawn bearer is set only on Windows
+  (`omnigent/runtime/harnesses/process_manager.py`, the auth check in
+  `omnigent/runtime/harnesses/_scaffold.py`). A step shell that can connect to
+  a sibling's socket can drive that sibling's turn, including its
+  `coral_submit_handoff` through the sibling's own runner, which the server
+  accepts.
+- **(b) The runner's environment.** A runner's environment as it was at exec
+  holds its tunnel binding token (`omnigent/runner/_entry.py`) and, for a
+  host-launched runner, the host's initial bearer
+  (`OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN`, set by `omnigent/host/connect.py`;
+  the runner removes it from `os.environ`, not from that copy). The same user
+  can read it through `/proc/<pid>/environ` on Linux and `ps eww` on macOS,
+  unless the sandbox hides other processes. The binding token proves that
+  runner on `/mcp`, and on a server with authentication that can mint
+  (accounts or OIDC) it mints an owner JWT through
+  `POST /v1/runners/{runner_id}/token` (`omnigent/server/routes/runner_tunnel.py`).
+  A reader can therefore act as the run owner on every route, not only the
+  engine tools, so an owner-authenticated gate answer, resume or cancel does
+  not prove that a person took it while this residual is open.
+  `omnigent run` also sets an allow-listed token, `OMNIGENT_RUNNER_TUNNEL_TOKEN`,
+  in its local server's environment; it is that server's runner's binding
+  token, and the server accepts it for every session
+  (`omnigent/server/mcp_identity.py`). Whether a Coral step can run on such a
+  server is unverified.
+- **(c) Bridge dirs.** A step shell can read the bridge-dir bearers of the same
+  user's native or Smart Routing sessions on the host; Coral steps have none.
+- **(d) Credential files.** A step shell can read the user's credential files.
+
+Whether the claude-sdk OS sandbox (seatbelt on macOS, bwrap on Linux) blocks
+any of these is unverified.
+
+**Decision.** Probe 15 does not block claude-sdk steps. The surface it asks
+about does not exist for Coral steps, and every residual needs a step that
+already acts as the user: it shares the run worktree and the user's
+credentials. Handoff and gate integrity hold against other users and on the
+server's path, not against a same-user step whose shell the sandbox does not
+confine ([`../contracts/session-facade.md`](../contracts/session-facade.md),
+"Residuals and limitations"). A per-spawn harness bearer on POSIX would be an
+Omnigent change, a Coral-owned seam; it is recorded here as an owner decision,
+not planned.
+
+| Follow-up | Owner |
+|---|---|
+| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | CRL-137 |
+| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced. No gate is labelled Enforced today ([`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md)) | RUL-02 |
+| Run probe 15 on native steps before HRN-03 enables them | CRL-138 |
+
+## Addendum: gates on the anchor (2026-11-19)
+
+Gates now reach people: each live gate visit is one prompt on its run's
+anchor and one alert in the owner's workflow Inbox, and the owner's answer
+advances the engine once
+([`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md)). This
+records the probe the gate work owned.
+
+| Probe | Verdict | Evidence or reason | Owner |
+|---|---|---|---|
+| (e) | **pass** | Through the real routes: one prompt on the anchor and one Inbox item; the anchor labelled `omnigent.closed` still takes the answer, which advances the run once; a repeat is a duplicate; the gate's alert clears; after a restart the same prompt returns and is answerable (`tests/coral/omni/test_gate_end_to_end.py`). Two answers at once commit once (`tests/coral/workers/test_worker_lifespan.py::test_two_answers_at_once_through_the_resolve_route_advance_the_gate_once`). An edit grantee and an admin are refused with the prompt left pending (`tests/coral/omni/test_gate_routes_auth.py`), and so is a re-created account (`test_gate_routes_accounts.py`). In the web app the workflow Inbox kind claims the anchor's gate prompt, so the real Inbox page shows the shared contract's gate as exactly one card while a mirrored step prompt stays an approval, the card answers through the anchor's resolve route, and a gate alert whose prompt is missing is still one answerable card (`web/src/workflows/inbox/workflowInboxKind.test.tsx`). | closed |
+
+Also decided:
+
+- **Who may answer.** Only the run owner, checked by Coral's verdict handler
+  after Omnigent's own edit check: an edit grant on the anchor (a grant on the
+  whole run) lets a collaborator read the prompt but not answer it, and an
+  admin is refused too. The handler takes the run from the anchor's binding,
+  so a gate prompt relayed onto any other session cannot answer the gate.
+- **Integrity.** On servers that require no identity, any process of the
+  owner that can reach the server answers as the owner; on authenticated
+  servers a same-user step that escapes the sandbox can mint an owner token
+  (probe 15, residual (b)). The labelling rule in the follow-up table above
+  applies.

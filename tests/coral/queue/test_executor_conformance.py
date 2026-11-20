@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
+from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError
 
 from coral.queue import (
     EffectCompleted,
@@ -17,6 +24,9 @@ from coral.queue import (
     run_executor_conformance,
     unregister_executor,
 )
+from coral.queue.run_effects import describe_exception
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_compute_effect_backoff_bounds_and_exhaustion() -> None:
@@ -97,3 +107,83 @@ async def test_run_executor_conformance_passes_for_compliant_executors() -> None
     await run_executor_conformance(_compliant_success, effect_type="test.success")
     await run_executor_conformance(_compliant_failure, effect_type="test.failure")
     assert StartupLeaseLost is not None
+
+
+def test_coral_queue_imports_without_pytest() -> None:
+    blocked = "import sys; sys.modules['pytest'] = sys.modules['_pytest'] = None; "
+    for module in ("coral.queue", "coral.workers"):
+        completed = subprocess.run(
+            [sys.executable, "-c", f"{blocked}import {module}"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+class _DriverError(Exception):
+    """A driver error carrying a SQLSTATE, as psycopg's errors do."""
+
+    sqlstate = "23505"
+
+
+class _LegacyDriverError(Exception):
+    """A driver error carrying its SQLSTATE as ``pgcode``, as psycopg2's errors do."""
+
+    pgcode = "40001"
+
+
+def test_describe_exception_names_database_errors_without_their_text() -> None:
+    sentinel = "SENTINEL-bound-parameter"
+    unique = IntegrityError(
+        "INSERT INTO coral_work (payload) VALUES (%(payload)s)",
+        {"payload": sentinel},
+        _DriverError(f"duplicate key value: Key (payload)=({sentinel})"),
+    )
+    serialization = OperationalError("SELECT 1", (sentinel,), _LegacyDriverError(sentinel))
+    mysql = IntegrityError("INSERT", (sentinel,), Exception(1062, f"Duplicate entry '{sentinel}'"))
+    sqlite_error = IntegrityError("INSERT", (sentinel,), sqlite3.IntegrityError(sentinel))
+    assert all(sentinel in str(exc) for exc in (unique, serialization, mysql, sqlite_error))
+
+    assert describe_exception(unique) == "IntegrityError (orig _DriverError, code 23505)"
+    assert describe_exception(serialization) == (
+        "OperationalError (orig _LegacyDriverError, code 40001)"
+    )
+    assert describe_exception(mysql) == "IntegrityError (orig Exception, code 1062)"
+    assert describe_exception(sqlite_error) == "IntegrityError (orig IntegrityError)"
+    # A driver error that escaped SQLAlchemy, and SQLAlchemy's own errors, keep only their type.
+    assert describe_exception(_DriverError(sentinel)) == "_DriverError (code 23505)"
+    assert describe_exception(NoResultFound(sentinel)) == "NoResultFound"
+    # Text that quotes a statement error is cut where the driver's text starts.
+    assert describe_exception(RuntimeError(f"commit failed: {unique}")) == (
+        "RuntimeError: commit failed:"
+    )
+
+
+def test_describe_exception_keeps_no_validation_input_or_control_characters() -> None:
+    class Handoff(BaseModel):
+        seq: int
+
+    try:
+        Handoff.model_validate({"seq": "SENTINEL handoff body"})
+    except ValidationError as exc:
+        assert "SENTINEL" in str(exc)
+        assert describe_exception(exc) == "ValidationError (1 error: seq int_parsing)"
+    assert describe_exception(ValueError("one\nforged line \x1b[31m")) == (
+        "ValueError: one forged line  [31m"
+    )
+
+
+class _Unprintable(Exception):
+    def __str__(self) -> str:
+        raise ValueError("no text")
+
+
+def test_describe_exception_keeps_other_errors_text_within_bounds() -> None:
+    assert describe_exception(ValueError("bad value")) == "ValueError: bad value"
+    assert describe_exception(_Unprintable()) == "_Unprintable"
+    assert describe_exception(TimeoutError()) == "TimeoutError"
+    described = describe_exception(RuntimeError("x" * 5000))
+    assert len(described) == 2000
+    assert described.startswith("RuntimeError: xxx") and described.endswith("…")

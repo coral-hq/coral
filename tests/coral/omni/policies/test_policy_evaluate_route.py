@@ -154,7 +154,7 @@ async def coral(stores: _Stores, db_uri: str) -> AsyncIterator[_Coral]:
         AsyncExitStack() as stack,
         httpx.AsyncClient(transport=transport, base_url="http://test") as client,
     ):
-        _wire_guards(run_store=runs, bindings=bindings, stack=stack)
+        _wire_guards(run_store=runs, bindings=bindings, port=None, stack=stack)
         yield _Coral(stores=stores, client=client, runs=runs, bindings=bindings)
 
 

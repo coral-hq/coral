@@ -41,6 +41,8 @@ class WorkRow(CoralBase):
     idempotency_cksum: Mapped[bytes] = mapped_column(CHECKSUM32, nullable=False)
     created_at_us: Mapped[int] = mapped_column(BigInteger, nullable=False)
     finished_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    # Epoch seconds of the first refusal of the current hold; null when not held.
+    held_since: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
 
     def __init__(self, **kwargs: object) -> None:
         kwargs.setdefault("attempts", 0)
@@ -67,6 +69,15 @@ class WorkRow(CoralBase):
             "id",
         ),
         Index("ix_coral_work_run", "workspace_id", "run_id", "status", "id"),
+        # The retention purge: finished rows of one kind and status, oldest first.
+        Index(
+            "ix_coral_work_finished",
+            "kind",
+            "status",
+            "finished_at",
+            "workspace_id",
+            "id",
+        ),
         make_enum_check_constraint("kind", WORK_KIND, name="ck_coral_work_kind"),
         make_enum_check_constraint("status", WORK_STATUS, name="ck_coral_work_status"),
     )

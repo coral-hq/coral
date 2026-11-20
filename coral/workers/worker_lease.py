@@ -35,6 +35,8 @@ class WorkerLeaseManager:
         self._clock = clock
         self._is_leader = False
         self._lease_lost_event = asyncio.Event()
+        # This replica's clock when the store last confirmed the lease, read before the call.
+        self._confirmed_at: float | None = None
 
     @property
     def worker_id(self) -> str:
@@ -60,8 +62,21 @@ class WorkerLeaseManager:
     def lease_lost_event(self) -> asyncio.Event:
         return self._lease_lost_event
 
+    @property
+    def confirmed_until(self) -> float | None:
+        """The latest the held lease can last by this replica's clock; ``None`` when not leader."""
+        if not self._is_leader or self._confirmed_at is None:
+            return None
+        return self._confirmed_at + self._lease_seconds
+
+    def mark_lost(self) -> None:
+        """Stop leading without the store, when the lease could not be confirmed in time."""
+        self._is_leader = False
+        self._lease_lost_event.set()
+
     async def try_acquire(self) -> bool:
         """Attempt to acquire the worker lease; clears lease_lost_event on success."""
+        started = self._clock()
         acquired = await asyncio.to_thread(
             self._queue_store.acquire_worker_lease,
             self._lease_name,
@@ -71,6 +86,7 @@ class WorkerLeaseManager:
         )
         if acquired:
             self._is_leader = True
+            self._confirmed_at = started
             self._lease_lost_event.clear()
         else:
             self._is_leader = False
@@ -80,6 +96,7 @@ class WorkerLeaseManager:
         """Renew the held worker lease; sets lease_lost_event if renewal fails."""
         if not self._is_leader:
             return False
+        started = self._clock()
         renewed = await asyncio.to_thread(
             self._queue_store.renew_worker_lease,
             self._lease_name,
@@ -87,7 +104,9 @@ class WorkerLeaseManager:
             lease_seconds=self._lease_seconds,
             now_fn=self._clock,
         )
-        if not renewed:
+        if renewed:
+            self._confirmed_at = started
+        else:
             self._is_leader = False
             self._lease_lost_event.set()
         return renewed

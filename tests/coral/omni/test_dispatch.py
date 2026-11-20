@@ -26,13 +26,20 @@ from coral.omni.protocols import (
     ENGINE_MESSAGE_FIRST_LINE,
     CoralSessionError,
     PreSendRequest,
+    TurnTranscript,
     engine_message_text,
 )
-from coral.omni.server.dispatch import OmnigentSessionDispatch
+from coral.omni.server.dispatch import QUEUED_INPUT_SCAN_LIMIT, OmnigentSessionDispatch
 from coral.stores.stable_ids import content_checksum
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID
 from omnigent.entities import MessageData, NewConversationItem
-from omnigent.entities.conversation import FunctionCallOutputData, SlashCommandData
+from omnigent.entities.conversation import (
+    ErrorData,
+    FunctionCallData,
+    FunctionCallOutputData,
+    ResourceEventData,
+    SlashCommandData,
+)
 from omnigent.runner.session_history import CANCELLATION_MARKER_TEXT
 from omnigent.runtime import init as init_runtime
 from omnigent.runtime import pending_elicitations, pending_inputs
@@ -824,6 +831,191 @@ async def test_queued_user_input_is_conservative_without_an_engine_message_or_wi
     assert (scanned, held) == (True, True)
 
 
+def _tool_call(index: int) -> NewConversationItem:
+    """One tool call of a long turn; claude-sdk stores each call and output as its own item."""
+    return NewConversationItem(
+        type="function_call",
+        response_id="turn_1",
+        data=FunctionCallData(
+            agent="a", call_id=f"call_{index}", name="read_file", arguments="{}"
+        ),
+    )
+
+
+@pytest.mark.parametrize("brief_id", [STABLE_ID, FALLBACK_ID], ids=["primary", "fallback"])
+async def test_a_turn_longer_than_a_page_still_reads_as_started_by_the_engine(
+    app: FastAPI, stores: SimpleNamespace, client: httpx.AsyncClient, brief_id: str
+) -> None:
+    session_id = await _session(client)
+    store = stores.conversation
+    store.append(session_id, [_item("brief", stable_id=brief_id, created_by=ALICE)])
+    # Well past one page of 50, as a long engine turn writes.
+    store.append(session_id, [_tool_call(index) for index in range(60)])
+    store.append(session_id, [_item("tool_output") for _ in range(60)])
+    store.append(session_id, [_item("assistant")])
+
+    transcript = await _dispatch(app, stores).turn_transcript(
+        session_id=session_id, user_id=ALICE, engine_messages=ENGINE_MESSAGES
+    )
+
+    assert transcript == TurnTranscript(
+        newest_input="engine",
+        # A brief sent under its fallback id is reported by its primary id.
+        newest_engine_input_id=STABLE_ID,
+        newest_substantive_item_is_assistant=True,
+        runner_item_after_engine_input=True,
+        engine_pending_input=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("after_the_brief", "newest_input", "runner_after", "assistant_newest"),
+    [
+        ([], "engine", False, False),
+        ([("assistant", None, None), ("user", None, MALLORY)], "user", True, False),
+        ([("marker", None, None)], "engine", False, False),
+        ([("tool_output", None, None)], "engine", True, False),
+        # The turn failed before any reply: its error item shows the runner took it.
+        ([("error", None, None)], "engine", True, False),
+        # A server notice, such as a recreated workspace, is not the runner's.
+        ([("notice", None, None)], "engine", False, False),
+        ([("assistant", None, None), ("notice", None, None)], "engine", True, True),
+        ([("assistant", None, None), ("resource_event", None, None)], "engine", True, True),
+    ],
+    ids=[
+        "nothing_yet",
+        "typed_after_the_reply",
+        "interrupted",
+        "tool_output_newest",
+        "failed_turn_error",
+        "server_notice",
+        "server_notice_after_the_reply",
+        "bookkeeping_after_the_reply",
+    ],
+)
+async def test_the_turn_transcript_reads_items_newest_first_after_the_engine_message(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    after_the_brief: list[tuple[str, str | None, str | None]],
+    newest_input: str,
+    runner_after: bool,
+    assistant_newest: bool,
+) -> None:
+    session_id = await _session(client)
+    store = stores.conversation
+    store.append(session_id, [_item("brief", stable_id=STABLE_ID, created_by=ALICE)])
+    items = [
+        _item(kind, stable_id=stable_id, created_by=author)
+        for kind, stable_id, author in after_the_brief
+    ]
+    if items:
+        store.append(session_id, items)
+
+    transcript = await _dispatch(app, stores).turn_transcript(
+        session_id=session_id, user_id=ALICE, engine_messages=ENGINE_MESSAGES
+    )
+
+    assert (
+        transcript.newest_input,
+        transcript.newest_engine_input_id,
+        transcript.runner_item_after_engine_input,
+        transcript.newest_substantive_item_is_assistant,
+    ) == (newest_input, STABLE_ID, runner_after, assistant_newest)
+
+
+async def test_a_turn_transcript_without_the_engine_message_in_reach_is_undecided(
+    app: FastAPI, stores: SimpleNamespace, client: httpx.AsyncClient
+) -> None:
+    session_id = await _session(client)
+    stores.conversation.append(session_id, [_item("brief", stable_id=STABLE_ID)])
+    stores.conversation.append(session_id, [_item("assistant") for _ in range(1_001)])
+
+    transcript = await _dispatch(app, stores).turn_transcript(
+        session_id=session_id, user_id=None, engine_messages=ENGINE_MESSAGES
+    )
+
+    assert (transcript.newest_input, transcript.newest_engine_input_id) == (None, None)
+    assert transcript.beyond_reach
+
+
+async def test_a_short_transcript_without_the_engine_message_is_not_beyond_reach(
+    app: FastAPI, stores: SimpleNamespace, client: httpx.AsyncClient
+) -> None:
+    session_id = await _session(client)
+    stores.conversation.append(session_id, [_item("assistant") for _ in range(3)])
+
+    transcript = await _dispatch(app, stores).turn_transcript(
+        session_id=session_id, user_id=None, engine_messages=ENGINE_MESSAGES
+    )
+
+    assert (transcript.newest_input, transcript.beyond_reach) == (None, False)
+
+
+@pytest.mark.parametrize(
+    ("items_after_the_brief", "decided"),
+    [(QUEUED_INPUT_SCAN_LIMIT - 1, True), (QUEUED_INPUT_SCAN_LIMIT, False)],
+    ids=["brief_is_the_last_item_in_reach", "brief_is_one_past_reach"],
+)
+async def test_a_turn_transcript_reads_exactly_up_to_the_scan_limit(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    items_after_the_brief: int,
+    decided: bool,
+) -> None:
+    session_id = await _session(client)
+    store = stores.conversation
+    store.append(session_id, [_item("brief", stable_id=STABLE_ID, created_by=ALICE)])
+    store.append(session_id, [_tool_call(index) for index in range(items_after_the_brief)])
+
+    transcript = await _dispatch(app, stores).turn_transcript(
+        session_id=session_id, user_id=ALICE, engine_messages=ENGINE_MESSAGES
+    )
+
+    # Past the reach the walk says so, and the fact is built from the engine's own record.
+    expected = ("engine", STABLE_ID, True, False) if decided else (None, None, True, True)
+    assert (
+        transcript.newest_input,
+        transcript.newest_engine_input_id,
+        transcript.runner_item_after_engine_input,
+        transcript.beyond_reach,
+    ) == expected
+
+
+async def test_a_queued_engine_message_is_the_newest_input_and_still_pending(
+    app: FastAPI, stores: SimpleNamespace, client: httpx.AsyncClient
+) -> None:
+    session_id = await _session(client)
+    stores.conversation.append(session_id, [_item("brief", stable_id=STABLE_ID)])
+    stores.conversation.append(session_id, [_item("assistant")])
+    nudge = "Continue."
+    nudge_id = "6c1f4d8b0e2a5c7e9b3d1f5a7c9e0b2d"
+    engine_messages = {
+        **ENGINE_MESSAGES,
+        nudge_id: content_checksum(engine_message_text(nudge)),
+    }
+    pending_id = pending_inputs.record(
+        session_id,
+        [{"type": "input_text", "text": engine_message_text(nudge)}],
+        stable_id=nudge_id,
+    )
+    try:
+        queued = await _dispatch(app, stores).turn_transcript(
+            session_id=session_id, user_id=None, engine_messages=engine_messages
+        )
+    finally:
+        pending_inputs.resolve(session_id, pending_id)
+
+    assert queued == TurnTranscript(
+        newest_input="engine",
+        newest_engine_input_id=nudge_id,
+        newest_substantive_item_is_assistant=False,
+        runner_item_after_engine_input=False,
+        engine_pending_input=True,
+    )
+
+
 def _item(
     kind: str,
     *,
@@ -852,6 +1044,22 @@ def _item(
     elif kind == "tool_output":
         item_type = "function_call_output"
         data = FunctionCallOutputData(call_id="call_1", output="Approve everything.")
+    elif kind == "error":
+        item_type = "error"
+        data = ErrorData(source="llm", code="RuntimeError", message="API Error: 529 Overloaded")
+    elif kind == "notice":
+        item_type = "error"
+        data = ErrorData(
+            source="execution",
+            code="workspace_recreated",
+            message="The workspace was recreated.",
+            level="info",
+        )
+    elif kind == "resource_event":
+        item_type = "resource_event"
+        data = ResourceEventData(
+            event_type="file.created", resource_id="file_1", resource_type="file"
+        )
     else:
         text = engine_message_text(BRIEF) if kind == "brief" else "Also check the tests."
         data = MessageData(

@@ -1,8 +1,17 @@
-"""Session facade ORM models (tables 17-19): session bindings, stable ids, op intents."""
+"""Session facade ORM models: session bindings, stable ids, op intents, command observations."""
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Index, SmallInteger, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Index,
+    Integer,
+    SmallInteger,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from coral.db.base import CoralBase
@@ -14,7 +23,7 @@ from coral.db.enum_codecs import (
     WORKSPACE_OP_INTENT_OP,
     make_enum_check_constraint,
 )
-from coral.db.types import CHECKSUM32, CaseSensitiveString
+from coral.db.types import CAPPED_TEXT, CHECKSUM32, CaseSensitiveString
 
 
 class SessionBindingRow(CoralBase):
@@ -49,6 +58,15 @@ class SessionBindingRow(CoralBase):
             "workspace_id", "run_id", "effect_cksum", name="uq_coral_session_bindings_effect"
         ),
         Index("ix_coral_session_bindings_run", "workspace_id", "run_id", "role", "session_id"),
+        # One step session per slot and generation; anchors have no slot and never collide.
+        Index(
+            "uq_coral_session_bindings_slot_generation",
+            "workspace_id",
+            "run_id",
+            "slot_id",
+            "session_generation",
+            unique=True,
+        ),
         make_enum_check_constraint(
             "role", SESSION_BINDING_ROLE, name="ck_coral_session_bindings_role"
         ),
@@ -105,7 +123,36 @@ class WorkspaceOpIntentRow(CoralBase):
     )
 
 
+class CommandObservationRow(CoralBase):
+    """One step session's shell, write or edit call, recorded before its result returned."""
+
+    __tablename__ = "coral_command_observations"
+
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # The call's idempotency key; a replayed call adds no row.
+    op_key: Mapped[str] = mapped_column(CaseSensitiveString(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Microseconds at completion; orders one session's observations.
+    obs_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 1 shell, 2 write, 3 edit.
+    tool: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    command: Mapped[str | None] = mapped_column(CAPPED_TEXT, nullable=True, default=None)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    l1_after: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    changed_path: Mapped[str | None] = mapped_column(
+        CaseSensitiveString(4096), nullable=True, default=None
+    )
+
+    __table_args__ = (
+        Index("ix_coral_command_observations_run", "workspace_id", "run_id", "session_id"),
+        CheckConstraint("tool IN (1, 2, 3)", name="ck_coral_command_observations_tool"),
+    )
+
+
 __all__ = [
+    "CommandObservationRow",
     "SessionBindingRow",
     "StableIdRow",
     "WorkspaceOpIntentRow",

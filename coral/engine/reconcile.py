@@ -7,9 +7,9 @@ from datetime import datetime
 
 from coral.engine.classify import classify_failure
 from coral.engine.facts import TurnFact
+from coral.engine.machines.slot import awaiting_effect
 from coral.engine.turn_end import evaluate
 from coral.engine.types import (
-    Effect,
     EngineConfig,
     Input,
     RunnerLost,
@@ -18,7 +18,7 @@ from coral.engine.types import (
     TurnEnded,
 )
 
-_LEASED_KINDS = frozenset({"send_input", "create_session"})
+__all__ = ["awaiting_effect", "reconcile"]
 
 
 def reconcile(
@@ -40,7 +40,7 @@ def reconcile(
     seen_turn: set[str] = set()
     seen_runner: set[str] = set()
     for fact in sorted(facts, key=_fact_sort_key):
-        if _effect_unacked(state, fact.slot_id):
+        if awaiting_effect(state, fact.slot_id):
             continue
         fact_key = _turn_key(fact)
         if fact_key not in seen_turn and not _receipted(state, fact_key):
@@ -102,37 +102,6 @@ def _runner_lost(
     if slot is None or slot.status != "working":
         return None
     return RunnerLost(slot_id=fact.slot_id, session_id=fact.session_id, generation=fact.generation)
-
-
-def _effect_unacked(state: RunState, slot_id: str) -> bool:
-    """True while the slot's latest session effect has no completion receipt.
-
-    A slot with no ``send_input`` or ``create_session`` is not waiting.
-    """
-    latest: Effect | None = None
-    latest_seq = -1
-    for effect in state.effects:
-        if effect.subject != slot_id or effect.kind not in _LEASED_KINDS:
-            continue
-        seq = _effect_seq(effect)
-        if latest is None or seq > latest_seq:
-            latest = effect
-            latest_seq = seq
-    if latest is None:
-        return False
-    return not _receipted(state, latest.effect_key)
-
-
-def _effect_seq(effect: Effect) -> int:
-    """Seq embedded in ``{run_id}:{seq}:{kind}:{subject}``. Unknown keys sort first."""
-    marker = f":{effect.kind}:{effect.subject}"
-    if not effect.effect_key.endswith(marker):
-        return -1
-    seq_text = effect.effect_key[: -len(marker)].rsplit(":", 1)[-1]
-    try:
-        return int(seq_text)
-    except ValueError:
-        return -1
 
 
 def _receipted(state: RunState, key: str) -> bool:

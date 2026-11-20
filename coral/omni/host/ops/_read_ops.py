@@ -17,8 +17,9 @@ import json
 import os
 import stat
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 
+from coral.evidence.fingerprint import blob_id, l1_digest
 from coral.omni.host.ops._files import (
     UnreadableFile,
     lstat_in_root,
@@ -54,9 +55,6 @@ _REGULAR_FILE_MODES = (b"100644", b"100755")
 _HFS_IGNORED = frozenset(
     [*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF]
 )
-# Interim L1 byte layout, until a shared L1 digest exists: digests compare
-# only within this backend.
-_L1_LAYOUT = b"coral-host-l1-interim-1\0"
 
 
 @one_op_per_worktree
@@ -176,16 +174,15 @@ def fingerprint(request: WorkspaceOpRequest) -> Mapping[str, object]:
         commit = head_commit(git)
         status = git.run(*WORKSPACE_STATUS_ARGV).stdout
         dirty_count, paths = status_paths(status)
-        digest = hashlib.sha256(_L1_LAYOUT)
-        digest.update(commit.encode() + b"\0")
-        digest.update(_framed(status))
-        for path in paths:
-            check_deadline(request.deadline, "fingerprint")
-            digest.update(_framed(path))
-            digest.update(_framed(_l1_entry(target.root, path, object_format, request.deadline)))
+
+        def entries() -> Iterator[tuple[bytes, bytes]]:
+            for path in paths:
+                check_deadline(request.deadline, "fingerprint")
+                yield path, _l1_entry(target.root, path, object_format, request.deadline)
+
         return {
             "level": "L1",
-            "digest": digest.hexdigest(),
+            "digest": l1_digest(commit, status, entries()),
             "head": commit,
             "dirty_count": dirty_count,
         }
@@ -272,7 +269,7 @@ def _l1_entry(root: str, path: bytes, object_format: str, deadline: float) -> by
         return b"file %d %d %s" % (info.st_size, info.st_mtime_ns, blob)
     if stat.S_ISLNK(mode):
         try:
-            blob = _blob_id(object_format, readlink_in_root(root, name, deadline=deadline))
+            blob = blob_id(object_format, readlink_in_root(root, name, deadline=deadline))
         except (UnreadableFile, OSError):
             blob = b"changing"
         return b"symlink %d %d %s" % (info.st_size, info.st_mtime_ns, blob)
@@ -289,21 +286,9 @@ def _file_blob(root: str, name: bytes, size: int, object_format: str, deadline: 
         return b"-"
     try:
         content = read_in_root(root, name, max_bytes=MAX_READ_BYTES, deadline=deadline)
-        return _blob_id(object_format, content)
+        return blob_id(object_format, content)
     except UnreadableFile:
         # It changed type or grew past the cap after lstat: an edit is under way.
         return b"changing"
     except OSError:
         return b"unreadable"
-
-
-def _blob_id(object_format: str, content: bytes) -> bytes:
-    """The id ``git hash-object --no-filters`` gives ``content`` in the repo's object format."""
-    digest = hashlib.new(object_format, b"blob %d\0" % len(content))
-    digest.update(content)
-    return digest.hexdigest().encode()
-
-
-def _framed(data: bytes) -> bytes:
-    """``data`` behind its length, so adjacent fields cannot run together."""
-    return b"%d:%s" % (len(data), data)

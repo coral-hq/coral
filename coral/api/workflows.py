@@ -1,76 +1,142 @@
-"""Workflow validate/save/get router. Unmounted: the Coral server plugin registers it."""
+"""
+Workflow validate/save/get/list router. Unmounted: the Coral server plugin registers it.
+
+Every route needs a signed-in caller. A caller saves, reads and lists their own
+definitions in the request's workspace, plus legacy ones saved before definitions had
+owners; saving a key another user holds is refused.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import asdict
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, replace
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends
 
+from coral.alerts.types import normalize_owner
+from coral.api.errors import CoralApiError, CoralRoute, error_responses
+from coral.api.schemas import (
+    InvalidResult,
+    SavedWorkflowOut,
+    ValidResult,
+    WorkflowDetailOut,
+    WorkflowSummaryOut,
+    WorkflowYaml,
+)
+from coral.model import LoadError
+from coral.omni.protocols import Viewer
 from coral.stores.workflows import (
     WorkflowDefinition,
     WorkflowDefinitionStore,
+    WorkflowKeyTaken,
     WorkflowTooLargeError,
 )
 from coral.validate import ValidateContext
 from coral.validate.pipeline import CheckResult, check_text
 
+WORKFLOW_NOT_FOUND = "Workflow not found."
+WORKFLOW_KEY_TAKEN = "A workflow with this key already exists."
+# A refused save describes its document in at most this much: the loader's report can
+# quote the document once per issue.
+MAX_LOAD_ISSUES = 20
+MAX_LOAD_TEXT_CHARS = 500
 
-class WorkflowYaml(BaseModel):
-    yaml: str
+
+def _clip(text: str) -> str:
+    return text if len(text) <= MAX_LOAD_TEXT_CHARS else text[: MAX_LOAD_TEXT_CHARS - 1] + "…"
 
 
-def _check_json(result: CheckResult) -> dict[str, Any]:
+def load_error_details(error: LoadError) -> dict[str, Any]:
+    """
+    The details of a save refused because its document does not load.
+
+    Only the loader's report on the caller's own text, which names no server path,
+    with its first issues and every message and path cut to a bounded length.
+    """
+    issues = tuple(
+        replace(issue, yaml_path=_clip(issue.yaml_path), message=_clip(issue.message))
+        for issue in error.issues[:MAX_LOAD_ISSUES]
+    )
+    bounded = replace(
+        error, yaml_path=_clip(error.yaml_path), message=_clip(error.message), issues=issues
+    )
+    return {"load_error": asdict(bounded), "issues_omitted": len(error.issues) - len(issues)}
+
+
+def _check_result(result: CheckResult) -> ValidResult | InvalidResult:
     if result.load_error is not None:
-        return {"valid": False, "runnable": False, "load_error": asdict(result.load_error)}
+        return InvalidResult(valid=False, runnable=False, load_error=result.load_error)
     assert result.graph is not None and result.report is not None
-    return {
-        "valid": True,
-        "runnable": result.report.runnable,
-        "content_hash": result.graph.content_hash,
-        "problems": [asdict(problem) for problem in result.report.problems],
-        "compiled": result.graph.model_dump(mode="json"),
-    }
+    return ValidResult(
+        valid=True,
+        runnable=result.report.runnable,
+        content_hash=result.graph.content_hash,
+        problems=list(result.report.problems),
+        compiled=result.graph,
+    )
 
 
-def _definition_json(definition: WorkflowDefinition, *, include_body: bool) -> dict[str, Any]:
-    summary: dict[str, Any] = {
-        "id": definition.id,
-        "workflow_key": definition.workflow_key,
-        "name": definition.name,
-        "content_hash": definition.content_hash,
-        "runnable": definition.runnable,
-        "created_at": definition.created_at,
-        "updated_at": definition.updated_at,
-    }
-    if include_body:
-        summary["yaml"] = definition.yaml_text
-        summary["compiled"] = definition.compiled.model_dump(mode="json")
-    return summary
+def _summary(definition: WorkflowDefinition) -> WorkflowSummaryOut:
+    return WorkflowSummaryOut(
+        id=definition.id,
+        workflow_key=definition.workflow_key,
+        name=definition.name,
+        content_hash=definition.content_hash,
+        runnable=definition.runnable,
+        created_at=definition.created_at,
+        updated_at=definition.updated_at,
+    )
 
 
 def create_workflows_router(
     store: WorkflowDefinitionStore,
     *,
+    viewer_dependency: Callable[..., Viewer] | Callable[..., Awaitable[Viewer]],
     workspace_id_dependency: Callable[..., int],
     validate_context: Callable[[], ValidateContext] = ValidateContext,
 ) -> APIRouter:
-    """Build the router; the caller chooses the mount prefix and workspace resolution."""
-    router = APIRouter()
+    """
+    The workflows routes, mounted by the caller under ``/v1/coral``.
 
-    @router.post("/workflows:validate")
-    def validate_workflow(body: WorkflowYaml) -> dict[str, Any]:
-        return _check_json(check_text(body.yaml, validate_context()))
+    :param viewer_dependency: Resolves the caller, refusing with 401 or 403; it runs
+        before the store is read.
+    :param workspace_id_dependency: The request's workspace.
+    """
+    router = APIRouter(route_class=CoralRoute)
+    caller = Depends(viewer_dependency)
+    workspace = Depends(workspace_id_dependency)
 
-    @router.post("/workflows")
+    @router.post(
+        "/workflows:validate",
+        operation_id="coral_validate_workflow",
+        response_model=ValidResult | InvalidResult,
+        responses=error_responses(401, 403, 422),
+        dependencies=[caller],
+    )
+    def validate_workflow(body: WorkflowYaml) -> ValidResult | InvalidResult:
+        """Load, compile and validate a workflow without storing it."""
+        return _check_result(check_text(body.yaml, validate_context()))
+
+    @router.post(
+        "/workflows",
+        operation_id="coral_save_workflow",
+        response_model=SavedWorkflowOut,
+        responses=error_responses(401, 403, 409, 413, 422),
+    )
     def save_workflow(
-        body: WorkflowYaml, workspace_id: int = Depends(workspace_id_dependency)
-    ) -> dict[str, Any]:
+        body: WorkflowYaml, viewer: Viewer = caller, workspace_id: int = workspace
+    ) -> SavedWorkflowOut:
+        """Store the caller's workflow under its key, replacing their earlier version."""
         result = check_text(body.yaml, validate_context())
         if result.graph is None or result.report is None:
-            raise HTTPException(status_code=422, detail=_check_json(result))
+            assert result.load_error is not None
+            raise CoralApiError(
+                "validation_failed",
+                "The workflow does not load.",
+                422,
+                details=load_error_details(result.load_error),
+            )
         try:
             definition = store.save(
                 workspace_id=workspace_id,
@@ -79,27 +145,55 @@ def create_workflows_router(
                 yaml_text=body.yaml,
                 compiled=result.graph,
                 runnable=result.report.runnable,
+                owner=normalize_owner(viewer.user_id),
             )
         except WorkflowTooLargeError as error:
-            raise HTTPException(status_code=413, detail=str(error)) from error
-        return {**_definition_json(definition, include_body=False), **_check_json(result)}
+            raise CoralApiError("payload_too_large", str(error), 413) from error
+        except WorkflowKeyTaken as error:
+            raise CoralApiError("workflow_key_taken", WORKFLOW_KEY_TAKEN, 409) from error
+        return SavedWorkflowOut(
+            **_summary(definition).model_dump(),
+            valid=True,
+            problems=list(result.report.problems),
+            compiled=result.graph,
+        )
 
-    @router.get("/workflows")
+    @router.get(
+        "/workflows",
+        operation_id="coral_list_workflows",
+        response_model=list[WorkflowSummaryOut],
+        responses=error_responses(401, 403),
+    )
     def list_workflows(
-        workspace_id: int = Depends(workspace_id_dependency),
-    ) -> list[dict[str, Any]]:
-        return [
-            _definition_json(definition, include_body=False)
-            for definition in store.list_definitions(workspace_id=workspace_id)
-        ]
+        viewer: Viewer = caller, workspace_id: int = workspace
+    ) -> list[WorkflowSummaryOut]:
+        """The caller's workflows, by key."""
+        definitions = store.list_definitions(
+            workspace_id=workspace_id, owner=normalize_owner(viewer.user_id)
+        )
+        return [_summary(definition) for definition in definitions]
 
-    @router.get("/workflows/{workflow_id}")
+    @router.get(
+        "/workflows/{workflow_id}",
+        operation_id="coral_get_workflow",
+        response_model=WorkflowDetailOut,
+        responses=error_responses(401, 403, 404, 422),
+    )
     def get_workflow(
-        workflow_id: str, workspace_id: int = Depends(workspace_id_dependency)
-    ) -> dict[str, Any]:
-        definition = store.get(workspace_id=workspace_id, workflow_id=workflow_id)
+        workflow_id: str, viewer: Viewer = caller, workspace_id: int = workspace
+    ) -> WorkflowDetailOut:
+        """One of the caller's workflows with its YAML and compiled graph."""
+        definition = store.get(
+            workspace_id=workspace_id,
+            workflow_id=workflow_id,
+            owner=normalize_owner(viewer.user_id),
+        )
         if definition is None:
-            raise HTTPException(status_code=404, detail="workflow not found")
-        return _definition_json(definition, include_body=True)
+            raise CoralApiError("not_found", WORKFLOW_NOT_FOUND, 404)
+        return WorkflowDetailOut(
+            **_summary(definition).model_dump(),
+            yaml=definition.yaml_text,
+            compiled=definition.compiled,
+        )
 
     return router

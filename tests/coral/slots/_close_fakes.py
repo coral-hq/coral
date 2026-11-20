@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -15,8 +16,10 @@ from coral.omni.protocols import (
     SendReceipt,
     StatusEdgeView,
     TranscriptItem,
+    TurnTranscript,
     engine_message_text,
     queued_input_decision,
+    turn_transcript_of,
 )
 from coral.stores.session_bindings import effect_checksum
 from coral.stores.stable_ids import (
@@ -72,6 +75,9 @@ class FakeItem:
     author: str | None
     text: str
     client_input: bool = True
+    # Written by the runner: a reply, a tool call or its output.
+    runner: bool = False
+    assistant: bool = False
 
 
 @dataclass
@@ -87,6 +93,8 @@ class FakeSession:
     runner_alive: bool = True
     # Oldest first.
     transcript: list[FakeItem] = field(default_factory=list)
+    # Messages taken but not yet persisted, oldest first; newer than the transcript.
+    queued: list[FakeItem] = field(default_factory=list)
 
 
 class FakeDispatch:
@@ -113,6 +121,8 @@ class FakeDispatch:
         # Each stop that reached a session: its id and the user it ran as.
         self.stops: list[tuple[str, str | None]] = []
         self.settle_on_interrupt: Callable[[str], None] | None = None
+        # The turn transcript's reach in items, as the server's walk has; ``None``: unbounded.
+        self.scan_limit: int | None = None
 
     def session(self, session_id: str, **state: object) -> FakeSession:
         session = FakeSession(**state)  # type: ignore[arg-type]
@@ -127,6 +137,34 @@ class FakeDispatch:
         if session.closed:
             raise CoralSessionError("dispatch.session_closed", f"session {session_id} is closed")
         session.transcript.append(FakeItem(item_id, author, text))
+
+    def reply(self, session_id: str, *, assistant: bool = True, count: int = 1) -> None:
+        """The runner writes ``count`` items: replies, or tool calls when not ``assistant``."""
+        session = self.sessions[session_id]
+        for _ in range(count):
+            item_id = f"runner-{len(session.transcript)}"
+            session.transcript.append(
+                FakeItem(
+                    item_id,
+                    None,
+                    "Working.",
+                    client_input=False,
+                    runner=True,
+                    assistant=assistant,
+                )
+            )
+
+    def mark_interrupted(self, session_id: str) -> None:
+        """The runner records an interrupted turn: a user-role marker no client wrote."""
+        session = self.sessions[session_id]
+        session.transcript.append(
+            FakeItem(
+                f"marker-{len(session.transcript)}",
+                None,
+                "[System: interrupted]",
+                client_input=False,
+            )
+        )
 
     def _act(self, name: str, session_id: str) -> FakeSession:
         self.events.append(name)
@@ -152,7 +190,13 @@ class FakeDispatch:
     ) -> SendReceipt:
         session = self._act("send_message", session_id)
         self.sends.append(
-            {"workspace_id": workspace_id, "run_id": run_id, "stable_id": stable_id, "text": text}
+            {
+                "workspace_id": workspace_id,
+                "run_id": run_id,
+                "session_id": session_id,
+                "stable_id": stable_id,
+                "text": text,
+            }
         )
         if any(item.item_id == stable_id for item in session.transcript):
             return SendReceipt(item_id=stable_id, delivery="already_persisted")
@@ -218,6 +262,39 @@ class FakeDispatch:
         )
         return True if decision is None else decision
 
+    async def turn_transcript(
+        self, *, session_id: str, user_id: str | None, engine_messages: Mapping[str, bytes]
+    ) -> TurnTranscript:
+        """The production walk over queued messages, then the transcript, newest first."""
+        session = self._act("turn_transcript", session_id)
+
+        def item(fake: FakeItem, *, pending: bool) -> TranscriptItem:
+            engine = fake.author == user_id and engine_messages.get(
+                fake.item_id
+            ) == content_checksum(fake.text)
+            return TranscriptItem(
+                fake.item_id,
+                engine=engine,
+                client_input=fake.client_input and not engine,
+                runner=fake.runner,
+                assistant=fake.assistant,
+                pending=pending,
+            )
+
+        persisted = list(reversed(session.transcript))
+        if self.scan_limit is not None:
+            persisted = persisted[: self.scan_limit]
+        transcript = turn_transcript_of(
+            [
+                *(item(fake, pending=True) for fake in reversed(session.queued)),
+                *(item(fake, pending=False) for fake in persisted),
+            ]
+        )
+        beyond = self.scan_limit is not None and len(persisted) >= self.scan_limit
+        if transcript.newest_input is None and beyond:
+            return dataclasses.replace(transcript, beyond_reach=True)
+        return transcript
+
 
 class FakeWatch:
     """
@@ -280,9 +357,10 @@ class FakeEdgeWatcher:
 class FakeStableIds:
     """``StableIds`` with the store's insert-if-absent rule and its conflict on another send."""
 
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], *, clock: Callable[[], float] = lambda: 0) -> None:
         self.events = events
         self.rows: dict[tuple[int, str], StableIdRecord] = {}
+        self._clock = clock
 
     def record_send(
         self,
@@ -306,10 +384,10 @@ class FakeStableIds:
             content_cksum=content_checksum(content),
             kind=StableIdKind(encode_stable_id_kind(kind)),
             session_generation=generation,
-            created_at=0,
+            created_at=int(self._clock()),
         )
         stored = self.rows.setdefault((workspace_id, stable_id), wanted)
-        if stored != wanted:
+        if dataclasses.replace(stored, created_at=wanted.created_at) != wanted:
             raise StableIdConflict(f"stable id {stable_id} is recorded for another send")
 
     def lookup(self, workspace_id: int, stable_id: str, *, run_id: str) -> StableIdRecord | None:

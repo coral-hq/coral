@@ -1,7 +1,7 @@
 """Pure-tier workflow model: load, compile and hash. Must not import ``omnigent``."""
 
 from coral.model.authoring import RESERVED_WORKFLOW_IDS, Workflow
-from coral.model.canonical import canonical_bytes, canonical_json, content_hash
+from coral.model.canonical import analysis_digest, canonical_bytes, canonical_json, content_hash
 from coral.model.compile import compile
 from coral.model.ir import (
     IR_VERSION,
@@ -26,6 +26,7 @@ __all__ = [
     "SourceMap",
     "SourceRange",
     "Workflow",
+    "analysis_digest",
     "canonical_bytes",
     "canonical_json",
     "compile",

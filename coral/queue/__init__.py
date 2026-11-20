@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from coral.queue.backoff import compute_effect_backoff
 from coral.queue.conformance import run_executor_conformance
-from coral.queue.drainer import WorkDrainer
+from coral.queue.drainer import FinishedWork, HoldPolicy, WorkDrainer, WorkFinishedHook
 from coral.queue.executors import (
     EffectCompleted,
     EffectExecutor,
@@ -26,9 +26,12 @@ __all__ = [
     "EffectFailed",
     "EffectOutcome",
     "ExecutionContext",
+    "FinishedWork",
+    "HoldPolicy",
     "SqlAlchemyCoralQueueStore",
     "StartupLeaseLost",
     "WorkDrainer",
+    "WorkFinishedHook",
     "clear_executors",
     "compute_effect_backoff",
     "get_executor",

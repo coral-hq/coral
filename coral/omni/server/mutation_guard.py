@@ -12,8 +12,9 @@ On a bound session a client may still rename, archive, pin, delete, fork, read
 and stop it. It may not change the session's runner, model, modes, project or
 ``omnigent.*`` labels, close it through its title, share it, start sessions under
 or beside it, replace its agent or MCP servers, or point a scheduled task at it.
-The anchor and closed steps take only stop and interrupt events; an open step
-also refuses ``clear`` and other agents' messages. Runner-only event types pass
+The anchor and closed steps take only stop and interrupt events, and the anchor
+also answers to approvals while Coral's gate verdict handler is registered; an
+open step also refuses ``clear`` and other agents' messages. Runner-only event types pass
 only from the session's own runner, because Omnigent lets owners post them too.
 Engine agents (``coral__*``) cannot be edited or installed by clients, and are
 removed only with ``force=true``.
@@ -22,10 +23,15 @@ removed only with ``force=true``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from coral.db.enum_codecs import SessionBindingRole
-from coral.omni._upstream import RUNNER_SESSION_EVENT_TYPES, label_key_skeleton
+from coral.omni._upstream import (
+    APPROVAL_EVENT_TYPE,
+    RUNNER_SESSION_EVENT_TYPES,
+    label_key_skeleton,
+)
 from coral.omni.policies.state import log_traceback_once
 from coral.omni.server.sessions import RUN_ID_LABEL_KEY
 from coral.profiles.bundle_spec import ENGINE_PREFIX
@@ -91,15 +97,27 @@ _RESERVED_NAMES = f"Names starting with {ENGINE_PREFIX} are reserved for Coral's
 _LOOKUP_FAILED = "Coral could not check whether session {session_id} is in a workflow run; retry."
 
 
+def _no_gate_answers() -> bool:
+    return False
+
+
 class CoralMutationGuard:
     """The S53 guard registered as ``"coral"``; thread-safe."""
 
-    def __init__(self, bindings: SessionBindingLookup) -> None:
+    def __init__(
+        self,
+        bindings: SessionBindingLookup,
+        *,
+        gate_answering: Callable[[], bool] = _no_gate_answers,
+    ) -> None:
         """
         :param bindings: Finds a session's binding row (the positive-only cache
             the policy provider shares, in production).
+        :param gate_answering: Whether Coral's gate verdict handler is registered,
+            so approvals posted to a run's anchor reach it.
         """
         self._bindings = bindings
+        self._gate_answering = gate_answering
 
     def screen(self, attempt: MutationAttempt) -> Screen | str:
         """Decide inline: agent names by their prefix, sessions by the run-id label only."""
@@ -140,21 +158,25 @@ class CoralMutationGuard:
         if binding is None:
             return None
         labels = conversation.labels or {}
-        inert = (
-            binding.role == SessionBindingRole.ANCHOR
-            or labels.get(CLOSED_LABEL_KEY) == CLOSED_LABEL_VALUE
+        anchor = binding.role == SessionBindingRole.ANCHOR
+        inert = anchor or labels.get(CLOSED_LABEL_KEY) == CLOSED_LABEL_VALUE
+        what = _refused_change(
+            attempt, inert=inert, takes_approvals=anchor and self._gate_answering()
         )
-        what = _refused_change(attempt, inert=inert)
         if what is None:
             return None
         return _SESSION_REFUSAL.format(session_id=conversation.id, what=what)
 
 
-def _refused_change(attempt: MutationAttempt, *, inert: bool) -> str | None:
+def _refused_change(
+    attempt: MutationAttempt, *, inert: bool, takes_approvals: bool = False
+) -> str | None:
     """What a client may not do to a bound session in *attempt*, or ``None``.
 
     :param inert: The session is the anchor or a closed step, which take only
         stop events (and runner-only ones from its runner).
+    :param takes_approvals: The session is the anchor and gate answers reach
+        Coral's handler, so it takes approvals too.
     """
     if attempt.action == SESSION_UPDATE:
         protected = [
@@ -167,6 +189,8 @@ def _refused_change(attempt: MutationAttempt, *, inert: bool) -> str | None:
     if attempt.action == SESSION_EVENT:
         event_type = attempt.event_type
         if event_type in STOP_EVENTS:
+            return None
+        if takes_approvals and event_type == APPROVAL_EVENT_TYPE:
             return None
         if event_type in RUNNER_SESSION_EVENT_TYPES:
             refused = not attempt.runner_proven
@@ -192,7 +216,9 @@ def _agent_refusal(attempt: MutationAttempt) -> str | None:
         return _ENGINE_AGENT.format(name=name) + " and can't be edited."
     if attempt.forced:
         return None
+    # Nothing pauses at once: its live steps lose their engine tools and stall on the nudge cap.
     return (
         _ENGINE_AGENT.format(name=name)
-        + "; delete with force=true to remove it anyway (runs that use it pause)."
+        + "; delete with force=true to remove it anyway (steps running it can no longer "
+        "hand off, and their runs pause after repeated nudges)."
     )

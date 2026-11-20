@@ -23,7 +23,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from coral.db import (
+    AlertRow,
     CoralBase,
+    GateVisitRow,
     RunRow,
     SessionBindingRow,
     StableIdRow,
@@ -56,6 +58,9 @@ EXPECTED_TABLE_NAMES = frozenset(
         "coral_session_bindings",
         "coral_stable_ids",
         "coral_workspace_op_intents",
+        "coral_tool_replies",
+        "coral_command_observations",
+        "coral_alerts",
     }
 )
 
@@ -83,10 +88,10 @@ def _column_index_byte_length(col: Column) -> int:
     return 8
 
 
-def test_exactly_19_tables_registered_and_no_metadata_overlap() -> None:
+def test_exactly_22_tables_registered_and_no_metadata_overlap() -> None:
     tables = CoralBase.metadata.tables
     assert set(tables.keys()) == EXPECTED_TABLE_NAMES
-    assert len(tables) == 19
+    assert len(tables) == 22
 
     omnigent_tables = set(OmnigentBase.metadata.tables.keys())
     conversation_tables = set(ConversationBase.metadata.tables.keys())
@@ -131,8 +136,9 @@ def test_constraint_and_index_naming_prefixes() -> None:
         for index in table.indexes:
             ix_name = index.name
             assert isinstance(ix_name, str), f"Unnamed index in {table_name}"
-            assert ix_name.startswith("ix_coral_"), (
-                f"Index {ix_name} on {table_name} missing 'ix_coral_' prefix"
+            prefix = "uq_coral_" if index.unique else "ix_coral_"
+            assert ix_name.startswith(prefix), (
+                f"Index {ix_name} on {table_name} missing {prefix!r} prefix"
             )
 
 
@@ -175,6 +181,9 @@ def test_exact_internal_and_external_id_lengths() -> None:
         "coral_session_bindings": {"run_id"},
         "coral_stable_ids": {"stable_id", "run_id"},
         "coral_workspace_op_intents": {"run_id"},
+        "coral_tool_replies": {"run_id"},
+        "coral_command_observations": {"run_id"},
+        "coral_alerts": {"id", "run_id", "subject_id"},
     }
 
     external_ref_columns: dict[str, set[str]] = {
@@ -188,12 +197,13 @@ def test_exact_internal_and_external_id_lengths() -> None:
             "restart_attempt_id",
         },
         "coral_handoffs": {"submitted_by_session_id"},
-        "coral_gate_visits": {"token", "elicitation_id", "elicitation_session_id"},
+        "coral_gate_visits": {"elicitation_id", "elicitation_session_id"},
         "coral_work": {"lease_holder"},
         "coral_worker_leases": {"name", "holder_id"},
         "coral_session_bindings": {"session_id", "host_id"},
         "coral_stable_ids": {"session_id"},
         "coral_workspace_op_intents": {"host_id"},
+        "coral_command_observations": {"session_id"},
     }
 
     for table_name, cols in internal_id_columns.items():
@@ -509,6 +519,24 @@ def test_enum_codecs_roundtrip_and_errors() -> None:
             ec.decode_workspace_op_intent_op,
             ec.WorkspaceOpIntentOp,
         ),
+        (
+            ec.ALERT_KIND,
+            ec.encode_alert_kind,
+            ec.decode_alert_kind,
+            ec.AlertKind,
+        ),
+        (
+            ec.ALERT_PRIORITY,
+            ec.encode_alert_priority,
+            ec.decode_alert_priority,
+            ec.AlertPriority,
+        ),
+        (
+            ec.ALERT_STATUS,
+            ec.encode_alert_status,
+            ec.decode_alert_status,
+            ec.AlertStatus,
+        ),
     ]
 
     for table, encode_fn, decode_fn, enum_cls in codecs_to_test:
@@ -551,6 +579,125 @@ def test_stored_codes_for_drift_and_session_facade_enums() -> None:
         < ec.SessionBindingProgress.ROW_CREATED
         < ec.SessionBindingProgress.INITIALIZED
     )
+
+
+def test_stored_codes_for_engine_bridge_enums() -> None:
+    """Stored integers are a persistence contract; renumbering breaks existing rows."""
+    assert ec.encode_run_pause_reason("auth") == ec.RunPauseReason.AUTH == 13
+    assert ec.encode_slot_status("evaluating") == ec.SlotStatus.EVALUATING == 10
+    assert ec.encode_slot_status("closing") == ec.SlotStatus.CLOSING == 11
+    assert ec.encode_log_kind("engine") == ec.LogKind.ENGINE == 22
+
+
+def test_engine_bridge_columns_table_and_binding_index() -> None:
+    tables = CoralBase.metadata.tables
+    versions = tables["coral_workflow_versions"]
+    # A pinned version holds its graph inline, so the blob refs are optional.
+    for name in ("yaml_ref", "compiled_ref", "yaml_text", "compiled_json"):
+        assert versions.c[name].nullable is True, name
+    assert versions.c.compiled_json.type.max_stored_bytes == MAX_STORED_BYTES
+    assert tables["coral_run_specs"].c.engine_config.nullable is True
+    assert isinstance(tables["coral_work"].c.held_since.type, BigInteger)
+    assert tables["coral_work"].c.held_since.nullable is True
+    (purge,) = [
+        index for index in tables["coral_work"].indexes if index.name == "ix_coral_work_finished"
+    ]
+    assert [column.name for column in purge.columns] == [
+        "kind",
+        "status",
+        "finished_at",
+        "workspace_id",
+        "id",
+    ]
+
+    replies = tables["coral_tool_replies"]
+    assert [column.name for column in replies.primary_key.columns] == [
+        "workspace_id",
+        "run_id",
+        "cksum",
+    ]
+    assert replies.primary_key.name == "pk_coral_tool_replies"
+    for name in ("reply", "run_version", "created_at_us"):
+        assert replies.c[name].nullable is False, name
+
+    (index,) = [
+        index
+        for index in tables["coral_session_bindings"].indexes
+        if index.name == "uq_coral_session_bindings_slot_generation"
+    ]
+    assert index.unique is True
+    assert [column.name for column in index.columns] == [
+        "workspace_id",
+        "run_id",
+        "slot_id",
+        "session_generation",
+    ]
+
+
+def test_stored_codes_for_alert_enums() -> None:
+    """Stored integers are a persistence contract; renumbering breaks existing rows."""
+    assert ec.ALERT_KIND == {
+        "gate": 1,
+        "question": 2,
+        "pause": 3,
+        "watchdog": 4,
+        "overdue": 5,
+        "reaction": 6,
+        "run_completed": 7,
+        "run_failed": 8,
+        "run_cancelled": 9,
+    }
+    # The inbox lists alerts in ascending priority code, so normal sorts before low.
+    assert ec.ALERT_PRIORITY == {"normal": 1, "low": 2}
+    assert ec.AlertPriority.NORMAL < ec.AlertPriority.LOW
+    assert ec.ALERT_STATUS == {"open": 1, "acked": 2, "resolved": 3}
+
+
+def test_alert_table_keys_indexes_and_checks() -> None:
+    alerts = AlertRow.__table__
+    assert alerts.primary_key.name == "pk_coral_alerts"
+    assert [column.name for column in alerts.primary_key.columns] == ["workspace_id", "id"]
+    nullable = {column.name for column in alerts.columns if column.nullable}
+    assert nullable == {
+        "owner_user_id",
+        "account_generation",
+        "acked_at",
+        "acked_by",
+        "resolved_at",
+    }
+    assert alerts.c.payload.type.max_stored_bytes == MAX_STORED_BYTES
+    indexes = {index.name: [column.name for column in index.columns] for index in alerts.indexes}
+    assert indexes == {
+        # The owner's feed: open rows by priority, then newest first.
+        "ix_coral_alerts_inbox": [
+            "workspace_id",
+            "owner_user_id",
+            "status",
+            "priority",
+            "created_at",
+            "id",
+        ],
+        # Resolutions match a run's alerts by what they point at.
+        "ix_coral_alerts_subject": ["workspace_id", "run_id", "subject_id"],
+    }
+    checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in alerts.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert checks == {
+        "ck_coral_alerts_kind": "kind IN (1, 2, 3, 4, 5, 6, 7, 8, 9)",
+        "ck_coral_alerts_priority": "priority IN (1, 2)",
+        "ck_coral_alerts_status": "status IN (1, 2, 3)",
+    }
+
+
+def test_gate_visit_token_holds_a_full_engine_token_case_sensitively() -> None:
+    token = GateVisitRow.__table__.c.token
+    assert token.type.length == 512
+    assert token.nullable is False
+    mysql_type = token.type._variant_mapping["mysql"]
+    assert (mysql_type.length, mysql_type.collation) == (512, "utf8mb4_bin")
 
 
 def test_session_facade_tables_enforce_their_enum_checks_on_sqlite() -> None:

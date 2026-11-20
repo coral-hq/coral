@@ -7,6 +7,7 @@ import builtins
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Index,
     Integer,
     SmallInteger,
@@ -92,9 +93,12 @@ class WorkflowVersionRow(CoralBase):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     workflow_id: Mapped[str] = mapped_column(String(32), nullable=False)
     content_hash: Mapped[bytes] = mapped_column(CHECKSUM32, nullable=False)
-    yaml_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    # A version pinned by a run holds its YAML and compiled graph inline, without blob refs.
+    yaml_ref: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
     yaml_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
-    compiled_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    compiled_ref: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    yaml_text: Mapped[str | None] = mapped_column(CAPPED_TEXT, nullable=True, default=None)
+    compiled_json: Mapped[str | None] = mapped_column(CAPPED_TEXT, nullable=True, default=None)
     compiler_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     origin: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     parent_version_id: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
@@ -123,6 +127,12 @@ class WorkflowVersionRow(CoralBase):
             "validation_state",
             WORKFLOW_VERSION_STATUS,
             name="ck_coral_workflow_versions_validation_state",
+        ),
+        # Each artifact is stored by blob ref or inline.
+        CheckConstraint(
+            "(yaml_ref IS NOT NULL OR yaml_text IS NOT NULL) "
+            "AND (compiled_ref IS NOT NULL OR compiled_json IS NOT NULL)",
+            name="ck_coral_workflow_versions_content",
         ),
     )
 
@@ -178,7 +188,7 @@ class RunRow(CoralBase):
         make_enum_check_constraint(
             "pause_reason",
             RUN_PAUSE_REASON,
-            name="ck_coral_runs_pause_reason_v2",
+            name="ck_coral_runs_pause_reason_v3",
             nullable=True,
         ),
     )
@@ -210,6 +220,8 @@ class RunSpecRow(CoralBase):
     max_activations: Mapped[int] = mapped_column(Integer, nullable=False)
     refresh_threshold_bp: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     rejected_call_limit: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    # JSON of the engine config the run's log is folded with; null for runs without an engine.
+    engine_config: Mapped[str | None] = mapped_column(CAPPED_TEXT, nullable=True, default=None)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     __table_args__ = (
@@ -351,7 +363,7 @@ class AgentSlotRow(CoralBase):
             "id",
         ),
         make_enum_check_constraint("role", SLOT_ROLE, name="ck_coral_agent_slots_role"),
-        make_enum_check_constraint("status", SLOT_STATUS, name="ck_coral_agent_slots_status"),
+        make_enum_check_constraint("status", SLOT_STATUS, name="ck_coral_agent_slots_status_v2"),
         make_enum_check_constraint(
             "last_turn_origin",
             SLOT_TURN_ORIGIN,
@@ -451,7 +463,8 @@ class GateVisitRow(CoralBase):
     scope_key: Mapped[str] = mapped_column(CaseSensitiveString(512), nullable=False)
     visit_no: Mapped[int] = mapped_column(Integer, nullable=False)
     owner_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
-    token: Mapped[str] = mapped_column(String(64), nullable=False)
+    # The engine token, "<activation id>:<visit number>", stored whole.
+    token: Mapped[str] = mapped_column(CaseSensitiveString(512), nullable=False)
     elicitation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
     elicitation_session_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, default=None
@@ -521,7 +534,7 @@ class RunLogRow(CoralBase):
         ),
         Index("ix_coral_run_log_activation", "workspace_id", "run_id", "activation_id", "seq"),
         make_enum_check_constraint("actor_kind", ACTOR_KIND, name="ck_coral_run_log_actor_kind"),
-        make_enum_check_constraint("kind", LOG_KIND, name="ck_coral_run_log_kind"),
+        make_enum_check_constraint("kind", LOG_KIND, name="ck_coral_run_log_kind_v2"),
     )
 
 
@@ -561,6 +574,20 @@ class SimulationCaseRow(CoralBase):
     )
 
 
+class ToolReplyRow(CoralBase):
+    """Reply an engine tool call committed, returned again when the call is resent."""
+
+    __tablename__ = "coral_tool_replies"
+
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # Checksum of the tool call that produced the reply.
+    cksum: Mapped[bytes] = mapped_column(CHECKSUM32, primary_key=True)
+    reply: Mapped[str] = mapped_column(CAPPED_TEXT, nullable=False)
+    run_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at_us: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class BlobRefRow(CoralBase):
     """Reference tracking for content-addressed CAS external artifacts."""
 
@@ -594,6 +621,7 @@ __all__ = [
     "RunRow",
     "RunSpecRow",
     "SimulationCaseRow",
+    "ToolReplyRow",
     "WorkflowDraftRow",
     "WorkflowRow",
     "WorkflowVersionRow",

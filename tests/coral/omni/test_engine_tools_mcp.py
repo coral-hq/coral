@@ -12,7 +12,8 @@ import asyncio
 import dataclasses
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+import threading
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,11 +23,12 @@ import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
 
+from coral.bridge.executors import BoundedThreads
 from coral.db.enum_codecs import RunPauseReason, RunStatus, SessionBindingRole, SlotRole
 from coral.engine.types import HandoffEvaluated, HandoffReceived, Input, RetryStep
 from coral.model.ir import CompiledGraph
 from coral.omni.runner.tool_provider import CoralToolProvider
-from coral.omni.server.tool_bridge import register_engine_tools
+from coral.omni.server.tool_bridge import LOOKUP_FAILED, register_engine_tools
 from coral.stores.session_bindings import SessionBinding
 from coral.tools.catalog import CHOOSE_ARROW, ENGINE_TOOLS, SUBMIT_HANDOFF, EngineToolDecl
 from coral.tools.dispatch import EngineToolCall, ToolDispatcher
@@ -40,11 +42,13 @@ from omnigent.runner.mcp_execution_registry import MCP_OPERATION_ID_PARAM
 from omnigent.server.routes import sessions as sessions_mod
 from omnigent.server.routes._sessions import orchestration
 from omnigent.server.routes.sessions import _handle_mcp_tools_call
-from omnigent.server.server_tools import server_tool
+from omnigent.server.server_tools import ServerToolCall, ServerToolResult, server_tool
 from omnigent.spec import AgentSpec, ExecutorSpec
 from omnigent.spec.types import PolicyAction
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.tools import extensions
+from tests._helpers.polling import poll_until_async
+from tests.budgets import budget
 from tests.coral.tools.fake_decision_port import (
     WORKSPACE,
     FakeBindingLookup,
@@ -52,7 +56,7 @@ from tests.coral.tools.fake_decision_port import (
     step_binding,
 )
 from tests.coral.tools.test_choose_arrow import _finish_work, _next_pass, _review_loop
-from tests.coral.tools.test_dispatch import _HeldPort
+from tests.coral.tools.test_dispatch import _HeldPort, _RunOneHeld
 from tests.coral.workflow_builders import (
     arrow,
     compile_text,
@@ -335,6 +339,104 @@ async def test_a_dispatcher_transport_error_is_32000_over_mcp(
     assert mcp.port.stored_replies() == {}
     # Mapped by the bridge: S10's "server tool failed" error and traceback never appear.
     assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def _server_call(session_id: str) -> ServerToolCall:
+    """A runner-proven ``coral_submit_handoff`` call as S10 hands it to the handler."""
+    return ServerToolCall(
+        session_id=session_id,
+        name=SUBMIT,
+        arguments=HANDOFF,
+        operation_id=OPERATION,
+        runner_proven=True,
+        actor=None,
+    )
+
+
+async def test_a_stalled_binding_lookup_is_answered_retry_and_drops_the_lookups_behind_it() -> (
+    None
+):
+    entered, release = threading.Event(), threading.Event()
+    reads: list[str] = []
+
+    class StalledLookup:
+        reads_fresh = True
+
+        def find_by_session(self, workspace_id: int, session_id: str) -> SessionBinding | None:
+            reads.append(session_id)
+            if session_id == "stalled":
+                entered.set()
+                assert release.wait(budget(10))
+            return None
+
+    pool = BoundedThreads(max_workers=1, thread_name_prefix="test-decision")
+    try:
+        async with AsyncExitStack() as stack:
+            stack.enter_context(installed_tool_providers(CoralToolProvider(ENGINE_TOOLS)))
+            register_engine_tools(
+                catalog=ENGINE_TOOLS,
+                port=InMemoryDecisionPort(),
+                bindings=StalledLookup(),
+                stack=stack,
+                run_in_thread=pool.run,
+                lookup_timeout_s=0.05,
+            )
+            handler = server_tool(SUBMIT)
+            assert handler is not None
+            stalled = await handler(_server_call("stalled"))
+            assert entered.is_set()
+            # The stalled read still holds the only thread: the next lookup waits, then is dropped.
+            behind = await handler(_server_call("behind"))
+    finally:
+        release.set()
+        pool.close()
+
+    assert stalled == behind == ServerToolResult(LOOKUP_FAILED, is_error=True)
+    assert reads == ["stalled"]
+
+
+async def test_a_call_waiting_on_the_decision_pool_when_it_closes_is_answered_retry() -> None:
+    """The lifespan closes the decision pool: a call still waiting for a thread is not lost."""
+    port = InMemoryDecisionPort()
+    port.add_run(_plain(), run_id="run-1")
+    port.add_run(_plain(), run_id="run-2")
+    held = _RunOneHeld(port)
+    lookup = FakeBindingLookup()
+    lookup.add(step_binding(SLOT, session_id="s1", run_id="run-1"))
+    lookup.add(step_binding(SLOT, session_id="s2", run_id="run-2"))
+    pool = BoundedThreads(max_workers=1, thread_name_prefix="test-decision")
+    submitted: list[str] = []
+
+    async def run_in_pool(fn: Callable[..., Any], /, *args: object, **kwargs: object) -> Any:
+        # Recorded as the call is handed to the pool.
+        submitted.append(getattr(fn, "__name__", "call"))
+        return await pool.run(fn, *args, **kwargs)
+
+    try:
+        async with AsyncExitStack() as stack:
+            stack.enter_context(installed_tool_providers(CoralToolProvider(ENGINE_TOOLS)))
+            register_engine_tools(
+                catalog=ENGINE_TOOLS,
+                port=held,
+                bindings=lookup,
+                stack=stack,
+                run_in_thread=run_in_pool,
+            )
+            handler = server_tool(SUBMIT)
+            assert handler is not None
+            with workspace_scope(WORKSPACE):
+                running = asyncio.create_task(handler(_server_call("s1")))
+                assert await asyncio.to_thread(held.entered.wait, budget(10))
+                waiting = asyncio.create_task(handler(_server_call("s2")))
+                # s2's lookup waits behind s1's decision on the only thread.
+                await poll_until_async(lambda: submitted.count("find_by_session") == 2)
+                pool.close()
+    finally:
+        held.release.set()
+
+    assert ToolReply.from_json((await running).text) == ToolReply(accepted=True, next=STOP)
+    dropped = await waiting
+    assert dropped.is_error and "retry" in dropped.text
 
 
 async def test_registration_refuses_a_tool_no_planner_answers(

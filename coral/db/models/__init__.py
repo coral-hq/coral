@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from coral.db.base import CoralBase
+from coral.db.models.alerts import AlertRow
 from coral.db.models.core import (
     ActivationRow,
     AgentSlotRow,
@@ -15,11 +16,13 @@ from coral.db.models.core import (
     RunRow,
     RunSpecRow,
     SimulationCaseRow,
+    ToolReplyRow,
     WorkflowDraftRow,
     WorkflowRow,
     WorkflowVersionRow,
 )
 from coral.db.models.sessions import (
+    CommandObservationRow,
     SessionBindingRow,
     StableIdRow,
     WorkspaceOpIntentRow,
@@ -32,7 +35,9 @@ from coral.db.models.work import (
 __all__ = [
     "ActivationRow",
     "AgentSlotRow",
+    "AlertRow",
     "BlobRefRow",
+    "CommandObservationRow",
     "CoralBase",
     "GateVisitRow",
     "HandoffItemRow",
@@ -44,6 +49,7 @@ __all__ = [
     "SessionBindingRow",
     "SimulationCaseRow",
     "StableIdRow",
+    "ToolReplyRow",
     "WorkRow",
     "WorkerLeaseRow",
     "WorkflowDraftRow",

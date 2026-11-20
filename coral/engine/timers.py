@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import datetime, timedelta
 
 from coral.engine.types import RunState, Timer, TimerPolicy
@@ -19,6 +20,28 @@ def find_timer(state: RunState, key: str) -> Timer | None:
         if timer.key == key:
             return timer
     return None
+
+
+def has_live_timer(state: RunState, kind: str, subject: str, now: datetime) -> bool:
+    """True when ``subject`` has a ``kind`` timer armed that is not due yet at ``now``."""
+    return any(
+        timer.kind == kind and timer.subject == subject and timer.due_at > now
+        for timer in state.timers
+    )
+
+
+def drop_slot_backoff(
+    state: RunState,
+    slot_ids: Collection[str],
+    kinds: Collection[str] = (INFRA_BACKOFF, PLAN_PROBE),
+) -> RunState:
+    """Drop the ``kinds`` timers (infra backoff and plan probe by default) of ``slot_ids``."""
+    kept = tuple(
+        timer for timer in state.timers if timer.kind not in kinds or timer.subject not in slot_ids
+    )
+    if kept == state.timers:
+        return state
+    return state.model_copy(update={"timers": kept})
 
 
 def sync_watchdogs(
