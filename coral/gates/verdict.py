@@ -20,7 +20,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from coral.alerts.types import LOCAL_USER_ID, generation_matches, normalize_owner
+from coral.alerts.types import LOCAL_USER_ID, is_owner
 from coral.bridge.executors import BridgeThreads, PoolClosed
 from coral.bridge.messages import strip_format_characters
 from coral.bridge.service import EngineLoadFailed, GateAnswerResult
@@ -348,9 +348,7 @@ def _answered(answered: str, label: str | None) -> GateVerdict:
 
 def _is_owner(run: CoralRun, viewer: Viewer) -> bool:
     """The caller is the run's owner, under the generation the run recorded, if any."""
-    return normalize_owner(run.user_id) == normalize_owner(viewer.user_id) and (
-        generation_matches(run.account_generation, viewer)
-    )
+    return is_owner(run.user_id, run.account_generation, viewer)
 
 
 def _choose(outcomes: Sequence[str]) -> str:

@@ -114,7 +114,7 @@ def resume_run(graph: CompiledGraph, state: RunState, command: ResumeRun) -> App
             store_cap = command.cap
 
     def cleared(cause: PauseCause) -> bool:
-        return _resume_clears(cause) or (cause.reason == "budget" and store_cap is not None)
+        return resume_clears(cause) or (cause.reason == "budget" and store_cap is not None)
 
     reasons = {cause.reason for cause in state.causes if cleared(cause)}
     if not reasons:
@@ -138,7 +138,7 @@ def resume_run(graph: CompiledGraph, state: RunState, command: ResumeRun) -> App
     return ApplyResult(state=updated, effects=effects)
 
 
-def _resume_clears(cause: PauseCause) -> bool:
+def resume_clears(cause: PauseCause) -> bool:
     """A resumable reason, or a step's failed turn no rule names (until steps can retry)."""
     if cause.reason in _RESUME_REASONS:
         return True

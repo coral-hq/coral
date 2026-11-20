@@ -75,6 +75,22 @@ def generation_matches(recorded: str | None, viewer: GenerationProof) -> bool:
     return recorded is None or (viewer.check_generation and viewer.account_generation == recorded)
 
 
+class OwnerProof(GenerationProof, Protocol):
+    """A caller: who it is and which account generation its request proved."""
+
+    @property
+    def user_id(self) -> str | None: ...
+
+
+def is_owner(
+    owner_user_id: str | None, recorded_generation: str | None, viewer: OwnerProof
+) -> bool:
+    """Whether the caller owns what ``owner_user_id`` recorded, under its generation if any."""
+    return normalize_owner(owner_user_id) == normalize_owner(viewer.user_id) and (
+        generation_matches(recorded_generation, viewer)
+    )
+
+
 __all__ = [
     "LOCAL_USER_ID",
     "MAX_ALERT_MESSAGE_CHARS",
@@ -86,6 +102,8 @@ __all__ = [
     "AlertKindName",
     "AlertPayload",
     "GenerationProof",
+    "OwnerProof",
     "generation_matches",
+    "is_owner",
     "normalize_owner",
 ]
