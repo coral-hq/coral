@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from coral.db.base import CoralBase
+from coral.db.models.alerts import AlertRow
 from coral.db.models.core import (
     ActivationRow,
     AgentSlotRow,
@@ -34,6 +35,7 @@ from coral.db.models.work import (
 __all__ = [
     "ActivationRow",
     "AgentSlotRow",
+    "AlertRow",
     "BlobRefRow",
     "CommandObservationRow",
     "CoralBase",

@@ -10,9 +10,11 @@ from coral.bridge.mapping import MapContext, map_effect
 from coral.bridge.messages import (
     brief_text,
     decision_request_text,
+    gate_prompt_text,
     nudge_text,
     orchestrator_title,
     sanitize,
+    strip_format_characters,
 )
 from coral.engine.types import ChooseArrow, EffectCompleted, PauseCause, RunState
 from coral.model.ir import CompiledGraph
@@ -290,6 +292,27 @@ def test_texts_drop_nul_and_lone_surrogates() -> None:
     text.encode()
     assert "badbyte and  half" in text
     assert "xy" in text
+
+
+def test_format_characters_are_stripped_from_free_text() -> None:
+    text = "a\x00b\ud800c\x1bd\x9fe\u202ef\u200bg\ufeffh\u2066i\u00adj\tk\n…é\U0001f600"
+    assert strip_format_characters(text) == "abcdefghijk…é\U0001f600"
+
+
+def test_a_gate_prompt_keeps_its_lines_and_strips_format_characters_in_each() -> None:
+    gated = fixture_graph("gated")
+    reached = drive(
+        gated, [start_run(gated), *accept("implement||a4:1:0", "one\u202e\ntwo\u200b")]
+    )
+    (visit,) = reached.state.gates
+    text = gate_prompt_text(gated, reached.state, visit, run_title="Fix\u2066 it")
+    assert text.splitlines()[:4] == [
+        "Approve change",
+        "Approve the change?",
+        "Run: Fix it",
+        "Visit 1",
+    ]
+    assert "> one\n> two" in text
 
 
 def _huge_graph(graph: CompiledGraph, filler: str) -> CompiledGraph:

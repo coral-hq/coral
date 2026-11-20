@@ -7,6 +7,7 @@ Header/OIDC identities leave the accounts-specific columns unset.
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -53,6 +54,38 @@ from omnigent.entities import Account, AccountToken
 from omnigent.server.auth import RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC
 
 _HIDDEN_LIST_USERS = frozenset({RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL})
+
+# CORAL(S106): server plugins move their own registration work when a generation rotates.
+RegistrationCarrier = Callable[[Session, str, str, str], None]
+_registration_carriers: tuple[tuple[object, RegistrationCarrier], ...] = ()
+_registration_carriers_lock = threading.Lock()
+
+
+def register_registration_carrier(carrier: RegistrationCarrier) -> Callable[[], None]:
+    """Also move *carrier*'s rows when a password change rotates an account's generation.
+
+    The carrier is called as ``carrier(session, user_id, old, new)`` inside the
+    rotation's transaction, after the scheduled tasks and hosts move, and writes
+    only through *session*; a retried transaction calls it again. An error it
+    raises aborts the whole rotation, so the account and every carried row keep
+    the old generation together. Re-creating an account starts a new
+    registration and calls no carrier.
+
+    :returns: A call that removes this registration only; calling it again does nothing.
+    """
+    global _registration_carriers
+    token = object()
+    with _registration_carriers_lock:
+        _registration_carriers = (*_registration_carriers, (token, carrier))
+
+    def unregister() -> None:
+        global _registration_carriers
+        with _registration_carriers_lock:
+            _registration_carriers = tuple(
+                entry for entry in _registration_carriers if entry[0] is not token
+            )
+
+    return unregister
 
 
 def _to_account(row: SqlUser) -> Account:
@@ -179,6 +212,9 @@ def _carry_registration_work(session: Session, user_id: str, *, old: str, new: s
         )
         .values(account_generation=new)
     )
+    # CORAL(S106): registered carriers move their rows in this transaction; an error aborts it.
+    for _token, carrier in _registration_carriers:
+        carrier(session, user_id, old, new)
 
 
 def _to_account_token(row: SqlAccountToken) -> AccountToken:

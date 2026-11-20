@@ -36,6 +36,7 @@ from coral.engine.types import (
     SessionFailed,
     TurnEnded,
 )
+from coral.gates.ids import GATE_PUBLISH, GATE_WITHDRAW, gate_visit_id
 from coral.model.ids import derived_id, effect_session_id
 from coral.model.ir import CompiledGraph
 from coral.slots.executors import _cancel_payload, _close_payload, _create_payload, _send_payload
@@ -314,14 +315,46 @@ def test_a_cancel_of_a_slot_without_a_create_names_no_session() -> None:
     assert _cancel_payload(payload) == {"session_id": None, "closed_label": True}
 
 
-@pytest.mark.parametrize(
-    "kind", ["publish_gate", "withdraw_gate", "notify", "runner_lost", "retry_step", "arm_timer"]
-)
+@pytest.mark.parametrize("kind", ["notify", "runner_lost", "retry_step", "arm_timer"])
 def test_kinds_without_an_executor_map_to_no_work(kind: str) -> None:
     started = _started()
     effect = Effect(effect_key=f"{RUN_ID}:9:{kind}:{IMPLEMENT}", kind=kind, subject=IMPLEMENT)
     assert map_effect(_ctx(started.state), effect) is None
     assert kind in UNMAPPED_KINDS
+    assert "publish_gate" not in UNMAPPED_KINDS and "withdraw_gate" not in UNMAPPED_KINDS
+    assert UNMAPPED_KINDS["notify"] == (
+        "alerts come from the commit; a decision's reminder goes to the orchestrator"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "effect_type"), [("publish_gate", GATE_PUBLISH), ("withdraw_gate", GATE_WITHDRAW)]
+)
+def test_a_gate_effect_queues_a_bridge_row_naming_only_its_visit(
+    kind: str, effect_type: str
+) -> None:
+    gated = fixture_graph("gate_only")
+    started = drive(gated, [start_run(gated)])
+    token = "approve||:1"
+    key = f"{RUN_ID}:1:{kind}:{token}"
+    draft = map_effect(
+        _ctx(started.state, graph=gated), Effect(effect_key=key, kind=kind, subject=token)
+    )
+    assert draft is not None
+    _assert_effect_row(draft, key)
+    assert _payload(draft) == {
+        "effect_type": effect_type,
+        "effect_key": key,
+        "bridge_item": "gate",
+        "visit_id": gate_visit_id(RUN_ID, token),
+    }
+    assert (draft.node_id, draft.scope_key, draft.slot_generation, draft.owner_key) == (
+        "approve",
+        None,
+        None,
+        None,
+    )
+    assert draft.available_at == epoch_seconds(LATER)
 
 
 def _runs_emitting_every_kind() -> list[tuple[CompiledGraph, Driven]]:
@@ -352,7 +385,7 @@ def _runs_emitting_every_kind() -> list[tuple[CompiledGraph, Driven]]:
 
 
 def test_every_effect_the_engine_emits_is_mapped_or_named_unmapped() -> None:
-    known = FED_KINDS | {"cancel_sessions"} | set(UNMAPPED_KINDS)
+    known = FED_KINDS | {"cancel_sessions", "publish_gate", "withdraw_gate"} | set(UNMAPPED_KINDS)
     seen: set[str] = set()
     for graph, driven in _runs_emitting_every_kind():
         for step in replay(graph, driven.log):

@@ -40,6 +40,7 @@ Limitations:
 from __future__ import annotations
 
 import copy
+import logging
 import threading
 from collections.abc import Callable
 from typing import Any, Literal
@@ -47,6 +48,10 @@ from typing import Any, Literal
 from cachetools import LRUCache
 
 from omnigent.db.workspace_cache import WorkspaceScopedCache
+from omnigent.process_logging import log_once
+
+# CORAL(S5): logging and log_once report observer failures.
+_logger = logging.getLogger(__name__)
 
 # Per-conversation mapping of outstanding elicitation_id → original
 # event payload. Storing the full event (not just the id) lets
@@ -68,6 +73,10 @@ _lock = threading.Lock()
 # Optional observer (``subagent_block_notifier``) run synchronously on every
 # tracked event — must be cheap + non-blocking. ``None`` (runner, tests) skips it.
 _observer: Callable[[str, dict[str, Any]], None] | None = None
+# CORAL(S5): further observers, replaced as a whole tuple, so readers take no lock.
+ElicitationObserver = Callable[[str, dict[str, Any]], None]
+_extra_observers: tuple[ElicitationObserver, ...] = ()
+_observers_lock = threading.Lock()  # writers only
 
 
 def set_elicitation_observer(
@@ -85,6 +94,58 @@ def set_elicitation_observer(
     """
     global _observer
     _observer = observer
+
+
+# CORAL(S5): observers added beside the primary slot; each uninstaller removes one registration.
+def add_elicitation_observer(observer: ElicitationObserver) -> Callable[[], None]:
+    """
+    Add an observer beside the primary one set by :func:`set_elicitation_observer`.
+
+    Added observers run after the primary, in registration order, on the
+    publishing thread and in the publisher's workspace scope (they get a bare
+    conversation id; read ``current_workspace_id()`` to key state). They must
+    be cheap, thread-safe and non-blocking, and must not mutate the event: the
+    index and every subscriber share it. A raising observer is logged and
+    stops neither the other observers nor the publish. Clearing the primary
+    slot leaves added observers in place.
+
+    :param observer: Callback invoked as ``observer(conversation_id, event)``
+        for every request and resolved event, e.g. a bound ``tracker.observe``.
+    :returns: An uninstaller that removes one registration of *observer* (its
+        earliest remaining position, matched by identity) and does nothing when
+        called again. A publish already under way may still call the observer
+        once after the uninstaller returns.
+    """
+    global _extra_observers
+    with _observers_lock:
+        _extra_observers = (*_extra_observers, observer)
+    removed = False
+
+    def remove() -> None:
+        global _extra_observers
+        nonlocal removed
+        with _observers_lock:
+            if removed:
+                return
+            removed = True
+            for index, registered in enumerate(_extra_observers):
+                if registered is observer:
+                    _extra_observers = _extra_observers[:index] + _extra_observers[index + 1 :]
+                    return
+
+    return remove
+
+
+def _observer_name(observer: ElicitationObserver) -> str:
+    """Return *observer*'s name for failure logs, e.g. ``"Tracker.observe"``; never raises."""
+    for candidate in (observer, type(observer)):
+        try:
+            name = getattr(candidate, "__qualname__", None)
+        except Exception:
+            continue
+        if isinstance(name, str):
+            return name
+    return "<unnamed observer>"
 
 
 # Optional per-session count sink, fired with the new count whenever the
@@ -182,9 +243,9 @@ def record_publish(conversation_id: str, event: dict[str, Any]) -> None:
 
 def _notify_observer(conversation_id: str, event: dict[str, Any]) -> None:
     """
-    Invoke the registered elicitation observer, if any.
+    Invoke the primary elicitation observer, then every added one.
 
-    Read the module-global once into a local so a concurrent
+    Read each module-global once into a local so a concurrent
     :func:`set_elicitation_observer` clearing it cannot turn the call
     into a ``None`` dereference between the check and the call.
 
@@ -193,9 +254,24 @@ def _notify_observer(conversation_id: str, event: dict[str, Any]) -> None:
     :param event: The elicitation request/resolved event dict.
     :returns: None.
     """
-    observer = _observer
-    if observer is not None:
-        observer(conversation_id, event)
+    # CORAL(S5): each observer is called once; a failure is logged and never reaches publish.
+    for observer in (_observer, *_extra_observers):
+        if observer is None:
+            continue
+        try:
+            observer(conversation_id, event)
+        except Exception:
+            name = _observer_name(observer)
+            log_once(
+                _logger,
+                logging.WARNING,
+                "elicitation observer %r failed; later failures are logged at debug",
+                name,
+                exc_info=True,
+            )
+            _logger.debug(
+                "elicitation observer %r failed", name, extra={"session_id": conversation_id}
+            )
 
 
 def resolve(conversation_id: str, elicitation_id: str) -> None:
@@ -413,8 +489,10 @@ def reset_for_tests() -> None:
     production callers — there is no legitimate use case for
     wiping the index at runtime.
     """
-    global _observer
+    global _observer, _extra_observers
     with _lock:
         _pending.clear()
         _native_resolutions.clear()
     _observer = None
+    with _observers_lock:  # CORAL(S5): added observers are cleared too
+        _extra_observers = ()

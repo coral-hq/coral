@@ -1,10 +1,12 @@
 """Starting a run: the YAML is compiled and checked here, the graph pinned, StartRun committed.
 
 The graph is never taken from the caller. A workflow is refused when the engine
-could not run it safely: unresolved analysis, a profile without a step stance,
-two writers at once in one worktree, more live slots than one commit can cancel,
-or effect keys longer than an executor accepts, and when an arrow leaves a
-parallel region while its other branches still run.
+could not run it safely: unresolved analysis, a profile without a step stance, a
+gate with more outcomes than an answer and its alert hold or with a hidden
+character in an outcome, two writers at once in
+one worktree, more live slots, decisions and gates than one commit can carry, or
+effect keys longer than an executor accepts, and when an arrow leaves a parallel
+region while its other branches still run.
 
 The bridge authorizes nothing, and it trusts the spec's fields as given, so the
 caller (the runs API) must take them from the server, never from the request:
@@ -34,9 +36,11 @@ from coral.bridge.config import (
 from coral.bridge.graphs import PinnedGraphMismatch, verified_content_hash
 from coral.bridge.keys import decision_rerequest_key
 from coral.bridge.mapping import FED_KINDS, UNMAPPED_KINDS
-from coral.bridge.messages import sanitize
+from coral.bridge.messages import sanitize, strip_format_characters
 from coral.bridge.service import EngineBridge, RunNotRunnable
 from coral.db.enum_codecs import RUN_AUTH_MODE, RUN_EXECUTION_TARGET, RUN_TRIGGER_KIND
+from coral.engine.types import effect_key
+from coral.gates.ids import MAX_GATE_OUTCOME_CHARS, MAX_GATE_OUTCOMES
 from coral.model.ids import derived_id
 from coral.model.ir import CompiledGraph, CompiledNode
 from coral.queue.run_effects import MAX_EFFECT_KEY_CHARS
@@ -241,6 +245,10 @@ def _steps(graph: CompiledGraph) -> list[CompiledNode]:
     return [node for node in graph.nodes if node.kind == "step"]
 
 
+def _gates(graph: CompiledGraph) -> list[CompiledNode]:
+    return [node for node in graph.nodes if node.kind == "gate"]
+
+
 def _graph_refusals(graph: CompiledGraph) -> Iterator[RunNotRunnable]:
     if graph.analysis.unresolved:
         yield RunNotRunnable("graph.unresolved", graph.analysis.unresolved[0].message)
@@ -253,6 +261,26 @@ def _graph_refusals(graph: CompiledGraph) -> Iterator[RunNotRunnable]:
                 "profile.unsupported",
                 f"step {node.id!r} uses {', '.join(unsupported)}; steps support "
                 f"{', '.join(sorted(STEP_STANCES))}",
+            )
+    for node in _gates(graph):
+        # A visit's alert lists every outcome, and its row stores the answer's label.
+        if len(node.outcomes) > MAX_GATE_OUTCOMES:
+            yield RunNotRunnable(
+                "graph.gate_too_large",
+                f"gate {node.id!r} has {len(node.outcomes)} outcomes; "
+                f"the limit is {MAX_GATE_OUTCOMES}",
+            )
+        elif any(len(outcome) > MAX_GATE_OUTCOME_CHARS for outcome in node.outcomes):
+            yield RunNotRunnable(
+                "graph.gate_too_large",
+                f"gate {node.id!r} has an outcome over {MAX_GATE_OUTCOME_CHARS} characters",
+            )
+        # An outcome is a button name and the answer's value, so a hidden character
+        # (a bidi override, a zero-width space) is refused rather than removed.
+        if any(strip_format_characters(outcome) != outcome for outcome in node.outcomes):
+            yield RunNotRunnable(
+                "graph.gate_label_invalid",
+                f"gate {node.id!r} has an outcome with a control or invisible format character",
             )
 
 
@@ -329,7 +357,8 @@ def _shape_refusals(graph: CompiledGraph, run_id: str) -> Iterator[RunNotRunnabl
     if work > MAX_LIVE_WORK:
         yield RunNotRunnable(
             "graph.too_wide",
-            f"up to {work} slots and decisions can be open at once; the limit is {MAX_LIVE_WORK}",
+            f"up to {work} slots, decisions and gates can be open at once; "
+            f"the limit is {MAX_LIVE_WORK}",
         )
     longest = worst_effect_key_length(graph, run_id)
     if longest > MAX_EFFECT_KEY_CHARS:
@@ -345,9 +374,12 @@ def live_slot_bound(graph: CompiledGraph) -> int:
 
 
 def live_work_bound(graph: CompiledGraph) -> int:
-    """The most slots and open decisions at once: a parallel region's together, or one node's."""
+    """
+    The most slots, open decisions and open gates at once: a parallel region's together,
+    or one node's.
+    """
     weights = {node.id: len(node.roster) for node in _steps(graph)}
-    weights.update((node.id, 1) for node in graph.nodes if node.kind == "decision")
+    weights.update((node.id, 1) for node in graph.nodes if node.kind in ("decision", "gate"))
     return _widest(graph, weights)
 
 
@@ -361,13 +393,15 @@ def _widest(graph: CompiledGraph, weights: dict[str, int]) -> int:
 
 def worst_effect_key_length(graph: CompiledGraph, run_id: str) -> int:
     """
-    The longest key a step's slot effect or a decision's message to the orchestrator can have.
+    The longest key a step's slot effect, a decision's message to the orchestrator or a
+    gate's publish or withdraw can have.
 
     A slot effect's key is ``{run_id}:{seq}:{kind}:{slot}`` and a slot id
     ``{activation}:{index}``; a decision's re-request key ends with its activation and
-    a run version. An activation id is ``{node}|{items}|{iterations}``, with one
-    ``{back arrow}:{pass}`` per enclosing loop. Item paths stay empty until the engine
-    fans items out.
+    a run version; a gate effect's subject is its visit token ``{activation}:{visit}``,
+    whose visit number stays below the activation cap. An activation id is
+    ``{node}|{items}|{iterations}``, with one ``{back arrow}:{pass}`` per enclosing
+    loop. Item paths stay empty until the engine fans items out.
     """
     kind = max(len(name) for name in _SLOT_KINDS)
     longest = 0
@@ -379,6 +413,10 @@ def worst_effect_key_length(graph: CompiledGraph, run_id: str) -> int:
             activation = _worst_activation(graph, node.id)
             key = decision_rerequest_key(run_id, activation, int("9" * _SEQ_DIGITS))
             longest = max(longest, len(key))
+    for node in _gates(graph):
+        token = f"{_worst_activation(graph, node.id)}:{'9' * len(str(MAX_RUN_ACTIVATIONS))}"
+        key = effect_key(run_id, int("9" * _SEQ_DIGITS), "withdraw_gate", token)
+        longest = max(longest, len(key))
     return longest
 
 

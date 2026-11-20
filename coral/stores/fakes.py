@@ -12,12 +12,23 @@ from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 
-from coral.db.enum_codecs import GateVisitStatus, LogKind, RunStatus, WorkKind, WorkStatus
+from coral.alerts.types import normalize_owner
+from coral.db.enum_codecs import (
+    AlertStatus,
+    GateVisitStatus,
+    LogKind,
+    RunStatus,
+    WorkKind,
+    WorkStatus,
+)
 from coral.model.ids import derived_id
+from coral.stores.alerts import check_alert_raises
 from coral.stores.protocols import (
     UNFINISHED_RUN_STATUSES,
     ActivationState,
     AgentSlotState,
+    AlertRecord,
+    AlertResolution,
     CommitOutcome,
     CoralRun,
     GateVisitState,
@@ -55,6 +66,7 @@ class FakeRunStore:
         self.handoffs: dict[tuple[int, str, str], HandoffState] = {}
         self.handoff_items: dict[tuple[int, str, str, int], HandoffItemState] = {}
         self.gate_visits: dict[tuple[int, str, str], GateVisitState] = {}
+        self.alerts: dict[tuple[int, str], AlertRecord] = {}
         self.logs: dict[tuple[int, str], list[RunLogEntry]] = {}
         self.work: dict[tuple[int, str], WorkItem] = {}
         self.tool_replies: dict[tuple[int, str, bytes], str] = {}
@@ -186,6 +198,7 @@ class FakeRunStore:
             raise TransitionTooLarge(
                 f"Transition contains {len(transition.outbox_work)} outbox items (limit 64)"
             )
+        check_alert_raises(run_id, transition.alert_raises)
 
         ws = self._resolve_ws(workspace_id)
         now_s = int(time.time()) if now is None else now
@@ -449,6 +462,35 @@ class FakeRunStore:
                     resolved_at=gv.resolved_at,
                 )
 
+            # As the SQL store: raises insert absent ids, then resolutions.
+            for draft in transition.alert_raises:
+                if (ws, draft.id) not in self.alerts:
+                    self.alerts[(ws, draft.id)] = AlertRecord(
+                        workspace_id=ws,
+                        id=draft.id,
+                        run_id=draft.run_id,
+                        owner_user_id=normalize_owner(draft.owner_user_id),
+                        account_generation=draft.account_generation,
+                        kind=draft.kind,
+                        priority=draft.priority,
+                        subject_id=draft.subject_id,
+                        status=int(AlertStatus.OPEN),
+                        payload=draft.payload,
+                        created_at=draft.created_at or now_s,
+                    )
+            for key, alert in list(self.alerts.items()):
+                if (
+                    key[0] == ws
+                    and alert.run_id == run_id
+                    and alert.status != int(AlertStatus.RESOLVED)
+                    and any(
+                        _resolves(resolution, alert) for resolution in transition.alert_resolutions
+                    )
+                ):
+                    self.alerts[key] = dataclasses.replace(
+                        alert, status=int(AlertStatus.RESOLVED), resolved_at=now_s
+                    )
+
             outbox_ids: list[str] = []
             for w in transition.outbox_work:
                 outbox_ids.append(w.id)
@@ -644,6 +686,15 @@ class FakeRunStore:
                 active = [r for r in active if (r.workspace_id, r.id) > cursor]
             return active[:limit]
 
+    def list_alerts(self, run_id: str, *, workspace_id: int | None = None) -> list[AlertRecord]:
+        """Every alert of the run, oldest first, as ``SqlAlchemyAlertStore.list_for_run``."""
+        ws = self._resolve_ws(workspace_id)
+        with self._lock:
+            return sorted(
+                (a for (w, _), a in self.alerts.items() if w == ws and a.run_id == run_id),
+                key=lambda a: (a.created_at, a.id),
+            )
+
     def list_open_gates_all_workspaces(
         self,
         *,
@@ -658,6 +709,24 @@ class FakeRunStore:
             if cursor is not None:
                 open_gates = [g for g in open_gates if (g.workspace_id, g.run_id, g.id) > cursor]
             return open_gates[:limit]
+
+    def list_open_gates(self, run_id: str, *, workspace_id: int) -> list[GateVisitState]:
+        with self._lock:
+            return sorted(
+                (
+                    gate
+                    for (ws, run, _), gate in self.gate_visits.items()
+                    if (ws, run) == (workspace_id, run_id)
+                    and gate.status == int(GateVisitStatus.OPEN)
+                ),
+                key=lambda gate: gate.id,
+            )
+
+
+def _resolves(resolution: AlertResolution, alert: AlertRecord) -> bool:
+    if resolution.subject_id is not None:
+        return alert.subject_id == resolution.subject_id
+    return alert.kind in resolution.kinds
 
 
 class FakeQueueStore:

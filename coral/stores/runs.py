@@ -37,6 +37,7 @@ from coral.db import (
 )
 from coral.db.enum_codecs import GateVisitStatus, LogKind, RunStatus, WorkStatus
 from coral.model.ids import derived_id
+from coral.stores.alerts import apply_alert_changes, check_alert_raises
 from coral.stores.protocols import (
     UNFINISHED_RUN_STATUSES,
     ActivationState,
@@ -658,6 +659,7 @@ class SqlAlchemyCoralRunStore:
             raise TransitionTooLarge(
                 f"Transition contains {len(transition.outbox_work)} outbox items (limit 64)"
             )
+        check_alert_raises(run_id, transition.alert_raises)
 
         ws = self._resolve_workspace_id(workspace_id)
         now_s = int(time.time()) if now is None else now
@@ -893,6 +895,15 @@ class SqlAlchemyCoralRunStore:
                         resolved_at=gv.resolved_at,
                     )
                 )
+
+            apply_alert_changes(
+                session,
+                workspace_id=ws,
+                run_id=run_id,
+                raises=transition.alert_raises,
+                resolutions=transition.alert_resolutions,
+                now=now_s,
+            )
 
             outbox_ids: list[str] = []
             for w in transition.outbox_work:
@@ -1154,6 +1165,21 @@ class SqlAlchemyCoralRunStore:
                 asc(GateVisitRow.run_id),
                 asc(GateVisitRow.id),
             ).limit(limit)
+            rows = session.execute(stmt).scalars().all()
+            return [_to_gate_visit_state(r) for r in rows]
+
+    def list_open_gates(self, run_id: str, *, workspace_id: int) -> list[GateVisitState]:
+        """The run's open gate rows, by id, read through ``ix_coral_gate_visits_open``."""
+        with shared_read_scope(), self._session("list_open_gates") as session:
+            stmt = (
+                select(GateVisitRow)
+                .where(
+                    GateVisitRow.status == int(GateVisitStatus.OPEN),
+                    GateVisitRow.workspace_id == workspace_id,
+                    GateVisitRow.run_id == run_id,
+                )
+                .order_by(asc(GateVisitRow.id))
+            )
             rows = session.execute(stmt).scalars().all()
             return [_to_gate_visit_state(r) for r in rows]
 

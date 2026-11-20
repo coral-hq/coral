@@ -34,6 +34,7 @@ import { migrateLegacyProjectFolderPagination } from "./lib/projectFolderPaginat
 import { applyThemePalette, readThemePalette } from "./lib/themePalette";
 import { applyCustomTheme, readCustomTheme } from "./lib/customTheme";
 import { initChatStore } from "./store/chatStore";
+import { CoralRuntime } from "./workflows/CoralRuntime"; // CORAL(S85)
 import "katex/dist/katex.min.css";
 import "streamdown/styles.css";
 import "./index.css";
@@ -164,6 +165,8 @@ function RootApp({ initialInfo }: { initialInfo: ServerInfo | "loading" }) {
                 <BrowserRouter basename={getBasePath() || undefined}>
                   <IdentityAwareSidebarDataProvider config={appConfig.sidebar}>
                     <SessionUpdatesProvider>
+                      {/* CORAL(S85): workflow Inbox kind and run notifications; renders nothing without Coral. */}
+                      <CoralRuntime />
                       <RunnerHealthProvider>
                         <QueueFlushProvider>
                           <App />

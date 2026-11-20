@@ -41,6 +41,8 @@ import {
 import { filterSessionScope, sessionVisibility } from "@/lib/sessionVisibility";
 import { useIdentityReady, useViewerId } from "./useViewerId";
 import { sumPendingApprovals } from "@/lib/inbox";
+// CORAL(S37): extension kinds add badge items and can leave the count incomplete.
+import { inboxKindsBadgeCount, inboxKindsIncomplete, useInboxKinds } from "@/lib/inboxKinds";
 import { useAutomationInbox } from "./useAutomationInbox";
 import { useCommentInbox } from "./useCommentInbox";
 import {
@@ -237,8 +239,12 @@ function useSidebarSources(config: SidebarConfig, identityReady: boolean) {
   );
   const comments = useCommentInbox(inboxRows);
   const automationInbox = useAutomationInbox(identityReady);
+  const inboxKinds = useInboxKinds(); // CORAL(S37)
   const inboxCount =
-    sumPendingApprovals(inboxRows) + comments.items.length + automationInbox.items.length;
+    sumPendingApprovals(inboxRows) +
+    comments.items.length +
+    automationInbox.items.length +
+    inboxKindsBadgeCount(inboxKinds); // CORAL(S37)
   const watchedIds = useMemo(() => loadedRows.map((row) => row.id), [loadedRows]);
   const mineCursor = mine.data?.pages.at(-1)?.last_id;
   const sharedCursor = shared.data?.pages.at(-1)?.last_id;
@@ -331,7 +337,7 @@ function useSidebarSources(config: SidebarConfig, identityReady: boolean) {
     inboxRows,
     serverInboxRows,
     inboxCount,
-    inboxCountIncomplete: automationInbox.hasNextPage,
+    inboxCountIncomplete: automationInbox.hasNextPage || inboxKindsIncomplete(inboxKinds), // CORAL(S37)
     comments,
     automationInbox,
     watchedIds,

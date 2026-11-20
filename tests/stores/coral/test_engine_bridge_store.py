@@ -19,6 +19,8 @@ from coral.queue import SqlAlchemyCoralQueueStore
 from coral.signals.turn_facts import EdgeFacts
 from coral.stores.fakes import FakeQueueStore, FakeRunStore
 from coral.stores.protocols import (
+    AlertDraft,
+    AlertResolution,
     CommitOutcome,
     CoralRun,
     LogEntryDraft,
@@ -440,6 +442,11 @@ def test_transition_with_only_bridge_fields_is_not_empty() -> None:
     assert not Transition(tool_reply=ToolReplyDraft(b"\0" * 32, "{}")).is_empty
     assert not Transition(revive_work_ids=("work",)).is_empty
     assert not Transition(release_held_codes=("run.paused",)).is_empty
+    alert = AlertDraft(
+        id="1" * 32, run_id="2" * 32, kind=3, priority=1, subject_id="3" * 32, payload="{}"
+    )
+    assert not Transition(alert_raises=(alert,)).is_empty
+    assert not Transition(alert_resolutions=(AlertResolution(kinds=(1,)),)).is_empty
 
 
 def test_lock_timeout_issues_set_local_timeouts_on_the_postgresql_family(

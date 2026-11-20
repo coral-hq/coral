@@ -25,6 +25,7 @@ from fastapi.routing import APIRoute, APIWebSocketRoute
 
 from coral.db.enum_codecs import SessionBindingRole, SlotRole
 from coral.omni._upstream import CLIENT_SESSION_EVENT_TYPES
+from coral.omni.server.gates import GateAnswering
 from coral.omni.server.mutation_guard import MUTATION_GUARD, STOP_EVENTS, CoralMutationGuard
 from coral.omni.server.sessions import RUN_ID_LABEL_KEY
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID
@@ -36,6 +37,11 @@ from omnigent.runner.identity import (
     token_bound_runner_id,
 )
 from omnigent.server.auth import LEVEL_READ, RESERVED_USER_PUBLIC
+from omnigent.server.elicitation_hooks import (
+    ElicitationVerdict,
+    VerdictDecision,
+    register_elicitation_verdict_handler,
+)
 from omnigent.server.feature_flags import resolve_feature_flags
 from omnigent.server.mutation_guards import (
     ACTIONS,
@@ -240,13 +246,18 @@ def _in_scope(path: str) -> bool:
 
 @dataclass
 class _Run:
-    """Alice's targets, a run's bindings in a fake lookup, and what the stub runner received."""
+    """
+    Alice's targets, a run's bindings in a fake lookup, and what the stub runner received.
+
+    ``answering`` is the guard's gate-handler flag, off unless a test turns it on.
+    """
 
     targets: MutationTargets
     lookup: FakeBindingLookup
     forwarded: list[dict[str, Any]]
     db_uri: str
     app: FastAPI
+    answering: GateAnswering
 
     def bind(self, session_id: str, kind: str = "step") -> None:
         """Bind *session_id* to the run as ``step``, ``closed step`` or ``anchor``."""
@@ -292,9 +303,12 @@ async def run(db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> A
         async with _app_client(app, ControllableMockClient(), tmp_path) as client:
             client.headers["origin"] = OMNIGENT_INTERNAL_WS_ORIGIN
             targets = await mutation_targets(app, client, db_uri)
-            unregister = register_mutation_guard(MUTATION_GUARD, CoralMutationGuard(lookup))
+            answering = GateAnswering()
+            unregister = register_mutation_guard(
+                MUTATION_GUARD, CoralMutationGuard(lookup, gate_answering=answering)
+            )
             try:
-                yield _Run(targets, lookup, forwarded, db_uri, app)
+                yield _Run(targets, lookup, forwarded, db_uri, app, answering)
             finally:
                 unregister()
     finally:
@@ -436,6 +450,59 @@ async def test_closed_step_and_anchor_events_follow_the_allowlist(run: _Run) -> 
         _assert_refused(await t.client.post(url, json=status, headers=ALICE), session_id)
         observed = await t.client.post(url, json=status, headers=run.runner(session_id))
         assert observed.status_code < 400, observed.text
+
+
+async def test_the_anchor_takes_gate_answers_only_while_the_gate_handler_is_registered(
+    run: _Run,
+) -> None:
+    """Both answer routes reach the handler on the anchor once admitted; a closed step never."""
+    t = run.targets
+    closed, anchor = t.session_id, t.scheduled_session_id
+    run.bind(closed, "closed step")
+    run.bind(anchor, "anchor")
+    prompt = "coral_gate_" + "a" * 32
+    verdicts: list[ElicitationVerdict] = []
+
+    async def handler(verdict: ElicitationVerdict) -> VerdictDecision:
+        verdicts.append(verdict)
+        return VerdictDecision(accepted=True)
+
+    def resolve(session_id: str) -> Awaitable[httpx.Response]:
+        return t.client.post(
+            f"/v1/sessions/{session_id}/elicitations/{prompt}/resolve",
+            json={"action": "accept", "content": {"decision": "approve"}},
+            headers=ALICE,
+        )
+
+    def approval(session_id: str) -> Awaitable[httpx.Response]:
+        data = {"elicitation_id": prompt, "action": "accept"}
+        return t.client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={"type": "approval", "data": data},
+            headers=ALICE,
+        )
+
+    unregister = register_elicitation_verdict_handler("coral_gate_", handler)
+    try:
+        # The handler alone does not open the anchor: the flag does, once it is registered.
+        for send in (resolve, approval):
+            _assert_refused(await send(anchor), anchor)
+        run.answering.enable()
+        for send in (resolve, approval):
+            answered = await send(anchor)
+            assert answered.status_code == 202, answered.text
+            _assert_refused(await send(closed), closed)
+        run.answering.disable()
+        for send in (resolve, approval):
+            _assert_refused(await send(anchor), anchor)
+    finally:
+        run.answering.disable()
+        unregister()
+
+    assert [(item.session_id, item.elicitation_id, item.resolved_by) for item in verdicts] == [
+        (anchor, prompt, "alice@example.com")
+    ] * 2
+    assert run.forwarded_types() == []
 
 
 async def test_peer_session_message_into_a_bound_session_is_refused(run: _Run) -> None:

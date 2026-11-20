@@ -270,6 +270,9 @@ Each item below was left to the bridge in v0; each has its line in
   the orchestrator's create and the decision's request, so `coral_choose_arrow`
   works end to end. Each later decision gets a request; an unanswered one gets
   a reminder at 30 and at 60 minutes, and every return to running asks again.
+  At 60 minutes the run owner also gets a `watchdog` alert in the workflow
+  Inbox, resolved once the decision is made
+  ([`gates-and-inbox.md`](gates-and-inbox.md)).
 - **Early submit.** A handoff sent before the brief's `send_input` completes
   is still refused with `evaluation_in_progress` (retry). The brief's row is
   fed back as soon as it finishes, so the window is short, and the retry is

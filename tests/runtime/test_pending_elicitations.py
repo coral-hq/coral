@@ -22,11 +22,15 @@ module in isolation.
 
 from __future__ import annotations
 
+# CORAL(S5): asyncio, logging, process_logging and session_stream serve the observer tests.
+import asyncio
+import logging
 from typing import Any
 
 import pytest
 
-from omnigent.runtime import pending_elicitations
+from omnigent import process_logging
+from omnigent.runtime import pending_elicitations, session_stream
 
 
 @pytest.fixture(autouse=True)
@@ -595,6 +599,217 @@ def test_reset_for_tests_clears_observer_registration() -> None:
     # received list has an entry, a leaked observer from a prior
     # test would trigger spurious cross-test side effects.
     assert received == []
+
+
+# CORAL(S5): added observers beside the primary slot, with crash isolation.
+def _recording_observer(
+    label: str, seen: list[tuple[str, str | None]]
+) -> pending_elicitations.ElicitationObserver:
+    """Return an observer that appends ``(label, event type)`` to *seen*."""
+
+    def _observer(conversation_id: str, event: dict[str, Any]) -> None:
+        seen.append((label, event.get("type")))
+
+    return _observer
+
+
+def test_added_observers_fire_beside_the_primary_once_per_event() -> None:
+    """The primary and each added observer see every request and resolved event once."""
+    seen: list[tuple[str, str | None]] = []
+    pending_elicitations.set_elicitation_observer(_recording_observer("primary", seen))
+    remove_first = pending_elicitations.add_elicitation_observer(
+        _recording_observer("first", seen)
+    )
+    remove_second = pending_elicitations.add_elicitation_observer(
+        _recording_observer("second", seen)
+    )
+    try:
+        pending_elicitations.record_publish("conv_a", _elicit_event("elicit_1"))
+        pending_elicitations.record_publish(
+            "conv_a",
+            {"type": "response.elicitation_resolved", "elicitation_id": "elicit_1"},
+        )
+        pending_elicitations.record_publish(
+            "conv_a", {"type": "response.output_text.delta", "delta": "hi"}
+        )
+    finally:
+        remove_second()
+        remove_first()
+        pending_elicitations.set_elicitation_observer(None)
+
+    request, resolved = "response.elicitation_request", "response.elicitation_resolved"
+    # The primary runs first, then added observers in registration order; the
+    # text delta reaches none of them.
+    assert seen == [
+        ("primary", request),
+        ("first", request),
+        ("second", request),
+        ("primary", resolved),
+        ("first", resolved),
+        ("second", resolved),
+    ]
+
+
+@pytest.mark.parametrize("failing_slot", ["primary", "added"])
+def test_a_raising_observer_is_logged_and_stops_no_other_observer(
+    failing_slot: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing observer is logged (one traceback, then debug) and the others still run."""
+    # A fresh once-per-process log memory, so the traceback assertion is deterministic.
+    monkeypatch.setattr(process_logging, "_log_once_seen", set())
+    seen: list[tuple[str, str | None]] = []
+
+    def _failing_observer(conversation_id: str, event: dict[str, Any]) -> None:
+        raise RuntimeError("observer bug")
+
+    if failing_slot == "primary":
+        pending_elicitations.set_elicitation_observer(_failing_observer)
+        added = [_recording_observer("after", seen)]
+        healthy = ["after"]
+    else:
+        pending_elicitations.set_elicitation_observer(_recording_observer("primary", seen))
+        added = [_failing_observer, _recording_observer("after", seen)]
+        healthy = ["primary", "after"]
+    removers = [pending_elicitations.add_elicitation_observer(observer) for observer in added]
+    prompts = [
+        {**_elicit_event(elicitation_id), "params": {"message": "Delete ~/private-notes?"}}
+        for elicitation_id in ("elicit_1", "elicit_2")
+    ]
+    try:
+        with caplog.at_level(logging.DEBUG, logger=pending_elicitations.__name__):
+            for prompt in prompts:
+                pending_elicitations.record_publish("conv_a", prompt)
+    finally:
+        for remove in removers:
+            remove()
+        pending_elicitations.set_elicitation_observer(None)
+
+    # Both prompts are indexed and every healthy observer saw both, in order.
+    assert pending_elicitations.count_for("conv_a") == 2
+    request = "response.elicitation_request"
+    assert seen == [(label, request) for _ in range(2) for label in healthy]
+    failures = [r for r in caplog.records if "_failing_observer" in r.getMessage()]
+    # One traceback for the first failure; each failure also at debug with the session.
+    assert [(r.levelno, r.exc_info is not None) for r in failures] == [
+        (logging.WARNING, True),
+        (logging.DEBUG, False),
+        (logging.DEBUG, False),
+    ]
+    assert [getattr(r, "session_id", None) for r in failures[1:]] == ["conv_a", "conv_a"]
+    # Neither the lines nor the traceback carry the prompt's content.
+    assert "private-notes" not in caplog.text
+
+
+def test_an_observer_whose_name_lookup_raises_is_still_isolated(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing observer whose ``__qualname__`` raises is logged by its type's name."""
+    monkeypatch.setattr(process_logging, "_log_once_seen", set())
+    seen: list[tuple[str, str | None]] = []
+
+    class _BadlyNamedObserver:
+        def __getattribute__(self, name: str) -> Any:
+            if name == "__qualname__":
+                raise RuntimeError("name lookup broken")
+            return object.__getattribute__(self, name)
+
+        def __call__(self, conversation_id: str, event: dict[str, Any]) -> None:
+            raise RuntimeError("observer bug")
+
+    pending_elicitations.add_elicitation_observer(_BadlyNamedObserver())
+    pending_elicitations.add_elicitation_observer(_recording_observer("after", seen))
+    with caplog.at_level(logging.DEBUG, logger=pending_elicitations.__name__):
+        pending_elicitations.record_publish("conv_a", _elicit_event("elicit_1"))
+
+    assert seen == [("after", "response.elicitation_request")]
+    assert pending_elicitations.count_for("conv_a") == 1
+    failures = [r for r in caplog.records if "_BadlyNamedObserver" in r.getMessage()]
+    assert [r.levelno for r in failures] == [logging.WARNING, logging.DEBUG]
+
+
+async def test_a_raising_observer_does_not_stop_stream_delivery() -> None:
+    """``session_stream.publish`` still delivers the prompt when an observer raises."""
+
+    def _failing_observer(conversation_id: str, event: dict[str, Any]) -> None:
+        raise RuntimeError("observer bug")
+
+    event = _elicit_event("elicit_stream")
+    remove = pending_elicitations.add_elicitation_observer(_failing_observer)
+    stream = session_stream.subscribe("conv_stream", ready_event={"type": "ready"})
+    try:
+        # The ready event arrives once the subscriber's slot is registered.
+        assert await asyncio.wait_for(anext(stream), timeout=2.0) == {"type": "ready"}
+        assert session_stream.publish("conv_stream", event) == 1
+        assert await asyncio.wait_for(anext(stream), timeout=2.0) == event
+    finally:
+        await stream.aclose()
+        remove()
+    assert pending_elicitations.count_for("conv_stream") == 1
+
+
+def test_observer_uninstall_removes_only_its_own_registration() -> None:
+    """An uninstaller removes one registration, once; clearing the primary keeps added ones."""
+    seen: list[tuple[str, str | None]] = []
+    shared = _recording_observer("shared", seen)
+
+    class _Holder:
+        def observe(self, conversation_id: str, event: dict[str, Any]) -> None:
+            seen.append(("bound", event.get("type")))
+
+    holder = _Holder()
+    pending_elicitations.set_elicitation_observer(_recording_observer("primary", seen))
+    remove_shared_first = pending_elicitations.add_elicitation_observer(shared)
+    remove_shared_second = pending_elicitations.add_elicitation_observer(shared)
+    # A bound method is a new object on every access; its uninstaller still finds it.
+    remove_bound = pending_elicitations.add_elicitation_observer(holder.observe)
+
+    remove_shared_first()
+    remove_shared_first()
+    remove_bound()
+    # The notifier's uninstall clears only the primary slot this way.
+    pending_elicitations.set_elicitation_observer(None)
+    pending_elicitations.record_publish("conv_a", _elicit_event("elicit_1"))
+    # Only the second registration of the shared observer is left.
+    assert seen == [("shared", "response.elicitation_request")]
+
+    remove_shared_second()
+    pending_elicitations.record_publish("conv_a", _elicit_event("elicit_2"))
+    assert seen == [("shared", "response.elicitation_request")]
+
+
+def test_observers_changed_during_delivery_apply_from_the_next_event() -> None:
+    """An observer may remove and add observers while called; changes apply from the next event."""
+    seen: list[tuple[str, str | None]] = []
+
+    def _changing_observer(conversation_id: str, event: dict[str, Any]) -> None:
+        seen.append(("changing", event.get("type")))
+        remove_changing()
+        remove_victim()
+        pending_elicitations.add_elicitation_observer(_recording_observer("late", seen))
+
+    remove_changing = pending_elicitations.add_elicitation_observer(_changing_observer)
+    remove_victim = pending_elicitations.add_elicitation_observer(
+        _recording_observer("victim", seen)
+    )
+    # Neither change blocks the publish; the autouse fixture drops the late observer.
+    pending_elicitations.record_publish("conv_a", _elicit_event("elicit_1"))
+    pending_elicitations.record_publish("conv_a", _elicit_event("elicit_2"))
+
+    request = "response.elicitation_request"
+    # The first delivery keeps its snapshot, so the removed observer still runs once.
+    assert seen == [("changing", request), ("victim", request), ("late", request)]
+
+
+def test_reset_for_tests_clears_added_observers() -> None:
+    """``reset_for_tests`` drops added observers as well as the primary."""
+    seen: list[tuple[str, str | None]] = []
+    pending_elicitations.add_elicitation_observer(_recording_observer("added", seen))
+    pending_elicitations.reset_for_tests()
+    pending_elicitations.record_publish("conv_a", _elicit_event("elicit_1"))
+    assert seen == []
 
 
 def test_lookup_returns_matching_elicitation() -> None:

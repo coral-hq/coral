@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from collections.abc import Callable
 
 import pytest
 
@@ -84,8 +85,13 @@ def _row(*, labelled: bool = True, closed: bool = False, **labels: str) -> Conve
     )
 
 
-def _bound(kind: str | None) -> tuple[CoralMutationGuard, FakeBindingLookup, Conversation]:
-    """A guard over a lookup that binds ``SESSION`` as *kind* (``None``: unbound), and its row."""
+def _bound(
+    kind: str | None, *, gate_answering: Callable[[], bool] | None = None
+) -> tuple[CoralMutationGuard, FakeBindingLookup, Conversation]:
+    """A guard over a lookup that binds ``SESSION`` as *kind* (``None``: unbound), and its row.
+
+    :param gate_answering: The guard's gate-handler flag; by default it is never set.
+    """
     lookup = FakeBindingLookup()
     if kind == "anchor":
         lookup.add(
@@ -94,7 +100,12 @@ def _bound(kind: str | None) -> tuple[CoralMutationGuard, FakeBindingLookup, Con
     elif kind is not None:
         slot_role = SlotRole.ORCHESTRATOR if kind == "orchestrator" else SlotRole.STEP_AGENT
         lookup.add(step_binding("work||:0", session_id=SESSION, slot_role=slot_role))
-    return CoralMutationGuard(lookup), lookup, _row(closed=kind == "closed step")
+    guard = (
+        CoralMutationGuard(lookup)
+        if gate_answering is None
+        else CoralMutationGuard(lookup, gate_answering=gate_answering)
+    )
+    return guard, lookup, _row(closed=kind == "closed step")
 
 
 def _decide(guard: CoralMutationGuard, attempt: MutationAttempt) -> str | None:
@@ -251,6 +262,27 @@ def test_the_anchor_and_a_closed_step_take_only_stop_and_runner_events(kind: str
             assert refusal == _refusal(f"sending it a {event_type!r} event"), event_type
     for event_type in sorted(RUNNER_SESSION_EVENT_TYPES):
         assert _decide(guard, _event(row, event_type, runner_proven=True)) is None, event_type
+
+
+@pytest.mark.parametrize("kind", [*OPEN, *INERT])
+def test_the_anchor_takes_approvals_only_while_the_gate_handler_is_registered(kind: str) -> None:
+    """Approvals answer gates on the anchor; a closed step refuses them whatever the flag."""
+    answering = [False]
+    guard, _, row = _bound(kind, gate_answering=lambda: answering[0])
+    approval = _event(row, "approval")
+    refused = _refusal("sending it a 'approval' event")
+    without_handler = _decide(guard, approval)
+    answering[0] = True
+
+    assert guard.screen(approval) is Screen.CHECK
+    if kind == "anchor":
+        assert (without_handler, _decide(guard, approval)) == (refused, None)
+        # Every other event keeps the anchor's allowlist.
+        assert _decide(guard, _event(row, "message")) == _refusal("sending it a 'message' event")
+    elif kind == "closed step":
+        assert (without_handler, _decide(guard, approval)) == (refused, refused)
+    else:
+        assert (without_handler, _decide(guard, approval)) == (None, None)
 
 
 @pytest.mark.parametrize("kind", OPEN)

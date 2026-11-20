@@ -14,6 +14,7 @@ from coral.db.migrate import (
 from coral.db.models import (
     ActivationRow,
     AgentSlotRow,
+    AlertRow,
     BlobRefRow,
     CommandObservationRow,
     GateVisitRow,
@@ -61,6 +62,7 @@ __all__ = [
     "MAX_STORED_BYTES",
     "ActivationRow",
     "AgentSlotRow",
+    "AlertRow",
     "BlobRefRow",
     "CaseSensitiveString",
     "CommandObservationRow",

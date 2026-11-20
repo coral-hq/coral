@@ -495,6 +495,31 @@ not planned.
 
 | Follow-up | Owner |
 |---|---|
-| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | CRL-137 |
-| Label no claude-sdk gate Enforced until that probe passes | CRL-134 |
+| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | CRL-137 |
+| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced. No gate is labelled Enforced today ([`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md)) | RUL-02 |
 | Run probe 15 on native steps before HRN-03 enables them | CRL-138 |
+
+## Addendum: gates on the anchor (2026-11-19)
+
+Gates now reach people: each live gate visit is one prompt on its run's
+anchor and one alert in the owner's workflow Inbox, and the owner's answer
+advances the engine once
+([`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md)). This
+records the probe the gate work owned.
+
+| Probe | Verdict | Evidence or reason | Owner |
+|---|---|---|---|
+| (e) | **pass** | Through the real routes: one prompt on the anchor and one Inbox item; the anchor labelled `omnigent.closed` still takes the answer, which advances the run once; a repeat is a duplicate; the gate's alert clears; after a restart the same prompt returns and is answerable (`tests/coral/omni/test_gate_end_to_end.py`). Two answers at once commit once (`tests/coral/workers/test_worker_lifespan.py::test_two_answers_at_once_through_the_resolve_route_advance_the_gate_once`). An edit grantee and an admin are refused with the prompt left pending (`tests/coral/omni/test_gate_routes_auth.py`), and so is a re-created account (`test_gate_routes_accounts.py`). In the web app the workflow Inbox kind claims the anchor's gate prompt, so the real Inbox page shows the shared contract's gate as exactly one card while a mirrored step prompt stays an approval, the card answers through the anchor's resolve route, and a gate alert whose prompt is missing is still one answerable card (`web/src/workflows/inbox/workflowInboxKind.test.tsx`). | closed |
+
+Also decided:
+
+- **Who may answer.** Only the run owner, checked by Coral's verdict handler
+  after Omnigent's own edit check: an edit grant on the anchor (a grant on the
+  whole run) lets a collaborator read the prompt but not answer it, and an
+  admin is refused too. The handler takes the run from the anchor's binding,
+  so a gate prompt relayed onto any other session cannot answer the gate.
+- **Integrity.** On servers that require no identity, any process of the
+  owner that can reach the server answers as the owner; on authenticated
+  servers a same-user step that escapes the sandbox can mint an owner token
+  (probe 15, residual (b)). The labelling rule in the follow-up table above
+  applies.

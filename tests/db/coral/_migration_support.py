@@ -56,8 +56,52 @@ def run_values(run_id: str, *, status: int, pause_reason: int | None) -> dict[st
     }
 
 
+def insert_row(engine: Engine, table: sa.Table, values: dict[str, object]) -> None:
+    """Insert one committed row."""
+    with engine.begin() as conn:
+        conn.execute(table.insert().values(**values))
+
+
 def insert_run(engine: Engine, run_id: str, *, status: int, pause_reason: int | None) -> None:
     """Insert one committed run row in workspace 1."""
-    values = run_values(run_id, status=status, pause_reason=pause_reason)
-    with engine.begin() as conn:
-        conn.execute(RunRow.__table__.insert().values(**values))
+    insert_row(
+        engine, RunRow.__table__, run_values(run_id, status=status, pause_reason=pause_reason)
+    )
+
+
+def _checks(inspector: sa.Inspector, table: str) -> list[tuple[str | None, str]]:
+    try:
+        return sorted(
+            (check["name"], check["sqltext"]) for check in inspector.get_check_constraints(table)
+        )
+    except NotImplementedError:
+        return []
+
+
+def reflected_schema(engine: Engine) -> dict[str, dict[str, object]]:
+    """Columns, keys, indexes and checks of every Coral data table, as the lane reflects them."""
+    inspector = sa.inspect(engine)
+    tables = sorted(
+        name
+        for name in inspector.get_table_names()
+        if name.startswith("coral_") and name != "coral_alembic_version"
+    )
+    return {
+        table: {
+            "columns": {
+                column["name"]: (repr(column["type"]), column["nullable"])
+                for column in inspector.get_columns(table)
+            },
+            "primary_key": inspector.get_pk_constraint(table)["constrained_columns"],
+            "indexes": sorted(
+                (index["name"], tuple(index["column_names"]), bool(index["unique"]))
+                for index in inspector.get_indexes(table)
+            ),
+            "unique": sorted(
+                (unique["name"], tuple(unique["column_names"]))
+                for unique in inspector.get_unique_constraints(table)
+            ),
+            "checks": _checks(inspector, table),
+        }
+        for table in tables
+    }

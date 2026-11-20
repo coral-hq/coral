@@ -21,6 +21,7 @@ from coral.bridge.keys import anchor_effect_key, effect_work_id
 from coral.bridge.mapping import resync_draft, timer_draft, turn_signal_draft
 from coral.bridge.service import EngineBridge, EngineLoadFailed, ResyncReport
 from coral.db.enum_codecs import (
+    GateVisitStatus,
     LogKind,
     RunPauseReason,
     RunStatus,
@@ -32,6 +33,19 @@ from coral.engine.types import PauseRun, SessionFailed
 from coral.model.ids import effect_session_id
 from coral.stores.fakes import FakeQueueStore, FakeRunStore
 from coral.stores.protocols import CommitOutcome, RunContended, WorkItem, WorkItemDraft
+from tests.coral.bridge._gates import (
+    APPROVE_TOKEN,
+    CHANGE_TOKEN,
+    CHANGE_TOKEN_AGAIN,
+    GATE_ONLY,
+    GATED,
+    IMPLEMENT_AGAIN,
+    answer,
+    effects,
+    gate_rows,
+    hand_off,
+    work_for,
+)
 from tests.coral.bridge._scripted_runs import accept
 from tests.coral.bridge._world import (
     IMPLEMENT,
@@ -616,3 +630,210 @@ def test_a_run_whose_rows_do_not_decode_is_paused_on_its_row(
     world.bridge.schedule_resync(paused)
     (row,) = world.queue.get_work([resync_draft(run.id).id], workspace_id=WORKSPACE)
     assert row.available_at == world.clock.epoch + PAUSED_RESYNC_DELAY_S
+
+
+# ── gate delivery ────────────────────────────────────────────────────────────
+
+
+def _gate_publish(world: World, run_id: str, token: str) -> WorkItem:
+    (effect,) = [item for item in effects(world, run_id, "publish_gate") if item.subject == token]
+    item = work_for(world, run_id, effect.effect_key)
+    assert item is not None
+    return item
+
+
+def test_a_resume_revives_a_failed_publish_of_a_live_visit(world: World) -> None:
+    run = start(world, GATE_ONLY)
+    failed = settle(
+        world,
+        _gate_publish(world, run.id, APPROVE_TOKEN),
+        WorkStatus.FAILED,
+        error_code="infra.transient",
+        result={"last_error_code": "session.anchor_missing"},
+    )
+    world.bridge.feed(finished(failed))
+    paused = world.run(run.id)
+    assert (paused.status, paused.pause_reason) == (
+        int(RunStatus.PAUSED),
+        int(RunPauseReason.INFRA),
+    )
+    state = world.assert_fold_matches(run.id)
+    assert [(cause.reason, cause.detail) for cause in state.causes] == [
+        ("infra", "gate:session.anchor_missing")
+    ]
+
+    world.bridge.resume_run(workspace_id=WORKSPACE, run_id=run.id, actor="alice")
+
+    (revived,) = world.queue.get_work([failed.id], workspace_id=WORKSPACE)
+    assert revived.status == int(WorkStatus.PENDING)
+    assert world.run(run.id).status == int(RunStatus.RUNNING)
+
+
+def test_a_resync_queues_a_missing_publish_and_writes_missing_gate_rows(world: World) -> None:
+    # As for a run whose gate opened before gates were delivered: no row, no publish.
+    run = start(world, GATE_ONLY)
+    publish = _gate_publish(world, run.id, APPROVE_TOKEN)
+    (row,) = gate_rows(world, run.id)
+    del _queue(world).work[(WORKSPACE, publish.id)]
+    _runs(world).gate_visits.clear()
+    world.clock.advance(60)
+
+    report = _resync(world, run.id)
+
+    assert (report.enqueued, report.repaired) == (1, True)
+    again = _gate_publish(world, run.id, APPROVE_TOKEN)
+    assert (again.id, again.payload) == (publish.id, publish.payload)
+    (repaired,) = gate_rows(world, run.id)
+    assert repaired.elicitation_id != row.elicitation_id
+    assert repaired.opened_at == world.clock.epoch
+    assert (
+        dataclasses.replace(repaired, elicitation_id=row.elicitation_id, opened_at=row.opened_at)
+        == row
+    )
+    _quiet(world, run.id)
+
+
+def test_a_failed_publish_is_fed_only_while_its_visit_is_live(world: World) -> None:
+    run = start(world, GATED)
+    hand_off(world, run.id)
+    first = _gate_publish(world, run.id, CHANGE_TOKEN)
+    answer(world, run.id, CHANGE_TOKEN, "reject")
+    # The visit was answered before its publish ran out: the failure stands for nothing.
+    failed = settle(world, first, WorkStatus.FAILED, error_code="session.anchor_missing")
+    version = world.run(run.id).version
+    world.bridge.feed(finished(failed))
+    _resync(world, run.id)
+    assert (world.run(run.id).status, world.run(run.id).version) == (
+        int(RunStatus.RUNNING),
+        version,
+    )
+
+    hand_off(world, run.id, IMPLEMENT_AGAIN)
+    settle(
+        world,
+        _gate_publish(world, run.id, CHANGE_TOKEN_AGAIN),
+        WorkStatus.FAILED,
+        error_code="effect.invalid_payload",
+    )
+    report = _resync(world, run.id)
+
+    assert report.fed >= 1
+    paused = world.run(run.id)
+    assert (paused.status, paused.pause_reason) == (
+        int(RunStatus.PAUSED),
+        int(RunPauseReason.FAILURE_PATH),
+    )
+    state = world.assert_fold_matches(run.id)
+    assert [(cause.reason, cause.detail) for cause in state.causes] == [
+        ("failure_path", "gate:effect.invalid_payload")
+    ]
+
+
+def test_a_resync_queues_only_the_live_visit_s_missing_publish(world: World) -> None:
+    run = start(world, GATED)
+    hand_off(world, run.id)
+    answer(world, run.id, CHANGE_TOKEN, "reject")
+    hand_off(world, run.id, IMPLEMENT_AGAIN)
+    dead = _gate_publish(world, run.id, CHANGE_TOKEN)
+    live = _gate_publish(world, run.id, CHANGE_TOKEN_AGAIN)
+    for item in (dead, live):
+        del _queue(world).work[(WORKSPACE, item.id)]
+
+    report = _resync(world, run.id)
+
+    assert report.enqueued == 1
+    assert world.queue.get_work([dead.id], workspace_id=WORKSPACE) == []
+    again = _gate_publish(world, run.id, CHANGE_TOKEN_AGAIN)
+    assert (again.id, again.payload) == (live.id, live.payload)
+    _quiet(world, run.id)
+
+
+def test_a_withdraw_that_finishes_after_the_cancel_changes_nothing(world: World) -> None:
+    run = start(world, GATE_ONLY)
+    world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=run.id, actor="alice")
+    (withdraw,) = effects(world, run.id, "withdraw_gate")
+    item = work_for(world, run.id, withdraw.effect_key)
+    assert item is not None
+    version = world.run(run.id).version
+
+    for status, code in (
+        (WorkStatus.FAILED, "session.anchor_missing"),
+        (WorkStatus.SUCCEEDED, None),
+    ):
+        world.bridge.feed(finished(settle(world, item, status, error_code=code)))
+        assert (world.run(run.id).status, world.run(run.id).version) == (
+            int(RunStatus.CANCELLED),
+            version,
+        )
+    _quiet(world, run.id)
+
+
+def test_a_resync_of_a_run_cancelled_before_gate_rows_writes_them_and_queues_nothing(
+    world: World,
+) -> None:
+    # As for a run cancelled at a gate before gates were delivered: no rows, no delivery.
+    run = start(world, GATE_ONLY)
+    world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=run.id, actor="alice")
+    for kind in ("publish_gate", "withdraw_gate"):
+        (effect,) = effects(world, run.id, kind)
+        del _queue(world).work[(WORKSPACE, effect_work_id(run.id, effect.effect_key))]
+    _runs(world).gate_visits.clear()
+    rows = world.work(run.id)
+
+    assert _resync(world, run.id).repaired
+
+    (row,) = gate_rows(world, run.id)
+    assert (row.token, row.status) == (APPROVE_TOKEN, int(GateVisitStatus.CANCELLED))
+    assert world.work(run.id) == rows
+    _quiet(world, run.id)
+
+
+def test_a_resync_that_dies_after_queueing_a_publish_writes_its_row_next_time(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = start(world, GATE_ONLY)
+    publish = _gate_publish(world, run.id, APPROVE_TOKEN)
+    del _queue(world).work[(WORKSPACE, publish.id)]
+    _runs(world).gate_visits.clear()
+
+    def dying(*_args: Any, **_kwargs: Any) -> CommitOutcome:
+        raise _Crash
+
+    with monkeypatch.context() as patch:
+        patch.setattr(world.runs, "apply_transition", dying)
+        with pytest.raises(_Crash):
+            world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run.id)
+    # The publish was queued outside the commit that would write its row.
+    assert _gate_publish(world, run.id, APPROVE_TOKEN).id == publish.id
+    assert gate_rows(world, run.id) == []
+
+    report = _resync(world, run.id)
+
+    assert (report.enqueued, report.repaired) == (0, True)
+    (row,) = gate_rows(world, run.id)
+    assert (row.token, row.status) == (APPROVE_TOKEN, int(GateVisitStatus.OPEN))
+    _quiet(world, run.id)
+
+
+def test_a_failed_withdraw_of_a_superseded_visit_never_pauses_the_running_run(
+    world: World,
+) -> None:
+    run = start(world, GATED)
+    hand_off(world, run.id)
+    answer(world, run.id, CHANGE_TOKEN, "reject")
+    hand_off(world, run.id, IMPLEMENT_AGAIN)
+    (withdraw,) = effects(world, run.id, "withdraw_gate")
+    assert withdraw.subject == CHANGE_TOKEN
+    item = work_for(world, run.id, withdraw.effect_key)
+    assert item is not None
+    version = world.run(run.id).version
+
+    failed = settle(world, item, WorkStatus.FAILED, error_code="session.anchor_missing")
+    world.bridge.feed(finished(failed))
+    _resync(world, run.id)
+
+    assert (world.run(run.id).status, world.run(run.id).version) == (
+        int(RunStatus.RUNNING),
+        version,
+    )
+    assert not world.assert_fold_matches(run.id).causes

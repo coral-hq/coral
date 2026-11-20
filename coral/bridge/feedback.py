@@ -16,14 +16,16 @@ from pydantic import JsonValue
 from coral.bridge.mapping import DECISION_ITEM, FED_KINDS
 from coral.db.enum_codecs import WorkKind, WorkStatus
 from coral.engine import types as engine
+from coral.gates.ids import GATE_ITEM
 from coral.queue.drainer import FinishedWork
 from coral.queue.run_effects import MAX_ERROR_CODE_CHARS
 from coral.stores.protocols import WorkItem
 
 # The drainer's code for an item whose retries ran out; its result names the last code.
 EXHAUSTED = "infra.transient"
-# Bridge rows that are not engine effects; a failure pauses the run with this prefix.
-BRIDGE_ITEMS = frozenset({"anchor", "orchestrator", DECISION_ITEM})
+# Rows the engine does not complete; a failure pauses the run with this prefix. A
+# gate's rows carry engine effects, but their subject is a visit, not a slot.
+BRIDGE_ITEMS = frozenset({"anchor", "orchestrator", DECISION_ITEM, GATE_ITEM})
 # The completion fields each fed kind's engine machine reads, with their JSON types.
 _FED_FIELDS: Mapping[str, Mapping[str, tuple[type, ...]]] = {
     "create_session": {"session_id": (str,), "role": (str,), "generation": (int,)},
@@ -99,6 +101,15 @@ def decision_of(item: WorkItem) -> str | None:
     return decision_id
 
 
+def gate_of(item: WorkItem) -> str | None:
+    """The visit row a gate's publish or withdraw is about; ``None`` for any other row."""
+    payload = _payload(item)
+    visit_id = payload.get("visit_id")
+    if payload.get("bridge_item") != GATE_ITEM or not isinstance(visit_id, str):
+        return None
+    return visit_id
+
+
 def finished_from_row(item: WorkItem) -> FinishedWork:
     """A stored row's outcome as the drainer handed it to the finished hook."""
     result = _json_object(item.result)
@@ -135,4 +146,5 @@ __all__ = [
     "fed_payload",
     "feedback_input",
     "finished_from_row",
+    "gate_of",
 ]

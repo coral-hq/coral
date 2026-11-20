@@ -7,6 +7,7 @@ import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type * as IdentityModule from "@/lib/identity";
 import { RoutingProvider, basenamedRouting, reactRouterRouting } from "@/lib/routing";
 
+// CORAL(S34): the Coral desk route tests mock identity's fetch and need a QueryClient.
 const authenticatedFetch = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/identity", async (importOriginal) => ({
   ...(await importOriginal<typeof IdentityModule>()),
@@ -304,6 +305,7 @@ describe("Canvas route", () => {
   });
 });
 
+// CORAL(S34): Coral desk routes behind the Coral gate.
 describe("Coral desk routes", () => {
   interface CoralInfoResponse {
     enabled: boolean;

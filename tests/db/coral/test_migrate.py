@@ -180,7 +180,7 @@ def test_schema_cache_and_clear_cache() -> None:
         # First call migrates
         ensure_coral_schema(uri)
         current, head = current_coral_revision(uri)
-        assert current == head == "coral_0004_observations"
+        assert current == head == "coral_0005_alerts_and_gates"
 
         # Second call returns early via cache
         ensure_coral_schema(uri)
@@ -310,7 +310,7 @@ def test_cli_upgrade_and_current() -> None:
             check=False,
         )
         assert res.returncode == 0, res.stderr
-        assert "Current Coral revision: coral_0004_observations" in res.stdout
+        assert "Current Coral revision: coral_0005_alerts_and_gates" in res.stdout
 
 
 def test_s30_omnigent_autogenerate_ignores_coral_tables() -> None:
@@ -435,7 +435,7 @@ def test_each_revision_commits_when_the_cockroachdb_runner_owns_the_transaction(
         with engine.connect() as conn:
             conn.execute(sa.text("SELECT 1"))
             config.attributes["connection"] = conn
-            command.upgrade(config, "coral_0003_engine_bridge")
+            command.upgrade(config, "coral_0005_alerts_and_gates")
             conn.commit()
     finally:
         engine.dispose()
@@ -445,4 +445,6 @@ def test_each_revision_commits_when_the_cockroachdb_runner_owns_the_transaction(
         "coral_0001_core",
         "coral_0002_session_facade",
         "coral_0003_engine_bridge",
+        "coral_0004_observations",
+        "coral_0005_alerts_and_gates",
     ]

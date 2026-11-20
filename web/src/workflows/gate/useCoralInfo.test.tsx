@@ -64,6 +64,19 @@ describe("useCoralInfo", () => {
     expect(authenticatedFetch).toHaveBeenCalledTimes(2);
     expect(isCoralMissingError(result.current.error)).toBe(false);
   });
+
+  it("asks nothing while disabled, then fetches once enabled", async () => {
+    // WHY: app-wide callers wait for the viewer's identity before probing Coral.
+    authenticatedFetch.mockResolvedValue(respond(200));
+    const { Wrapper } = wrapper();
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useCoralInfo({ enabled }),
+      { wrapper: Wrapper, initialProps: { enabled: false } },
+    );
+    expect(authenticatedFetch).not.toHaveBeenCalled();
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.data).toEqual(INFO));
+  });
 });
 
 describe("fetchCoralInfo", () => {

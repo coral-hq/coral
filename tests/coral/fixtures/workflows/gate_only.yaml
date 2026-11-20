@@ -1,0 +1,24 @@
+id: gate-only
+name: Gate only
+nodes:
+  - id: start
+    kind: start
+  - id: approve
+    kind: gate
+    name: Approve
+    prompt: Ship it?
+    outcomes: [approve, reject]
+  - id: end
+    kind: end
+arrows:
+  - id: a1
+    from: start
+    to: approve
+  - id: a2
+    from: approve
+    to: end
+    label: approve
+  - id: a3
+    from: approve
+    to: end
+    label: reject

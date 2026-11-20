@@ -12,6 +12,7 @@ import {
   resetLocalElicitationResolutionsForTests,
   useLocalElicitationResolutions,
 } from "@/lib/localElicitationResolutions";
+import { registerInboxKind, type InboxKind } from "@/lib/inboxKinds"; // CORAL(S37)
 import type { Conversation } from "./useConversations";
 import { SidebarDataProvider, useLoadedConversations, useSidebarData } from "./useSidebarData";
 import { useArchivedSessions } from "./useScopeCache";
@@ -254,4 +255,72 @@ it("restores the count when the POST for an answer in flight fails", async () =>
   expect(result.current.inboxCount).toBe(2);
   act(() => cancelLocalElicitationResolution("elicit_1", holdToken));
   expect(result.current.inboxCount).toBe(3);
+});
+
+// CORAL(S37): extension kinds add their own badge items and can leave the count incomplete.
+it("adds each registered kind's badge count and incompleteness to the inbox badge", async () => {
+  const { result } = renderHook(useSidebarData, { wrapper });
+  await waitFor(() => expect(result.current.inboxCount).toBe(3));
+  expect(result.current.inboxCountIncomplete).toBe(false);
+
+  const kind: InboxKind = {
+    id: "fake",
+    claims: () => false,
+    entries: () => [],
+    badgeCount: 2,
+    incomplete: true,
+    loading: false,
+    error: null,
+    summary: (count) => `${count} fake`,
+    silences: () => false,
+    render: () => null,
+  };
+  let unregister = () => {};
+  act(() => {
+    unregister = registerInboxKind(kind);
+  });
+  try {
+    expect(result.current.inboxCount).toBe(5);
+    expect(result.current.inboxCountIncomplete).toBe(true);
+  } finally {
+    act(() => unregister());
+  }
+  expect(result.current.inboxCount).toBe(3);
+  expect(result.current.inboxCountIncomplete).toBe(false);
+});
+
+// CORAL(S37): a kind whose counts throw leaves the badge as it was.
+it("keeps the inbox badge when a kind's badge count throws", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const { result } = renderHook(useSidebarData, { wrapper });
+  await waitFor(() => expect(result.current.inboxCount).toBe(3));
+  const kind = {
+    id: "faulty-badge",
+    claims: () => false,
+    entries: () => [],
+    loading: false,
+    error: null,
+    summary: () => "",
+    silences: () => false,
+    render: () => null,
+  } as unknown as InboxKind;
+  for (const field of ["badgeCount", "incomplete"]) {
+    Object.defineProperty(kind, field, {
+      get: () => {
+        throw new Error("kind bug");
+      },
+    });
+  }
+  let unregister = () => {};
+  act(() => {
+    unregister = registerInboxKind(kind);
+  });
+  try {
+    expect(result.current.inboxCount).toBe(3);
+    expect(result.current.inboxCountIncomplete).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+  } finally {
+    act(() => unregister());
+    warn.mockRestore();
+  }
 });

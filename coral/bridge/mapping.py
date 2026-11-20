@@ -2,7 +2,8 @@
 
 A row rides the same commit as the engine entry that emitted its effect, keyed by
 that effect's key, so a repeat of the commit never queues it twice. Slot effects
-carry the store slot id and generation, so the drainer can fence stale work.
+carry the store slot id and generation, so the drainer can fence stale work. A
+gate's publish and withdraw are bridge rows naming only the visit.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from coral.bridge.config import (
     ceil_epoch_seconds,
     epoch_seconds,
 )
+from coral.bridge.gate_rows import gate_publish_draft, gate_withdraw_draft
 from coral.bridge.keys import (
     ORCHESTRATOR_GENERATION,
     ORCHESTRATOR_SLOT_ID,
@@ -54,9 +56,7 @@ FED_KINDS = frozenset({"create_session", "send_input", "close_slot", "nudge"})
 # Effects that queue no work yet, and why; each is logged when it is committed.
 UNMAPPED_KINDS: Mapping[str, str] = MappingProxyType(
     {
-        "publish_gate": "gates are not published yet",
-        "withdraw_gate": "gates are not published yet",
-        "notify": "notifications are not delivered yet",
+        "notify": "alerts come from the commit; a decision's reminder goes to the orchestrator",
         "runner_lost": "lost runners are not restarted yet",
         "retry_step": "step retries are not run yet",
         "arm_timer": "timer rows come from the run's armed timers",
@@ -126,6 +126,10 @@ def map_effect(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft | None:
             "closed_label": effect.payload.get("closed_label") is not False,
         }
         return _slot_draft(ctx, effect, CANCEL_SESSIONS, fields)
+    if effect.kind == "publish_gate":
+        return gate_publish_draft(ctx, effect)
+    if effect.kind == "withdraw_gate":
+        return gate_withdraw_draft(ctx, effect)
     return None
 
 

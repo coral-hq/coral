@@ -325,6 +325,57 @@ def test_keyset_scans_and_cross_workspace_isolation(db_uri: str) -> None:
     assert any(g.id == "gate_1" for g in open_gates)
 
 
+@pytest.mark.parametrize("store_kind", ["sqlalchemy", "fake"])
+def test_list_open_gates_reads_only_the_runs_open_rows(db_uri: str, store_kind: str) -> None:
+    ensure_coral_schema(db_uri)
+    store: SqlAlchemyCoralRunStore | FakeRunStore = (
+        SqlAlchemyCoralRunStore(db_uri) if store_kind == "sqlalchemy" else FakeRunStore()
+    )
+    run = store.start_run(RunStartSpec("wf", "v1", "Run", "p", workspace_id=1))
+    other = store.start_run(RunStartSpec("wf", "v1", "Other", "p", workspace_id=1))
+    elsewhere = store.start_run(RunStartSpec("wf", "v1", "Elsewhere", "p", workspace_id=2))
+
+    def gate(gate_id: str, status: GateVisitStatus) -> GateVisitDraft:
+        return GateVisitDraft(
+            id=gate_id,
+            activation_id="act_1",
+            node_id="gate_node",
+            scope_key="root",
+            visit_no=1,
+            token=f"token_{gate_id}",
+            status=int(status),
+            elicitation_id=f"coral_gate_{gate_id}",
+        )
+
+    store.apply_transition(
+        run.id,
+        1,
+        Transition(
+            gate_visits=(
+                gate("g2", GateVisitStatus.OPEN),
+                gate("g1", GateVisitStatus.OPEN),
+                gate("g3", GateVisitStatus.RESOLVED),
+            )
+        ),
+        workspace_id=1,
+    )
+    store.apply_transition(
+        other.id, 1, Transition(gate_visits=(gate("g4", GateVisitStatus.OPEN),)), workspace_id=1
+    )
+    store.apply_transition(
+        elsewhere.id,
+        1,
+        Transition(gate_visits=(gate("g5", GateVisitStatus.OPEN),)),
+        workspace_id=2,
+    )
+
+    assert [g.id for g in store.list_open_gates(run.id, workspace_id=1)] == ["g1", "g2"]
+    assert store.list_open_gates(run.id, workspace_id=2) == []
+    assert [g.elicitation_id for g in store.list_open_gates(elsewhere.id, workspace_id=2)] == [
+        "coral_gate_g5"
+    ]
+
+
 def test_post_commit_hook_execution_and_resilience(db_uri: str) -> None:
     """Post-commit callbacks execute after commit, and callback exceptions do not fail commit."""
     ensure_coral_schema(db_uri)

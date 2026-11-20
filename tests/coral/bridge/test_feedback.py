@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from coral.bridge.feedback import fed_payload, feedback_input
+from coral.bridge.feedback import fed_payload, feedback_input, gate_of
 from coral.bridge.keys import anchor_effect_key, store_slot_id
 from coral.db.enum_codecs import LogKind, RunPauseReason, RunStatus, SlotStatus, WorkStatus
 from coral.engine.types import EffectCompleted, EffectFailed, PauseRun
@@ -301,6 +301,23 @@ def test_feedback_maps_outcomes_to_engine_inputs() -> None:
         "pending_input": True,
         "commit": "c",
     }
+    # A gate's publish or withdraw is a bridge row: never a completion.
+    publish = item(
+        {"effect_type": "gate_publish", "bridge_item": "gate", "effect_key": "k4", "visit_id": "v"}
+    )
+    assert feedback_input(FinishedWork(publish, int(WorkStatus.SUCCEEDED), None, None)) is None
+    assert feedback_input(
+        FinishedWork(publish, int(WorkStatus.FAILED), "effect.invalid_payload", None)
+    ) == PauseRun(reason="failure_path", detail="gate:effect.invalid_payload")
+    assert feedback_input(
+        FinishedWork(
+            publish,
+            int(WorkStatus.FAILED),
+            "infra.transient",
+            {"last_error_code": "session.anchor_missing"},
+        )
+    ) == PauseRun(reason="infra", detail="gate:session.anchor_missing")
+    assert (gate_of(publish), gate_of(request), gate_of(nudge)) == ("v", None, None)
 
 
 def test_a_contended_feed_is_logged_for_the_resync(

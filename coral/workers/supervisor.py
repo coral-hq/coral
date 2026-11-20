@@ -89,7 +89,8 @@ class WorkerSupervisor:
 
     While leader, ``drain_concurrency`` workers drain the queue, never two items
     of one run at once in this process, and every ``resync_interval_s`` the
-    resync task passes each active run to ``run_reconciler`` and, hourly, purges
+    resync task passes each active run to ``run_reconciler`` and each run's open
+    gates to ``gate_republisher`` (as the startup sweep does) and, hourly, purges
     finished signal and timer rows older than ``retention_s``. Workers, the task
     and the lease renewal log their errors and retry after a growing delay. The
     replica steps down when it cannot confirm its lease (a renewal or the reclaim
@@ -438,12 +439,14 @@ class WorkerSupervisor:
             delay = interval_s if failures == 0 else _retry_delay(failures)
             if await self._wait((self._stop_event, loss_ev), delay):
                 return
-            if self._run_reconciler is not None:
+            if self._run_reconciler is not None or self._gate_republisher is not None:
                 try:
+                    # The republisher shows only prompts this process lost since the last tick.
                     await startup_recovery_sweep(
                         self._run_store,
                         self._queue_store,
                         scope_runner=self._scope_runner,
+                        gate_republisher=self._gate_republisher,
                         run_reconciler=self._run_reconciler,
                         clock=self._clock,
                     )

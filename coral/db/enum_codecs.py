@@ -242,6 +242,31 @@ WORKSPACE_OP_INTENT_OP: dict[str, int] = {
     "reset": 3,
 }
 
+# question, overdue and reaction have no producer yet; their codes are reserved.
+ALERT_KIND: dict[str, int] = {
+    "gate": 1,
+    "question": 2,
+    "pause": 3,
+    "watchdog": 4,
+    "overdue": 5,
+    "reaction": 6,
+    "run_completed": 7,
+    "run_failed": 8,
+    "run_cancelled": 9,
+}
+
+# The inbox lists the lower code first.
+ALERT_PRIORITY: dict[str, int] = {
+    "normal": 1,
+    "low": 2,
+}
+
+ALERT_STATUS: dict[str, int] = {
+    "open": 1,
+    "acked": 2,
+    "resolved": 3,
+}
+
 
 # ── Python Enums (IntEnum & StrEnum) ────────────────────────────────────────
 
@@ -485,6 +510,29 @@ class WorkspaceOpIntentOp(IntEnum):
     COMMIT = 1
     SALVAGE = 2
     RESET = 3
+
+
+class AlertKind(IntEnum):
+    GATE = 1
+    QUESTION = 2
+    PAUSE = 3
+    WATCHDOG = 4
+    OVERDUE = 5
+    REACTION = 6
+    RUN_COMPLETED = 7
+    RUN_FAILED = 8
+    RUN_CANCELLED = 9
+
+
+class AlertPriority(IntEnum):
+    NORMAL = 1
+    LOW = 2
+
+
+class AlertStatus(IntEnum):
+    OPEN = 1
+    ACKED = 2
+    RESOLVED = 3
 
 
 # ── StrEnum Variants ─────────────────────────────────────────────────────────
@@ -861,3 +909,27 @@ def encode_workspace_op_intent_op(val: str | WorkspaceOpIntentOp) -> int:
 
 def decode_workspace_op_intent_op(code: int) -> str:
     return decode_enum(WORKSPACE_OP_INTENT_OP, code, field="coral_workspace_op_intents.op")
+
+
+def encode_alert_kind(val: str | AlertKind) -> int:
+    return _encode_val(ALERT_KIND, val, "coral_alerts.kind", expected_enum=AlertKind)
+
+
+def decode_alert_kind(code: int) -> str:
+    return decode_enum(ALERT_KIND, code, field="coral_alerts.kind")
+
+
+def encode_alert_priority(val: str | AlertPriority) -> int:
+    return _encode_val(ALERT_PRIORITY, val, "coral_alerts.priority", expected_enum=AlertPriority)
+
+
+def decode_alert_priority(code: int) -> str:
+    return decode_enum(ALERT_PRIORITY, code, field="coral_alerts.priority")
+
+
+def encode_alert_status(val: str | AlertStatus) -> int:
+    return _encode_val(ALERT_STATUS, val, "coral_alerts.status", expected_enum=AlertStatus)
+
+
+def decode_alert_status(code: int) -> str:
+    return decode_enum(ALERT_STATUS, code, field="coral_alerts.status")

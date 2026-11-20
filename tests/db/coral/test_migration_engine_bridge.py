@@ -39,7 +39,13 @@ from coral.db.enum_codecs import (
     WorkStatus,
 )
 from coral.db.migrate import _build_coral_alembic_config
-from tests.db.coral._migration_support import coral_revision, migrate_coral, run_values
+from tests.db.coral._migration_support import (
+    coral_revision,
+    insert_row,
+    migrate_coral,
+    reflected_schema,
+    run_values,
+)
 
 _CORE = "coral_0001_core"
 _SESSION_FACADE = "coral_0002_session_facade"
@@ -67,11 +73,6 @@ def coral_session_facade_engine(coral_scratch_engine: Engine) -> Engine:
     """A scratch database on the active lane with the Coral chain at coral_0002."""
     migrate_coral(coral_scratch_engine, "upgrade", _SESSION_FACADE)
     return coral_scratch_engine
-
-
-def _insert(engine: Engine, table: sa.Table, values: dict[str, object]) -> None:
-    with engine.begin() as conn:
-        conn.execute(table.insert().values(**values))
 
 
 def _spec(run_id: str, **changes: object) -> dict[str, object]:
@@ -194,20 +195,22 @@ def _populate(engine: Engine, revision: str = _SESSION_FACADE) -> None:
     session_facade = revision == _SESSION_FACADE
     last_reason = RunPauseReason.DRIFT if session_facade else RunPauseReason.ENGINE_UPGRADE
     for reason in range(1, int(last_reason) + 1):
-        _insert(engine, _RUNS, run_values(f"paused-{reason}", status=_PAUSED, pause_reason=reason))
-    _insert(engine, _RUNS, run_values(_RUN, status=int(RunStatus.RUNNING), pause_reason=None))
-    _insert(engine, _SPECS, _spec(_RUN))
+        insert_row(
+            engine, _RUNS, run_values(f"paused-{reason}", status=_PAUSED, pause_reason=reason)
+        )
+    insert_row(engine, _RUNS, run_values(_RUN, status=int(RunStatus.RUNNING), pause_reason=None))
+    insert_row(engine, _SPECS, _spec(_RUN))
     for status in range(1, int(SlotStatus.CLOSED) + 1):
-        _insert(engine, _SLOTS, _slot(f"slot-{status}", status))
+        insert_row(engine, _SLOTS, _slot(f"slot-{status}", status))
     # Each kind at its own sequence number, leaving the engine kind's number free.
     for kind in range(1, int(LogKind.COMMAND_REJECTED) + 1):
-        _insert(engine, _LOG, _log(kind, kind))
-    _insert(engine, _VERSIONS, _version("v" * 32))
-    _insert(engine, _WORK, _work("k" * 32))
+        insert_row(engine, _LOG, _log(kind, kind))
+    insert_row(engine, _VERSIONS, _version("v" * 32))
+    insert_row(engine, _WORK, _work("k" * 32))
     if session_facade:
-        _insert(engine, _BINDINGS, _binding("anchor-run", _RUN, slot_id=None))
-        _insert(engine, _BINDINGS, _binding("anchor-other-run", _OTHER_RUN, slot_id=None))
-        _insert(engine, _BINDINGS, _binding("step", _RUN, slot_id=_STEP_SLOT))
+        insert_row(engine, _BINDINGS, _binding("anchor-run", _RUN, slot_id=None))
+        insert_row(engine, _BINDINGS, _binding("anchor-other-run", _OTHER_RUN, slot_id=None))
+        insert_row(engine, _BINDINGS, _binding("step", _RUN, slot_id=_STEP_SLOT))
 
 
 def _stored(engine: Engine, *, bindings: bool = True) -> dict[str, list[tuple[object, ...]]]:
@@ -231,44 +234,6 @@ def _stored(engine: Engine, *, bindings: bool = True) -> dict[str, list[tuple[ob
         }
 
 
-def _checks(inspector: sa.Inspector, table: str) -> list[tuple[str | None, str]]:
-    try:
-        return sorted(
-            (check["name"], check["sqltext"]) for check in inspector.get_check_constraints(table)
-        )
-    except NotImplementedError:
-        return []
-
-
-def _schema(engine: Engine) -> dict[str, dict[str, object]]:
-    """Columns, keys, indexes and checks of every Coral data table, as the lane reflects them."""
-    inspector = sa.inspect(engine)
-    tables = sorted(
-        name
-        for name in inspector.get_table_names()
-        if name.startswith("coral_") and name != "coral_alembic_version"
-    )
-    return {
-        table: {
-            "columns": {
-                column["name"]: (repr(column["type"]), column["nullable"])
-                for column in inspector.get_columns(table)
-            },
-            "primary_key": inspector.get_pk_constraint(table)["constrained_columns"],
-            "indexes": sorted(
-                (index["name"], tuple(index["column_names"]), bool(index["unique"]))
-                for index in inspector.get_indexes(table)
-            ),
-            "unique": sorted(
-                (unique["name"], tuple(unique["column_names"]))
-                for unique in inspector.get_unique_constraints(table)
-            ),
-            "checks": _checks(inspector, table),
-        }
-        for table in tables
-    }
-
-
 def _new_codes() -> list[tuple[sa.Table, dict[str, object]]]:
     return [
         (_RUNS, run_values("auth", status=_PAUSED, pause_reason=int(RunPauseReason.AUTH))),
@@ -286,7 +251,7 @@ def test_upgrade_keeps_rows_and_stores_engine_bridge_data(
     stored = _stored(engine)
     for table, values in _new_codes():
         with pytest.raises(_CHECK_VIOLATION):
-            _insert(engine, table, values)
+            insert_row(engine, table, values)
 
     # The checks are replaced on tables committed before the upgrade, as in a deployment.
     migrate_coral(engine, "upgrade", _ENGINE_BRIDGE)
@@ -294,7 +259,7 @@ def test_upgrade_keeps_rows_and_stores_engine_bridge_data(
     assert coral_revision(engine) == _ENGINE_BRIDGE
     assert _stored(engine) == stored
     for table, values in _new_codes():
-        _insert(engine, table, values)
+        insert_row(engine, table, values)
     unknown_codes = [
         (_RUNS, run_values("unknown", status=_PAUSED, pause_reason=int(RunPauseReason.AUTH) + 1)),
         (_SLOTS, _slot("u" * 32, int(SlotStatus.CLOSING) + 1)),
@@ -302,7 +267,7 @@ def test_upgrade_keeps_rows_and_stores_engine_bridge_data(
     ]
     for table, values in unknown_codes:
         with pytest.raises(_CHECK_VIOLATION):
-            _insert(engine, table, values)
+            insert_row(engine, table, values)
     # A version stores each artifact by blob ref or inline, never neither.
     for missing in (
         {"yaml_ref": None},
@@ -310,7 +275,7 @@ def test_upgrade_keeps_rows_and_stores_engine_bridge_data(
         {"yaml_ref": None, "compiled_ref": None, "compiled_json": "{}"},
     ):
         with pytest.raises(_CHECK_VIOLATION):
-            _insert(engine, _VERSIONS, _version("x" * 32, **missing))
+            insert_row(engine, _VERSIONS, _version("x" * 32, **missing))
 
     # A pinned graph inline, a frozen engine config, a hold start and a tool reply.
     pinned = _version(
@@ -320,15 +285,15 @@ def test_upgrade_keeps_rows_and_stores_engine_bridge_data(
         yaml_text="nodes: []",
         compiled_json='{"nodes": []}',
     )
-    _insert(engine, _VERSIONS, pinned)
-    _insert(engine, _SPECS, _spec(_OTHER_RUN, engine_config='{"max_activations": 100}'))
+    insert_row(engine, _VERSIONS, pinned)
+    insert_row(engine, _SPECS, _spec(_OTHER_RUN, engine_config='{"max_activations": 100}'))
     with engine.begin() as conn:
         conn.execute(_WORK.update().values(held_since=1_700_000_000))
-    _insert(engine, _REPLIES, _reply(b"\x07" * 32))
+    insert_row(engine, _REPLIES, _reply(b"\x07" * 32))
     with pytest.raises(IntegrityError):
-        _insert(engine, _REPLIES, {**_reply(b"\x07" * 32), "reply": "{}"})
+        insert_row(engine, _REPLIES, {**_reply(b"\x07" * 32), "reply": "{}"})
     # The same call checksum in another run is that run's own reply.
-    _insert(engine, _REPLIES, {**_reply(b"\x07" * 32), "run_id": _OTHER_RUN})
+    insert_row(engine, _REPLIES, {**_reply(b"\x07" * 32), "run_id": _OTHER_RUN})
     with engine.connect() as conn:
         version = conn.execute(
             sa.select(
@@ -368,7 +333,7 @@ def test_upgrade_from_coral_0001_to_head_and_back_keeps_rows(
     assert coral_revision(engine) == _ENGINE_BRIDGE
     assert _stored(engine, bindings=False) == stored
     for table, values in _new_codes():
-        _insert(engine, table, values)
+        insert_row(engine, table, values)
         key = sa.and_(*(column == values[column.name] for column in table.primary_key.columns))
         with engine.begin() as conn:
             conn.execute(table.delete().where(key))
@@ -385,8 +350,8 @@ def test_upgrade_refuses_two_step_sessions_for_one_slot_before_any_change(
 ) -> None:
     engine = coral_session_facade_engine
     _populate(engine)
-    _insert(engine, _BINDINGS, _binding("second-step", _RUN, slot_id=_STEP_SLOT))
-    schema = _schema(engine)
+    insert_row(engine, _BINDINGS, _binding("second-step", _RUN, slot_id=_STEP_SLOT))
+    schema = reflected_schema(engine)
     stored = _stored(engine)
 
     with pytest.raises(RuntimeError, match=f"Runs {_RUN} bind two step sessions to one slot"):
@@ -394,7 +359,7 @@ def test_upgrade_refuses_two_step_sessions_for_one_slot_before_any_change(
 
     # Nothing changed, so removing the extra binding lets the same upgrade run.
     assert coral_revision(engine) == _SESSION_FACADE
-    assert _schema(engine) == schema
+    assert reflected_schema(engine) == schema
     assert _stored(engine) == stored
     with engine.begin() as conn:
         conn.execute(_BINDINGS.delete().where(_BINDINGS.c.session_id == "second-step"))
@@ -405,19 +370,21 @@ def test_upgrade_refuses_two_step_sessions_for_one_slot_before_any_change(
 def test_one_step_binding_per_run_slot_and_generation(coral_scratch_engine: Engine) -> None:
     engine = coral_scratch_engine
     migrate_coral(engine, "upgrade", _ENGINE_BRIDGE)
-    _insert(engine, _BINDINGS, _binding("step", _RUN, slot_id=_STEP_SLOT))
+    insert_row(engine, _BINDINGS, _binding("step", _RUN, slot_id=_STEP_SLOT))
 
     with pytest.raises(IntegrityError):
-        _insert(engine, _BINDINGS, _binding("second-step", _RUN, slot_id=_STEP_SLOT))
+        insert_row(engine, _BINDINGS, _binding("second-step", _RUN, slot_id=_STEP_SLOT))
 
     # Another generation, run or workspace is another binding.
-    _insert(engine, _BINDINGS, _binding("next-generation", _RUN, slot_id=_STEP_SLOT, generation=2))
-    _insert(engine, _BINDINGS, _binding("other-run", _OTHER_RUN, slot_id=_STEP_SLOT))
-    _insert(engine, _BINDINGS, _binding("step", _RUN, slot_id=_STEP_SLOT, workspace_id=2))
+    insert_row(
+        engine, _BINDINGS, _binding("next-generation", _RUN, slot_id=_STEP_SLOT, generation=2)
+    )
+    insert_row(engine, _BINDINGS, _binding("other-run", _OTHER_RUN, slot_id=_STEP_SLOT))
+    insert_row(engine, _BINDINGS, _binding("step", _RUN, slot_id=_STEP_SLOT, workspace_id=2))
     # Anchors have no slot, and the index never compares slotless rows.
-    _insert(engine, _BINDINGS, _binding("anchor-run", _RUN, slot_id=None))
-    _insert(engine, _BINDINGS, _binding("anchor-other-run", _OTHER_RUN, slot_id=None))
-    _insert(engine, _BINDINGS, _binding("second-anchor-run", _RUN, slot_id=None))
+    insert_row(engine, _BINDINGS, _binding("anchor-run", _RUN, slot_id=None))
+    insert_row(engine, _BINDINGS, _binding("anchor-other-run", _OTHER_RUN, slot_id=None))
+    insert_row(engine, _BINDINGS, _binding("second-anchor-run", _RUN, slot_id=None))
     with engine.connect() as conn:
         stored = conn.execute(sa.select(sa.func.count()).select_from(_BINDINGS)).scalar_one()
     assert stored == 7
@@ -428,10 +395,10 @@ def test_downgrade_refuses_engine_bridge_data_then_restores_coral_0002(
 ) -> None:
     engine = coral_session_facade_engine
     _populate(engine)
-    schema = _schema(engine)
+    schema = reflected_schema(engine)
     stored = _stored(engine)
     migrate_coral(engine, "upgrade", _ENGINE_BRIDGE)
-    upgraded = _schema(engine)
+    upgraded = reflected_schema(engine)
 
     engine_bridge_rows = [
         *_new_codes(),
@@ -440,7 +407,7 @@ def test_downgrade_refuses_engine_bridge_data_then_restores_coral_0002(
         (_SPECS, _spec(_OTHER_RUN, engine_config="{}")),
     ]
     for table, values in engine_bridge_rows:
-        _insert(engine, table, values)
+        insert_row(engine, table, values)
         with pytest.raises(RuntimeError, match=_REFUSED):
             migrate_coral(engine, "downgrade", _SESSION_FACADE)
         assert coral_revision(engine) == _ENGINE_BRIDGE
@@ -449,25 +416,25 @@ def test_downgrade_refuses_engine_bridge_data_then_restores_coral_0002(
             conn.execute(table.delete().where(key))
 
     # Replies and hold starts belong to the dropped schema only, so they never block.
-    _insert(engine, _REPLIES, _reply(b"\x07" * 32))
+    insert_row(engine, _REPLIES, _reply(b"\x07" * 32))
     with engine.begin() as conn:
         conn.execute(_WORK.update().values(held_since=1_700_000_000))
     migrate_coral(engine, "downgrade", _SESSION_FACADE)
 
     assert coral_revision(engine) == _SESSION_FACADE
-    assert _schema(engine) == schema
+    assert reflected_schema(engine) == schema
     assert _stored(engine) == stored
     for table, values in _new_codes():
         with pytest.raises(_CHECK_VIOLATION):
-            _insert(engine, table, values)
+            insert_row(engine, table, values)
 
     # The downgraded database upgrades again to the same schema with its rows kept.
     migrate_coral(engine, "upgrade", _ENGINE_BRIDGE)
     assert coral_revision(engine) == _ENGINE_BRIDGE
-    assert _schema(engine) == upgraded
+    assert reflected_schema(engine) == upgraded
     assert _stored(engine) == stored
     for table, values in _new_codes():
-        _insert(engine, table, values)
+        insert_row(engine, table, values)
 
 
 def test_engine_bridge_downgrade_requires_a_live_connection() -> None:

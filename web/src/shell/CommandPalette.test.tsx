@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps, ReactNode } from "react";
 
 import { ALT_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
+// CORAL(S34): Coral palette entries follow a mocked Coral info.
 import type { CoralInfo } from "@/workflows/api/types";
 import type * as CoralInfoModule from "@/workflows/gate/useCoralInfo";
 import { CommandPalette } from "./CommandPalette";
@@ -13,6 +14,7 @@ vi.mock("@/lib/routing", () => ({
   useNavigate: () => navigate,
 }));
 
+// CORAL(S34)
 const coralInfo = vi.hoisted(() => ({ data: undefined as CoralInfo | undefined }));
 vi.mock("@/workflows/gate/useCoralInfo", async (importOriginal) => ({
   ...(await importOriginal<typeof CoralInfoModule>()),
@@ -97,7 +99,7 @@ function withQueryClient(queryClient = new QueryClient()) {
 
 beforeEach(() => {
   navigate.mockClear();
-  coralInfo.data = undefined;
+  coralInfo.data = undefined; // CORAL(S34)
   useConversations.mockReset();
   useSessionSearch.mockReset();
   serverInfo.mockReturnValue({ session_search_scope: true });
@@ -922,6 +924,7 @@ describe("CommandPalette — actions", () => {
     expect(screen.getByText("Toggle workspace sidebar")).toBeTruthy();
   });
 
+  // CORAL(S34): Coral palette entries.
   it("omits Coral actions until Coral is enabled", () => {
     renderPalette();
     expect(screen.queryByText("Go to Workflows")).toBeNull();

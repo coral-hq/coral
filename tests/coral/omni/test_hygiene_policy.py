@@ -37,7 +37,7 @@ def test_plugin_registers_every_coral_policy_handler(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
-    services = cast(Any, SimpleNamespace(host_sharded=False, server_config={}))
+    services = cast(Any, SimpleNamespace(host_sharded=False, server_config={}, auth_provider=None))
     load_registry()
     # Generated bundles name these handlers, and materialize accepts only registered ones.
     handlers = [

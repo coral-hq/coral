@@ -1,0 +1,35 @@
+id: gated
+name: Gated change
+nodes:
+  - id: start
+    kind: start
+  - id: implement
+    kind: step
+    name: Implement
+    goal: Implement the change
+    roster: [implementer]
+  - id: approve_change
+    kind: gate
+    name: Approve change
+    prompt: Approve the change?
+    outcomes: [approve, reject]
+  - id: end
+    kind: end
+arrows:
+  - id: a1
+    from: start
+    to: implement
+  - id: a2
+    from: implement
+    to: approve_change
+  - id: a3
+    from: approve_change
+    to: end
+    label: approve
+  - id: a4
+    from: approve_change
+    to: implement
+    label: reject
+    back: true
+    limit: 2
+    at_limit: a3

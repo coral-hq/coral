@@ -4,7 +4,8 @@
 Both pin workflow versions in SQL, the only version store there is.
 :func:`serving` adds the session side: the real executors over fake sessions,
 a drainer with the bridge's hook and hold policy, and the engine tools, which a
-scripted :class:`Agent` and :class:`Orchestrator` call.
+scripted :class:`Agent` and :class:`Orchestrator` call. Gate prompts go to a
+:class:`RecordingGatePublisher`.
 """
 
 from __future__ import annotations
@@ -43,12 +44,15 @@ from coral.db.enum_codecs import SessionBindingProgress, WorkKind, WorkStatus
 from coral.engine import fold
 from coral.engine.machines.slot import find_slot
 from coral.engine.types import RunState, TurnEnded
+from coral.gates.executors import gate_publish_executor, gate_withdraw_executor
+from coral.gates.ids import GATE_PUBLISH, GATE_WITHDRAW
 from coral.model.ids import derived_id
 from coral.omni.protocols import (
     CoralSessionError,
     SessionCreateRequest,
     SessionRef,
     SessionState,
+    TrackedPrompt,
 )
 from coral.omni.server.turn_facts import TurnFactRecorder
 from coral.queue import FinishedWork, SqlAlchemyCoralQueueStore
@@ -138,21 +142,26 @@ class World:
     db_uri: str | None = None
 
     @classmethod
-    def fake(cls, tmp_path: Path) -> World:
+    def fake(cls, tmp_path: Path, *, gate_ids: Callable[[], str] | None = None) -> World:
+        """:param gate_ids: The bridge's gate elicitation ids; random when not given."""
         engine = create_engine(f"sqlite:///{tmp_path / 'versions.db'}")
         CoralBase.metadata.create_all(engine)
         runs = FakeRunStore(default_workspace_id=WORKSPACE)
         return cls._build(
-            runs, FakeQueueStore(run_store=runs), SqlAlchemyWorkflowVersionStore(engine)
+            runs,
+            FakeQueueStore(run_store=runs),
+            SqlAlchemyWorkflowVersionStore(engine),
+            gate_ids=gate_ids,
         )
 
     @classmethod
-    def sql(cls, db_uri: str) -> World:
+    def sql(cls, db_uri: str, *, gate_ids: Callable[[], str] | None = None) -> World:
         return cls._build(
             SqlAlchemyCoralRunStore(db_uri),
             SqlAlchemyCoralQueueStore(db_uri),
             SqlAlchemyWorkflowVersionStore(db_uri),
             db_uri=db_uri,
+            gate_ids=gate_ids,
         )
 
     @classmethod
@@ -163,6 +172,7 @@ class World:
         versions: SqlAlchemyWorkflowVersionStore,
         *,
         db_uri: str | None = None,
+        gate_ids: Callable[[], str] | None = None,
     ) -> World:
         clock = ManualClock()
         bound = BoundSessions()
@@ -172,6 +182,7 @@ class World:
             versions=versions,
             clock=clock,
             bound_sessions=bound,
+            **({} if gate_ids is None else {"gate_elicitation_ids": gate_ids}),
         )
         return cls(
             runs=runs,
@@ -343,6 +354,60 @@ def ids(items: Sequence[WorkItem]) -> set[str]:
 
 # ── the session side ────────────────────────────────────────────────────────
 
+
+@dataclass
+class RecordingGatePublisher:
+    """
+    A ``GatePublisher`` over a dict of pending prompts, recording each call in order.
+
+    :ivar after_publish: Runs after each publish is recorded, e.g. to commit a cancel
+        between the executor's two loads.
+    """
+
+    calls: list[tuple[str, str, str]] = field(default_factory=list)
+    pending: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    after_publish: Callable[[], object] | None = None
+
+    async def publish(
+        self, *, session_id: str, elicitation_id: str, params: Mapping[str, Any]
+    ) -> None:
+        self.calls.append(("publish", session_id, elicitation_id))
+        self.pending[(session_id, elicitation_id)] = dict(params)
+        if self.after_publish is not None:
+            self.after_publish()
+
+    async def withdraw(self, *, session_id: str, elicitation_id: str) -> bool:
+        self.calls.append(("withdraw", session_id, elicitation_id))
+        return self.pending.pop((session_id, elicitation_id), None) is not None
+
+
+@dataclass
+class FakeGatePrompts:
+    """``PendingGatePrompts`` over a recording publisher's pending prompts (one workspace)."""
+
+    gates: RecordingGatePublisher
+    prompts: list[TrackedPrompt] = field(default_factory=list)
+    listed: int = 0
+
+    def track(self, session_id: str, elicitation_id: str) -> TrackedPrompt:
+        """Publish ``elicitation_id`` on the session and track it, as the S5 observer would."""
+        self.gates.pending[(session_id, elicitation_id)] = {}
+        prompt = TrackedPrompt(WORKSPACE, session_id, elicitation_id)
+        self.prompts.append(prompt)
+        return prompt
+
+    def tracked(self) -> list[TrackedPrompt]:
+        self.listed += 1
+        return list(self.prompts)
+
+    def forget(self, prompt: TrackedPrompt) -> None:
+        if prompt in self.prompts:
+            self.prompts.remove(prompt)
+
+    def is_pending(self, prompt: TrackedPrompt) -> bool:
+        return (prompt.session_id, prompt.elicitation_id) in self.gates.pending
+
+
 # What the run worktree's host answers a writer's close: an unchanged tree, then one commit.
 HOST_REPLIES: dict[str, Mapping[str, object]] = {
     "fingerprint": {"level": "L1", "digest": "d" * 64, "head": "1" * 40, "dirty_count": 1},
@@ -446,7 +511,8 @@ class Sessions:
     The drainer runs every work kind on the world's clock, with the bridge's hold
     policy and its finished hook; ``before_feed`` runs first for each finished row.
     The engine tools are decided by the store port through the real dispatcher. Status
-    edges go through the turn-fact recorder over the world's bound-session index.
+    edges go through the turn-fact recorder over the world's bound-session index. Gate
+    prompts are published to ``gates``.
     """
 
     world: World
@@ -462,6 +528,7 @@ class Sessions:
     threads: BridgeThreads
     dispatcher: ToolDispatcher
     recorder: TurnFactRecorder
+    gates: RecordingGatePublisher = field(default_factory=RecordingGatePublisher)
     drainer: WorkDrainer = field(init=False)
     before_feed: Callable[[FinishedWork], Awaitable[None]] | None = None
 
@@ -509,6 +576,10 @@ class Sessions:
             ),
             TIMER: timer_executor(self.threads),
             RUN_RESYNC: run_resync_executor(self.threads),
+            GATE_PUBLISH: gate_publish_executor(
+                self.threads, self.gates, self.bindings, world.runs, scope
+            ),
+            GATE_WITHDRAW: gate_withdraw_executor(self.threads, self.gates, world.runs, scope),
             TURN_FACT: turn_fact_executor(
                 self.threads,
                 bindings=self.bindings,
@@ -635,7 +706,8 @@ async def serving(world: World, *, after: Sessions | None = None) -> AsyncIterat
 
     :param after: The session side of a process that died: the new one keeps its
         sessions and host, which outlive a server process, and on the in-memory
-        stores its bindings, stable ids and op intents; its edge watchers are new.
+        stores its bindings, stable ids and op intents; its edge watchers and its
+        published gate prompts are new.
     """
     events: list[str] = [] if after is None else after.events
     if after is not None and world.db_uri is None:
@@ -682,7 +754,7 @@ async def serving(world: World, *, after: Sessions | None = None) -> AsyncIterat
                 effect_type,
                 executor,
                 replace=True,
-                runs_after_terminal=effect_type == CANCEL_SESSIONS,
+                runs_after_terminal=effect_type in (CANCEL_SESSIONS, GATE_WITHDRAW),
             )
         yield sessions
     finally:

@@ -22,6 +22,8 @@ allowed_roots:
     new_files_only: false
   - path: web/src/brand/
     new_files_only: false
+  - path: web/src/workflows/
+    new_files_only: false
   - path: .claude/skills/
     new_files_only: true
 
@@ -2666,3 +2668,465 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: true
+
+  - id: S5
+    title: Crash-isolated, copy-on-write elicitation observers
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      pending_elicitations had one observer slot, owned by the sub-agent block
+      notifier, and called it with no try/except, so a raising observer
+      propagated out of record_publish and session_stream.publish before the
+      SSE fan-out and dropped delivery of the prompt. add_elicitation_observer
+      now adds further observers beside that primary slot and returns an
+      idempotent uninstaller that removes only its own registration (the exact
+      object it added, first match, so a bound method or an observer added
+      twice is handled). Added observers are a tuple replaced as a whole under
+      a writers-only lock; each publish reads the primary and the tuple once
+      without a lock. _notify_observer calls the primary, then the added
+      observers in registration order, each in its own try/except: a failure
+      logs one WARNING traceback per observer name (log_once), then a DEBUG
+      line with the session id, and never stops the other observers, the
+      count hook or the publish. set_elicitation_observer and
+      configure_subagent_block_notifier are unchanged, so the notifier's
+      uninstall (clearing the primary) cannot remove added observers.
+      The failure log names the observer by its __qualname__, falling back to
+      its type's, so a name lookup that raises cannot escape either.
+      reset_for_tests clears the tuple. Contract for consumers: observers get a
+      bare conversation id in the publisher's workspace scope, share the event
+      dict with the index and subscribers (read-only), and may be called once
+      more after their uninstaller returns; for an observer added twice, an
+      uninstaller removes its earliest remaining registration.
+      omnigent.process_logging imports only omnigent._platform at module
+      level, so there is no import cycle. The first consumer is Coral's gate
+      prompt tracker; with nothing added, behaviour is unchanged except that a
+      raising primary observer is now logged instead of breaking the publish.
+    files:
+      - omnigent/runtime/pending_elicitations.py
+      - tests/runtime/test_pending_elicitations.py
+      - tests/runtime/test_subagent_block_notifier.py
+    tests:
+      - tests/runtime/test_pending_elicitations.py
+      - tests/runtime/test_subagent_block_notifier.py
+    budget_lines: 40
+    budget_exception:
+      lines: 217
+      reason: >-
+        Changed lines against the base, per file.
+        omnigent/runtime/pending_elicitations.py (90: 84 added, 6 removed): the
+        logger, the observer tuple and its lock, add_elicitation_observer with
+        its uninstaller and consumer contract, the never-raising
+        _observer_name and the isolated _notify_observer loop, each with its
+        docstring, and the reset of the tuple.
+        tests/runtime/test_pending_elicitations.py (217: 216 added, 1 removed):
+        the anchored imports and seven tests (the primary and two added
+        observers per event type; a raising primary or added observer with its
+        logging and no prompt content in the log; an observer whose name
+        lookup raises; delivery to a stream subscriber beside a raising
+        observer; uninstall scope; observers changed during delivery applying
+        from the next event; the reset).
+        tests/runtime/test_subagent_block_notifier.py (45): the parent wake and
+        resolution notice beside a raising added observer.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S6a
+    title: Request-free publish and withdraw of claimed elicitation ids
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      omnigent/server/elicitation_hooks.py lets a server component publish a
+      form elicitation on a session with no HTTP request behind it, and
+      withdraw it. publish_form_elicitation(session_id, params, *,
+      elicitation_id) accepts only an id a registered S6b verdict handler
+      claims, 1-64 of A-Za-z0-9_- and never starting with Omnigent's elicit_
+      (ValueError otherwise, and for params that do not validate as
+      ElicitationRequestParams), builds the same ElicitationRequestEvent
+      payload as the mcp_elicitation branch (model_dump(), so unset optional
+      params are null and extra params keys such as coral survive) and calls
+      session_stream.publish as a module attribute. Re-publishing an id
+      replaces the stored prompt with the count unchanged. There is no
+      ancestor mirror: the only planned caller publishes on a run anchor,
+      which has no parent. The caller must be inside the session's workspace
+      scope. withdraw_elicitation(session_id, elicitation_id) refuses a
+      malformed or unclaimed id, returns False and publishes nothing when the
+      prompt is not pending on that session, and otherwise publishes a
+      verdict-less response.elicitation_resolved and returns True; the
+      answer path uses the same withdraw without the id check, so a handler
+      unregistered mid-answer cannot turn the answer into an error. The
+      mcp_elicitation branch is unchanged. elicitation_hooks imports helpers,
+      schemas, session_stream, errors and pending_elicitations; helpers
+      imports neither orchestration nor this module, so there is no cycle.
+    files:
+      - omnigent/server/elicitation_hooks.py
+      - tests/server/test_elicitation_hooks.py
+      - tests/server/integration/test_sessions_elicitation_api.py
+    tests:
+      - tests/server/test_elicitation_hooks.py
+      - tests/server/integration/test_sessions_elicitation_api.py
+    budget_lines: 40
+    budget_exception:
+      lines: 342
+      reason: >-
+        Changed lines against the base, per file, shared with S6b.
+        omnigent/server/elicitation_hooks.py (new, 281 lines): the header,
+        imports and id rules (37), S6b's registry and answer section (185)
+        and S6a's publish section (59: the claimed-id check, the unchecked
+        withdraw, publish and withdraw, with docstrings).
+        tests/server/test_elicitation_hooks.py (new, 341): the prefix,
+        registry, publish, withdraw, no-caller, malformed-id, mid-answer
+        unregister, tombstone and runner-forward skip, and raising-handler
+        unit tests. tests/server/integration/test_sessions_elicitation_api.py
+        (342 added): the test_gate_ handler and event recorder fixtures, the
+        answer helper and the publish, both-route, caller, access, duplicate,
+        refusal, malformed-id and child-session cases.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S6b
+    title: Stable-id elicitation verdict handlers on both answer routes
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A component registers an async verdict handler for an id prefix
+      (register_elicitation_verdict_handler: [a-z][a-z0-9_]{0,31}_, never
+      elicit_, never a prefix of or prefixed by a registered one, ValueError
+      otherwise; unlike the S1 and S53 registries a second registration
+      raises instead of replacing, since one Coral lifespan runs per
+      process). The returned unregister removes that registration only (a
+      per-registration marker, so a stale uninstaller never removes a later
+      registration, even of the same handler). _resolve_elicitation gains a
+      keyword-only resolved_by whose default NO_CALLER names no one, and
+      returns VerdictDecision | None. Its first step,
+      resolve_claimed_elicitation, returns None for an unclaimed id, which
+      then takes today's path byte for byte (native delivery, harness
+      Future, tombstones, resolved fan-out, runner forward). A claimed id
+      never reaches those. Without the handler it is refused with NO_CALLER
+      (forbidden, no_caller), so the existing direct test calls cannot answer
+      one, and as invalid_answer (409 on both routes) when the id is not 1-64
+      of A-Za-z0-9_- or the result is invalid (the resolve URL's FastAPI body
+      check answers 422 first for a malformed body). Otherwise the handler is
+      awaited in the request's task, with no timeout (it bounds its own
+      waits), with an ElicitationVerdict (session, id, validated result,
+      resolved_by: the authenticated user, None when the request carried no
+      identity). A non-duplicate acceptance publishes the resolved event with
+      the verdict; clear_pending withdraws a still-pending prompt, except on
+      a forbidden refusal, so a caller refused for who they are never clears
+      the owner's prompt. Both touch the answered session only: claimed
+      prompts are never mirrored, so nothing is published to ancestors, and
+      an answer on a child cannot clear its parent's prompt. Nothing else is
+      published, and the outcome stands if the handler is unregistered while
+      it runs. The resolve URL and the approval event pass resolved_by=user_id
+      and, for a claimed id, return verdict_response(decision) before the
+      deferred policy writes: 202 {"queued": false}, with "duplicate": true
+      for a duplicate, or an OmnigentError FORBIDDEN (forbidden) or CONFLICT
+      with the message "[<reason>] <message>". A handler's own exception
+      propagates (500, nothing published). ELICITATION_RESOLVE_LEVEL, the S53
+      guard call and unclaimed ids are unchanged. The registry global carries
+      the workspace-scoped-cache lint disable (keyed by prefix). The server
+      tests' elicitation reset also drops handlers.
+    files:
+      - omnigent/server/elicitation_hooks.py
+      - omnigent/server/routes/_sessions/orchestration.py
+      - omnigent/server/routes/sessions/routes_elicitations.py
+      - omnigent/server/routes/sessions/routes_events.py
+      - tests/server/conftest.py
+      - tests/server/test_elicitation_hooks.py
+      - tests/server/integration/test_sessions_elicitation_api.py
+    tests:
+      - tests/server/test_elicitation_hooks.py
+      - tests/server/integration/test_sessions_elicitation_api.py
+    budget_lines: 40
+    budget_exception:
+      lines: 342
+      reason: >-
+        Changed lines against the base, per file. The new module and the two
+        test files are shared with S6a (see S6a's reason); the registry and
+        answer section of elicitation_hooks.py is 185 lines with docstrings.
+        The Omnigent route files are within budget:
+        omnigent/server/routes/_sessions/orchestration.py 17 (the module
+        import, the keyword and return type, the docstring, the claimed branch
+        and two explicit None returns), routes_elicitations.py 7,
+        routes_events.py 7, tests/server/conftest.py 3.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S34
+    title: Coral desk routes, navigation and palette entries
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      Records the Coral desk anchors already in the tree. App.tsx mounts
+      coralRoutes (the /workflows and /profiles desk behind the Coral
+      gate) before the catch-all route. Sidebar.tsx adds
+      CoralPrimaryNavigation after Inbox; useActiveNavItem treats Coral desk
+      paths as their own rows, never New session, and never matches a
+      workflow key in the path against another nav leaf. CommandPalette.tsx
+      adds useCoralPaletteActions (Go to Workflows, Agent Profiles with
+      profiles_desk), empty while Coral is off. The Coral modules live under
+      web/src/workflows/, now an allowed root. The three test files gained
+      their anchors with this ledger entry.
+    files:
+      - web/src/App.tsx
+      - web/src/App.test.tsx
+      - web/src/shell/CommandPalette.tsx
+      - web/src/shell/CommandPalette.test.tsx
+      - web/src/shell/Sidebar.tsx
+      - web/src/shell/Sidebar.test.tsx
+    tests:
+      - web/src/App.test.tsx
+      - web/src/shell/CommandPalette.test.tsx
+      - web/src/shell/Sidebar.test.tsx
+    budget_lines: 40
+    budget_exception:
+      lines: 144
+      reason: >-
+        Changed lines against the upstream base, per file. The production
+        files are within budget: App.tsx 3, CommandPalette.tsx 13, Sidebar.tsx
+        34 (S34's share; S80 and S89 change it too). web/src/App.test.tsx (144:
+        the Coral desk route matrix, its identity mock and QueryClient wrapper,
+        and the two anchors), web/src/shell/Sidebar.test.tsx (65) and
+        web/src/shell/CommandPalette.test.tsx (35) hold the tests.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S84
+    title: Coral page header on the Inbox and Tasks pages
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      Records the Coral desk header anchors already in the tree. The Inbox and
+      Automations page
+      headers render through web/src/brand/CoralPageHeader (variant list):
+      the Inbox keeps its title, count badge and screen-reader summary; the
+      Automations header keeps its title, description, intro button and New
+      automation button with the same test ids. Covered by the brand header's
+      own tests and the existing page tests.
+    files:
+      - web/src/pages/InboxPage.tsx
+      - web/src/pages/TasksPage.tsx
+    tests:
+      - web/src/brand/CoralPageHeader.test.tsx
+      - web/src/pages/InboxPage.test.tsx
+    budget_lines: 40
+    budget_exception:
+      lines: 63
+      reason: >-
+        web/src/pages/TasksPage.tsx (63 changed lines: 32 added, 31 removed)
+        moves the existing header into CoralPageHeader's title, description,
+        titleAccessory and actions props, mostly re-indentation.
+        web/src/pages/InboxPage.tsx's S84 share is 30.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S37
+    title: Inbox extension kinds
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      web/src/lib/inboxKinds.ts (no Coral import) lets an extension register
+      an Inbox kind: it claims the pending prompts it renders, adds entries
+      (key, epoch-second time, awaiting or unread tab, opaque data), renders
+      them with the page's own card primitives, reports loading, an error
+      with Retry, a badge count of items no session count already covers and
+      incompleteness, and can silence the generic notifier for rows (S36).
+      Every registered kind is wrapped so that no call can throw into the
+      Inbox, the badge or the notifier: a call that throws (or answers
+      malformed data) counts as nothing and is warned about once per kind, its
+      fields are read once at registration, and each rendered entry sits in its
+      own error boundary (InboxKindEntryView), so a faulty kind is left out
+      while the rest of the Inbox keeps working. The
+      registry is a module store read with useSyncExternalStore (as
+      terminalSplitPanesStore), so the sidebar provider and the Inbox read it
+      without a provider; snapshots are stable until a change; registering
+      the same id replaces in place and an unregister removes only its own
+      registration. partitionElicitations hands each pending event to the
+      first claiming kind and keeps the rest in their source. InboxPage
+      changes only at its eight S37 anchors (15 comment sites: imports and KIND_UI, the
+      extension union member, the kinds hook with the partition and kind
+      entries, visibility, counts and summary, the recency groups, the
+      default expansion, loading, error rows and the empty state, and the
+      render delegation). useSidebarData adds the kinds' badge counts and
+      incompleteness. With no kind registered every value equals today's;
+      Coral registers its workflow kind from CoralRuntime (S85) in a later
+      step, so this lands dark.
+    files:
+      - web/src/lib/inboxKinds.ts
+      - web/src/lib/inboxKinds.test.ts
+      - web/src/pages/InboxPage.tsx
+      - web/src/pages/InboxPage.test.tsx
+      - web/src/hooks/useSidebarData.tsx
+      - web/src/hooks/useSidebarData.test.tsx
+    tests:
+      - web/src/lib/inboxKinds.test.ts
+      - web/src/pages/InboxPage.test.tsx
+      - web/src/hooks/useSidebarData.test.tsx
+    budget_lines: 40
+    budget_exception:
+      lines: 278
+      reason: >-
+        Changed lines against the upstream base, per file.
+        web/src/lib/inboxKinds.ts (new, 278 lines): the kind, entry, card and
+        UI interfaces with their contracts, the module store, the per-kind
+        guard and render error boundary, the partition and the two badge
+        helpers. web/src/pages/InboxPage.tsx (110 changed lines: 104 added, 6
+        removed, S37's share; S84 has 30) across the eight anchors at 15
+        comment sites. Tests: web/src/lib/inboxKinds.test.ts (new, 199: the
+        registry, the partition and a throwing or malformed kind),
+        web/src/pages/InboxPage.test.tsx (205: claim and render, tabs, default
+        expansion, loading, error rows and the empty state, sorting and
+        toggling, live unregister, and a kind throwing in render, claims,
+        entries or summary) and web/src/hooks/useSidebarData.test.tsx (69: the
+        badge and incompleteness, and a throwing badge count).
+        web/src/hooks/useSidebarData.tsx (10) is within budget.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S36
+    title: The idle notifier skips rows an Inbox kind silences
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      useIdleNotifications reads the registered Inbox kinds (S37) through a
+      ref and, in both loops (a turn end when it is scheduled and again when
+      it fires after the settle window, and a new prompt), skips a row any
+      kind silences, so a kind that notifies for its own rows (Coral's
+      once-per-run notifications for run sessions) is not doubled by the
+      per-session toast. The dock badge is unchanged. With no kind nothing
+      changes.
+    files:
+      - web/src/hooks/useIdleNotifications.ts
+      - web/src/hooks/useIdleNotifications.test.tsx
+    tests:
+      - web/src/hooks/useIdleNotifications.test.tsx
+    budget_lines: 10
+    budget_exception:
+      lines: 131
+      reason: >-
+        web/src/hooks/useIdleNotifications.test.tsx (131 added lines): four
+        tests, each with its fake kind: both loops for a silenced and an
+        ordinary row, a kind registered after mount until it unregisters, a
+        kind whose silences throws, and a kind registered while a turn end
+        settles. The hook itself changes 9 lines.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S85
+    title: Mount Coral's web runtime
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      main.tsx mounts web/src/workflows/CoralRuntime inside
+      SessionUpdatesProvider, before RunnerHealthProvider, where the session
+      rows its notifications need exist and below the sidebar data provider
+      that reads the Inbox kinds. CoralRuntime renders nothing; it registers
+      the workflow Inbox kind and run notifications only when Coral is
+      available, from a later step, and nothing before that.
+    files:
+      - web/src/main.tsx
+    tests:
+      - web/src/workflows/CoralRuntime.test.tsx
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: MF-1
+    title: Workflows desk web dependencies (dagre layout, YAML parsing)
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      Dependency-manifest entry (non-seam, K16 MF-n). The workflows desk
+      added two runtime dependencies to web/package.json:
+      @dagrejs/dagre ^3.1.3 (DAG layout for the read-only graph, used by
+      web/src/workflows/layout/dagreLayout.ts) and yaml ^2.9.0 (declared for the
+      workflow editor; nothing in web/ imports it yet, and it was already in
+      the lockfile as a transitive dependency); pnpm-lock.yaml gains their
+      importer entries and
+      @dagrejs/dagre 3.1.3 with @dagrejs/graphlib 4.0.6, and the same lock
+      refresh added three lines of deprecated metadata to @smithy/core 3.35.1.
+      JSON and the lockfile cannot carry anchors. S83 ledgers the Newsreader font lines in the same
+      two files.
+    files:
+      - web/package.json
+      - pnpm-lock.yaml
+    tests:
+      - web/src/workflows/layout/dagreLayout.test.ts
+    budget_lines: 40
+    anchor_exempt:
+      - web/package.json
+      - pnpm-lock.yaml
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S106
+    title: Registration carriers move a plugin's rows across a password change
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A password change (or an admin reset) rotates an account's generation,
+      and `_carry_registration_work` moves the account's scheduled tasks and
+      hosts to the new one in the same transaction. Coral's runs and alerts
+      record the generation they were created under and only a request that
+      proves it can answer the run's gates or list its alerts, so without a
+      carry the owner lost her own gates and Inbox after changing her
+      password. `register_registration_carrier(fn)` adds a callable that
+      `_carry_registration_work` calls as `fn(session, user_id, old, new)`
+      after tasks and hosts move; it writes only through that session. An
+      error it raises aborts the rotation, so the account and every carried
+      row keep one generation. A savepoint could isolate a failing carrier;
+      aborting is chosen so a run never silently loses its owner, since the
+      old generation is recorded nowhere else to repair from. The cost: any
+      fault in Coral's carrier fails every password change and admin reset on
+      that server until it is fixed or Coral is unloaded; deleting the
+      account still revokes access (deletion calls no carrier). A retried
+      transaction calls it again. Registrations are a copy-on-write tuple of
+      (token, carrier) pairs under a writers-only lock; the returned
+      unregister removes only its own pair and is idempotent. Deleting and
+      re-creating an account calls no carrier, so a new registration sees
+      nothing of the old one. Coral's lifespan registers one carrier on a
+      usable operational database, which is the database the accounts live
+      in, and removes it on exit (`coral/stores/registration.py`).
+    files:
+      - omnigent/server/accounts_store.py
+      - tests/server/test_registration_carriers.py
+    tests:
+      - tests/server/test_registration_carriers.py
+      - tests/server/test_account_revocation.py
+    budget_lines: 40
+    budget_exception:
+      lines: 129
+      reason: >-
+        omnigent/server/accounts_store.py (36 added lines: the import, the
+        registry with its docstring and the carrier loop) is within budget.
+        tests/server/test_registration_carriers.py (new, 129 lines): four
+        tests (the call and its transaction, a failing carrier's rollback, no
+        call without a rotation or on re-creation, and unregister scope).
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

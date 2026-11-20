@@ -12,7 +12,13 @@ from typing import Any
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from coral.db.enum_codecs import RunPauseReason, RunStatus, WorkKind, WorkStatus
+from coral.db.enum_codecs import (
+    GateVisitStatus,
+    RunPauseReason,
+    RunStatus,
+    WorkKind,
+    WorkStatus,
+)
 from coral.queue import (
     EffectCompleted,
     ExecutionContext,
@@ -22,7 +28,15 @@ from coral.queue import (
     unregister_executor,
 )
 from coral.stores.fakes import FakeQueueStore, FakeRunStore
-from coral.stores.protocols import CoralRun, RunStartSpec, Transition, WorkItem, WorkItemDraft
+from coral.stores.protocols import (
+    CoralRun,
+    GateVisitDraft,
+    GateVisitState,
+    RunStartSpec,
+    Transition,
+    WorkItem,
+    WorkItemDraft,
+)
 from coral.workers import DEFAULT_WORKER_LEASE_NAME, WorkerSupervisor
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
@@ -564,6 +578,51 @@ async def test_the_resync_task_reconciles_active_runs_each_interval_and_purges_h
     failures = [r.getMessage() for r in caplog.records if "resync" in r.getMessage()]
     assert len(failures) == 1 and "OperationalError" in failures[0]
     assert _SENTINEL not in caplog.text
+
+
+async def test_the_resync_tick_republishes_the_gates_the_startup_sweep_could_not() -> None:
+    """A cold start's failed republish is not left until the next leadership epoch."""
+    run_store = FakeRunStore()
+    queue = FakeQueueStore(run_store=run_store)
+    run_id = _start_run(run_store, "Gated", RunStatus.RUNNING)
+    run_store.apply_transition(
+        run_id,
+        2,
+        Transition(
+            gate_visits=(
+                GateVisitDraft(
+                    id="g" * 32,
+                    activation_id="act",
+                    node_id="approve",
+                    scope_key="approve||",
+                    visit_no=1,
+                    token="approve||:1",
+                    status=int(GateVisitStatus.OPEN),
+                    opened_at=int(_START),
+                ),
+            )
+        ),
+        now=int(_START),
+    )
+    batches: list[list[str]] = []
+
+    async def republish(gates: Sequence[GateVisitState]) -> None:
+        batches.append([gate.id for gate in gates])
+        if len(batches) == 1:
+            raise RuntimeError("cold fold cache")
+
+    time = VirtualTime(_START)
+    async with _supervisor(
+        run_store, queue, time, gate_republisher=republish, resync_interval_s=600.0
+    ) as supervisor:
+        await _leading(supervisor)
+        assert supervisor.last_startup_report is not None
+        assert supervisor.last_startup_report.errors == 1
+        await poll_until_async(lambda: time.waiting(600.0), timeout_s=budget(10))
+        time.advance(600)
+        await poll_until_async(lambda: len(batches) == 2, timeout_s=budget(10))
+
+    assert batches == [["g" * 32]] * 2
 
 
 async def _stray_cancellation() -> None:
