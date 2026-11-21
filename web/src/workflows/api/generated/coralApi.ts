@@ -360,7 +360,9 @@ export interface ResyncFrame {
 /**
  * One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that
  * cannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are
- * ``None`` when its stored rows cannot be read.
+ * ``None`` when its stored rows cannot be read. ``retry_activation_ids`` are the store
+ * ids of the failed steps a retry may restart now, in cause order: none while the run
+ * is not paused or a host hold or a restart stands.
  */
 export interface RunDetail {
   activation_count: number;
@@ -390,6 +392,7 @@ export interface RunDetail {
     | "auth"
     | null;
   request_preview: string | null;
+  retry_activation_ids: string[];
   run_branch: string;
   run_id: string;
   slots: SlotOut[];
@@ -856,7 +859,8 @@ export interface CoralOperations {
   /**
    * POST /v1/coral/runs/{run_id}/activations/{activation_id}:retry
    *
-   * Not served yet: the caller's own run answers 501.
+   * Retry a failed step of one of the caller's runs: its old session is fenced and its
+   * work saved while the run stays paused, then a new session starts it again.
    */
   coral_retry_activation: {
     method: "POST";
@@ -866,9 +870,9 @@ export interface CoralOperations {
       run_id: string;
     };
     body: EmptyRequest;
-    status: never;
-    response: never;
-    errors: 401 | 403 | 404 | 422 | 501 | 503;
+    status: 200;
+    response: RunSummary;
+    errors: 401 | 403 | 404 | 409 | 422 | 503;
   };
   /**
    * POST /v1/coral/runs/{run_id}/gates/{node_id}:answer

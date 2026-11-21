@@ -44,7 +44,6 @@ from coral.api.spend import CachedSpend
 from coral.api.stream import STREAM_THREADS, RunStreamHub, StreamCursor, stream_cursor
 from coral.bridge.executors import BoundedThreads
 from coral.engine.projection import project
-from coral.model.ids import effect_session_id
 from coral.omni.protocols import RunSpendTotals, Viewer
 from coral.runview.actions import RunViewFacts
 from coral.workspace.run_worktree import run_branch_name
@@ -64,8 +63,8 @@ from tests.coral.bridge._gates import (
     IMPLEMENT_FIRST,
     GateIds,
     answer,
+    brief,
     complete,
-    effects,
 )
 from tests.coral.bridge._scripted_runs import accept
 from tests.coral.bridge._world import USER, WORKSPACE, World, run_id_for, run_spec, start
@@ -179,17 +178,6 @@ def write_or_check(contract: Any, path: Path, *, write: bool, module: str) -> in
     return 0
 
 
-def _brief(world: World, run_id: str, slot: str) -> None:
-    """The slot's session is created and briefed: the step works."""
-    (create, *_older) = reversed(
-        [effect for effect in effects(world, run_id, "create_session") if effect.subject == slot]
-    )
-    session_id = effect_session_id(WORKSPACE, create.effect_key)
-    created = {"session_id": session_id, "role": "step", "generation": 1}
-    complete(world, run_id, "create_session", slot, created)
-    complete(world, run_id, "send_input", slot, {"session_id": session_id, "stable_id": "m1"})
-
-
 def _hand_off(world: World, run_id: str, slot: str, report: str) -> None:
     """The step hands off done, its handoff is accepted and it closes: the gate opens."""
     world.bridge.commit_inputs(
@@ -202,13 +190,13 @@ def _script(world: World, run_id: str) -> tuple[tuple[str, Callable[[], object]]
     """Each milestone and the step that reaches it; the approve also ends the run."""
     bridge = world.bridge
     return (
-        ("implement_running", lambda: _brief(world, run_id, IMPLEMENT_FIRST)),
+        ("implement_running", lambda: brief(world, run_id, IMPLEMENT_FIRST)),
         ("gate1_open", lambda: _hand_off(world, run_id, IMPLEMENT_FIRST, REPORTS[0])),
         (
             "gate1_answered",
             lambda: answer(world, run_id, CHANGE_TOKEN, "reject", note=REJECT_NOTE),
         ),
-        ("pass2_running", lambda: _brief(world, run_id, IMPLEMENT_AGAIN)),
+        ("pass2_running", lambda: brief(world, run_id, IMPLEMENT_AGAIN)),
         ("gate2_open", lambda: _hand_off(world, run_id, IMPLEMENT_AGAIN, REPORTS[1])),
         # Paused at the open gate: the pill says "Paused", not "Needs you".
         ("paused", lambda: bridge.pause_run(workspace_id=WORKSPACE, run_id=run_id, actor=USER)),

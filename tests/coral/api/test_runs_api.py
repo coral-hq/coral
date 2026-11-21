@@ -53,10 +53,27 @@ from coral.api.run_service import (
 from coral.api.runs import create_runs_router
 from coral.api.spend import SPEND_THREADS, SpendCache
 from coral.bridge.executors import BoundedThreads, BridgeThreads
-from coral.bridge.service import GateAnswerResult
-from coral.db.enum_codecs import SLOT_ROLE, SLOT_STATUS, LogKind, RunPauseReason, RunStatus
+from coral.bridge.keys import store_activation_id
+from coral.bridge.mapping import RECOVERY_RESTART, RECOVERY_WAKE
+from coral.bridge.service import USER_PAUSE_DETAIL, GateAnswerResult
+from coral.db.enum_codecs import (
+    SLOT_ROLE,
+    SLOT_STATUS,
+    LogKind,
+    RunPauseReason,
+    RunStatus,
+    WorkStatus,
+)
 from coral.db.models_workflows import CoralBase, WorkflowRow
-from coral.engine.types import HandoffEvaluated, PauseRun
+from coral.engine.lifecycle import retryable_activations
+from coral.engine.types import (
+    HandoffEvaluated,
+    Input,
+    PauseRun,
+    RunnerHeld,
+    RunnerHoldEnded,
+    RunnerLost,
+)
 from coral.gates.prompt import gate_params
 from coral.gates.verdict import GateAnswers
 from coral.model.ids import anchor_session_id, derived_id
@@ -75,7 +92,7 @@ from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.recovery.cancel import cancel_run_row
 from coral.recovery.pause import pause_run_once
 from coral.stores.fakes import FakeRunStore
-from coral.stores.protocols import CoralRun, RunLogEntry, RunNotFound
+from coral.stores.protocols import CoralRun, RunLogEntry, RunNotFound, WorkItem
 from coral.stores.workflows import SqlWorkflowDefinitionStore, WorkflowDefinition
 from coral.validate.pipeline import check_text
 from coral.workspace.host_backend import host_capability_unavailable
@@ -94,14 +111,35 @@ from omnigent.server import elicitation_hooks
 from omnigent.server.auth import AuthProvider, UnifiedAuthProvider
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
-from tests.coral.bridge._gates import APPROVE_TOKEN, GATE_ONLY, before_next_commit
+from tests.coral.bridge._gates import (
+    APPROVE_TOKEN,
+    CHANGE_TOKEN,
+    GATE_ONLY,
+    GATED,
+    IMPLEMENT_AGAIN,
+    IMPLEMENT_FIRST,
+    answer,
+    before_next_commit,
+    brief,
+    complete,
+    effects,
+    hand_off,
+    payload,
+    work_for,
+)
+from tests.coral.bridge._scripted_runs import accept
 from tests.coral.bridge._world import (
     DEFINITION,
+    IMPLEMENT,
+    REVIEW,
     WORKSPACE,
     RecordingGatePublisher,
     World,
+    blocked,
+    finished,
     run_id_for,
     run_spec,
+    settle,
     start,
     start_without_engine,
 )
@@ -114,6 +152,7 @@ from tests.coral.omni._gate_server import (
 from tests.coral.omni.host.ops._worktrees import isolate_git_home, make_repository, run_git
 from tests.coral.workflow_builders import arrow, fixture_text, step, workflow_text
 from tests.coral.workflow_builders import end as end_node
+from tests.coral.workflow_builders import gate as gate_node
 from tests.coral.workflow_builders import start as start_node
 from tests.coral.workspace._executor_fakes import (
     ChannelRequest,
@@ -736,6 +775,7 @@ async def test_a_running_run_s_detail_holds_its_view_target_slots_and_spend(
     assert detail["orchestrator_session_id"] is None
     assert detail["run_branch"] == run_branch_name(run.id)
     assert (detail["causes"], detail["load_error"], detail["gates"]) == ([], None, [])
+    assert detail["retry_activation_ids"] == []
     assert detail["view"]["status"] == "running"
     assert detail["slots"] == [
         {
@@ -3004,21 +3044,798 @@ async def test_an_unexpected_write_error_is_logged_without_its_parameters_or_cau
 # ── Retry and preflight ─────────────────────────────────────────────────────
 
 
-async def test_retry_is_not_implemented_for_the_owner_s_run(writes: Api) -> None:
-    run = _start(writes.world, "retry")
-    activation = "a" * 32
+def _retry_url(run_id: str, activation_id: str) -> str:
+    return f"{RUNS}/{run_id}/activations/{activation_id}:retry"
+
+
+def _step_id(run: CoralRun, slot_id: str = IMPLEMENT) -> str:
+    """The store activation id of the step ``slot_id`` works for."""
+    return store_activation_id(run.id, slot_id.rsplit(":", 1)[0])
+
+
+def _commit(world: World, run_id: str, *inputs: Input) -> None:
+    world.bridge.commit_inputs(
+        workspace_id=WORKSPACE, run_id=run_id, inputs=lambda _snapshot: inputs
+    )
+
+
+def _blocked_run(world: World, key: str) -> CoralRun:
+    """A two-step run of Alice's whose implementer handed off blocked: it pauses for a retry."""
+    run = _start(world, key)
+    brief(world, run.id, IMPLEMENT)
+    _commit(world, run.id, *blocked(IMPLEMENT))
+    return world.run(run.id)
+
+
+def _retry_case(world: World, case: str) -> tuple[CoralRun, str]:
+    """Alice's run in the named case, and the activation id a retry of it names."""
+    if case == "completed":
+        run = _complete(world, case)
+        return run, store_activation_id(run.id, "approve||")
+    if case == "not_started":
+        run = start_without_engine(world, start_key=case)
+        return run, _step_id(run)
+    if case == "unknown":
+        return _blocked_run(world, case), "a" * 32
+    if case == "another_run":
+        run, other = _blocked_run(world, case), _blocked_run(world, "other")
+        return run, _step_id(other)
+    if case == "gate":
+        run = _gate_run(world, case)
+        world.bridge.pause_run(workspace_id=WORKSPACE, run_id=run.id, actor=ALICE)
+        return world.run(run.id), store_activation_id(run.id, "approve||")
+    run = _start(world, case)
+    session_id = brief(world, run.id, IMPLEMENT)
+    if case == "held":
+        _commit(world, run.id, RunnerHeld(slot_id=IMPLEMENT, session_id=session_id, generation=1))
+    elif case == "cancelled":
+        world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=run.id, actor=ALICE)
+    elif case == "unloadable":
+        _config_missing(world, run)
+    return world.run(run.id), _step_id(run)
+
+
+@dataclass(frozen=True)
+class RetryRefusal:
+    """
+    What a retry the run cannot take answers: its reason (none for a finished run), its
+    message, and the row's status and pause reason after it.
+    """
+
+    reason: str | None
+    message: str
+    status: str
+    pause_reason: str | None = None
+
+
+NO_SUCH_STEP = "The run has no such step."
+NOT_RETRYABLE = "This step cannot be retried now."
+RETRY_REFUSALS: dict[str, RetryRefusal] = {
+    "completed": RetryRefusal(None, "The run is completed.", "completed"),
+    "cancelled": RetryRefusal(None, "The run is cancelled.", "cancelled"),
+    # The failed load pauses the run, as any write does.
+    "unloadable": RetryRefusal(
+        "engine.load_failed",
+        "The run cannot be loaded; it can only be cancelled.",
+        "paused",
+        "failure_path",
+    ),
+    "unknown": RetryRefusal("unknown_activation", NO_SUCH_STEP, "paused", "failure_path"),
+    # An activation of another of the caller's runs is not one of this run's.
+    "another_run": RetryRefusal("unknown_activation", NO_SUCH_STEP, "paused", "failure_path"),
+    "not_started": RetryRefusal("unknown_activation", NO_SUCH_STEP, "starting"),
+    "running": RetryRefusal("retry_not_allowed", NOT_RETRYABLE, "running"),
+    "gate": RetryRefusal("retry_not_allowed", NOT_RETRYABLE, "paused", "user"),
+    "held": RetryRefusal(
+        "host_offline_hold",
+        "The run's machine is offline; steps can be retried once it is back.",
+        "paused",
+        "infra",
+    ),
+}
+
+
+async def test_the_owner_retries_a_blocked_step_and_the_run_stays_paused_while_it_restarts(
+    writes: Api, caplog: pytest.LogCaptureFixture
+) -> None:
+    world = writes.world
+    run = _blocked_run(world, "blocked")
+    activation = _step_id(run)
 
     async with _client(writes.app()) as client:
-        owner = await client.post(
-            f"{RUNS}/{run.id}/activations/{activation}:retry", headers=_as(ALICE), json={}
-        )
+        before = (await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))).json()
+        with caplog.at_level(logging.DEBUG):
+            retried = await client.post(
+                _retry_url(run.id, activation), headers=_as(ALICE), json={}
+            )
+            again = await client.post(_retry_url(run.id, activation), headers=_as(ALICE), json={})
+        after = (await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))).json()
+        [listed] = (await client.get(RUNS, headers=_as(ALICE))).json()["data"]
+
+    # Blocked, the step is what the run can retry; Resume does not clear it.
+    assert (before["status"], before["pause_reason"]) == ("paused", "failure_path")
+    assert (before["retry_activation_ids"], before["allowed_actions"]) == (
+        [activation],
+        ["cancel"],
+    )
+    # Taken: the run stays paused while the old session is fenced and its work saved.
+    assert retried.status_code == 200, retried.text
+    assert retried.headers["cache-control"] == "private, no-store"
+    summary = retried.json()
+    assert (summary["run_id"], summary["status"], summary["pause_reason"]) == (
+        run.id,
+        "paused",
+        "infra",
+    )
+    assert summary["allowed_actions"] == after["allowed_actions"] == ["cancel"]
+    assert after["causes"] == [
+        {"reason": "infra", "detail": "recovery.restarting", "subject": IMPLEMENT}
+    ]
+    assert after["retry_activation_ids"] == []
+    assert [slot["session_generation"] for slot in after["slots"]] == [2]
+    (restart,) = [
+        item for item in world.work(run.id) if payload(item)["effect_type"] == RECOVERY_RESTART
+    ]
+    assert (restart.status, restart.slot_generation) == (int(WorkStatus.PENDING), 2)
+    # Until it is done, a second retry is refused and the list offers Cancel only.
+    assert _refusal(again) == (409, "illegal_transition")
+    assert again.json()["error"] == {
+        "code": "illegal_transition",
+        "message": "A step of this run is restarting; try again when it is done.",
+        "details": {"status": "paused", "pause_reason": "infra", "reason": "restart_in_progress"},
+    }
+    assert again.headers["cache-control"] == "private, no-store"
+    assert listed["allowed_actions"] == ["cancel"]
+    # The id is matched, never echoed or logged.
+    assert activation not in retried.text + again.text + caplog.text
+
+
+async def test_the_detail_names_only_the_failed_step_and_a_completed_one_is_not_retried(
+    writes: Api,
+) -> None:
+    world = writes.world
+    run = _start(world, "review")
+    brief(world, run.id, IMPLEMENT)
+    _commit(world, run.id, *accept(IMPLEMENT, "Implemented."))
+    complete(world, run.id, "close_slot", IMPLEMENT, {})
+    brief(world, run.id, REVIEW)
+    _commit(world, run.id, *blocked(REVIEW))
+    implement, review = _step_id(run, IMPLEMENT), _step_id(run, REVIEW)
+
+    async with _client(writes.app()) as client:
+        before = (await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))).json()
+        done = await client.post(_retry_url(run.id, implement), headers=_as(ALICE), json={})
+        retried = await client.post(_retry_url(run.id, review), headers=_as(ALICE), json={})
+
+    assert before["retry_activation_ids"] == [review]
+    assert _refusal(done) == (409, "illegal_transition")
+    assert done.json()["error"]["details"]["reason"] == "retry_not_allowed"
+    assert retried.status_code == 200, retried.text
+    review_slot = world.bridge.load(workspace_id=WORKSPACE, run_id=run.id).state.slots[-1]
+    assert (review_slot.id, review_slot.session_generation) == (REVIEW, 2)
+
+
+@pytest.mark.parametrize("case", list(RETRY_REFUSALS))
+async def test_a_retry_the_run_cannot_take_is_refused_with_its_reason(
+    writes: Api, case: str
+) -> None:
+    world = writes.world
+    run, activation = _retry_case(world, case)
+    before = _row_state(world, run.id)
+    logs_before = len(_fake_runs(world).logs[(WORKSPACE, run.id)])
+
+    async with _client(writes.app()) as client:
+        offered = (await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))).json()
+        response = await client.post(_retry_url(run.id, activation), headers=_as(ALICE), json={})
+
+    expected = RETRY_REFUSALS[case]
+    assert _refusal(response) == (409, "illegal_transition"), response.text
+    assert response.headers["cache-control"] == "private, no-store"
+    error = response.json()["error"]
+    assert error["message"] == expected.message
+    details = {"status": expected.status, "pause_reason": expected.pause_reason}
+    assert error["details"] == (
+        details if expected.reason is None else {**details, "reason": expected.reason}
+    )
+    assert _row_state(world, run.id)[:2] == (expected.status, expected.pause_reason)
+    # A refusal commits nothing; only the failed load paused the run.
+    if case != "unloadable":
+        assert _row_state(world, run.id) == before
+        assert len(_fake_runs(world).logs[(WORKSPACE, run.id)]) == logs_before
+    # A step the detail does not name is never retried; a run running or held names none.
+    assert activation not in offered["retry_activation_ids"]
+    if case in ("running", "held"):
+        assert offered["retry_activation_ids"] == []
+    assert activation not in response.text
+
+
+async def test_a_retry_naming_a_malformed_activation_is_refused_before_any_work(
+    writes: Api,
+) -> None:
+    run = _start(writes.world, "retry")
+    writes.calls.clear()
+
+    async with _client(writes.app()) as client:
         malformed = await client.post(
-            f"{RUNS}/{run.id}/activations/not-an-activation:retry", headers=_as(ALICE), json={}
+            _retry_url(run.id, "not-an-activation"), headers=_as(ALICE), json={}
+        )
+        upper_case = await client.post(_retry_url(run.id, "A" * 32), headers=_as(ALICE), json={})
+
+    assert _refusal(malformed) == _refusal(upper_case) == (422, "validation_failed")
+    assert "not-an-" not in malformed.text
+    assert "A" * 32 not in upper_case.text
+    assert writes.calls == []
+
+
+# ── Retry under races, loops, generations and holds ─────────────────────────
+
+PLAN, BUILD, DOCS = "plan||:0", "build||:0", "docs||:0"
+# A plan, then two steps side by side, so two steps can fail in one run.
+FAN_OUT = workflow_text(
+    [start_node(), step("plan"), step("build"), step("docs", roster=["reviewer"]), end_node()],
+    [
+        arrow("a1", "start", "plan"),
+        arrow("a2", "plan", "build"),
+        arrow("a3", "plan", "docs"),
+        arrow("a4", "build", "end"),
+        arrow("a5", "docs", "end"),
+    ],
+)
+# A step beside a gate, so the gate is open while the step fails and is retried.
+STEP_BESIDE_GATE = workflow_text(
+    [
+        start_node(),
+        step("build"),
+        gate_node("approve", prompt="Ship it?", outcomes=["approve"]),
+        step("finish", roster=["reviewer"]),
+        end_node(),
+    ],
+    [
+        arrow("a1", "start", "build"),
+        arrow("a2", "start", "approve"),
+        arrow("a3", "build", "finish"),
+        arrow("a4", "approve", "finish", label="approve"),
+        arrow("a5", "finish", "end"),
+    ],
+)
+RESTARTED = {"salvage_ref": None, "salvage_commit": None, "head_verified": True}
+RESTARTING = {"reason": "infra", "detail": "recovery.restarting"}
+
+
+def _start_text(world: World, key: str, yaml_text: str) -> CoralRun:
+    world.clock.advance(1)
+    return start(world, yaml_text, spec=run_spec(user=ALICE, start_key=key), start_key=key)
+
+
+def _restarts(world: World, run_id: str) -> list[WorkItem]:
+    """The run's ``recovery.restart`` rows, oldest generation first."""
+    rows = [
+        item for item in world.work(run_id) if payload(item)["effect_type"] == RECOVERY_RESTART
+    ]
+    return sorted(rows, key=lambda item: (item.slot_generation or 0, item.available_at))
+
+
+def _fail(world: World, run_id: str, kind: str, subject: str, error_code: str) -> None:
+    """Fail the latest ``kind`` effect about ``subject`` for good, as a drainer would."""
+    (effect, *_older) = reversed(
+        [effect for effect in effects(world, run_id, kind) if effect.subject == subject]
+    )
+    item = work_for(world, run_id, effect.effect_key)
+    assert item is not None
+    world.bridge.feed(finished(settle(world, item, WorkStatus.FAILED, error_code=error_code)))
+
+
+async def _detail(client: httpx.AsyncClient, run_id: str) -> dict[str, Any]:
+    response = await client.get(f"{RUNS}/{run_id}", headers=_as(ALICE))
+    assert response.status_code == 200, response.text
+    detail: dict[str, Any] = response.json()
+    # Every id the detail offers names one of its slots, so a page can label its button.
+    labelled = {slot["activation_id"] for slot in detail["slots"]}
+    assert set(detail["retry_activation_ids"]) <= labelled
+    return detail
+
+
+async def _retry_as_offered(
+    client: httpx.AsyncClient, run_id: str, activation: str
+) -> tuple[dict[str, Any], httpx.Response]:
+    """The detail just before, and the retry: the route takes exactly what the detail offers."""
+    offered = await _detail(client, run_id)
+    response = await client.post(_retry_url(run_id, activation), headers=_as(ALICE), json={})
+    taken = response.status_code == 200
+    assert taken == (activation in offered["retry_activation_ids"]), (offered, response.text)
+    if not taken:
+        assert _refusal(response) == (409, "illegal_transition"), response.text
+    return offered, response
+
+
+def _reason(response: httpx.Response) -> str | None:
+    details: dict[str, Any] = response.json()["error"]["details"]
+    return details.get("reason")
+
+
+@pytest.mark.parametrize("race", ["together", "interleaved"])
+async def test_two_retries_of_one_step_at_once_queue_one_restart(writes: Api, race: str) -> None:
+    world = writes.world
+    run = _blocked_run(world, "twice")
+    activation = _step_id(run)
+    url = _retry_url(run.id, activation)
+
+    async with _client(writes.app()) as client:
+        if race == "together":
+            answers = list(
+                await asyncio.gather(
+                    client.post(url, headers=_as(ALICE), json={}),
+                    client.post(url, headers=_as(ALICE), json={}),
+                )
+            )
+        else:
+            # Another replica's retry lands just before this one's commit.
+            before_next_commit(
+                world,
+                lambda: world.bridge.retry_activation(
+                    workspace_id=WORKSPACE, run_id=run.id, actor=ALICE, activation_id=activation
+                ),
+            )
+            answers = [await client.post(url, headers=_as(ALICE), json={})]
+        after = await _detail(client, run.id)
+
+    taken = [response for response in answers if response.status_code == 200]
+    refused = [response for response in answers if response.status_code != 200]
+    assert len(taken) == (1 if race == "together" else 0)
+    (refusal,) = refused
+    assert _refusal(refusal) == (409, "illegal_transition"), refusal.text
+    assert _reason(refusal) == "restart_in_progress"
+    (restart,) = _restarts(world, run.id)
+    assert (restart.status, restart.slot_generation) == (int(WorkStatus.PENDING), 2)
+    assert len(effects(world, run.id, "retry_step")) == 1
+    state = world.assert_fold_matches(run.id)
+    assert [slot.session_generation for slot in state.slots] == [2]
+    assert after["causes"] == [{**RESTARTING, "subject": IMPLEMENT}]
+    assert after["retry_activation_ids"] == []
+
+
+@pytest.mark.parametrize("cancel", ["engine", "row"])
+async def test_a_retry_that_meets_a_cancel_is_refused_and_queues_no_restart(
+    writes: Api, cancel: str
+) -> None:
+    world = writes.world
+    run = _blocked_run(world, "raced")
+    activation = _step_id(run)
+
+    def cancelled() -> object:
+        if cancel == "engine":
+            return world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=run.id, actor=ALICE)
+        # A cancel on the row alone; the retry's commit cancels the engine first.
+        return cancel_run_row(
+            world.runs, workspace_id=WORKSPACE, run_id=run.id, actor=ALICE, now_us=1
         )
 
-    assert _refusal(owner) == (501, "not_implemented")
-    assert _refusal(malformed) == (422, "validation_failed")
-    assert "not-an-" not in malformed.text
+    async with _client(writes.app()) as client:
+        offered = await _detail(client, run.id)
+        before_next_commit(world, cancelled)
+        response = await client.post(_retry_url(run.id, activation), headers=_as(ALICE), json={})
+        after = await _detail(client, run.id)
+
+    assert offered["retry_activation_ids"] == [activation]
+    assert _refusal(response) == (409, "illegal_transition"), response.text
+    assert response.json()["error"]["message"] == "The run is cancelled."
+    assert _reason(response) == "run_terminal"
+    assert _restarts(world, run.id) == []
+    assert effects(world, run.id, "retry_step") == []
+    assert world.assert_fold_matches(run.id).status == "cancelled"
+    assert (after["status"], after["retry_activation_ids"], after["allowed_actions"]) == (
+        "cancelled",
+        [],
+        [],
+    )
+
+
+@pytest.mark.parametrize("ended", ["cancelled", "completed", "failed", "failed_while_blocked"])
+async def test_a_retry_after_the_run_ended_is_refused_before_the_engine_is_asked(
+    writes: Api, ended: str
+) -> None:
+    world = writes.world
+    if ended == "failed_while_blocked":
+        # The row failed while its engine still holds a step a retry would restart.
+        run = _blocked_run(world, ended)
+        runs = _fake_runs(world)
+        runs.runs[(WORKSPACE, run.id)] = dataclasses.replace(
+            run, status=int(RunStatus.FAILED), finished_at=world.clock.epoch
+        )
+        state = world.bridge.load(workspace_id=WORKSPACE, run_id=run.id).state
+        assert retryable_activations(state) == ("implement||",)
+        ended = "failed"
+    else:
+        run = _run_in_state(world, ended)
+    activation = (
+        store_activation_id(run.id, "approve||") if ended == "completed" else _step_id(run)
+    )
+    writes.calls.clear()
+
+    async with _client(writes.app()) as client:
+        offered, response = await _retry_as_offered(client, run.id, activation)
+
+    assert offered["retry_activation_ids"] == offered["allowed_actions"] == []
+    assert response.json()["error"]["message"] == f"The run is {ended}."
+    assert _reason(response) is None
+    assert "bridge.retry_activation" not in writes.calls
+
+
+async def test_only_the_newest_loop_pass_of_a_blocked_step_is_retried(writes: Api) -> None:
+    world = writes.world
+    run = _start_text(world, "loop", GATED)
+    hand_off(world, run.id, IMPLEMENT_FIRST)
+    answer(world, run.id, CHANGE_TOKEN, "reject", note="Again.")
+    brief(world, run.id, IMPLEMENT_AGAIN)
+    _commit(world, run.id, *blocked(IMPLEMENT_AGAIN))
+    state = world.bridge.load(workspace_id=WORKSPACE, run_id=run.id).state
+    newest = _step_id(run, IMPLEMENT_AGAIN)
+    others = [
+        store_activation_id(run.id, activation.id)
+        for activation in state.activations
+        if store_activation_id(run.id, activation.id) != newest
+    ]
+
+    async with _client(writes.app()) as client:
+        refused = [await _retry_as_offered(client, run.id, other) for other in others]
+        offered, taken = await _retry_as_offered(client, run.id, newest)
+
+    # The first pass, its gate visit, and the start: none is a failed step of this pass.
+    assert _step_id(run, IMPLEMENT_FIRST) in others and len(others) >= 3
+    assert [_reason(response) for _offered, response in refused] == ["retry_not_allowed"] * len(
+        others
+    )
+    assert offered["retry_activation_ids"] == [newest]
+    assert taken.status_code == 200, taken.text
+    slots = {slot.id: slot.session_generation for slot in world.assert_fold_matches(run.id).slots}
+    assert (slots[IMPLEMENT_FIRST], slots[IMPLEMENT_AGAIN]) == (1, 2)
+
+
+@pytest.mark.parametrize(
+    "ended", ["restarted_then_blocked", "restart_failed", "restart_abandoned"]
+)
+async def test_a_step_retried_before_is_retried_again_and_fences_its_latest_session(
+    writes: Api, ended: str
+) -> None:
+    world = writes.world
+    run = _start(world, ended)
+    first_session = brief(world, run.id, IMPLEMENT)
+    _commit(world, run.id, *blocked(IMPLEMENT))
+    activation = _step_id(run)
+    retried = world.bridge.retry_activation(
+        workspace_id=WORKSPACE, run_id=run.id, actor=ALICE, activation_id=activation
+    )
+    assert retried.outcome == "retried", retried
+    if ended == "restarted_then_blocked":
+        complete(world, run.id, "retry_step", IMPLEMENT, RESTARTED)
+        fenced = brief(world, run.id, IMPLEMENT)
+        _commit(world, run.id, *blocked(IMPLEMENT, session_generation=2))
+    elif ended == "restart_failed":
+        _fail(world, run.id, "retry_step", IMPLEMENT, "workspace.head_moved")
+        fenced = first_session
+    else:
+        # A drainer gave the restart row up; the resync feeds that as the restart's failure.
+        (row,) = _restarts(world, run.id)
+        settle(world, row, WorkStatus.ABANDONED, error_code="effect.abandoned")
+        world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run.id)
+        fenced = first_session
+
+    async with _client(writes.app()) as client:
+        offered, response = await _retry_as_offered(client, run.id, activation)
+        after = await _detail(client, run.id)
+
+    assert offered["retry_activation_ids"] == [activation]
+    assert offered["allowed_actions"] == ["cancel"]
+    assert response.status_code == 200, response.text
+    assert after["causes"] == [{**RESTARTING, "subject": IMPLEMENT}]
+    assert [slot["session_generation"] for slot in after["slots"]] == [3]
+    restarts = _restarts(world, run.id)
+    assert [item.slot_generation for item in restarts] == [2, 3]
+    # A restart that created nothing leaves the first session the one to fence.
+    assert payload(restarts[-1])["session_id"] == fenced
+    assert (fenced == first_session) == (ended != "restarted_then_blocked")
+
+
+async def test_two_failed_steps_are_retried_one_restart_at_a_time(writes: Api) -> None:
+    world = writes.world
+    run = _start_text(world, "two-failed", FAN_OUT)
+    brief(world, run.id, PLAN)
+    _commit(world, run.id, *accept(PLAN, "Planned."))
+    complete(world, run.id, "close_slot", PLAN, {})
+    brief(world, run.id, BUILD)
+    _commit(world, run.id, *blocked(BUILD))
+    # The paused run's other step cannot start: its session is never created.
+    _fail(world, run.id, "create_session", DOCS, "session.create_failed")
+    build, docs = _step_id(run, BUILD), _step_id(run, DOCS)
+
+    async with _client(writes.app()) as client:
+        both, first = await _retry_as_offered(client, run.id, build)
+        during, waiting = await _retry_as_offered(client, run.id, docs)
+        complete(world, run.id, "retry_step", BUILD, RESTARTED)
+        between, again = await _retry_as_offered(client, run.id, build)
+        _offered, second = await _retry_as_offered(client, run.id, docs)
+        after = await _detail(client, run.id)
+
+    assert both["retry_activation_ids"] == [build, docs]
+    assert first.status_code == 200, first.text
+    # While one step restarts, the other's failure stands but no retry is offered or taken.
+    assert {(cause["detail"], cause["subject"]) for cause in during["causes"]} == {
+        ("recovery.restarting", BUILD),
+        ("session.create_failed", DOCS),
+    }
+    assert during["retry_activation_ids"] == []
+    assert _reason(waiting) == "restart_in_progress"
+    # Once it has restarted, only the other step is offered.
+    assert between["retry_activation_ids"] == [docs]
+    assert _reason(again) == "retry_not_allowed"
+    assert second.status_code == 200, second.text
+    assert after["causes"] == [{**RESTARTING, "subject": DOCS}]
+    slots = {slot.id: slot.session_generation for slot in world.assert_fold_matches(run.id).slots}
+    assert (slots[BUILD], slots[DOCS]) == (2, 2)
+    assert sorted(payload(item)["engine_slot_id"] for item in _restarts(world, run.id)) == [
+        BUILD,
+        DOCS,
+    ]
+
+
+async def test_a_step_beside_an_open_gate_is_retried_and_the_gate_stays_open(
+    writes: Api,
+) -> None:
+    world = writes.world
+    run = _start_text(world, "beside", STEP_BESIDE_GATE)
+    brief(world, run.id, BUILD)
+    _commit(world, run.id, *blocked(BUILD))
+    (visit,) = world.bridge.load(workspace_id=WORKSPACE, run_id=run.id).state.gates
+    gate_activation = store_activation_id(run.id, visit.activation_id)
+
+    async with _client(writes.app()) as client:
+        refused_offer, refused = await _retry_as_offered(client, run.id, gate_activation)
+        offered, taken = await _retry_as_offered(client, run.id, _step_id(run, BUILD))
+        after = await _detail(client, run.id)
+
+    assert visit.status == "open"
+    assert offered["retry_activation_ids"] == [_step_id(run, BUILD)]
+    assert _reason(refused) == "retry_not_allowed"
+    assert taken.status_code == 200, taken.text
+    # The open visit is untouched: same token, still waiting for its answer.
+    assert [gate["token"] for gate in after["gates"]] == [visit.token]
+    assert after["gates"] == refused_offer["gates"]
+    (still,) = world.assert_fold_matches(run.id).gates
+    assert (still.token, still.status) == (visit.token, "open")
+
+
+async def test_a_host_hold_on_one_step_keeps_another_failed_step_from_its_retry(
+    writes: Api,
+) -> None:
+    world = writes.world
+    run = _start_text(world, "held-beside", FAN_OUT)
+    brief(world, run.id, PLAN)
+    _commit(world, run.id, *accept(PLAN, "Planned."))
+    complete(world, run.id, "close_slot", PLAN, {})
+    held_session = brief(world, run.id, BUILD)
+    _commit(world, run.id, RunnerHeld(slot_id=BUILD, session_id=held_session, generation=1))
+    _fail(world, run.id, "create_session", DOCS, "session.create_failed")
+    build, docs = _step_id(run, BUILD), _step_id(run, DOCS)
+
+    async with _client(writes.app()) as client:
+        held_offer, held_docs = await _retry_as_offered(client, run.id, docs)
+        _offered, held_build = await _retry_as_offered(client, run.id, build)
+        listed_held = (await client.get(RUNS, headers=_as(ALICE))).json()["data"]
+        _commit(world, run.id, RunnerHoldEnded(slot_id=BUILD, generation=1))
+        _back, not_failed = await _retry_as_offered(client, run.id, build)
+        back_offer, taken = await _retry_as_offered(client, run.id, docs)
+
+    assert held_offer["retry_activation_ids"] == []
+    assert held_offer["allowed_actions"] == ["cancel"]
+    assert [item["allowed_actions"] for item in listed_held] == [["cancel"]]
+    assert _reason(held_docs) == _reason(held_build) == "host_offline_hold"
+    # Back online, the held step was never failed; the other is retried.
+    assert back_offer["retry_activation_ids"] == [docs]
+    assert _reason(not_failed) == "retry_not_allowed"
+    assert taken.status_code == 200, taken.text
+
+
+async def test_a_step_whose_wake_found_its_session_closed_is_offered_and_retried(
+    writes: Api,
+) -> None:
+    world = writes.world
+    run = _start(world, "closed")
+    session_id = brief(world, run.id, IMPLEMENT)
+    _commit(
+        world,
+        run.id,
+        RunnerLost(slot_id=IMPLEMENT, session_id=session_id, generation=1, runner_id="r1"),
+    )
+    (wake,) = [
+        item for item in world.work(run.id) if payload(item)["effect_type"] == RECOVERY_WAKE
+    ]
+    # The wake found the step's session closed, so it fails for good.
+    closed = settle(world, wake, WorkStatus.FAILED, error_code="session.closed")
+    world.bridge.feed(finished(closed))
+    activation = _step_id(run)
+
+    async with _client(writes.app()) as client:
+        offered, response = await _retry_as_offered(client, run.id, activation)
+        after = await _detail(client, run.id)
+
+    assert offered["causes"] == [
+        {"reason": "failure_path", "detail": "session.closed", "subject": IMPLEMENT}
+    ]
+    assert (offered["retry_activation_ids"], offered["allowed_actions"]) == (
+        [activation],
+        ["cancel"],
+    )
+    assert response.status_code == 200, response.text
+    assert after["causes"] == [{**RESTARTING, "subject": IMPLEMENT}]
+    (restart,) = _restarts(world, run.id)
+    assert (restart.slot_generation, payload(restart)["session_id"]) == (2, session_id)
+
+
+@pytest.mark.parametrize(
+    ("case", "listed", "offered"),
+    [
+        pytest.param("host_offline", ["cancel"], ["cancel"], id="held"),
+        pytest.param("restarting", ["cancel"], ["cancel"], id="restarting"),
+        # Resume clears an infra pause no step holds, but the list cannot tell it apart.
+        pytest.param("infra", ["cancel"], ["resume", "cancel"], id="infra"),
+        pytest.param("user", ["resume", "cancel"], ["resume", "cancel"], id="user"),
+        pytest.param("blocked", ["cancel"], ["cancel"], id="blocked"),
+    ],
+)
+async def test_a_list_item_paused_infra_offers_cancel_only_and_other_pauses_are_unchanged(
+    writes: Api, case: str, listed: list[str], offered: list[str]
+) -> None:
+    world = writes.world
+    run = _start(world, case)
+    session_id = brief(world, run.id, IMPLEMENT)
+    if case == "host_offline":
+        _commit(world, run.id, RunnerHeld(slot_id=IMPLEMENT, session_id=session_id, generation=1))
+    elif case == "infra":
+        _commit(world, run.id, PauseRun(reason="infra", detail="infra.transient"))
+    elif case == "user":
+        world.bridge.pause_run(workspace_id=WORKSPACE, run_id=run.id, actor=ALICE)
+    else:
+        _commit(world, run.id, *blocked(IMPLEMENT))
+        if case == "restarting":
+            world.bridge.retry_activation(
+                workspace_id=WORKSPACE, run_id=run.id, actor=ALICE, activation_id=_step_id(run)
+            )
+
+    async with _client(writes.app()) as client:
+        detail = await _detail(client, run.id)
+        [item] = (await client.get(RUNS, headers=_as(ALICE))).json()["data"]
+
+    reason = {"user": "user", "blocked": "failure_path"}.get(case, "infra")
+    assert (item["status"], item["pause_reason"]) == ("paused", reason)
+    assert item["allowed_actions"] == listed
+    assert detail["allowed_actions"] == offered
+
+
+@pytest.mark.parametrize(
+    "activation",
+    [
+        pytest.param("a" * 31, id="short"),
+        pytest.param("a" * 33, id="long"),
+        pytest.param("a" * 20_000, id="very-long"),
+        pytest.param("g" * 32, id="not-hex"),
+        pytest.param("a" * 31 + "%C3%A9", id="non-ascii"),
+        pytest.param("a" * 32 + "%0A", id="trailing-newline"),
+        pytest.param("a" * 32 + "%00", id="trailing-nul"),
+        pytest.param("a" * 16 + "%2F" + "a" * 16, id="encoded-slash"),
+        pytest.param("%20" + "a" * 31, id="leading-space"),
+    ],
+)
+async def test_a_malformed_activation_id_is_refused_alike_for_any_run_and_never_echoed(
+    writes: Api, activation: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    world = writes.world
+    alices = _blocked_run(world, "malformed")
+    bobs = _start(world, "bobs", user=BOB)
+    writes.calls.clear()
+
+    with caplog.at_level(logging.DEBUG):
+        async with _client(writes.app()) as client:
+            answers = [
+                await client.post(_retry_url(run_id, activation), headers=_as(ALICE), json={})
+                for run_id in (alices.id, bobs.id, UNKNOWN_RUN)
+            ]
+
+    # The answer never depends on whose run it is, so it reveals none.
+    assert len({(response.status_code, response.content) for response in answers}) == 1
+    (answer_status,) = {response.status_code for response in answers}
+    # An encoded slash splits the path, so no route matches; any other form is refused.
+    assert answer_status == (404 if "%2F" in activation else 422), answers[0].text
+    if answer_status == 422:
+        assert _refusal(answers[0]) == (422, "validation_failed")
+        assert answers[0].headers["cache-control"] == "private, no-store"
+    seen = answers[0].text + caplog.text
+    assert "a" * 16 not in seen and "g" * 16 not in seen
+    assert writes.calls == []
+    assert _restarts(world, alices.id) == []
+
+
+async def test_a_failed_step_of_a_run_its_user_paused_is_retried_and_the_user_s_pause_stays(
+    writes: Api,
+) -> None:
+    world = writes.world
+    run = _start(world, "user-paused")
+    world.bridge.pause_run(workspace_id=WORKSPACE, run_id=run.id, actor=ALICE)
+    # While paused, the step's session cannot be created.
+    _fail(world, run.id, "create_session", IMPLEMENT, "session.create_failed")
+    activation = _step_id(run)
+
+    async with _client(writes.app()) as client:
+        offered, response = await _retry_as_offered(client, run.id, activation)
+        restarting = await _detail(client, run.id)
+        complete(world, run.id, "retry_step", IMPLEMENT, RESTARTED)
+        restarted = await _detail(client, run.id)
+
+    assert {cause["reason"] for cause in offered["causes"]} == {"user", "failure_path"}
+    assert offered["retry_activation_ids"] == [activation]
+    assert response.status_code == 200, response.text
+    assert {cause["detail"] for cause in restarting["causes"]} == {
+        "recovery.restarting",
+        USER_PAUSE_DETAIL,
+    }
+    # The restart ends only its own pause: the person's pause stays, with Resume.
+    assert (restarted["status"], restarted["pause_reason"]) == ("paused", "user")
+    assert [cause["detail"] for cause in restarted["causes"]] == [USER_PAUSE_DETAIL]
+    assert restarted["allowed_actions"] == ["resume", "cancel"]
+    assert restarted["retry_activation_ids"] == []
+
+
+async def test_an_empty_or_digit_only_activation_id_is_no_step_of_the_run(writes: Api) -> None:
+    world = writes.world
+    run = _blocked_run(world, "edges")
+    writes.calls.clear()
+
+    async with _client(writes.app()) as client:
+        empty = await client.post(_retry_url(run.id, ""), headers=_as(ALICE), json={})
+        empty_unknown = await client.post(_retry_url(UNKNOWN_RUN, ""), headers=_as(ALICE), json={})
+        digits = await client.post(_retry_url(run.id, "1" * 32), headers=_as(ALICE), json={})
+
+    # An empty id matches no route; the answer is the same for a run that does not exist.
+    assert empty.status_code == 404
+    assert (empty.status_code, empty.content) == (empty_unknown.status_code, empty_unknown.content)
+    # Thirty-two digits are a well-formed id that no activation of the run has.
+    assert _refusal(digits) == (409, "illegal_transition")
+    assert _reason(digits) == "unknown_activation"
+    assert "1" * 32 not in digits.text
+    assert _restarts(world, run.id) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"activation_id": 5}, id="id-as-number"),
+        pytest.param({"activation_id": ["a" * 32]}, id="id-as-list"),
+        pytest.param({"activation_id": None}, id="id-as-null"),
+        pytest.param([], id="list"),
+        pytest.param(None, id="null"),
+        pytest.param(5, id="number"),
+        pytest.param("x", id="string"),
+        pytest.param(True, id="bool"),
+    ],
+)
+async def test_a_retry_whose_body_is_not_an_empty_object_is_refused_before_any_work(
+    writes: Api, body: Any
+) -> None:
+    world = writes.world
+    run = _blocked_run(world, "body")
+    activation = _step_id(run)
+    writes.calls.clear()
+
+    async with _client(writes.app()) as client:
+        response = await client.post(
+            _retry_url(run.id, activation),
+            headers={**_as(ALICE), "content-type": "application/json"},
+            content=json.dumps(body),
+        )
+
+    assert _refusal(response) == (422, "validation_failed"), response.text
+    assert activation not in response.text
+    assert writes.calls == []
+    assert _restarts(world, run.id) == []
 
 
 async def test_preflight_is_not_implemented_after_the_caller_check() -> None:
@@ -3301,7 +4118,12 @@ WRITE_ROUTES = [
     pytest.param(":pause", {}, id="pause"),
     pytest.param(":resume", {}, id="resume"),
     pytest.param(":cancel", {}, id="cancel"),
-    pytest.param(f"/activations/{'a' * 32}:retry", {}, id="retry"),
+    # An activation the other user's run has: the 404 never depends on the id.
+    pytest.param(
+        f"/activations/{store_activation_id(run_id_for(BOB, 'bobs'), 'approve||')}:retry",
+        {},
+        id="retry",
+    ),
     pytest.param("/gates/approve:answer", _answer_body(), id="answer"),
 ]
 

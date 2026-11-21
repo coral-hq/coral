@@ -359,7 +359,9 @@ def ids(items: Sequence[WorkItem]) -> set[str]:
     return {item.id for item in items}
 
 
-def blocked(slot_id: str, report: str = "Cannot go on.") -> tuple[Input, ...]:
+def blocked(
+    slot_id: str, report: str = "Cannot go on.", *, session_generation: int = 1
+) -> tuple[Input, ...]:
     """A blocked handoff of ``slot_id``; with no failure arrow the run pauses for a retry."""
     activation = slot_id.rsplit(":", 1)[0]
     body = json.dumps(
@@ -368,8 +370,10 @@ def blocked(slot_id: str, report: str = "Cannot go on.") -> tuple[Input, ...]:
         separators=(",", ":"),
     )
     return (
-        HandoffReceived(slot_id=slot_id, body=body),
-        HandoffEvaluated(slot_id=slot_id, outcome="blocked"),
+        HandoffReceived(slot_id=slot_id, body=body, session_generation=session_generation),
+        HandoffEvaluated(
+            slot_id=slot_id, outcome="blocked", session_generation=session_generation
+        ),
     )
 
 

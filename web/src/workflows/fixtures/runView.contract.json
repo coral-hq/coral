@@ -408,7 +408,8 @@
         "session_generation": 1,
         "engine_slot_id": "implement||a4:1:0"
       }
-    ]
+    ],
+    "retry_activation_ids": []
   },
   "detail_gate_pass2": {
     "run_id": "84170e76f35c7a90d1280a24a7230fc9",
@@ -511,7 +512,8 @@
         "session_generation": 1,
         "engine_slot_id": "implement||a4:2:0"
       }
-    ]
+    ],
+    "retry_activation_ids": []
   },
   "final_detail": {
     "run_id": "84170e76f35c7a90d1280a24a7230fc9",
@@ -601,7 +603,8 @@
         "session_generation": 1,
         "engine_slot_id": "implement||a4:2:0"
       }
-    ]
+    ],
+    "retry_activation_ids": []
   },
   "outcome": {
     "run_id": "84170e76f35c7a90d1280a24a7230fc9",

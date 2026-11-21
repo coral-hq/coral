@@ -18,6 +18,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue
 from coral.api.errors import CoralApiError
 from coral.api.spend import CachedSpend
 from coral.bridge.config import MAX_RUN_ACTIVATIONS
+from coral.bridge.keys import store_activation_id
 from coral.bridge.messages import gate_prompt_text, sanitize
 from coral.bridge.service import LOAD_FAILED_DETAIL, RunRead
 from coral.db.enum_codecs import (
@@ -31,6 +32,7 @@ from coral.db.enum_codecs import (
     decode_slot_status,
 )
 from coral.engine import types as engine
+from coral.engine.lifecycle import retryable_activations
 from coral.engine.machines.activation import find_node
 from coral.engine.projection import RunView, project
 from coral.engine.types import JsonPatch, PauseCause
@@ -40,6 +42,7 @@ from coral.model.ir import CompiledGraph
 from coral.runview.actions import RunViewFacts, allowed_actions
 from coral.runview.patch import stored_view_patch
 from coral.runview.types import (
+    FINISHED_RUN_STATUSES,
     ActorKindName,
     EntryFrame,
     LoadError,
@@ -299,7 +302,9 @@ class RunDetail(RunSummary):
     """
     One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that
     cannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are
-    ``None`` when its stored rows cannot be read.
+    ``None`` when its stored rows cannot be read. ``retry_activation_ids`` are the store
+    ids of the failed steps a retry may restart now, in cause order: none while the run
+    is not paused or a host hold or a restart stands.
     """
 
     version: int
@@ -314,6 +319,7 @@ class RunDetail(RunSummary):
     view: RunView | None
     gates: tuple[GateOut, ...]
     slots: tuple[SlotOut, ...]
+    retry_activation_ids: tuple[str, ...]
 
 
 # Why a run's outcome has no diff.
@@ -557,6 +563,13 @@ def _read_actions(read: RunRead, view: RunView | None) -> tuple[RunAction, ...]:
     )
 
 
+def _retry_activation_ids(run: CoralRun, state: engine.RunState | None) -> tuple[str, ...]:
+    """The store ids of the steps a retry may restart; none for a finished row."""
+    if state is None or row_status(run) in FINISHED_RUN_STATUSES:
+        return ()
+    return tuple(store_activation_id(run.id, found) for found in retryable_activations(state))
+
+
 def run_header(run: CoralRun, view: RunViewFacts | None) -> RunHeader:
     """
     The run row as the stream shows it. What it allows is judged with the stream's own
@@ -639,6 +652,7 @@ def run_detail(read: RunRead) -> RunDetail:
         view=view,
         gates=gates,
         slots=slots,
+        retry_activation_ids=_retry_activation_ids(run, state),
     )
 
 

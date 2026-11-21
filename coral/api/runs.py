@@ -216,21 +216,27 @@ def create_runs_router(
     @router.post(
         "/runs/{run_id}/activations/{activation_id}:retry",
         operation_id="coral_retry_activation",
-        status_code=501,
-        response_class=Response,
-        responses=error_responses(401, 403, 404, 422, 501, 503),
+        response_model=RunSummary,
+        responses=_ACTION_REFUSALS,
     )
     async def retry_activation(
         request: Request,
+        response: Response,
         run_id: str,
         _body: EmptyRequest,
-        # Checked as a format only: the id is never looked up, echoed or logged.
-        activation_id: str = Path(pattern=ACTIVATION_ID_PATTERN),  # noqa: ARG001
+        # A store activation id, as the detail's ``retry_activation_ids`` name it; matched
+        # only against the run's own activations, never echoed or logged.
+        activation_id: str = Path(pattern=ACTIVATION_ID_PATTERN),
         viewer: Viewer = caller,
         workspace_id: int = workspace,
-    ) -> Response:
-        """Not served yet: the caller's own run answers 501."""
-        await _runs_api(request).retry(viewer, workspace_id, run_id)
+    ) -> RunSummary:
+        """
+        Retry a failed step of one of the caller's runs: its old session is fenced and its
+        work saved while the run stays paused, then a new session starts it again.
+        """
+        summary = await _runs_api(request).retry(viewer, workspace_id, run_id, activation_id)
+        response.headers["Cache-Control"] = _NO_STORE
+        return summary
 
     @router.post(
         "/runs/{run_id}/gates/{node_id}:answer",

@@ -29,12 +29,15 @@ def _cause(reason: PauseReason, detail: str = "hold", subject: str = "") -> Paus
     return PauseCause(reason=reason, detail=detail, subject=subject)
 
 
-# Every engine reason, and a step's failed turn with and without the slot it names.
+# Every engine reason, a step's failed turn with and without the slot it names, and the
+# slot holds: a host hold and a restart in progress.
 ENGINE_CAUSES: tuple[PauseCause, ...] = (
     *(_cause(reason) for reason in get_args(PauseReason) if reason != "failure_path"),
     _cause("failure_path", "agent.failed", IMPLEMENT),
     _cause("failure_path", "agent.failed"),
     _cause("failure_path", "effect.permanent", IMPLEMENT),
+    _cause("infra", "infra.host_offline", IMPLEMENT),
+    _cause("infra", "recovery.restarting", IMPLEMENT),
 )
 CAUSE_SETS: tuple[tuple[PauseCause, ...], ...] = (
     *((cause,) for cause in ENGINE_CAUSES),
@@ -146,7 +149,6 @@ def test_the_list_offers_resume_only_for_reasons_the_engine_clears_without_a_cap
     assert {
         "user",
         "rejected_calls",
-        "infra",
         "auth",
         "plan_limit",
         "authority_revoked",
@@ -154,6 +156,22 @@ def test_the_list_offers_resume_only_for_reasons_the_engine_clears_without_a_cap
     for reason in ROW_REASONS:
         expected = RESUMABLE if reason in LIST_RESUMABLE_REASONS else CANCEL
         assert _listed("paused", reason) == expected
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        _cause("infra", "infra.host_offline", IMPLEMENT),
+        _cause("infra", "recovery.restarting", IMPLEMENT),
+        _cause("infra", "infra.runner_lost", IMPLEMENT),
+    ],
+)
+def test_a_run_paused_infra_lists_only_cancel_whatever_its_detail_offers(
+    first: PauseCause,
+) -> None:
+    # A list item cannot tell a host hold or a restart from a lost runner.
+    assert _listed("paused", "infra") == CANCEL
+    assert set(CANCEL) <= set(_detail("paused", "infra", _paused(first)))
 
 
 def test_a_row_only_drift_pause_over_an_engine_paused_for_budget_lists_only_cancel() -> None:

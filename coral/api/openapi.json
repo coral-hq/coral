@@ -1662,7 +1662,7 @@
       },
       "RunDetail": {
         "additionalProperties": false,
-        "description": "One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that\ncannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are\n``None`` when its stored rows cannot be read.",
+        "description": "One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that\ncannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are\n``None`` when its stored rows cannot be read. ``retry_activation_ids`` are the store\nids of the failed steps a retry may restart now, in cause order: none while the run\nis not paused or a host hold or a restart stands.",
         "properties": {
           "activation_count": {
             "title": "Activation Count",
@@ -1788,6 +1788,13 @@
             ],
             "title": "Request Preview"
           },
+          "retry_activation_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retry Activation Ids",
+            "type": "array"
+          },
           "run_branch": {
             "title": "Run Branch",
             "type": "string"
@@ -1891,7 +1898,8 @@
           "load_error",
           "view",
           "gates",
-          "slots"
+          "slots",
+          "retry_activation_ids"
         ],
         "title": "RunDetail",
         "type": "object"
@@ -4037,7 +4045,7 @@
     },
     "/v1/coral/runs/{run_id}/activations/{activation_id}:retry": {
       "post": {
-        "description": "Not served yet: the caller's own run answers 501.",
+        "description": "Retry a failed step of one of the caller's runs: its old session is fenced and its\nwork saved while the run stays paused, then a new session starts it again.",
         "operationId": "coral_retry_activation",
         "parameters": [
           {
@@ -4071,6 +4079,16 @@
           "required": true
         },
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -4101,6 +4119,16 @@
             },
             "description": "Not Found"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -4110,16 +4138,6 @@
               }
             },
             "description": "Unprocessable Content"
-          },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CoralErrorResponse"
-                }
-              }
-            },
-            "description": "Not Implemented"
           },
           "503": {
             "content": {

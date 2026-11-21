@@ -716,6 +716,7 @@ describe("WorkflowAlertCard run actions", () => {
       view: null,
       gates: [],
       slots: [],
+      retry_activation_ids: [],
       ...overrides,
     };
   }

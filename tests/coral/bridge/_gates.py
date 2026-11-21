@@ -14,6 +14,7 @@ from coral.bridge.keys import effect_work_id
 from coral.bridge.service import GateAnswerResult
 from coral.db.enum_codecs import WorkStatus
 from coral.engine import types as engine
+from coral.model.ids import effect_session_id
 from coral.queue import FinishedWork
 from coral.stores.fakes import FakeRunStore
 from coral.stores.protocols import GateVisitState, WorkItem
@@ -76,15 +77,19 @@ def gate_rows(world: World, run_id: str) -> list[GateVisitState]:
     return sorted(state.gate_visits, key=lambda row: (row.node_id, row.visit_no))
 
 
-def effects(world: World, run_id: str, kind: str) -> list[engine.Effect]:
+def effects(
+    world: World, run_id: str, kind: str, *, workspace_id: int = WORKSPACE
+) -> list[engine.Effect]:
     """The run's engine effects of ``kind``, in the order they were emitted."""
-    state = world.bridge.load(workspace_id=WORKSPACE, run_id=run_id).state
+    state = world.bridge.load(workspace_id=workspace_id, run_id=run_id).state
     return [effect for effect in state.effects if effect.kind == kind]
 
 
-def work_for(world: World, run_id: str, effect_key: str) -> WorkItem | None:
+def work_for(
+    world: World, run_id: str, effect_key: str, *, workspace_id: int = WORKSPACE
+) -> WorkItem | None:
     """The work row an effect key queued, if any."""
-    rows = world.queue.get_work([effect_work_id(run_id, effect_key)], workspace_id=WORKSPACE)
+    rows = world.queue.get_work([effect_work_id(run_id, effect_key)], workspace_id=workspace_id)
     return rows[0] if rows else None
 
 
@@ -93,17 +98,46 @@ def payload(item: WorkItem) -> dict[str, Any]:
 
 
 def complete(
-    world: World, run_id: str, kind: str, subject: str, result: dict[str, Any] | None = None
+    world: World,
+    run_id: str,
+    kind: str,
+    subject: str,
+    result: dict[str, Any] | None = None,
+    *,
+    workspace_id: int = WORKSPACE,
 ) -> None:
     """Feed a success of the latest ``kind`` effect about ``subject``, as the drainer would."""
     (effect, *_older) = reversed(
-        [effect for effect in effects(world, run_id, kind) if effect.subject == subject]
+        [
+            effect
+            for effect in effects(world, run_id, kind, workspace_id=workspace_id)
+            if effect.subject == subject
+        ]
     )
-    item = work_for(world, run_id, effect.effect_key)
+    item = work_for(world, run_id, effect.effect_key, workspace_id=workspace_id)
     assert item is not None, f"no row for {effect.effect_key}"
     world.bridge.feed(
         FinishedWork(item=item, status=int(WorkStatus.SUCCEEDED), error_code=None, result=result)
     )
+
+
+def brief(world: World, run_id: str, slot: str, *, workspace_id: int = WORKSPACE) -> str:
+    """The slot's latest session is created and briefed, so its step works; its session id."""
+    (create, *_older) = reversed(
+        [
+            effect
+            for effect in effects(world, run_id, "create_session", workspace_id=workspace_id)
+            if effect.subject == slot
+        ]
+    )
+    session_id = effect_session_id(workspace_id, create.effect_key)
+    # A first generation's create names no generation; a retried one names its own.
+    generation = create.payload.get("generation", 1)
+    created = {"session_id": session_id, "role": "step", "generation": generation}
+    complete(world, run_id, "create_session", slot, created, workspace_id=workspace_id)
+    sent = {"session_id": session_id, "stable_id": "m1"}
+    complete(world, run_id, "send_input", slot, sent, workspace_id=workspace_id)
+    return session_id
 
 
 def hand_off(

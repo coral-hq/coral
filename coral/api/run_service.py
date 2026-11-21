@@ -21,7 +21,7 @@ import logging
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal, NoReturn, ParamSpec, Protocol, TypeVar
+from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
 from coral.alerts.types import LOCAL_USER_ID, CallerKey, caller_key, is_owner, normalize_owner
 from coral.api.errors import CoralApiError, run_not_found
@@ -135,6 +135,13 @@ _LOAD_FAILED_TEXT = "The run cannot be loaded; it can only be cancelled."
 _NOT_PAUSABLE_TEXT = "The run cannot be paused now."
 _NOT_RESUMABLE_TEXT = "The run cannot be resumed now."
 _NOT_CANCELLABLE_TEXT = "The run cannot be cancelled now."
+_NOT_RETRYABLE_TEXT = "This step cannot be retried now."
+# A refused retry's text by its reason; others say the step cannot be retried now.
+_RETRY_REFUSAL_TEXTS: Mapping[str, str] = {
+    "unknown_activation": "The run has no such step.",
+    "host_offline_hold": "The run's machine is offline; steps can be retried once it is back.",
+    "restart_in_progress": "A step of this run is restarting; try again when it is done.",
+}
 _RESUME_NOT_ALLOWED = "resume_not_allowed"
 # The refusal each worktree failure is, by its code; a locked worktree is a start in flight.
 _WORKTREE_REFUSALS: Mapping[str, tuple[Any, int]] = {
@@ -966,10 +973,42 @@ class RunsApi:
         read = self._bridge.read(workspace_id=workspace_id, run_id=run_id)
         return _Acted(read, gate_rows=gate_rows)
 
-    async def retry(self, viewer: Viewer, workspace_id: int, run_id: str) -> NoReturn:
-        """Not served yet; the caller's own runs answer 501, any other the run 404."""
-        await self.owned_run(viewer, workspace_id, run_id)
-        raise CoralApiError("not_implemented", "Retrying a step is not available yet.", 501)
+    async def retry(
+        self, viewer: Viewer, workspace_id: int, run_id: str, activation_id: str
+    ) -> RunSummary:
+        """
+        Retry a failed step of the caller's run, named by its store activation id.
+
+        The id is matched only against the run's own activations and never echoed or
+        logged. A retry that is taken leaves the run paused while the step's old session
+        is fenced and its work saved; then its new session starts.
+
+        :raises CoralApiError: 409 for a finished run, one that cannot be loaded, an id
+            that is no activation of the run, or a step the engine does not retry now
+            (``details.reason`` names which); 503 when busy.
+        """
+        run = await self.owned_run(viewer, workspace_id, run_id)
+        with _write_errors("retry a step of", run_id):
+            if row_status(run) in FINISHED_RUN_STATUSES:
+                raise _illegal(run, _NOT_RETRYABLE_TEXT)
+            acted = await self._act(
+                viewer, self._retried, workspace_id, run_id, _actor(viewer), activation_id
+            )
+            if acted.refusal is not None:
+                text = _RETRY_REFUSAL_TEXTS.get(acted.refusal, _NOT_RETRYABLE_TEXT)
+                raise _illegal(acted.read.run, text, reason=acted.refusal)
+            return self._with_spend(workspace_id, read_summary(acted.read))
+
+    def _retried(self, workspace_id: int, run_id: str, actor: str, activation_id: str) -> _Acted:
+        try:
+            result = self._bridge.retry_activation(
+                workspace_id=workspace_id, run_id=run_id, actor=actor, activation_id=activation_id
+            )
+        except EngineLoadFailed:
+            refusal: str | None = LOAD_FAILED_DETAIL
+        else:
+            refusal = result.code if result.outcome == "refused" else None
+        return _Acted(self._bridge.read(workspace_id=workspace_id, run_id=run_id), refusal)
 
     async def _act(
         self, viewer: Viewer, fn: Callable[_P, _Acted], /, *args: _P.args, **kwargs: _P.kwargs
