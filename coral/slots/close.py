@@ -276,6 +276,15 @@ def turn_ended(response_id: str | None) -> EdgePredicate:
     return matches
 
 
+def _awaited_response(live: LiveStatus) -> str | None:
+    """
+    The response a wait may hold out for: only one this replica saw the turn name.
+
+    A guessed id may name no turn, so its wait ends at the session's next end edge.
+    """
+    return live.response_id if live.response_observed else None
+
+
 def _restarted(live: LiveStatus) -> bool:
     """The runner is at work again, or a prompt is open."""
     return live.status in LIVE_STATUSES or turn_state(live) == "prompt_open"
@@ -396,12 +405,11 @@ async def cancel_session(
         live = await dispatch.live_status(session_id=session_id)
         if turn_state(live) == "running":
             await ensure_lease()
+            awaited = _awaited_response(live)
             if await dispatch.interrupt(
-                session_id=session_id, user_id=user_id, response_id=live.response_id
+                session_id=session_id, user_id=user_id, response_id=awaited
             ):
-                await watch.wait_for(
-                    turn_ended(live.response_id), timeout_s=bounds.interrupt_settle_s
-                )
+                await watch.wait_for(turn_ended(awaited), timeout_s=bounds.interrupt_settle_s)
     if closed_label:
         await ensure_lease()
         await dispatch.set_closed(session_id=session_id)
@@ -443,7 +451,8 @@ async def _end_turn(
         live = await dispatch.live_status(session_id=session_id)
         if not _still_running(live, session_id):
             return False
-        ended = await watch.wait_for(turn_ended(live.response_id), timeout_s=bounds.turn_end_s)
+        awaited = _awaited_response(live)
+        ended = await watch.wait_for(turn_ended(awaited), timeout_s=bounds.turn_end_s)
         if ended is not None:
             return False
         live = await dispatch.live_status(session_id=session_id)
@@ -452,11 +461,12 @@ async def _end_turn(
         if not interrupt:
             return True
         await ensure_lease()
+        awaited = _awaited_response(live)
         sent = await dispatch.interrupt(
-            session_id=session_id, user_id=user_id, response_id=live.response_id
+            session_id=session_id, user_id=user_id, response_id=awaited
         )
         # The read after the bound may name the running response the first could not.
-        settled = turn_ended(live.response_id)
+        settled = turn_ended(awaited)
         if sent and await watch.wait_for(settled, timeout_s=bounds.interrupt_settle_s) is not None:
             return False
         return _still_running(await dispatch.live_status(session_id=session_id), session_id)

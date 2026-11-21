@@ -88,6 +88,8 @@ class FakeSession:
 
     status: str | None = "idle"
     response_id: str | None = None
+    # False when the replica guessed ``response_id`` from the store (a cold cache).
+    response_observed: bool = True
     blocked_on: str | None = None
     pending_elicitations: int = 0
     background_work: bool = False
@@ -250,6 +252,7 @@ class FakeDispatch:
             blocked_on=session.blocked_on,
             pending_elicitations=session.pending_elicitations,
             background_work=session.background_work,
+            response_observed=session.response_observed,
         )
         self._after("live_status")
         return live

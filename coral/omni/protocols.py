@@ -337,13 +337,21 @@ class SessionState:
 
 @dataclass(frozen=True)
 class LiveStatus:
-    """A session's live status, as a close or cancel reads it."""
+    """
+    A session's live status, as a close or cancel reads it.
+
+    :param response_observed: ``response_id`` came from this replica's own cache, which
+        its edges fill; Omnigent can briefly keep an earlier turn's id there, so it is
+        not proof of the running turn. ``False`` when it is a guess from the stored
+        items, which after a server restart mid-turn can name no turn at all.
+    """
 
     status: str | None
     response_id: str | None
     blocked_on: str | None
     pending_elicitations: int
     background_work: bool
+    response_observed: bool
 
 
 @dataclass(frozen=True)

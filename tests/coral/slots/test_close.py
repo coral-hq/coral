@@ -8,6 +8,7 @@ none returns at once as if its bound passed.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, override
@@ -16,9 +17,13 @@ import pytest
 
 from coral.db.enum_codecs import SlotRole
 from coral.omni.protocols import CoralSessionError, LiveStatus, engine_message_text
+from coral.omni.server.status_edges import CoralStatusEdges
 from coral.queue.executors import EffectCompleted
 from coral.queue.run_effects import EffectRefused
 from coral.slots.close import (
+    DEFAULT_BOUNDS,
+    INTERRUPT_SETTLE_S,
+    TURN_END_S,
     AcceptedEdits,
     CloseBlocked,
     CloseBounds,
@@ -44,6 +49,7 @@ from coral.workspace.ops import (
     WorkspaceOpError,
     WorkspaceRef,
 )
+from omnigent.server.session_live_state import SessionStatusEdge
 from tests.coral.slots._close_fakes import (
     OWNER,
     FakeDispatch,
@@ -230,6 +236,7 @@ def _live(**changes: Any) -> LiveStatus:
         "blocked_on": None,
         "pending_elicitations": 0,
         "background_work": False,
+        "response_observed": True,
         **changes,
     }
     return LiveStatus(**fields)
@@ -388,6 +395,169 @@ async def test_an_unknown_response_ends_the_wait_at_the_first_terminal_edge() ->
     assert env.edges.timeouts == []
     assert "interrupt" not in env.events
     assert outcome.forced_stop is False
+
+
+async def test_a_known_response_waits_out_another_responses_outcome() -> None:
+    # This replica saw the turn start: an outcome for another response ends nothing.
+    env = _Close(status="running", response_id="resp_1", response_observed=True)
+    env.edges.arrive_during_next_wait(
+        observed(SESSION, "idle", outcome="completed", turn_response_id="resp_9")
+    )
+
+    await env.close(interrupt=False)
+
+    assert env.edges.timeouts == [BOUNDS.turn_end_s]
+
+
+async def test_a_guessed_response_ends_the_wait_at_the_turns_own_end_edge() -> None:
+    # A server restarted mid-turn stores the rest of it under ids of its own and guesses
+    # the newest; the turn's real end names the response the old server saw start.
+    env = _Close(status="running", response_id="turn_guessed", response_observed=False)
+    env.edges.arrive_during_next_wait(
+        observed(SESSION, "idle", outcome="completed", turn_response_id="resp_real")
+    )
+
+    outcome = await env.close()
+
+    assert env.edges.timeouts == []
+    assert "interrupt" not in env.events
+    assert outcome.forced_stop is False
+
+
+async def test_a_guessed_response_is_not_used_to_pick_the_turn_to_interrupt() -> None:
+    env = _Close(status="running", response_id="turn_guessed", response_observed=False)
+
+    def settle(session_id: str) -> None:
+        env.session.status = "idle"
+        env.edges.arrive_during_next_wait(
+            observed(session_id, "idle", outcome="cancelled", turn_response_id="resp_real")
+        )
+
+    env.dispatch.settle_on_interrupt = settle
+
+    outcome = await env.close()
+
+    assert env.dispatch.interrupts == [None]
+    assert env.edges.timeouts == [BOUNDS.turn_end_s]
+    assert outcome.forced_stop is False
+
+
+@pytest.mark.parametrize(
+    ("published", "response_observed", "forced_stop"),
+    [
+        ("before_the_watch", False, True),
+        ("once_watching", False, False),
+        ("once_watching", True, True),
+    ],
+    ids=["guessed_before_the_watch", "guessed_once_watching", "known_once_watching"],
+)
+async def test_an_earlier_turns_late_end_edge_ends_only_a_guessed_wait_that_saw_it(
+    published: str, response_observed: bool, forced_stop: bool
+) -> None:
+    # The real watcher: its stream starts when the close begins watching, before the read.
+    edges = CoralStatusEdges(asyncio.get_running_loop())
+    env = _Close(
+        status="running",
+        response_id="turn_guessed" if not response_observed else "resp_1",
+        response_observed=response_observed,
+    )
+    # An earlier turn's runner report, published late by the relay.
+    earlier = SessionStatusEdge(
+        SESSION,
+        "idle",
+        "running",
+        turn_outcome="completed",
+        turn_response_id="resp_earlier",
+        workspace_id=WORKSPACE,
+    )
+    reads: list[str] = []
+
+    def once_watching() -> None:
+        reads.append("live_status")
+        if len(reads) == 1:
+            edges.observe(earlier)
+
+    if published == "before_the_watch":
+        edges.observe(earlier)
+    else:
+        env.dispatch.hooks["live_status"] = once_watching
+    bounds = CloseBounds(turn_end_s=0.2, interrupt_settle_s=0.05)
+
+    outcome = await env.close(edges=edges, bounds=bounds, interrupt=False)
+
+    # A guess takes any end edge it sees (R89); a known response keeps CRL-128's rule.
+    assert outcome.forced_stop is forced_stop
+    assert "interrupt" not in env.events
+    assert env.main_events() == ["set_closed", "stop", "commit", "queued_user_input"]
+
+
+@pytest.mark.parametrize("interrupt", [True, False])
+async def test_a_guessed_response_with_no_end_edge_waits_out_its_bounds_as_a_known_one_does(
+    interrupt: bool,
+) -> None:
+    closes: dict[bool, tuple[_Close, CloseOutcome]] = {}
+    for response_observed in (True, False):
+        env = _Close(
+            status="running",
+            response_id="resp_1" if response_observed else "turn_guessed",
+            response_observed=response_observed,
+        )
+        # No turn end: a running edge for another response, then one naming none.
+        env.edges.arrive_during_next_wait(observed(SESSION, "running", response_id="turn_other"))
+        env.edges.arrive_during_next_wait(observed(SESSION, "running"))
+        outcome = await env.close(interrupt=interrupt, bounds=DEFAULT_BOUNDS)
+        closes[response_observed] = (env, outcome)
+    (known, known_outcome), (guessed, guessed_outcome) = closes[True], closes[False]
+
+    expected_timeouts = [TURN_END_S, INTERRUPT_SETTLE_S] if interrupt else [TURN_END_S]
+    assert guessed.edges.timeouts == known.edges.timeouts == expected_timeouts
+    assert guessed_outcome.forced_stop is known_outcome.forced_stop is True
+    assert guessed.main_events() == known.main_events()
+    # Only the interrupt differs: it never names the guess.
+    assert (known.dispatch.interrupts, guessed.dispatch.interrupts) == (
+        (["resp_1"], [None]) if interrupt else ([], [])
+    )
+
+
+async def test_a_known_responses_settle_wait_ignores_another_responses_outcome() -> None:
+    env = _Close(status="running", response_id="resp_1")
+    env.dispatch.settle_on_interrupt = lambda session_id: env.edges.arrive_during_next_wait(
+        observed(session_id, "idle", outcome="completed", turn_response_id="resp_9")
+    )
+
+    outcome = await env.close()
+
+    assert env.dispatch.interrupts == ["resp_1"]
+    assert env.edges.timeouts == [BOUNDS.turn_end_s, BOUNDS.interrupt_settle_s]
+    assert outcome.forced_stop is True
+
+
+@pytest.mark.parametrize("operation", ["close", "cancel"])
+async def test_a_guessed_turn_is_interrupted_unnamed_though_the_stores_guess_moves(
+    operation: str,
+) -> None:
+    # After a restart each stored item has its own made-up id, so each read guesses anew.
+    env = _Close(status="running", response_id="turn_a", response_observed=False)
+    guesses = iter(["turn_b", "turn_c", "turn_d"])
+    env.dispatch.hooks["live_status"] = lambda: setattr(env.session, "response_id", next(guesses))
+
+    def settle(session_id: str) -> None:
+        env.session.status = "idle"
+        env.edges.arrive_during_next_wait(
+            observed(session_id, "idle", outcome="cancelled", turn_response_id="resp_real")
+        )
+
+    env.dispatch.settle_on_interrupt = settle
+
+    if operation == "close":
+        await env.close()
+    else:
+        await _cancel(env)
+
+    assert env.dispatch.interrupts == [None]
+    # The settle wait ended at the turn's own end edge, which names another response.
+    assert env.edges.timeouts == ([BOUNDS.turn_end_s] if operation == "close" else [])
+    assert not env.session.runner_alive and env.session.closed
 
 
 async def test_the_settle_wait_follows_the_response_the_second_read_found() -> None:
@@ -870,6 +1040,33 @@ async def test_cancel_never_waits_on_a_prompt_and_always_stops(
     )
 
     assert env.main_events() == expected
+
+
+async def _cancel(env: _Close) -> None:
+    await cancel_session(
+        workspace_id=WORKSPACE,
+        session_id=SESSION,
+        user_id=OWNER,
+        slot_id="slot-1",
+        closed_label=True,
+        dispatch=env.dispatch,
+        edges=env.edges,
+        ensure_lease=env.lease,
+        bounds=BOUNDS,
+    )
+
+
+async def test_cancel_with_a_known_response_waits_out_another_responses_outcome() -> None:
+    env = _Close(status="running", response_id="resp_1")
+    env.dispatch.settle_on_interrupt = lambda session_id: env.edges.arrive_during_next_wait(
+        observed(session_id, "idle", outcome="completed", turn_response_id="resp_9")
+    )
+
+    await _cancel(env)
+
+    assert env.dispatch.interrupts == ["resp_1"]
+    assert env.edges.timeouts == [BOUNDS.interrupt_settle_s]
+    assert env.main_events() == ["interrupt", "set_closed", "stop"]
 
 
 async def _reference_outcome() -> CloseOutcome:

@@ -6,7 +6,10 @@ to an in-process ``create_runner_app`` over the WS tunnel (the three-layer
 harness). Coral's ``stop``, ``cancel_session`` and a reader's ``close_session``
 end the turn through the same route. The runner reports each turn end (S43),
 the server relays it, and S1 hands the edge to ``CoralStatusEdges``. Only the
-harness is a stub, so a turn can be held open until the runner ends it.
+harness is a stub, so a turn can be held open until the runner ends it. A close
+after a server restart mid-turn is the same stack with the server's status caches
+emptied and the rest of the turn stored under a new id, as a restarted server leaves
+them.
 
 Not covered here: the session is hostless and bound with ``PATCH runner_id``,
 not a facade step, so the host-owner runner kill and the server's own inferred
@@ -32,7 +35,7 @@ from fastapi import FastAPI
 
 from coral.engine.facts import TurnFact
 from coral.engine.turn_end import evaluate
-from coral.omni.protocols import engine_message_text
+from coral.omni.protocols import LiveStatus, engine_message_text
 from coral.omni.server.dispatch import OmnigentSessionDispatch
 from coral.omni.server.status_edges import CoralStatusEdges
 from coral.slots.close import (
@@ -45,6 +48,7 @@ from coral.slots.close import (
 )
 from coral.stores.stable_ids import content_checksum
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID
+from omnigent.entities import MessageData, NewConversationItem
 from omnigent.runtime import get_conversation_store
 from omnigent.server import session_live_state
 from omnigent.server.routes import sessions as sessions_module
@@ -94,6 +98,7 @@ class _GatedHarness:
     - ``ignores_interrupt``: never ends on its own; only the runner cancelling
       the turn's task ends it.
     - ``completes``: completes at once.
+    - ``completes_on_release``: completes once the test calls :meth:`release`.
     """
 
     def __init__(self, runner_app: FastAPI, session_id: str, turns: Sequence[str]) -> None:
@@ -101,7 +106,12 @@ class _GatedHarness:
         self.session_id = session_id
         self._turns = tuple(turns)
         self.response_ids: list[str] = []
+        self.interrupts = 0
         self._interrupted: dict[str, asyncio.Event] = {}
+        self._released = asyncio.Event()
+
+    def release(self) -> None:
+        self._released.set()
 
     def stream(self, method: str, url: str, *, json: dict[str, Any], timeout: Any) -> Any:
         del method, url, json, timeout
@@ -114,6 +124,9 @@ class _GatedHarness:
             yield _sse("response.created", response_id, "queued")
             yield _sse("response.in_progress", response_id, "in_progress")
             if script == "completes":
+                yield _sse("response.completed", response_id, "completed")
+            elif script == "completes_on_release":
+                await self._released.wait()
                 yield _sse("response.completed", response_id, "completed")
             elif script == "honors_interrupt":
                 await interrupted.wait()
@@ -129,6 +142,8 @@ class _GatedHarness:
 
     async def post(self, url: str, *, json: dict[str, Any], timeout: Any = None) -> Any:
         del url, timeout
+        if json.get("type") == "interrupt":
+            self.interrupts += 1
         if json.get("type") == "interrupt" and self.response_ids:
             current = self.response_ids[-1]
             if self._turns[len(self.response_ids) - 1] == "honors_interrupt":
@@ -399,3 +414,94 @@ async def test_coral_stop_and_cancel_reach_coral_as_cancelled(
     closed = store.get_conversation(session_id)
     assert closed is not None
     assert (closed.labels or {}).get(CLOSED_LABEL_KEY) == (CLOSED_LABEL_VALUE if lease else None)
+
+
+class _ReadsLive(OmnigentSessionDispatch):
+    """The real dispatch, keeping each live status the close read."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.reads: list[LiveStatus] = []
+        self.read = asyncio.Event()
+
+    async def live_status(self, *, session_id: str) -> LiveStatus:
+        live = await super().live_status(session_id=session_id)
+        self.reads.append(live)
+        self.read.set()
+        return live
+
+
+async def test_a_close_after_a_restart_mid_turn_ends_at_the_turns_own_end_edge(
+    tunnel_three_layer_stack: _TunnelStack,  # noqa: F811 — pytest injects the imported fixture
+) -> None:
+    stack = tunnel_three_layer_stack
+    harness = await _bound_session(stack, ["completes_on_release"])
+    session_id = harness.session_id
+    store = get_conversation_store()
+    edges = CoralStatusEdges(asyncio.get_running_loop())
+    dispatch = _ReadsLive(stack.ap_app, store, stack.ap_app.state.runner_router, pre_send_hooks=())
+    stable_id = uuid.uuid4().hex
+    unregister = session_live_state.register_status_edge_observer(OBSERVER, edges.observe)
+    try:
+        receipt = await dispatch.send_message(
+            workspace_id=WS,
+            run_id=uuid.uuid4().hex,
+            session_id=session_id,
+            user_id=None,
+            stable_id=stable_id,
+            text=BRIEF,
+        )
+        assert receipt.delivery == "sent"
+        await poll_until_async(_session_running(session_id, "resp_turn_1"), timeout_s=budget(30))
+        # The server restarts mid-turn: its caches are cold, and the rest of the turn is
+        # stored under an id of the restarted server's own.
+        for cache in (
+            sessions_module._session_status_cache,
+            sessions_module._session_active_response_cache,
+            sessions_module._session_blocked_on_cache,
+        ):
+            cache.pop(session_id, None)
+        working = MessageData(
+            role="assistant", content=[{"type": "output_text", "text": "Working."}], agent="a"
+        )
+        store.append(
+            session_id,
+            [NewConversationItem(type="message", response_id="turn_after_restart", data=working)],
+        )
+        dispatch.reads.clear()
+        close = asyncio.create_task(
+            close_session(
+                workspace_id=WS,
+                session_id=session_id,
+                user_id=None,
+                slot_id=SLOT,
+                interrupt=True,
+                closed_label=True,
+                commit=None,
+                engine_messages={stable_id: content_checksum(engine_message_text(BRIEF))},
+                dispatch=dispatch,
+                edges=edges,
+                ensure_lease=_Lease([]),
+                bounds=BOUNDS,
+                stops=ConfirmedStops(),
+            )
+        )
+        await asyncio.wait_for(dispatch.read.wait(), timeout=budget(30))
+        # The close is watching; the turn the old server saw start now ends.
+        harness.release()
+        released = time.monotonic()
+        outcome = await asyncio.wait_for(close, timeout=budget(60))
+        took = time.monotonic() - released
+    finally:
+        unregister()
+
+    first = dispatch.reads[0]
+    assert (first.status, first.response_id, first.response_observed) == (
+        "running",
+        "turn_after_restart",
+        False,
+    )
+    # The turn's own end ended the wait, long before the bound a guessed id would sit out.
+    assert took < BOUNDS.turn_end_s / 2, took
+    assert harness.interrupts == 0
+    assert outcome.forced_stop is False

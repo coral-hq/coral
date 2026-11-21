@@ -775,6 +775,7 @@ async def test_live_status_reads_this_replicas_caches_and_falls_back_to_the_row(
     assert (cold.pending_elicitations, cold.background_work) == (2, True)
     # This replica's edges win: not parked, one approval open, the active response known.
     assert (warm.status, warm.response_id, warm.blocked_on) == ("running", "resp_1", None)
+    assert (cold.response_observed, warm.response_observed) == (False, True)
     assert (warm.pending_elicitations, warm.background_work) == (1, True)
     with pytest.raises(CoralSessionError) as deleted:
         await dispatch.live_status(session_id="0" * 32)
@@ -843,7 +844,59 @@ async def test_a_cold_live_status_reads_the_running_response_from_the_store(
     writing = await dispatch.live_status(session_id=session_id)
 
     assert (started.status, started.response_id) == ("running", None)
+    # A guess from the store: after a restart mid-turn it may name no turn.
     assert (writing.status, writing.response_id) == ("running", "resp_store")
+    assert (started.response_observed, writing.response_observed) == (False, False)
+
+
+async def test_only_this_replicas_own_response_is_observed_whatever_the_store_holds(
+    app: FastAPI, stores: SimpleNamespace, client: httpx.AsyncClient
+) -> None:
+    session_id = await _session(client)
+    dispatch = _dispatch(app, stores)
+    stores.conversation.append(session_id, [_item("assistant", response_id="turn_after_restart")])
+
+    # A running edge reached this replica without naming its response.
+    sessions_routes._session_status_cache[session_id] = "running"
+    try:
+        unnamed = await dispatch.live_status(session_id=session_id)
+        sessions_routes._session_active_response_cache[session_id] = "resp_live"
+        named = await dispatch.live_status(session_id=session_id)
+    finally:
+        _forget(session_id)
+
+    assert (unnamed.status, unnamed.response_id, unnamed.response_observed) == (
+        "running",
+        "turn_after_restart",
+        False,
+    )
+    assert (named.response_id, named.response_observed) == ("resp_live", True)
+
+
+async def test_an_interrupt_naming_no_response_reaches_a_turn_whose_stored_guess_moved(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    forwarded: list[dict[str, Any]],
+) -> None:
+    # A restarted server stores each item of the running turn under a new id of its own.
+    session_id = await _session(client)
+    dispatch = _dispatch(app, stores)
+    store = stores.conversation
+    store.set_session_live_status(session_id, "running")
+    store.append(session_id, [_item("assistant", response_id="turn_a")])
+    read = await dispatch.live_status(session_id=session_id)
+    store.append(session_id, [_item("assistant", response_id="turn_b")])
+
+    stale = await dispatch.interrupt(session_id=session_id, user_id=None, response_id="turn_a")
+    unnamed = await dispatch.interrupt(session_id=session_id, user_id=None)
+
+    assert (read.response_id, read.response_observed) == ("turn_a", False)
+    # Naming the guess would miss the turn; naming none interrupts whatever runs.
+    assert (stale, unnamed) == (False, True)
+    assert [body for body in forwarded if body.get("type") == "interrupt"] == [
+        {"type": "interrupt"}
+    ]
 
 
 @pytest.mark.parametrize(

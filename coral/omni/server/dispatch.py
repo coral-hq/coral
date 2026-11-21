@@ -505,7 +505,9 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
 
         A running turn's response id comes from this replica's cache, else from
         the store: the newest item's, unless that is a user message (its turn
-        has written nothing yet), when it stays unknown.
+        has written nothing yet), when it stays unknown. Only the cache's id is
+        ``response_observed``: a server restarted mid-turn stores the rest of that
+        turn under ids of its own, so the store's newest one may name no turn.
 
         :raises CoralSessionError: ``session.deleted`` when the row is gone.
         """
@@ -523,6 +525,7 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
             blocked_on=(blocked_on or None) if blocked_on is not None else conv.blocked_on,
             pending_elicitations=pending or (0 if warm else conv.pending_elicitation_count or 0),
             background_work=bool(conv.background_work_running),
+            response_observed=response_id is not None,
         )
         if live.status == "running" and response_id is None:
             return dataclasses.replace(
