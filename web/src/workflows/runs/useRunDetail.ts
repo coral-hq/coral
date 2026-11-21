@@ -1,8 +1,7 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { ApiError } from "@/lib/sessionsApi";
 import type { RunDetail } from "../api/generated/coralApi";
-import { getRun, retryRunRead, runQueryKey } from "../api/runsApi";
+import { getRun, isRunNotFound, retryRunRead, runQueryKey } from "../api/runsApi";
 import { isFinishedRunStatus } from "../shared/runStatus";
 import { useCoralScope } from "../shared/viewerScope";
 import type { RunStreamStatus } from "../stream/runStream";
@@ -25,8 +24,6 @@ export const DETAIL_REFRESH_MIN_MS = 2_000;
 export interface RunDetailStream extends StalenessMarks {
   status?: RunStreamStatus;
 }
-
-const isNotFound = (error: unknown) => error instanceof ApiError && error.status === 404;
 
 interface RefreshState {
   /** The page is gone; a reread that ends now asks for nothing more. */
@@ -63,7 +60,7 @@ export function useRunDetail(
     // The stream's status first; the detail's own until the stream speaks.
     refetchInterval: (query) =>
       streamEnded ||
-      isNotFound(query.state.error) ||
+      isRunNotFound(query.state.error) ||
       isFinishedRunStatus(headerStatus ?? query.state.data?.status)
         ? false
         : DETAIL_POLL_MS,

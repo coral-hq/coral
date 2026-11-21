@@ -22,6 +22,7 @@ import { runOverlay } from "../canvas/runOverlay";
 import { RunActions } from "../inbox/RunActions";
 import { runPath } from "../nav/coralPaths";
 import { LOAD_FAILED_TEXT } from "../shared/pauseCopy";
+import { isFinishedRunStatus } from "../shared/runStatus";
 import { useCoralScope } from "../shared/viewerScope";
 import type { RunStreamStatus } from "../stream/runStream";
 import { useRunStream } from "../stream/useRunStream";
@@ -41,6 +42,7 @@ import {
 import { RunStepList } from "./RunStepList";
 import { useAckRunAlerts } from "./useAckRunAlerts";
 import { useDetailFailure, useRunDetail } from "./useRunDetail";
+import { OutcomePanel } from "./outcome/OutcomePanel";
 import { runSession, stepSessions } from "./agents/stepSessions";
 import { StepDrawerFallback } from "./agents/StepDrawerFallback";
 
@@ -54,7 +56,8 @@ const StepDrawer = lazy(() =>
 // and allowed actions come only from the stream's header and view; the detail supplies the
 // title, spend, gates and slots. Before the stream's first frame the detail's status shows
 // as provisional, with no actions. The selected node rides `?node=`; `?panel=gate` asks to
-// show that node's open gate; `?agent=` opens a step session's transcript in a drawer.
+// show that node's open gate; `?agent=` opens a step session's transcript in a drawer. A
+// finished run shows its outcome.
 
 export function RunPage() {
   const { runId = "" } = useParams<{ runId: string }>();
@@ -225,6 +228,7 @@ function RunPageBody({ runId }: { runId: string }) {
           <PauseBanner reason={header.pause_reason} view={view} graph={graph.data ?? null} />
         )}
         {settingUp && <p className="text-ui text-muted-foreground">Setting up the run…</p>}
+        {isFinishedRunStatus(status) && <OutcomePanel runId={runId} />}
         {run && (
           <RunGatePanel
             runId={runId}

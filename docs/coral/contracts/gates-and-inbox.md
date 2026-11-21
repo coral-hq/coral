@@ -17,7 +17,9 @@
   web Inbox kind, its cards' Resume and Cancel, and notifications in
   `web/src/workflows/inbox/` and
   `web/src/workflows/notifications/`, mounted by
-  `web/src/workflows/CoralRuntime.tsx`.
+  `web/src/workflows/CoralRuntime.tsx`; the run view's gate card in
+  `web/src/workflows/runs/RunGatePanel.tsx` and its mark-as-read on open in
+  `web/src/workflows/runs/useAckRunAlerts.ts`.
 - **Related:** [`session-facade.md`](session-facade.md) (the bridge's work
   rows, run protection), [`runs-api.md`](runs-api.md) (the runs API, its
   gate answers and its actions), [`persistence.md`](persistence.md) (`coral_0005`),
@@ -51,7 +53,10 @@
 `test_gate_routes_auth.py` (header auth) and `test_gate_routes_accounts.py`
 (accounts, across a password change and a re-created account) run this
 through the real routes. `test_runs_end_to_end.py` answers through the runs
-API in all three modes.
+API in all three modes. The web's half is
+`web/src/workflows/runs/RunPage.proving.test.tsx`: over a run recorded live
+from the real stream, the run view answers the open gate inline, and the same
+stream closes the gate and carries the run on to its end, with no reload.
 
 ## The live rule
 
@@ -231,8 +236,8 @@ shape, `{"error": {"code", "message", "details"}}` ([`runs-api.md`](runs-api.md)
 request's task: 401 `unauthenticated` "Authentication required" when the
 server's provider finds no user, 403 `not_permitted` "Not permitted" when the
 account context names another user or no identity is given where one is
-required. Without the alert store (no operational database) both routes answer
-404 `not_found` "Coral inbox is not available".
+required. Without the alert store (no operational database) every Inbox route
+answers 404 `not_found` "Coral inbox is not available".
 
 - **`GET /v1/coral/inbox?limit=1..100&after=<cursor>`** → 200
   `{"data": [...], "next_cursor": ...}`, `Cache-Control: private, no-store`.
@@ -254,6 +259,17 @@ required. Without the alert store (no operational database) both routes answer
   `not_found` "alert not found" for another user's, another generation's, an
   unknown or a malformed id; 409 `illegal_transition` "Answer the gate to clear
   this alert." for an open gate alert.
+- **`POST /v1/coral/inbox/ack`** (`coral_ack_alerts`) with `{"run_id": "<32
+  lowercase hex>"}` (no other field) → 200 `{"acked": n}`. It marks read the
+  caller's open **low-priority** alerts of that run that are not gate or
+  question kinds: in practice the plain run-end alert. Pause and watchdog
+  alerts, and the normal-priority alert of a cancel that may have left
+  sessions running, stay until the person acts on them or marks them read one by one. Owner and
+  account generation are matched exactly, in SQL and again in Python (a
+  collation can fold), so another user's run, or an unknown one, answers
+  `{"acked": 0}` and its existence never shows. At most 500 rows, read and then
+  updated by exact id in one write transaction (`ack_low_for_run`); repeating
+  it marks nothing more. A malformed `run_id` or an extra field is 422.
 
 Admins see only their own alerts. The owner is stored normalized (the single
 local user is `null`) and compared exactly.
@@ -276,8 +292,13 @@ ordinary approval that still answers.
 **Resume and Cancel on a pause card** (`RunActions.tsx`, through
 `web/src/workflows/api/runsApi.ts`). Only a `pause` alert's card has them, and
 only while it is expanded, which is when it reads the run:
-`GET /v1/coral/runs/{id}` under the query key `["coral-run", run_id]`, fresh for
-10 s, and retried once only for a failure a retry can fix (never a 404).
+`GET /v1/coral/runs/{id}` under the query key `["coral-run", scope, run_id]`,
+fresh for 10 s, and retried once only for a failure a retry can fix (never a
+404). `scope` names the server (or an embedded host's mount), the app root and
+the viewer (`useCoralScope()`, which the Inbox's own `["coral-inbox", scope]`
+uses too), so a cached run is never shown to another viewer or read back from
+another server; every such query waits until the viewer is known. The run view
+shares the key ([`runs-api.md`](runs-api.md), "In the web app").
 
 - **Resume** (primary) and **Cancel run** (outline) appear only when the run's
   `allowed_actions` list them. Pause is never offered here. "Open run" is an
@@ -298,9 +319,25 @@ only while it is expanded, which is when it reads the run:
   available." and rereads the run, which hides the buttons; a 503 says "The
   server is busy; try again."; anything else says "Couldn’t update the run.".
 - Both buttons are disabled while an action is in flight, also on a card
-  reopened meanwhile (the actions share the mutation key
-  `["coral-run-action", run_id]`), and while offline, with "You’re offline."
-  beside the result.
+  reopened meanwhile or on the run's page (the actions share the mutation key
+  `["coral-run-action", scope, run_id]`), and while offline, with "You’re
+  offline." beside the result.
+
+**Opening a run marks its run-end alert read.** The run view posts
+`POST /v1/coral/inbox/ack {"run_id"}` once per open page, and only after the
+run's detail loaded, which confirms the caller owns it: at once for a run that
+was already finished, otherwise after a `[DONE]` that arrives while the page is
+open. It then rereads the Inbox; a failed post is left alone. Nothing else is
+marked: a pause, a watchdog or an unstopped cancel still asks for the person.
+
+**The run view's gate card.** The run page shows each open visit the stream
+lists with `WorkflowGateCard`, always open, through a run-view adapter: it shows
+the visit's `context` (the prompt's text, rendered as the Inbox renders it,
+never as HTML), its outcomes and the evidence of the steps that led to it, and
+answers through the runs API's `:answer` with the visit's token instead of the
+anchor's prompt route. A refusal keeps its `details.reason`, so it reads with
+the Inbox card's texts; a runs-route 404 reads as "no longer waiting". The
+stream, not the answer, closes the card.
 
 ## Account generations
 
@@ -381,8 +418,8 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
   generation under the account lock, finished runs and resolved alerts
   included, so a long-lived heavy user makes a large rotation transaction;
   alert retention (DUR-06) bounds it.
-- **Run-end alerts accumulate** until marked read; they are listed after
-  normal alerts. A watchdog alert on a decision that closes without being
+- **Run-end alerts accumulate** until marked read or their run is opened;
+  they are listed after normal alerts. A watchdog alert on a decision that closes without being
   decided stays until the run ends. A paused run whose reason changes between
   two non-user reasons keeps its first alert's text.
 - **The badge can miss a gate for a while.** The badge leaves out a gate
@@ -399,11 +436,17 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
   `failure_path` (the load does, as every bridge write does), and answers any
   token, an unknown one included, `run_paused` rather than the runs API's 404.
   Only the owner gets that far.
-- **The Inbox's run cache is shared and unscoped.** The key
-  `["coral-run", run_id]` names no viewer or server; scope it, or clear it when
-  the viewer changes, before the run view (CRL-136) shares it. After an action
-  the cached run holds the new `status` and `allowed_actions` but the old
-  `pause_reason`, causes and view until the reread lands.
+- **A card's action patches only part of the cached run.** After a Resume or
+  Cancel the cached run holds the new `status` and `allowed_actions` but the old
+  `pause_reason`, causes and view until the reread lands. The run view reads
+  those from its stream instead.
+- **A link to your own finished run marks its run-end alert read** when you
+  open it. That is the designed mark-on-open, limited to low-priority alerts of
+  that one run, and the server filters by owner. A run that ends while its page
+  is out of date (a newer stream protocol) is not marked: no `[DONE]` reaches it.
+- **Bodies are parsed before their checks.** FastAPI parses any Coral POST
+  body, the bulk ack's included, before its dependencies run; a shared size cap
+  belongs in `CoralRoute` (CRL-150). This route's body is one 32-hex field.
 - **A resumed or cancelled pause card leaves the list.** The action resolves
   its alert, so the next Inbox read drops the card, and its status line and
   focus go with it. The line is announced first. A card reopened while its
@@ -420,7 +463,7 @@ single-user or auth-off servers are never Enforced.
 
 | Work | Owner |
 |---|---|
-| The run view, marking a run's alerts read when it is opened, bulk ack (`POST /v1/coral/inbox/ack`); scoping the `["coral-run", id]` query key to the viewer | CRL-136 |
+| A request-body size cap in `CoralRoute` for every Coral POST | CRL-150 |
 | The sandbox probe also tests, from the step shell, HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials | CRL-137 |
 | Label gates Enforced under the rule above | RUL-02 |
 | Retention of marked-read and resolved alerts | DUR-06 |

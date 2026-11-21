@@ -98,6 +98,10 @@ export async function coralError(response: Response): Promise<ApiError> {
   );
 }
 
+/** Whether `error` is a runs route's 404: the run is gone, or not the caller's. */
+export const isRunNotFound = (error: unknown): boolean =>
+  error instanceof ApiError && error.status === 404;
+
 /** A run read's retry rule: once for a failure a retry can fix; a 404 or another refusal is final. */
 export const retryRunRead = (failureCount: number, error: unknown): boolean =>
   failureCount < 1 && isRetryableRequestError(error);

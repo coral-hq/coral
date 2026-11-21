@@ -1,4 +1,4 @@
-import { ApiError } from "@/lib/sessionsApi";
+import { isRunNotFound } from "../api/runsApi";
 import type { RunStreamStatus } from "../stream/runStream";
 
 // Which of its states the run page is in, from its detail read and its stream, and what it
@@ -25,8 +25,6 @@ export interface RunPageInputs {
 export const NOT_FOUND_TEXT = "Run not found or you don’t have access";
 export const LOAD_FAILED_PAGE_TEXT = "Couldn’t load this run.";
 
-const isNotFound = (error: unknown) => error instanceof ApiError && error.status === 404;
-
 /**
  * The page's state. A 404 from either source ends it (both check the owner). A refused
  * stream, until a frame follows its Retry, or a detail that never loaded, is a failure with
@@ -39,7 +37,7 @@ export function runPageState({
   streamStatus,
   streamRetrying,
 }: RunPageInputs): RunPageState {
-  if (isNotFound(detailError) || streamStatus === "not_found") return "not_found";
+  if (isRunNotFound(detailError) || streamStatus === "not_found") return "not_found";
   if (streamStatus === "failed" || streamRetrying) return "failed";
   if (detailError !== null && !detailLoaded) return "failed";
   if (!detailLoaded && !streamShown) return "loading";

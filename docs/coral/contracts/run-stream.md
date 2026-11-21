@@ -7,7 +7,8 @@
   frames in `coral/runview/types.py`; entries and headers in `coral/api/run_models.py`
   (`entry_frame`, `run_header`); the patch applier in `coral/runview/patch.py`; the route
   in `coral/api/runs.py`; the account re-check in `coral/omni/server/access.py`
-  (`account_still_valid`); wiring in `coral/omni/server/plugin.py` (`_run_stream_hub`).
+  (`account_still_valid`); wiring in `coral/omni/server/plugin.py` (`_run_stream_hub`);
+  the web client in `web/src/workflows/stream/` ("The web client").
 - **Related:** [`runs-api.md`](runs-api.md) (the routes, the one 404, `allowed_actions`),
   [`session-facade.md`](session-facade.md) (the engine bridge and its view).
 
@@ -215,6 +216,60 @@ goes on from there, so a reconnect never meets that row again; `/log` shows it a
   yourself and honour `Retry-After`, or poll `GET /runs/{id}/log?after_seq=<last seq>` and
   the detail instead.
 
+## The web client
+
+The run view ([`runs-api.md`](runs-api.md), "In the web app") follows a run through
+`web/src/workflows/stream/`: `sseParser.ts`, `viewPatch.ts`, `frames.ts`, the controller in
+`runStream.ts` and the hook in `useRunStream.ts`. It keeps the client rules above, as
+built:
+
+- **Transport.** A streamed `fetch` through `authenticatedFetch`, not `EventSource`, so
+  refusals and `Retry-After` are read; the app's 45 s stall guard. Its own parser keeps
+  `id:` and caps an event at 8 MiB. Frames are checked by zod guards, but the patch applier
+  works on the raw `JSON.parse` value: zod drops unknown keys and `__proto__`.
+- **Patches.** `applyViewPatch` gives the same result or refusal as
+  `coral/runview/patch.py` on every case in `viewPatch.contract.json`, which
+  `tests/coral/runview/view_patch_contract.py` writes from the Python applier and the
+  recorded run's patches. It refuses more, cases a real `RunView` never meets: the tokens
+  `__proto__`, `constructor` and `prototype`, a pointer of more than 16 tokens or 1,024
+  characters, a patch of more than 10,000 ops. Every token needs an own key or a valid
+  index; containers are copied on write and the input never changes.
+- **Frames.** A `snapshot` replaces the view, header and seq. An entry at the held seq or
+  below is ignored, the next one applies, and a gap reconnects fresh; an unloadable run's
+  entries move the seq without a patch. A `run` frame applies at once, unless its `version`
+  is below the held header's, so during a replay the pill can lead the canvas. On `resync`
+  the view stays on screen until the snapshot. `[DONE]` stops the stream and frees its
+  slot. Unknown types are ignored. A snapshot of a newer `protocol` or `view_version` stops
+  streaming for good: the page says "This page is out of date. Reload it for live
+  updates." and polls the detail.
+- **Reconnects.** `Last-Event-ID` is the last seq held. A patch that does not apply, a
+  gap, an event over the cap or a malformed frame reconnects without it, keeping the view
+  on screen. A body that ended after frames (the 5-minute end) reconnects after the
+  shortest backoff; one that ended with none counts as a failure, so the empty 200 for an
+  unknown row code never loops fast. A 404 says "Run not found or you don't have access";
+  401, 403 and 422 stop, with Retry. A 429 or 503 waits its `Retry-After`, capped at 60 s,
+  or the backoff if longer, keeping the slot; three in a row switch to limited mode. Other
+  failures back off (`awaitReconnectDelay`).
+- **Connection budget.** A page holds at most one of the origin's stream slots. With none
+  free it disposes one of this tab's background chats (`conversationRegistry.
+  evictLruEvictable()`, which never takes the conversation on screen, an open drawer's
+  session or one with unsent work) and tries again every 200 ms, five times. Then "Live
+  updates limited": the detail every 5 s, the stream again every 30 s with one more
+  eviction, resuming with `Last-Event-ID`. A page hidden for 30 s gives its slot back and
+  resumes when shown; a page opened hidden takes no slot until then. A slot granted after
+  the page stopped is handed back at once.
+- **Cache.** The hook writes each state under `["coral-run-view", scope, runId]`, the
+  key's only writer, without structural sharing (which would turn an own `__proto__`
+  member into a prototype). A remount within 5 minutes resumes from it with
+  `Last-Event-ID`. In limited mode the detail read lands in the detail's key. On `[DONE]`
+  the hook invalidates the run's detail and outcome.
+- **Proof.** `stream/runStream.test.ts` and `stream/useRunStream.test.tsx` drive the
+  controller over the live recording in `runView.contract.json` (one stream read while
+  the run went through both gates, a pause and a resume, written by
+  `tests/coral/api/run_view_contract.py`): a stream dropped after the first gate resumes
+  with `Last-Event-ID` and applies every seq once, in order; every path holds at most one
+  slot and releases it. `stream/viewPatch.test.ts` runs every patch case.
+
 ## OpenAPI and TypeScript
 
 - The checked-in `coral/api/openapi.json` gives the stream's 200 only as
@@ -270,3 +325,18 @@ order. A client that reconnects to any process, after a restart or not, with
   is left incomplete. uvicorn logs "ASGI callable returned without completing response." at
   ERROR for each such client, and closes the connection.
 - **The live `/openapi.json` has a dangling `RunStreamFrame` `$ref`** (above).
+- **The web client is not checked in a browser** (the repository's rule): that
+  `authenticatedFetch` and the dev proxy pass `Last-Event-ID` unchanged, and that real Web
+  Locks slots behave as the tests' counting slots, are left to a manual check.
+- **A hostile server can stall the tab.** Each array op costs the array's length, so a
+  10,000-op entry on a huge array takes about a second; the event cap bounds it. Real
+  views are graph-sized.
+- **Limited mode after the end.** A finished run seen only through limited mode stops
+  reading its detail, but still tries the stream every 30 s to collect `[DONE]`, and each
+  try may dispose one of this tab's background chats while other tabs hold every slot.
+  Each limited detail read is cut at its 5 s tick, so a server slower than that never
+  updates the page.
+- **An out-of-date page never sees `[DONE]`,** so a run that ends while it is open is not
+  marked read on open ([`gates-and-inbox.md`](gates-and-inbox.md)).
+- **Handing slots back has no bound.** A new slot request waits for this tab's releases;
+  Web Locks releases settle, so this is liveness hardening left undone.

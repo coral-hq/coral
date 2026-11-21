@@ -34,9 +34,12 @@ import {
 import {
   CONTRACT_DETAIL_GATE_PASS1,
   CONTRACT_DETAIL_GATE_PASS2,
+  CONTRACT_FINAL_DETAIL,
+  CONTRACT_FINAL_SNAPSHOT,
   CONTRACT_GRAPH,
   CONTRACT_LIVE,
   CONTRACT_LIVE_MARKS,
+  CONTRACT_OUTCOME,
   CONTRACT_PAUSE_MESSAGES,
   type ContractEvent,
 } from "../fixtures/runViewContract";
@@ -45,16 +48,18 @@ import { RunPage } from "./RunPage";
 
 // The live run view's proving tests, over the run recorded live from the backend's own
 // stream: the page follows step transitions as they arrive, an open gate is answered inline
-// and the same stream carries the run on, and every pause reason's copy renders. Only I/O is
-// faked: the stream body is released event by event, in the recorded order. These prove the
-// client half of resuming a run from its gate; the server half is the runs route's answer
-// tests and the runs end-to-end test.
+// and the same stream carries the run on, every pause reason's copy renders, and the finished
+// run shows its outcome with the server's checkout command. Only I/O is faked: the stream
+// body is released event by event, in the recorded order. These prove the client half of
+// resuming a run from its gate and of checking a run out; the server halves are the runs
+// route's answer tests, the runs end-to-end test and the real-git outcome test.
 
 const RUN_ID = CONTRACT_DETAIL_GATE_PASS1.run_id;
 const DETAIL_URL = `/v1/coral/runs/${RUN_ID}`;
 const GRAPH_URL = `/v1/coral/runs/${RUN_ID}/graph`;
 const ACK_URL = "/v1/coral/inbox/ack";
 const ANSWER_URL = `/v1/coral/runs/${RUN_ID}/gates/approve_change:answer`;
+const OUTCOME_URL = `/v1/coral/runs/${RUN_ID}/outcome`;
 const MARKS = CONTRACT_LIVE_MARKS;
 const REJECT_NOTE = "Add a regression test for the parser.";
 
@@ -177,6 +182,7 @@ beforeEach(() => {
     }
     if (url === DETAIL_URL) return Promise.resolve(jsonResponse(200, detail));
     if (url === GRAPH_URL) return Promise.resolve(jsonResponse(200, CONTRACT_GRAPH));
+    if (url === OUTCOME_URL) return Promise.resolve(jsonResponse(200, CONTRACT_OUTCOME));
     return server.fetch(input, init);
   });
   slots = countingSlots();
@@ -534,6 +540,83 @@ describe("Live run view proving tests", () => {
       // WHY: a newer server's reason still reads as a pause, never as a blank banner.
       await showPause("a_future_reason", []);
       expectBanner("Paused", "The run paused.");
+    });
+  });
+
+  describe("5: the finished run's outcome panel shows the server's checkout command", () => {
+    const outcomeReads = () =>
+      authenticatedFetch.mock.calls.filter(([url]) => String(url) === OUTCOME_URL).length;
+    const outcome = () => screen.getByRole("region", { name: "Outcome" });
+    let writeText: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(window.navigator, "clipboard", {
+        value: { writeText },
+        configurable: true,
+      });
+    });
+
+    afterEach(() => {
+      Reflect.deleteProperty(window.navigator, "clipboard");
+    });
+
+    /** What the panel shows of the recorded outcome. */
+    function expectRecordedOutcome() {
+      const diff = CONTRACT_OUTCOME.diff!;
+      expect(within(outcome()).getByTestId("run-outcome-branch")).toHaveTextContent(
+        CONTRACT_OUTCOME.branch!,
+      );
+      expect(within(outcome()).getByTestId("run-outcome-summary")).toHaveTextContent(
+        `${diff.files_changed} files changed, +${diff.insertions} −${diff.deletions}`,
+      );
+      expect(
+        within(within(outcome()).getByTestId("run-outcome-paths"))
+          .getAllByRole("listitem")
+          .map((item) => item.textContent),
+      ).toEqual(diff.paths);
+      // Verbatim: the string the real-git outcome test ran through `sh -c`.
+      expect(within(outcome()).getByTestId("run-outcome-checkout-command").textContent).toBe(
+        CONTRACT_OUTCOME.checkout.command,
+      );
+      expect(within(outcome()).getByTestId("run-outcome-worktree-command").textContent).toBe(
+        CONTRACT_OUTCOME.checkout.worktree_command,
+      );
+    }
+
+    it("a finished recorded run shows its branch, diff and exact checkout command", async () => {
+      // WHY: the ticket's criterion: the outcome panel shows a working checkout command.
+      detail = CONTRACT_FINAL_DETAIL;
+      server.reply(sseResponse(wireText(CONTRACT_FINAL_SNAPSHOT)));
+      renderPage();
+      await run();
+      // The finished header mounts the panel, which then reads the outcome.
+      await run();
+      expect(page()).toHaveAttribute("data-stream", "done");
+      expect(pillKind()).toBe("completed");
+      expectRecordedOutcome();
+      fireEvent.click(within(outcome()).getByTestId("run-outcome-checkout-copy"));
+      await run();
+      expect(writeText).toHaveBeenCalledWith(CONTRACT_OUTCOME.checkout.command);
+    });
+
+    it("a run that ends while watched shows its outcome once the stream says it finished", async () => {
+      // WHY: the outcome is read only for a finished run, on the page that watched it end.
+      detail = CONTRACT_DETAIL_GATE_PASS2;
+      const body = openStream(liveUpTo(MARKS.gate2_open));
+      renderPage();
+      await run();
+      expect(screen.queryByRole("region", { name: "Outcome" })).toBeNull();
+      expect(outcomeReads()).toBe(0);
+      body.send(wireText(CONTRACT_LIVE.slice(liveUpTo(MARKS.gate2_open).length)));
+      await run();
+      await run();
+      expect(page()).toHaveAttribute("data-stream", "done");
+      // The mount's read and the `[DONE]` refetch may coalesce; nothing reads more.
+      expect(outcomeReads()).toBeGreaterThan(0);
+      expect(outcomeReads()).toBeLessThanOrEqual(2);
+      expectRecordedOutcome();
+      expect(server.streamRequests()).toHaveLength(1);
     });
   });
 });
