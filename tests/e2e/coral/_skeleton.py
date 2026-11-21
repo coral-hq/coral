@@ -2,9 +2,8 @@
 
 The stack is a subprocess server with the Coral plugin, a host daemon that launches each
 step's runner, and the real ``claude`` CLI, whose model calls go only to the test's mock
-gateway. Its update checks and telemetry are not turned off yet: the host strips the
-variables that would, before they reach the CLI (step 3b, R62). Callers pass the
-scripts, tokens, deadlines and faults, and keep every assertion.
+gateway, with its self-update and non-essential traffic off. Callers pass the scripts,
+tokens, deadlines and faults, and keep every assertion.
 """
 
 from __future__ import annotations
@@ -45,10 +44,8 @@ RUN_ID_LABEL = "coral.run_id"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 _ACTIVATION_LINE = re.compile(r"^Activation id: (\S+)$", re.MULTILINE)
 _BRIEF_OPENING = "Coral step brief."
-# Kept from the test's environment; HOME and data dirs come from the helpers. TMPDIR is
-# not: the CLI keeps its temp root under /tmp whatever TMPDIR says, while the runner
-# grants the sandboxed CLI <tempdir>/claude-<uid>, so the two agree only on /tmp.
-_KEPT_ENV = ("LANG", "LC_ALL", "LC_CTYPE")
+# Kept from the test's environment; HOME and data dirs come from the helpers.
+_KEPT_ENV = ("LANG", "LC_ALL", "LC_CTYPE", "TMPDIR")
 # Appends the stack's config file to the server command line before the CLI parses it.
 _SERVER_BOOTSTRAP = """
 import os
@@ -97,8 +94,8 @@ def minimal_env() -> dict[str, str]:
     """
     The environment every stack process starts from: no credential, no ambient CLI setup.
 
-    The two CLI switches reach the server, the host and its zygote only; the host's
-    runner allowlist drops them before the CLI starts (step 3b, R62).
+    The two switches turn off the CLI's self-update and non-essential traffic; the host
+    forwards them to every step's CLI.
     """
     path_dirs = [os.path.dirname(sys.executable)]
     # An npm-installed claude is a node script.
@@ -187,6 +184,20 @@ def _omnigent_processes(needles: tuple[str, ...]) -> list[psutil.Process]:
             or any(_cmdline_references_dir(argv, needle) for needle in needles)
         ):
             found.append(proc)
+    return found
+
+
+def cli_environs(root: Path) -> list[dict[str, str]]:
+    """The environment of each live process the claude-sdk executor started a CLI with."""
+    needles = tuple(dict.fromkeys(str(path).rstrip(os.sep) for path in (root, root.resolve())))
+    found = []
+    for proc in psutil.process_iter():
+        with contextlib.suppress(psutil.Error, OSError):
+            environ = proc.environ()
+            if environ.get("CLAUDE_AGENT_SDK_CLIENT_APP") == "omnigent" and _under(
+                environ.get("HOME", ""), needles
+            ):
+                found.append(environ)
     return found
 
 

@@ -4116,6 +4116,90 @@ def test_prepare_claude_cli_path_probe_passes_target_and_still_wraps(
     )
 
 
+# CORAL(S109): each seatbelt launch gets its own CLI temp dir; no shared temp dir is granted
+class _PassingWrapBackend:
+    def wrap_launcher_argv(self, argv, policy, cwd, chdir=None, target=None):
+        return ["sandbox", "--", *argv]
+
+
+def _granted_policy(monkeypatch, tmp_path: Path, backend_type: str):
+    """The policy the CLI wrap is built from, with HOME, TMPDIR and the socket root in tmp_path."""
+    import dataclasses
+
+    from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "tmpdir").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmpdir"))
+    monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", str(tmp_path / "h"))
+    policy = dataclasses.replace(_active_policy(), backend_type=backend_type)
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.resolve_sandbox", lambda *a, **k: policy
+    )
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.get_backend", lambda name: _PassingWrapBackend()
+    )
+    captured = {}
+
+    def _capture(path, sandbox):
+        captured["sandbox"] = sandbox
+        return "/tmp/launcher"
+
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor.create_exec_launcher", _capture)
+    prepared = prepare_claude_cli_path("/usr/bin/claude", _wrap_probe_spec())
+    assert prepared.enable_native_tools is True
+    return captured["sandbox"]
+
+
+def _granted_paths(policy) -> list[Path]:
+    return [*policy.write_roots, *(policy.read_roots or []), *policy.write_files]
+
+
+@pytest.mark.parametrize("backend_type", ["darwin_seatbelt", "linux_bwrap"])
+def test_prepare_claude_cli_path_grants_no_shared_claude_temp_dir(
+    monkeypatch, tmp_path, backend_type: str
+) -> None:
+    """Neither the runner's ``$TMPDIR/claude-<uid>`` nor ``/tmp/claude-<uid>`` is granted."""
+    policy = _granted_policy(monkeypatch, tmp_path, backend_type)
+
+    granted = _granted_paths(policy)
+    assert not [path for path in granted if path.name.startswith("claude-")], granted
+    assert not (tmp_path / "tmpdir" / f"claude-{os.getuid()}").exists()
+
+
+def test_prepare_claude_cli_path_gives_each_seatbelt_launch_its_own_cli_temp_dir(
+    monkeypatch, tmp_path
+) -> None:
+    """Seatbelt shares the host's /tmp, so the launcher makes CLAUDE_CODE_TMPDIR per launch."""
+    policy = _granted_policy(monkeypatch, tmp_path, "darwin_seatbelt")
+
+    assert policy.launch_tmpdir_env == "CLAUDE_CODE_TMPDIR"
+    assert policy.launch_tmpdir_parent == tmp_path / "h"
+    # The launcher makes the dir per launch; nothing under the socket root is granted up front.
+    assert not [path for path in _granted_paths(policy) if (tmp_path / "h") in path.parents]
+
+
+def test_prepare_claude_cli_path_leaves_bwraps_private_tmp_alone(monkeypatch, tmp_path) -> None:
+    """Bwrap's /tmp is a private tmpfs per launch: no CLI dir is bound over it."""
+    policy = _granted_policy(monkeypatch, tmp_path, "linux_bwrap")
+
+    assert (policy.launch_tmpdir_env, policy.launch_tmpdir_parent) == (None, None)
+
+
+@pytest.mark.parametrize(("parent", "warns"), [("h", False), ("h" * 40, True)])
+def test_the_cli_temp_dir_parent_warns_past_the_clis_short_path_limit(
+    monkeypatch, tmp_path, caplog, parent: str, warns: bool
+) -> None:
+    """Past 44 bytes the CLI sends its child-process temp dirs to the shared /tmp."""
+    from omnigent.inner.claude_sdk_executor import _claude_launch_tmpdir_parent
+
+    monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", f"/tmp/{parent}")
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor"):
+        assert _claude_launch_tmpdir_parent() == Path(f"/tmp/{parent}")
+
+    assert any("exceeds 44 bytes" in record.getMessage() for record in caplog.records) is warns
+
+
 # ---------------------------------------------------------------------------
 # Tests: _to_anthropic_content_blocks
 # ---------------------------------------------------------------------------

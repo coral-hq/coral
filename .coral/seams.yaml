@@ -3289,3 +3289,95 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S109
+    title: Each sandboxed claude CLI launch gets its own temp dir
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      The claude CLI (2.1.325, read from its binary) keeps its temp dir at
+      $CLAUDE_CODE_TMPDIR/claude-<uid>, else /tmp/claude-<uid>, and ignores
+      TMPDIR for it; past 44 bytes it sends child-process temp dirs to
+      /tmp/claude-<uid>. The CLI wrap granted only
+      <gettempdir()>/claude-<uid>, so under seatbelt with TMPDIR set (always
+      on macOS) the CLI failed at start with EPERM on /tmp/claude-<uid>.
+      Granting /tmp/claude-<uid> would give every step, its siblings and the
+      user's own Claude Code sessions one shared directory (R71), so no
+      per-user temp dir is granted at all, and the upstream
+      <gettempdir()>/claude-<uid> grant is removed: inside the wrap the CLI's
+      TMPDIR is the launcher's own scratch, so no CLI used it, and with Linux's
+      default TMPDIR it bound the shared /tmp/claude-<uid> over bwrap's
+      private /tmp. Instead a
+      SandboxPolicy can name an env var and a parent (with_launch_tmpdir). For
+      each launch the spawn-time-wrap host pass creates a fresh 0700 dir there
+      with mkdtemp, grants only that dir, and exports it; the in-wrap pass
+      removes it when the target exits. The parent must pass lstat as a real
+      directory (not a symlink) owned by this uid with mode 0700, so a planted
+      /tmp/omnigent-<uid> is refused with no grant and a warning that names no
+      path. Each dir holds an owner claim for its launcher, and each launch
+      first removes sibling c???????? dirs that are this user's private dirs
+      with a claim whose launcher is gone; unclaimed, live, foreign-named and
+      symlinked entries stay. Under seatbelt the executor asks for
+      CLAUDE_CODE_TMPDIR under the runner's harness socket root
+      (/tmp/omnigent-<uid> or OMNIGENT_HARNESS_TMP_PARENT, already short and
+      0700 for the harness sockets; its sweep touches only ap-* dirs), so the
+      CLI's dir is 38 bytes for uid 501, and it warns past 44. The CLI puts its
+      messaging socket under XDG_RUNTIME_DIR, which the launcher points at its
+      scratch, so no socket lands in this dir. Bwrap gets no launch dir: its
+      /tmp is a private tmpfs per launch. A dir a killed launcher leaves
+      behind is removed at the next launch under the same root; a CLI that
+      outlived its killed launcher can lose its dir then.
+    files:
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/inner/sandbox.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_sandbox.py
+    tests:
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_sandbox.py
+      - tests/e2e/coral/test_skeleton.py
+    budget_lines: 120
+    budget_exception:
+      lines: 211
+      reason: >-
+        tests/inner/test_sandbox.py (211 added lines): three helpers and the
+        launch dir tests (the fields on the wire and through clones, fresh
+        private dirs, four refused parent modes, a planted symlink parent, a
+        parent another uid owns, the orphan sweep's keep and remove cases, the
+        host pass's grant and export, and removal when the target exits or
+        fails). The other files are within budget:
+        omnigent/inner/sandbox.py 115, omnigent/inner/claude_sdk_executor.py
+        31, tests/inner/test_claude_sdk_executor.py 84.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S110
+    title: Host-launched runners keep the claude CLI's update and traffic switches
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      DISABLE_AUTOUPDATER and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC turn off
+      the claude CLI's self-update and its non-essential traffic. The host's
+      runner env allowlist dropped both, so they never reached a host-launched
+      step's CLI and the coral-e2e lane's CLI could call off the machine for
+      updates or telemetry. Both names are now in _RUNNER_ENV_ALLOWLIST, which
+      the CLI's host-daemon env also uses, so they pass CLI, daemon and
+      runner; the harness, the sandbox launcher and the SDK keep the runner's
+      environment, so they reach the CLI. Exact names only: no prefix and no
+      other CLAUDE_CODE_* name. Both are non-secret booleans, and a host that
+      does not set them sees no change. The skeleton E2E reads them from the
+      live step CLI.
+    files:
+      - omnigent/host/connect.py
+      - tests/host/test_connect.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/e2e/coral/test_skeleton.py
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

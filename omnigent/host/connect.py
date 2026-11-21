@@ -886,6 +886,10 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # which turns off MCP tool search and loads every tool schema eagerly.
         "CLAUDE_CODE_USE_GATEWAY",
         "ENABLE_TOOL_SEARCH",
+        # CORAL(S110): Claude CLI switches that turn off its self-update and non-essential
+        # traffic. Non-secret booleans, forwarded by exact name only.
+        "DISABLE_AUTOUPDATER",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         # Kubernetes config path. A filesystem path (typically
         # ``~/.kube/config``), not a bearer secret — the file *contains*
         # cluster certs/tokens but the env var is just a path string,

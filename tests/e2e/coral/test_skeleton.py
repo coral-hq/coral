@@ -137,6 +137,11 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
 
         # Implement, pass 1: a handoff before the check is refused, then accepted after it.
         implement_1 = held_activation(impl_token, 1)
+        # Read while the step's CLI is held on its first call.
+        cli_switches = {
+            (env.get("DISABLE_AUTOUPDATER"), env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            for env in sk.cli_environs(stack.root)
+        }
         _queue(
             mock,
             impl_token,
@@ -243,6 +248,8 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
         greeting = (stack.repo / "greeting.txt").read_text() if checkout.returncode == 0 else None
 
     assert (run["status"], run["causes"]) == ("completed", []), run
+    # The step's CLI ran with its self-update and non-essential traffic off.
+    assert cli_switches == {("1", "1")}, cli_switches
     # One evidence rejection, then the same activation's handoff is accepted.
     [rejected] = _result_texts(mock, early)
     [accepted] = _result_texts(mock, done)

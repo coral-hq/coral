@@ -6,8 +6,10 @@ import base64
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -50,6 +52,8 @@ _LAUNCHER_WRAPPED_ENV = "OMNIGENT_LAUNCHER_SPAWN_WRAPPED"
 # dir the host pass created, so cleanup can never touch a spec-supplied
 # write root that merely happens to sit under the system tempdir.
 _LAUNCHER_PRIVATE_TMPDIR_ENV = "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR"
+# CORAL(S109): names this launch's own target dir for the in-wrap pass, which removes it.
+_LAUNCHER_LAUNCH_TMPDIR_ENV = "OMNIGENT_LAUNCHER_LAUNCH_TMPDIR"
 
 # Trusted outer-launcher hint consumed before sandbox environment filtering.
 # Active sandbox helpers and launcher targets strip it; unsandboxed children keep it.
@@ -195,6 +199,10 @@ class SandboxPolicy:
     git_ssh_socket_path: str | None = None
     deny_unix_socket_paths: list[Path] | None = None
     credential_source_paths: list[Path] | None = None
+    # CORAL(S109): per launch, a spawn-time-wrap launcher makes a private dir under this
+    # parent, grants it, sets the target's env var to it, and removes it when the target exits.
+    launch_tmpdir_env: str | None = None
+    launch_tmpdir_parent: Path | None = None
     # Parent-side only: the resolved credential-proxy policy. Read in
     # ``_HelperProcessClient._start_locked`` (parent) to mint synthetic
     # placeholders and proxy rewrite rules. Intentionally NOT carried in
@@ -268,6 +276,11 @@ class SandboxPolicy:
                 if self.credential_source_paths is not None
                 else None
             ),
+            # CORAL(S109)
+            "launch_tmpdir_env": self.launch_tmpdir_env,
+            "launch_tmpdir_parent": (
+                str(self.launch_tmpdir_parent) if self.launch_tmpdir_parent is not None else None
+            ),
         }
         return result
 
@@ -334,6 +347,9 @@ class SandboxPolicy:
             if isinstance(credential_source_paths_data, list)
             else None
         )
+        # CORAL(S109)
+        launch_env_raw = data.get("launch_tmpdir_env")
+        launch_parent_raw = data.get("launch_tmpdir_parent")
         cow_roots = data.get("copy_on_write_roots", [])
         if not isinstance(cow_roots, list) or any(not isinstance(p, str) for p in cow_roots):
             raise ValueError("Invalid copy_on_write_roots")
@@ -365,6 +381,10 @@ class SandboxPolicy:
             git_ssh_socket_path=git_ssh_socket_path,
             deny_unix_socket_paths=deny_unix_socket_paths,
             credential_source_paths=credential_source_paths,
+            launch_tmpdir_env=launch_env_raw if isinstance(launch_env_raw, str) else None,
+            launch_tmpdir_parent=(
+                Path(launch_parent_raw) if isinstance(launch_parent_raw, str) else None
+            ),
         )
 
 
@@ -905,6 +925,9 @@ def _clone_policy_with(
             if policy.credential_source_paths is not None
             else None
         ),
+        # CORAL(S109)
+        launch_tmpdir_env=policy.launch_tmpdir_env,
+        launch_tmpdir_parent=policy.launch_tmpdir_parent,
         # Preserve the credential-proxy policy across clones: the
         # ``with_additional_*`` helpers run before the parent reads it in
         # ``_start_locked``, so dropping it here would silently disable
@@ -1083,7 +1106,10 @@ def _prune_environ_to_spawn_allowlist(sandbox: SandboxPolicy) -> None:
         _LAUNCHER_WRAPPED_ENV,
         _SANDBOX_STRACE_ENV,
         _LAUNCHER_PRIVATE_TMPDIR_ENV,
+        _LAUNCHER_LAUNCH_TMPDIR_ENV,  # CORAL(S109)
     }
+    if sandbox.launch_tmpdir_env is not None:
+        allowed.add(sandbox.launch_tmpdir_env)  # CORAL(S109)
     for name in list(os.environ):
         if name not in allowed:
             del os.environ[name]
@@ -1111,6 +1137,81 @@ def cleanup_private_tmpdir(tmpdir: Path | None) -> None:
     if tmpdir is None:
         return
     shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def with_launch_tmpdir(policy: SandboxPolicy, env_name: str, parent: Path) -> SandboxPolicy:
+    """CORAL(S109): give each launch's target its own dir under ``parent``, in ``env_name``."""
+    return replace(policy, launch_tmpdir_env=env_name, launch_tmpdir_parent=parent)
+
+
+# CORAL(S109): launch dirs are ``mkdtemp(prefix="c")`` names holding this owner claim.
+_LAUNCH_TMPDIR_NAME = re.compile(r"c[a-z0-9_]{8}")
+_LAUNCH_TMPDIR_OWNER = ".launch-owner"
+
+
+def _is_private_dir(path: Path) -> bool:
+    """CORAL(S109): a real directory, not a symlink, owned by this uid with mode 0700."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and stat.S_IMODE(info.st_mode) == 0o700
+    )
+
+
+def _remove_orphaned_launch_tmpdirs(parent: Path) -> None:
+    """CORAL(S109): remove launch dirs left by launchers that died before their cleanup."""
+    from omnigent.native.owner_claim import owner_is_gone, read_owner_claim
+
+    from ._proc import process_alive
+
+    try:
+        children = list(parent.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if not _LAUNCH_TMPDIR_NAME.fullmatch(child.name) or not _is_private_dir(child):
+            continue
+        claim = read_owner_claim(child, filename=_LAUNCH_TMPDIR_OWNER)
+        if claim is not None and owner_is_gone(claim, process_alive=process_alive):
+            shutil.rmtree(child, ignore_errors=True)
+
+
+def create_launch_tmpdir(policy: SandboxPolicy) -> Path | None:
+    """
+    CORAL(S109): a fresh 0700 dir under the policy's launch parent, or ``None``.
+
+    ``None`` when the policy asks for none, or when the parent is not this user's private
+    directory (a symlink, another owner, or a mode other than 0700): someone else could then
+    swap the dir before the grant resolves it. The dir records its launcher as owner, and
+    siblings whose launcher is gone are removed first.
+    """
+    from omnigent.native.owner_claim import write_owner_claim
+
+    parent = policy.launch_tmpdir_parent
+    if policy.launch_tmpdir_env is None or parent is None:
+        return None
+    try:
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Cannot create the launch temp dirs' parent (%s)", type(exc).__name__)
+        return None
+    if not _is_private_dir(parent):
+        logger.warning("Not creating a launch temp dir: its parent is not a private directory")
+        return None
+    _remove_orphaned_launch_tmpdirs(parent)
+    launch_tmpdir: Path | None = None
+    try:
+        launch_tmpdir = Path(tempfile.mkdtemp(prefix="c", dir=parent))
+        write_owner_claim(launch_tmpdir, filename=_LAUNCH_TMPDIR_OWNER)
+    except OSError as exc:
+        logger.warning("Cannot create a launch temp dir (%s)", type(exc).__name__)
+        cleanup_private_tmpdir(launch_tmpdir)
+        return None
+    return launch_tmpdir
 
 
 def run_launcher(
@@ -1168,6 +1269,7 @@ def run_launcher(
     # Before any wrap / exec so neither the re-exec'd launcher nor the target
     # can see env vars the spawner didn't deliberately pass.
     _prune_environ_to_spawn_allowlist(sandbox)
+    launch_tmpdir: Path | None = None  # CORAL(S109)
 
     # Spawn-time wrap re-exec for backends whose sandbox enforcement
     # is installed by the spawning process (``bwrap`` /
@@ -1204,9 +1306,15 @@ def run_launcher(
         # ``FileNotFoundError: No usable temporary directory`` on
         # seatbelt (bwrap masked it via its ``--tmpfs /tmp`` fallback).
         host_tmpdir = create_private_tmpdir()
+        # CORAL(S109): this launch's own target dir, granted here and removed in-wrap
+        launch_tmpdir = create_launch_tmpdir(sandbox)
         try:
-            sandbox = with_additional_write_roots(sandbox, [host_tmpdir])
+            launch_roots = [launch_tmpdir] if launch_tmpdir is not None else []
+            sandbox = with_additional_write_roots(sandbox, [host_tmpdir, *launch_roots])
             set_sandbox_env(os.environ, host_tmpdir)
+            if launch_tmpdir is not None and sandbox.launch_tmpdir_env is not None:
+                os.environ[sandbox.launch_tmpdir_env] = str(launch_tmpdir)
+                os.environ[_LAUNCHER_LAUNCH_TMPDIR_ENV] = str(launch_tmpdir)
             encoded_sandbox = _encode_json_arg(sandbox.to_jsonable())
             # Name the dir for the in-wrap pass: it adopts this exact
             # path (no second mint) and owns the cleanup on exit.
@@ -1258,12 +1366,16 @@ def run_launcher(
             os.execvp(wrapped[0], wrapped)
         except BaseException:
             cleanup_private_tmpdir(host_tmpdir)
+            cleanup_private_tmpdir(launch_tmpdir)  # CORAL(S109)
             raise
 
     tmpdir: Path | None = None
     if sandbox.active:
         inherited = os.environ.get(_LAUNCHER_PRIVATE_TMPDIR_ENV)
         if inherited:
+            # CORAL(S109): adopt this launch's own target dir so it goes when the target exits
+            if launch := os.environ.get(_LAUNCHER_LAUNCH_TMPDIR_ENV):
+                launch_tmpdir = Path(launch)
             # In-wrap pass of a spawn-time-wrap backend: adopt the dir
             # the host pass minted and granted. Re-assert ``$TMPDIR`` in
             # case the env prune stripped it; do NOT mint a second dir
@@ -1317,6 +1429,7 @@ def run_launcher(
         return int(completed.returncode)
     finally:
         cleanup_private_tmpdir(tmpdir)
+        cleanup_private_tmpdir(launch_tmpdir)  # CORAL(S109)
 
 
 def _launcher_inline_source(

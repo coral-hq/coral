@@ -4986,6 +4986,10 @@ def test_build_runner_env_allowlists_host_env_and_strips_secrets(tmp_path: Path)
         "OMNIGENT_WRAPPER_COMMAND": "isaac omni",
         "OMNIGENT_DEBUG_LOG_CLIENT_SECRET_COMMAND": "credential-helper --format raw",
         "OMNIGENT_MCP_AUTH_STATUS_FILE": "/srv/omnigent/mcp-auth-status.json",
+        # CORAL(S110): the Claude CLI's update and traffic switches, and a name never listed
+        "DISABLE_AUTOUPDATER": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_UNLISTED_SWITCH": "1",
     }
 
     env = _build_runner_env(
@@ -5065,6 +5069,10 @@ def test_build_runner_env_allowlists_host_env_and_strips_secrets(tmp_path: Path)
     assert env["OMNIGENT_LOG_TTY_FD"] == "9"
     # Runner-side CLI hints name the wrapper the user runs.
     assert env["OMNIGENT_WRAPPER_COMMAND"] == "isaac omni"
+    # CORAL(S110): the two CLI switches forward by exact name, other CLAUDE_CODE_* names do not.
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert "CLAUDE_CODE_UNLISTED_SWITCH" not in env
     # Non-harness secrets are stripped — the point of the allowlist.
     assert "DATABRICKS_TOKEN" not in env
     assert "AWS_SECRET_ACCESS_KEY" not in env
