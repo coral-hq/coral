@@ -109,7 +109,8 @@ def test_a_pause_on_the_row_alone_can_be_resumed(
         (_cause("user"),),
         (_cause("drift"),),
         (_cause("budget"), _cause("infra")),
-        (_cause("failure_path", "agent.failed", IMPLEMENT),),
+        (_cause("infra", "infra.runner_lost", IMPLEMENT),),
+        (_cause("infra", "infra.host_offline", IMPLEMENT), _cause("user")),
     ],
 )
 def test_an_engine_pause_with_a_cause_resume_clears_can_be_resumed(
@@ -125,8 +126,14 @@ def test_an_engine_pause_with_a_cause_resume_clears_can_be_resumed(
         (_cause("liveness"),),
         (_cause("engine_upgrade"),),
         (_cause("failure_path", "agent.failed"),),
+        # A step's failed turn is retried, never resumed.
+        (_cause("failure_path", "agent.failed", IMPLEMENT),),
         (_cause("failure_path", "effect.permanent", IMPLEMENT),),
         (_cause("budget"), _cause("liveness")),
+        # A host hold and a restart in progress leave only Cancel.
+        (_cause("infra", "infra.host_offline", IMPLEMENT),),
+        (_cause("infra", "recovery.restarting", IMPLEMENT),),
+        (_cause("infra", "recovery.restarting", IMPLEMENT), _cause("budget")),
     ],
 )
 def test_an_engine_pause_no_cause_of_which_resume_clears_can_only_be_cancelled(

@@ -6,8 +6,8 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from coral.engine.classify import classify_failure
-from coral.engine.facts import TurnFact
-from coral.engine.machines.slot import awaiting_effect
+from coral.engine.facts import TurnFact, runner_loss_key
+from coral.engine.machines.slot import awaiting_effect, reports_an_ended_outage
 from coral.engine.turn_end import evaluate
 from coral.engine.types import (
     EngineConfig,
@@ -63,12 +63,14 @@ def reconcile(
                         failure_class=failure.name,
                         cause=failure.cause,
                         fact_key=fact_key,
+                        runner_id=fact.runner_id,
+                        observed_at=fact.observed_at,
                     )
                 )
         lost = _runner_lost(state, fact, now, config)
         if lost is None:
             continue
-        runner_key = f"runner:{lost.session_id}:{lost.generation}"
+        runner_key = _loss_key(state, lost)
         if runner_key in seen_runner or _receipted(state, runner_key):
             continue
         seen_runner.add(runner_key)
@@ -101,7 +103,23 @@ def _runner_lost(
     slot = next((item for item in state.slots if item.id == fact.slot_id), None)
     if slot is None or slot.status != "working":
         return None
-    return RunnerLost(slot_id=fact.slot_id, session_id=fact.session_id, generation=fact.generation)
+    if reports_an_ended_outage(slot, fact.runner_id, seen):
+        return None
+    return RunnerLost(
+        slot_id=fact.slot_id,
+        session_id=fact.session_id,
+        generation=fact.generation,
+        runner_id=fact.runner_id,
+        fact_key=_turn_key(fact),
+        observed_at=seen,
+    )
+
+
+def _loss_key(state: RunState, lost: RunnerLost) -> str:
+    """The key the reducer receipts for this loss."""
+    slot = next((item for item in state.slots if item.id == lost.slot_id), None)
+    epoch = slot.connection_epoch if slot is not None else 0
+    return runner_loss_key(lost.session_id, lost.generation, lost.runner_id, lost.fact_key, epoch)
 
 
 def _receipted(state: RunState, key: str) -> bool:
@@ -133,6 +151,8 @@ def _fact_sort_key(fact: TurnFact) -> tuple[object, ...]:
         _opt_str(fact.error_code),
         _opt_str(fact.failure_origin),
         seen,
+        _opt_str(fact.runner_id),
+        "" if fact.observed_at is None else fact.observed_at.isoformat(),
     )
 
 
@@ -150,7 +170,11 @@ def _opt_int(value: int | None) -> tuple[bool, int]:
 
 def _input_sort_key(command: Input) -> tuple[str, str, str]:
     if isinstance(command, RunnerLost):
-        return (command.kind, f"{command.session_id}:{command.generation}", command.slot_id)
+        loss = (
+            f"{command.session_id}:{command.generation}:{command.runner_id}:{command.fact_key}"
+            f":{command.observed_at}"
+        )
+        return (command.kind, loss, command.slot_id)
     if isinstance(command, (TurnEnded, SessionFailed)):
         return (command.kind, command.fact_key, command.slot_id)
     kind = getattr(command, "kind", "")

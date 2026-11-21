@@ -318,7 +318,10 @@ class EngineBridge:
         run_id = snapshot.store.run_id
         # The run id derives from the caller's start key, so it is as idempotent a key.
         return engine.StartRun(
-            run_id=run_id, start_key=run_id, version_hash=snapshot.graph.content_hash
+            run_id=run_id,
+            start_key=run_id,
+            version_hash=snapshot.graph.content_hash,
+            rules=engine.RULES,
         )
 
     # ── loading ──────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ from __future__ import annotations
 from coral.engine import fold, transition
 from coral.engine.machines.activation import traverse_arrow
 from coral.engine.types import (
+    RULES,
     AttemptCount,
     ChooseArrow,
     HandoffEvaluated,
@@ -27,7 +28,7 @@ from tests.coral.workflow_builders import (
     workflow_text,
 )
 
-RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1")
+RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1", rules=RULES)
 
 
 def _graph(text: str) -> CompiledGraph:

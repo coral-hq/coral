@@ -10,6 +10,7 @@ from datetime import timedelta
 from coral.engine import empty_state, transition
 from coral.engine.machines.activation import choosable_labels, find_activation, routes_by_label
 from coral.engine.types import (
+    RULES,
     AnswerGate,
     CancelRun,
     ChooseArrow,
@@ -45,7 +46,9 @@ def fixture_graph(name: str) -> CompiledGraph:
 
 
 def start_run(graph: CompiledGraph, run_id: str = RUN_ID) -> StartRun:
-    return StartRun(run_id=run_id, start_key=START_KEY, version_hash=graph.content_hash)
+    return StartRun(
+        run_id=run_id, start_key=START_KEY, version_hash=graph.content_hash, rules=RULES
+    )
 
 
 def handoff_body(

@@ -38,6 +38,7 @@ from coral.db.enum_codecs import (
 )
 from coral.engine import transition
 from coral.engine.types import (
+    RULES,
     CancelRun,
     EffectCompleted,
     HandoffEvaluated,
@@ -141,10 +142,27 @@ def _causes(world: World, run_id: str) -> list[tuple[str, str]]:
 # ── build_commit ─────────────────────────────────────────────────────────────
 
 
+def test_a_run_the_bridge_starts_names_the_current_rules(world: World) -> None:
+    run = start(world)
+    (first, *_rest) = world.engine_log(run.id)
+    assert json.loads(first.body)["input"] == {
+        "kind": "start_run",
+        "run_id": run.id,
+        "start_key": run.id,
+        "version_hash": world.bridge.load(
+            workspace_id=WORKSPACE, run_id=run.id
+        ).graph.content_hash,
+        "rules": RULES,
+    }
+    assert world.bridge.load(workspace_id=WORKSPACE, run_id=run.id).state.rules == RULES
+
+
 def test_refused_entries_ride_audit_only_and_no_op_entries_are_not_stored(world: World) -> None:
     run = start(world)
     snapshot = world.bridge.load(workspace_id=WORKSPACE, run_id=run.id)
-    repeat = StartRun(run_id=run.id, start_key=run.id, version_hash=snapshot.graph.content_hash)
+    repeat = StartRun(
+        run_id=run.id, start_key=run.id, version_hash=snapshot.graph.content_hash, rules=RULES
+    )
     built = _build(
         world,
         run.id,

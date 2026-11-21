@@ -21,7 +21,7 @@ from coral.db.enum_codecs import (
     SlotRole,
 )
 from coral.engine import fold, transition
-from coral.engine.types import Input, LogEntry, RunState, StartRun
+from coral.engine.types import RULES, Input, LogEntry, RunState, StartRun
 from coral.model.ir import CompiledGraph
 from coral.stores.protocols import CoralRun, RunContended, RunNotFound
 from coral.stores.session_bindings import SessionBinding
@@ -114,7 +114,9 @@ class InMemoryDecisionPort:
         auto_ack: bool = True,
     ) -> None:
         """Start a run (store row RUNNING, version 1) and apply ``inputs``."""
-        start = StartRun(run_id=run_id, start_key=f"start-{run_id}", version_hash="hash-1")
+        start = StartRun(
+            run_id=run_id, start_key=f"start-{run_id}", version_hash="hash-1", rules=RULES
+        )
         driven = _accepted(drive(graph, [start, *inputs], auto_ack=auto_ack), after=None)
         row = CoralRun(
             workspace_id=workspace_id,

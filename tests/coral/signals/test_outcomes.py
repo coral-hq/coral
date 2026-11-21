@@ -8,6 +8,7 @@ from coral.engine import fold, transition
 from coral.engine.classify import classify_failure
 from coral.engine.facts import TurnSnapshot
 from coral.engine.types import (
+    RULES,
     EngineConfig,
     PauseCause,
     SessionFailed,
@@ -21,7 +22,7 @@ from coral.signals.outcomes import outcomes
 from tests.coral.engine.drive import NOW, drive
 from tests.coral.workflow_builders import compile_text, fixture_text
 
-RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1")
+RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1", rules=RULES)
 SLOT = "work||:0"
 POLICY = TimerPolicy()
 CFG = EngineConfig(timer_policy=POLICY)

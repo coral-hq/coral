@@ -1,0 +1,1053 @@
+{
+ "about": "Runs logged by the engine before start entries named their rules (step 1 of CRL-137), with the state and view each folded to then. Every later engine must fold them to the same state and view.",
+ "engine_config": {
+  "max_activations": 100,
+  "rejected_call_limit": 3
+ },
+ "runs": {
+  "attempts_exhausted_then_user_pause": {
+   "graph": "{\"ir_version\":1,\"workflow_id\":\"demo\",\"name\":\"Demo\",\"description\":null,\"nodes\":[{\"id\":\"start\",\"kind\":\"start\",\"name\":null,\"goal\":null,\"question\":null,\"prompt\":null,\"roster\":[],\"harness\":null,\"attempts\":null,\"concurrency\":null,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"work\",\"kind\":\"step\",\"name\":null,\"goal\":\"Do work\",\"question\":null,\"prompt\":null,\"roster\":[\"implementer\"],\"harness\":null,\"attempts\":1,\"concurrency\":1,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"ship\",\"kind\":\"step\",\"name\":null,\"goal\":\"Do ship\",\"question\":null,\"prompt\":null,\"roster\":[\"implementer\"],\"harness\":null,\"attempts\":3,\"concurrency\":1,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"end\",\"kind\":\"end\",\"name\":null,\"goal\":null,\"question\":null,\"prompt\":null,\"roster\":[],\"harness\":null,\"attempts\":null,\"concurrency\":null,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null}],\"arrows\":[{\"id\":\"a1\",\"source\":\"start\",\"target\":\"work\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null},{\"id\":\"a2\",\"source\":\"work\",\"target\":\"ship\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null},{\"id\":\"a3\",\"source\":\"ship\",\"target\":\"end\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null}],\"content_hash\":\"f4fcf4f62e0b166dbb070828202c07c3135d404142fedc963dc387041675a04d\",\"analysis\":{\"join_types\":[],\"loops\":[],\"regions\":[],\"unresolved\":[],\"label_sets\":[{\"node_id\":\"start\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a1\"]},{\"node_id\":\"work\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a2\"]},{\"node_id\":\"ship\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a3\"]}],\"checked_parts\":[]}}",
+   "log": [
+    "{\"seq\":1,\"input\":{\"kind\":\"start_run\",\"run_id\":\"run-1\",\"start_key\":\"start-1\",\"version_hash\":\"hash-1\"},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:1:create_session:work||:0\",\"kind\":\"create_session\",\"subject\":\"work||:0\",\"payload\":{\"node_id\":\"work\",\"profile\":\"implementer\",\"goal\":\"Do work\"}}],\"receipt_key\":\"start-1\",\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"running\"},{\"op\":\"add\",\"path\":\"/activations/0\",\"value\":{\"id\":\"start||\",\"status\":\"closed\",\"outcome\":\"completed\"}},{\"op\":\"add\",\"path\":\"/activations/1\",\"value\":{\"id\":\"work||\",\"status\":\"starting\",\"outcome\":null}},{\"op\":\"add\",\"path\":\"/slots/0\",\"value\":{\"id\":\"work||:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}}]}",
+    "{\"seq\":2,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:1:create_session:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:2:send_input:work||:0\",\"kind\":\"send_input\",\"subject\":\"work||:0\",\"payload\":{\"node_id\":\"work\",\"profile\":\"implementer\",\"goal\":\"Do work\"}}],\"receipt_key\":\"run-1:1:create_session:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"session_created\"}]}",
+    "{\"seq\":3,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:2:send_input:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:2:send_input:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"working\"}]}",
+    "{\"seq\":4,\"input\":{\"kind\":\"handoff_received\",\"slot_id\":\"work||:0\",\"body\":\"partial\",\"session_generation\":1,\"label\":null},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"evaluating\"}]}",
+    "{\"seq\":5,\"input\":{\"kind\":\"handoff_evaluated\",\"slot_id\":\"work||:0\",\"outcome\":\"evidence_missing\",\"missing\":[\"spec\"],\"session_generation\":1},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"paused\"},{\"op\":\"add\",\"path\":\"/causes/0\",\"value\":{\"reason\":\"failure_path\",\"detail\":\"attempts_exhausted\",\"subject\":\"spec\"}}]}",
+    "{\"seq\":6,\"input\":{\"kind\":\"pause_run\",\"reason\":\"user\",\"detail\":\"hold\"},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"add\",\"path\":\"/causes/1\",\"value\":{\"reason\":\"user\",\"detail\":\"hold\",\"subject\":\"\"}}]}",
+    "{\"seq\":7,\"input\":{\"kind\":\"resume_run\",\"cap\":null},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"remove\",\"path\":\"/causes/1\",\"value\":null}]}"
+   ],
+   "state": {
+    "activations": [
+     {
+      "handoffs": [],
+      "id": "start||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "start",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "handoffs": [],
+      "id": "work||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "work",
+      "outcome": null,
+      "status": "evaluating"
+     }
+    ],
+    "arrivals": [],
+    "attempts": [
+     {
+      "activation_id": "work||",
+      "used": 1
+     }
+    ],
+    "causes": [
+     {
+      "detail": "attempts_exhausted",
+      "reason": "failure_path",
+      "subject": "spec"
+     }
+    ],
+    "decisions": [],
+    "effects": [
+     {
+      "effect_key": "run-1:1:create_session:work||:0",
+      "kind": "create_session",
+      "payload": {
+       "goal": "Do work",
+       "node_id": "work",
+       "profile": "implementer"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:2:send_input:work||:0",
+      "kind": "send_input",
+      "payload": {
+       "goal": "Do work",
+       "node_id": "work",
+       "profile": "implementer"
+      },
+      "subject": "work||:0"
+     }
+    ],
+    "gates": [],
+    "loop_counters": [],
+    "max_activations": 100,
+    "receipts": [
+     {
+      "key": "start-1",
+      "payload": {
+       "run_id": "run-1",
+       "version_hash": "hash-1"
+      }
+     },
+     {
+      "key": "run-1:1:create_session:work||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:2:send_input:work||:0",
+      "payload": {}
+     }
+    ],
+    "reject_streaks": [],
+    "rejected_call_limit": 3,
+    "run_id": "run-1",
+    "seq": 7,
+    "slots": [
+     {
+      "activation_id": "work||",
+      "drift": false,
+      "failed_turn": null,
+      "handoff": "partial",
+      "handoff_label": null,
+      "id": "work||:0",
+      "nudges": 0,
+      "pending_input": false,
+      "profile": "implementer",
+      "session_generation": 1,
+      "status": "evaluating"
+     }
+    ],
+    "start_key": "start-1",
+    "status": "paused",
+    "timers": [],
+    "version_hash": "hash-1"
+   },
+   "view": {
+    "activations": [
+     {
+      "id": "start||",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "id": "work||",
+      "outcome": null,
+      "status": "evaluating"
+     }
+    ],
+    "armed_timer_keys": [],
+    "causes": [
+     {
+      "detail": "attempts_exhausted",
+      "reason": "failure_path",
+      "subject": "spec"
+     }
+    ],
+    "loop_pass_indexes": [],
+    "open_decisions": [],
+    "open_gates": [],
+    "slots": [
+     {
+      "drift": false,
+      "id": "work||:0",
+      "pending_input": false,
+      "status": "evaluating"
+     }
+    ],
+    "status": "paused"
+   }
+  },
+  "four_edge_losses": {
+   "graph": "{\"ir_version\":1,\"workflow_id\":\"demo\",\"name\":\"Demo\",\"description\":null,\"nodes\":[{\"id\":\"start\",\"kind\":\"start\",\"name\":null,\"goal\":null,\"question\":null,\"prompt\":null,\"roster\":[],\"harness\":null,\"attempts\":null,\"concurrency\":null,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"work\",\"kind\":\"step\",\"name\":null,\"goal\":\"Do work\",\"question\":null,\"prompt\":null,\"roster\":[\"implementer\"],\"harness\":null,\"attempts\":3,\"concurrency\":1,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"ship\",\"kind\":\"step\",\"name\":null,\"goal\":\"Do ship\",\"question\":null,\"prompt\":null,\"roster\":[\"implementer\"],\"harness\":null,\"attempts\":3,\"concurrency\":1,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"end\",\"kind\":\"end\",\"name\":null,\"goal\":null,\"question\":null,\"prompt\":null,\"roster\":[],\"harness\":null,\"attempts\":null,\"concurrency\":null,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null}],\"arrows\":[{\"id\":\"a1\",\"source\":\"start\",\"target\":\"work\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null},{\"id\":\"a2\",\"source\":\"work\",\"target\":\"ship\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null},{\"id\":\"a3\",\"source\":\"ship\",\"target\":\"end\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null}],\"content_hash\":\"de17c45efc267bd28e1893904b820a309207c79df26326a14583eacab2910c23\",\"analysis\":{\"join_types\":[],\"loops\":[],\"regions\":[],\"unresolved\":[],\"label_sets\":[{\"node_id\":\"start\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a1\"]},{\"node_id\":\"work\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a2\"]},{\"node_id\":\"ship\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a3\"]}],\"checked_parts\":[]}}",
+   "log": [
+    "{\"seq\":1,\"input\":{\"kind\":\"start_run\",\"run_id\":\"run-1\",\"start_key\":\"start-1\",\"version_hash\":\"hash-1\"},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:1:create_session:work||:0\",\"kind\":\"create_session\",\"subject\":\"work||:0\",\"payload\":{\"node_id\":\"work\",\"profile\":\"implementer\",\"goal\":\"Do work\"}}],\"receipt_key\":\"start-1\",\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"running\"},{\"op\":\"add\",\"path\":\"/activations/0\",\"value\":{\"id\":\"start||\",\"status\":\"closed\",\"outcome\":\"completed\"}},{\"op\":\"add\",\"path\":\"/activations/1\",\"value\":{\"id\":\"work||\",\"status\":\"starting\",\"outcome\":null}},{\"op\":\"add\",\"path\":\"/slots/0\",\"value\":{\"id\":\"work||:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}}]}",
+    "{\"seq\":2,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:1:create_session:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:2:send_input:work||:0\",\"kind\":\"send_input\",\"subject\":\"work||:0\",\"payload\":{\"node_id\":\"work\",\"profile\":\"implementer\",\"goal\":\"Do work\"}}],\"receipt_key\":\"run-1:1:create_session:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"session_created\"}]}",
+    "{\"seq\":3,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:2:send_input:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:2:send_input:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"working\"}]}",
+    "{\"seq\":4,\"input\":{\"kind\":\"session_failed\",\"slot_id\":\"work||:0\",\"failure_class\":\"infra.runner_lost\",\"cause\":\"runner_disconnected\",\"fact_key\":\"turn:sess-1:1:resp-0\"},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:4:runner_lost:work||:0\",\"kind\":\"runner_lost\",\"subject\":\"work||:0\",\"payload\":{\"session_id\":\"sess-1\",\"generation\":1}}],\"receipt_key\":\"runner:sess-1:1\",\"patch\":[{\"op\":\"add\",\"path\":\"/armed_timer_keys/0\",\"value\":\"infra_backoff:work||:0:1\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/1\",\"value\":\"infra_backoff:work||:0:2\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/2\",\"value\":\"infra_backoff:work||:0:3\"}]}",
+    "{\"seq\":5,\"input\":{\"kind\":\"session_failed\",\"slot_id\":\"work||:0\",\"failure_class\":\"infra.runner_lost\",\"cause\":\"runner_disconnected\",\"fact_key\":\"turn:sess-1:1:resp-1\"},\"now\":\"2026-01-01T00:00:01Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"turn:sess-1:1:resp-1\",\"patch\":[]}",
+    "{\"seq\":6,\"input\":{\"kind\":\"session_failed\",\"slot_id\":\"work||:0\",\"failure_class\":\"infra.runner_lost\",\"cause\":\"runner_disconnected\",\"fact_key\":\"turn:sess-1:1:resp-2\"},\"now\":\"2026-01-01T00:00:02Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"turn:sess-1:1:resp-2\",\"patch\":[]}",
+    "{\"seq\":7,\"input\":{\"kind\":\"session_failed\",\"slot_id\":\"work||:0\",\"failure_class\":\"infra.runner_lost\",\"cause\":\"runner_disconnected\",\"fact_key\":\"turn:sess-1:1:resp-3\"},\"now\":\"2026-01-01T00:00:03Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"turn:sess-1:1:resp-3\",\"patch\":[]}",
+    "{\"seq\":8,\"input\":{\"kind\":\"handoff_received\",\"slot_id\":\"work||:0\",\"body\":\"done\",\"session_generation\":1,\"label\":null},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"evaluating\"}]}",
+    "{\"seq\":9,\"input\":{\"kind\":\"handoff_evaluated\",\"slot_id\":\"work||:0\",\"outcome\":\"accepted\",\"missing\":[],\"session_generation\":1},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:9:close_slot:work||:0\",\"kind\":\"close_slot\",\"subject\":\"work||:0\",\"payload\":{\"interrupt\":true,\"closed_label\":true}}],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closing\"}]}",
+    "{\"seq\":10,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:9:close_slot:work||:0\",\"payload\":{\"pending_input\":false}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:10:create_session:ship||:0\",\"kind\":\"create_session\",\"subject\":\"ship||:0\",\"payload\":{\"node_id\":\"ship\",\"profile\":\"implementer\",\"goal\":\"Do ship\"}}],\"receipt_key\":\"run-1:9:close_slot:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/1/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/2\",\"value\":{\"id\":\"ship||\",\"status\":\"starting\",\"outcome\":null}},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closed\"},{\"op\":\"add\",\"path\":\"/slots/1\",\"value\":{\"id\":\"ship||:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}}]}",
+    "{\"seq\":11,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:10:create_session:ship||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:11:send_input:ship||:0\",\"kind\":\"send_input\",\"subject\":\"ship||:0\",\"payload\":{\"node_id\":\"ship\",\"profile\":\"implementer\",\"goal\":\"Do ship\"}}],\"receipt_key\":\"run-1:10:create_session:ship||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"session_created\"}]}",
+    "{\"seq\":12,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:11:send_input:ship||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:11:send_input:ship||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/2/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"working\"}]}",
+    "{\"seq\":13,\"input\":{\"kind\":\"handoff_received\",\"slot_id\":\"ship||:0\",\"body\":\"done\",\"session_generation\":1,\"label\":null},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/2/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"evaluating\"}]}",
+    "{\"seq\":14,\"input\":{\"kind\":\"handoff_evaluated\",\"slot_id\":\"ship||:0\",\"outcome\":\"accepted\",\"missing\":[],\"session_generation\":1},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:14:close_slot:ship||:0\",\"kind\":\"close_slot\",\"subject\":\"ship||:0\",\"payload\":{\"interrupt\":true,\"closed_label\":true}}],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closing\"}]}",
+    "{\"seq\":15,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:14:close_slot:ship||:0\",\"payload\":{\"pending_input\":false}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:14:close_slot:ship||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"completed\"},{\"op\":\"replace\",\"path\":\"/activations/2/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/2/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/3\",\"value\":{\"id\":\"end||\",\"status\":\"closed\",\"outcome\":\"completed\"}},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closed\"}]}"
+   ],
+   "state": {
+    "activations": [
+     {
+      "handoffs": [],
+      "id": "start||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "start",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "handoffs": [
+       {
+        "handoff": "done",
+        "profile": "implementer",
+        "slot_id": "work||:0"
+       }
+      ],
+      "id": "work||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "work",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "handoffs": [
+       {
+        "handoff": "done",
+        "profile": "implementer",
+        "slot_id": "ship||:0"
+       }
+      ],
+      "id": "ship||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "ship",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "handoffs": [],
+      "id": "end||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "end",
+      "outcome": "completed",
+      "status": "closed"
+     }
+    ],
+    "arrivals": [],
+    "attempts": [],
+    "causes": [],
+    "decisions": [],
+    "effects": [
+     {
+      "effect_key": "run-1:1:create_session:work||:0",
+      "kind": "create_session",
+      "payload": {
+       "goal": "Do work",
+       "node_id": "work",
+       "profile": "implementer"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:2:send_input:work||:0",
+      "kind": "send_input",
+      "payload": {
+       "goal": "Do work",
+       "node_id": "work",
+       "profile": "implementer"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:4:runner_lost:work||:0",
+      "kind": "runner_lost",
+      "payload": {
+       "generation": 1,
+       "session_id": "sess-1"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:9:close_slot:work||:0",
+      "kind": "close_slot",
+      "payload": {
+       "closed_label": true,
+       "interrupt": true
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:10:create_session:ship||:0",
+      "kind": "create_session",
+      "payload": {
+       "goal": "Do ship",
+       "node_id": "ship",
+       "profile": "implementer"
+      },
+      "subject": "ship||:0"
+     },
+     {
+      "effect_key": "run-1:11:send_input:ship||:0",
+      "kind": "send_input",
+      "payload": {
+       "goal": "Do ship",
+       "node_id": "ship",
+       "profile": "implementer"
+      },
+      "subject": "ship||:0"
+     },
+     {
+      "effect_key": "run-1:14:close_slot:ship||:0",
+      "kind": "close_slot",
+      "payload": {
+       "closed_label": true,
+       "interrupt": true
+      },
+      "subject": "ship||:0"
+     }
+    ],
+    "gates": [],
+    "loop_counters": [],
+    "max_activations": 100,
+    "receipts": [
+     {
+      "key": "start-1",
+      "payload": {
+       "run_id": "run-1",
+       "version_hash": "hash-1"
+      }
+     },
+     {
+      "key": "run-1:1:create_session:work||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:2:send_input:work||:0",
+      "payload": {}
+     },
+     {
+      "key": "runner:sess-1:1",
+      "payload": {
+       "generation": 1,
+       "session_id": "sess-1"
+      }
+     },
+     {
+      "key": "turn:sess-1:1:resp-0",
+      "payload": {
+       "generation": 1,
+       "session_id": "sess-1"
+      }
+     },
+     {
+      "key": "turn:sess-1:1:resp-1",
+      "payload": {
+       "failure_class": "infra.runner_lost"
+      }
+     },
+     {
+      "key": "turn:sess-1:1:resp-2",
+      "payload": {
+       "failure_class": "infra.runner_lost"
+      }
+     },
+     {
+      "key": "turn:sess-1:1:resp-3",
+      "payload": {
+       "failure_class": "infra.runner_lost"
+      }
+     },
+     {
+      "key": "run-1:9:close_slot:work||:0",
+      "payload": {
+       "pending_input": false
+      }
+     },
+     {
+      "key": "run-1:10:create_session:ship||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:11:send_input:ship||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:14:close_slot:ship||:0",
+      "payload": {
+       "pending_input": false
+      }
+     }
+    ],
+    "reject_streaks": [],
+    "rejected_call_limit": 3,
+    "run_id": "run-1",
+    "seq": 15,
+    "slots": [
+     {
+      "activation_id": "work||",
+      "drift": false,
+      "failed_turn": null,
+      "handoff": "done",
+      "handoff_label": null,
+      "id": "work||:0",
+      "nudges": 0,
+      "pending_input": false,
+      "profile": "implementer",
+      "session_generation": 1,
+      "status": "closed"
+     },
+     {
+      "activation_id": "ship||",
+      "drift": false,
+      "failed_turn": null,
+      "handoff": "done",
+      "handoff_label": null,
+      "id": "ship||:0",
+      "nudges": 0,
+      "pending_input": false,
+      "profile": "implementer",
+      "session_generation": 1,
+      "status": "closed"
+     }
+    ],
+    "start_key": "start-1",
+    "status": "completed",
+    "timers": [
+     {
+      "due_at": "2026-01-01T00:00:30Z",
+      "generation": 1,
+      "key": "infra_backoff:work||:0:1",
+      "kind": "infra_backoff",
+      "scope": "work||:0",
+      "stage": 1,
+      "subject": "work||:0"
+     },
+     {
+      "due_at": "2026-01-01T00:02:00Z",
+      "generation": 1,
+      "key": "infra_backoff:work||:0:2",
+      "kind": "infra_backoff",
+      "scope": "work||:0",
+      "stage": 2,
+      "subject": "work||:0"
+     },
+     {
+      "due_at": "2026-01-01T00:08:00Z",
+      "generation": 1,
+      "key": "infra_backoff:work||:0:3",
+      "kind": "infra_backoff",
+      "scope": "work||:0",
+      "stage": 3,
+      "subject": "work||:0"
+     }
+    ],
+    "version_hash": "hash-1"
+   },
+   "view": {
+    "activations": [
+     {
+      "id": "start||",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "id": "work||",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "id": "ship||",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "id": "end||",
+      "outcome": "completed",
+      "status": "closed"
+     }
+    ],
+    "armed_timer_keys": [
+     "infra_backoff:work||:0:1",
+     "infra_backoff:work||:0:2",
+     "infra_backoff:work||:0:3"
+    ],
+    "causes": [],
+    "loop_pass_indexes": [],
+    "open_decisions": [],
+    "open_gates": [],
+    "slots": [
+     {
+      "drift": false,
+      "id": "work||:0",
+      "pending_input": false,
+      "status": "closed"
+     },
+     {
+      "drift": false,
+      "id": "ship||:0",
+      "pending_input": false,
+      "status": "closed"
+     }
+    ],
+    "status": "completed"
+   }
+  },
+  "resume_agent_failed": {
+   "graph": "{\"ir_version\":1,\"workflow_id\":\"demo\",\"name\":\"Demo\",\"description\":null,\"nodes\":[{\"id\":\"start\",\"kind\":\"start\",\"name\":null,\"goal\":null,\"question\":null,\"prompt\":null,\"roster\":[],\"harness\":null,\"attempts\":null,\"concurrency\":null,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"work\",\"kind\":\"step\",\"name\":null,\"goal\":\"Do work\",\"question\":null,\"prompt\":null,\"roster\":[\"implementer\"],\"harness\":null,\"attempts\":3,\"concurrency\":1,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"ship\",\"kind\":\"step\",\"name\":null,\"goal\":\"Do ship\",\"question\":null,\"prompt\":null,\"roster\":[\"implementer\"],\"harness\":null,\"attempts\":3,\"concurrency\":1,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"end\",\"kind\":\"end\",\"name\":null,\"goal\":null,\"question\":null,\"prompt\":null,\"roster\":[],\"harness\":null,\"attempts\":null,\"concurrency\":null,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null}],\"arrows\":[{\"id\":\"a1\",\"source\":\"start\",\"target\":\"work\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null},{\"id\":\"a2\",\"source\":\"work\",\"target\":\"ship\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null},{\"id\":\"a3\",\"source\":\"ship\",\"target\":\"end\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null}],\"content_hash\":\"de17c45efc267bd28e1893904b820a309207c79df26326a14583eacab2910c23\",\"analysis\":{\"join_types\":[],\"loops\":[],\"regions\":[],\"unresolved\":[],\"label_sets\":[{\"node_id\":\"start\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a1\"]},{\"node_id\":\"work\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a2\"]},{\"node_id\":\"ship\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a3\"]}],\"checked_parts\":[]}}",
+   "log": [
+    "{\"seq\":1,\"input\":{\"kind\":\"start_run\",\"run_id\":\"run-1\",\"start_key\":\"start-1\",\"version_hash\":\"hash-1\"},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:1:create_session:work||:0\",\"kind\":\"create_session\",\"subject\":\"work||:0\",\"payload\":{\"node_id\":\"work\",\"profile\":\"implementer\",\"goal\":\"Do work\"}}],\"receipt_key\":\"start-1\",\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"running\"},{\"op\":\"add\",\"path\":\"/activations/0\",\"value\":{\"id\":\"start||\",\"status\":\"closed\",\"outcome\":\"completed\"}},{\"op\":\"add\",\"path\":\"/activations/1\",\"value\":{\"id\":\"work||\",\"status\":\"starting\",\"outcome\":null}},{\"op\":\"add\",\"path\":\"/slots/0\",\"value\":{\"id\":\"work||:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}}]}",
+    "{\"seq\":2,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:1:create_session:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:2:send_input:work||:0\",\"kind\":\"send_input\",\"subject\":\"work||:0\",\"payload\":{\"node_id\":\"work\",\"profile\":\"implementer\",\"goal\":\"Do work\"}}],\"receipt_key\":\"run-1:1:create_session:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"session_created\"}]}",
+    "{\"seq\":3,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:2:send_input:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:2:send_input:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"working\"}]}",
+    "{\"seq\":4,\"input\":{\"kind\":\"session_failed\",\"slot_id\":\"work||:0\",\"failure_class\":\"agent.failed\",\"cause\":\"agent.failed\",\"fact_key\":\"turn:sess-1:1:resp-1\"},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"turn:sess-1:1:resp-1\",\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"paused\"},{\"op\":\"add\",\"path\":\"/causes/0\",\"value\":{\"reason\":\"failure_path\",\"detail\":\"agent.failed\",\"subject\":\"work||:0\"}}]}",
+    "{\"seq\":5,\"input\":{\"kind\":\"resume_run\",\"cap\":null},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:5:nudge:work||:0\",\"kind\":\"nudge\",\"subject\":\"work||:0\",\"payload\":{\"fact_key\":\"turn:sess-1:1:resp-1\",\"reason\":\"resume\"}}],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"running\"},{\"op\":\"remove\",\"path\":\"/causes/0\",\"value\":null}]}",
+    "{\"seq\":6,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:5:nudge:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:5:nudge:work||:0\",\"patch\":[]}",
+    "{\"seq\":7,\"input\":{\"kind\":\"handoff_received\",\"slot_id\":\"work||:0\",\"body\":\"done\",\"session_generation\":1,\"label\":null},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"evaluating\"}]}",
+    "{\"seq\":8,\"input\":{\"kind\":\"handoff_evaluated\",\"slot_id\":\"work||:0\",\"outcome\":\"accepted\",\"missing\":[],\"session_generation\":1},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:8:close_slot:work||:0\",\"kind\":\"close_slot\",\"subject\":\"work||:0\",\"payload\":{\"interrupt\":true,\"closed_label\":true}}],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closing\"}]}",
+    "{\"seq\":9,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:8:close_slot:work||:0\",\"payload\":{\"pending_input\":false}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:9:create_session:ship||:0\",\"kind\":\"create_session\",\"subject\":\"ship||:0\",\"payload\":{\"node_id\":\"ship\",\"profile\":\"implementer\",\"goal\":\"Do ship\"}}],\"receipt_key\":\"run-1:8:close_slot:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/1/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/2\",\"value\":{\"id\":\"ship||\",\"status\":\"starting\",\"outcome\":null}},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closed\"},{\"op\":\"add\",\"path\":\"/slots/1\",\"value\":{\"id\":\"ship||:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}}]}",
+    "{\"seq\":10,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:9:create_session:ship||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:10:send_input:ship||:0\",\"kind\":\"send_input\",\"subject\":\"ship||:0\",\"payload\":{\"node_id\":\"ship\",\"profile\":\"implementer\",\"goal\":\"Do ship\"}}],\"receipt_key\":\"run-1:9:create_session:ship||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"session_created\"}]}",
+    "{\"seq\":11,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:10:send_input:ship||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:10:send_input:ship||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/2/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"working\"}]}",
+    "{\"seq\":12,\"input\":{\"kind\":\"handoff_received\",\"slot_id\":\"ship||:0\",\"body\":\"done\",\"session_generation\":1,\"label\":null},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/2/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"evaluating\"}]}",
+    "{\"seq\":13,\"input\":{\"kind\":\"handoff_evaluated\",\"slot_id\":\"ship||:0\",\"outcome\":\"accepted\",\"missing\":[],\"session_generation\":1},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:13:close_slot:ship||:0\",\"kind\":\"close_slot\",\"subject\":\"ship||:0\",\"payload\":{\"interrupt\":true,\"closed_label\":true}}],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closing\"}]}",
+    "{\"seq\":14,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:13:close_slot:ship||:0\",\"payload\":{\"pending_input\":false}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:13:close_slot:ship||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"completed\"},{\"op\":\"replace\",\"path\":\"/activations/2/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/2/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/3\",\"value\":{\"id\":\"end||\",\"status\":\"closed\",\"outcome\":\"completed\"}},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closed\"}]}"
+   ],
+   "state": {
+    "activations": [
+     {
+      "handoffs": [],
+      "id": "start||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "start",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "handoffs": [
+       {
+        "handoff": "done",
+        "profile": "implementer",
+        "slot_id": "work||:0"
+       }
+      ],
+      "id": "work||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "work",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "handoffs": [
+       {
+        "handoff": "done",
+        "profile": "implementer",
+        "slot_id": "ship||:0"
+       }
+      ],
+      "id": "ship||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "ship",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "handoffs": [],
+      "id": "end||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "end",
+      "outcome": "completed",
+      "status": "closed"
+     }
+    ],
+    "arrivals": [],
+    "attempts": [],
+    "causes": [],
+    "decisions": [],
+    "effects": [
+     {
+      "effect_key": "run-1:1:create_session:work||:0",
+      "kind": "create_session",
+      "payload": {
+       "goal": "Do work",
+       "node_id": "work",
+       "profile": "implementer"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:2:send_input:work||:0",
+      "kind": "send_input",
+      "payload": {
+       "goal": "Do work",
+       "node_id": "work",
+       "profile": "implementer"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:5:nudge:work||:0",
+      "kind": "nudge",
+      "payload": {
+       "fact_key": "turn:sess-1:1:resp-1",
+       "reason": "resume"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:8:close_slot:work||:0",
+      "kind": "close_slot",
+      "payload": {
+       "closed_label": true,
+       "interrupt": true
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:9:create_session:ship||:0",
+      "kind": "create_session",
+      "payload": {
+       "goal": "Do ship",
+       "node_id": "ship",
+       "profile": "implementer"
+      },
+      "subject": "ship||:0"
+     },
+     {
+      "effect_key": "run-1:10:send_input:ship||:0",
+      "kind": "send_input",
+      "payload": {
+       "goal": "Do ship",
+       "node_id": "ship",
+       "profile": "implementer"
+      },
+      "subject": "ship||:0"
+     },
+     {
+      "effect_key": "run-1:13:close_slot:ship||:0",
+      "kind": "close_slot",
+      "payload": {
+       "closed_label": true,
+       "interrupt": true
+      },
+      "subject": "ship||:0"
+     }
+    ],
+    "gates": [],
+    "loop_counters": [],
+    "max_activations": 100,
+    "receipts": [
+     {
+      "key": "start-1",
+      "payload": {
+       "run_id": "run-1",
+       "version_hash": "hash-1"
+      }
+     },
+     {
+      "key": "run-1:1:create_session:work||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:2:send_input:work||:0",
+      "payload": {}
+     },
+     {
+      "key": "turn:sess-1:1:resp-1",
+      "payload": {
+       "failure_class": "agent.failed"
+      }
+     },
+     {
+      "key": "run-1:5:nudge:work||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:8:close_slot:work||:0",
+      "payload": {
+       "pending_input": false
+      }
+     },
+     {
+      "key": "run-1:9:create_session:ship||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:10:send_input:ship||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:13:close_slot:ship||:0",
+      "payload": {
+       "pending_input": false
+      }
+     }
+    ],
+    "reject_streaks": [],
+    "rejected_call_limit": 3,
+    "run_id": "run-1",
+    "seq": 14,
+    "slots": [
+     {
+      "activation_id": "work||",
+      "drift": false,
+      "failed_turn": null,
+      "handoff": "done",
+      "handoff_label": null,
+      "id": "work||:0",
+      "nudges": 0,
+      "pending_input": false,
+      "profile": "implementer",
+      "session_generation": 1,
+      "status": "closed"
+     },
+     {
+      "activation_id": "ship||",
+      "drift": false,
+      "failed_turn": null,
+      "handoff": "done",
+      "handoff_label": null,
+      "id": "ship||:0",
+      "nudges": 0,
+      "pending_input": false,
+      "profile": "implementer",
+      "session_generation": 1,
+      "status": "closed"
+     }
+    ],
+    "start_key": "start-1",
+    "status": "completed",
+    "timers": [],
+    "version_hash": "hash-1"
+   },
+   "view": {
+    "activations": [
+     {
+      "id": "start||",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "id": "work||",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "id": "ship||",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "id": "end||",
+      "outcome": "completed",
+      "status": "closed"
+     }
+    ],
+    "armed_timer_keys": [],
+    "causes": [],
+    "loop_pass_indexes": [],
+    "open_decisions": [],
+    "open_gates": [],
+    "slots": [
+     {
+      "drift": false,
+      "id": "work||:0",
+      "pending_input": false,
+      "status": "closed"
+     },
+     {
+      "drift": false,
+      "id": "ship||:0",
+      "pending_input": false,
+      "status": "closed"
+     }
+    ],
+    "status": "completed"
+   }
+  },
+  "transient_then_resume_and_gate": {
+   "graph": "{\"ir_version\":1,\"workflow_id\":\"demo\",\"name\":\"Demo\",\"description\":null,\"nodes\":[{\"id\":\"start\",\"kind\":\"start\",\"name\":null,\"goal\":null,\"question\":null,\"prompt\":null,\"roster\":[],\"harness\":null,\"attempts\":null,\"concurrency\":null,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"work\",\"kind\":\"step\",\"name\":null,\"goal\":\"Do work\",\"question\":null,\"prompt\":null,\"roster\":[\"implementer\"],\"harness\":null,\"attempts\":3,\"concurrency\":1,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null},{\"id\":\"hold\",\"kind\":\"gate\",\"name\":null,\"goal\":null,\"question\":null,\"prompt\":null,\"roster\":[],\"harness\":null,\"attempts\":null,\"concurrency\":null,\"list_from\":null,\"parts\":[],\"outcomes\":[\"approve\"],\"evidence\":null},{\"id\":\"end\",\"kind\":\"end\",\"name\":null,\"goal\":null,\"question\":null,\"prompt\":null,\"roster\":[],\"harness\":null,\"attempts\":null,\"concurrency\":null,\"list_from\":null,\"parts\":[],\"outcomes\":[],\"evidence\":null}],\"arrows\":[{\"id\":\"a1\",\"source\":\"start\",\"target\":\"work\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null},{\"id\":\"a2\",\"source\":\"work\",\"target\":\"hold\",\"label\":null,\"kind\":\"forward\",\"limit\":null,\"at_limit\":null},{\"id\":\"a3\",\"source\":\"hold\",\"target\":\"end\",\"label\":\"approve\",\"kind\":\"forward\",\"limit\":null,\"at_limit\":null}],\"content_hash\":\"84a6a494cc70bda3960aa3126f8d8d25a7fd40428d2d393d61b4d1c6bbe01d16\",\"analysis\":{\"join_types\":[],\"loops\":[],\"regions\":[],\"unresolved\":[],\"label_sets\":[{\"node_id\":\"start\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a1\"]},{\"node_id\":\"work\",\"labels\":[],\"labelled_arrow_ids\":[],\"unlabelled_arrow_ids\":[\"a2\"]},{\"node_id\":\"hold\",\"labels\":[\"approve\"],\"labelled_arrow_ids\":[\"a3\"],\"unlabelled_arrow_ids\":[]}],\"checked_parts\":[]}}",
+   "log": [
+    "{\"seq\":1,\"input\":{\"kind\":\"start_run\",\"run_id\":\"run-1\",\"start_key\":\"start-1\",\"version_hash\":\"hash-1\"},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:1:create_session:work||:0\",\"kind\":\"create_session\",\"subject\":\"work||:0\",\"payload\":{\"node_id\":\"work\",\"profile\":\"implementer\",\"goal\":\"Do work\"}}],\"receipt_key\":\"start-1\",\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"running\"},{\"op\":\"add\",\"path\":\"/activations/0\",\"value\":{\"id\":\"start||\",\"status\":\"closed\",\"outcome\":\"completed\"}},{\"op\":\"add\",\"path\":\"/activations/1\",\"value\":{\"id\":\"work||\",\"status\":\"starting\",\"outcome\":null}},{\"op\":\"add\",\"path\":\"/slots/0\",\"value\":{\"id\":\"work||:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}}]}",
+    "{\"seq\":2,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:1:create_session:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:2:send_input:work||:0\",\"kind\":\"send_input\",\"subject\":\"work||:0\",\"payload\":{\"node_id\":\"work\",\"profile\":\"implementer\",\"goal\":\"Do work\"}}],\"receipt_key\":\"run-1:1:create_session:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"session_created\"}]}",
+    "{\"seq\":3,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:2:send_input:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:2:send_input:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"working\"}]}",
+    "{\"seq\":4,\"input\":{\"kind\":\"session_failed\",\"slot_id\":\"work||:0\",\"failure_class\":\"infra.transient\",\"cause\":\"529\",\"fact_key\":\"turn:sess-1:1:resp-1\"},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:4:arm_timer:infra_backoff:work||:0:1\",\"kind\":\"arm_timer\",\"subject\":\"infra_backoff:work||:0:1\",\"payload\":{\"kind\":\"infra_backoff\",\"stage\":1,\"due_at\":\"2026-01-01T00:00:30+00:00\"}},{\"effect_key\":\"run-1:4:arm_timer:infra_backoff:work||:0:2\",\"kind\":\"arm_timer\",\"subject\":\"infra_backoff:work||:0:2\",\"payload\":{\"kind\":\"infra_backoff\",\"stage\":2,\"due_at\":\"2026-01-01T00:02:00+00:00\"}},{\"effect_key\":\"run-1:4:arm_timer:infra_backoff:work||:0:3\",\"kind\":\"arm_timer\",\"subject\":\"infra_backoff:work||:0:3\",\"payload\":{\"kind\":\"infra_backoff\",\"stage\":3,\"due_at\":\"2026-01-01T00:08:00+00:00\"}}],\"receipt_key\":\"turn:sess-1:1:resp-1\",\"patch\":[{\"op\":\"add\",\"path\":\"/armed_timer_keys/0\",\"value\":\"infra_backoff:work||:0:1\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/1\",\"value\":\"infra_backoff:work||:0:2\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/2\",\"value\":\"infra_backoff:work||:0:3\"}]}",
+    "{\"seq\":5,\"input\":{\"kind\":\"pause_run\",\"reason\":\"user\",\"detail\":\"hold\"},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"paused\"},{\"op\":\"add\",\"path\":\"/causes/0\",\"value\":{\"reason\":\"user\",\"detail\":\"hold\",\"subject\":\"\"}}]}",
+    "{\"seq\":6,\"input\":{\"kind\":\"resume_run\",\"cap\":null},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:6:nudge:work||:0\",\"kind\":\"nudge\",\"subject\":\"work||:0\",\"payload\":{\"fact_key\":\"turn:sess-1:1:resp-1\",\"reason\":\"resume\"}}],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"running\"},{\"op\":\"remove\",\"path\":\"/causes/0\",\"value\":null}]}",
+    "{\"seq\":7,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:6:nudge:work||:0\",\"payload\":{}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":\"run-1:6:nudge:work||:0\",\"patch\":[]}",
+    "{\"seq\":8,\"input\":{\"kind\":\"handoff_received\",\"slot_id\":\"work||:0\",\"body\":\"done\",\"session_generation\":1,\"label\":null},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"evaluating\"}]}",
+    "{\"seq\":9,\"input\":{\"kind\":\"handoff_evaluated\",\"slot_id\":\"work||:0\",\"outcome\":\"accepted\",\"missing\":[],\"session_generation\":1},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:9:close_slot:work||:0\",\"kind\":\"close_slot\",\"subject\":\"work||:0\",\"payload\":{\"interrupt\":true,\"closed_label\":true}}],\"receipt_key\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closing\"}]}",
+    "{\"seq\":10,\"input\":{\"kind\":\"effect_completed\",\"effect_key\":\"run-1:9:close_slot:work||:0\",\"payload\":{\"pending_input\":false}},\"now\":\"2026-01-01T00:00:00Z\",\"rejection\":null,\"effects\":[{\"effect_key\":\"run-1:10:publish_gate:hold||:1\",\"kind\":\"publish_gate\",\"subject\":\"hold||:1\",\"payload\":{\"token\":\"hold||:1\",\"node_id\":\"hold\",\"activation_id\":\"hold||\",\"visit_no\":1}}],\"receipt_key\":\"run-1:9:close_slot:work||:0\",\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/1/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/2\",\"value\":{\"id\":\"hold||\",\"status\":\"running\",\"outcome\":null}},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closed\"},{\"op\":\"add\",\"path\":\"/open_gates/0\",\"value\":\"hold||:1\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/3\",\"value\":\"watchdog_remind:hold||\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/4\",\"value\":\"watchdog_alert:hold||\"}]}"
+   ],
+   "state": {
+    "activations": [
+     {
+      "handoffs": [],
+      "id": "start||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "start",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "handoffs": [
+       {
+        "handoff": "done",
+        "profile": "implementer",
+        "slot_id": "work||:0"
+       }
+      ],
+      "id": "work||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "work",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "handoffs": [],
+      "id": "hold||",
+      "item_path": [],
+      "iteration_path": [],
+      "node_id": "hold",
+      "outcome": null,
+      "status": "running"
+     }
+    ],
+    "arrivals": [],
+    "attempts": [],
+    "causes": [],
+    "decisions": [],
+    "effects": [
+     {
+      "effect_key": "run-1:1:create_session:work||:0",
+      "kind": "create_session",
+      "payload": {
+       "goal": "Do work",
+       "node_id": "work",
+       "profile": "implementer"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:2:send_input:work||:0",
+      "kind": "send_input",
+      "payload": {
+       "goal": "Do work",
+       "node_id": "work",
+       "profile": "implementer"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:4:arm_timer:infra_backoff:work||:0:1",
+      "kind": "arm_timer",
+      "payload": {
+       "due_at": "2026-01-01T00:00:30+00:00",
+       "kind": "infra_backoff",
+       "stage": 1
+      },
+      "subject": "infra_backoff:work||:0:1"
+     },
+     {
+      "effect_key": "run-1:4:arm_timer:infra_backoff:work||:0:2",
+      "kind": "arm_timer",
+      "payload": {
+       "due_at": "2026-01-01T00:02:00+00:00",
+       "kind": "infra_backoff",
+       "stage": 2
+      },
+      "subject": "infra_backoff:work||:0:2"
+     },
+     {
+      "effect_key": "run-1:4:arm_timer:infra_backoff:work||:0:3",
+      "kind": "arm_timer",
+      "payload": {
+       "due_at": "2026-01-01T00:08:00+00:00",
+       "kind": "infra_backoff",
+       "stage": 3
+      },
+      "subject": "infra_backoff:work||:0:3"
+     },
+     {
+      "effect_key": "run-1:6:nudge:work||:0",
+      "kind": "nudge",
+      "payload": {
+       "fact_key": "turn:sess-1:1:resp-1",
+       "reason": "resume"
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:9:close_slot:work||:0",
+      "kind": "close_slot",
+      "payload": {
+       "closed_label": true,
+       "interrupt": true
+      },
+      "subject": "work||:0"
+     },
+     {
+      "effect_key": "run-1:10:publish_gate:hold||:1",
+      "kind": "publish_gate",
+      "payload": {
+       "activation_id": "hold||",
+       "node_id": "hold",
+       "token": "hold||:1",
+       "visit_no": 1
+      },
+      "subject": "hold||:1"
+     }
+    ],
+    "gates": [
+     {
+      "activation_id": "hold||",
+      "by": null,
+      "label": null,
+      "note": null,
+      "status": "open",
+      "token": "hold||:1",
+      "visit_no": 1
+     }
+    ],
+    "loop_counters": [],
+    "max_activations": 100,
+    "receipts": [
+     {
+      "key": "start-1",
+      "payload": {
+       "run_id": "run-1",
+       "version_hash": "hash-1"
+      }
+     },
+     {
+      "key": "run-1:1:create_session:work||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:2:send_input:work||:0",
+      "payload": {}
+     },
+     {
+      "key": "turn:sess-1:1:resp-1",
+      "payload": {
+       "failure_class": "infra.transient"
+      }
+     },
+     {
+      "key": "run-1:6:nudge:work||:0",
+      "payload": {}
+     },
+     {
+      "key": "run-1:9:close_slot:work||:0",
+      "payload": {
+       "pending_input": false
+      }
+     }
+    ],
+    "reject_streaks": [],
+    "rejected_call_limit": 3,
+    "run_id": "run-1",
+    "seq": 10,
+    "slots": [
+     {
+      "activation_id": "work||",
+      "drift": false,
+      "failed_turn": null,
+      "handoff": "done",
+      "handoff_label": null,
+      "id": "work||:0",
+      "nudges": 0,
+      "pending_input": false,
+      "profile": "implementer",
+      "session_generation": 1,
+      "status": "closed"
+     }
+    ],
+    "start_key": "start-1",
+    "status": "running",
+    "timers": [
+     {
+      "due_at": "2026-01-01T00:00:30Z",
+      "generation": 1,
+      "key": "infra_backoff:work||:0:1",
+      "kind": "infra_backoff",
+      "scope": "work||:0",
+      "stage": 1,
+      "subject": "work||:0"
+     },
+     {
+      "due_at": "2026-01-01T00:02:00Z",
+      "generation": 1,
+      "key": "infra_backoff:work||:0:2",
+      "kind": "infra_backoff",
+      "scope": "work||:0",
+      "stage": 2,
+      "subject": "work||:0"
+     },
+     {
+      "due_at": "2026-01-01T00:08:00Z",
+      "generation": 1,
+      "key": "infra_backoff:work||:0:3",
+      "kind": "infra_backoff",
+      "scope": "work||:0",
+      "stage": 3,
+      "subject": "work||:0"
+     },
+     {
+      "due_at": "2026-01-01T00:30:00Z",
+      "generation": 1,
+      "key": "watchdog_remind:hold||",
+      "kind": "watchdog_remind",
+      "scope": "hold||",
+      "stage": 1,
+      "subject": "hold||"
+     },
+     {
+      "due_at": "2026-01-01T01:00:00Z",
+      "generation": 1,
+      "key": "watchdog_alert:hold||",
+      "kind": "watchdog_alert",
+      "scope": "hold||",
+      "stage": 2,
+      "subject": "hold||"
+     }
+    ],
+    "version_hash": "hash-1"
+   },
+   "view": {
+    "activations": [
+     {
+      "id": "start||",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "id": "work||",
+      "outcome": "completed",
+      "status": "closed"
+     },
+     {
+      "id": "hold||",
+      "outcome": null,
+      "status": "running"
+     }
+    ],
+    "armed_timer_keys": [
+     "infra_backoff:work||:0:1",
+     "infra_backoff:work||:0:2",
+     "infra_backoff:work||:0:3",
+     "watchdog_remind:hold||",
+     "watchdog_alert:hold||"
+    ],
+    "causes": [],
+    "loop_pass_indexes": [],
+    "open_decisions": [],
+    "open_gates": [
+     "hold||:1"
+    ],
+    "slots": [
+     {
+      "drift": false,
+      "id": "work||:0",
+      "pending_input": false,
+      "status": "closed"
+     }
+    ],
+    "status": "running"
+   }
+  }
+ }
+}

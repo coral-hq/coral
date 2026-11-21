@@ -23,6 +23,7 @@ from coral.db.enum_codecs import ActorKind, LogKind
 from coral.engine import empty_state
 from coral.engine import fold as replay_log
 from coral.engine.types import (
+    RULES,
     TERMINAL_STATUSES,
     CancelRun,
     Effect,
@@ -307,7 +308,9 @@ def test_the_cache_keeps_runs_only_up_to_its_byte_bound() -> None:
 
 def _cancelled(run_id: str) -> tuple[LogEntry, ...]:
     """Another history from its first entry: the run is cancelled while the review runs."""
-    start = StartRun(run_id=run_id, start_key="cancelled", version_hash=GRAPH.content_hash)
+    start = StartRun(
+        run_id=run_id, start_key="cancelled", version_hash=GRAPH.content_hash, rules=RULES
+    )
     return drive(GRAPH, [start, *accept(IMPLEMENT, "done"), CancelRun()]).log
 
 

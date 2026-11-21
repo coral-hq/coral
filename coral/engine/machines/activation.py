@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+from pydantic import JsonValue
+
 from coral.engine.machines.decision import open_decision, take_labelled_arrow
 from coral.engine.machines.gate import open_gate
 from coral.engine.types import (
@@ -69,7 +73,7 @@ def open_node(
             for index, profile in enumerate(node.roster)
             if not any(slot.id == slot_id(owner.id, index) for slot in opened.slots)
         )
-        effects = tuple(_create_session(run_id, opened.seq, slot, node) for slot in slots)
+        effects = tuple(create_session_effect(run_id, opened.seq, slot, node) for slot in slots)
         opened = opened.model_copy(
             update={
                 "slots": (*opened.slots, *slots),
@@ -415,14 +419,27 @@ def _cap_pause(
     return paused.model_copy(update={"receipts": (*paused.receipts, receipt)})
 
 
-def _create_session(run_id: str, seq: int, slot: Slot, node: CompiledNode) -> Effect:
+def create_session_effect(
+    run_id: str,
+    seq: int,
+    slot: Slot,
+    node: CompiledNode,
+    extra: Mapping[str, JsonValue] | None = None,
+) -> Effect:
+    """Create the slot's session for its current generation; ``extra`` rides to its brief.
+
+    A first generation's create names no generation, so stored logs fold unchanged.
+    """
+    payload: dict[str, JsonValue] = {
+        "node_id": node.id,
+        "profile": slot.profile,
+        "goal": node.goal or "",
+    }
+    if slot.session_generation != 1:
+        payload["generation"] = slot.session_generation
     return Effect(
         effect_key=effect_key(run_id, seq, "create_session", slot.id),
         kind="create_session",
         subject=slot.id,
-        payload={
-            "node_id": node.id,
-            "profile": slot.profile,
-            "goal": node.goal or "",
-        },
+        payload={**payload, **(extra or {})},
     )

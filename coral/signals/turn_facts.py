@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import JsonValue
@@ -257,7 +258,15 @@ def build_turn_fact(
         error_code=error_code,
         error_text=error_text,
         failure_origin=failure_origin,
+        observed_at=_observed_at(current),
     )
+
+
+def _observed_at(edge: EdgeFacts | None) -> datetime | None:
+    """When the edge was observed; a placeholder edge with time 0 has none."""
+    if edge is None or edge.observed_at_ms <= 0:
+        return None
+    return datetime.fromtimestamp(edge.observed_at_ms / 1000, tz=UTC)
 
 
 def _integer(value: object) -> bool:

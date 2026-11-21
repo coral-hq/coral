@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
@@ -185,6 +186,18 @@ def test_an_edge_older_than_the_engine_message_is_ignored() -> None:
     # An edge in the engine message's own second counts as current.
     assert current is not None and evaluate(current) == "failed"
     assert unknown_send_time is not None and evaluate(unknown_send_time) == "completed"
+
+
+def test_a_fact_from_a_current_edge_carries_when_the_edge_was_observed() -> None:
+    from_edge = _fact(live=FAILED, edge=_edge("failed", error_code="RuntimeError"))
+    without_edge = _fact(
+        replace(ENGINE_TURN, newest_substantive_item_is_assistant=False), live=FAILED
+    )
+
+    # A runner loss reported after its wake's result is told apart by this time.
+    assert from_edge is not None
+    assert from_edge.observed_at == datetime.fromtimestamp(AFTER_MS / 1000, tz=UTC)
+    assert without_edge is not None and without_edge.observed_at is None
 
 
 def test_a_failed_turn_whose_edge_was_lost_is_a_transient_edge_lost_failure() -> None:

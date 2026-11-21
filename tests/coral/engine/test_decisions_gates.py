@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from coral.engine import fold, transition
+from coral.engine.lifecycle import retryable_activations
 from coral.engine.types import (
+    RULES,
     AnswerGate,
     AttemptCount,
     ChooseArrow,
@@ -31,7 +33,7 @@ from tests.coral.workflow_builders import (
 )
 
 CONFIG = EngineConfig()
-RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1")
+RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1", rules=RULES)
 SLOT = "work||:0"
 
 
@@ -409,9 +411,11 @@ def test_evidence_missing_at_cap_pauses_when_failure_arrow_is_absent() -> None:
         config=CONFIG,
     )
     assert driven.state.status == "paused"
+    # The pause names the slot, so a retry can find the step; the detail carries the ids.
     assert driven.state.causes == (
-        PauseCause(reason="failure_path", detail="attempts_exhausted", subject="spec, tests"),
+        PauseCause(reason="failure_path", detail="attempts_exhausted:spec, tests", subject=SLOT),
     )
+    assert retryable_activations(driven.state) == ("work||",)
     assert driven.state.attempts == (AttemptCount(activation_id="work||", used=2),)
     assert driven.state.slots[0].status == "evaluating"
     assert driven.log[-1].effects == ()
@@ -422,6 +426,28 @@ def test_evidence_missing_at_cap_pauses_when_failure_arrow_is_absent() -> None:
     assert again.entry.rejection is not None
     assert again.entry.rejection.code == "run_paused"
     assert again.state.attempts == (AttemptCount(activation_id="work||", used=2),)
+
+
+def test_an_attempts_exhausted_pause_bounds_the_ids_it_names() -> None:
+    graph = _graph(
+        workflow_text(
+            [start(), step("work", attempts=1), end()],
+            [arrow("a1", "start", "work"), arrow("a2", "work", "end")],
+        )
+    )
+    many = tuple(f"check-{index:03d}" for index in range(100))
+    driven = drive(
+        graph,
+        [
+            RUN,
+            HandoffReceived(slot_id=SLOT, body="partial"),
+            HandoffEvaluated(slot_id=SLOT, outcome="evidence_missing", missing=many),
+        ],
+        config=CONFIG,
+    )
+    (cause,) = driven.state.causes
+    assert cause.subject == SLOT
+    assert cause.detail == "attempts_exhausted:" + ", ".join(many)[:256]
 
 
 def test_closed_slot_handoff_does_not_change_attempts() -> None:
