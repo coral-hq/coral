@@ -3067,6 +3067,29 @@ seams:
     upstream_first: false
     upstream_candidate: false
 
+  - id: S86
+    title: A run session's Chat header links back to its run
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      ChatHeader.tsx renders web/src/workflows/session/CoralRunChip beside
+      CreatedBySession. On a session that carries Coral's coral.run_id label
+      (a run's anchor, orchestrator or step) it shows "Part of a run · Open
+      run", linking to the run view (a step opens on its own transcript). It
+      reads only the cached session snapshot, asks whether Coral is on only
+      for such a session, and renders nothing for any other session or while
+      Coral is off. ChatHeader has no extension slot, so this is one import and
+      one JSX line.
+    files:
+      - web/src/shell/ChatHeader.tsx
+    tests:
+      - web/src/workflows/session/CoralRunChip.test.tsx
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
   - id: MF-1
     title: Workflows desk web dependencies (dagre layout, YAML parsing)
     owner: WS-WEB

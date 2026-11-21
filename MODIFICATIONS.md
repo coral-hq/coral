@@ -530,6 +530,7 @@ OPS-01's generator will maintain this file later.
 | `web/src/server-selector-v2.test.tsx` | S89b | coral-specific | Queries follow the Coral onboarding copy (S89b). |
 | `web/src/shell/AppShell.test.tsx` | S89 | coral-specific | Share-action tests now expect 'Coral server' in the read-only notice and in the sharing-off title (S89). |
 | `web/src/shell/AppShell.tsx` | S89 | coral-specific | The header Share button's sharing-off reason (shareDisabledReason) now reads 'Sharing has been disabled for this <appName> server.' through useAppName() (default Coral) (S89). |
+| `web/src/shell/ChatHeader.tsx` | S86 | coral-specific | Renders Coral's `CoralRunChip` beside `CreatedBySession`: a run's anchor, orchestrator or step session shows "Part of a run · Open run", linking back to the run; any other session, or Coral off, renders nothing (S86). |
 | `web/src/shell/CloseWindowDialog.test.tsx` | S89 | coral-specific | The last-window test now expects "Quit Coral?" and "...closing it quits Coral." (S89). |
 | `web/src/shell/CloseWindowDialog.tsx` | S89 | coral-specific | The last-window close dialog's title and description now name the app via useAppName() ("Quit Coral?", "...closing it quits Coral.") instead of Omnigent (S89). |
 | `web/src/shell/CommandPalette.test.tsx` | S34 | coral-specific | The Coral palette actions are absent until Coral is enabled, and Agent Profiles appears only with `profiles_desk` (S34). |

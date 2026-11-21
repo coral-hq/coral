@@ -19,7 +19,12 @@ export function runIdOf(row: Pick<Conversation, "labels">): string | null {
   return label(row, RUN_ID_LABEL);
 }
 
+/** The session's part in its run: `run` (the anchor), `orchestrator` or `step`. */
+export function runRoleOf(row: Pick<Conversation, "labels">): string | null {
+  return runIdOf(row) === null ? null : label(row, ROLE_LABEL);
+}
+
 /** The session is a run's anchor, where the run's gate prompts live. */
 export function isRunAnchor(row: Pick<Conversation, "labels">): boolean {
-  return runIdOf(row) !== null && label(row, ROLE_LABEL) === ANCHOR_ROLE;
+  return runRoleOf(row) === ANCHOR_ROLE;
 }

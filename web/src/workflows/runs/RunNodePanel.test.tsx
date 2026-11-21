@@ -1,8 +1,11 @@
 import { render, screen, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
-import type { CompiledGraph } from "../api/generated/coralApi";
+import type { CompiledGraph, SlotOut } from "../api/generated/coralApi";
 import { runOverlay } from "../canvas/runOverlay";
 import { CONTRACT_DETAIL_GATE_PASS2, CONTRACT_GRAPH } from "../fixtures/runViewContract";
+import { runPath } from "../nav/coralPaths";
+import { stepSessions } from "./agents/stepSessions";
 import { RunNodePanel } from "./RunNodePanel";
 
 const OVERLAY = runOverlay(CONTRACT_GRAPH, CONTRACT_DETAIL_GATE_PASS2.view);
@@ -84,5 +87,60 @@ describe("RunNodePanel", () => {
     expect(panel).toHaveTextContent("Approve the change?");
     expect(within(panel).queryByRole("list", { name: "Evidence checks" })).toBeNull();
     expect(within(panel).queryByTestId("roster-chip")).toBeNull();
+  });
+
+  it("links each of the step's sessions to its transcript, latest pass first", () => {
+    // WHY: a step's agents are where its transcript is read; each pass has its own session.
+    const detail = CONTRACT_DETAIL_GATE_PASS2;
+    const [pass1, pass2] = ["implement||a4:1:0", "implement||a4:2:0"].map(
+      (id) => detail.slots.find((slot) => slot.engine_slot_id === id)!.session_id!,
+    );
+    render(
+      <MemoryRouter>
+        <RunNodePanel
+          graph={CONTRACT_GRAPH}
+          nodeId="implement"
+          overlay={OVERLAY.get("implement")!}
+          runId={detail.run_id}
+          sessions={stepSessions(detail, CONTRACT_GRAPH, "implement")}
+          openSessionId={pass2!}
+        />
+      </MemoryRouter>,
+    );
+    const panel = screen.getByRole("region", { name: "Implement" });
+    const passes = within(panel).getAllByRole("list", { name: /^Pass / });
+    expect(passes.map((list) => list.getAttribute("aria-label"))).toEqual(["Pass 2", "Pass 1"]);
+    const links = passes.map((list) => within(list).getByRole("link", { name: /implementer/ }));
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      runPath(detail.run_id, { node: "implement", agent: pass2 }),
+      runPath(detail.run_id, { node: "implement", agent: pass1 }),
+    ]);
+    expect(links[0]).toHaveAttribute("aria-current", "true");
+    expect(links[1]).not.toHaveAttribute("aria-current");
+  });
+
+  it("shows an agent whose session does not exist yet without a link", () => {
+    const detail = CONTRACT_DETAIL_GATE_PASS2;
+    const pending: SlotOut = {
+      ...detail.slots[0]!,
+      engine_slot_id: "implement||a4:2:0",
+      session_id: null,
+      status: "pending",
+    };
+    render(
+      <MemoryRouter>
+        <RunNodePanel
+          graph={CONTRACT_GRAPH}
+          nodeId="implement"
+          overlay={OVERLAY.get("implement")!}
+          runId={detail.run_id}
+          sessions={stepSessions({ ...detail, slots: [pending] }, CONTRACT_GRAPH, "implement")}
+          openSessionId={null}
+        />
+      </MemoryRouter>,
+    );
+    const panel = screen.getByRole("region", { name: "Implement" });
+    expect(within(panel).getByTestId("roster-chip")).toHaveTextContent("implementer");
+    expect(within(panel).queryByRole("link")).toBeNull();
   });
 });

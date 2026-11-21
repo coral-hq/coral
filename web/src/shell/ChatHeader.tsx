@@ -38,6 +38,7 @@ import {
 import { AgentInfoButton } from "@/components/AgentInfo";
 import { ConversationBreadcrumb } from "./ConversationBreadcrumb";
 import { CreatedBySession } from "./CreatedBySession";
+import { CoralRunChip } from "@/workflows/session/CoralRunChip"; // CORAL(S86)
 import { HeaderConversationMenu } from "./HeaderConversationMenu";
 import { SessionActionMenuItem } from "@/components/SessionActionMenuItem";
 import { HeaderProjectTag } from "./HeaderProjectTag";
@@ -635,6 +636,8 @@ export function ChatHeader({
         {conversationId && createdBySessionId && (
           <CreatedBySession key={createdBySessionId} sessionId={createdBySessionId} />
         )}
+        {/* CORAL(S86): a run's sessions link back to their run; nothing otherwise. */}
+        {conversationId && <CoralRunChip conversationId={conversationId} />}
       </div>
 
       <MobileHeaderButtonGroup className="flex items-center gap-2 max-md:empty:hidden">

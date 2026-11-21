@@ -1,6 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { CircleAlertIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { CoralPageHeader } from "@/brand/CoralPageHeader";
 import { PageScroll } from "@/components/PageScroll";
 import { RenderErrorBoundary } from "@/components/RenderErrorBoundary";
@@ -21,7 +30,7 @@ import { runViewCardUi } from "./gateCardUi";
 import { PauseBanner } from "./PauseBanner";
 import { RunGatePanel, type GateFocus } from "./RunGatePanel";
 import { RunHeaderBar } from "./RunHeaderBar";
-import { RunNodePanel } from "./RunNodePanel";
+import { findSessionChip, RunNodePanel } from "./RunNodePanel";
 import {
   connectionNotice,
   LOAD_FAILED_PAGE_TEXT,
@@ -32,12 +41,20 @@ import {
 import { RunStepList } from "./RunStepList";
 import { useAckRunAlerts } from "./useAckRunAlerts";
 import { useDetailFailure, useRunDetail } from "./useRunDetail";
+import { runSession, stepSessions } from "./agents/stepSessions";
+import { StepDrawerFallback } from "./agents/StepDrawerFallback";
+
+// Split from the page. The app shell already bundles the transcript's modules, so this
+// saves no download in the app; the page alone (as its route tests mount it) skips them.
+const StepDrawer = lazy(() =>
+  import("./agents/StepDrawer").then((module) => ({ default: module.StepDrawer })),
+);
 
 // The live view of one run at `/workflows/runs/:runId`. Its status, pause reason, causes
 // and allowed actions come only from the stream's header and view; the detail supplies the
 // title, spend, gates and slots. Before the stream's first frame the detail's status shows
 // as provisional, with no actions. The selected node rides `?node=`; `?panel=gate` asks to
-// show that node's open gate.
+// show that node's open gate; `?agent=` opens a step session's transcript in a drawer.
 
 export function RunPage() {
   const { runId = "" } = useParams<{ runId: string }>();
@@ -93,6 +110,17 @@ function RunPageBody({ runId }: { runId: string }) {
     },
     [navigate, runId, selectedNodeId],
   );
+  // `?agent=` is untrusted: the drawer opens only a session the run's own slots list.
+  const agentParam = searchParams.get("agent");
+  const run = detail.data;
+  const openSessionId =
+    run && agentParam !== null
+      ? (runSession(run, graph.data ?? null, agentParam)?.sessionId ?? null)
+      : null;
+  const closeDrawer = useCallback(
+    () => void navigate(runPath(runId, { node: selectedNodeId ?? undefined })),
+    [navigate, runId, selectedNodeId],
+  );
   const refetchDetail = detail.refetch;
   const onAnswerSettled = useCallback(() => void refetchDetail(), [refetchDetail]);
   const state = runPageState({
@@ -121,7 +149,6 @@ function RunPageBody({ runId }: { runId: string }) {
     if (detail.data === undefined) void detail.refetch();
   };
 
-  const run = detail.data;
   const title = run?.title ?? graph.data?.name ?? "Workflow run";
   if (state !== "ready") {
     return (
@@ -238,12 +265,28 @@ function RunPageBody({ runId }: { runId: string }) {
                   graph={graph.data}
                   nodeId={selectedNodeId}
                   overlay={overlay.get(selectedNodeId) ?? null}
+                  runId={runId}
+                  sessions={run ? stepSessions(run, graph.data, selectedNodeId, view) : []}
+                  openSessionId={openSessionId}
                 />
               )}
             </div>
           </div>
         )}
       </div>
+      {run && agentParam !== null && (
+        <Suspense fallback={<StepDrawerFallback />}>
+          <StepDrawer
+            detail={run}
+            graph={graph.data ?? null}
+            view={view}
+            agent={agentParam}
+            onClose={closeDrawer}
+            findOpener={findSessionChip}
+            focusFallback={statusRef}
+          />
+        </Suspense>
+      )}
     </RunPageFrame>
   );
 }
