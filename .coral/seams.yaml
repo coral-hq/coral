@@ -1246,19 +1246,31 @@ seams:
     upstream_candidate: false
 
   - id: S39d
-    title: Dedicated coral CI matrix group and misc ignore
+    title: Dedicated coral CI matrix groups and misc ignore
     owner: WS-OPS
     status: landed
     category: coral-specific
     note: >-
       Adds a `coral` shard running `tests/coral` and excludes `tests/coral` from
-      `misc` in `.github/scripts/ci/python-matrix.json`.
+      `misc` in `.github/scripts/ci/python-matrix.json`. Adds a `coral-e2e`
+      shard that runs the walking-skeleton E2E (`tests/e2e/coral/test_skeleton.py`)
+      on two workers with `--dist=load`; `misc` keeps ignoring `tests/e2e`, and
+      `tests/coral/test_ci_lane.py` pins the shard (S107 installs its CLI).
     files:
       - .github/scripts/ci/python-matrix.json
       - tests/scripts/test_dependency_ci.py
     tests:
       - tests/scripts/test_dependency_ci.py
+      - tests/coral/test_ci_lane.py
     budget_lines: 10
+    budget_exception:
+      lines: 13
+      reason: >-
+        .github/scripts/ci/python-matrix.json (12 added lines, 1 changed): the
+        two five- and six-line shard rows (`coral`, `coral-e2e`) and the
+        `--ignore=tests/coral` on `misc`'s paths line. Later steps only lengthen
+        the `coral-e2e` paths line, so the count stays.
+      approver: nicholasjano (delegated)
     anchor_exempt:
       - .github/scripts/ci/python-matrix.json
     upstream_first: false
@@ -3164,6 +3176,208 @@ seams:
         tests (the call and its transaction, a failing carrier's rollback, no
         call without a rotation or on re-creation, and unregister scope).
       approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S107
+    title: The coral-e2e CI shard installs the pinned claude CLI
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      The `coral-e2e` shard (S39d) runs the real `claude` CLI against the mock
+      model. Its `pytest` job sets up Node for that shard and installs `claude`
+      through the in-repo `./.github/actions/setup-harness-cli`: the version
+      pinned in its manifest, installed with `npm ci --ignore-scripts` from a
+      sha512-locked lockfile, then the verified package's own `install.cjs`;
+      its two third-party steps (`actions/cache/restore`, `actions/cache/save`)
+      are SHA-pinned. The job then writes the installed version to the job
+      summary and sets `CORAL_E2E_REQUIRE_CLI=1`, so the E2E fails rather than
+      skips on a CLI that does not run. The other shards' cross-repo action
+      references are unchanged. About 21 changed lines.
+    files:
+      - .github/workflows/ci.yml
+    tests:
+      - tests/coral/test_ci_lane.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S108
+    title: A Coral step runner's own process group ends with it
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A Coral step runner's harness, claude CLI, in-flight tool commands and
+      any background process its agent started could outlive it: a killed
+      runner left its shell commands running, and Coral's fence (a graceful
+      stop) left an in-flight shell command able to edit the worktree after
+      salvage. Zygote-forked runners shared the zygote's group, so no group
+      signal could reach one runner's tree alone. Every runner now leads its
+      own group: the zygote's runner child calls setpgid(0, 0) (and the zygote
+      sets it too before it replies), staying in the zygote's session so the
+      harnesses it forks for that runner join the group (setpgid to the
+      runner's pid, only while that runner is unreaped); direct spawns already
+      lead their session. setpgid, not setsid: a process cannot join a group
+      in another session. Grouping alone signals nothing. The host records the
+      group at spawn only when getpgid(pid) == pid and it is neither the
+      host's nor the zygote's group (else pid-only), and never looks it up
+      again. The host marks a runner as a Coral step runner at spawn when the
+      launch's workspace is a checkout on a Coral run branch (HEAD is
+      refs/heads/coral/r-<12 hex>/...; read from the HEAD file, or from
+      git symbolic-ref for a reftable repository, whose HEAD files hold a
+      stub), and passes the mark to that runner in
+      OMNIGENT_RUNNER_GROUP_ENDS_WITH_RUNNER, which the runner reads once and
+      removes from its environment. Only a marked runner's group is ended, and
+      on every exit: (1) when the host's watcher sees it exit, clean or not;
+      when a stop of it (Coral's fence, a relaunch's superseded runner)
+      returns or times out, before the stop is answered; and at the host's own
+      shutdown cleanup. The host SIGKILLs the group's remaining members one by
+      one through psutil (which refuses a reused pid), only those whose start
+      stamp lies between the runner's start and the observed exit, never the
+      host, the zygote, another tracked runner, or a group id that is now the
+      host's, the zygote's or another tracked runner's. A status query that
+      finds the runner dead awaits the same pass before answering dead.
+      (2) A marked runner that outlives its parent (host killed, crashed or
+      hung up, or its zygote gone) ends the group it leads with killpg(SIGKILL)
+      as its last act, after its graceful shutdown (and any finished work) or
+      at the hard-exit backstop. Every unmarked runner (non-Coral sessions,
+      CLI-launched runners) and host shutdown, hangup or terminal close for
+      them signal exactly what they did before. Residual: for a gone runner
+      the observed exit lags the reap by up to about 1.5 s (one 0.5 s watch
+      interval for a direct runner, about 1 s of zygote poll latency), so a
+      new group reusing the id inside that interval could match; it needs a
+      pid wrap to the exact id. Processes that start their own session escape
+      the group, except inside a bwrap sandbox, whose pid namespace ends with
+      it.
+    files:
+      - omnigent/host/connect.py
+      - omnigent/runner/_entry.py
+      - omnigent/runner/_zygote.py
+      - omnigent/runner/identity.py
+      - tests/host/test_connect.py
+      - tests/host/test_runner_zygote.py
+      - tests/runner/test_runner_entry.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/host/test_runner_zygote.py
+      - tests/runner/test_runner_entry.py
+    budget_lines: 120
+    budget_exception:
+      lines: 619
+      reason: >-
+        Three files are over budget. omnigent/host/connect.py (221 added
+        lines, about half docstrings): the Coral run-branch check (with its
+        reftable fallback), the
+        start-stamp clock, the member sweep, the spawn-time group check, the
+        shared pass and its five call sites (watcher, status, stop,
+        superseded stop, shutdown). tests/host/test_connect.py (619 added
+        lines): stand-in runners and the tests for the run-branch check, a
+        SIGKILLed runner and a sibling, dead only after the pass, every ending
+        for marked and unmarked runners, a stop during the pass, pid-only
+        runners, a group id another runner holds, the start-stamp window and
+        spared pids, the clock, a zygote runner's real harness, a bwrap
+        sandbox (Linux), a recycled pid behind the spawn record, and the orphan
+        reaper's two-sweep rule around the pass.
+        tests/runner/test_runner_entry.py (164 added lines): the
+        parent-death matrix, the read-once mark, the PID 1 and non-leader
+        guards and a real host SIGKILL. The other four files are within budget.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S109
+    title: Each sandboxed claude CLI launch gets its own temp dir
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      The claude CLI (2.1.325, read from its binary) keeps its temp dir at
+      $CLAUDE_CODE_TMPDIR/claude-<uid>, else /tmp/claude-<uid>, and ignores
+      TMPDIR for it; past 44 bytes it sends child-process temp dirs to
+      /tmp/claude-<uid>. The CLI wrap granted only
+      <gettempdir()>/claude-<uid>, so under seatbelt with TMPDIR set (always
+      on macOS) the CLI failed at start with EPERM on /tmp/claude-<uid>.
+      Granting /tmp/claude-<uid> would give every step, its siblings and the
+      user's own Claude Code sessions one shared directory (R71), so no
+      per-user temp dir is granted at all, and the upstream
+      <gettempdir()>/claude-<uid> grant is removed: inside the wrap the CLI's
+      TMPDIR is the launcher's own scratch, so no CLI used it, and with Linux's
+      default TMPDIR it bound the shared /tmp/claude-<uid> over bwrap's
+      private /tmp. Instead a
+      SandboxPolicy can name an env var and a parent (with_launch_tmpdir). For
+      each launch the spawn-time-wrap host pass creates a fresh 0700 dir there
+      with mkdtemp, grants only that dir, and exports it; the in-wrap pass
+      removes it when the target exits. The parent must pass lstat as a real
+      directory (not a symlink) owned by this uid with mode 0700, so a planted
+      /tmp/omnigent-<uid> is refused with no grant and a warning that names no
+      path. Each dir holds an owner claim for its launcher, and each launch
+      first removes sibling c???????? dirs that are this user's private dirs
+      with a claim whose launcher is gone; unclaimed, live, foreign-named and
+      symlinked entries stay. Under seatbelt the executor asks for
+      CLAUDE_CODE_TMPDIR under the runner's harness socket root
+      (/tmp/omnigent-<uid> or OMNIGENT_HARNESS_TMP_PARENT, already short and
+      0700 for the harness sockets; its sweep touches only ap-* dirs), so the
+      CLI's dir is 38 bytes for uid 501, and it warns past 44. The CLI puts its
+      messaging socket under XDG_RUNTIME_DIR, which the launcher points at its
+      scratch, so no socket lands in this dir. Bwrap gets no launch dir: its
+      /tmp is a private tmpfs per launch. A dir a killed launcher leaves
+      behind is removed at the next launch under the same root; a CLI that
+      outlived its killed launcher can lose its dir then.
+    files:
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/inner/sandbox.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_sandbox.py
+    tests:
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_sandbox.py
+      - tests/e2e/coral/test_skeleton.py
+    budget_lines: 120
+    budget_exception:
+      lines: 211
+      reason: >-
+        tests/inner/test_sandbox.py (211 added lines): three helpers and the
+        launch dir tests (the fields on the wire and through clones, fresh
+        private dirs, four refused parent modes, a planted symlink parent, a
+        parent another uid owns, the orphan sweep's keep and remove cases, the
+        host pass's grant and export, and removal when the target exits or
+        fails). The other files are within budget:
+        omnigent/inner/sandbox.py 115, omnigent/inner/claude_sdk_executor.py
+        31, tests/inner/test_claude_sdk_executor.py 84.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S110
+    title: Host-launched runners keep the claude CLI's update and traffic switches
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      DISABLE_AUTOUPDATER and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC turn off
+      the claude CLI's self-update and its non-essential traffic. The host's
+      runner env allowlist dropped both, so they never reached a host-launched
+      step's CLI and the coral-e2e lane's CLI could call off the machine for
+      updates or telemetry. Both names are now in _RUNNER_ENV_ALLOWLIST, which
+      the CLI's host-daemon env also uses, so they pass CLI, daemon and
+      runner; the harness, the sandbox launcher and the SDK keep the runner's
+      environment, so they reach the CLI. Exact names only: no prefix and no
+      other CLAUDE_CODE_* name. Both are non-secret booleans, and a host that
+      does not set them sees no change. The skeleton E2E reads them from the
+      live step CLI.
+    files:
+      - omnigent/host/connect.py
+      - tests/host/test_connect.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/e2e/coral/test_skeleton.py
+    budget_lines: 10
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

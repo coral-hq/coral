@@ -7,6 +7,7 @@ from coral.engine.machines.activation import find_activation, find_node, replace
 from coral.engine.machines.run import record_pause, refuse
 from coral.engine.machines.slot import require_evaluating, return_to_working
 from coral.engine.types import (
+    RULES,
     ApplyResult,
     AttemptCount,
     Effect,
@@ -16,6 +17,9 @@ from coral.engine.types import (
     effect_key,
 )
 from coral.model.ir import DEFAULT_ATTEMPTS, CompiledGraph
+
+_EXHAUSTED_PREFIX = "attempts_exhausted:"
+_MAX_MISSING_CHARS = 256
 
 
 def note_evidence_missing(
@@ -37,9 +41,14 @@ def note_evidence_missing(
         return ApplyResult(state=working.model_copy(update={"seq": state.seq + 1}))
     failure = failure_arrow(graph, owner.node_id) if owner is not None else None
     if failure is None or owner is None:
-        paused = record_pause(
-            counted, "failure_path", "attempts_exhausted", ", ".join(command.missing)
-        )
+        ids = ", ".join(command.missing)
+        if state.rules < RULES:
+            # The previous rules named the ids as the subject.
+            paused = record_pause(counted, "failure_path", "attempts_exhausted", ids)
+            return ApplyResult(state=paused.model_copy(update={"seq": state.seq + 1}))
+        # The slot is the subject so a retry finds the step; the detail names the ids.
+        detail = _EXHAUSTED_PREFIX + ids[:_MAX_MISSING_CHARS]
+        paused = record_pause(counted, "failure_path", detail, found.id)
         return ApplyResult(state=paused.model_copy(update={"seq": state.seq + 1}))
     failed, closing = _close_failed(counted, found)
     opened = traverse(

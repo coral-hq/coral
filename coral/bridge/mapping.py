@@ -39,6 +39,7 @@ from coral.bridge.messages import (
     decision_request_text,
     nudge_text,
     orchestrator_title,
+    salvage_note,
 )
 from coral.bridge.projection import slot_role
 from coral.db.enum_codecs import SlotRole
@@ -52,16 +53,17 @@ from coral.stores.protocols import WorkItemDraft
 from coral.tools.catalog import ORCHESTRATOR_STANCE, STEP_STANCES
 
 # Effects whose outcome is fed back to the engine as a completion or a failure.
-FED_KINDS = frozenset({"create_session", "send_input", "close_slot", "nudge"})
+FED_KINDS = frozenset({"create_session", "send_input", "close_slot", "nudge", "retry_step"})
 # Effects that queue no work yet, and why; each is logged when it is committed.
 UNMAPPED_KINDS: Mapping[str, str] = MappingProxyType(
     {
         "notify": "alerts come from the commit; a decision's reminder goes to the orchestrator",
         "runner_lost": "lost runners are not restarted yet",
-        "retry_step": "step retries are not run yet",
         "arm_timer": "timer rows come from the run's armed timers",
     }
 )
+# The row of a ``retry_step``: fence the old session, salvage and reset (``coral.recovery``).
+RECOVERY_RESTART = "recovery.restart"
 TIMER = "timer"
 RUN_RESYNC = "run_resync"
 TURN_FACT = "turn_fact"
@@ -104,7 +106,11 @@ def map_effect(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft | None:
         return _create(ctx, effect)
     if effect.kind == "send_input":
         text = brief_text(
-            ctx.graph, ctx.state, effect.subject, request_preview=ctx.request_preview
+            ctx.graph,
+            ctx.state,
+            effect.subject,
+            request_preview=ctx.request_preview,
+            salvage=salvage_note(effect.payload),
         )
         return _slot_draft(ctx, effect, SEND_INPUT, _message(ctx, effect, "brief", text))
     if effect.kind == "nudge":
@@ -126,6 +132,8 @@ def map_effect(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft | None:
             "closed_label": effect.payload.get("closed_label") is not False,
         }
         return _slot_draft(ctx, effect, CANCEL_SESSIONS, fields)
+    if effect.kind == "retry_step":
+        return _restart(ctx, effect)
     if effect.kind == "publish_gate":
         return gate_publish_draft(ctx, effect)
     if effect.kind == "withdraw_gate":
@@ -303,6 +311,49 @@ def _create(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft:
     return _slot_draft(ctx, effect, CREATE_SESSION, fields)
 
 
+def _restart(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft:
+    """
+    The restart of a retried slot, fenced by the slot's new generation.
+
+    It names the session of the slot's latest create, still the old generation's,
+    whether that session wrote the run worktree, and the slot's newest close whose
+    commit never reached a receipt: a commit it made is still this step's own.
+    """
+    slot = find_slot(ctx.state, effect.subject)
+    generation = effect.payload.get("generation")
+    if not isinstance(generation, int) or isinstance(generation, bool):
+        generation = slot.session_generation if slot is not None else 1
+    expected_head = effect.payload.get("expected_head")
+    fields = {
+        "engine_slot_id": effect.subject,
+        "generation": generation,
+        "session_id": slot_session_id(ctx.workspace_id, ctx.state, effect.subject),
+        "writer": slot is not None and slot_role(slot.profile) == SlotRole.STEP_AGENT,
+        "expected_head": expected_head if isinstance(expected_head, str) else None,
+        "close_key": _unreported_close(ctx.state, effect.subject),
+    }
+    return _slot_draft(ctx, effect, RECOVERY_RESTART, fields, generation=generation)
+
+
+def _unreported_close(state: engine.RunState, engine_slot_id: str) -> str | None:
+    """The key of the slot's newest close, unless a receipt recorded the commit it made."""
+    close = next(
+        (
+            effect
+            for effect in reversed(state.effects)
+            if effect.kind == "close_slot" and effect.subject == engine_slot_id
+        ),
+        None,
+    )
+    if close is None:
+        return None
+    for receipt in state.receipts:
+        commit = receipt.payload.get("commit")
+        if receipt.key == close.effect_key and isinstance(commit, str) and commit:
+            return None
+    return close.effect_key
+
+
 def _message(ctx: MapContext, effect: engine.Effect, kind: str, text: str) -> dict[str, Any]:
     return {
         "session_id": slot_session_id(ctx.workspace_id, ctx.state, effect.subject),
@@ -312,9 +363,17 @@ def _message(ctx: MapContext, effect: engine.Effect, kind: str, text: str) -> di
 
 
 def _slot_draft(
-    ctx: MapContext, effect: engine.Effect, effect_type: str, fields: Mapping[str, Any]
+    ctx: MapContext,
+    effect: engine.Effect,
+    effect_type: str,
+    fields: Mapping[str, Any],
+    *,
+    generation: int | None = None,
 ) -> WorkItemDraft:
+    """:param generation: The row's slot generation; the slot's current one by default."""
     slot = find_slot(ctx.state, effect.subject)
+    if generation is None and slot is not None:
+        generation = slot.session_generation
     payload = {
         "effect_type": effect_type,
         "effect_key": effect.effect_key,
@@ -328,7 +387,7 @@ def _slot_draft(
         payload=payload,
         node_id=_node_id(ctx, effect),
         scope_key=effect.subject,
-        slot_generation=slot.session_generation if slot is not None else None,
+        slot_generation=generation,
         owner_key=slot_owner_key(ctx.run_id, effect.subject),
         available_at=epoch_seconds(ctx.now),
     )
@@ -353,6 +412,7 @@ def _checked(draft: WorkItemDraft) -> WorkItemDraft:
 __all__ = [
     "DECISION_ITEM",
     "FED_KINDS",
+    "RECOVERY_RESTART",
     "RUN_RESYNC",
     "TIMER",
     "TURN_FACT",

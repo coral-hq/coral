@@ -52,13 +52,8 @@ from coral.omni.protocols import (
     SessionRef,
     SessionState,
 )
-from coral.omni.server.bundles import (
-    StepBundleRejected,
-    agent_owner,
-    check_hygiene,
-    ownerless_runs_allowed,
-    pack_bundle,
-)
+from coral.omni.server.access import omnigent_owner, ownerless_runs_allowed
+from coral.omni.server.bundles import StepBundleRejected, check_hygiene, pack_bundle
 from coral.omni.server.host_access import HostAccessError, OwnerHost, authorize_owner_host
 from coral.omni.server.worktrees import connect_run_worktree_host
 from coral.profiles.bundle_spec import ENGINE_PREFIX, Stance, build_seed_bundle_yaml
@@ -198,11 +193,6 @@ def _role_label(request: SessionCreateRequest) -> str:
     return "orchestrator" if request.slot_role == "orchestrator" else "step"
 
 
-def _owner_identity(user_id: str | None) -> str:
-    """The grant identity of a run owner: the local user when auth is off."""
-    return user_id if user_id is not None else RESERVED_USER_LOCAL
-
-
 def _host_failure(exc: HostAccessError) -> CoralSessionError:
     if exc.code == "host_offline":
         return _refused("session.host_offline", exc.message, retryable=True)
@@ -249,7 +239,7 @@ class OmnigentStepLauncher(StepLauncher):
         try:
             target = await asyncio.to_thread(
                 resolve_host_launch,
-                user_id=user_id,
+                user_id=omnigent_owner(user_id),
                 host_id=conv.host_id,
                 session_id=conv.id,
                 host_store=services.host_store,
@@ -658,7 +648,7 @@ class OmnigentSessionFacade(SessionFacade):
         The step's agent, if the server or the run owner authored it.
 
         An ownerless run's own agents are its server's local user's on a single-user
-        server, as Omnigent reads them (:func:`agent_owner`).
+        server, as Omnigent reads them (:func:`omnigent_owner`).
 
         Never a copy of another user's agent (the facade does not mint one), and
         never the run anchor's agent.
@@ -674,7 +664,7 @@ class OmnigentSessionFacade(SessionFacade):
         if (
             agent is None
             or agent.name.lower() == ANCHOR_AGENT_NAME
-            or not (agent.operator_authored or agent.created_by == agent_owner(request.user_id))
+            or not (agent.operator_authored or agent.created_by == omnigent_owner(request.user_id))
         ):
             raise _agent_not_permitted(agent_id)
         try:
@@ -715,7 +705,7 @@ class OmnigentSessionFacade(SessionFacade):
         services = self._services
         try:
             return await validate_existing_host_workspace(
-                user_id=request.user_id,
+                user_id=omnigent_owner(request.user_id),
                 host_id=request.host_id or "",
                 workspace=request.workspace,
                 agent=agent,
@@ -772,7 +762,7 @@ class OmnigentSessionFacade(SessionFacade):
                 host_id=request.host_id,
                 parent_session_id=anchor.id,
                 inherited_runner_id=None,
-                user_id=request.user_id,
+                user_id=omnigent_owner(request.user_id),
                 conversation_store=services.conversation_store,
                 host_store=services.host_store,
                 parent=anchor,
@@ -893,7 +883,7 @@ class OmnigentSessionFacade(SessionFacade):
         if permission_store is None:
             return False
         grants, _ = await asyncio.to_thread(permission_store.list_for_session, session_id)
-        owner = _owner_identity(user_id)
+        owner = omnigent_owner(user_id)
         return any(grant.level >= LEVEL_OWNER and grant.user_id != owner for grant in grants)
 
     async def _write_row(
@@ -953,13 +943,14 @@ class OmnigentSessionFacade(SessionFacade):
         permission_store = self._services.permission_store
         if permission_store is None:
             return
+        owner = omnigent_owner(user_id)
+        if owner is None:
+            raise _refused("session.invalid", "the run has no owner, and this server requires one")
         try:
             if user_id is None:
-                # Auth is off: the local user owns it. A real owner's row is never recreated.
+                # The local user owns it. A real owner's row is never recreated.
                 await asyncio.to_thread(permission_store.ensure_user, RESERVED_USER_LOCAL)
-            await asyncio.to_thread(
-                permission_store.grant, _owner_identity(user_id), session_id, LEVEL_OWNER
-            )
+            await asyncio.to_thread(permission_store.grant, owner, session_id, LEVEL_OWNER)
         except OmnigentError as exc:
             raise _owner_failure(exc, "own sessions") from exc
 

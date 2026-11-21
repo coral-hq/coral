@@ -29,7 +29,7 @@ from coral.bridge.executors import (
     bridge_hold_policy,
 )
 from coral.bridge.keys import effect_work_id
-from coral.bridge.mapping import RUN_RESYNC, TIMER, TURN_FACT
+from coral.bridge.mapping import RECOVERY_RESTART, RUN_RESYNC, TIMER, TURN_FACT
 from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import EngineBridge
 from coral.db import WorkRow
@@ -144,6 +144,7 @@ ENGINE_EFFECT_TYPES = frozenset(
         WORKSPACE_COMMIT,
         WORKSPACE_SALVAGE,
         WORKSPACE_RESET,
+        RECOVERY_RESTART,
         TURN_FACT,
     }
 )

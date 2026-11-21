@@ -517,7 +517,7 @@ def _wire_session_engine(
     fingerprints through the same ones, set on ``evidence_channels``.
     """
     from coral.bridge.executors import turn_fact_executor
-    from coral.bridge.mapping import TURN_FACT
+    from coral.bridge.mapping import RECOVERY_RESTART, TURN_FACT
     from coral.omni.server.anchor_runner import AnchorRunnerStopper
     from coral.omni.server.dispatch import OmnigentSessionDispatch
     from coral.omni.server.sessions import OmnigentSessionFacade
@@ -529,6 +529,7 @@ def _wire_session_engine(
         TurnFactRecorder,
     )
     from coral.recovery.drift import DriftPauser, DriftPreSendHook
+    from coral.recovery.ladder import restart_executor
     from coral.slots.close import ConfirmedStops, StopConfirmedTurnEnd
     from coral.slots.executors import (
         CANCEL_SESSIONS,
@@ -607,6 +608,15 @@ def _wire_session_engine(
         ),
         WORKSPACE_SALVAGE: salvage_executor(channels, run_store, scope_runner),
         WORKSPACE_RESET: reset_executor(channels, run_store, scope_runner),
+        RECOVERY_RESTART: restart_executor(
+            dispatch=dispatch,
+            edges=edges,
+            channels=channels,
+            bindings=bindings,
+            intents=intents,
+            run_store=run_store,
+            scope_runner=scope_runner,
+        ),
         TURN_FACT: turn_fact_executor(
             threads,
             bindings=bindings,

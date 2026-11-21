@@ -234,7 +234,7 @@ async def run_workspace_effect(
 
 
 @contextmanager
-def _refused_params() -> Iterator[None]:
+def refused_params() -> Iterator[None]:
     """A K13 validator or the host refused an op's params: the same op fails again."""
     try:
         yield
@@ -382,7 +382,7 @@ async def _salvage(
     target = run_target(state)
     workspace = await workspace_for(channels, state, target)
     await ctx.ensure_lease()
-    with _refused_params():
+    with refused_params():
         result = await workspace.salvage(
             target.ref,
             HostChannel(target.host_id),
@@ -401,7 +401,7 @@ async def _reset(
     target = run_target(state)
     workspace = await workspace_for(channels, state, target)
     await ctx.ensure_lease()
-    with _refused_params():
+    with refused_params():
         result = await workspace.reset(
             target.ref,
             HostChannel(target.host_id),
@@ -563,7 +563,7 @@ async def recorded_head(
     elif payload_head is not None:
         head = payload_head
     else:
-        with _refused_params():
+        with refused_params():
             head = await read_head()
     await ensure_lease()
     intent = await asyncio.to_thread(
@@ -606,7 +606,7 @@ async def commit_and_diff(
     :raises WorkspaceOpError: The commit's own K13 failure.
     """
     await ensure_lease()
-    with _refused_params():
+    with refused_params():
         result = await workspace.commit(
             ref,
             session,
@@ -617,7 +617,7 @@ async def commit_and_diff(
             attempt_id=attempt_id,
         )
     try:
-        with _refused_params():
+        with refused_params():
             stat = await workspace.diff_stat(
                 ref, session, from_commit=diff_from or expected_head, to_commit=result.commit
             )

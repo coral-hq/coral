@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import shlex
+import shutil  # CORAL(S108)
+import signal  # CORAL(S108)
 import subprocess
 import sys
 import threading
@@ -20,6 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import click
+import psutil  # CORAL(S108)
 import pytest
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus, InvalidURI
@@ -35,8 +38,11 @@ from omnigent.host.connect import (
     ModelOptionsResult,
     _build_runner_env,
     _connection_refused,
+    _is_coral_run_workspace,  # CORAL(S108)
+    _kill_lost_group_members,  # CORAL(S108)
     _runner_exit_error,
     _RunnerHandle,
+    _start_stamp_now,  # CORAL(S108)
     run_host_process,
 )
 from omnigent.host.frames import (
@@ -107,10 +113,12 @@ from omnigent.host.git_worktree import CreatedWorktree, WorktreeInfo
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
+from omnigent.inner import _proc  # CORAL(S108)
 from omnigent.onboarding.harness_login import CodexDeviceLogin
 from omnigent.runner.identity import (
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
+    RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR,  # CORAL(S108)
     RUNNER_HOST_OWNS_GLOBAL_CLEANUP_ENV_VAR,
     RUNNER_ID_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
@@ -122,6 +130,7 @@ from omnigent.runner.identity import (
     token_bound_runner_id,
 )
 from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
+from tests._helpers.polling import poll_until, poll_until_async  # CORAL(S108)
 from tests._helpers.providers import isolate_provider_resolution
 from tests.tools.test_extensions import StubToolProvider, installed_tool_providers  # CORAL(S50)
 
@@ -4977,6 +4986,10 @@ def test_build_runner_env_allowlists_host_env_and_strips_secrets(tmp_path: Path)
         "OMNIGENT_WRAPPER_COMMAND": "isaac omni",
         "OMNIGENT_DEBUG_LOG_CLIENT_SECRET_COMMAND": "credential-helper --format raw",
         "OMNIGENT_MCP_AUTH_STATUS_FILE": "/srv/omnigent/mcp-auth-status.json",
+        # CORAL(S110): the Claude CLI's update and traffic switches, and a name never listed
+        "DISABLE_AUTOUPDATER": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_UNLISTED_SWITCH": "1",
     }
 
     env = _build_runner_env(
@@ -5056,6 +5069,10 @@ def test_build_runner_env_allowlists_host_env_and_strips_secrets(tmp_path: Path)
     assert env["OMNIGENT_LOG_TTY_FD"] == "9"
     # Runner-side CLI hints name the wrapper the user runs.
     assert env["OMNIGENT_WRAPPER_COMMAND"] == "isaac omni"
+    # CORAL(S110): the two CLI switches forward by exact name, other CLAUDE_CODE_* names do not.
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert "CLAUDE_CODE_UNLISTED_SWITCH" not in env
     # Non-harness secrets are stripped — the point of the allowlist.
     assert "DATABRICKS_TOKEN" not in env
     assert "AWS_SECRET_ACCESS_KEY" not in env
@@ -12045,3 +12062,613 @@ async def test_host_publishes_stored_workspace_at_startup(
 
     assert host._origin_workspace_id == "1965859176160743"
     assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
+
+
+# CORAL(S108): a runner's own process group ends on a runner-loss path, and only then.
+# Launch tests patch subprocess.Popen itself, so the stand-ins keep the real one.
+_REAL_POPEN = subprocess.Popen
+
+
+def _spawn_group_runner(
+    tmp_path: Path,
+    name: str,
+    *,
+    new_session: bool = True,
+    process_group: int | None = None,
+    stdout: object = subprocess.DEVNULL,
+) -> tuple[subprocess.Popen[bytes], psutil.Process]:
+    """Spawn a stand-in runner (``sh``) holding a background ``sleep`` as its CLI.
+
+    The runner exits 0 when a line arrives on its stdin, leaving the sleep behind.
+    ``process_group=0`` with ``new_session=False`` makes it lead a group in this session.
+
+    :returns: The runner handle and its CLI stand-in.
+    """
+    child_file = tmp_path / f"{name}.child"
+    runner = _REAL_POPEN(
+        ["sh", "-c", f'sleep 600 & echo $! > "{child_file}"; read _; exit 0'],
+        stdin=subprocess.PIPE,
+        stdout=stdout,
+        stderr=stdout,
+        start_new_session=new_session,
+        process_group=process_group,
+    )
+    poll_until(lambda: child_file.exists() and child_file.read_text().strip(), timeout_s=10)
+    return runner, psutil.Process(int(child_file.read_text()))
+
+
+def _gone(proc: psutil.Process) -> bool:
+    """Whether *proc* (by identity) has exited."""
+    try:
+        return not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+@contextlib.contextmanager
+def _killed_at_exit(*procs: psutil.Process | subprocess.Popen[bytes]) -> Iterator[None]:
+    """Kill each stand-in process the test leaves behind."""
+    try:
+        yield
+    finally:
+        for proc in procs:
+            with contextlib.suppress(psutil.Error, OSError):
+                proc.kill()
+            if isinstance(proc, subprocess.Popen):
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+
+
+def _launch_frame(token: str, workspace: Path) -> HostLaunchRunnerFrame:
+    return HostLaunchRunnerFrame(
+        request_id=f"req_{token}",
+        binding_token=token,
+        workspace=str(workspace),
+        session_id=f"session_{token}",
+    )
+
+
+def _workspace(tmp_path: Path, *, coral_step: bool) -> Path:
+    """A launch workspace; a Coral step's is a checkout on its run's branch."""
+    workspace = tmp_path / ("coral-run" if coral_step else "project")
+    (workspace / ".git").mkdir(parents=True, exist_ok=True)
+    branch = "coral/r-0123456789ab/base" if coral_step else "main"
+    (workspace / ".git" / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
+    return workspace
+
+
+async def _launch_group_runners(
+    host: HostProcess,
+    tmp_path: Path,
+    tokens: list[str],
+    *,
+    new_session: bool = True,
+    coral_step: bool = True,
+) -> dict[str, tuple[subprocess.Popen[bytes], psutil.Process]]:
+    """Launch one stand-in runner per token through the host's real launch path."""
+    workspace = _workspace(tmp_path, coral_step=coral_step)
+    spawned: list[tuple[subprocess.Popen[bytes], psutil.Process]] = []
+    marked: list[bool] = []
+
+    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        # The production spawn asks for its own session; new_session=False models a
+        # runner that shares the host's group instead.
+        assert kwargs.get("start_new_session") is True
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        marked.append(env.get(RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR) == "1")
+        pair = _spawn_group_runner(
+            tmp_path, f"runner{len(spawned)}", new_session=new_session, stdout=kwargs["stdout"]
+        )
+        spawned.append(pair)
+        return pair[0]
+
+    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+        for token in tokens:
+            result = await host._handle_launch(_launch_frame(token, workspace))
+            assert result.status == "launched", result.error
+    assert marked == [coral_step] * len(tokens)
+    return dict(zip(tokens, spawned, strict=True))
+
+
+def _quiet_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> HostProcess:
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    monkeypatch.setattr("omnigent.host.connect._RUNNER_WATCH_INTERVAL_S", 0.01)
+    host = _make_host_process()
+    host._maintenance_janitor = SimpleNamespace(trigger=lambda _reason: None)  # type: ignore[assignment]
+    host._ws = _FakeTunnel()  # type: ignore[assignment]
+    return host
+
+
+@pytest.mark.parametrize("ref_format", ["files", "reftable"])
+def test_a_coral_step_is_recognised_by_its_run_worktree(tmp_path: Path, ref_format: str) -> None:
+    """A workspace in a Coral run's linked worktree is a Coral step's; others are not.
+
+    A reftable repository's HEAD files hold a stub, so its branch comes from git.
+    """
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    repo = tmp_path / "repo"
+    made = subprocess.run(
+        [*git, "init", "-q", "-b", "main", f"--ref-format={ref_format}", str(repo)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if made.returncode != 0 and ref_format == "reftable":
+        pytest.skip(f"this git cannot create a reftable repository: {made.stderr.strip()}")
+    assert made.returncode == 0, made.stderr
+    subprocess.run([*git, "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+    run = tmp_path / "repo-worktrees" / "run"
+    other = tmp_path / "repo-worktrees" / "feature"
+    for path, branch in ((run, "coral/r-0a1b2c3d4e5f/base"), (other, "coral/feature")):
+        subprocess.run(
+            [*git, "-C", str(repo), "worktree", "add", "-q", "-b", branch, str(path)], check=True
+        )
+    (run / "src").mkdir()
+
+    assert _is_coral_run_workspace(run)
+    assert _is_coral_run_workspace(run / "src")
+    assert not _is_coral_run_workspace(repo)
+    assert not _is_coral_run_workspace(other)
+    assert not _is_coral_run_workspace(tmp_path / "missing")
+
+
+async def test_a_runner_lost_to_sigkill_takes_its_own_group_and_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed Coral step runner's CLI dies before the exit is reported; a sibling lives."""
+    host = _quiet_host(monkeypatch, tmp_path)
+    reported_after_kill: list[bool] = []
+
+    class _Tunnel(_FakeTunnel):
+        async def send(self, data: str) -> None:
+            kill = host_handle.group_kill
+            reported_after_kill.append(kill is not None and kill.done())
+            await super().send(data)
+
+    tunnel = _Tunnel()
+    host._ws = tunnel  # type: ignore[assignment]
+    runners = await _launch_group_runners(host, tmp_path, ["tok_lost", "tok_kept"])
+    (lost, lost_cli), (kept, kept_cli) = runners["tok_lost"], runners["tok_kept"]
+    host_handle = host._runners[token_bound_runner_id("tok_lost")]
+    with _killed_at_exit(lost, lost_cli, kept, kept_cli):
+        try:
+            assert host_handle.coral_step and host_handle.group_id == lost.pid
+            assert host._runners[token_bound_runner_id("tok_kept")].group_id == kept.pid
+
+            os.kill(lost.pid, signal.SIGKILL)
+            await poll_until_async(lambda: tunnel.sent, timeout_s=10)
+
+            assert reported_after_kill == [True]
+            await poll_until_async(lambda: _gone(lost_cli), timeout_s=10)
+            assert kept.poll() is None
+            assert not _gone(kept_cli)
+        finally:
+            _cleanup_host(host)
+
+
+async def test_runner_status_answers_dead_only_after_the_lost_group_ended(
+    tmp_path: Path,
+) -> None:
+    """A status query that finds a Coral step runner gone ends its group, then answers dead."""
+    host = _make_host_process()
+    runner, cli = _spawn_group_runner(tmp_path, "status")
+    with _killed_at_exit(runner, cli):
+        handle = _RunnerHandle(
+            proc=runner,
+            log_path=tmp_path / "runner.log",
+            create_time=_proc.process_create_time(runner.pid),
+            group_id=host._runner_group_at_spawn(runner.pid),
+            coral_step=True,
+        )
+        host._runners["runner_lost"] = handle
+        os.kill(runner.pid, signal.SIGKILL)
+        runner.wait(timeout=5)
+
+        result = await host._handle_runner_status(
+            HostRunnerStatusFrame(request_id="req_rs", runner_id="runner_lost")
+        )
+
+        assert result.status == "dead"
+        assert handle.group_kill is not None and handle.group_kill.done()
+        await poll_until_async(lambda: _gone(cli), timeout_s=10)
+
+
+@pytest.mark.parametrize("coral_step", [True, False], ids=["coral_step", "other_runner"])
+@pytest.mark.parametrize("ending", ["sigkill", "clean_exit", "stop", "shutdown"])
+async def test_only_a_coral_step_runners_group_ends_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: str, coral_step: bool
+) -> None:
+    """A Coral step runner's group ends on any exit, its fence's stop included.
+
+    Any other runner keeps its background processes through every ending, as before.
+    """
+    host = _quiet_host(monkeypatch, tmp_path)
+    [(runner, background)] = (
+        await _launch_group_runners(host, tmp_path, ["tok_step"], coral_step=coral_step)
+    ).values()
+    runner_id = token_bound_runner_id("tok_step")
+    handle = host._runners[runner_id]
+    with _killed_at_exit(runner, background):
+        try:
+            assert handle.connect_marker is not None
+            handle.connect_marker.touch()
+            if ending == "sigkill":
+                os.kill(runner.pid, signal.SIGKILL)
+            elif ending == "clean_exit":
+                assert runner.stdin is not None
+                runner.stdin.write(b"done\n")
+                runner.stdin.flush()
+            elif ending == "stop":
+                stopped = await host._handle_stop(
+                    HostStopRunnerFrame(request_id="req_stop", runner_id=runner_id)
+                )
+                assert stopped.status == "stopped"
+                # The stop is answered only after the group pass.
+                assert (handle.group_kill is not None and handle.group_kill.done()) is coral_step
+            else:
+                host._cleanup_runners()
+            await asyncio.wait_for(asyncio.gather(*host._watcher_tasks), timeout=10)
+
+            assert runner.poll() is not None
+            if coral_step:
+                await poll_until_async(lambda: _gone(background), timeout_s=10)
+            else:
+                assert handle.group_kill is None
+                assert not _gone(background)
+        finally:
+            _cleanup_host(host)
+
+
+async def test_a_stop_claiming_a_runner_mid_pass_waits_for_it_and_reports_no_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop that claims a dead runner while its group pass runs shares that pass."""
+    host = _quiet_host(monkeypatch, tmp_path)
+    tunnel = _FakeTunnel()
+    host._ws = tunnel  # type: ignore[assignment]
+    pass_may_run = threading.Event()
+
+    def held_pass(*args: object) -> int:
+        pass_may_run.wait(10)
+        return _kill_lost_group_members(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("omnigent.host.connect._kill_lost_group_members", held_pass)
+    [(runner, cli)] = (await _launch_group_runners(host, tmp_path, ["tok_mid"])).values()
+    runner_id = token_bound_runner_id("tok_mid")
+    handle = host._runners[runner_id]
+    with _killed_at_exit(runner, cli):
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            await poll_until_async(lambda: handle.group_kill is not None, timeout_s=10)
+            stop = asyncio.create_task(
+                host._handle_stop(HostStopRunnerFrame(request_id="req_mid", runner_id=runner_id))
+            )
+            await poll_until_async(lambda: runner_id not in host._runners, timeout_s=10)
+            assert not stop.done()
+
+            pass_may_run.set()
+            assert (await asyncio.wait_for(stop, timeout=10)).status == "stopped"
+            await asyncio.wait_for(asyncio.gather(*host._watcher_tasks), timeout=10)
+
+            assert tunnel.sent == []
+            await poll_until_async(lambda: _gone(cli), timeout_s=10)
+        finally:
+            pass_may_run.set()
+            _cleanup_host(host)
+
+
+async def test_a_runner_without_a_group_of_its_own_gets_pid_only_signals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Coral step runner sharing the host's group, or the zygote's, has no group signalled."""
+    host = _quiet_host(monkeypatch, tmp_path)
+    tunnel = _FakeTunnel()
+    host._ws = tunnel  # type: ignore[assignment]
+    [(shared, shared_cli)] = (
+        await _launch_group_runners(host, tmp_path, ["tok_shared"], new_session=False)
+    ).values()
+    leader, leader_cli = _spawn_group_runner(tmp_path, "zygote_group")
+    with _killed_at_exit(shared, shared_cli, leader, leader_cli):
+        try:
+            assert host._runners[token_bound_runner_id("tok_shared")].group_id is None
+            host._zygote = SimpleNamespace(pid=leader.pid)  # type: ignore[assignment]
+            assert host._runner_group_at_spawn(leader.pid) is None
+
+            os.kill(shared.pid, signal.SIGKILL)
+            await poll_until_async(lambda: tunnel.sent, timeout_s=10)
+
+            assert not _gone(shared_cli)
+            assert os.getpgid(shared_cli.pid) == os.getpgrp()
+        finally:
+            host._zygote = None
+            _cleanup_host(host)
+
+
+def test_a_group_id_another_runner_holds_is_never_swept(tmp_path: Path) -> None:
+    """A recorded group id that a tracked runner now holds names that runner's group."""
+    host = _make_host_process()
+    runner, cli = _spawn_group_runner(tmp_path, "holder")
+    with _killed_at_exit(runner, cli):
+        started = _proc.process_create_time(runner.pid)
+        gone = _RunnerHandle(
+            proc=_exited_runner(runner.pid),  # type: ignore[arg-type]
+            log_path=tmp_path / "gone.log",
+            create_time=started,
+            group_id=runner.pid,
+            coral_step=True,
+        )
+        host._runners["holder"] = _RunnerHandle(
+            proc=runner,
+            log_path=tmp_path / "holder.log",
+            create_time=started,
+            group_id=runner.pid,
+            coral_step=True,
+        )
+
+        assert host._runner_group_sweep("gone", gone) is None
+        host._runners.clear()
+        assert host._runner_group_sweep("gone", gone) is not None
+
+
+def test_a_lost_group_kill_never_signals_a_recycled_or_spared_pid(tmp_path: Path) -> None:
+    """Only members started within the runner's life, and not spared, are signalled."""
+    runner, cli = _spawn_group_runner(tmp_path, "window")
+    with _killed_at_exit(runner, cli):
+        started = _proc.process_create_time(cli.pid)
+        assert started is not None
+
+        def sweep(begin: float, end: float, spared: frozenset[int] = frozenset()) -> int:
+            return _kill_lost_group_members("r", runner.pid, begin, end, spared)
+
+        # A member that started after the runner's observed exit holds a recycled id.
+        assert sweep(started - 60, started - 1) == 0
+        # So does one that started before the runner did.
+        assert sweep(started + 1, started + 60) == 0
+        assert sweep(started - 60, started + 60, frozenset({runner.pid, cli.pid})) == 0
+        assert runner.poll() is None and not _gone(cli)
+
+        assert sweep(started - 60, started + 60) == 2
+        poll_until(lambda: _gone(cli), timeout_s=10)
+
+
+def test_start_stamp_clock_matches_process_start_stamps() -> None:
+    """``_start_stamp_now`` reads the clock that process start stamps are taken on."""
+    before = _start_stamp_now()
+    proc = subprocess.Popen(["sleep", "5"])
+    try:
+        stamp = _proc.process_create_time(proc.pid)
+        after = _start_stamp_now()
+        assert stamp is not None
+        # Linux stamps count whole clock ticks, so allow one tick below the reading.
+        assert before - 0.02 <= stamp <= after
+        assert after - before < 5
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+async def test_a_lost_zygote_runners_harness_dies_with_its_group_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zygote-forked runner's harness joins its group and ends with it, and nothing else.
+
+    The harness ignores SIGTERM, so the zygote's own SIGTERM on the runner's drop
+    cannot end it: only the host's sweep of the runner's group can.
+    """
+    from omnigent.runner._zygote import (
+        _ZYGOTE_TEST_CHILD_HARNESS_ENV_VAR,
+        _ZYGOTE_TEST_CHILD_SLEEP_ENV_VAR,
+    )
+
+    host = _quiet_host(monkeypatch, tmp_path)
+    zygote = ZygoteManager(log_path=tmp_path / "zygote.log")
+    zygote.start()
+    host._zygote = zygote
+    path = os.environ.get("PATH", "")
+    harness: psutil.Process | None = None
+    try:
+        for name, seam in (
+            ("lost", {_ZYGOTE_TEST_CHILD_HARNESS_ENV_VAR: "60"}),
+            ("kept", {_ZYGOTE_TEST_CHILD_SLEEP_ENV_VAR: "60"}),
+        ):
+            log = tmp_path / f"{name}.log"
+            proc = zygote.fork_runner({"PATH": path, **seam}, str(log), str(tmp_path))
+            host._runners[name] = _RunnerHandle(
+                proc=proc,
+                log_path=log,
+                create_time=_proc.process_create_time(proc.pid),
+                group_id=host._runner_group_at_spawn(proc.pid),
+                coral_step=True,
+            )
+        lost, kept = host._runners["lost"], host._runners["kept"]
+        poll_until(lambda: "harness=" in lost.log_path.read_text(), timeout_s=10)
+        reply = lost.log_path.read_text().split("harness=", 1)[1].splitlines()[0]
+        harness = psutil.Process(json.loads(reply)["pid"])
+        assert os.getpgid(harness.pid) == lost.proc.pid == lost.group_id
+        assert kept.group_id == kept.proc.pid
+        watcher = asyncio.create_task(host._watch_runner("lost"))
+
+        os.kill(lost.proc.pid, signal.SIGKILL)
+        await asyncio.wait_for(watcher, timeout=10)
+
+        assert lost.group_kill is not None and lost.group_kill.result() == 1
+        await poll_until_async(lambda: _gone(harness), timeout_s=10)
+        assert kept.proc.poll() is None
+        assert zygote.is_running()
+    finally:
+        if harness is not None:
+            with contextlib.suppress(psutil.Error):
+                harness.kill()
+        for handle in host._runners.values():
+            handle.proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                handle.proc.wait(timeout=5)
+        host._runners.clear()
+        host._zygote = None
+        zygote.stop()
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or shutil.which("bwrap") is None, reason="needs Linux bubblewrap"
+)
+async def test_a_lost_runners_bwrap_sandbox_ends_with_it_setsid_children_included(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ending a runner's group ends its bwrap sandbox's pid namespace, setsid children too.
+
+    As in production, bwrap's parent is a member of the runner's group (the harness)
+    that outlives the runner, so ``--die-with-parent`` fires only once the sweep ends
+    that member: the sweep alone can end the sandbox.
+    """
+    host = _quiet_host(monkeypatch, tmp_path)
+    marker = f"{6000 + os.getpid() % 1000}"
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        "bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --die-with-parent "
+        f"--new-session -- sh -c 'setsid sleep {marker}.5 & exec sleep {marker}'\n"
+        "echo sandbox ended\n"
+    )
+    runner = _REAL_POPEN(
+        ["sh", "-c", 'sh "$0" & read _', str(harness)],
+        stdin=subprocess.PIPE,
+        start_new_session=True,
+    )
+    found: list[psutil.Process] = []
+
+    def escapee_started() -> bool:
+        for proc in psutil.process_iter():
+            with contextlib.suppress(psutil.Error):
+                if proc.cmdline() == ["sleep", f"{marker}.5"]:
+                    found.append(proc)
+                    return True
+        return False
+
+    with _killed_at_exit(runner):
+        try:
+            poll_until(escapee_started, timeout_s=20, interval_s=0.1)
+            [setsid_child] = found
+            assert os.getsid(setsid_child.pid) != os.getsid(runner.pid)
+            handle = _RunnerHandle(
+                proc=runner,
+                log_path=tmp_path / "runner.log",
+                create_time=_proc.process_create_time(runner.pid),
+                group_id=host._runner_group_at_spawn(runner.pid),
+                coral_step=True,
+            )
+            host._runners["sandboxed"] = handle
+            os.kill(runner.pid, signal.SIGKILL)
+            await asyncio.wait_for(host._watch_runner("sandboxed"), timeout=10)
+
+            # The harness stand-in and the outer bwrap at least, both in the group.
+            assert handle.group_kill is not None and handle.group_kill.result() >= 2
+            await poll_until_async(lambda: _gone(setsid_child), timeout_s=10)
+        finally:
+            for proc in found:
+                with contextlib.suppress(psutil.Error):
+                    proc.kill()
+            for proc in psutil.process_iter():
+                with contextlib.suppress(psutil.Error, OSError):
+                    argv = " ".join(proc.cmdline())
+                    if str(harness) in argv or marker in argv or argv.startswith("bwrap "):
+                        proc.kill()
+
+
+def _exited_runner(pid: int) -> SimpleNamespace:
+    """A runner handle's process that has already exited by SIGKILL."""
+    return SimpleNamespace(pid=pid, returncode=-signal.SIGKILL, poll=lambda: -signal.SIGKILL)
+
+
+@pytest.mark.parametrize("recycled_into", ["another_group", "a_new_group"])
+async def test_a_lost_runners_recycled_pid_is_never_signalled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recycled_into: str
+) -> None:
+    """A spawn record whose pid now names another process tree signals none of it.
+
+    The recorded group is never looked up again, and a new group under the reused id
+    started after the host observed the runner's exit.
+    """
+    monkeypatch.setattr("omnigent.host.connect._RUNNER_WATCH_INTERVAL_S", 0.01)
+    host = _make_host_process()
+    host._maintenance_janitor = SimpleNamespace(trigger=lambda _reason: None)  # type: ignore[assignment]
+    host._ws = _FakeTunnel()  # type: ignore[assignment]
+    leader, member = _spawn_group_runner(tmp_path, "stranger")
+    with _killed_at_exit(leader, member):
+        stranger_start = _proc.process_create_time(leader.pid)
+        assert stranger_start is not None
+        # The member belongs to the leader's group; the leader leads its own.
+        recycled = member.pid if recycled_into == "another_group" else leader.pid
+        if recycled_into == "a_new_group":
+            monkeypatch.setattr(
+                "omnigent.host.connect._start_stamp_now", lambda: stranger_start - 1
+            )
+        handle = _RunnerHandle(
+            proc=_exited_runner(recycled),  # type: ignore[arg-type]
+            log_path=tmp_path / "runner.log",
+            create_time=stranger_start - 60,
+            group_id=recycled,
+            coral_step=True,
+        )
+        host._runners["runner_lost"] = handle
+
+        await asyncio.wait_for(host._watch_runner("runner_lost"), timeout=10)
+
+        assert handle.group_kill is not None and handle.group_kill.result() == 0
+        assert leader.poll() is None
+        assert not _gone(member)
+
+
+async def test_a_lost_groups_adopted_orphan_keeps_the_two_sweep_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The orphan reaper keeps a lost runner's exit code while its group pass runs.
+
+    A member that is this host's own unowned child, as a subreaper host adopts a dead
+    runner's children, is reaped only by the second sweep after the pass kills it.
+    """
+    monkeypatch.setattr("omnigent.host.connect._RUNNER_WATCH_INTERVAL_S", 0.01)
+    host = _make_host_process()
+    host._maintenance_janitor = SimpleNamespace(trigger=lambda _reason: None)  # type: ignore[assignment]
+    runner, cli = _spawn_group_runner(tmp_path, "adopting", new_session=False, process_group=0)
+    orphan = os.posix_spawn("/bin/sleep", ["sleep", "600"], os.environ, setpgroup=runner.pid)
+    pass_may_run = threading.Event()
+
+    def held_pass(*args: object) -> int:
+        pass_may_run.wait(10)
+        return _kill_lost_group_members(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("omnigent.host.connect._kill_lost_group_members", held_pass)
+    try:
+        handle = _RunnerHandle(
+            proc=runner,
+            log_path=tmp_path / "runner.log",
+            create_time=_proc.process_create_time(runner.pid),
+            group_id=host._runner_group_at_spawn(runner.pid),
+            coral_step=True,
+        )
+        assert handle.group_id == runner.pid == os.getpgid(orphan)
+        host._runners["runner_lost"] = handle
+        os.kill(runner.pid, signal.SIGKILL)
+        watcher = asyncio.create_task(host._watch_runner("runner_lost"))
+        await poll_until_async(lambda: handle.group_kill is not None, timeout_s=10)
+
+        assert [host._reap_orphans_once([runner.pid, orphan]) for _ in range(2)] == [0, 0]
+        assert runner.returncode == -signal.SIGKILL
+        pass_may_run.set()
+        await asyncio.wait_for(watcher, timeout=10)
+
+        assert "code -9" in host._unreported_exits["runner_lost"].error
+        poll_until(lambda: psutil.Process(orphan).status() == psutil.STATUS_ZOMBIE, timeout_s=10)
+        assert [host._reap_orphans_once([orphan]) for _ in range(2)] == [0, 1]
+        await poll_until_async(lambda: _gone(cli), timeout_s=10)
+    finally:
+        pass_may_run.set()
+        with contextlib.suppress(OSError):
+            os.kill(orphan, signal.SIGKILL)
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(orphan, 0)
+        with contextlib.suppress(psutil.Error):
+            cli.kill()
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait(timeout=5)

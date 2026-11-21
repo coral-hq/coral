@@ -108,10 +108,12 @@ jobs:
         with:
           enable-cache: true
 
+      # CORAL(S107): coral-e2e installs the claude CLI through npm
       - name: Set up Node.js for local relay and harness CLI tests
         if: >-
           matrix.group == 'misc' || matrix.group == 'harnesses' ||
-          matrix.group == 'inner-rest' || matrix.group == 'ci-tooling'
+          matrix.group == 'inner-rest' || matrix.group == 'ci-tooling' ||
+          matrix.group == 'coral-e2e'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
@@ -129,6 +131,23 @@ jobs:
         uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@c76912dd5f9cfe9e2e11572eae45ad657243232f
         with:
           harness: pi
+
+      # CORAL(S107): the walking-skeleton E2E runs the pinned claude CLI from the in-repo action
+      - name: Install Claude CLI
+        id: claude_cli
+        if: matrix.group == 'coral-e2e'
+        uses: ./.github/actions/setup-harness-cli
+        with:
+          harness: claude
+
+      # CORAL(S107): record which claude CLI the E2E ran; a CLI that does not run fails the E2E
+      - name: Record Claude CLI version
+        if: matrix.group == 'coral-e2e'
+        env:
+          CLAUDE_CLI_VERSION: ${{ steps.claude_cli.outputs.version }}
+        run: |
+          echo "claude CLI $CLAUDE_CLI_VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "CORAL_E2E_REQUIRE_CLI=1" >> "$GITHUB_ENV"
 
       - name: Install test system dependencies
         # ripgrep: the Grep tool prefers it. bubblewrap: the linux_bwrap sandbox

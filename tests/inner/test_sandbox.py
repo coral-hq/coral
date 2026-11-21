@@ -686,3 +686,214 @@ def test_exec_launcher_rejects_an_unnameable_interpreter(monkeypatch) -> None:
     monkeypatch.setattr(sys, "executable", "")
     with pytest.raises(OSError, match=re.escape("sys.executable is empty")):
         create_exec_launcher("/bin/true", _noop_policy())
+
+
+# CORAL(S109): a target's own temp dir per launch, granted by the host pass, removed in-wrap
+def _launch_policy(parent: pathlib.Path) -> SandboxPolicy:
+    from omnigent.inner.sandbox import with_launch_tmpdir
+
+    policy = dataclasses.replace(_noop_policy(), backend_type="darwin_seatbelt", active=True)
+    return with_launch_tmpdir(policy, "CLAUDE_CODE_TMPDIR", parent)
+
+
+def _encoded(policy: SandboxPolicy) -> str:
+    raw = json.dumps(policy.to_jsonable(), separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def test_launch_tmpdir_fields_survive_the_wire_and_clones(tmp_path: pathlib.Path) -> None:
+    from omnigent.inner.sandbox import with_additional_write_roots
+
+    policy = _launch_policy(tmp_path / "h")
+    for copy in (
+        SandboxPolicy.from_jsonable(policy.to_jsonable()),
+        with_additional_write_roots(policy, [tmp_path / "w"]),
+    ):
+        assert (copy.launch_tmpdir_env, copy.launch_tmpdir_parent) == (
+            "CLAUDE_CODE_TMPDIR",
+            tmp_path / "h",
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_create_launch_tmpdir_makes_a_fresh_private_dir_or_none(tmp_path: pathlib.Path) -> None:
+    from omnigent.inner.sandbox import create_launch_tmpdir
+
+    assert create_launch_tmpdir(_noop_policy()) is None
+    first = create_launch_tmpdir(_launch_policy(tmp_path / "h"))
+    second = create_launch_tmpdir(_launch_policy(tmp_path / "h"))
+    assert first is not None and second is not None and first != second
+    assert first.parent == tmp_path / "h"
+    assert (first.stat().st_mode & 0o777) == 0o700
+    assert ((tmp_path / "h").stat().st_mode & 0o777) == 0o700
+
+
+def _refused(parent: pathlib.Path, caplog: pytest.LogCaptureFixture) -> bool:
+    """Whether ``create_launch_tmpdir`` refused ``parent``, logging no path."""
+    from omnigent.inner.sandbox import create_launch_tmpdir
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.sandbox"):
+        made = create_launch_tmpdir(_launch_policy(parent))
+    messages = [record.getMessage() for record in caplog.records]
+    assert all(str(parent) not in message for message in messages), messages
+    return made is None and any("not a private directory" in m for m in messages)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+@pytest.mark.parametrize("mode", [0o777, 0o1777, 0o755, 0o750])
+def test_create_launch_tmpdir_refuses_a_parent_that_is_not_mode_0700(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture, mode: int
+) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(mode)
+
+    assert _refused(parent, caplog)
+    assert not list(parent.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_create_launch_tmpdir_refuses_a_planted_symlink_parent(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Even a link to a private dir is refused: whoever planted it can repoint it."""
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    (tmp_path / "planted").symlink_to(target)
+
+    assert _refused(tmp_path / "planted", caplog)
+    assert not list(target.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_create_launch_tmpdir_refuses_a_parent_another_uid_owns(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "theirs"
+    parent.mkdir(mode=0o700)
+    monkeypatch.setattr(os, "getuid", lambda: parent.stat().st_uid + 1)
+
+    assert _refused(parent, caplog)
+    assert not list(parent.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_create_launch_tmpdir_removes_only_its_own_orphaned_siblings(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A launch dir whose launcher is gone goes; live, unclaimed and foreign entries stay."""
+    from omnigent.inner.sandbox import create_launch_tmpdir
+    from omnigent.native.owner_claim import current_boot_id, current_pid_namespace
+
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait()
+
+    def claimed_dir(name: str, pid: int) -> pathlib.Path:
+        path = parent / name
+        path.mkdir(mode=0o700)
+        boot = current_boot_id()
+        claim = f"{pid}\npid_ns={current_pid_namespace()}\n" + (f"boot={boot}\n" if boot else "")
+        (path / ".launch-owner").write_text(claim)
+        return path
+
+    parent = tmp_path / "h"
+    parent.mkdir(mode=0o700)
+    orphan = claimed_dir("cdeadbeef", finished.pid)
+    live = claimed_dir("clive0000", os.getpid())
+    foreign = claimed_dir("ap-deadbeef", finished.pid)
+    unclaimed = parent / "cnoclaim1"
+    unclaimed.mkdir(mode=0o700)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    (elsewhere / "keep").write_text("x")
+    (parent / "csymlink1").symlink_to(elsewhere)
+
+    made = create_launch_tmpdir(_launch_policy(parent))
+
+    assert made is not None and made.parent == parent
+    assert (made / ".launch-owner").read_text().split()[0] == str(os.getpid())
+    assert not orphan.exists()
+    assert live.is_dir() and foreign.is_dir() and unclaimed.is_dir()
+    assert (parent / "csymlink1").is_symlink() and (elsewhere / "keep").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_run_launcher_grants_and_exports_the_launch_dir_before_the_wrap(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host pass grants only the fresh dir and names it to the target, then execs the wrap."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    seen: dict[str, object] = {}
+
+    class _Backend:
+        def prepare_launcher_policy(self, policy: SandboxPolicy) -> SandboxPolicy:
+            return policy
+
+        def wrap_launcher_argv(self, argv, policy, cwd, chdir=None, target=None):
+            seen["policy"] = policy
+            return ["sandbox-exec", *argv]
+
+    def _capture_exec(_file: str, _argv: list[str]) -> None:
+        launch_dir = pathlib.Path(os.environ["CLAUDE_CODE_TMPDIR"])
+        seen["dir"] = launch_dir
+        seen["mode"] = launch_dir.stat().st_mode & 0o777
+        seen["marker"] = os.environ["OMNIGENT_LAUNCHER_LAUNCH_TMPDIR"]
+        raise SystemExit
+
+    monkeypatch.setattr("omnigent.inner.sandbox.get_backend", lambda _name: _Backend())
+    monkeypatch.setattr("omnigent.inner.sandbox.create_private_tmpdir", lambda: scratch)
+    monkeypatch.setattr(os, "execvp", _capture_exec)
+    with mock.patch.dict(os.environ):
+        with pytest.raises(SystemExit):
+            run_launcher(_encoded(_launch_policy(tmp_path / "h")), "/bin/true", [])
+
+    launch_dir = seen["dir"]
+    assert isinstance(launch_dir, pathlib.Path) and launch_dir.parent == tmp_path / "h"
+    assert seen["mode"] == 0o700 and seen["marker"] == str(launch_dir)
+    policy = seen["policy"]
+    assert isinstance(policy, SandboxPolicy)
+    assert launch_dir.resolve() in policy.write_roots
+    assert not [root for root in policy.write_roots if root.name.startswith("claude-")]
+    # An exec that never hands off leaves nothing behind.
+    assert not launch_dir.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+@pytest.mark.parametrize("target_fails", [False, True])
+def test_run_launcher_removes_the_launch_dir_when_the_target_exits(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, target_fails: bool
+) -> None:
+    """The in-wrap pass hands the dir to the target and removes it after the target exits."""
+    scratch = tmp_path / "scratch"
+    launch_dir = tmp_path / "h" / "cabcdefgh"
+    for path in (scratch, launch_dir / "claude-1"):
+        path.mkdir(parents=True)
+    (launch_dir / "claude-1" / "state.json").write_text("{}")
+    seen: dict[str, str] = {}
+
+    def _run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+        seen["tmpdir"] = os.environ["CLAUDE_CODE_TMPDIR"]
+        if target_fails:
+            raise OSError("target vanished")
+        return subprocess.CompletedProcess(argv, 3)
+
+    monkeypatch.setattr("omnigent.inner.sandbox.activate_sandbox", lambda _policy: None)
+    monkeypatch.setattr("omnigent.inner.sandbox.subprocess.run", _run)
+    wrapped_env = {
+        "OMNIGENT_LAUNCHER_SPAWN_WRAPPED": "1",
+        "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR": str(scratch),
+        "OMNIGENT_LAUNCHER_LAUNCH_TMPDIR": str(launch_dir),
+        "CLAUDE_CODE_TMPDIR": str(launch_dir),
+    }
+    with mock.patch.dict(os.environ, wrapped_env):
+        encoded = _encoded(_launch_policy(tmp_path / "h"))
+        if target_fails:
+            with pytest.raises(OSError):
+                run_launcher(encoded, "/bin/true", [])
+        else:
+            assert run_launcher(encoded, "/bin/true", []) == 3
+
+    assert seen["tmpdir"] == str(launch_dir)
+    assert not launch_dir.exists() and not scratch.exists()
+    assert (tmp_path / "h").is_dir()

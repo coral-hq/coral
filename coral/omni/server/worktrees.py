@@ -53,8 +53,8 @@ async def connect_run_worktree_host(
     Callers (the run executor) take ``user_id``, ``account_generation`` and
     ``workspace_id`` from the stored run, never from a request.
 
-    :param user_id: The run owner. ``None`` only when auth is disabled, which
-        skips the owner and generation checks, as Omnigent does.
+    :param user_id: The run owner. ``None`` is the single local user, checked as
+        :func:`~coral.omni.server.access.omnigent_owner` names it.
     :param account_generation: The owner's account registration saved with the
         run. A host row or connection from another registration of the same user
         id is refused, as ``fire.py`` refuses it for scheduled tasks.

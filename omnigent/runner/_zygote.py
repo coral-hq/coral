@@ -88,6 +88,11 @@ _ZYGOTE_TEST_CHILD_RAISE_ENV_VAR = "OMNIGENT_RUNNER_ZYGOTE_TEST_CHILD_RAISE"
 # genuinely alive) instead of exiting, so a test can kill the zygote out from
 # under a live child and assert the crash-recovery path. Never set in prod.
 _ZYGOTE_TEST_CHILD_SLEEP_ENV_VAR = "OMNIGENT_RUNNER_ZYGOTE_TEST_CHILD_SLEEP"
+# CORAL(S108) test-only seams: a runner child forks one sleeping harness over its own
+# control socket, prints the reply, then sleeps this many seconds; such a harness
+# ignores SIGTERM, so only a SIGKILL of its group ends it. Never set in production.
+_ZYGOTE_TEST_CHILD_HARNESS_ENV_VAR = "OMNIGENT_RUNNER_ZYGOTE_TEST_CHILD_HARNESS"
+_ZYGOTE_TEST_CHILD_IGNORE_TERM_ENV_VAR = "OMNIGENT_RUNNER_ZYGOTE_TEST_CHILD_IGNORE_TERM"
 
 # Upper bound on draining a forked child's debug-log sink before os._exit.
 _CHILD_TELEMETRY_FLUSH_TIMEOUT_S = 2.0
@@ -359,6 +364,18 @@ def _maybe_run_test_seam() -> None:
     not return. Shared by runner and harness child bodies so both can be driven
     deterministically (including staying alive for crash-recovery tests).
     """
+    harness_s = os.environ.get(_ZYGOTE_TEST_CHILD_HARNESS_ENV_VAR)
+    if harness_s is not None:  # CORAL(S108)
+        harness_env = {
+            "PATH": os.environ.get("PATH", ""),
+            _ZYGOTE_TEST_CHILD_SLEEP_ENV_VAR: harness_s,
+            _ZYGOTE_TEST_CHILD_IGNORE_TERM_ENV_VAR: "1",
+        }
+        channel = socket.socket(fileno=int(os.environ[ZYGOTE_HARNESS_FD_ENV_VAR]))
+        _send(channel, {"cmd": "fork_harness", "argv": [], "env": harness_env})
+        sys.stdout.write(f"harness={channel.recv(4096).decode().strip()}\n")
+        sys.stdout.flush()
+        os.environ[_ZYGOTE_TEST_CHILD_SLEEP_ENV_VAR] = harness_s
     sleep_s = os.environ.get(_ZYGOTE_TEST_CHILD_SLEEP_ENV_VAR)
     if sleep_s is not None:
         import time
@@ -422,6 +439,8 @@ def _run_harness_child(request: dict[str, Any]) -> None:
     if sleep_s is not None:
         import time
 
+        if os.environ.get(_ZYGOTE_TEST_CHILD_IGNORE_TERM_ENV_VAR):  # CORAL(S108)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
         time.sleep(float(sleep_s))
         os._exit(0)
     test_exit = os.environ.get(_ZYGOTE_TEST_CHILD_EXIT_ENV_VAR)
@@ -473,6 +492,8 @@ class _ZygoteServer:
         # _exit_codes, which would otherwise grow unbounded and risk pid-reuse
         # misattribution over a long-lived daemon.
         self._runner_harness_pids: dict[int, set[int]] = {}
+        # CORAL(S108): each runner's pid (its own group id) by its control-socket fileno.
+        self._runner_pids: dict[int, int] = {}
         # Pids whose exit code must be discarded (not stored) when reaped: a
         # dropped runner's harness children that nothing will ever poll.
         self._orphaned: set[int] = set()
@@ -716,17 +737,24 @@ class _ZygoteServer:
             _send(conn, {"error": f"fork failed: {exc}"})
             return
         if pid == 0:
+            # CORAL(S108): the runner leads its own group, staying in this session so its
+            # harness forks can join it. Both sides set it, so it holds before the reply.
+            with contextlib.suppress(OSError):
+                os.setpgid(0, 0)
             # Runner child: keep r_end (its harness channel), close every
             # inherited zygote-side socket including the just-made z_end.
             with contextlib.suppress(OSError):
                 z_end.close()
             self._close_inherited_in_child()
             self._exit_child(lambda: _run_child(request, r_end.fileno()))
+        with contextlib.suppress(OSError):
+            os.setpgid(pid, pid)  # CORAL(S108)
         # Zygote parent: keep z_end (watch for this runner's harness forks),
         # drop r_end (the child owns it).
         with contextlib.suppress(OSError):
             r_end.close()
         self._live.add(pid)
+        self._runner_pids[z_end.fileno()] = pid  # CORAL(S108)
         self._control_socks.add(z_end)
         self._buffers[z_end.fileno()] = bytearray()
         self._sel.register(z_end, selectors.EVENT_READ, "runner")
@@ -743,16 +771,25 @@ class _ZygoteServer:
             return
         if self._refuse_if_upgraded(conn, "harness"):
             return
+        # CORAL(S108): a runner's harness joins that runner's group while the runner is unreaped.
+        runner_pid = self._runner_pids.get(conn.fileno())
+        group = runner_pid if runner_pid in self._live else None
         try:
             pid = os.fork()
         except OSError as exc:
             _send(conn, {"error": f"fork failed: {exc}"})
             return
         if pid == 0:
+            if group is not None:
+                with contextlib.suppress(OSError):
+                    os.setpgid(0, group)  # CORAL(S108)
             # Harness child: close every inherited zygote-side socket (it never
             # speaks the fork protocol; it talks to its runner over its own UDS).
             self._close_inherited_in_child()
             self._exit_child(lambda: _run_harness_child(request))
+        if group is not None:
+            with contextlib.suppress(OSError):
+                os.setpgid(pid, group)  # CORAL(S108)
         self._live.add(pid)
         # Track under the requesting runner so _drop_runner can orphan this
         # harness's exit-code state if that runner disappears before polling.
@@ -810,12 +847,13 @@ class _ZygoteServer:
             self._sel.unregister(conn)
         self._control_socks.discard(conn)
         self._buffers.pop(fileno, None)
+        self._runner_pids.pop(fileno, None)  # CORAL(S108)
         for harness_pid in self._runner_harness_pids.pop(fileno, set()):
             self._exit_codes.pop(harness_pid, None)
             if harness_pid in self._live:
                 self._orphaned.add(harness_pid)
-                # Signal the pid, never the group: everything the zygote forks
-                # shares the zygote's group, so a killpg would take it down too.
+                # Signal the pid, never the group: a harness shares its runner's group
+                # (else the zygote's), so a killpg would reach them too. CORAL(S108)
                 with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                     os.kill(harness_pid, signal.SIGTERM)
         with contextlib.suppress(OSError):

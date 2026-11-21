@@ -6,6 +6,7 @@ import pytest
 
 from coral.engine import empty_state, fold, transition
 from coral.engine.types import (
+    RULES,
     CancelRun,
     ChooseArrow,
     Effect,
@@ -22,6 +23,7 @@ from coral.engine.types import (
     RejectionObserved,
     RejectStreak,
     ResumeRun,
+    RetryStep,
     RunState,
     StartRun,
     TimerDue,
@@ -42,7 +44,7 @@ from tests.coral.workflow_builders import (
 )
 
 CONFIG = EngineConfig()
-RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1")
+RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1", rules=RULES)
 SLOT = "work||:0"
 FACT_KEY = "turn:sess-1:1:resp-1"
 
@@ -480,7 +482,7 @@ def test_start_rejects_unresolved_graph() -> None:
     result = transition(
         graph,
         state,
-        StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1"),
+        StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1", rules=RULES),
         NOW,
         CONFIG,
     )
@@ -623,3 +625,91 @@ def test_a_close_with_pending_input_pauses_drift_and_resume_finishes_it() -> Non
     )
     assert again.log[-1].effects == ()
     assert [item.node_id for item in again.state.activations].count("ship") == 1
+
+
+def _single_step() -> CompiledGraph:
+    return _graph(
+        workflow_text(
+            [start(), step("work"), end()],
+            [arrow("a1", "start", "work"), arrow("a2", "work", "end")],
+        )
+    )
+
+
+def test_a_create_completion_of_another_generation_only_receipts() -> None:
+    graph = _single_step()
+    opened = drive(graph, [RUN], auto_ack=False)
+    create = _last_effect(opened.state, "create_session")
+    # A first generation's create names no generation.
+    assert "generation" not in create.payload
+    # The create's retries ran out, and the step was retried while it was still in flight.
+    retried = drive(
+        graph,
+        [
+            EffectFailed(effect_key=create.effect_key, code="session.not_ready", retryable=True),
+            RetryStep(node_id="work"),
+        ],
+        after=opened,
+        auto_ack=False,
+    )
+    slot = retried.state.slots[0]
+    assert (slot.status, slot.session_generation) == ("pending", 2)
+
+    late = drive(
+        graph,
+        [EffectCompleted(effect_key=create.effect_key, payload={"generation": 1})],
+        after=retried,
+        auto_ack=False,
+    )
+
+    entry = late.log[-1]
+    assert (entry.rejection, entry.effects, entry.receipt_key) == (None, (), create.effect_key)
+    assert late.state.slots == retried.state.slots
+
+    restart = _last_effect(late.state, "retry_step")
+    finished = drive(
+        graph,
+        [EffectCompleted(effect_key=restart.effect_key, payload={"salvage_ref": None})],
+        after=late,
+        auto_ack=False,
+    )
+    (renewed,) = finished.log[-1].effects
+    assert (renewed.kind, renewed.payload["generation"]) == ("create_session", 2)
+    created = drive(
+        graph, [EffectCompleted(effect_key=renewed.effect_key)], after=finished, auto_ack=False
+    )
+    assert [effect.kind for effect in created.log[-1].effects] == ["send_input"]
+    assert created.state.slots[0].status == "session_created"
+
+
+def test_a_create_failure_of_another_generation_pauses_nothing() -> None:
+    graph = _single_step()
+    opened = drive(graph, [RUN], auto_ack=False)
+    create = _last_effect(opened.state, "create_session")
+    retried = drive(
+        graph,
+        [
+            EffectFailed(effect_key=create.effect_key, code="session.not_ready", retryable=True),
+            RetryStep(node_id="work"),
+        ],
+        after=opened,
+        auto_ack=False,
+    )
+    restart = _last_effect(retried.state, "retry_step")
+    restarted = drive(
+        graph,
+        [EffectCompleted(effect_key=restart.effect_key, payload={"salvage_ref": None})],
+        after=retried,
+        auto_ack=False,
+    )
+    assert (restarted.state.status, restarted.state.causes) == ("running", ())
+
+    late = drive(
+        graph,
+        [EffectFailed(effect_key=create.effect_key, code="session.host_unsupported")],
+        after=restarted,
+        auto_ack=False,
+    )
+
+    assert (late.state.status, late.state.causes) == ("running", ())
+    assert late.log[-1].receipt_key == create.effect_key

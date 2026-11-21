@@ -231,6 +231,15 @@ _ROUND_TRIPS: dict[str, tuple[OpCall, dict, dict, object]] = {
         {"head": HEAD},
         ResetResult(head=HEAD),
     ),
+    # The precondition rides only when given, so a plain reset stays what older hosts take.
+    "reset-under-a-salvage": (
+        lambda ops: ops.reset(
+            REF, HostChannel(HOST_ID), op_key="k-3", commit=HEAD, salvage_commit=NEW
+        ),
+        _wire("reset", WRITE_TIMEOUT_S, "k-3", commit=HEAD, salvage_commit=NEW),
+        {"head": HEAD},
+        ResetResult(head=HEAD),
+    ),
 }
 
 
@@ -307,6 +316,9 @@ _INVALID: dict[str, OpCall] = {
     "salvage-op-key": lambda ops: ops.salvage(REF, WRITER, op_key="a/b"),
     "reset-op-key": lambda ops: ops.reset(REF, WRITER, op_key="", commit=HEAD),
     "reset-commit": lambda ops: ops.reset(REF, WRITER, op_key="k", commit="A" * 40),
+    "reset-salvage-commit": lambda ops: ops.reset(
+        REF, WRITER, op_key="k", commit=HEAD, salvage_commit="HEAD"
+    ),
 }
 
 
@@ -474,6 +486,8 @@ async def test_a_malformed_payload_is_permanently_unavailable(
         "workspace.git_failed",
         "workspace.op_key_conflict",
         "workspace.target_mismatch",
+        "workspace.tree_changed",
+        "workspace.head_moved",
     ],
 )
 @pytest.mark.parametrize("permanent", [False, True])

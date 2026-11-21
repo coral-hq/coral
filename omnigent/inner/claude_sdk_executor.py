@@ -36,7 +36,6 @@ import os
 import pathlib
 import shutil
 import sys
-import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
@@ -103,6 +102,7 @@ from .sandbox import (
     with_additional_read_roots,
     with_additional_write_files,
     with_additional_write_roots,
+    with_launch_tmpdir,
 )
 
 logger = logging.getLogger(__name__)
@@ -1526,11 +1526,34 @@ def _claude_internal_write_roots() -> list[pathlib.Path]:
         pathlib.Path.home() / ".claude" / "session-env",
         pathlib.Path.home() / ".claude" / "sessions",
         pathlib.Path.home() / ".npm" / "_logs",
-        pathlib.Path(tempfile.gettempdir()) / f"claude-{stable_user_id()}",
+        # CORAL(S109): no per-user temp dir: one is shared by every session; see
+        # _claude_launch_tmpdir_parent for the CLI's own dir per launch.
     ]
     for root in roots:
         root.mkdir(parents=True, exist_ok=True)
     return roots
+
+
+# CORAL(S109): the CLI keeps child-process temp dirs in <CLAUDE_CODE_TMPDIR>/claude-<uid>
+# only up to this many bytes; past it they fall back to the shared /tmp/claude-<uid>.
+_CLAUDE_CLI_TEMP_DIR_MAX_BYTES = 44
+
+
+def _claude_launch_tmpdir_parent() -> pathlib.Path:
+    """CORAL(S109): the runner's short private socket root, which holds each launch's CLI dir."""
+    from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
+
+    parent = resolve_harness_tmp_parent()
+    # A launch dir is "c" plus eight random characters.
+    longest = parent / ("c" * 9) / f"claude-{stable_user_id()}"
+    if len(os.fsencode(longest)) > _CLAUDE_CLI_TEMP_DIR_MAX_BYTES:
+        logger.warning(
+            "The Claude CLI's temp dir under %s exceeds %d bytes; its child processes "
+            "will use /tmp, which the sandbox does not grant",
+            parent,
+            _CLAUDE_CLI_TEMP_DIR_MAX_BYTES,
+        )
+    return parent
 
 
 def _claude_internal_write_files() -> list[pathlib.Path]:
@@ -1624,6 +1647,10 @@ def prepare_claude_cli_path(
     sandbox = with_additional_read_roots(sandbox, _claude_internal_write_roots())
     sandbox = with_additional_write_roots(sandbox, _claude_internal_write_roots())
     sandbox = with_additional_write_files(sandbox, _claude_internal_write_files())
+    # CORAL(S109): the CLI ignores TMPDIR and seatbelt shares the host's /tmp, so each launch
+    # gets its own dir; bwrap's /tmp is already a private tmpfs per launch.
+    if sandbox.backend_type == "darwin_seatbelt":
+        sandbox = with_launch_tmpdir(sandbox, "CLAUDE_CODE_TMPDIR", _claude_launch_tmpdir_parent())
     # Dry-run the spawn-time wrap now, while degrading is still possible.
     # The real wrap happens later inside run_launcher, where an OSError
     # (un-grantable interpreter layout, profile-size cap, cwd-scan

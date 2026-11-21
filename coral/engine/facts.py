@@ -32,12 +32,18 @@ class TurnSnapshot(BaseModel):
 
 
 class TurnFact(TurnSnapshot):
-    """A snapshot plus the slot it belongs to and when its runner was last seen."""
+    """A snapshot plus the slot it belongs to and when its runner was last seen.
+
+    ``runner_id`` names the runner incarnation the fact is about, so a loss is keyed by it.
+    """
 
     slot_id: str
     runner_last_seen: datetime | None = None
+    runner_id: str | None = None
+    # When the edge the fact came from was observed.
+    observed_at: datetime | None = None
 
-    @field_validator("runner_last_seen")
+    @field_validator("runner_last_seen", "observed_at")
     @classmethod
     def _aware_runner(cls, value: datetime | None) -> datetime | None:
         _require_aware_runner(value)
@@ -49,7 +55,7 @@ def _require_aware_runner(value: datetime | None) -> None:
     if value is None:
         return
     if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
-        raise ValueError("runner_last_seen must be timezone-aware")
+        raise ValueError("fact timestamps must be timezone-aware")
 
 
 def turn_key_generation(fact_key: str) -> int | None:
@@ -68,3 +74,32 @@ def turn_key_generation(fact_key: str) -> int | None:
         return int(parts[1])
     except ValueError:
         return None
+
+
+def turn_key_tail(fact_key: str | None) -> str:
+    """Tail of ``turn:{session}:{generation}:{tail}``, or ``"None"`` for another shape."""
+    if fact_key is None or not fact_key.startswith("turn:"):
+        return "None"
+    parts = fact_key[len("turn:") :].split(":", 2)
+    return parts[2] if len(parts) == 3 else "None"
+
+
+def runner_loss_key(
+    session_id: str,
+    generation: int,
+    runner_id: str | None,
+    fact_key: str | None,
+    epoch: int,
+) -> str:
+    """One key per outage of a runner: ``runner:{session}:{generation}:{runner_id}:{epoch}``.
+
+    ``epoch`` is the slot's ``connection_epoch``. Without a runner id the key falls back
+    to the turn's response tail, ``runner:{session}:{generation}:turn:{tail}:{epoch}``.
+    """
+    runner = runner_id if runner_id else f"turn:{turn_key_tail(fact_key)}"
+    return f"runner:{session_id}:{generation}:{runner}:{epoch}"
+
+
+def previous_runner_loss_key(session_id: str, generation: int) -> str:
+    """The loss key of the previous rules: one per session generation."""
+    return f"runner:{session_id}:{generation}"

@@ -416,23 +416,24 @@ async def test_the_backoff_stages_fire_from_their_timer_rows(
     assert _texts(sessions, run_id)[-1].startswith(BACKOFF)
 
 
-async def test_a_failure_no_rule_names_pauses_and_a_resume_re_prompts_the_step_once(
+async def test_a_failure_no_rule_names_pauses_for_a_retry_and_a_resume_re_prompts_nothing(
     world: World, briefed: tuple[Sessions, str]
 ) -> None:
     sessions, run_id = briefed
     sessions.fail_turn(run_id, IMPLEMENT, "inner executor error: the harness gave up")
     await sessions.drain()
-    assert _status(world, run_id) == (int(RunStatus.PAUSED), int(RunPauseReason.FAILURE_PATH))
+    paused = (int(RunStatus.PAUSED), int(RunPauseReason.FAILURE_PATH))
+    assert _status(world, run_id) == paused
     assert _failures(world, run_id) == [("agent.failed", "agent.failed")]
 
-    world.bridge.resume_run(workspace_id=WORKSPACE, run_id=run_id, actor=USER)
+    commit = world.bridge.resume_run(workspace_id=WORKSPACE, run_id=run_id, actor=USER)
     await sessions.drain()
 
-    texts = _texts(sessions, run_id)
-    assert len(texts) == 2 and texts[-1].startswith(RESUME)
-    assert _status(world, run_id) == RUNNING
-    await sessions.run(Agent(sessions))
-    assert world.run(run_id).status == int(RunStatus.COMPLETED)
+    # A step's failed turn is restarted by a retry; a resume is refused and sends nothing.
+    rejections = [entry.rejection for entry in commit.entries if entry.rejection is not None]
+    assert [rejection.code for rejection in rejections] == ["resume_not_allowed"]
+    assert len(_texts(sessions, run_id)) == 1
+    assert _status(world, run_id) == paused
 
 
 @pytest.mark.parametrize(

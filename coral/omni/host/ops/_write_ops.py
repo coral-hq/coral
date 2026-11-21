@@ -60,10 +60,14 @@ from coral.omni.host.ops._target import (
 )
 from coral.workspace.ops import (
     CLEAN_EXCLUDE,
+    GIT_DIFF_FLAGS,
+    HEAD_MOVED,
     HOOKS_TRAILER_KEY,
     HOOKS_TRAILER_VALUE,
     OP_PARAMS_TRAILER_KEY,
     OP_TRAILER_KEY,
+    SALVAGE_REF_PREFIX,
+    TREE_CHANGED,
     commit_params_digest,
     commit_record_trailers,
     salvage_ref_name,
@@ -171,20 +175,81 @@ def _salvage(request: WorkspaceOpRequest, *, sleep: Sleep) -> Mapping[str, objec
 
 
 def _reset(request: WorkspaceOpRequest, *, sleep: Sleep) -> Mapping[str, object]:
-    """``{head}``: restore ``commit`` and remove untracked files that are not ignored."""
-    params = op_params(request, required=("commit",))
+    """
+    ``{head}``: restore ``commit`` and remove untracked files that are not ignored.
+
+    With ``salvage_commit`` the reset is a compare-and-swap on that salvage (see
+    :func:`_require_salvaged`), under this op's own worktree lock.
+    """
+    params = op_params(request, required=("commit",), optional=("salvage_commit",))
     _op_key(request)
     commit = str(commit_param(params, "commit", required=True))
+    salvage_commit = commit_param(params, "salvage_commit")
     with pinned(request, params, write=True) as target:
         git = replace(target.git, sleep=sleep)
         resolved = resolve_commit(git, commit)
-        if _already_at(git, target.root, resolved):
+        if salvage_commit is not None:
+            # Decided from the compare-and-swap's own read: a second status walk would only
+            # widen the window in which a write lands unrecorded.
+            clean = _require_salvaged(target, git, resolved, salvage_commit)
+            if clean and not unfinished_operations(git, target.root):
+                return {"head": resolved}
+        elif _already_at(git, target.root, resolved):
             return {"head": resolved}
         # "--" makes the id a revision even when a file of that name exists.
         git.run_locking("reset", "--hard", "-q", "--no-recurse-submodules", resolved, "--")
         # Never -x: ignored files stay, and the exclude keeps .coral/runtime/.
         git.run("clean", "-fdq", *CLEAN_EXCLUDE, "--", ".")
         return {"head": resolved}
+
+
+def _require_salvaged(target: PinnedTarget, git: Git, commit: str, salvage_commit: str) -> bool:
+    """
+    Refuse a reset that could drop what ``salvage_commit`` did not record.
+
+    The commit must be a ``refs/coral/salvage/`` ref's. HEAD must be ``commit`` and the
+    salvage's parent, so the branch never loses a commit (``workspace.head_moved``,
+    permanent). Every path the tree records differently from HEAD must be as the
+    salvage recorded it, so a reset that stopped before its ``clean`` passes and a later
+    write does not (``workspace.tree_changed``: salvage again).
+
+    :returns: Whether the tree records nothing beyond HEAD.
+    """
+    salvaged = _read_commit(git, resolve_commit(git, salvage_commit))
+    listed = git.run("for-each-ref", "--format=%(refname)", "--points-at", salvaged.commit)
+    names = listed.stdout.decode("utf-8", "replace").split("\n")
+    if not any(name.startswith(SALVAGE_REF_PREFIX) for name in names):
+        raise WorkspaceOpHandlerError(GIT_FAILED, f"{salvage_commit} is not a salvage record")
+    head = head_commit(git)
+    if head != commit or salvaged.parents != (head,):
+        raise WorkspaceOpHandlerError(
+            HEAD_MOVED,
+            f"HEAD is {head}, not {commit} and the parent of salvage {salvage_commit}",
+            permanent=True,
+        )
+    tree = _recordable_tree(target, git)
+    head_tree = _tree_of(git, head)
+    if tree == head_tree:
+        return True
+    try:
+        unrecorded = _changed_paths(git, head_tree, tree) & _changed_paths(
+            git, _tree_of(git, salvaged.commit), tree
+        )
+    except OutputTooLarge:
+        unrecorded = {b"(too many paths to compare)"}
+    if unrecorded:
+        raise WorkspaceOpHandlerError(
+            TREE_CHANGED, f"the worktree changed since salvage {salvage_commit}; salvage it again"
+        )
+    return False
+
+
+def _changed_paths(git: Git, old_tree: str, new_tree: str) -> set[bytes]:
+    """The paths whose entry differs between two trees, with no rename detection."""
+    listed = git.run(
+        "diff-tree", "-r", "-z", "--no-renames", "--name-only", *GIT_DIFF_FLAGS, old_tree, new_tree
+    )
+    return {path for path in listed.stdout.split(b"\0") if path}
 
 
 def _move_branch(git: Git, ref: str, commit: str, expected_head: str, op_key: str) -> None:

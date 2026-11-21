@@ -9,6 +9,7 @@ import pytest
 from coral.engine import fold, transition
 from coral.engine.reconcile import awaiting_effect
 from coral.engine.types import (
+    RULES,
     AnswerGate,
     EffectCompleted,
     EffectFailed,
@@ -37,7 +38,7 @@ from tests.coral.workflow_builders import (
     workflow_text,
 )
 
-RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1")
+RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1", rules=RULES)
 SLOT = "work||:0"
 SHORT = TimerPolicy(
     watchdog=timedelta(seconds=5),

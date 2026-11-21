@@ -31,12 +31,15 @@ from dataclasses import dataclass, field
 from typing import override
 
 from coral.workspace.ops import (
+    HEAD_MOVED,
     HOOKS_TRAILER_KEY,
     HOOKS_TRAILER_VALUE,
     MAX_READ_BYTES,
     OP_PARAMS_TRAILER_KEY,
     OP_TRAILER_KEY,
     RUNTIME_DIR,
+    SALVAGE_REF_PREFIX,
+    TREE_CHANGED,
     CheckResult,
     CommitResult,
     DiffStat,
@@ -291,13 +294,23 @@ class FakeWorkspaceOps(WorkspaceOps):
 
     @override
     async def reset(
-        self, ref: WorkspaceRef, executor: OpExecutor, *, op_key: str, commit: str
+        self,
+        ref: WorkspaceRef,
+        executor: OpExecutor,
+        *,
+        op_key: str,
+        commit: str,
+        salvage_commit: str | None = None,
     ) -> ResetResult:
         check_op_host("reset", executor)
         validate_op_key(op_key)
         validate_commit_id(commit)
+        if salvage_commit is not None:
+            validate_commit_id(salvage_commit)
         worktree = self._target(ref, executor)
         self._commit(commit)
+        if salvage_commit is not None:
+            self._require_salvaged(worktree, commit, salvage_commit)
         self._checkout(worktree, commit)
         return ResetResult(head=commit)
 
@@ -382,6 +395,32 @@ class FakeWorkspaceOps(WorkspaceOps):
                 f"{ref.root} is on {worktree.branch}, not {ref.branch}",
             )
         return worktree
+
+    def _require_salvaged(self, worktree: _Worktree, commit: str, salvage_commit: str) -> None:
+        """Refuse a reset that could drop work its salvage did not record."""
+        salvaged = self._commit(salvage_commit)
+        if not any(
+            name.startswith(SALVAGE_REF_PREFIX) and target == salvage_commit
+            for name, target in worktree.refs.items()
+        ):
+            raise WorkspaceOpError(
+                "workspace.git_failed", f"{salvage_commit} is not a salvage record"
+            )
+        if worktree.head != commit or salvaged.parent != worktree.head:
+            raise WorkspaceOpError(
+                HEAD_MOVED,
+                f"HEAD is {worktree.head}, not {commit} and the parent of {salvage_commit}",
+                permanent=True,
+            )
+        tree = self._recordable(worktree)
+        head = self._commits[worktree.head].files
+        if any(
+            tree.get(path) != head.get(path) and tree.get(path) != salvaged.files.get(path)
+            for path in set(tree) | set(head) | set(salvaged.files)
+        ):
+            raise WorkspaceOpError(
+                TREE_CHANGED, f"the worktree changed since salvage {salvage_commit}"
+            )
 
     def _commit(self, commit: str) -> _Commit:
         found = self._commits.get(commit)
