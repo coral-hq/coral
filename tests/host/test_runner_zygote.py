@@ -1794,3 +1794,54 @@ def test_child_telemetry_flush_swallows_interrupts(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(dl, "close_debug_log_sink", _interrupted_close)
     _zygote._flush_child_telemetry()
+
+
+# CORAL(S108): each runner leads its own group, and its harnesses join it.
+def test_forked_runner_leads_its_own_group_in_the_zygote_session(
+    manager: ZygoteManager, tmp_path
+) -> None:
+    """A forked runner's group is its own, so ending it reaches no sibling or the zygote.
+
+    The runner stays in the zygote's session, where its harness forks can join its group.
+    """
+    first = manager.fork_runner(_sleep_env(30), "/dev/null", str(tmp_path))
+    second = manager.fork_runner(_sleep_env(30), "/dev/null", str(tmp_path))
+    try:
+        zygote_pid = manager.pid
+        assert zygote_pid is not None
+        for runner in (first, second):
+            assert os.getpgid(runner.pid) == runner.pid
+            assert os.getsid(runner.pid) == os.getsid(zygote_pid)
+        assert os.getpgid(zygote_pid) == zygote_pid
+    finally:
+        for runner in (first, second):
+            runner.kill()
+            _wait_exit(runner)
+
+
+def test_a_runners_harness_forks_join_its_group(monkeypatch) -> None:
+    """A harness forked for a live runner joins its group; a daemon-side one does not.
+
+    Neither does one a reaped runner asked for, whose group id the OS may reuse.
+    """
+    daemon, daemon_peer = socket.socketpair()
+    server = _ZygoteServer(daemon)
+    pids = iter([5001, 5002, 5003, 5004])
+    grouped: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "fork", lambda: next(pids))
+    monkeypatch.setattr(os, "setpgid", lambda pid, group: grouped.append((pid, group)))
+    harness = json.dumps({"cmd": "fork_harness", "argv": [], "env": {}}).encode()
+    try:
+        assert _dispatch_fork(server, daemon, daemon_peer, "fork") == {"pid": 5001}
+        [runner_sock] = server._control_socks - {daemon}
+        server._dispatch(runner_sock, harness)
+        assert _dispatch_fork(server, daemon, daemon_peer, "fork_harness") == {"pid": 5003}
+        server._live.discard(5001)
+        server._dispatch(runner_sock, harness)
+
+        assert grouped == [(5001, 5001), (5002, 5001)]
+        assert 5004 in server._live
+    finally:
+        server._sel.close()
+        for sock in (daemon, daemon_peer, *server._control_socks):
+            sock.close()

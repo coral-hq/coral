@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib  # CORAL(S108)
 import hashlib
 import importlib
 import io
@@ -11,6 +12,7 @@ import logging
 import os
 import queue
 import signal
+import subprocess  # CORAL(S108)
 import sys
 import tarfile
 import tempfile
@@ -23,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import psutil  # CORAL(S108)
 import pytest
 
 from omnigent.errors import OmnigentError
@@ -35,6 +38,7 @@ from omnigent.runner._entry import (
     _agent_cache_dest,
     _AgentSpecCache,
     _apply_host_interactive_shells,
+    _end_own_process_group,  # CORAL(S108)
     _host_interactive_shells_from_env,
     _ignore_finish_work_signal_until_handled,
     _InitialAuthTokenFactory,
@@ -78,6 +82,7 @@ from omnigent.runner.transports.ws_tunnel.serve import (
     RunnerTunnelAuthRejectedError,
 )
 from omnigent.util import event_loop_watchdog as watchdog
+from tests._helpers.polling import poll_until  # CORAL(S108)
 from tests._helpers.session import bundle_files
 from tests.budgets import budget
 from tests.runner.helpers import make_test_terminal_instance
@@ -2686,6 +2691,165 @@ def test_run_parent_death_killer_waits_for_a_late_finish_work_signal() -> None:
     assert events == ["idle_close", "exit"], (
         "a finish-work signal arriving after parent death must still finish the turn"
     )
+
+
+# CORAL(S108): a Coral step runner outliving its host ends the process group it leads.
+@pytest.mark.parametrize(
+    ("hung_up", "busy", "marked", "adopted", "expected"),
+    [
+        (False, False, True, False, ["stop", "end_group", "exit"]),
+        (False, True, True, False, ["stop", "end_group", "exit"]),
+        (True, False, True, False, ["stop", "end_group", "exit"]),
+        (True, True, True, False, ["idle_close", "end_group", "exit"]),
+        (False, False, False, False, ["stop", "exit"]),
+        (True, True, False, False, ["idle_close", "exit"]),
+        (False, False, True, True, []),
+    ],
+    ids=[
+        "idle-parent-death",
+        "busy-parent-death",
+        "idle-hangup",
+        "busy-hangup",
+        "unmarked-parent-death",
+        "unmarked-hangup",
+        "adopted",
+    ],
+)
+def test_run_parent_death_killer_ends_only_a_marked_runners_group(
+    monkeypatch: pytest.MonkeyPatch,
+    hung_up: bool,
+    busy: bool,
+    marked: bool,
+    adopted: bool,
+    expected: list[str],
+) -> None:
+    """A marked runner whose parent is gone ends its group, however it then exits.
+
+    A runner given no ``parent_lost`` event, and an adopted one, end nothing.
+    """
+    import omnigent.runner._entry as entry_mod
+
+    events: list[str] = []
+    monkeypatch.setattr(entry_mod, "_end_own_process_group", lambda: events.append("end_group"))
+    finish_work = threading.Event()
+    if hung_up:
+        finish_work.set()
+    adopted_event = threading.Event()
+    if adopted:
+        adopted_event.set()
+    probes: list[str] = []
+
+    def has_active_work() -> bool:
+        probes.append("probe")
+        return busy and len(probes) < 3
+
+    parent_lost = threading.Event() if marked else None
+    _run_parent_death_killer(
+        os.getppid() + 100000,  # already "orphaned"
+        lambda: events.append("stop"),
+        adopted=adopted_event,
+        finish_work=finish_work,
+        has_active_work=has_active_work,
+        request_idle_shutdown=lambda: events.append("idle_close"),
+        parent_lost=parent_lost,
+        poll_interval_s=0.01,
+        grace_s=0.01,
+        idle_grace_s=0.01,
+        signal_wait_s=0.05,
+        exit_fn=lambda code: events.append("exit"),
+    )
+
+    assert events == expected
+    if parent_lost is not None:
+        assert parent_lost.is_set() is ("end_group" in expected)
+
+
+def test_runner_group_flag_is_read_once_and_not_inherited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host's mark is consumed, so the runner's harness and CLI never see it."""
+    from omnigent.runner._entry import _runner_group_ends_with_it
+    from omnigent.runner.identity import RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR
+
+    monkeypatch.setenv(RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR, "1")
+    assert _runner_group_ends_with_it() is True
+    assert RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR not in os.environ
+    assert _runner_group_ends_with_it() is False
+
+
+def test_end_own_process_group_needs_a_group_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runner that does not lead its group, or is PID 1, never signals a group."""
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "killpg", lambda group, sig: signalled.append((group, sig)))
+    monkeypatch.setattr(os, "getpgrp", lambda: os.getpid() + 1)
+    _end_own_process_group()
+    assert signalled == []
+    with monkeypatch.context() as as_init:
+        as_init.setattr(os, "getpid", lambda: 1)
+        as_init.setattr(os, "getpgrp", lambda: 1)
+        _end_own_process_group()
+    assert signalled == []
+
+    monkeypatch.setattr(os, "getpgrp", os.getpid)
+    _end_own_process_group()
+    assert signalled == [(os.getpid(), signal.SIGKILL)]
+
+
+_LOST_RUNNER = """
+import os, subprocess, threading
+from omnigent.runner._entry import _run_parent_death_killer
+cli = subprocess.Popen(["sleep", "600"])
+print(os.getpid(), cli.pid, flush=True)
+_run_parent_death_killer(
+    os.getppid(), lambda: None, parent_lost=threading.Event(), poll_interval_s=0.05, grace_s=0.05
+)
+"""
+_HOST = """
+import subprocess, sys, time
+bystander = subprocess.Popen(["sleep", "600"])
+runner = subprocess.Popen(
+    [sys.executable, "-c", sys.argv[1]], start_new_session=True, stdout=subprocess.PIPE, text=True
+)
+print(runner.stdout.readline().strip(), bystander.pid, flush=True)
+time.sleep(600)
+"""
+
+
+@pytest.mark.posix_only
+@pytest.mark.timeout(60)
+def test_a_runner_lost_with_its_host_ends_its_own_group_only() -> None:
+    """A host SIGKILL leaves nothing of its runner's group; the host's own group is untouched."""
+    host = subprocess.Popen(
+        [sys.executable, "-c", _HOST, _LOST_RUNNER],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    assert host.stdout is not None
+    pids = [int(value) for value in host.stdout.readline().split()]
+    procs = [psutil.Process(pid) for pid in pids]
+    runner, cli, bystander = procs
+
+    def gone(proc: psutil.Process) -> bool:
+        try:
+            return not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return True
+
+    try:
+        assert os.getpgid(runner.pid) == runner.pid == os.getpgid(cli.pid)
+        host.kill()
+        host.wait(timeout=10)
+
+        poll_until(lambda: gone(runner) and gone(cli), timeout_s=20, interval_s=0.05)
+        assert not gone(bystander)
+    finally:
+        for proc in procs:
+            with contextlib.suppress(psutil.Error):
+                proc.kill()
+        with contextlib.suppress(OSError):
+            host.kill()
+        host.wait(timeout=10)
 
 
 def test_work_still_active_treats_any_exception_as_active() -> None:

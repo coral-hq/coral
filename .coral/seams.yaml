@@ -3204,3 +3204,88 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S108
+    title: A Coral step runner's own process group ends with it
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A Coral step runner's harness, claude CLI, in-flight tool commands and
+      any background process its agent started could outlive it: a killed
+      runner left its shell commands running, and Coral's fence (a graceful
+      stop) left an in-flight shell command able to edit the worktree after
+      salvage. Zygote-forked runners shared the zygote's group, so no group
+      signal could reach one runner's tree alone. Every runner now leads its
+      own group: the zygote's runner child calls setpgid(0, 0) (and the zygote
+      sets it too before it replies), staying in the zygote's session so the
+      harnesses it forks for that runner join the group (setpgid to the
+      runner's pid, only while that runner is unreaped); direct spawns already
+      lead their session. setpgid, not setsid: a process cannot join a group
+      in another session. Grouping alone signals nothing. The host records the
+      group at spawn only when getpgid(pid) == pid and it is neither the
+      host's nor the zygote's group (else pid-only), and never looks it up
+      again. The host marks a runner as a Coral step runner at spawn when the
+      launch's workspace is a checkout on a Coral run branch (HEAD is
+      refs/heads/coral/r-<12 hex>/...; read from the HEAD file, or from
+      git symbolic-ref for a reftable repository, whose HEAD files hold a
+      stub), and passes the mark to that runner in
+      OMNIGENT_RUNNER_GROUP_ENDS_WITH_RUNNER, which the runner reads once and
+      removes from its environment. Only a marked runner's group is ended, and
+      on every exit: (1) when the host's watcher sees it exit, clean or not;
+      when a stop of it (Coral's fence, a relaunch's superseded runner)
+      returns or times out, before the stop is answered; and at the host's own
+      shutdown cleanup. The host SIGKILLs the group's remaining members one by
+      one through psutil (which refuses a reused pid), only those whose start
+      stamp lies between the runner's start and the observed exit, never the
+      host, the zygote, another tracked runner, or a group id that is now the
+      host's, the zygote's or another tracked runner's. A status query that
+      finds the runner dead awaits the same pass before answering dead.
+      (2) A marked runner that outlives its parent (host killed, crashed or
+      hung up, or its zygote gone) ends the group it leads with killpg(SIGKILL)
+      as its last act, after its graceful shutdown (and any finished work) or
+      at the hard-exit backstop. Every unmarked runner (non-Coral sessions,
+      CLI-launched runners) and host shutdown, hangup or terminal close for
+      them signal exactly what they did before. Residual: for a gone runner
+      the observed exit lags the reap by up to about 1.5 s (one 0.5 s watch
+      interval for a direct runner, about 1 s of zygote poll latency), so a
+      new group reusing the id inside that interval could match; it needs a
+      pid wrap to the exact id. Processes that start their own session escape
+      the group, except inside a bwrap sandbox, whose pid namespace ends with
+      it.
+    files:
+      - omnigent/host/connect.py
+      - omnigent/runner/_entry.py
+      - omnigent/runner/_zygote.py
+      - omnigent/runner/identity.py
+      - tests/host/test_connect.py
+      - tests/host/test_runner_zygote.py
+      - tests/runner/test_runner_entry.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/host/test_runner_zygote.py
+      - tests/runner/test_runner_entry.py
+    budget_lines: 120
+    budget_exception:
+      lines: 619
+      reason: >-
+        Three files are over budget. omnigent/host/connect.py (221 added
+        lines, about half docstrings): the Coral run-branch check (with its
+        reftable fallback), the
+        start-stamp clock, the member sweep, the spawn-time group check, the
+        shared pass and its five call sites (watcher, status, stop,
+        superseded stop, shutdown). tests/host/test_connect.py (619 added
+        lines): stand-in runners and the tests for the run-branch check, a
+        SIGKILLed runner and a sibling, dead only after the pass, every ending
+        for marked and unmarked runners, a stop during the pass, pid-only
+        runners, a group id another runner holds, the start-stamp window and
+        spared pids, the clock, a zygote runner's real harness, a bwrap
+        sandbox (Linux), a recycled pid behind the spawn record, and the orphan
+        reaper's two-sweep rule around the pass.
+        tests/runner/test_runner_entry.py (164 added lines): the
+        parent-death matrix, the read-once mark, the PID 1 and non-leader
+        guards and a real host SIGKILL. The other four files are within budget.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
