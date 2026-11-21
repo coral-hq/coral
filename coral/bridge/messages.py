@@ -58,6 +58,10 @@ _NUDGES: dict[str, str] = {
         "Your last turn stopped before it finished. Continue the work; when it is done, or "
         "you cannot continue, call coral_submit_handoff with activation_id {activation}."
     ),
+    "runner_lost": (
+        "Your runner stopped and Coral restarted it. Continue the step; when it is done, "
+        "call coral_submit_handoff with activation_id {activation}."
+    ),
 }
 _SALVAGED = (
     "Coral restarted this step from its last handoff. The previous attempt's uncommitted "

@@ -231,6 +231,7 @@ class SqlAlchemyCoralQueueStore:
         workspace_id: int | None = None,
         now_fn: Callable[[], float] | None = None,
         hold: bool = False,
+        restart_held_since: bool = False,
     ) -> bool:
         """Complete, fail, abandon, or reschedule a claimed work item conditioned on its lease.
 
@@ -238,6 +239,8 @@ class SqlAlchemyCoralQueueStore:
             no sooner than ``MIN_HOLD_DELAY_S`` from now; the row keeps the first
             refusal's time in ``held_since``. Needs ``status`` PENDING. A retry re-pend
             keeps ``held_since``; a finish to SUCCEEDED, FAILED or ABANDONED clears it.
+        :param restart_held_since: The caller's hold rules measure the wait the row starts
+            or leaves on its own: a hold starts ``held_since`` afresh, and a retry clears it.
         """
         if hold and int(status) != int(WorkStatus.PENDING):
             raise ValueError("a hold re-pends the item: status must be PENDING")
@@ -269,9 +272,9 @@ class SqlAlchemyCoralQueueStore:
             if hold:
                 row.available_at = max(row.available_at, locked_now + MIN_HOLD_DELAY_S)
                 row.attempts = max(int(row.attempts) - 1, 0)
-                if row.held_since is None:
+                if row.held_since is None or restart_held_since:
                     row.held_since = locked_now
-            elif int(status) != int(WorkStatus.PENDING):
+            elif restart_held_since or int(status) != int(WorkStatus.PENDING):
                 # A retry past a hold's horizon keeps its start, so the horizon still ends.
                 row.held_since = None
             session.flush()

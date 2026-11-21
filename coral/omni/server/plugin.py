@@ -30,6 +30,7 @@ from coral.bridge.executors import (
     BoundedThreads,
     BridgeThreads,
     bridge_hold_policy,
+    crosses_host_wait,
 )
 from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import EngineBridge
@@ -611,13 +612,15 @@ def _wire_session_engine(
     ``bound``; the returned refresher, which the caller starts, rebuilds it.
     Workspace ops go through ``channels``; the evidence check reads worktree
     fingerprints through the same ones, set on ``evidence_channels``. The resync's
-    runner liveness check is set on ``liveness``, with ``reconnect_grace_s``.
+    runner liveness check is set on ``liveness``, with ``reconnect_grace_s``. Coral's own
+    paths launch a step's runner again only through the one relauncher, which the wake
+    and every engine send share.
     """
     from coral.bridge.executors import turn_fact_executor
-    from coral.bridge.mapping import RECOVERY_RESTART, TURN_FACT
+    from coral.bridge.mapping import RECOVERY_RESTART, RECOVERY_WAKE, TURN_FACT
     from coral.omni.server.anchor_runner import AnchorRunnerStopper
     from coral.omni.server.dispatch import OmnigentSessionDispatch
-    from coral.omni.server.sessions import OmnigentSessionFacade
+    from coral.omni.server.sessions import OmnigentSessionFacade, OmnigentStepRelauncher
     from coral.omni.server.status_edges import CoralStatusEdges
     from coral.omni.server.step_agents import OmnigentStepAgents
     from coral.omni.server.turn_facts import (
@@ -627,6 +630,7 @@ def _wire_session_engine(
     )
     from coral.recovery.drift import DriftPauser, DriftPreSendHook
     from coral.recovery.ladder import restart_executor
+    from coral.recovery.relaunch import wake_executor
     from coral.slots.close import ConfirmedStops, StopConfirmedTurnEnd
     from coral.slots.executors import (
         CANCEL_SESSIONS,
@@ -659,12 +663,20 @@ def _wire_session_engine(
         dispatch=lambda: dispatch,
     )
     pauser = DriftPauser(run_store, engine=threads, on_anchor_bound=anchor_runner_stopper)
-    facade = OmnigentSessionFacade(app, services, bindings)
+    # The dispatch's relaunch path holds the facade and the relauncher, so both resolve it late.
+    facade = OmnigentSessionFacade(
+        app, services, bindings, slot_generations=queue_store, dispatch=lambda: dispatch
+    )
+    relauncher = OmnigentStepRelauncher(
+        facade, services, bindings, run_store, dispatch=lambda: dispatch
+    )
     dispatch = OmnigentSessionDispatch(
         app,
         services.conversation_store,
         services.runner_router,
         pre_send_hooks=(DriftPreSendHook(facade, bindings, pauser),),
+        relauncher=relauncher,
+        bindings=bindings,
     )
     if evidence_channels is not None:
         evidence_channels.channels = channels
@@ -714,6 +726,15 @@ def _wire_session_engine(
             run_store=run_store,
             scope_runner=scope_runner,
         ),
+        RECOVERY_WAKE: wake_executor(
+            threads=threads,
+            relauncher=relauncher,
+            dispatch=dispatch,
+            facade=facade,
+            drift=pauser,
+            run_store=run_store,
+            scope_runner=scope_runner,
+        ),
         TURN_FACT: turn_fact_executor(
             threads,
             bindings=bindings,
@@ -740,6 +761,7 @@ def _wire_session_engine(
     refresher = BoundSessionRefresher(bindings, bound)
     app.state.coral_session_facade = facade
     app.state.coral_session_dispatch = dispatch
+    app.state.coral_step_relauncher = relauncher
     app.state.coral_status_edges = edges
     app.state.coral_confirmed_stops = stops
     app.state.coral_turn_fact_recorder = recorder
@@ -828,6 +850,7 @@ async def coral_lifespan(
                 run_reconciler=threads.schedule_resync,
                 on_finished=threads.feed,
                 hold_policy=bridge_hold_policy,
+                hold_restart=crosses_host_wait,
                 drain_concurrency=workers,
                 resync_interval_s=RESYNC_INTERVAL_S,
                 lease_seconds=lease_s,

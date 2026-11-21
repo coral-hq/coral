@@ -174,7 +174,7 @@ def _dispatch(
     if isinstance(command, TurnEnded):
         return note_turn_ended(state, command, config)
     if isinstance(command, RunnerLost):
-        return note_runner_lost(state, command, now, config.timer_policy)
+        return note_runner_lost(state, command)
     if isinstance(command, RunnerHeld):
         return note_runner_held(state, command)
     if isinstance(command, RunnerHoldEnded):
@@ -219,7 +219,7 @@ def _effect_completed(
     if effect.kind == "retry_step":
         return complete_restart(graph, state, effect, command)
     if effect.kind == "runner_lost":
-        return complete_wake(state, effect, command)
+        return complete_wake(graph, state, effect, command)
     return complete_effect(graph, state, effect, command)
 
 

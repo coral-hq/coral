@@ -93,6 +93,8 @@ _HELD_DETAILS = frozenset({HOST_OFFLINE_DETAIL, RESTARTING_DETAIL})
 # The fourth runner loss of one generation pauses with this detail instead of waking.
 RUNNER_LOST_DETAIL = "infra.runner_lost"
 MAX_WAKES = 3
+# Wake outcomes that leave the slot on a connected runner.
+_RUNNER_UP = frozenset({"runner_back", "relaunched"})
 # A failed or abandoned restart pauses ``failure_path`` with this prefix and its code.
 RESTART_FAILED_PREFIX = "restart:"
 _MAX_RESTART_CODE_CHARS = 128
@@ -369,14 +371,17 @@ def fail_restart(state: RunState, effect: Effect, command: EffectFailed) -> Appl
     return ApplyResult(state=failed, receipt_key=effect.effect_key)
 
 
-def complete_wake(state: RunState, effect: Effect, command: EffectCompleted) -> ApplyResult:
+def complete_wake(
+    graph: CompiledGraph, state: RunState, effect: Effect, command: EffectCompleted
+) -> ApplyResult:
     """The wake found the runner back, relaunched it, or skipped the slot.
 
     Any result of the slot's generation ends the outage it was for, so a later loss of
-    the same runner is a new one. A runner back with its turn still running only clears
-    the failed turn and the slot's infra ladder. Any other runner back or relaunch
-    re-prompts the slot once. A slot that is no longer working, moved on, or holds only
-    records the receipt.
+    the same runner is a new one. A runner back or relaunched with its turn already
+    running only clears the failed turn and the slot's infra ladder; any other one
+    re-prompts the slot once. A skipped wake ends the slot's host-offline hold, since
+    nothing waits on the host any more. A slot that is no longer working, moved on, or
+    holds only records the receipt.
     """
     slot = find_slot(state, effect.subject)
     if slot is None:
@@ -386,29 +391,37 @@ def complete_wake(state: RunState, effect: Effect, command: EffectCompleted) -> 
     if effect_generation(effect) != slot.session_generation:
         return receipt_only(state, effect.effect_key, receipt_payload)
     ended = _record_wake(_end_outage(state, slot.id), slot.id, effect, command.payload)
-    if slot.status != "working" or outcome == "skipped" or _slot_holds(state, slot.id):
+    if outcome == "skipped":
+        released = _release_hold(ended, slot.id)
+        receipted = receipt_only(released, effect.effect_key, receipt_payload)
+        if released.status == "running" and state.status != "running":
+            advanced, effects = _advance_closed(graph, receipted.state)
+            return receipted.model_copy(update={"state": advanced, "effects": effects})
+        return receipted
+    if slot.status != "working" or _slot_holds(state, slot.id):
         return receipt_only(ended, effect.effect_key, receipt_payload)
     receipt = Receipt(key=effect.effect_key, payload=receipt_payload)
-    receipted = ended.model_copy(
+    receipted_state = ended.model_copy(
         update={"seq": state.seq + 1, "receipts": (*ended.receipts, receipt)}
     )
-    if outcome == "runner_back" and command.payload.get("turn_running") is True:
+    if outcome in _RUNNER_UP and command.payload.get("turn_running") is True:
         recovered = drop_slot_backoff(
-            map_slot(receipted, slot.id, failed_turn=None), (slot.id,), (INFRA_BACKOFF,)
+            map_slot(receipted_state, slot.id, failed_turn=None), (slot.id,), (INFRA_BACKOFF,)
         )
         return ApplyResult(state=recovered, receipt_key=effect.effect_key)
-    nudged, effects = _reprompt(receipted, "runner_lost", only=slot.id)
+    nudged, effects = _reprompt(receipted_state, "runner_lost", only=slot.id)
     return ApplyResult(state=nudged, effects=effects, receipt_key=effect.effect_key)
 
 
 def fail_wake(state: RunState, effect: Effect, command: EffectFailed) -> ApplyResult:
-    """A wake that gave up pauses as any effect does, and ends the outage it was for."""
+    """A wake that gave up pauses as any effect does, ends the outage it was for, and ends
+    the slot's host-offline hold: nothing waits on the host any more."""
     failed = fail_effect(state, effect, command)
     slot = find_slot(state, effect.subject)
     if slot is None or effect_generation(effect) != slot.session_generation:
         return failed
-    ended = _end_outage(failed.state, slot.id).model_copy(update={"seq": state.seq + 1})
-    return failed.model_copy(update={"state": ended})
+    ended = _release_hold(_end_outage(failed.state, slot.id), slot.id)
+    return failed.model_copy(update={"state": ended.model_copy(update={"seq": state.seq + 1})})
 
 
 def note_runner_held(state: RunState, command: RunnerHeld) -> ApplyResult:
@@ -465,10 +478,8 @@ def note_rejection(state: RunState, command: RejectionObserved) -> ApplyResult:
     return ApplyResult(state=updated.model_copy(update={"seq": state.seq + 1}))
 
 
-def note_runner_lost(
-    state: RunState, command: RunnerLost, now: datetime, policy: TimerPolicy
-) -> ApplyResult:
-    """One loss per runner incarnation: mark the turn, arm the ladder, and wake the slot.
+def note_runner_lost(state: RunState, command: RunnerLost) -> ApplyResult:
+    """One loss per runner incarnation: mark the turn and wake the slot.
 
     A loss already receipted is answered with its receipt. The fourth loss of one
     generation pauses ``infra`` / ``infra.runner_lost`` instead of waking. Only a
@@ -501,7 +512,7 @@ def note_runner_lost(
         "generation": command.generation,
         "runner_id": command.runner_id,
     }
-    return _lose_runner(state, slot, failed_turn, payload, (key,), now, policy)
+    return _lose_runner(state, slot, failed_turn, payload, (key,))
 
 
 def note_usage_limited(
@@ -888,14 +899,38 @@ def _host_offline_cause(slot_id: str) -> PauseCause:
     return PauseCause(reason="infra", detail=HOST_OFFLINE_DETAIL, subject=slot_id)
 
 
+def _release_hold(state: RunState, slot_id: str) -> RunState:
+    """Drop the slot's host-offline hold, if it has one."""
+    hold = _host_offline_cause(slot_id)
+    return _without_causes(state, lambda cause: cause == hold)
+
+
+def _wake_in_flight(state: RunState, slot_id: str) -> bool:
+    """Whether a wake of the slot's current generation has no result yet."""
+    slot = find_slot(state, slot_id)
+    if slot is None:
+        return False
+    receipted = {receipt.key for receipt in state.receipts}
+    return any(
+        effect.kind == "runner_lost"
+        and effect.subject == slot_id
+        and effect.effect_key not in receipted
+        and effect_generation(effect) == slot.session_generation
+        for effect in state.effects
+    )
+
+
 def _slot_holds(state: RunState, slot_id: str) -> bool:
     return any(holds_slot(cause) and cause.subject == slot_id for cause in state.causes)
 
 
 def _ladder_allowed(state: RunState, slot_id: str) -> bool:
-    """No infra stage may re-prompt a held slot or one paused for its fourth loss."""
+    """No infra stage may re-prompt a held slot, one paused for its fourth loss, or one
+    whose wake is in flight: the wake's own result decides what comes next."""
     lost = PauseCause(reason="infra", detail=RUNNER_LOST_DETAIL, subject=slot_id)
-    return not _slot_holds(state, slot_id) and lost not in state.causes
+    if _slot_holds(state, slot_id) or lost in state.causes:
+        return False
+    return state.rules < RULES or not _wake_in_flight(state, slot_id)
 
 
 def _record_wake(
@@ -1113,9 +1148,10 @@ def _session_runner_lost(
 ) -> ApplyResult:
     """Receipt the turn and the loss key so one lost runner emits one effect.
 
-    Every loss marks the failed turn and arms the infra ladder unless one is live, so
-    stage nudges relaunch the runner and a slot that keeps failing pauses ``infra``. A
-    loss of a runner already reported lost records only the turn's receipt.
+    Every loss marks the failed turn. A new loss wakes the slot and arms no infra stage:
+    the wake's result re-prompts it. A loss of a runner already reported lost records
+    only the turn's receipt, and arms the ladder (unless one is live) only when no wake
+    of the slot is out.
     """
     if _has_receipt(state, command.fact_key):
         return ApplyResult(state=state, receipt_key=command.fact_key)
@@ -1140,9 +1176,7 @@ def _session_runner_lost(
         "generation": generation,
         "runner_id": command.runner_id,
     }
-    return _lose_runner(
-        state, slot, command.fact_key, payload, (key, command.fact_key), now, policy
-    )
+    return _lose_runner(state, slot, command.fact_key, payload, (key, command.fact_key))
 
 
 def _lose_runner(
@@ -1151,12 +1185,11 @@ def _lose_runner(
     failed_turn: str,
     payload: dict[str, JsonValue],
     receipt_keys: tuple[str, ...],
-    now: datetime,
-    policy: TimerPolicy,
 ) -> ApplyResult:
     """Mark the turn, then wake the slot, or pause once it used its wakes this generation.
 
-    The pause replaces the infra ladder, so no stage re-prompts the slot while it waits.
+    The wake, or the pause, replaces the infra ladder, so no stage re-prompts the slot
+    while it waits: the wake's result re-prompts it.
     """
     seq = state.seq + 1
     receipts = tuple(
@@ -1168,10 +1201,8 @@ def _lose_runner(
         paused = record_pause(unladdered, "infra", RUNNER_LOST_DETAIL, slot.id)
         stopped = paused.model_copy(update={"seq": seq, "receipts": (*paused.receipts, *receipts)})
         return ApplyResult(state=stopped, receipt_key=receipt_keys[0])
-    armed = marked
-    if _ladder_allowed(state, slot.id):
-        armed, _armed = _arm_infra_unless_live(marked, slot, now, policy)
-    woken = map_slot(armed, slot.id, wakes=slot.wakes + 1)
+    unladdered = drop_slot_backoff(marked, (slot.id,), (INFRA_BACKOFF,))
+    woken = map_slot(unladdered, slot.id, wakes=slot.wakes + 1)
     effect = _effect(state, seq, "runner_lost", slot.id, payload)
     updated = woken.model_copy(
         update={

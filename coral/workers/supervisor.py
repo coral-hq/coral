@@ -14,6 +14,7 @@ from coral.omni.protocols import RunScopeRunner
 from coral.queue.drainer import (
     DEFAULT_EXECUTION_LIMIT_S,
     HoldPolicy,
+    HoldRestart,
     WorkDrainer,
     WorkFinishedHook,
 )
@@ -129,6 +130,7 @@ class WorkerSupervisor:
         drain_concurrency: int = 4,
         on_finished: WorkFinishedHook | None = None,
         hold_policy: HoldPolicy | None = None,
+        hold_restart: HoldRestart | None = None,
         resync_interval_s: float | None = 60.0,
         retention_s: int = 86_400,
         execution_limit_s: float | None = DEFAULT_EXECUTION_LIMIT_S,
@@ -165,6 +167,7 @@ class WorkerSupervisor:
             clock=clock,
             on_finished=on_finished,
             hold_policy=hold_policy,
+            hold_restart=hold_restart,
             execution_limit_s=execution_limit_s,
             sleep=_sleep_with(wait),
         )

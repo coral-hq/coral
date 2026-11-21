@@ -18,10 +18,11 @@ import itertools
 import json
 import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 import pytest
@@ -30,25 +31,41 @@ from sqlalchemy.orm import Session
 
 from coral.bridge.codec import decode_entries
 from coral.bridge.keys import slot_session_id, store_activation_id
-from coral.bridge.mapping import RECOVERY_RESTART, resync_draft
+from coral.bridge.mapping import RECOVERY_RESTART, RECOVERY_WAKE, resync_draft
 from coral.db import WorkRow
 from coral.db.enum_codecs import RunStatus, SlotRole, WorkStatus
 from coral.db.migrate import ensure_coral_schema
 from coral.engine.lifecycle import retryable_activations
-from coral.engine.types import RunnerLost, SessionFailed
-from coral.model.ids import effect_session_id
+from coral.engine.types import RunnerHeld, RunnerHoldEnded, RunnerLost, SessionFailed
+from coral.model.ids import anchor_session_id, effect_session_id
 from coral.omni.host.ops import workspace_op_handlers
 from coral.omni.host.ops._git import Git
 from coral.omni.policies.run_guard import run_guard
 from coral.omni.policies.state import RunStatusCache
-from coral.omni.protocols import CoralSessionError, SessionCreateRequest, SessionState
+from coral.omni.process_map import CORAL_RUNNER_TOKEN
+from coral.omni.protocols import (
+    CoralSessionError,
+    NoOpScopeRunner,
+    SessionCreateRequest,
+    SessionState,
+)
 from coral.omni.server.dispatch import OmnigentSessionDispatch
-from coral.omni.server.sessions import session_state_of
+from coral.omni.server.sessions import (
+    OmnigentSessionFacade,
+    OmnigentStepRelauncher,
+    session_state_of,
+)
 from coral.omni.server.status_edges import CoralStatusEdges
 from coral.queue import FinishedWork
-from coral.queue.executors import EffectCompleted, EffectOutcome
+from coral.queue.executors import (
+    EffectCompleted,
+    EffectOutcome,
+    register_executor,
+    unregister_executor,
+)
+from coral.recovery.drift import DriftPauser
 from coral.recovery.ladder import restart_executor
-from coral.recovery.relaunch import LivenessPass, LivenessRef
+from coral.recovery.relaunch import LivenessPass, LivenessRef, wake_executor
 from coral.slots.close import CloseBounds
 from coral.stores.fakes import FakeRunStore
 from coral.stores.protocols import CoralRun
@@ -60,8 +77,10 @@ from coral.workspace.run_worktree import run_branch_name
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, workspace_scope
 from omnigent.policies.schema import PolicyEvent
 from omnigent.runtime import get_conversation_store
+from omnigent.runtime.pending_inputs import pending_ids
 from omnigent.server import session_live_state, shutdown_state
 from omnigent.server.routes import sessions as omnigent_sessions
+from omnigent.server.server_plugins import ServerServices
 from omnigent.server.session_live_state import SessionStatusEdge
 from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
 from tests._helpers.polling import poll_until_async
@@ -93,6 +112,8 @@ from tests.coral.omni.host.ops._worktrees import (
     run_git,
 )
 from tests.coral.omni.test_ac2_stop_cancel_end_to_end import _bound_session, _session_running
+from tests.coral.omni.test_session_facade import _Host as _MockHost
+from tests.coral.recovery.test_relaunch import _host_offline, _lose
 from tests.coral.workflow_builders import arrow, end, fixture_text, step, workflow_text
 from tests.coral.workflow_builders import start as start_node
 from tests.coral.workspace._executor_fakes import (
@@ -106,6 +127,7 @@ from tests.coral.workspace._executor_fakes import (
     start_run,
 )
 from tests.coral.workspace._executor_fakes import step_binding as executor_step_binding
+from tests.server.integration.test_session_host_launch import _HOST_ID, _connect_host
 from tests.server.integration.test_sessions_tunnel_three_layer import (
     _TunnelStack,
     tunnel_three_layer_stack,  # noqa: F401 -- pytest injects the imported fixture
@@ -979,6 +1001,16 @@ def _live_losses(world: World, run_id: str) -> list[RunnerLost]:
     return [entry.input for entry in decode_entries(rows) if isinstance(entry.input, RunnerLost)]
 
 
+def _live_entries(world: World, run_id: str, kind: type[Any]) -> list[Any]:
+    rows = world.runs.read_engine_log(
+        run_id,
+        workspace_id=LIVE_WORKSPACE,
+        max_run_version=_live_run(world, run_id).version,
+        limit=10_000,
+    )
+    return [entry.input for entry in decode_entries(rows) if isinstance(entry.input, kind)]
+
+
 def _live_wakes(world: World, run_id: str) -> list[dict[str, Any]]:
     state = world.bridge.load(workspace_id=LIVE_WORKSPACE, run_id=run_id).state
     return [dict(effect.payload) for effect in state.effects if effect.kind == "runner_lost"]
@@ -1070,6 +1102,8 @@ async def test_a_runner_whose_tunnel_dropped_on_an_online_host_is_lost_by_its_ed
     async with serving(world, liveness=ref) as sessions:
         run_id, session_id = await _working_on_the_server(world, sessions, server)
         liveness = LivenessPass(sessions.threads, _live_dispatch(server, world), grace_s=GRACE_S)
+        # The edge's wake gets no answer from the host, so its outage stays open.
+        sessions.relauncher.fallback = _no_host_answer
 
         async def server_row(*, workspace_id: int, session_id: str) -> SessionState:
             with workspace_scope(workspace_id):
@@ -1186,6 +1220,16 @@ async def test_a_restart_at_the_production_defaults_gives_a_reconnecting_runner_
     assert server.store.get_runner_liveness(session_id)[0] == RUNNER  # type: ignore[index]
 
 
+def _no_host_answer(session_id: str) -> Literal["connected", "relaunched"]:
+    raise CoralSessionError(
+        "session.runner_status_unknown", f"no answer about {session_id}", retryable=True
+    )
+
+
+def _host_gone(session_id: str) -> Literal["connected", "relaunched"]:
+    raise CoralSessionError("session.host_offline", f"{session_id}'s host is gone", retryable=True)
+
+
 def _offline_host(server: TunnelServer, world: World) -> None:
     """The world's clock on wall time; the session's host row known and offline."""
     world.clock.now = datetime.now(UTC).replace(microsecond=0)
@@ -1298,7 +1342,7 @@ TRIO_SLOTS = ("work||:0", "work||:1", "work||:2")
 
 
 @pytest.mark.usefixtures("omnigent_decides_at_once")
-async def test_a_host_that_goes_offline_with_three_runners_loses_each_once_and_pauses_nothing(
+async def test_a_host_that_goes_offline_with_three_runners_loses_each_once_and_holds_each_once(
     world: World,
     tunnel_server: TunnelServer,  # noqa: F811 -- pytest injects the imported fixture
     caplog: pytest.LogCaptureFixture,
@@ -1307,6 +1351,7 @@ async def test_a_host_that_goes_offline_with_three_runners_loses_each_once_and_p
     _offline_host(server, world)
     ref = LivenessRef()
     async with serving(world, liveness=ref) as sessions:
+        sessions.relauncher.fallback = _host_gone
         spec = run_spec(
             workspace_id=LIVE_WORKSPACE, host_id=LIVE_HOST, worktree_path=LIVE_WORKTREE
         )
@@ -1340,11 +1385,19 @@ async def test_a_host_that_goes_offline_with_three_runners_loses_each_once_and_p
             await sessions.drain()
             world.clock.advance(60)
             await _tick(world, sessions, run_id)
+        polls = len(sessions.relauncher.calls)
 
     losses = _live_losses(world, run_id)
     assert sorted((lost.slot_id, lost.runner_id) for lost in losses) == sorted(runners.items())
     state = world.bridge.load(workspace_id=LIVE_WORKSPACE, run_id=run_id).state
-    assert (state.status, state.causes) == ("running", ())
+    # Each slot's wake finds the host gone and holds its own slot once, however often it polls.
+    assert state.status == "paused"
+    assert sorted(cause.subject for cause in state.causes) == sorted(runners)
+    assert {(cause.reason, cause.detail) for cause in state.causes} == {
+        ("infra", "infra.host_offline")
+    }
+    assert polls == 6
+    assert len(_live_entries(world, run_id, RunnerHeld)) == 3
     assert [slot.wakes for slot in state.slots if slot.id in runners] == [1, 1, 1]
     lines = [r.getMessage() for r in caplog.records if r.name == "coral.recovery.relaunch"]
     tail = "loss(es) already recorded, 0 report(s) to make again"
@@ -1352,3 +1405,445 @@ async def test_a_host_that_goes_offline_with_three_runners_loses_each_once_and_p
         f"Coral liveness of run {run_id}: 3 runner clock(s) started, 0 runner(s) lost, 0 {tail}",
         f"Coral liveness of run {run_id}: 0 runner clock(s) started, 3 runner(s) lost, 0 {tail}",
     ]
+
+
+# ── The wake through the one relaunch path, on a real server ────────────────
+
+
+@dataclass
+class _TunnelLauncher:
+    """A host's launch as the server sees it: the session rebound to a new runner whose
+    tunnel connects. The real host launch is the facade suite's."""
+
+    server: TunnelServer
+    stack: contextlib.AsyncExitStack
+    launched: list[str] = field(default_factory=list)
+    # Each launch's ask that the runner resume no turn from its history on its own.
+    suppressed: list[bool] = field(default_factory=list)
+
+    async def launch(
+        self, conv: Any, *, user_id: str | None, suppress_recovery_turn: bool = False
+    ) -> str | None:
+        self.suppressed.append(suppress_recovery_turn)
+        runner_id = f"{RUNNER}-relaunched-{len(self.launched) + 1}"
+        await asyncio.to_thread(self.server.store.replace_runner_id, conv.id, runner_id)
+        await self.stack.enter_async_context(runner_tunnel(self.server, runner_id))
+        self.launched.append(runner_id)
+        return runner_id
+
+
+@contextlib.asynccontextmanager
+async def _wake_on_the_server(
+    world: World, sessions: Sessions, server: TunnelServer
+) -> AsyncIterator[_TunnelLauncher]:
+    """The wake as the session engine wires it, over the server: its real relauncher,
+    facade and dispatch, launching through :class:`_TunnelLauncher`."""
+    dispatch = _live_dispatch(server, world)
+    services = cast(
+        ServerServices,
+        SimpleNamespace(
+            conversation_store=server.store,
+            host_store=server.hosts,
+            host_registry=server.app.state.host_registry,
+            runner_router=server.app.state.runner_router,
+            auth_provider=None,
+        ),
+    )
+    async with contextlib.AsyncExitStack() as stack:
+        launcher = _TunnelLauncher(server, stack)
+        facade = OmnigentSessionFacade(
+            server.app,
+            services,
+            sessions.bindings,
+            launcher=launcher,
+            slot_generations=world.queue,
+            dispatch=lambda: dispatch,
+        )
+        relauncher = OmnigentStepRelauncher(
+            facade, services, sessions.bindings, world.runs, dispatch=lambda: dispatch
+        )
+        wake = wake_executor(
+            threads=sessions.threads,
+            relauncher=relauncher,
+            dispatch=dispatch,
+            facade=facade,
+            drift=DriftPauser(world.runs, engine=sessions.threads),
+            run_store=world.runs,
+            scope_runner=NoOpScopeRunner(),
+        )
+        register_executor(RECOVERY_WAKE, wake, replace=True)
+        try:
+            yield launcher
+        finally:
+            unregister_executor(RECOVERY_WAKE, wake)
+
+
+async def _step_on_the_server(
+    world: World, sessions: Sessions, server: TunnelServer
+) -> tuple[str, str]:
+    """An ownerless run on ``_HOST_ID`` whose implementer works on its brief.
+
+    Its anchor and its step are rows on the server, the step a mid-turn child of the
+    anchor bound to ``RUNNER``, as the facade writes them.
+    """
+    # Its own run, so the server's process-wide status cache knows none of its sessions.
+    start_key = uuid.uuid4().hex
+    spec = run_spec(
+        user=None,
+        start_key=start_key,
+        workspace_id=LIVE_WORKSPACE,
+        host_id=_HOST_ID,
+        worktree_path=LIVE_WORKTREE,
+    )
+    run = start(world, spec=spec, start_key=start_key, allow_ownerless=True)
+    await sessions.drain()
+    state = world.bridge.load(workspace_id=LIVE_WORKSPACE, run_id=run.id).state
+    session_id = slot_session_id(LIVE_WORKSPACE, state, IMPLEMENT)
+    assert session_id is not None and len(sessions.messages(session_id)) == 1
+    anchor_id = anchor_session_id(LIVE_WORKSPACE, run.id)
+    await asyncio.to_thread(server.store.create_conversation, conversation_id=anchor_id)
+    sessions.dispatch.sessions[session_id].status = "running"
+    await asyncio.to_thread(
+        server.store.create_conversation,
+        conversation_id=session_id,
+        kind="sub_agent",
+        parent_conversation_id=anchor_id,
+        runner_id=RUNNER,
+        host_id=_HOST_ID,
+        workspace=LIVE_WORKTREE,
+    )
+    await asyncio.to_thread(server.store.set_session_live_status, session_id, "running")
+    return run.id, session_id
+
+
+def _rows_by_server(
+    sessions: Sessions, server: TunnelServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn-fact executor reads a session from its server row, as the real facade does."""
+
+    async def server_row(*, workspace_id: int, session_id: str) -> SessionState:
+        with workspace_scope(workspace_id):
+            conv = await asyncio.to_thread(server.store.get_conversation, session_id)
+        return session_state_of(session_id, conv)
+
+    monkeypatch.setattr(sessions.facade, "session_state", server_row)
+
+
+def _started_a_turn(edges: list[SessionStatusEdge], session_id: str) -> bool:
+    """Whether the server published the session leaving idle or failed for a running turn."""
+    return any(
+        edge.session_id == session_id
+        and edge.status == "running"
+        and edge.previous_status in ("idle", "failed")
+        for edge in edges
+    )
+
+
+def _wake_result(world: World, run_id: str) -> dict[str, Any]:
+    """The run's one wake row's result, once it succeeded."""
+    assert world.db_uri is not None
+    with Session(fresh_process(world.db_uri)) as db:
+        ids = list(db.execute(select(WorkRow.id).where(WorkRow.run_id == run_id)).scalars())
+    rows = [
+        row
+        for row in world.queue.get_work(ids, workspace_id=LIVE_WORKSPACE)
+        if json.loads(row.payload)["effect_type"] == RECOVERY_WAKE
+    ]
+    [row] = rows
+    assert row.status == int(WorkStatus.SUCCEEDED), (row.status, row.error_code)
+    assert row.result is not None
+    return json.loads(row.result)
+
+
+@pytest.mark.usefixtures("omnigent_decides_at_once")
+async def test_a_runner_lost_on_a_live_host_is_relaunched_in_its_session_and_re_prompted_once(
+    world: World,
+    tunnel_server: TunnelServer,  # noqa: F811 -- pytest injects the imported fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = tunnel_server
+    world.clock.now = datetime.now(UTC).replace(microsecond=0)
+    async with (
+        _MockHost(server.app, await _connect_host(server.app, [CORAL_RUNNER_TOKEN])) as host,
+        serving(world) as sessions,
+        _wake_on_the_server(world, sessions, server) as launcher,
+    ):
+        host.statuses[RUNNER] = "dead"
+        run_id, session_id = await _step_on_the_server(world, sessions, server)
+        _rows_by_server(sessions, server, monkeypatch)
+        edges: list[SessionStatusEdge] = []
+        unregisters = [
+            session_live_state.register_status_edge_observer("coral-wake-test", edges.append),
+            session_live_state.register_status_edge_observer(
+                "coral-wake-turn-facts", sessions.recorder.observe
+            ),
+        ]
+        try:
+            async with runner_tunnel(server, RUNNER) as tunnel:
+                await poll_until_async(lambda: _stamp(server, session_id), timeout_s=budget(10))
+                await tunnel.close()
+                await poll_until_async(
+                    lambda: any(edge.session_id == session_id for edge in edges),
+                    timeout_s=budget(10),
+                )
+            sessions.recorder.wait_idle()
+            await sessions.drain()
+            # The loss armed the slot's infra stages (30 s, 2 min, 8 min); past all of them
+            # the relaunched step is re-prompted no more and the run does not pause.
+            for _ in range(3):
+                world.clock.advance(200)
+                await sessions.drain()
+        finally:
+            for unregister in unregisters:
+                unregister()
+        state = world.bridge.load(workspace_id=LIVE_WORKSPACE, run_id=run_id).state
+        row = await asyncio.to_thread(server.store.get_conversation, session_id)
+
+    assert _wake_result(world, run_id)["outcome"] == "relaunched"
+    [wake] = _live_wakes(world, run_id)
+    assert (wake["session_id"], wake["generation"], wake["runner_id"]) == (session_id, 1, RUNNER)
+    # The same session, now on its relaunched runner; the old one was stopped first.
+    assert row is not None and row.runner_id == launcher.launched[0]
+    assert launcher.launched == [f"{RUNNER}-relaunched-1"]
+    # The relaunch asks the runner to resume no turn from its history: Coral re-prompts it.
+    assert launcher.suppressed == [True]
+    assert [frame.runner_id for frame in host.stop_frames] == [RUNNER]
+    assert host.launch_frames == []
+    # The stop wrote no turn input, and the step was re-prompted once.
+    assert server.store.list_items(session_id, type="message").data == []
+    [_brief, nudge] = sessions.messages(session_id)
+    assert str(nudge["text"]).startswith("Your runner stopped and Coral restarted it.")
+    [slot] = [slot for slot in state.slots if slot.id == IMPLEMENT]
+    assert (state.status, slot.session_generation, slot.wakes) == ("running", 1, 1)
+    assert [timer.key for timer in state.timers if timer.kind == "infra_backoff"] == []
+
+
+@pytest.mark.usefixtures("omnigent_decides_at_once")
+@pytest.mark.parametrize("edge_first", [True, False], ids=["edge-then-relaunch", "relaunch-first"])
+async def test_a_runner_lost_with_its_host_is_held_then_relaunched_once_the_host_returns(
+    world: World,
+    tunnel_server: TunnelServer,  # noqa: F811 -- pytest injects the imported fixture
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    edge_first: bool,
+) -> None:
+    server = tunnel_server
+    world.clock.now = datetime.now(UTC).replace(microsecond=0)
+    server.hosts.upsert_on_connect(_HOST_ID, "laptop", "local")
+    server.hosts.set_offline(_HOST_ID)
+    if edge_first:
+        # The server's hold notices the host's return at once and fails the held turn.
+        monkeypatch.setattr(omnigent_sessions, "HOST_OFFLINE_RECHECK_S", 0.05)
+    ref = LivenessRef()
+    edges: list[SessionStatusEdge] = []
+    async with (
+        serving(world, liveness=ref) as sessions,
+        _wake_on_the_server(world, sessions, server) as launcher,
+    ):
+        run_id, session_id = await _step_on_the_server(world, sessions, server)
+        _rows_by_server(sessions, server, monkeypatch)
+        ref.current = LivenessPass(
+            sessions.threads, _live_dispatch(server, world), grace_s=GRACE_S
+        )
+        unregisters = [
+            session_live_state.register_status_edge_observer("coral-wake-test", edges.append),
+            session_live_state.register_status_edge_observer(
+                "coral-wake-turn-facts", sessions.recorder.observe
+            ),
+        ]
+        try:
+            async with runner_tunnel(server, RUNNER) as tunnel:
+                await poll_until_async(lambda: _stamp(server, session_id), timeout_s=budget(10))
+                with caplog.at_level(logging.INFO, logger="omnigent.server.app"):
+                    await tunnel.close()
+                    await poll_until_async(
+                        lambda: "host offline, holding session" in caplog.text,
+                        timeout_s=budget(10),
+                    )
+            # Liveness reports the loss at its grace, and the wake finds the host gone.
+            await _tick(world, sessions, run_id)
+            world.clock.advance(GRACE_S)
+            await sessions.drain()
+            held = world.bridge.load(workspace_id=LIVE_WORKSPACE, run_id=run_id).state
+            world.clock.advance(30)
+            await sessions.drain()
+            polled = world.bridge.load(workspace_id=LIVE_WORKSPACE, run_id=run_id).state
+
+            async with _MockHost(
+                server.app, await _connect_host(server.app, [CORAL_RUNNER_TOKEN])
+            ) as host:
+                host.statuses[RUNNER] = "unknown"
+                if edge_first:
+                    await poll_until_async(
+                        lambda: any(edge.session_id == session_id for edge in edges),
+                        timeout_s=budget(10),
+                    )
+                    sessions.recorder.wait_idle()
+                    await sessions.drain()
+                running_before = (
+                    await asyncio.to_thread(server.store.get_conversation, session_id)
+                ).live_status
+                world.clock.advance(30)
+                await sessions.drain()
+                stops = [frame.runner_id for frame in host.stop_frames]
+                launches = list(host.launch_frames)
+                state = world.bridge.load(workspace_id=LIVE_WORKSPACE, run_id=run_id).state
+                # What the relaunch left on the server before the re-prompt reaches it.
+                row = await asyncio.to_thread(server.store.get_conversation, session_id)
+                left = (server.store.list_items(session_id).data, pending_ids(session_id))
+                settled = len(edges)
+                # The engine's re-prompt, through the server's own dispatch, starts a turn on
+                # the relaunched runner instead of queuing behind the turn the old one held.
+                [_brief, nudge] = sessions.messages(session_id)
+                receipt = await _live_dispatch(server, world).send_message(
+                    workspace_id=LIVE_WORKSPACE,
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=None,
+                    stable_id=str(nudge["stable_id"]),
+                    text=str(nudge["text"]),
+                )
+                await poll_until_async(
+                    lambda: _started_a_turn(edges[settled:], session_id), timeout_s=budget(10)
+                )
+        finally:
+            for unregister in unregisters:
+                unregister()
+
+    hold = ("infra", "infra.host_offline", IMPLEMENT)
+    for while_held in (held, polled):
+        assert while_held.status == "paused"
+        assert [(c.reason, c.detail, c.subject) for c in while_held.causes] == [hold]
+        assert retryable_activations(while_held) == ()
+    assert len(_live_entries(world, run_id, RunnerHeld)) == 1
+    assert len(_live_entries(world, run_id, RunnerHoldEnded)) == 1
+    assert _wake_result(world, run_id)["outcome"] == "relaunched"
+    # One loss and one wake, whether the server's own edge for that runner came first.
+    assert len(_live_wakes(world, run_id)) == 1
+    failed = [
+        edge
+        for edge in edges[:settled]
+        if edge.session_id == session_id and edge.status == "failed"
+    ]
+    assert [edge.error_code for edge in failed] == (["runner_interrupted"] if edge_first else [])
+    # A relaunch while the server still held the turn settles its row first, so the
+    # re-prompt starts a turn instead of waiting behind one no runner runs.
+    assert running_before == ("failed" if edge_first else "running")
+    assert receipt.pending_id is None and receipt.item_id == nudge["stable_id"]
+    assert row is not None and row.live_status != "running"
+    assert row.runner_id == launcher.launched[0] and launcher.launched == [
+        f"{RUNNER}-relaunched-1"
+    ]
+    assert launcher.suppressed == [True]
+    # Omnigent relaunches no sub-agent itself; the host's only stop was the old runner's.
+    assert (stops, launches) == ([RUNNER], [])
+    # The pre-launch stop left no item and no queued input for the new runner to take.
+    assert left == ([], [])
+    [_brief, nudge] = sessions.messages(session_id)
+    assert str(nudge["text"]).startswith("Your runner stopped and Coral restarted it.")
+    assert state.status == "running" and state.causes == ()
+
+
+# ── A wake across a server restart ──────────────────────────────────────────
+
+
+def _wake_row_of(world: World) -> Any:
+    """The run's one wake row, as a new process reads it."""
+    [row] = [
+        row
+        for row in world.queue.get_work(_work_ids(world), workspace_id=WORKSPACE)
+        if json.loads(row.payload)["effect_type"] == RECOVERY_WAKE
+    ]
+    return row
+
+
+def _engine_inputs(world: World, kind: type[Any]) -> list[Any]:
+    rows = world.runs.read_engine_log(
+        RUN_ID,
+        workspace_id=WORKSPACE,
+        max_run_version=world.run(RUN_ID).version,
+        limit=10_000,
+    )
+    return [entry.input for entry in decode_entries(rows) if isinstance(entry.input, kind)]
+
+
+def _restarted_prompts(sessions: Sessions, session_id: str) -> list[str]:
+    return [
+        str(send["text"])
+        for send in sessions.messages(session_id)
+        if str(send["text"]).startswith("Your runner stopped and Coral restarted it.")
+    ]
+
+
+async def test_a_held_wake_cut_off_by_a_crash_holds_once_and_comes_back_after_the_restart(
+    world: World,
+) -> None:
+    start(world)
+    async with serving(world) as sessions:
+        await sessions.drain()
+        session_id = _lose(world, sessions, RUN_ID)
+        # The first poll holds the step; the process dies during the second.
+        sessions.relauncher.answers.extend(
+            [_host_offline(), SimulatedCrash("the server died mid-poll")]
+        )
+        await sessions.drain()
+        world.clock.advance(30)
+        with pytest.raises(SimulatedCrash):
+            await sessions.drain()
+    assert _wake_row_of(world).status == int(WorkStatus.CLAIMED)
+
+    async with restarted(sessions, lease_s=LEASE_S) as again:
+        relaunch = again.relauncher.fallback
+        again.relauncher.fallback = _host_gone
+        await again.drain()
+        row = _wake_row_of(again.world)
+        polled_offline = (row.status, row.error_code, len(again.relauncher.calls))
+        again.relauncher.fallback = relaunch
+        again.world.clock.advance(30)
+        await again.drain()
+        state = again.world.bridge.load(workspace_id=WORKSPACE, run_id=RUN_ID).state
+
+        assert polled_offline == (int(WorkStatus.PENDING), "recovery.host_offline", 1)
+        assert len(_engine_inputs(again.world, RunnerHeld)) == 1
+        assert len(_engine_inputs(again.world, RunnerHoldEnded)) == 1
+        assert json.loads(_wake_row_of(again.world).result)["outcome"] == "relaunched"
+        assert (state.status, state.causes) == ("running", ())
+        assert len(_restarted_prompts(again, session_id)) == 1
+
+
+async def test_a_relaunch_whose_feed_a_crash_lost_is_fed_after_the_restart_and_re_prompts_once(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start(world)
+    async with serving(world) as sessions:
+        await sessions.drain()
+        session_id = _lose(world, sessions, RUN_ID)
+        with monkeypatch.context() as patch:
+            crash_around_async(
+                patch,
+                sessions.threads,
+                "feed",
+                when="before",
+                matching=lambda finished: (
+                    json.loads(finished.item.payload)["effect_type"] == RECOVERY_WAKE
+                ),
+            )
+            with pytest.raises(SimulatedCrash):
+                await sessions.drain()
+        relaunches = len(sessions.relauncher.calls)
+    # The relaunched runner runs no turn yet.
+    sessions.dispatch.sessions[session_id].status = "idle"
+
+    async with restarted(sessions, lease_s=LEASE_S) as again:
+        await again.drain()
+        state = again.world.bridge.load(workspace_id=WORKSPACE, run_id=RUN_ID).state
+
+        assert relaunches == 1
+        # The stored result is fed by the new process's resync; nothing is relaunched again.
+        assert again.relauncher.calls == []
+        assert json.loads(_wake_row_of(again.world).result)["outcome"] == "relaunched"
+        [slot] = [slot for slot in state.slots if slot.id == IMPLEMENT]
+        assert (slot.wakes, slot.connection_epoch, slot.failed_turn) == (1, 1, None)
+        # One re-prompt: the slot's due infra stage re-prompts it first when the new
+        # process starts past it, and the wake's late result then adds none.
+        [_brief, _nudge] = again.messages(session_id)

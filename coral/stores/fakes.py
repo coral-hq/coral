@@ -936,6 +936,7 @@ class FakeQueueStore:
         workspace_id: int | None = None,
         now_fn: Callable[[], float] | None = None,
         hold: bool = False,
+        restart_held_since: bool = False,
     ) -> bool:
         if hold and int(status) != int(WorkStatus.PENDING):
             raise ValueError("a hold re-pends the item: status must be PENDING")
@@ -961,7 +962,10 @@ class FakeQueueStore:
             held_since = None if not repended else item.held_since
             if hold:
                 avail_at = max(avail_at, now_s + MIN_HOLD_DELAY_S)
-                held_since = now_s if held_since is None else held_since
+                if held_since is None or restart_held_since:
+                    held_since = now_s
+            elif restart_held_since:
+                held_since = None
             self.work[key] = dataclasses.replace(
                 item,
                 status=status,

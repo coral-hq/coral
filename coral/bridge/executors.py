@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Any, ParamSpec, Protocol, TypeVar
 
 from coral.bridge.commit import DRIFT_EFFECT_CODES, EngineSnapshot
-from coral.bridge.config import DRIFT_HOLD, HOLD_RULES
+from coral.bridge.config import DRIFT_HOLD, HOLD_RULES, HOST_WAIT_HOLDS
 from coral.bridge.keys import ORCHESTRATOR_SLOT_ID, slot_message_id
 from coral.bridge.mapping import NEXT_RESYNC_AT
 from coral.bridge.orchestrator import failure_inputs, failure_pause, open_decisions
@@ -180,8 +180,11 @@ def bridge_hold_policy(item: WorkItem, failure: EffectFailed, now_s: int) -> int
     """
     How long to hold a refused item without spending its attempt, or ``None`` to retry it.
 
-    Domain waits are held; a wait with a horizon ends that long after its first
-    refusal (``held_since``), and the item then takes the normal retries. Reads no store.
+    Domain waits are held; a wait with a horizon ends that long after the hold began
+    (``held_since``), and the item then takes the normal retries. A wait for an offline
+    host is measured on its own: the hold that starts or ends one starts afresh, so that
+    time never counts toward another code's horizon. Any other sequence, a retry between
+    two holds or two codes alternating, keeps one start. Reads no store.
     """
     code = failure.error_code
     rule = HOLD_RULES.get(code)
@@ -191,10 +194,19 @@ def bridge_hold_policy(item: WorkItem, failure: EffectFailed, now_s: int) -> int
     if rule is None:
         return None
     delay, horizon = rule
-    held_since = item.held_since if item.held_since is not None else now_s
+    held_since = item.held_since
+    if held_since is None or crosses_host_wait(item, code):
+        held_since = now_s
     if horizon is not None and now_s - held_since >= horizon:
         return None
     return delay
+
+
+def crosses_host_wait(item: WorkItem, code: str) -> bool:
+    """Whether a refusal with ``code`` moves the row into or out of a wait for an offline host."""
+    if code == item.error_code:
+        return False
+    return code in HOST_WAIT_HOLDS or item.error_code in HOST_WAIT_HOLDS
 
 
 def timer_executor(threads: BridgeThreads) -> EffectExecutor:

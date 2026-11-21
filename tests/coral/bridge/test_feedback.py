@@ -495,6 +495,15 @@ def test_only_an_abandoned_restart_of_the_slots_generation_is_fed_as_its_failure
     assert abandoned_restart(close, state) is None
 
 
+def test_wake_results_feed_only_the_fields_the_engine_reads() -> None:
+    seen_at = "2026-01-01T12:00:00+00:00"
+    assert fed_payload(
+        "runner_lost",
+        {"outcome": "relaunched", "turn_running": False, "seen_at": seen_at, "runner": "r2"},
+    ) == {"outcome": "relaunched", "turn_running": False, "seen_at": seen_at}
+    assert fed_payload("runner_lost", {"outcome": 1, "turn_running": "no"}) == {}
+
+
 def test_restart_results_feed_only_the_fields_the_engine_reads() -> None:
     assert fed_payload(
         "retry_step",

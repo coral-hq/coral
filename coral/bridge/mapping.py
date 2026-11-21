@@ -53,17 +53,20 @@ from coral.stores.protocols import WorkItemDraft
 from coral.tools.catalog import ORCHESTRATOR_STANCE, STEP_STANCES
 
 # Effects whose outcome is fed back to the engine as a completion or a failure.
-FED_KINDS = frozenset({"create_session", "send_input", "close_slot", "nudge", "retry_step"})
+FED_KINDS = frozenset(
+    {"create_session", "send_input", "close_slot", "nudge", "retry_step", "runner_lost"}
+)
 # Effects that queue no work yet, and why; each is logged when it is committed.
 UNMAPPED_KINDS: Mapping[str, str] = MappingProxyType(
     {
         "notify": "alerts come from the commit; a decision's reminder goes to the orchestrator",
-        "runner_lost": "lost runners are not restarted yet",
         "arm_timer": "timer rows come from the run's armed timers",
     }
 )
 # The row of a ``retry_step``: fence the old session, salvage and reset (``coral.recovery``).
 RECOVERY_RESTART = "recovery.restart"
+# The row of a ``runner_lost``: bring the lost runner back in its session (``coral.recovery``).
+RECOVERY_WAKE = "recovery.wake"
 TIMER = "timer"
 RUN_RESYNC = "run_resync"
 TURN_FACT = "turn_fact"
@@ -136,6 +139,8 @@ def map_effect(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft | None:
         return _slot_draft(ctx, effect, CANCEL_SESSIONS, fields)
     if effect.kind == "retry_step":
         return _restart(ctx, effect)
+    if effect.kind == "runner_lost":
+        return _wake(ctx, effect)
     if effect.kind == "publish_gate":
         return gate_publish_draft(ctx, effect)
     if effect.kind == "withdraw_gate":
@@ -342,6 +347,31 @@ def _restart(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft:
     return _slot_draft(ctx, effect, RECOVERY_RESTART, fields, generation=generation)
 
 
+def _wake(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft:
+    """
+    The wake of a slot's lost runner, fenced by the generation that lost it.
+
+    It names the lost session and runner as the engine saw them.
+    """
+    slot = find_slot(ctx.state, effect.subject)
+    generation = effect.payload.get("generation")
+    if not isinstance(generation, int) or isinstance(generation, bool):
+        generation = slot.session_generation if slot is not None else 1
+    session_id = effect.payload.get("session_id")
+    runner_id = effect.payload.get("runner_id")
+    fields = {
+        "engine_slot_id": effect.subject,
+        "generation": generation,
+        "session_id": (
+            session_id
+            if isinstance(session_id, str)
+            else slot_session_id(ctx.workspace_id, ctx.state, effect.subject)
+        ),
+        "runner_id": runner_id if isinstance(runner_id, str) else None,
+    }
+    return _slot_draft(ctx, effect, RECOVERY_WAKE, fields, generation=generation)
+
+
 def _unreported_close(state: engine.RunState, engine_slot_id: str) -> str | None:
     """The key of the slot's newest close, unless a receipt recorded the commit it made."""
     close = next(
@@ -421,6 +451,7 @@ __all__ = [
     "FED_KINDS",
     "NEXT_RESYNC_AT",
     "RECOVERY_RESTART",
+    "RECOVERY_WAKE",
     "RUN_RESYNC",
     "TIMER",
     "TURN_FACT",

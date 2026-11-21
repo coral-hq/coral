@@ -224,9 +224,9 @@ def test_a_stale_runner_emits_one_runner_lost_and_does_not_pause() -> None:
     assert applied.state.status == "running"
     assert applied.state.causes == ()
     slot = applied.state.slots[0]
-    # Like an edge, the loss marks the turn it interrupted and arms the infra ladder.
+    # Like an edge, the loss marks the turn it interrupted; its wake replaces the ladder.
     assert (slot.status, slot.failed_turn, slot.wakes) == ("working", "turn:sess-1:1:None", 1)
-    assert [timer.stage for timer in applied.state.timers] == [1, 2, 3]
+    assert applied.state.timers == ()
     assert fold(graph, (*running.log, applied.entry), CFG) == applied.state
     assert reconcile(applied.state, (stale,), NOW, CFG) == ()
 
@@ -311,11 +311,7 @@ def test_runner_lost_emits_one_effect_and_agent_failed_pauses() -> None:
     }
     assert lost.state.status == "running"
     assert lost.state.causes == ()
-    assert [timer.stage for timer in lost.state.timers if timer.kind == "infra_backoff"] == [
-        1,
-        2,
-        3,
-    ]
+    assert [timer for timer in lost.state.timers if timer.kind == "infra_backoff"] == []
     assert lost.state.slots[0].failed_turn == FACT_KEY
     assert fold(graph, (*running.log, lost.entry), CFG) == lost.state
     assert reconcile(lost.state, (fact,), NOW, CFG) == ()
@@ -503,63 +499,35 @@ def test_a_naive_now_raises() -> None:
         reconcile(running.state, (), datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None), CFG)
 
 
-def test_a_repeated_loss_of_one_runner_arms_the_ladder_again() -> None:
+def test_a_runner_reported_again_while_its_wake_is_out_arms_nothing_and_a_later_loss_wakes() -> (
+    None
+):
     graph = _graph()
     running = drive(graph, [RUN], config=CFG)
     lost = _at(graph, running, [_runner_lost("a")], NOW)
-    assert [effect.kind for effect in lost.log[-1].effects] == ["runner_lost"]
-    assert lost.state.slots[0].failed_turn == "turn:sess-1:1:msg:a"
-    first, _second, _third = lost.state.timers
+    (wake,) = lost.log[-1].effects
+    assert wake.kind == "runner_lost"
+    assert (lost.state.slots[0].failed_turn, lost.state.timers) == ("turn:sess-1:1:msg:a", ())
 
-    # Stage 1 re-prompts, and the re-prompted turn completes: a recovery.
-    nudged = _at(graph, lost, [TimerDue(timer_key=first.key)], first.due_at)
-    recovered = _at(
-        graph,
-        _delivered(graph, nudged, first.due_at),
-        [TurnEnded(slot_id=SLOT, fact_key="turn:sess-1:1:msg:b")],
-        first.due_at,
-    )
-    assert recovered.state.timers == ()
-    assert recovered.state.slots[0].failed_turn is None
-    working = _delivered(graph, recovered, first.due_at)
-
-    # The same runner is reported lost again later: only the fact's receipt, no second
-    # runner_lost, but the ladder is armed and the slot marked like the first time.
-    later = first.due_at + timedelta(hours=1)
-    again = _at(graph, working, [_runner_lost("c")], later)
+    # The same runner is reported again while its wake is out: only the fact's receipt.
+    again = _at(graph, lost, [_runner_lost("c")], NOW + timedelta(seconds=5))
     entry = again.log[-1]
     assert (entry.rejection, entry.effects, entry.receipt_key) == (
         None,
         (),
         "turn:sess-1:1:msg:c",
     )
-    assert again.state.slots[0].failed_turn == "turn:sess-1:1:msg:c"
-    first, second, third = again.state.timers
-    assert [timer.due_at for timer in (first, second, third)] == [
-        later + delay for delay in CFG.timer_policy.infra_backoff
-    ]
+    assert (again.state.slots[0].failed_turn, again.state.timers) == ("turn:sess-1:1:msg:c", ())
 
-    # The slot keeps failing after each re-prompt, so stage 3 pauses infra.
-    retried = _delivered(
-        graph, _at(graph, again, [TimerDue(timer_key=first.key)], first.due_at), first.due_at
+    # The wake finds the runner back and idle: one re-prompt, then a later loss is new.
+    back = {"outcome": "runner_back", "turn_running": False}
+    woken = _at(graph, again, [EffectCompleted(effect_key=wake.effect_key, payload=back)], NOW)
+    assert [effect.kind for effect in woken.log[-1].effects] == ["nudge"]
+    later = _at(
+        graph, _delivered(graph, woken, NOW), [_runner_lost("d")], NOW + timedelta(hours=1)
     )
-    failing = _at(graph, retried, [_runner_lost("d")], first.due_at + timedelta(seconds=1))
-    assert failing.log[-1].effects == ()
-    assert failing.state.timers == (second, third)
-    retried = _delivered(
-        graph, _at(graph, failing, [TimerDue(timer_key=second.key)], second.due_at), second.due_at
-    )
-    failing = _at(graph, retried, [_runner_lost("e")], second.due_at + timedelta(seconds=1))
-    paused = _at(graph, failing, [TimerDue(timer_key=third.key)], third.due_at)
-    assert paused.state.status == "paused"
-    assert paused.state.causes == (
-        PauseCause(reason="infra", detail="infra.transient", subject=SLOT),
-    )
-
-    resumed = _at(graph, paused, [ResumeRun()], third.due_at)
-    assert [(effect.kind, effect.payload) for effect in resumed.log[-1].effects] == [
-        ("nudge", {"fact_key": "turn:sess-1:1:msg:e", "reason": "resume"})
-    ]
+    assert [effect.kind for effect in later.log[-1].effects] == ["runner_lost"]
+    assert later.state.timers == ()
 
 
 def _runner_lost(tail: str, runner_id: str | None = "runner-1") -> SessionFailed:

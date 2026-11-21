@@ -605,8 +605,8 @@ def test_hold_repends_without_spending_an_attempt_and_keeps_its_start(
         )
     assert _one(queue, draft) == claimed
 
-    # A retry past the horizon spends an attempt but keeps the first refusal's time,
-    # so the horizon is not restarted by the next hold.
+    # A retry past the horizon spends an attempt but keeps the first refusal's time, so
+    # the next hold, of any code, does not restart the horizon.
     _finish(
         queue,
         claimed,
@@ -620,12 +620,35 @@ def test_hold_repends_without_spending_an_attempt_and_keeps_its_start(
     claimed = _claim(queue, _NOW + 910)
     _finish(queue, claimed, WorkStatus.PENDING, _NOW + 910, error_code="run.paused", hold=True)
     assert _one(queue, draft).held_since == _NOW
-    _finish(queue, _claim(queue, _NOW + 920), WorkStatus.SUCCEEDED, _NOW + 920)
+    # Only the caller's restart starts it afresh: on a hold, and a retry clears it.
+    claimed = _claim(queue, _NOW + 915)
+    _finish(
+        queue,
+        claimed,
+        WorkStatus.PENDING,
+        _NOW + 915,
+        error_code="session.not_ready",
+        hold=True,
+        restart_held_since=True,
+    )
+    assert _one(queue, draft).held_since == _NOW + 915
+    claimed = _claim(queue, _NOW + 920)
+    _finish(
+        queue,
+        claimed,
+        WorkStatus.PENDING,
+        _NOW + 920,
+        error_code="net.timeout",
+        next_available_at=_NOW + 925,
+        restart_held_since=True,
+    )
+    assert _one(queue, draft).held_since is None
+    _finish(queue, _claim(queue, _NOW + 925), WorkStatus.SUCCEEDED, _NOW + 925)
     done = _one(queue, draft)
     assert (done.status, done.held_since, done.finished_at) == (
         int(WorkStatus.SUCCEEDED),
         None,
-        _NOW + 920,
+        _NOW + 925,
     )
 
 
@@ -1153,7 +1176,8 @@ async def test_a_hold_keeps_spent_attempts_and_a_failing_policy_falls_back_to_th
         (pending, "net.timeout", 1, 1, None),
         # A hold keeps the attempt a retry spent; a zero or negative delay waits the minimum.
         (pending, "session.not_ready", 1, MIN_HOLD_DELAY_S, first_hold),
-        # The policy is asked first, a permanent failure included.
+        # The policy is asked first, a permanent failure included; a hold of another code
+        # keeps the first hold's start.
         (pending, "slot.close_blocked", 1, MIN_HOLD_DELAY_S, first_hold),
         # A failing policy is logged and the item takes the normal retry.
         (pending, "policy.bug", 2, 2, first_hold),

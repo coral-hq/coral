@@ -59,8 +59,15 @@ HOLD_RULES: Mapping[str, tuple[int, int | None]] = MappingProxyType(
         "executor.missing": (60, 1_800),
         "signal.awaiting_effect": (5, None),
         "timer.early": (5, None),
+        # A wake while its step's host is offline: checked again until the host returns.
+        "recovery.host_offline": (30, None),
+        # A wake whose old runner the host says is alive: never superseded, for 10 minutes.
+        "recovery.runner_alive": (30, 600),
     }
 )
+# Holds for a host that is offline: each is measured on its own, so waiting on one never
+# counts toward the horizon of another code the row is held or retried with.
+HOST_WAIT_HOLDS: frozenset[str] = frozenset({"session.host_offline", "recovery.host_offline"})
 # ``drift.<cause>`` failures wait for the resume commit like ``run.paused``.
 DRIFT_HOLD = (300, None)
 
@@ -129,6 +136,7 @@ __all__ = [
     "FOLD_CACHE_BYTES",
     "FOLD_CACHE_RUNS",
     "HOLD_RULES",
+    "HOST_WAIT_HOLDS",
     "LOCK_TIMEOUT_S",
     "LOG_VERSION",
     "MAX_ACTOR_REF_CHARS",

@@ -530,6 +530,37 @@ class SessionDispatch(Protocol):
         ...
 
 
+# How a lost step's runner was brought back: it was connected after all, or relaunched.
+RunnerRelaunch = Literal["connected", "relaunched"]
+
+
+@runtime_checkable
+class StepRelauncher(Protocol):
+    """How Coral's own paths launch a step's runner after its create (K4 subset)."""
+
+    async def ensure_runner(
+        self,
+        *,
+        workspace_id: int,
+        session_id: str,
+        generation: int,
+        ensure_lease: Callable[[], Awaitable[None]] | None = None,
+    ) -> RunnerRelaunch:
+        """
+        Relaunch the step session's runner in place, unless it is connected.
+
+        Its run, owner and host come from the stored run and binding, never the caller.
+        Before any launch the binding must be the step's at ``generation``, the slot
+        still at it, the session open, the run owner's host connected with the Coral
+        token, and the old runner not alive there.
+
+        :param ensure_lease: Called before each side effect (the stop, the launch).
+        :raises CoralSessionError: A typed refusal, e.g. retryable
+            ``session.host_offline`` or ``recovery.runner_alive``.
+        """
+        ...
+
+
 @runtime_checkable
 class TurnTranscripts(Protocol):
     """Reads what a session's transcript shows about its newest turn (K4 subset)."""
@@ -596,6 +627,7 @@ __all__ = [
     "RunSpendReader",
     "RunSpendTotals",
     "RunnerLiveness",
+    "RunnerRelaunch",
     "SendReceipt",
     "SessionCreateRequest",
     "SessionDispatch",
@@ -607,6 +639,7 @@ __all__ = [
     "SlotRoleName",
     "StatusEdgeView",
     "StepAgentResolver",
+    "StepRelauncher",
     "TrackedPrompt",
     "TranscriptItem",
     "TurnFactSink",

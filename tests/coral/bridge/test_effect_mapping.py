@@ -13,6 +13,7 @@ from coral.bridge.keys import decision_request_key, decision_rerequest_key, stor
 from coral.bridge.mapping import (
     FED_KINDS,
     RECOVERY_RESTART,
+    RECOVERY_WAKE,
     UNMAPPED_KINDS,
     MapContext,
     UnsupportedStance,
@@ -45,6 +46,7 @@ from coral.gates.ids import GATE_PUBLISH, GATE_WITHDRAW, gate_visit_id
 from coral.model.ids import derived_id, effect_session_id
 from coral.model.ir import CompiledGraph
 from coral.recovery.ladder import _restart_payload
+from coral.recovery.relaunch import _wake_payload
 from coral.slots.executors import _cancel_payload, _close_payload, _create_payload, _send_payload
 from coral.stores.protocols import WorkItemDraft
 from coral.tools.catalog import STEP_STANCES
@@ -378,6 +380,39 @@ def test_a_retry_becomes_one_restart_row_fenced_by_the_new_generation(
     }
 
 
+def test_a_lost_runner_becomes_one_wake_row_fenced_by_the_generation_that_lost_it() -> None:
+    driven = _started()
+    lost = SessionFailed(
+        slot_id=IMPLEMENT,
+        failure_class="infra.runner_lost",
+        cause="lost",
+        fact_key="turn:s:1:x",
+        runner_id="runner-1",
+    )
+    wake = _only(drive(GRAPH, [lost], after=driven), "runner_lost")
+    draft = _draft(driven.state, wake)
+
+    _assert_effect_row(draft, wake.effect_key)
+    _assert_slot_row(draft, IMPLEMENT, "implement")
+    payload = _payload(draft)
+    assert payload == {
+        "effect_type": RECOVERY_WAKE,
+        "effect_key": wake.effect_key,
+        "engine_kind": "runner_lost",
+        "engine_slot_id": IMPLEMENT,
+        "generation": 1,
+        "session_id": wake.payload["session_id"],
+        "runner_id": "runner-1",
+        "slot_id": store_slot_id(RUN_ID, IMPLEMENT),
+    }
+    assert _wake_payload(payload) == {
+        "engine_slot_id": IMPLEMENT,
+        "generation": 1,
+        "session_id": wake.payload["session_id"],
+        "runner_id": "runner-1",
+    }
+
+
 @pytest.mark.parametrize(
     ("receipt", "named"),
     [
@@ -456,7 +491,7 @@ def test_a_brief_after_a_finished_restart_names_the_salvage_ref() -> None:
     assert f"saved at {salvage_ref} (commit {'f' * 12})" in text
 
 
-@pytest.mark.parametrize("kind", ["notify", "runner_lost", "arm_timer"])
+@pytest.mark.parametrize("kind", ["notify", "arm_timer"])
 def test_kinds_without_an_executor_map_to_no_work(kind: str) -> None:
     started = _started()
     effect = Effect(effect_key=f"{RUN_ID}:9:{kind}:{IMPLEMENT}", kind=kind, subject=IMPLEMENT)

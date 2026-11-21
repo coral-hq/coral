@@ -29,7 +29,7 @@ from coral.bridge.executors import (
     bridge_hold_policy,
 )
 from coral.bridge.keys import effect_work_id
-from coral.bridge.mapping import RECOVERY_RESTART, RUN_RESYNC, TIMER, TURN_FACT
+from coral.bridge.mapping import RECOVERY_RESTART, RECOVERY_WAKE, RUN_RESYNC, TIMER, TURN_FACT
 from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import EngineBridge
 from coral.db import WorkRow
@@ -54,7 +54,11 @@ from coral.omni.server import plugin as plugin_module
 from coral.omni.server.dispatch import OmnigentSessionDispatch
 from coral.omni.server.gates import GateAnswering, OmnigentGatePublisher
 from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
-from coral.omni.server.sessions import RUN_ID_LABEL_KEY, OmnigentSessionFacade
+from coral.omni.server.sessions import (
+    RUN_ID_LABEL_KEY,
+    OmnigentSessionFacade,
+    OmnigentStepRelauncher,
+)
 from coral.omni.server.turn_facts import BoundSessionRefresher, TurnFactRecorder
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue import executors as queue_executors
@@ -146,6 +150,7 @@ ENGINE_EFFECT_TYPES = frozenset(
         WORKSPACE_SALVAGE,
         WORKSPACE_RESET,
         RECOVERY_RESTART,
+        RECOVERY_WAKE,
         TURN_FACT,
     }
 )
@@ -315,6 +320,7 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
             assert observers["coral"] == state.coral_status_edges.observe
             assert observers["coral.confirmed_stops"] == state.coral_confirmed_stops.observe
             assert observers["coral.turn_facts"] == state.coral_turn_fact_recorder.observe
+            assert isinstance(state.coral_step_relauncher, OmnigentStepRelauncher)
             # Only cancel_sessions runs for a run that already ended (cancel_run ends it).
             registrations = {kind: get_registration(kind) for kind in ENGINE_EFFECT_TYPES}
             assert {

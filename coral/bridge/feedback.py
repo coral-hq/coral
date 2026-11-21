@@ -45,6 +45,7 @@ _FED_FIELDS: Mapping[str, Mapping[str, tuple[type, ...]]] = {
         "head_verified": (bool,),
         "head": (str, type(None)),
     },
+    "runner_lost": {"outcome": (str,), "turn_running": (bool,), "seen_at": (str,)},
 }
 _MAX_FED_TEXT_CHARS = 128
 

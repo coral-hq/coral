@@ -40,17 +40,20 @@ from coral.omni.runner.tool_provider import tool_provider
 from coral.omni.server import sessions as facade_module
 from coral.omni.server import step_agents as step_agents_module
 from coral.omni.server.bundles import materialize, pack_bundle
+from coral.omni.server.dispatch import OmnigentSessionDispatch
 from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.omni.server.sessions import (
     ANCHOR_AGENT_NAME,
     CORAL_RUNS_PROJECT_NAME,
     TITLE_ID_SUFFIX_CHARS,
     OmnigentSessionFacade,
+    OmnigentStepRelauncher,
 )
 from coral.omni.server.step_agents import OmnigentStepAgents
 from coral.profiles.bundle_spec import Stance, StepRef, build_step_bundle_yaml
 from coral.queue import StartupLeaseLost
 from coral.queue.conformance import run_executor_conformance
+from coral.queue.drainer import SlotSuperseded
 from coral.queue.executors import EffectCompleted, EffectFailed, EffectOutcome
 from coral.recovery.drift import DriftPauser
 from coral.slots.executors import CREATE_SESSION, create_session_executor
@@ -61,6 +64,7 @@ from omnigent.db.account_authority import account_authority_scope
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, SqlUser, current_workspace_id
 from omnigent.db.utils import builtin_agent_id, get_or_create_engine
 from omnigent.entities import Conversation, MessageData, NewConversationItem
+from omnigent.entities.conversation import FunctionCallData
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import (
     HostHelloFrame,
@@ -77,6 +81,8 @@ from omnigent.host.frames import (
     host_capabilities,
 )
 from omnigent.runner.identity import token_bound_runner_id
+from omnigent.runner.session_init_protocol import SESSION_INIT_PAYLOAD_KEY
+from omnigent.runtime import init as init_runtime
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.auth import (
@@ -101,6 +107,7 @@ from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
 from tests.budgets import budget
 from tests.coral.workspace._executor_fakes import effect_context, start_run
 from tests.server.integration.test_session_host_launch import (
@@ -187,6 +194,12 @@ class _Host:
         self._app = app
         self._comm = comm
         self.launch_frames: list[HostLaunchRunnerFrame] = []
+        self.stop_frames: list[HostStopRunnerFrame] = []
+        self.status_frames: list[HostRunnerStatusFrame] = []
+        # What it says a runner's status is, by runner, else ``runner_status``; ``None``
+        # leaves the query unanswered.
+        self.runner_status: str | None = "alive"
+        self.statuses: dict[str, str | None] = {}
         self.frames_seen = 0
         # Paths the host reports as missing.
         self.missing: set[str] = set()
@@ -230,9 +243,14 @@ class _Host:
                     canonical_path=frame.path if exists else None,
                 )
             elif isinstance(frame, HostStopRunnerFrame):
+                self.stop_frames.append(frame)
                 reply = HostStopRunnerResultFrame(request_id=frame.request_id, status="stopped")
             elif isinstance(frame, HostRunnerStatusFrame):
-                reply = HostRunnerStatusResultFrame(request_id=frame.request_id, status="alive")
+                self.status_frames.append(frame)
+                status = self.statuses.get(frame.runner_id, self.runner_status)
+                if status is None:
+                    continue
+                reply = HostRunnerStatusResultFrame(request_id=frame.request_id, status=status)
             elif isinstance(frame, HostLaunchRunnerFrame):
                 self.launch_frames.append(frame)
                 runner_id = token_bound_runner_id(frame.binding_token)
@@ -258,12 +276,23 @@ async def host(app: FastAPI) -> AsyncIterator[_Host]:
 
 @dataclass
 class _Runner:
-    """The launched runners' HTTP side: records each session-init handshake."""
+    """
+    The launched runners' HTTP side: records each session-init handshake.
+
+    It counts the turns it starts as a runner does: one per message it takes, and one
+    at session init when the stored history ends mid-turn, unless the init asks it not
+    to resume (``suppress_recovery_turn``).
+    """
 
     inits: list[str] = field(default_factory=list)
+    suppressed: list[bool] = field(default_factory=list)
+    turns: list[str] = field(default_factory=list)
 
     def inits_for(self, session_id: str) -> int:
         return self.inits.count(session_id)
+
+    def turns_for(self, session_id: str) -> list[str]:
+        return [turn.split(":", 1)[1] for turn in self.turns if turn.startswith(session_id)]
 
 
 @pytest_asyncio.fixture
@@ -274,7 +303,19 @@ async def runner(
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/sessions":
-            recorded.inits.append(json.loads(request.content)["session_id"])
+            body = json.loads(request.content)
+            session_id = body["session_id"]
+            recorded.inits.append(session_id)
+            envelope = body.get(SESSION_INIT_PAYLOAD_KEY) or {}
+            suppressed = envelope.get("suppress_recovery_turn") is True
+            recorded.suppressed.append(suppressed)
+            newest = stores.conversation.list_items(session_id, limit=1, order="desc").data
+            if not suppressed and newest and newest[0].type == "function_call":
+                recorded.turns.append(f"{session_id}:history")
+        elif request.method == "POST" and request.url.path.endswith("/events"):
+            body = json.loads(request.content)
+            if body.get("type") == "message":
+                recorded.turns.append(f"{request.url.path.split('/')[3]}:message")
         return httpx.Response(200, json={})
 
     async with httpx.AsyncClient(
@@ -317,6 +358,20 @@ class _RecordingLauncher:
                 ),
             }
         )
+
+
+@dataclass
+class _SlotGenerations:
+    """The queue's slot generations, by store slot id; ``moves`` changes one mid-launch."""
+
+    current: dict[str, int] = field(default_factory=dict)
+    reads: list[str] = field(default_factory=list)
+
+    def get_slot_generation(
+        self, run_id: str, slot_id: str, *, workspace_id: int | None = None
+    ) -> int | None:
+        self.reads.append(slot_id)
+        return self.current.get(slot_id)
 
 
 class _Coral:
@@ -362,7 +417,20 @@ class _Coral:
             server_config={},
             host_sharded=False,
         )
-        self.facade = OmnigentSessionFacade(app, services, self.bindings, launcher=launcher)
+        self.services = services
+        # Each slot's generation as the queue reads it; a slot it does not name is unchecked.
+        self.slot_generations = _SlotGenerations()
+        self.dispatch = OmnigentSessionDispatch(
+            app, stores.conversation, app.state.runner_router, pre_send_hooks=()
+        )
+        self.facade = OmnigentSessionFacade(
+            app,
+            services,
+            self.bindings,
+            launcher=launcher,
+            slot_generations=self.slot_generations,
+            dispatch=lambda: self.dispatch,
+        )
         self.run_store = FakeRunStore(default_workspace_id=WORKSPACE)
         self.run: CoralRun = start_run(
             self.run_store,
@@ -2395,3 +2463,654 @@ async def test_a_step_archived_while_it_is_created_is_not_launched(
     assert (failure.error_code, failure.retryable) == ("drift.session_archived", False)
     assert launcher.calls == []
     assert unlaunched.progress(unlaunched.step_id()) == SessionBindingProgress.ROW_CREATED
+
+
+# ── The one relaunch path ───────────────────────────────────────────────────
+
+
+def _relauncher(coral: _Coral) -> OmnigentStepRelauncher:
+    return OmnigentStepRelauncher(
+        coral.facade,
+        coral.services,
+        coral.bindings,
+        coral.run_store,
+        dispatch=lambda: coral.dispatch,
+    )
+
+
+async def _started_step(coral: _Coral) -> tuple[str, str]:
+    """A created step session whose runner is connected; returns the session and runner."""
+    await coral.anchor()
+    _completed(await coral.deliver(coral.step_payload()))
+    step = coral.conversation(coral.step_id())
+    assert step is not None and step.runner_id is not None
+    return step.id, step.runner_id
+
+
+def _lose_runner(app: FastAPI, runner_id: str) -> None:
+    """The runner's tunnel is gone, as after its process died."""
+    app.state.tunnel_registry.deregister(runner_id)
+
+
+@pytest.mark.parametrize("status", ["dead", "unknown"])
+async def test_a_lost_steps_runner_is_relaunched_in_its_session_after_a_confirmed_stop(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI, status: str
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = status
+    leases, asked = coral.lease_checks, len(host.status_frames)
+
+    async def ensure_lease() -> None:
+        coral.lease_checks += 1
+
+    relaunched = await _relauncher(coral).ensure_runner(
+        workspace_id=WORKSPACE, session_id=step_id, generation=1, ensure_lease=ensure_lease
+    )
+
+    assert relaunched == "relaunched"
+    step = coral.conversation(step_id)
+    assert step is not None and step.runner_id not in (None, old_runner)
+    # The old runner was asked about, then stopped, before the one new launch.
+    assert host.status_frames[asked].runner_id == old_runner
+    assert host.stop_frames and {frame.runner_id for frame in host.stop_frames} == {old_runner}
+    assert host.launches_for(step_id) == 2
+    assert runner.inits_for(step_id) == 2
+    assert coral.lease_checks - leases == 2
+    assert coral.progress(step_id) == SessionBindingProgress.INITIALIZED
+    assert coral.children() == [step_id]
+
+
+async def test_a_connected_runner_is_back_with_no_stop_and_no_launch(
+    coral: _Coral, host: _Host, runner: _Runner
+) -> None:
+    step_id, _ = await _started_step(coral)
+    frames = host.frames_seen
+
+    connected = await _relauncher(coral).ensure_runner(
+        workspace_id=WORKSPACE, session_id=step_id, generation=1
+    )
+
+    assert connected == "connected"
+    assert (host.frames_seen, host.launches_for(step_id)) == (frames, 1)
+
+
+def _refuse_host_token(app: FastAPI) -> None:
+    """The host comes back with a Coral that does not advertise the runner token."""
+    registry = app.state.host_registry
+    conn = registry.get(_HOST_ID)
+    registry.register(
+        host_id=_HOST_ID,
+        ws=_FakeWebSocket(),
+        hello=HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="laptop"),
+        owner=conn.owner,
+        workspace_id=conn.workspace_id,
+    )
+
+
+def _bind_elsewhere(coral: _Coral, step_id: str, **values: object) -> None:
+    """Rewrite the step's binding row, as a torn or foreign binding would read."""
+    engine = get_or_create_engine(coral.stores.conversation.storage_location)
+    with engine.begin() as connection:
+        connection.execute(
+            update(SessionBindingRow)
+            .where(SessionBindingRow.session_id == step_id)
+            .values(**values)
+        )
+
+
+@pytest.mark.parametrize(
+    ("change", "code", "retryable", "asks_host"),
+    [
+        ("another_generation", "session.not_bound", False, False),
+        ("unfinished_create", "session.not_bound", False, False),
+        ("binding_on_another_host", "session.host_not_permitted", False, False),
+        ("row_on_another_host", "session.host_not_permitted", False, False),
+        ("closed", "session.closed", False, False),
+        ("archived", "session.archived", False, False),
+        ("slot_moved", "slot.generation_mismatch", False, False),
+        ("host_without_the_token", "session.host_unsupported", False, False),
+        ("host_offline", "session.host_offline", True, False),
+        ("runner_alive", "recovery.runner_alive", True, True),
+        ("runner_signing_in", "recovery.runner_alive", True, True),
+        ("no_answer", "session.runner_status_unknown", True, True),
+        ("an_answer_it_does_not_know", "session.runner_status_unknown", True, True),
+    ],
+)
+async def test_a_relaunch_is_refused_before_any_stop_or_launch(
+    coral: _Coral,
+    host: _Host,
+    runner: _Runner,
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    code: str,
+    retryable: bool,
+    asks_host: bool,
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+    generation = 1
+    if change == "another_generation":
+        generation = 2
+    elif change == "unfinished_create":
+        _bind_elsewhere(coral, step_id, progress=int(SessionBindingProgress.ROW_CREATED))
+    elif change == "binding_on_another_host":
+        _bind_elsewhere(coral, step_id, host_id="f" * 32)
+    elif change == "row_on_another_host":
+        read = coral.stores.conversation.get_conversation
+
+        def elsewhere(session_id: str) -> Conversation | None:
+            row = read(session_id)
+            if row is None or session_id != step_id:
+                return row
+            return dataclasses.replace(row, host_id="f" * 32)
+
+        monkeypatch.setattr(coral.stores.conversation, "get_conversation", elsewhere)
+    elif change == "closed":
+        coral.stores.conversation.set_labels(step_id, {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE})
+    elif change == "archived":
+        await _archive(client, step_id)
+    elif change == "slot_moved":
+        coral.slot_generations.current[derived_id("coral-slot", coral.run.id, SLOT)] = 2
+    elif change == "host_without_the_token":
+        _refuse_host_token(app)
+    elif change == "host_offline":
+        app.state.host_registry.deregister(_HOST_ID)
+    elif change == "runner_alive":
+        host.statuses[old_runner] = "alive"
+    elif change == "runner_signing_in":
+        host.statuses[old_runner] = "sign_in_pending"
+    elif change == "an_answer_it_does_not_know":
+        # A newer or broken host's answer is no answer: nothing is stopped on it.
+        host.statuses[old_runner] = "stopping"
+    else:
+        host.statuses[old_runner] = None
+        monkeypatch.setattr(sessions_module, "_HOST_RUNNER_STATUS_TIMEOUT_S", 0.05)
+    asked, stops = len(host.status_frames), len(host.stop_frames)
+
+    with pytest.raises((CoralSessionError, SlotSuperseded)) as refused:
+        await _relauncher(coral).ensure_runner(
+            workspace_id=WORKSPACE, session_id=step_id, generation=generation
+        )
+
+    if change == "slot_moved":
+        assert refused.type is SlotSuperseded
+    else:
+        error = refused.value
+        assert isinstance(error, CoralSessionError)
+        assert (error.code, error.retryable) == (code, retryable)
+    assert (len(host.status_frames) > asked) is asks_host
+    assert len(host.stop_frames) == stops
+    assert host.launches_for(step_id) == 1
+
+
+async def test_a_session_closed_while_it_relaunched_is_stopped_and_refused(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+    launch = coral.facade._launcher.launch
+
+    async def launch_then_close(
+        conv: Conversation, *, user_id: str | None, **options: Any
+    ) -> str | None:
+        launched = await launch(conv, user_id=user_id, **options)
+        coral.stores.conversation.set_labels(step_id, {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE})
+        return launched
+
+    monkeypatch.setattr(coral.facade._launcher, "launch", launch_then_close)
+
+    with pytest.raises(CoralSessionError) as refused:
+        await _relauncher(coral).ensure_runner(
+            workspace_id=WORKSPACE, session_id=step_id, generation=1
+        )
+
+    assert refused.value.code == "session.closed"
+    step = coral.conversation(step_id)
+    assert step is not None
+    # The new runner was stopped after its launch, so nothing can reach it.
+    assert host.stop_frames[-1].runner_id == step.runner_id != old_runner
+    assert host.launches_for(step_id) == 2
+
+
+@pytest.mark.parametrize("path", ["create", "relaunch"])
+async def test_a_launch_whose_slot_moved_meanwhile_is_closed_stopped_and_never_binds(
+    coral: _Coral,
+    host: _Host,
+    runner: _Runner,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    """A create (an old leader's, or one a retry overtook) or a relaunch never binds a slot
+    that left its generation while it launched."""
+    slot = derived_id("coral-slot", coral.run.id, SLOT)
+    coral.slot_generations.current[slot] = 1
+    if path == "relaunch":
+        step_id, old_runner = await _started_step(coral)
+        _lose_runner(app, old_runner)
+        host.statuses[old_runner] = "dead"
+    else:
+        await coral.anchor()
+        step_id, old_runner = coral.step_id(), ""
+    launch = coral.facade._launcher.launch
+
+    async def launch_then_retry(
+        conv: Conversation, *, user_id: str | None, **options: Any
+    ) -> str | None:
+        launched = await launch(conv, user_id=user_id, **options)
+        coral.slot_generations.current[slot] = 2
+        return launched
+
+    monkeypatch.setattr(coral.facade._launcher, "launch", launch_then_retry)
+
+    with pytest.raises(SlotSuperseded):
+        if path == "create":
+            await coral.deliver(coral.step_payload())
+        else:
+            await _relauncher(coral).ensure_runner(
+                workspace_id=WORKSPACE, session_id=step_id, generation=1
+            )
+
+    step = coral.conversation(step_id)
+    assert step is not None and step.labels.get(CLOSED_LABEL_KEY) == CLOSED_LABEL_VALUE
+    stopped = [frame.runner_id for frame in host.stop_frames]
+    assert stopped[-1] == step.runner_id and step.runner_id != old_runner
+    if path == "create":
+        # The drainer abandons the row: the create never reached ``initialized``.
+        assert coral.progress(step_id) == SessionBindingProgress.ROW_CREATED
+
+
+# ── The one relaunch path under faults and races ────────────────────────────
+
+
+async def test_two_relaunches_of_one_lost_step_at_once_end_on_one_new_runner(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+    relauncher = _relauncher(coral)
+
+    results = await asyncio.gather(
+        *(
+            relauncher.ensure_runner(workspace_id=WORKSPACE, session_id=step_id, generation=1)
+            for _ in range(2)
+        ),
+        return_exceptions=True,
+    )
+
+    # The create's launch and one relaunch: the later launch finds the first one's runner.
+    assert results == ["relaunched", "relaunched"]
+    assert host.launches_for(step_id) == 2
+    step = coral.conversation(step_id)
+    assert step is not None and step.runner_id not in (None, old_runner)
+    assert {frame.runner_id for frame in host.stop_frames} == {old_runner}
+
+
+async def test_a_relaunch_that_overlaps_another_never_stops_the_runner_it_launched(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+    relauncher = _relauncher(coral)
+    asked = facade_module._query_host_runner_status
+    first: list[asyncio.Task[Any] | None] = []
+
+    async def the_later_caller_asks_after_the_first_finished(
+        conn: Any, registry: Any, runner_id: str
+    ) -> str | None:
+        # The wake and a send both found no runner; the send's question is answered late.
+        task = asyncio.current_task()
+        if not first:
+            first.append(task)
+        elif task is not first[0] and first[0] is not None:
+            await asyncio.wait({first[0]})
+        return await asked(conn, registry, runner_id)
+
+    monkeypatch.setattr(
+        facade_module, "_query_host_runner_status", the_later_caller_asks_after_the_first_finished
+    )
+
+    results = await asyncio.gather(
+        *(
+            relauncher.ensure_runner(workspace_id=WORKSPACE, session_id=step_id, generation=1)
+            for _ in range(2)
+        ),
+        return_exceptions=True,
+    )
+
+    step = coral.conversation(step_id)
+    assert step is not None and step.runner_id not in (None, old_runner), results
+    # Only the lost runner is ever stopped; the runner the first relaunch started is not.
+    assert {frame.runner_id for frame in host.stop_frames} == {old_runner}
+
+
+async def test_a_relaunch_whose_stop_is_unconfirmed_launches_nothing(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+
+    async def unconfirmed(*, session_id: str, user_id: str | None) -> None:
+        raise CoralSessionError(
+            "dispatch.stop_unconfirmed", "the runner did not confirm the stop", retryable=True
+        )
+
+    monkeypatch.setattr(coral.dispatch, "stop", unconfirmed)
+
+    with pytest.raises(CoralSessionError) as refused:
+        await _relauncher(coral).ensure_runner(
+            workspace_id=WORKSPACE, session_id=step_id, generation=1
+        )
+
+    assert (refused.value.code, refused.value.retryable) == ("dispatch.stop_unconfirmed", True)
+    assert host.launches_for(step_id) == 1
+    step = coral.conversation(step_id)
+    assert step is not None and step.runner_id == old_runner
+
+
+async def test_a_relaunch_whose_launcher_fails_is_relaunched_by_the_next_try(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+    launch = coral.facade._launcher.launch
+    failures = [CoralSessionError("session.runner_unavailable", "no runner", retryable=True)]
+
+    async def fails_once(conv: Conversation, *, user_id: str | None, **options: Any) -> str | None:
+        if failures:
+            raise failures.pop()
+        return await launch(conv, user_id=user_id, **options)
+
+    monkeypatch.setattr(coral.facade._launcher, "launch", fails_once)
+    relauncher = _relauncher(coral)
+
+    with pytest.raises(CoralSessionError) as refused:
+        await relauncher.ensure_runner(workspace_id=WORKSPACE, session_id=step_id, generation=1)
+    stops_after_the_failure = [frame.runner_id for frame in host.stop_frames]
+    again = await relauncher.ensure_runner(
+        workspace_id=WORKSPACE, session_id=step_id, generation=1
+    )
+
+    assert (refused.value.code, refused.value.retryable) == ("session.runner_unavailable", True)
+    # The old runner was stopped before the failed launch; the next try relaunches once.
+    assert stops_after_the_failure == [old_runner]
+    assert again == "relaunched"
+    assert host.launches_for(step_id) == 2
+    step = coral.conversation(step_id)
+    assert step is not None and step.runner_id not in (None, old_runner)
+    assert coral.progress(step_id) == SessionBindingProgress.INITIALIZED
+
+
+async def test_the_anchor_is_never_relaunched_as_a_step(
+    coral: _Coral, host: _Host, runner: _Runner
+) -> None:
+    await _started_step(coral)
+    frames = host.frames_seen
+
+    with pytest.raises(CoralSessionError) as refused:
+        await _relauncher(coral).ensure_runner(
+            workspace_id=WORKSPACE, session_id=coral.anchor_id, generation=1
+        )
+
+    assert (refused.value.code, refused.value.retryable) == ("session.not_bound", False)
+    assert host.frames_seen == frames
+
+
+async def test_a_runner_back_during_its_relaunch_is_reported_back_not_relaunched(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    # The host lost track of the runner (counted as dead), which in fact still lives.
+    host.statuses[old_runner] = "unknown"
+    launch = coral.facade._launcher.launch
+
+    async def old_runner_reconnects_first(
+        conv: Conversation, *, user_id: str | None, **options: Any
+    ) -> str | None:
+        # The runner's tunnel comes back between the relaunch's stop and its launch.
+        app.state.tunnel_registry.register(old_runner, _NoopRunnerWS(), _runner_hello())
+        return await launch(conv, user_id=user_id, **options)
+
+    monkeypatch.setattr(coral.facade._launcher, "launch", old_runner_reconnects_first)
+
+    answer = await _relauncher(coral).ensure_runner(
+        workspace_id=WORKSPACE, session_id=step_id, generation=1
+    )
+
+    step = coral.conversation(step_id)
+    assert step is not None
+    # Either a new runner was launched, or the old one is reported back (``connected``).
+    assert (answer, step.runner_id == old_runner) in {("relaunched", False), ("connected", True)}
+
+
+async def test_a_session_deleted_while_it_relaunched_has_its_new_runner_stopped(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+    launch = coral.facade._launcher.launch
+    launched: list[str | None] = []
+
+    async def launch_then_delete(
+        conv: Conversation, *, user_id: str | None, **options: Any
+    ) -> str | None:
+        runner_id = await launch(conv, user_id=user_id, **options)
+        current = coral.conversation(step_id)
+        launched.append(None if current is None else current.runner_id)
+        await coral.stores.conversation.delete_conversation(step_id)
+        return runner_id
+
+    monkeypatch.setattr(coral.facade._launcher, "launch", launch_then_delete)
+
+    with pytest.raises(CoralSessionError) as refused:
+        await _relauncher(coral).ensure_runner(
+            workspace_id=WORKSPACE, session_id=step_id, generation=1
+        )
+
+    assert launched[0] not in (None, old_runner)
+    assert refused.value.code in ("session.closed", "session.deleted")
+    assert host.stop_frames[-1].runner_id == launched[0]
+
+
+# ── Fix round: one turn per relaunch, canonical hosts, a stop that fails ────
+
+
+async def test_a_relaunch_resumes_no_turn_from_history_so_its_re_prompt_is_its_one_turn(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    # The lost runner died mid-turn: its stored history ends on a tool call.
+    coral.stores.conversation.append(
+        step_id,
+        [
+            NewConversationItem(
+                type="function_call",
+                response_id="turn_1",
+                data=FunctionCallData(
+                    agent="a", call_id="call_1", name="sys_os_shell", arguments="{}"
+                ),
+            )
+        ],
+    )
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+    # The send's input-policy check reads the runtime's stores, as a server sets them.
+    stores = coral.stores
+    init_runtime(
+        conversation_store=stores.conversation,
+        agent_store=stores.agent,
+        agent_cache=stores.agent_cache,
+        file_store=stores.file,
+        artifact_store=stores.artifact,
+    )
+
+    relaunched = await _relauncher(coral).ensure_runner(
+        workspace_id=WORKSPACE, session_id=step_id, generation=1
+    )
+    await coral.dispatch.send_message(
+        workspace_id=WORKSPACE,
+        run_id=coral.run.id,
+        session_id=step_id,
+        user_id=None,
+        stable_id="5b0e3c7a9d1f4e6b8a2c0d4f6e8b1a3c",
+        text="Your runner stopped and Coral restarted it.",
+    )
+
+    assert relaunched == "relaunched"
+    # The create's init may resume; the relaunch's must not, since Coral re-prompts it.
+    assert runner.suppressed == [False, True]
+    assert runner.turns_for(step_id) == ["message"]
+
+
+async def test_a_relaunch_compares_host_ids_in_their_canonical_form(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    # A binding stored with the legacy spelling of the same host.
+    _bind_elsewhere(coral, step_id, host_id=f"host_{_HOST_ID}")
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+
+    relaunched = await _relauncher(coral).ensure_runner(
+        workspace_id=WORKSPACE, session_id=step_id, generation=1
+    )
+
+    assert relaunched == "relaunched"
+    assert host.launches_for(step_id) == 2
+
+
+@pytest.mark.parametrize("fails", ["label", "stop"])
+async def test_a_superseded_launch_is_abandoned_when_its_label_or_its_stop_fails(
+    coral: _Coral,
+    host: _Host,
+    runner: _Runner,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    fails: str,
+) -> None:
+    slot = derived_id("coral-slot", coral.run.id, SLOT)
+    coral.slot_generations.current[slot] = 1
+    await coral.anchor()
+    step_id = coral.step_id()
+    launch = coral.facade._launcher.launch
+
+    async def launch_then_retry(
+        conv: Conversation, *, user_id: str | None, **options: Any
+    ) -> str | None:
+        launched = await launch(conv, user_id=user_id, **options)
+        coral.slot_generations.current[slot] = 2
+        return launched
+
+    monkeypatch.setattr(coral.facade._launcher, "launch", launch_then_retry)
+    if fails == "label":
+
+        def no_label(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("the store is down")
+
+        monkeypatch.setattr(coral.stores.conversation, "set_labels", no_label)
+    else:
+
+        async def unconfirmed(*, session_id: str, user_id: str | None) -> None:
+            raise CoralSessionError("dispatch.stop_unconfirmed", "no answer", retryable=True)
+
+        monkeypatch.setattr(coral.dispatch, "stop", unconfirmed)
+    stops = len(host.stop_frames)
+
+    with pytest.raises(SlotSuperseded):
+        await coral.deliver(coral.step_payload())
+
+    step = coral.conversation(step_id)
+    assert step is not None
+    # Each half runs although the other failed, and the create never binds.
+    closed = step.labels.get(CLOSED_LABEL_KEY) == CLOSED_LABEL_VALUE
+    assert closed is (fails == "stop")
+    assert (len(host.stop_frames) > stops) is (fails == "label")
+    assert coral.progress(step_id) == SessionBindingProgress.ROW_CREATED
+
+
+async def test_a_relaunch_whose_row_moved_to_another_runner_stops_nothing(
+    coral: _Coral, host: _Host, runner: _Runner, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+    asked = facade_module._query_host_runner_status
+
+    async def rebound_meanwhile(conn: Any, registry: Any, runner_id: str) -> str | None:
+        # Another launch rebinds the session while the host is asked about the lost one.
+        coral.stores.conversation.replace_runner_id(step_id, "runner-from-elsewhere")
+        return await asked(conn, registry, runner_id)
+
+    monkeypatch.setattr(facade_module, "_query_host_runner_status", rebound_meanwhile)
+    stops = len(host.stop_frames)
+
+    with pytest.raises(CoralSessionError) as refused:
+        await _relauncher(coral).ensure_runner(
+            workspace_id=WORKSPACE, session_id=step_id, generation=1
+        )
+
+    assert (refused.value.code, refused.value.retryable) == ("session.runner_changed", True)
+    assert len(host.stop_frames) == stops
+    assert host.launches_for(step_id) == 1
+
+
+@pytest.mark.parametrize("elsewhere_is", ["connected", "still_starting"])
+async def test_the_try_after_a_runner_changed_refusal_never_stops_the_other_launchs_runner(
+    coral: _Coral,
+    host: _Host,
+    runner: _Runner,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    elsewhere_is: str,
+) -> None:
+    step_id, old_runner = await _started_step(coral)
+    _lose_runner(app, old_runner)
+    host.statuses[old_runner] = "dead"
+    elsewhere = "runner-from-elsewhere"
+    asked = facade_module._query_host_runner_status
+
+    async def rebound_meanwhile(conn: Any, registry: Any, runner_id: str) -> str | None:
+        # Another launch rebinds the session while the host is asked about the lost one.
+        coral.stores.conversation.replace_runner_id(step_id, elsewhere)
+        return await asked(conn, registry, runner_id)
+
+    relauncher = _relauncher(coral)
+    monkeypatch.setattr(facade_module, "_query_host_runner_status", rebound_meanwhile)
+    with pytest.raises(CoralSessionError) as changed:
+        await relauncher.ensure_runner(workspace_id=WORKSPACE, session_id=step_id, generation=1)
+    monkeypatch.setattr(facade_module, "_query_host_runner_status", asked)
+    if elsewhere_is == "connected":
+        app.state.tunnel_registry.register(elsewhere, _NoopRunnerWS(), _runner_hello())
+    else:
+        # The other launch's runner still boots: its host tracks it as alive.
+        host.statuses[elsewhere] = "alive"
+    stops, launches = len(host.stop_frames), host.launches_for(step_id)
+
+    if elsewhere_is == "connected":
+        answer: str = await relauncher.ensure_runner(
+            workspace_id=WORKSPACE, session_id=step_id, generation=1
+        )
+    else:
+        with pytest.raises(CoralSessionError) as held:
+            await relauncher.ensure_runner(
+                workspace_id=WORKSPACE, session_id=step_id, generation=1
+            )
+        answer = held.value.code
+
+    assert (changed.value.code, changed.value.retryable) == ("session.runner_changed", True)
+    assert answer == ("connected" if elsewhere_is == "connected" else "recovery.runner_alive")
+    assert (len(host.stop_frames), host.launches_for(step_id)) == (stops, launches)
+    assert elsewhere not in {frame.runner_id for frame in host.stop_frames}
+    step = coral.conversation(step_id)
+    assert step is not None and step.runner_id == elsewhere

@@ -16,7 +16,14 @@ The anchor is a visible session Coral never launches, filed in the owner's
 agent from the anchor seed, which runs only if a user binds a runner to it).
 A step is a child of the anchor on the run owner's host, in the run worktree,
 with no runner until its own create launches one inside the owner's host
-scope. Both get an owner grant and no public grant.
+scope. Both get an owner grant and no public grant. A create binds only while
+its slot is still at the create's generation: one the slot left meanwhile (a
+retry, or an old leader's late create) is labelled closed, stopped and abandoned.
+
+After its create, Coral's own paths launch a step's runner again only through
+:class:`OmnigentStepRelauncher`, in the same session: the wake after a lost
+runner and any engine send that finds no runner both use it. A person's message
+or a resource route can still reach Omnigent's own launch for the session.
 """
 
 from __future__ import annotations
@@ -30,14 +37,19 @@ from typing import Any, Protocol, override
 from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException
 
-from coral.db.enum_codecs import SessionBindingProgress
+from coral.bridge.keys import store_slot_id
+from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole
 from coral.model.ids import anchor_session_id, derived_id, effect_session_id
 from coral.omni._upstream import (
     _announce_session_added,
     _create_resolved_harness,
     _ensure_builtin_agent,
     _ensure_runner_session_initialized,
+    _get_runner_client,
+    _query_host_runner_status,
     _repl_terminal_ui_labels,
+    _stop_session_host_runner,
+    canonical_host_id,
     resolve_host_launch,
     validate_create_harness_readiness,
     validate_existing_host_workspace,
@@ -47,21 +59,28 @@ from coral.omni._upstream import (
 from coral.omni.process_map import CORAL_RUNNER_TOKEN
 from coral.omni.protocols import (
     CoralSessionError,
+    RunnerRelaunch,
     SessionCreateRequest,
+    SessionDispatch,
     SessionFacade,
     SessionRef,
     SessionState,
+    StepRelauncher,
 )
 from coral.omni.server.access import omnigent_owner, ownerless_runs_allowed
 from coral.omni.server.bundles import StepBundleRejected, check_hygiene, pack_bundle
 from coral.omni.server.host_access import HostAccessError, OwnerHost, authorize_owner_host
 from coral.omni.server.worktrees import connect_run_worktree_host
 from coral.profiles.bundle_spec import ENGINE_PREFIX, Stance, build_seed_bundle_yaml
+from coral.queue.drainer import SlotSuperseded
 from coral.recovery.drift import DriftDetected, DriftFinding, classify_anchor, classify_step
+from coral.recovery.relaunch import RUNNER_ALIVE_HOLD
+from coral.stores.protocols import RunNotFound, RunStore
 from coral.stores.session_bindings import (
     BindingConflict,
     SessionBinding,
     SessionBindingDraft,
+    SessionBindingLookup,
     SessionBindings,
 )
 from coral.tools.catalog import ORCHESTRATOR_STANCE, STEP_STANCES, generated_stance
@@ -72,6 +91,7 @@ from omnigent.entities.conversation import USER_SESSION_TITLE_MAX_CHARS
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_aliases import is_claude_sdk_harness_name, is_native_harness
 from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_LOCAL
+from omnigent.server.host_registry import HostConnection
 from omnigent.server.routes.sessions import announce_projects_changed, ensure_runner_connected
 from omnigent.server.server_plugins import ServerServices
 from omnigent.spec.types import AgentSpec
@@ -107,15 +127,66 @@ _REVOKED = frozenset({ErrorCode.UNAUTHORIZED, ErrorCode.FORBIDDEN})
 class StepLauncher(Protocol):
     """Starts a written step session's runner and its session-init handshake."""
 
-    async def launch(self, conv: Conversation, *, user_id: str | None) -> None:
+    async def launch(
+        self, conv: Conversation, *, user_id: str | None, suppress_recovery_turn: bool = False
+    ) -> str | None:
         """
         Launch ``conv``'s runner on its host and wait until it is initialized.
 
         The caller is inside the run owner's host scope.
 
+        :param suppress_recovery_turn: The runner must not resume a turn from the
+            session's history on its own: the caller prompts it.
+        :returns: The runner the session is on afterwards, when known.
         :raises CoralSessionError: A typed ``session.*`` failure.
         """
         ...
+
+
+class SlotGenerations(Protocol):
+    """Reads a slot's current session generation, as the drainer's fence does."""
+
+    def get_slot_generation(
+        self, run_id: str, slot_id: str, *, workspace_id: int | None = None
+    ) -> int | None: ...
+
+
+class _StepIdentity(Protocol):
+    """Who a step's launch acts as, and for which slot: a create's request, or a stored run."""
+
+    @property
+    def workspace_id(self) -> int: ...
+
+    @property
+    def run_id(self) -> str: ...
+
+    @property
+    def user_id(self) -> str | None: ...
+
+    @property
+    def account_generation(self) -> str | None: ...
+
+    @property
+    def host_id(self) -> str | None: ...
+
+    @property
+    def engine_slot_id(self) -> str | None: ...
+
+    @property
+    def generation(self) -> int: ...
+
+
+@dataclass(frozen=True)
+class _StoredStep:
+    """A bound step's identity, taken from its stored run and binding."""
+
+    workspace_id: int
+    run_id: str
+    user_id: str | None
+    account_generation: str | None
+    host_id: str | None
+    engine_slot_id: str | None
+    generation: int
 
 
 @dataclass(frozen=True)
@@ -199,6 +270,22 @@ def _host_failure(exc: HostAccessError) -> CoralSessionError:
     return _refused("session.host_not_permitted", exc.message)
 
 
+def require_coral_runner(conn: HostConnection, host_id: str) -> None:
+    """
+    Refuse a host whose live connection does not advertise Coral's runner token.
+
+    Self-reported, so a compatibility gate only: the owner checks decide who may use it.
+
+    :raises CoralSessionError: Permanent ``session.host_unsupported``.
+    """
+    if CORAL_RUNNER_TOKEN not in conn.hello.capabilities:
+        raise _refused(
+            "session.host_unsupported",
+            f"host {host_id!r} cannot run Coral steps: update Coral on that host, "
+            "or unset CORAL_DISABLE_HOST_ENTRY_POINTS",
+        )
+
+
 def _owner_failure(exc: OmnigentError, what: str) -> CoralSessionError:
     """A store refused a write for the run owner: revoked for good, or a typed refusal."""
     if exc.code in _REVOKED:
@@ -232,7 +319,9 @@ class OmnigentStepLauncher(StepLauncher):
         self._services = services
 
     @override
-    async def launch(self, conv: Conversation, *, user_id: str | None) -> None:
+    async def launch(
+        self, conv: Conversation, *, user_id: str | None, suppress_recovery_turn: bool = False
+    ) -> str | None:
         services = self._services
         if conv.host_id is None or services.host_store is None:
             raise _refused("session.invalid", f"step session {conv.id} has no host to launch on")
@@ -287,10 +376,12 @@ class OmnigentStepLauncher(StepLauncher):
                 runner_client,
                 services.conversation_store,
                 initializer=getattr(self._app.state, "runner_session_initializer", None),
+                suppress_recovery_turn=suppress_recovery_turn,
                 require_success=True,
             )
         except OmnigentError as exc:
             raise _launch_failure(exc) from exc
+        return current.runner_id
 
 
 class OmnigentSessionFacade(SessionFacade):
@@ -301,6 +392,10 @@ class OmnigentSessionFacade(SessionFacade):
 
     :param bindings: Records how far each create got.
     :param launcher: Starts a step's runner; Omnigent's host launch by default.
+    :param slot_generations: Each slot's current generation. Without it, a launch is
+        not checked against its slot.
+    :param dispatch: Stops the runner of a launch its slot left meanwhile; resolved at
+        stop time, since the dispatch's relaunch path holds this facade.
     """
 
     def __init__(
@@ -310,10 +405,14 @@ class OmnigentSessionFacade(SessionFacade):
         bindings: SessionBindings,
         *,
         launcher: StepLauncher | None = None,
+        slot_generations: SlotGenerations | None = None,
+        dispatch: Callable[[], SessionDispatch] | None = None,
     ) -> None:
         self._services = services
         self._bindings = bindings
         self._launcher = launcher or OmnigentStepLauncher(app, services)
+        self._slot_generations = slot_generations
+        self._dispatch = dispatch
         self._auth_on = services.auth_provider is not None
         self._anchor_agent_lock = asyncio.Lock()
         self._anchor_agent_ids: dict[int, str] = {}
@@ -578,7 +677,7 @@ class OmnigentSessionFacade(SessionFacade):
             reasoning_effort=reasoning_effort,
         )
 
-    async def _live_anchor(self, request: SessionCreateRequest) -> Conversation:
+    async def _live_anchor(self, request: _StepIdentity) -> Conversation:
         """
         The run's anchor, created and not drifted.
 
@@ -611,22 +710,26 @@ class OmnigentSessionFacade(SessionFacade):
             raise DriftDetected(finding)
         return conv
 
-    async def _owner_host(self, request: SessionCreateRequest) -> OwnerHost:
-        """The run owner's live host: authorized from its stored row, then its connection."""
+    async def _owner_host(self, request: _StepIdentity) -> OwnerHost:
+        """
+        The run owner's live host: authorized from its stored row, then its connection
+        and its Coral token.
+        """
         services = self._services
-        if services.host_store is None or services.host_registry is None or not request.host_id:
+        host_id = request.host_id
+        if services.host_store is None or services.host_registry is None or not host_id:
             raise _refused("session.invalid", "this server reaches no hosts")
         try:
             await authorize_owner_host(
                 host_store=services.host_store,
                 user_id=request.user_id,
                 account_generation=request.account_generation,
-                host_id=request.host_id,
+                host_id=host_id,
                 workspace_id=request.workspace_id,
             )
             owner_host = OwnerHost(
                 host_registry=services.host_registry,
-                host_id=request.host_id,
+                host_id=host_id,
                 workspace_id=request.workspace_id,
                 user_id=request.user_id,
                 account_generation=request.account_generation,
@@ -634,13 +737,7 @@ class OmnigentSessionFacade(SessionFacade):
             conn = owner_host.connection()
         except HostAccessError as exc:
             raise _host_failure(exc) from exc
-        # Self-reported, so a compatibility gate only: the checks above decide who may use it.
-        if CORAL_RUNNER_TOKEN not in conn.hello.capabilities:
-            raise _refused(
-                "session.host_unsupported",
-                f"host {request.host_id!r} cannot run Coral steps: update Coral on that host, "
-                "or unset CORAL_DISABLE_HOST_ENTRY_POINTS",
-            )
+        require_coral_runner(conn, host_id)
         return owner_host
 
     async def _permitted_agent(self, request: SessionCreateRequest) -> Any:
@@ -778,11 +875,23 @@ class OmnigentSessionFacade(SessionFacade):
 
     async def _launch(
         self,
-        request: SessionCreateRequest,
+        request: _StepIdentity,
         conv: Conversation,
         ensure_lease: Callable[[], Awaitable[None]],
-    ) -> None:
-        """Launch the step, checking its anchor, its own row and its host again first."""
+        *,
+        relaunch: bool = False,
+    ) -> str | None:
+        """
+        Launch the step, checking its anchor, its own row and its host again first.
+
+        A slot that left the launch's generation meanwhile gets no live runner from it.
+
+        :param relaunch: The step is brought back after a lost runner: Coral prompts it,
+            so the runner must not resume a turn from its history on its own.
+        :returns: The runner the launch left the session on, when the launcher knows it.
+        :raises SlotSuperseded: The slot is at another generation after the launch; the
+            session is labelled closed and its runner stopped first.
+        """
         await self._live_anchor(request)
         current = await asyncio.to_thread(
             self._services.conversation_store.get_conversation, conv.id
@@ -794,7 +903,59 @@ class OmnigentSessionFacade(SessionFacade):
         owner_host = await self._owner_host(request)
         await ensure_lease()
         with owner_host.owner_scope():
-            await self._launcher.launch(current, user_id=request.user_id)
+            if relaunch:
+                launched = await self._launcher.launch(
+                    current, user_id=request.user_id, suppress_recovery_turn=True
+                )
+            else:
+                launched = await self._launcher.launch(current, user_id=request.user_id)
+        if await self._slot_moved(request):
+            await self._retire(request, conv.id)
+            raise SlotSuperseded(
+                f"step session {conv.id}'s slot moved past generation {request.generation} "
+                "while it launched"
+            )
+        return launched
+
+    async def _slot_moved(self, request: _StepIdentity) -> bool:
+        """Whether the step's slot is at another generation; a slot with no row is not."""
+        if self._slot_generations is None or request.engine_slot_id is None:
+            return False
+        current = await asyncio.to_thread(
+            self._slot_generations.get_slot_generation,
+            request.run_id,
+            store_slot_id(request.run_id, request.engine_slot_id),
+            workspace_id=request.workspace_id,
+        )
+        return current is not None and current != request.generation
+
+    async def _retire(self, request: _StepIdentity, session_id: str) -> None:
+        """
+        Close a superseded step to new messages and stop its runner, each best effort.
+
+        One failing never skips the other: the caller abandons the row either way.
+        """
+        try:
+            await asyncio.to_thread(
+                self._services.conversation_store.set_labels,
+                session_id,
+                {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE},
+            )
+        except Exception as exc:  # noqa: BLE001 -- logged; the stop still runs
+            _logger.warning(
+                "Coral could not close superseded step session %s: %s",
+                session_id,
+                type(exc).__name__,
+            )
+        if self._dispatch is None:
+            return
+        try:
+            await self._dispatch().stop(session_id=session_id, user_id=request.user_id)
+        except Exception as exc:  # noqa: BLE001 -- logged; an idle runner may linger
+            code = exc.code if isinstance(exc, CoralSessionError) else type(exc).__name__
+            _logger.warning(
+                "Coral could not stop superseded step session %s: %s", session_id, code
+            )
 
     # ── Writes ──────────────────────────────────────────────────────────
 
@@ -955,6 +1116,276 @@ class OmnigentSessionFacade(SessionFacade):
             raise _owner_failure(exc, "own sessions") from exc
 
 
+# Host answers that mean the old runner may still be working: it is not superseded.
+_RUNNER_ALIVE = frozenset({"alive", "sign_in_pending"})
+# The only host answers that let a relaunch stop the old runner: it is gone, or the host
+# lost track of it, which counts as gone. Any other answer is no answer.
+_RUNNER_GONE = frozenset({"dead", "unknown"})
+
+
+async def _no_lease() -> None:
+    return None
+
+
+def _same_host(left: str | None, right: str | None) -> bool:
+    """Whether two host ids name one host, however each was spelled when stored."""
+    return (
+        left is not None
+        and right is not None
+        and canonical_host_id(left) == canonical_host_id(right)
+    )
+
+
+class _RunnerMoved(Exception):
+    """The session's row names another runner than the one the host was asked about."""
+
+
+class OmnigentStepRelauncher(StepRelauncher):
+    """
+    The relaunch path Coral's own paths use for a bound step's runner, in its own session.
+
+    The binding names the run; the run row names the owner, account registration and
+    host. Nothing is launched unless the binding is the step's at the asked generation,
+    the slot is still at it, the session is open on its run's host, the owner's host is
+    connected with the Coral token, and that host says the old runner is gone. Only that
+    runner is then stopped (confirmed), and the facade's own launch sequence starts a new
+    one, which resumes no turn from its history: Coral prompts it. A session closed or
+    deleted, or a slot moved on, meanwhile gets no live runner. A launch that kept the
+    old runner, because it came back, is reported ``connected``.
+
+    :param dispatch: Stops the old runner; resolved at stop time, since the dispatch's
+        relaunch path holds this relauncher.
+    """
+
+    def __init__(
+        self,
+        facade: OmnigentSessionFacade,
+        services: ServerServices,
+        bindings: SessionBindingLookup,
+        run_store: RunStore,
+        *,
+        dispatch: Callable[[], SessionDispatch],
+    ) -> None:
+        self._facade = facade
+        self._services = services
+        self._bindings = bindings
+        self._run_store = run_store
+        self._dispatch = dispatch
+
+    @override
+    async def ensure_runner(
+        self,
+        *,
+        workspace_id: int,
+        session_id: str,
+        generation: int,
+        ensure_lease: Callable[[], Awaitable[None]] | None = None,
+    ) -> RunnerRelaunch:
+        with workspace_scope(workspace_id):
+            return await self._ensure(
+                workspace_id, session_id, generation, ensure_lease or _no_lease
+            )
+
+    async def _ensure(
+        self,
+        workspace_id: int,
+        session_id: str,
+        generation: int,
+        ensure_lease: Callable[[], Awaitable[None]],
+    ) -> RunnerRelaunch:
+        step = await self._bound_step(workspace_id, session_id, generation)
+        store = self._services.conversation_store
+        conv = self._open_on_its_host(
+            step, session_id, await asyncio.to_thread(store.get_conversation, session_id)
+        )
+        if await self._connected(conv):
+            return "connected"
+        if await self._facade._slot_moved(step):
+            raise SlotSuperseded(f"step session {session_id}'s slot moved past {generation}")
+        owner_host = await self._facade._owner_host(step)
+        try:
+            await self._stop_lost_runner(step, owner_host, conv, ensure_lease)
+        except _RunnerMoved:
+            current = await asyncio.to_thread(store.get_conversation, session_id)
+            if current is not None and await self._connected(current):
+                return "connected"
+            raise _refused(
+                "session.runner_changed",
+                f"step session {session_id} moved to another runner while Coral relaunched it",
+                retryable=True,
+            ) from None
+        launched = await self._facade._launch(step, conv, ensure_lease, relaunch=True)
+        after = await asyncio.to_thread(store.get_conversation, session_id)
+        if after is None:
+            await self._stop_launched(step, owner_host, session_id, launched)
+            raise _session_deleted(session_id)
+        if session_state_of(session_id, after).closed:
+            # Closed while it launched: the new runner must not take any message.
+            await self._stop_launched(step, owner_host, session_id, launched or after.runner_id)
+            raise _refused("session.closed", f"step session {session_id} closed while it launched")
+        if conv.runner_id is not None and after.runner_id == conv.runner_id:
+            # The old runner came back during the launch, which kept it.
+            _logger.info("Coral found step session %s's runner back while relaunching", session_id)
+            return "connected"
+        _logger.info("Coral relaunched the runner of step session %s", session_id)
+        return "relaunched"
+
+    async def _connected(self, conv: Conversation) -> bool:
+        client = await _get_runner_client(conv.id, self._services.runner_router, conversation=conv)
+        return client is not None
+
+    async def _bound_step(
+        self, workspace_id: int, session_id: str, generation: int
+    ) -> _StoredStep:
+        """
+        The step's identity from its binding and its stored run.
+
+        :raises CoralSessionError: Permanent ``session.not_bound`` unless the session
+            is a step whose create finished at ``generation``, of a run that exists.
+        """
+        binding = await asyncio.to_thread(self._bindings.find_by_session, workspace_id, session_id)
+        if (
+            binding is None
+            or binding.role is not SessionBindingRole.STEP
+            or binding.progress != SessionBindingProgress.INITIALIZED
+            or binding.session_generation != generation
+        ):
+            raise _refused(
+                "session.not_bound",
+                f"session {session_id} is not a started step at generation {generation}",
+            )
+        try:
+            state, _version = await asyncio.to_thread(
+                self._run_store.load_run_state, binding.run_id, workspace_id=workspace_id
+            )
+        except RunNotFound:
+            raise _refused(
+                "session.not_bound", f"session {session_id}'s run no longer exists"
+            ) from None
+        if not _same_host(binding.host_id, state.spec.host_id):
+            raise _host_not_permitted(session_id)
+        return _StoredStep(
+            workspace_id=workspace_id,
+            run_id=binding.run_id,
+            user_id=state.run.user_id,
+            account_generation=state.run.account_generation,
+            host_id=state.spec.host_id,
+            engine_slot_id=binding.slot_id,
+            generation=generation,
+        )
+
+    @staticmethod
+    def _open_on_its_host(
+        step: _StoredStep, session_id: str, conv: Conversation | None
+    ) -> Conversation:
+        """
+        The session's row, open and on its run's host.
+
+        :raises DriftDetected: The row is gone or archived.
+        :raises CoralSessionError: Permanent ``session.closed``, or
+            ``session.host_not_permitted`` for a row on another host.
+        """
+        finding = classify_step(session_state_of(session_id, conv))
+        if finding is not None:
+            raise DriftDetected(finding)
+        assert conv is not None
+        if session_state_of(session_id, conv).closed:
+            raise _refused("session.closed", f"step session {session_id} is closed")
+        if not _same_host(conv.host_id, step.host_id):
+            raise _host_not_permitted(session_id)
+        return conv
+
+    async def _stop_lost_runner(
+        self,
+        step: _StoredStep,
+        owner_host: OwnerHost,
+        conv: Conversation,
+        ensure_lease: Callable[[], Awaitable[None]],
+    ) -> None:
+        """
+        Ask the host about the old runner, then stop it, confirmed, before any launch.
+
+        Only ``dead`` and ``unknown`` (the host lost track of it, which counts as dead)
+        let the stop go ahead, and only while the row still names that runner: a runner
+        another launch started meanwhile is never stopped.
+
+        :raises CoralSessionError: Retryable ``recovery.runner_alive`` while the host
+            says the runner lives, ``session.runner_status_unknown`` for no answer or any
+            other answer, or the stop's own refusal (``dispatch.stop_unconfirmed``).
+        :raises DriftDetected: The row is gone.
+        :raises _RunnerMoved: The row names another runner by the time of the stop.
+        """
+        with owner_host.owner_scope():
+            if conv.runner_id is not None:
+                try:
+                    conn = owner_host.connection()
+                except HostAccessError as exc:
+                    raise _host_failure(exc) from exc
+                status = await _query_host_runner_status(
+                    conn, owner_host.host_registry, conv.runner_id
+                )
+                if status in _RUNNER_ALIVE:
+                    raise _refused(
+                        RUNNER_ALIVE_HOLD,
+                        f"step session {conv.id}'s runner is alive but not connected",
+                        retryable=True,
+                    )
+                if status not in _RUNNER_GONE:
+                    raise _refused(
+                        "session.runner_status_unknown",
+                        f"host {step.host_id!r} did not say that step session {conv.id}'s "
+                        "runner is gone",
+                        retryable=True,
+                    )
+                if status == "unknown":
+                    _logger.info(
+                        "Coral relaunches step session %s: its host no longer knows the "
+                        "old runner",
+                        conv.id,
+                    )
+            await ensure_lease()
+            current = await asyncio.to_thread(
+                self._services.conversation_store.get_conversation, conv.id
+            )
+            if current is None:
+                raise _session_deleted(conv.id)
+            if current.runner_id != conv.runner_id:
+                raise _RunnerMoved(conv.id)
+            await self._dispatch().stop(session_id=conv.id, user_id=step.user_id)
+
+    async def _stop_launched(
+        self, step: _StoredStep, owner_host: OwnerHost, session_id: str, runner_id: str | None
+    ) -> None:
+        """Stop the runner this relaunch started, by id through the host, best effort."""
+        if runner_id is None or step.host_id is None:
+            _logger.warning(
+                "Coral cannot stop step session %s's new runner: its id is unknown", session_id
+            )
+            return
+        try:
+            with owner_host.owner_scope():
+                stopped = await _stop_session_host_runner(
+                    session_id, step.host_id, runner_id, owner_host.host_registry
+                )
+        except Exception as exc:  # noqa: BLE001 -- logged; the session refuses the runner
+            stopped = False
+            _logger.warning(
+                "Coral could not stop step session %s's new runner: %s",
+                session_id,
+                type(exc).__name__,
+            )
+        if not stopped:
+            _logger.warning(
+                "Coral's stop of step session %s's new runner was not confirmed", session_id
+            )
+
+
+def _host_not_permitted(session_id: str) -> CoralSessionError:
+    return _refused(
+        "session.host_not_permitted", f"step session {session_id} is not on its run's host"
+    )
+
+
 def _agent_not_permitted(agent_id: str) -> CoralSessionError:
     return _refused(
         "session.agent_not_permitted", f"agent {agent_id} is not available to this run"
@@ -1025,6 +1456,9 @@ __all__ = [
     "TITLE_ID_SUFFIX_CHARS",
     "OmnigentSessionFacade",
     "OmnigentStepLauncher",
+    "OmnigentStepRelauncher",
+    "SlotGenerations",
     "StepLauncher",
+    "require_coral_runner",
     "session_state_of",
 ]

@@ -102,6 +102,9 @@ WorkFinishedHook = Callable[[FinishedWork], Awaitable[None]]
 # attempt, or ``None`` for the normal retry. ``item.held_since`` starts a horizon. It
 # runs on the event loop, so it must not block (no store reads).
 HoldPolicy = Callable[[WorkItem, EffectFailed, int], int | None]
+# ``(item, code)``: whether re-pending the item with ``code`` starts or ends a wait the hold
+# rules measure on its own, so its ``held_since`` starts afresh.
+HoldRestart = Callable[[WorkItem, str], bool]
 
 
 def _bounded(failure: EffectFailed) -> EffectFailed:
@@ -175,6 +178,8 @@ class WorkDrainer:
 
     :param on_finished: Called after each finish to SUCCEEDED or FAILED; its errors are logged.
     :param hold_policy: Asked first for every failure, a missing executor included.
+    :param hold_restart: Whether a re-pend starts or ends a wait the hold rules measure
+        on its own; its ``held_since`` then starts afresh.
     :param execution_limit_s: An attempt still running after this long is cancelled
         and ends as a retryable ``executor.timeout``; ``None`` sets no limit.
     :param sleep: The timed sleep of the heartbeat and the limit; tests pass a virtual one.
@@ -197,6 +202,7 @@ class WorkDrainer:
         max_backoff_s: float = 300.0,
         on_finished: WorkFinishedHook | None = None,
         hold_policy: HoldPolicy | None = None,
+        hold_restart: HoldRestart | None = None,
         execution_limit_s: float | None = DEFAULT_EXECUTION_LIMIT_S,
         sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     ) -> None:
@@ -220,6 +226,7 @@ class WorkDrainer:
         self._max_backoff_s = max_backoff_s
         self._on_finished = on_finished
         self._hold_policy = hold_policy
+        self._hold_restart = hold_restart
         self._execution_limit_s = execution_limit_s
         self._sleep = sleep
 
@@ -514,6 +521,9 @@ class WorkDrainer:
             return
         failure = _bounded(outcome)
         finish_now = int(self._clock())
+        restart = self._hold_restart is not None and self._hold_restart(
+            claimed, failure.error_code
+        )
         hold_s = self._hold_delay(claimed, failure, finish_now)
         if hold_s is not None:
             if paused_at_claim and await self._left_pause(claimed):
@@ -528,6 +538,7 @@ class WorkDrainer:
                 next_available_at=finish_now + hold_s,
                 hold=True,
                 now_s=finish_now,
+                restart_held_since=restart,
             )
             return
         if not failure.retryable:
@@ -554,6 +565,7 @@ class WorkDrainer:
                 error_code=failure.error_code,
                 next_available_at=finish_now + backoff_s,
                 now_s=finish_now,
+                restart_held_since=restart,
             )
             return
         await self._finish_terminal(
@@ -598,6 +610,7 @@ class WorkDrainer:
         next_available_at: int | None = None,
         hold: bool = False,
         now_s: int | None = None,
+        restart_held_since: bool = False,
     ) -> bool:
         """Finish the claimed item; ``False`` when its lease was fenced off."""
         finished = await asyncio.to_thread(
@@ -612,6 +625,7 @@ class WorkDrainer:
             workspace_id=claimed.workspace_id,
             now_fn=self._clock if now_s is None else functools.partial(float, now_s),
             hold=hold,
+            restart_held_since=restart_held_since,
         )
         if not finished:
             _logger.warning(
@@ -683,6 +697,7 @@ __all__ = [
     "GENERATION_MISMATCH",
     "FinishedWork",
     "HoldPolicy",
+    "HoldRestart",
     "WorkDrainer",
     "WorkFinishedHook",
 ]

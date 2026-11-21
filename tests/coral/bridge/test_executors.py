@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import dataclasses
+import itertools
 import json
 import threading
 from collections.abc import AsyncIterator
@@ -15,13 +16,14 @@ from typing import Any
 import pytest
 
 from coral.bridge.codec import decode_entries
-from coral.bridge.config import HOLD_RULES
+from coral.bridge.config import HOLD_RULES, HOST_WAIT_HOLDS
 from coral.bridge.executors import (
     BRIDGE_THREAD_NAME,
     BoundedThreads,
     BridgeThreads,
     PoolClosed,
     bridge_hold_policy,
+    crosses_host_wait,
     run_resync_executor,
     timer_executor,
 )
@@ -51,7 +53,7 @@ from coral.queue.executors import (
 from coral.recovery.drift import DriftDetected, DriftFinding, DriftPauser
 from coral.slots.executors import CREATE_SESSION, create_session_executor
 from coral.stores.fakes import FakeRunStore
-from coral.stores.protocols import WorkItem
+from coral.stores.protocols import WorkItem, WorkItemDraft
 from tests.budgets import budget
 from tests.coral.bridge._world import (
     IMPLEMENT,
@@ -460,7 +462,8 @@ def test_a_finished_resync_that_names_its_next_time_is_due_again_then(
 NOW_S = 1_800_000_000
 
 
-def _item(held_since: int | None = None) -> WorkItem:
+def _item(held_since: int | None = None, error_code: str | None = None) -> WorkItem:
+    """A claimed row; ``error_code`` is the code its last hold or retry stored."""
     return WorkItem(
         workspace_id=WORKSPACE,
         id="w" * 32,
@@ -472,6 +475,7 @@ def _item(held_since: int | None = None) -> WorkItem:
         available_at=0,
         created_at_us=0,
         held_since=held_since,
+        error_code=error_code,
     )
 
 
@@ -493,6 +497,7 @@ def _refusal(code: str, *, retryable: bool = True) -> EffectFailed:
         ("executor.missing", 60),
         ("signal.awaiting_effect", 5),
         ("timer.early", 5),
+        ("recovery.host_offline", 30),
     ],
 )
 def test_a_domain_wait_is_held_from_its_first_refusal(code: str, delay: int) -> None:
@@ -505,17 +510,34 @@ def test_a_domain_wait_is_held_from_its_first_refusal(code: str, delay: int) -> 
 @pytest.mark.parametrize(
     "code", sorted(code for code, (_delay, horizon) in HOLD_RULES.items() if horizon is not None)
 )
-def test_a_hold_with_a_horizon_ends_30_minutes_after_its_first_refusal(code: str) -> None:
+def test_a_hold_with_a_horizon_ends_that_long_after_its_first_refusal(code: str) -> None:
     delay, horizon = HOLD_RULES[code]
-    assert horizon == 1_800
-    assert (
-        bridge_hold_policy(_item(held_since=NOW_S - horizon + 1), _refusal(code), NOW_S) == delay
+    # A runner the host calls alive is waited on for 10 minutes; other waits for 30.
+    assert horizon == (600 if code == "recovery.runner_alive" else 1_800)
+    held = _refusal(code)
+    assert bridge_hold_policy(_item(NOW_S - horizon + 1, code), held, NOW_S) == delay
+    assert bridge_hold_policy(_item(NOW_S - horizon, code), held, NOW_S) is None
+    # Waiting on an offline host before it does not count toward this horizon...
+    host_wait = (
+        "session.host_offline" if code != "session.host_offline" else "recovery.host_offline"
     )
-    assert bridge_hold_policy(_item(held_since=NOW_S - horizon), _refusal(code), NOW_S) is None
+    assert bridge_hold_policy(_item(NOW_S - horizon, host_wait), held, NOW_S) == delay
+    assert crosses_host_wait(_item(NOW_S - horizon, host_wait), code)
+    # ...while a retry or a hold of any other code before it does, unless this code is a
+    # wait for an offline host itself, which is measured from its own start.
+    other = bridge_hold_policy(_item(NOW_S - horizon, "net.timeout"), held, NOW_S)
+    assert other == (delay if code in HOST_WAIT_HOLDS else None)
 
 
 @pytest.mark.parametrize(
-    "code", ["run.paused", "drift.anchor_bound", "slot.close_blocked", "signal.awaiting_effect"]
+    "code",
+    [
+        "run.paused",
+        "drift.anchor_bound",
+        "slot.close_blocked",
+        "signal.awaiting_effect",
+        "recovery.host_offline",
+    ],
 )
 def test_a_hold_without_a_horizon_lasts_until_its_condition_ends(code: str) -> None:
     assert bridge_hold_policy(_item(held_since=NOW_S - 10**7), _refusal(code), NOW_S) is not None
@@ -866,3 +888,44 @@ async def test_the_reconciler_schedules_the_runs_resync_on_the_pool(
     (row,) = world.queue.get_work([resync_draft(run.id).id], workspace_id=WORKSPACE)
     assert (row.status, row.available_at) == (int(WorkStatus.PENDING), world.clock.epoch)
     assert json.loads(row.payload) == {"effect_type": RUN_RESYNC}
+
+
+async def test_two_horizon_codes_that_alternate_stay_bounded_by_the_first_holds_start(
+    world: World, threads: BridgeThreads, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A runner the host calls alive, then a step not ready, then alive again, and so on."""
+    monkeypatch.setattr(queue_executors, "_EXECUTORS", {})
+    codes = itertools.cycle(["recovery.runner_alive", "session.not_ready"])
+
+    async def refuse(_ctx: ExecutionContext) -> EffectFailed:
+        return EffectFailed(error_code=next(codes), message="refused", retryable=True)
+
+    register_executor("test.alternating", refuse)
+    run = start(world)
+    draft = WorkItemDraft.effect(
+        run_id=run.id, idempotency_key="alternating", payload={"effect_type": "test.alternating"}
+    )
+    world.queue.enqueue_work([draft], workspace_id=WORKSPACE, now=world.clock.epoch)
+    drainer = WorkDrainer(
+        world.queue,
+        worker_id=WORKER,
+        kinds=(int(WorkKind.EFFECT),),
+        clock=lambda: world.clock.now.timestamp(),
+        rng=lambda: 0.5,
+        hold_policy=bridge_hold_policy,
+        hold_restart=crosses_host_wait,
+    )
+    started = world.clock.epoch
+    seen: list[tuple[int, str | None, int, int | None]] = []
+    while world.clock.epoch < started + 900:
+        while await drainer.drain_once() is not None:
+            pass
+        [row] = world.queue.get_work([draft.id], workspace_id=WORKSPACE)
+        seen.append((world.clock.epoch - started, row.error_code, row.attempts, row.held_since))
+        world.clock.advance(30)
+
+    # One start for both codes, so neither restarts the other's horizon.
+    assert {held_since for _at, _code, _attempts, held_since in seen} == {started}
+    # The alive hold ends ten minutes after the first hold: its refusals then spend attempts.
+    assert all(attempts == 0 for at, _code, attempts, _since in seen if at < 600)
+    assert seen[-1][2] > 0

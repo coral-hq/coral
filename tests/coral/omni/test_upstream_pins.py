@@ -62,6 +62,16 @@ PINNED: dict[str, tuple[str, str]] = {
         " omnigent.stores.artifact_store.ArtifactStore, agent_cache: Any, *, name: str,"
         " bundle_bytes: bytes) -> None",
     ),
+    "_get_runner_client": (
+        "omnigent.server.routes._sessions.helpers",
+        "(session_id: 'str', runner_router: 'RunnerRouter | None', *, conversation:"
+        " 'Conversation | None' = None) -> 'httpx.AsyncClient | None'",
+    ),
+    "_query_host_runner_status": (
+        "omnigent.server.routes._sessions.helpers",
+        "(host_conn: 'HostConnection', host_registry: 'HostRegistry', runner_id: 'str')"
+        " -> 'str | None'",
+    ),
     "_ensure_runner_session_initialized": (
         "omnigent.server.routes._sessions.orchestration",
         "(session_id: 'str', conv: 'Conversation', runner_client: 'httpx.AsyncClient',"
@@ -77,6 +87,12 @@ PINNED: dict[str, tuple[str, str]] = {
     "_session_active_response_cache": ("omnigent.server.routes._sessions.common", ""),
     "_session_blocked_on_cache": ("omnigent.server.routes._sessions.common", ""),
     "_session_status_cache": ("omnigent.server.routes._sessions.common", ""),
+    "_stop_session_host_runner": (
+        "omnigent.server.routes._sessions.helpers",
+        "(session_id: 'str', host_id: 'str', runner_id: 'str', host_registry: 'Any', *,"
+        " expect_already_stopped: 'bool' = False, attempt: '_HostRunnerStopAttempt | None' ="
+        " None) -> 'bool'",
+    ),
     "_tar_gz_dir": ("omnigent.server.app", "(bundle_dir: pathlib.Path) -> bytes"),
     "attribution_user": (
         "omnigent.server.routes._auth_helpers",
@@ -140,7 +156,15 @@ PINNED: dict[str, tuple[str, str]] = {
     ),
 }
 # Pins wrapped so importing _upstream never loads the server app module.
-LAZY = frozenset({"_ensure_builtin_agent", "_tar_gz_dir"})
+LAZY = frozenset(
+    {
+        "_ensure_builtin_agent",
+        "_get_runner_client",
+        "_query_host_runner_status",
+        "_stop_session_host_runner",
+        "_tar_gz_dir",
+    }
+)
 # Status caches Coral reads by key in the run's workspace scope.
 CACHES = frozenset(
     {"_session_active_response_cache", "_session_blocked_on_cache", "_session_status_cache"}
@@ -153,6 +177,7 @@ VALUES = {"APPROVAL_EVENT_TYPE": "approval"}
 ALIASES = {
     "APPROVAL_EVENT_TYPE": "_APPROVAL_TYPE",
     "RUNNER_SESSION_EVENT_TYPES": "_RUNNER_SESSION_EVENT_TYPES",
+    "_get_runner_client": "_get_runner_client_impl",
     "canonical_host_id": "_canonical_host_id",
     "label_key_skeleton": "_label_key_skeleton",
     "pending_elicitation_count": "count_for",

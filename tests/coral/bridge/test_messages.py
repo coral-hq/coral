@@ -210,7 +210,7 @@ def test_a_step_reached_through_a_loop_limit_says_the_limit_sent_it() -> None:
     assert _quoted("Try again.") in text
 
 
-@pytest.mark.parametrize("reason", ["turn_ended", "resume", "backoff"])
+@pytest.mark.parametrize("reason", ["turn_ended", "resume", "backoff", "runner_lost"])
 def test_nudges_repeat_the_activation_id_and_never_carry_error_text(reason: str) -> None:
     started = drive(TWO_STEPS, [start_run(TWO_STEPS)])
     error = "API Error: 529 overloaded_error at host-7 token=abc"
@@ -229,9 +229,19 @@ def test_nudges_repeat_the_activation_id_and_never_carry_error_text(reason: str)
     assert "coral_submit_handoff" in text
     for fragment in ("529", "overloaded", "host-7", "token"):
         assert fragment not in text
-    others = {nudge_text(state, IMPLEMENT, other) for other in ("turn_ended", "resume", "backoff")}
-    assert len(others) == 3
+    reasons = ("turn_ended", "resume", "backoff", "runner_lost")
+    others = {nudge_text(state, IMPLEMENT, other) for other in reasons}
+    assert len(others) == 4
     assert nudge_text(state, IMPLEMENT, None) == nudge_text(state, IMPLEMENT, "turn_ended")
+
+
+def test_a_relaunched_runner_is_told_it_was_restarted_and_how_to_hand_off() -> None:
+    started = drive(TWO_STEPS, [start_run(TWO_STEPS)])
+    text = nudge_text(started.state, IMPLEMENT, "runner_lost")
+    assert text.endswith(
+        "Your runner stopped and Coral restarted it. Continue the step; when it is done, "
+        'call coral_submit_handoff with activation_id "implement||".'
+    )
 
 
 def test_a_decision_request_puts_id_labels_and_instruction_around_the_reports() -> None:

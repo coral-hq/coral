@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from coral.model.ids import anchor_session_id, effect_session_id
-from coral.omni.protocols import SessionCreateRequest, SessionRef, SessionState
+from coral.omni.protocols import RunnerRelaunch, SessionCreateRequest, SessionRef, SessionState
 
 
 def present(session_id: str, **changes: object) -> SessionState:
@@ -64,3 +64,37 @@ class FakeSessionFacade:
 
     async def session_state(self, *, workspace_id: int, session_id: str) -> SessionState:
         return self.states.get((workspace_id, session_id), present(session_id))
+
+
+@dataclass
+class FakeRelauncher:
+    """
+    ``StepRelauncher`` that answers from a script and records each call.
+
+    :param answers: Returned (or raised) in order; once used up, ``fallback`` decides.
+    :param fallback: Answers a call the script does not, e.g. from the session's runner.
+    :param on_relaunch: Called with the session id after each ``relaunched`` answer.
+    """
+
+    answers: list[RunnerRelaunch | BaseException] = field(default_factory=list)
+    fallback: Callable[[str], RunnerRelaunch] = lambda _session_id: "relaunched"
+    on_relaunch: Callable[[str], None] | None = None
+    calls: list[tuple[int, str, int]] = field(default_factory=list)
+
+    async def ensure_runner(
+        self,
+        *,
+        workspace_id: int,
+        session_id: str,
+        generation: int,
+        ensure_lease: Callable[[], Awaitable[None]] | None = None,
+    ) -> RunnerRelaunch:
+        self.calls.append((workspace_id, session_id, generation))
+        if ensure_lease is not None:
+            await ensure_lease()
+        answer = self.answers.pop(0) if self.answers else self.fallback(session_id)
+        if isinstance(answer, BaseException):
+            raise answer
+        if answer == "relaunched" and self.on_relaunch is not None:
+            self.on_relaunch(session_id)
+        return answer

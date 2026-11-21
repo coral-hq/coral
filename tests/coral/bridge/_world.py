@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import create_engine
 
@@ -31,12 +31,13 @@ from coral.bridge.executors import (
     BridgeThreads,
     LivenessCheck,
     bridge_hold_policy,
+    crosses_host_wait,
     run_resync_executor,
     timer_executor,
     turn_fact_executor,
 )
 from coral.bridge.keys import slot_session_id, store_activation_id
-from coral.bridge.mapping import RECOVERY_RESTART, RUN_RESYNC, TIMER, TURN_FACT
+from coral.bridge.mapping import RECOVERY_RESTART, RECOVERY_WAKE, RUN_RESYNC, TIMER, TURN_FACT
 from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import BridgeCommit, EngineBridge
 from coral.bridge.start import start_engine_run
@@ -62,6 +63,7 @@ from coral.queue.executors import EffectExecutor, register_executor, unregister_
 from coral.reconcile.startup import startup_recovery_sweep
 from coral.recovery.drift import DriftPauser
 from coral.recovery.ladder import restart_executor
+from coral.recovery.relaunch import wake_executor
 from coral.slots.close import ConfirmedStops
 from coral.slots.executors import (
     CANCEL_SESSIONS,
@@ -94,7 +96,7 @@ from coral.tools.schemas import ToolReply
 from coral.workspace.ops import HostChannelBackend
 from coral.workspace.run_worktree import run_branch_name
 from omnigent.server.session_live_state import SessionStatusEdge
-from tests.coral.omni.fakes import FakeSessionFacade
+from tests.coral.omni.fakes import FakeRelauncher, FakeSessionFacade
 from tests.coral.slots._close_fakes import FakeDispatch, FakeEdgeWatcher, FakeStableIds
 from tests.coral.workflow_builders import compile_text, fixture_text
 from tests.coral.workspace._executor_fakes import (
@@ -583,8 +585,13 @@ class Sessions:
     channel: HostChannelBackend | None = None
     # The resync's runner liveness check, as the session engine wires it.
     liveness: LivenessCheck | None = None
+    # The wake's relaunch path: by default a connected runner is back, else relaunched.
+    relauncher: FakeRelauncher = field(init=False)
 
     def __post_init__(self) -> None:
+        self.relauncher = FakeRelauncher(
+            fallback=self._runner_back_or_relaunched, on_relaunch=self._relaunched
+        )
         self.drainer = WorkDrainer(
             self.world.queue,
             worker_id="worker-1",
@@ -592,8 +599,20 @@ class Sessions:
             clock=lambda: self.world.clock.now.timestamp(),
             rng=lambda: 0.5,
             hold_policy=bridge_hold_policy,
+            hold_restart=crosses_host_wait,
             on_finished=self._finished,
         )
+
+    def _runner_back_or_relaunched(self, session_id: str) -> Literal["connected", "relaunched"]:
+        """A connected runner is back; any other is relaunched in place."""
+        return "connected" if self.dispatch.sessions[session_id].runner_alive else "relaunched"
+
+    def _relaunched(self, session_id: str) -> None:
+        """A relaunch replaces a lost runner under a new id; a connected one is kept."""
+        session = self.dispatch.sessions[session_id]
+        if not session.runner_alive:
+            session.runner_alive = True
+            session.runner_id = f"{session.runner_id or 'runner'}-relaunched"
 
     async def _finished(self, finished: FinishedWork) -> None:
         if self.before_feed is not None:
@@ -632,6 +651,15 @@ class Sessions:
                 channels=channels,
                 bindings=self.bindings,
                 intents=self.intents,
+                run_store=world.runs,
+                scope_runner=scope,
+            ),
+            RECOVERY_WAKE: wake_executor(
+                threads=self.threads,
+                relauncher=self.relauncher,
+                dispatch=self.dispatch,
+                facade=self.facade,
+                drift=pauser,
                 run_store=world.runs,
                 scope_runner=scope,
             ),

@@ -12,6 +12,7 @@ from pydantic import JsonValue, ValidationError
 
 from coral.engine import fold, transition
 from coral.engine.lifecycle import retryable_activations
+from coral.engine.timers import arm_infra_backoff
 from coral.engine.types import (
     PREVIOUS_RULES,
     RULES,
@@ -43,6 +44,7 @@ from coral.engine.types import (
     SessionFailed,
     StartRun,
     TimerDue,
+    TimerPolicy,
     TurnEnded,
     UsageLimited,
     WaitingWithoutElicitation,
@@ -2354,6 +2356,7 @@ def _lost(graph: CompiledGraph) -> tuple[Driven, Effect]:
     ("outcome", "turn_running", "nudged"),
     [
         ("relaunched", False, True),
+        ("relaunched", True, False),
         ("runner_back", False, True),
         ("runner_back", True, False),
         ("skipped", False, False),
@@ -2374,14 +2377,64 @@ def test_a_wake_result_re_prompts_the_step_unless_its_turn_survived(
     expected = [("nudge", SLOT, {"fact_key": FACT_A, "reason": "runner_lost"})] if nudged else []
     assert [(effect.kind, effect.subject, effect.payload) for effect in entry.effects] == expected
     slot = woken.state.slots[0]
-    backoff = [timer for timer in woken.state.timers if timer.kind == "infra_backoff"]
-    if outcome == "runner_back" and turn_running:
-        assert (slot.failed_turn, backoff) == (None, [])
-    elif outcome == "skipped":
-        assert (slot.failed_turn, len(backoff)) == (FACT_A, 3)
-    else:
-        assert slot.failed_turn is None
+    # The wake replaced the infra ladder: no stage is armed after any of its results.
+    assert [timer for timer in woken.state.timers if timer.kind == "infra_backoff"] == []
+    assert slot.failed_turn == (FACT_A if outcome == "skipped" else None)
     assert woken.state.status == "running"
+
+
+def test_no_infra_stage_re_prompts_a_slot_while_its_wake_is_in_flight() -> None:
+    graph = _step_graph()
+    lost, wake = _lost(graph)
+    # A turn failure the ladder backs off on lands while the wake is still out.
+    armed = arm_infra_backoff(lost.state, SLOT, 1, NOW, TimerPolicy())
+    first = min(armed.timers, key=lambda timer: timer.stage)
+
+    fired = transition(graph, armed, TimerDue(timer_key=first.key), first.due_at)
+
+    assert lost.state.timers == ()
+    assert fired.entry.effects == ()
+    assert first not in fired.state.timers
+    # Once the wake answers, its own result re-prompts the slot.
+    result = {"outcome": "relaunched", "turn_running": False}
+    completed = EffectCompleted(effect_key=wake.effect_key, payload=result)
+    woken = transition(graph, fired.state, completed, NOW)
+    assert [effect.kind for effect in woken.entry.effects] == ["nudge"]
+
+
+@pytest.mark.parametrize(
+    ("ending", "cause"),
+    [
+        ("skipped", None),
+        ("permanent", ("failure_path", "session.host_unsupported", SLOT)),
+        ("exhausted", ("infra", "recovery.runner_alive", SLOT)),
+    ],
+)
+def test_a_wake_that_ends_without_the_runner_ends_its_slots_host_hold(
+    ending: str, cause: tuple[str, str, str] | None
+) -> None:
+    graph = _step_graph()
+    lost, wake = _lost(graph)
+    held = drive(graph, [RunnerHeld(slot_id=SLOT, session_id="sess-1", generation=1)], after=lost)
+    if ending == "skipped":
+        command: Input = EffectCompleted(
+            effect_key=wake.effect_key, payload={"outcome": "skipped", "turn_running": False}
+        )
+    else:
+        code = "session.host_unsupported" if ending == "permanent" else "recovery.runner_alive"
+        command = EffectFailed(
+            effect_key=wake.effect_key, code=code, retryable=ending != "permanent"
+        )
+
+    ended = transition(graph, held.state, command, NOW)
+
+    causes = [(item.reason, item.detail, item.subject) for item in ended.state.causes]
+    assert causes == ([] if cause is None else [cause])
+    assert ended.state.status == ("running" if cause is None else "paused")
+    if ending == "permanent":
+        assert retryable_activations(ended.state) == (lost.state.slots[0].activation_id,)
+    if ending == "exhausted":
+        assert transition(graph, ended.state, ResumeRun(), NOW).entry.rejection is None
 
 
 def test_a_wake_result_only_receipts_for_a_slot_that_moved_on_or_holds() -> None:
@@ -2410,7 +2463,7 @@ def test_a_wake_result_only_receipts_for_a_slot_that_moved_on_or_holds() -> None
 def test_an_offline_host_holds_its_slot_with_cancel_only_until_it_returns() -> None:
     graph = _step_graph()
     lost, _wake = _lost(graph)
-    assert [timer.stage for timer in lost.state.timers] == [1, 2, 3]
+    assert lost.state.timers == ()
     hold = RunnerHeld(slot_id=SLOT, session_id="sess-1", generation=1)
 
     held = drive(graph, [hold], after=lost)
@@ -2715,7 +2768,7 @@ def test_an_unmarked_live_runs_liveness_loss_re_prompts_its_relaunched_runner() 
     assert wake.payload == {"session_id": "sess-1", "generation": 1, "runner_id": "r1"}
     slot = lost.state.slots[0]
     assert (slot.failed_turn, slot.wakes) == (FACT_A, 1)
-    assert [timer.stage for timer in lost.state.timers] == [1, 2, 3]
+    assert lost.state.timers == ()
     relaunched = EffectCompleted(
         effect_key=wake.effect_key, payload={"outcome": "relaunched", "turn_running": False}
     )
