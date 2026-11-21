@@ -1173,6 +1173,69 @@ async def test_reset_to_an_unknown_commit_fails(backend: BackendUnderTest) -> No
     )
 
 
+async def test_reset_under_a_salvage_resets_only_the_tree_the_salvage_holds(
+    backend: BackendUnderTest,
+) -> None:
+    ops, ref, session = backend.ops, backend.ref, backend.session
+    base = await _head(backend)
+    backend.setup.write_file("notes/todo.txt", b"untracked\n")
+    salvaged = (await ops.salvage(ref, session, op_key="k-1")).commit
+    assert salvaged is not None
+    backend.setup.write_file("late.txt", b"after the salvage\n")
+
+    await _assert_error(
+        "workspace.tree_changed",
+        ops.reset(ref, session, op_key="k-2", commit=base, salvage_commit=salvaged),
+    )
+    assert await _read(backend, "late.txt") == b"after the salvage\n"
+
+    backend.setup.delete_file("late.txt")
+    result = await ops.reset(ref, session, op_key="k-3", commit=base, salvage_commit=salvaged)
+    # A clean tree records nothing beyond HEAD, so a repeat resets too.
+    again = await ops.reset(ref, session, op_key="k-4", commit=base, salvage_commit=salvaged)
+
+    assert result.head == again.head == base
+    await _assert_missing(backend, "notes/todo.txt")
+    assert (await _fingerprint(backend)).dirty_count == 0
+
+
+async def test_reset_under_a_salvage_takes_a_tree_that_differs_from_head_only_as_salvaged(
+    backend: BackendUnderTest,
+) -> None:
+    ops, ref, session = backend.ops, backend.ref, backend.session
+    base = await _head(backend)
+    backend.setup.write_file("README.md", b"edited\n")
+    backend.setup.write_file("notes/todo.txt", b"untracked\n")
+    salvaged = (await ops.salvage(ref, session, op_key="k-1")).commit
+    assert salvaged is not None
+    # The tracked edit is undone again (as a reset cut short before its clean leaves it).
+    backend.setup.write_file("README.md", INITIAL_FILES["README.md"])
+
+    result = await ops.reset(ref, session, op_key="k-2", commit=base, salvage_commit=salvaged)
+
+    assert result.head == base
+    await _assert_missing(backend, "notes/todo.txt")
+    assert (await _fingerprint(backend)).dirty_count == 0
+
+
+async def test_reset_under_a_salvage_refuses_a_head_that_is_not_its_parent(
+    backend: BackendUnderTest,
+) -> None:
+    ops, ref, session = backend.ops, backend.ref, backend.session
+    base = await _head(backend)
+    backend.setup.write_file("README.md", b"salvaged\n")
+    salvaged = (await ops.salvage(ref, session, op_key="k-1")).commit
+    assert salvaged is not None
+    moved = await _commit(backend, "k-2", "later", expected_head=base)
+
+    for commit in (base, moved.commit):
+        await _assert_error(
+            "workspace.head_moved",
+            ops.reset(ref, session, op_key="k-3", commit=commit, salvage_commit=salvaged),
+        )
+    assert await _head(backend) == moved.commit
+
+
 # ── merge ───────────────────────────────────────────────────────────────────
 
 

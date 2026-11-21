@@ -18,7 +18,7 @@ from coral.bridge import fold as fold_module
 from coral.bridge.commit import build_commit
 from coral.bridge.config import PAUSED_RESYNC_DELAY_S, ceil_epoch_seconds
 from coral.bridge.keys import anchor_effect_key, effect_work_id
-from coral.bridge.mapping import resync_draft, timer_draft, turn_signal_draft
+from coral.bridge.mapping import RECOVERY_RESTART, resync_draft, timer_draft, turn_signal_draft
 from coral.bridge.service import EngineBridge, EngineLoadFailed, ResyncReport
 from coral.db.enum_codecs import (
     GateVisitStatus,
@@ -53,6 +53,7 @@ from tests.coral.bridge._world import (
     WORKSPACE,
     World,
     finished,
+    retried,
     row_of,
     run_id_for,
     settle,
@@ -837,3 +838,34 @@ def test_a_failed_withdraw_of_a_superseded_visit_never_pauses_the_running_run(
         version,
     )
     assert not world.assert_fold_matches(run.id).causes
+
+
+def test_an_abandoned_restart_ends_the_restarting_pause_at_the_next_resync(world: World) -> None:
+    run_id = retried(world)
+    restart = row_of(world, run_id, RECOVERY_RESTART)
+    settle(world, restart, WorkStatus.ABANDONED, error_code="slot.generation_mismatch")
+
+    report = _resync(world, run_id)
+
+    assert report.fed == 1
+    state = world.assert_fold_matches(run_id)
+    assert [(cause.reason, cause.detail, cause.subject) for cause in state.causes] == [
+        ("failure_path", "restart:slot.generation_mismatch", IMPLEMENT)
+    ]
+    _quiet(world, run_id)
+
+
+def test_a_lost_restart_row_is_queued_again_with_the_same_key(world: World) -> None:
+    run_id = retried(world)
+    restart = row_of(world, run_id, RECOVERY_RESTART)
+    del _queue(world).work[(restart.workspace_id, restart.id)]
+
+    report = _resync(world, run_id)
+
+    assert report.enqueued == 1
+    again = row_of(world, run_id, RECOVERY_RESTART)
+    assert (again.id, again.payload, again.slot_generation) == (
+        restart.id,
+        restart.payload,
+        restart.slot_generation,
+    )

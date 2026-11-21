@@ -13,9 +13,10 @@ from typing import Any
 
 from pydantic import JsonValue
 
-from coral.bridge.mapping import DECISION_ITEM, FED_KINDS
+from coral.bridge.mapping import DECISION_ITEM, FED_KINDS, RECOVERY_RESTART
 from coral.db.enum_codecs import WorkKind, WorkStatus
 from coral.engine import types as engine
+from coral.engine.machines.slot import find_slot
 from coral.gates.ids import GATE_ITEM
 from coral.queue.drainer import FinishedWork
 from coral.queue.run_effects import MAX_ERROR_CODE_CHARS
@@ -37,6 +38,12 @@ _FED_FIELDS: Mapping[str, Mapping[str, tuple[type, ...]]] = {
         "post_accept_edits": (bool,),
         "commit": (str, type(None)),
         "empty": (bool, type(None)),
+    },
+    "retry_step": {
+        "salvage_ref": (str, type(None)),
+        "salvage_commit": (str, type(None)),
+        "head_verified": (bool,),
+        "head": (str, type(None)),
     },
 }
 _MAX_FED_TEXT_CHARS = 128
@@ -92,6 +99,34 @@ def feedback_input(finished: FinishedWork) -> engine.Input | None:
     )
 
 
+def abandoned_restart(item: WorkItem, state: engine.RunState) -> engine.EffectFailed | None:
+    """
+    An abandoned restart of the slot's current generation, as the failure that ends it.
+
+    Nothing else would end the restarting pause, so the resync feeds it with the row's
+    own code; an abandoned restart of an older generation (a newer retry owns the slot)
+    and every other abandoned row feed nothing.
+    """
+    if item.kind != int(WorkKind.EFFECT) or item.status != int(WorkStatus.ABANDONED):
+        return None
+    payload = _payload(item)
+    effect_key = payload.get("effect_key")
+    generation = payload.get("generation")
+    if (
+        payload.get("effect_type") != RECOVERY_RESTART
+        or payload.get("engine_kind") != "retry_step"
+        or not isinstance(effect_key, str)
+        or not isinstance(generation, int)
+    ):
+        return None
+    effect = next((found for found in state.effects if found.effect_key == effect_key), None)
+    slot = None if effect is None else find_slot(state, effect.subject)
+    if slot is None or slot.session_generation != generation:
+        return None
+    code = (item.error_code or "effect.abandoned")[:MAX_ERROR_CODE_CHARS]
+    return engine.EffectFailed(effect_key=effect_key, code=code, retryable=False)
+
+
 def decision_of(item: WorkItem) -> str | None:
     """The decision a message to the orchestrator is about; ``None`` for any other row."""
     payload = _payload(item)
@@ -142,6 +177,7 @@ def _json_object(text: str | None) -> dict[str, Any] | None:
 __all__ = [
     "BRIDGE_ITEMS",
     "EXHAUSTED",
+    "abandoned_restart",
     "decision_of",
     "fed_payload",
     "feedback_input",

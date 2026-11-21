@@ -66,6 +66,15 @@ DEFAULT_EXECUTION_LIMIT_S = 900.0
 # An item claimed this many times the attempt limit without settling (each crash,
 # lost lease or error after the claim spends an attempt) fails without running again.
 _CLAIMS_PER_ATTEMPT_LIMIT = 2
+GENERATION_MISMATCH = "slot.generation_mismatch"
+
+
+class SlotSuperseded(Exception):
+    """A lease check found the row's slot at another generation: the row acts no further."""
+
+
+# What ``_execute`` returns for a row a lease check found superseded.
+_SUPERSEDED = EffectFailed(error_code=GENERATION_MISMATCH, message="the slot moved on")
 
 
 @dataclass(frozen=True)
@@ -258,23 +267,16 @@ class WorkDrainer:
             )
             return
 
-        if claimed.slot_generation is not None:
-            slot_id = _extract_slot_id(claimed, payload_dict)
-            if slot_id is not None:
-                current_gen = await asyncio.to_thread(
-                    self._queue_store.get_slot_generation,
-                    claimed.run_id,
-                    slot_id,
-                    workspace_id=claimed.workspace_id,
-                )
-                if current_gen is not None and current_gen != claimed.slot_generation:
-                    await self._finish(
-                        claimed,
-                        lease_expires_at,
-                        WorkStatus.ABANDONED,
-                        error_code="slot.generation_mismatch",
-                    )
-                    return
+        fenced_slot = (
+            _extract_slot_id(claimed, payload_dict)
+            if claimed.slot_generation is not None
+            else None
+        )
+        if fenced_slot is not None and await self._superseded(claimed, fenced_slot):
+            await self._finish(
+                claimed, lease_expires_at, WorkStatus.ABANDONED, error_code=GENERATION_MISMATCH
+            )
+            return
 
         if claimed.attempts > _CLAIMS_PER_ATTEMPT_LIMIT * self._max_attempts:
             _logger.warning(
@@ -296,10 +298,17 @@ class WorkDrainer:
         if registration is None:
             outcome: EffectOutcome = _MISSING_EXECUTOR
         else:
-            executed = await self._execute(claimed, registration, payload_dict, lease_expires_at)
+            executed = await self._execute(
+                claimed, registration, payload_dict, lease_expires_at, fenced_slot=fenced_slot
+            )
             if executed is None:
                 return
             outcome, lease_expires_at = executed
+            if outcome is _SUPERSEDED:
+                await self._finish(
+                    claimed, lease_expires_at, WorkStatus.ABANDONED, error_code=GENERATION_MISMATCH
+                )
+                return
         await self._settle(
             claimed,
             outcome,
@@ -307,18 +316,32 @@ class WorkDrainer:
             paused_at_claim=run_status == int(RunStatus.PAUSED),
         )
 
+    async def _superseded(self, claimed: WorkItem, slot_id: str) -> bool:
+        """Whether the row's slot is now at another generation than the row names."""
+        current = await asyncio.to_thread(
+            self._queue_store.get_slot_generation,
+            claimed.run_id,
+            slot_id,
+            workspace_id=claimed.workspace_id,
+        )
+        return current is not None and current != claimed.slot_generation
+
     async def _execute(
         self,
         claimed: WorkItem,
         registration: ExecutorRegistration,
         payload_dict: dict[str, Any],
         lease_expires_at: int,
+        *,
+        fenced_slot: str | None = None,
     ) -> tuple[EffectOutcome, int] | None:
         """
         Run the executor under a lease heartbeat and the execution limit.
 
-        :returns: The outcome and the lease the finish must name; ``None`` when the
-            lease was lost.
+        :param fenced_slot: The slot whose generation each ``ensure_lease`` re-reads, so
+            a row a retry superseded after its claim acts no further.
+        :returns: The outcome and the lease the finish must name (``_SUPERSEDED`` for a
+            superseded row); ``None`` when the lease was lost.
         """
         current_lease_expires_at = lease_expires_at
         lease_lock = asyncio.Lock()
@@ -356,7 +379,14 @@ class WorkDrainer:
             # thread committed, so the finish names it.
             return await asyncio.shield(_renew_and_record())
 
-        ctx._ensure_lease_fn = _renew_lease
+        async def _ensure_lease() -> bool:
+            if not await _renew_lease():
+                return False
+            if fenced_slot is not None and await self._superseded(claimed, fenced_slot):
+                raise SlotSuperseded(f"work {claimed.id}'s slot moved to another generation")
+            return True
+
+        ctx._ensure_lease_fn = _ensure_lease
 
         async def _heartbeat_loop() -> None:
             while True:
@@ -393,6 +423,12 @@ class WorkDrainer:
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
             outcome = await self._within_limit(claimed, _run())
+        except SlotSuperseded:
+            _logger.info(
+                "Work item %s stopped at a lease check: its slot moved to another generation",
+                claimed.id,
+            )
+            outcome = _SUPERSEDED
         except StartupLeaseLost:
             _logger.info(
                 "Work item %s lost lease during execution on worker %s",
@@ -644,6 +680,7 @@ class WorkDrainer:
 
 __all__ = [
     "DEFAULT_EXECUTION_LIMIT_S",
+    "GENERATION_MISMATCH",
     "FinishedWork",
     "HoldPolicy",
     "WorkDrainer",

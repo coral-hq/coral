@@ -1973,6 +1973,21 @@ def test_a_retry_expects_the_newest_written_commit_as_its_head() -> None:
     assert effect.payload["expected_head"] == "c0ffee1"
 
 
+def test_a_retry_after_a_finished_restart_expects_the_head_that_restart_kept() -> None:
+    # The restart kept a commit no close receipt names (its close never reported it).
+    graph = _graph(_PLAIN)
+    retried = drive(graph, [RUN, *_blocked(SLOT), RetryStep(node_id="work")])
+    (restart,) = [effect for effect in retried.log[-1].effects if effect.kind == "retry_step"]
+    kept = {"salvage_ref": None, "salvage_commit": None, "head_verified": True, "head": "c1"}
+    finished = drive(
+        graph, [EffectCompleted(effect_key=restart.effect_key, payload=kept)], after=retried
+    )
+    again = drive(graph, [*_blocked(SLOT, 2), RetryStep(node_id="work")], after=finished)
+
+    (effect,) = [effect for effect in again.log[-1].effects if effect.kind == "retry_step"]
+    assert (effect.payload["generation"], effect.payload["expected_head"]) == (3, "c1")
+
+
 def test_a_retry_after_closes_without_a_written_commit_expects_no_head() -> None:
     graph = _graph(_PLAIN)
     closed = _close_with_commit(graph, drive(graph, [RUN]), SLOT, None)

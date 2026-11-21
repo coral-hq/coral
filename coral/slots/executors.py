@@ -31,7 +31,7 @@ import functools
 import logging
 import re
 from collections.abc import Mapping
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole
 from coral.model.ids import (
@@ -110,6 +110,8 @@ MAX_GENERATION = 32_767
 # A roster position; start refuses more than 32 live slots, so far fewer are used.
 MAX_ROSTER_INDEX = 999
 _AGENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+# How :func:`fence_session` ended a session: not there to end, or stopped.
+FenceOutcome = Literal["no_session", "unbound", "deleted", "stopped"]
 
 
 def create_session_executor(
@@ -539,19 +541,30 @@ async def _commit_spec(
             reason,
         )
         return None
-    slot_id = binding.slot_id or ""
+    message, attempt_id = close_commit_params(state.run_id, binding)
     return CommitSpec(
         workspace=await workspace_for(channels, state, target),
         ref=target.ref,
         intents=intents,
         workspace_id=ctx.workspace_id,
         run_id=state.run_id,
-        op_key=effect_op_key(ctx.workspace_id, payload["effect_key"], "commit"),
-        message=payload["message"] or f"Coral: {slot_id}",
-        attempt_id=payload["attempt_id"]
-        or derived_id("coral-attempt", state.run_id, slot_id, str(binding.session_generation)),
+        op_key=close_commit_op_key(ctx.workspace_id, payload["effect_key"]),
+        message=payload["message"] or message,
+        attempt_id=payload["attempt_id"] or attempt_id,
         diff_from=payload["diff_from"],
     )
+
+
+def close_commit_op_key(workspace_id: int, close_effect_key: str) -> str:
+    """The op key of the commit a writer's close makes, also recorded in its op intent."""
+    return effect_op_key(workspace_id, close_effect_key, "commit")
+
+
+def close_commit_params(run_id: str, binding: SessionBinding) -> tuple[str, str]:
+    """The message and ``Coral-Attempt`` id a writer's close commits with by default."""
+    slot_id = binding.slot_id or ""
+    attempt_id = derived_id("coral-attempt", run_id, slot_id, str(binding.session_generation))
+    return f"Coral: {slot_id}", attempt_id
 
 
 async def _cancel(
@@ -565,17 +578,52 @@ async def _cancel(
     bounds: CloseBounds,
 ) -> dict[str, Any]:
     session_id = payload["session_id"]
+    fenced = await fence_session(
+        ctx,
+        state,
+        session_id,
+        closed_label=payload["closed_label"],
+        dispatch=dispatch,
+        edges=edges,
+        bindings=bindings,
+        bounds=bounds,
+    )
+    if fenced in ("unbound", "deleted"):
+        _logger.info(
+            "cancel_sessions for run %s: session %s is %s", state.run_id, session_id, fenced
+        )
+    return {"session_id": session_id}
+
+
+async def fence_session(
+    ctx: ExecutionContext,
+    state: RunState,
+    session_id: str | None,
+    *,
+    closed_label: bool,
+    dispatch: SessionDispatch,
+    edges: SessionEdgeWatcher,
+    bindings: SessionBindings,
+    bounds: CloseBounds = DEFAULT_BOUNDS,
+) -> FenceOutcome:
+    """
+    End one of the run's step sessions (:func:`coral.slots.close.cancel_session`).
+
+    No session yet, a session this run never bound (its create never got that far) and
+    a deleted one count as ended without a stop; any other returns only once its stop
+    is confirmed.
+
+    :raises EffectRefused: Permanent ``session.identity_conflict`` for a session that is
+        not one of the run's steps.
+    :raises CoralSessionError: From dispatch, e.g. retryable ``dispatch.stop_unconfirmed``.
+    """
     if session_id is None:
-        return {"session_id": None}
+        return "no_session"
     found = await asyncio.to_thread(
         bindings.get, state.workspace_id, session_id, run_id=state.run_id
     )
     if found is None:
-        # The slot's create never bound it in this run: nothing was created to cancel.
-        _logger.info(
-            "cancel_sessions for run %s: session %s was never bound", state.run_id, session_id
-        )
-        return {"session_id": session_id}
+        return "unbound"
     binding = _step_binding(found, state, session_id)
     try:
         await cancel_session(
@@ -583,7 +631,7 @@ async def _cancel(
             session_id=session_id,
             user_id=state.run.user_id,
             slot_id=binding.slot_id or "",
-            closed_label=payload["closed_label"],
+            closed_label=closed_label,
             dispatch=dispatch,
             edges=edges,
             ensure_lease=ctx.ensure_lease,
@@ -592,8 +640,8 @@ async def _cancel(
     except CoralSessionError as exc:
         if exc.code != "session.deleted":
             raise
-        _logger.info("cancel_sessions for run %s: session %s is gone", state.run_id, session_id)
-    return {"session_id": session_id}
+        return "deleted"
+    return "stopped"
 
 
 async def _bound_step(
@@ -685,11 +733,16 @@ __all__ = [
     "CANCEL_SESSIONS",
     "CLOSE_SLOT",
     "CREATE_SESSION",
+    "MAX_GENERATION",
     "MAX_ROSTER_INDEX",
     "MESSAGE_KINDS",
     "SEND_INPUT",
+    "FenceOutcome",
     "cancel_sessions_executor",
+    "close_commit_op_key",
+    "close_commit_params",
     "close_slot_executor",
     "create_session_executor",
+    "fence_session",
     "send_input_executor",
 ]

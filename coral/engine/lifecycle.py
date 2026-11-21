@@ -844,11 +844,20 @@ def _retry_slots(state: RunState, owner_id: str, seq: int) -> tuple[RunState, tu
 
 
 def _expected_head(state: RunState) -> str | None:
-    """The commit of the run's newest close that recorded one; a reader's close has none."""
-    closes = {effect.effect_key for effect in state.effects if effect.kind == "close_slot"}
+    """The newest commit the run recorded: a close's commit, or the head a restart kept.
+
+    A reader's close has none. A restart keeps the head it verified, which may be a commit
+    its step's own close made but never reported.
+    """
+    fields = {
+        effect.effect_key: "commit" if effect.kind == "close_slot" else "head"
+        for effect in state.effects
+        if effect.kind in ("close_slot", "retry_step")
+    }
     for receipt in reversed(state.receipts):
-        commit = receipt.payload.get("commit")
-        if receipt.key in closes and isinstance(commit, str) and commit:
+        field = fields.get(receipt.key)
+        commit = None if field is None else receipt.payload.get(field)
+        if isinstance(commit, str) and commit:
             return commit
     return None
 

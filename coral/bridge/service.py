@@ -45,7 +45,13 @@ from coral.bridge.config import (
     epoch_us,
     utc_now,
 )
-from coral.bridge.feedback import decision_of, feedback_input, finished_from_row, gate_of
+from coral.bridge.feedback import (
+    abandoned_restart,
+    decision_of,
+    feedback_input,
+    finished_from_row,
+    gate_of,
+)
 from coral.bridge.fold import EngineStateCache
 from coral.bridge.gate_rows import live_publish_effects
 from coral.bridge.graphs import PinnedGraphError, PinnedGraphs
@@ -55,6 +61,7 @@ from coral.bridge.keys import (
     anchor_effect_key,
     effect_work_id,
     slot_session_id,
+    store_activation_id,
 )
 from coral.bridge.mapping import (
     FED_KINDS,
@@ -223,6 +230,24 @@ class PauseResult:
 
     outcome: Literal["paused", "unchanged", "refused"]
     commit: BridgeCommit
+    code: str | None = None
+
+
+@dataclass(frozen=True)
+class RetryResult:
+    """
+    What a step retry did.
+
+    :param outcome: ``retried`` when the engine took the retry, ``refused`` otherwise.
+    :param commit: ``None`` when nothing was committed (``unknown_activation``).
+    :param code: For a refusal: ``unknown_activation`` (no started activation of the run
+        has the id), the engine's code (``retry_not_allowed``, ``host_offline_hold``,
+        ``restart_in_progress``, ``run_terminal``), or ``unbuildable`` (the run was paused
+        ``failure_path`` instead).
+    """
+
+    outcome: Literal["retried", "refused"]
+    commit: BridgeCommit | None
     code: str | None = None
 
 
@@ -689,6 +714,61 @@ class EngineBridge:
             return PauseResult(outcome="refused", commit=commit, code=pause.entry.rejection.code)
         return PauseResult(outcome="paused" if pause.accepted else "unchanged", commit=commit)
 
+    def retry_activation(
+        self, *, workspace_id: int, run_id: str, actor: str | None, activation_id: str
+    ) -> RetryResult:
+        """
+        Retry the step activation whose store id is ``activation_id``, as ``actor``.
+
+        The id is matched only against the run's own activations; none, or a run whose
+        engine has not started, is refused ``unknown_activation`` with nothing committed.
+        The engine decides the rest: the retried step's old session is restarted while
+        the run stays paused.
+
+        :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
+        :raises RunContended: when other commits kept winning.
+        """
+        snapshot = self.load(workspace_id=workspace_id, run_id=run_id)
+        found = next(
+            (
+                activation
+                for activation in snapshot.state.activations
+                if store_activation_id(run_id, activation.id) == activation_id
+            ),
+            None,
+        )
+        if snapshot.state.status is None or found is None:
+            return RetryResult(outcome="refused", commit=None, code="unknown_activation")
+        command = engine.RetryStep(
+            node_id=found.node_id,
+            item_path=found.item_path,
+            iteration_path=found.iteration_path,
+        )
+        retries: list[Applied] = []
+
+        def observe(_snapshot: EngineSnapshot, applied: Sequence[Applied]) -> CommitExtras:
+            retries[:] = [
+                item for item in applied if isinstance(item.entry.input, engine.RetryStep)
+            ]
+            return CommitExtras()
+
+        commit = self.commit_inputs(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            inputs=lambda _snapshot: (command,),
+            actor=actor,
+            extra=observe,
+        )
+        if commit.unbuildable is not None:
+            return RetryResult(outcome="refused", commit=commit, code="unbuildable")
+        if not retries:
+            # A row cancelled without its engine takes the cancel first.
+            return RetryResult(outcome="refused", commit=commit, code="run_terminal")
+        (retry,) = retries
+        if retry.entry.rejection is not None:
+            return RetryResult(outcome="refused", commit=commit, code=retry.entry.rejection.code)
+        return RetryResult(outcome="retried", commit=commit)
+
     def cancel_run(self, *, workspace_id: int, run_id: str, actor: str | None) -> BridgeCommit:
         """
         Cancel the run; its live slots' sessions are cancelled by the derived session id.
@@ -1020,7 +1100,8 @@ class EngineBridge:
     def _repair_effects(self, snapshot: EngineSnapshot) -> tuple[int, int, list[WorkItem]]:
         """
         Queue missing rows of unreceipted effects, the anchor, the orchestrator's create
-        and requests, and live gate visits' publishes; feed finished ones.
+        and requests, and live gate visits' publishes; feed finished ones, and an
+        abandoned restart of its slot's generation as the restart's failure.
         """
         run = snapshot.store.run
         now = self._clock()
@@ -1071,7 +1152,12 @@ class EngineBridge:
         fed: list[_Fed] = []
         for row in rows.values():
             if row.status == int(WorkStatus.ABANDONED):
-                _logger.debug("Coral run %s has abandoned work %s", run.id, row.id)
+                ended = abandoned_restart(row, snapshot.state)
+                if ended is not None:
+                    # Never revived, so it stands without the FAILED re-check.
+                    fed.append(_Fed(row.id, False, ended))
+                else:
+                    _logger.debug("Coral run %s has abandoned work %s", run.id, row.id)
                 continue
             outcome = finished_from_row(row)
             self._index_created(outcome)
@@ -1187,6 +1273,7 @@ __all__ = [
     "GateAnswerResult",
     "PauseResult",
     "ResyncReport",
+    "RetryResult",
     "RunNotRunnable",
     "RunRead",
     "TurnFactResult",

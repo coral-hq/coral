@@ -79,9 +79,9 @@ def _salvage_request(worktree: LinkedWorktree, op_key: str = "k-s") -> Workspace
 
 
 def _reset_request(
-    worktree: LinkedWorktree, commit: str, op_key: str = "k-r"
+    worktree: LinkedWorktree, commit: str, op_key: str = "k-r", **params: object
 ) -> WorkspaceOpRequest:
-    return op_request("reset", worktree, op_key=op_key, commit=commit)
+    return op_request("reset", worktree, op_key=op_key, commit=commit, **params)
 
 
 def _head(worktree: LinkedWorktree) -> str:
@@ -669,6 +669,185 @@ def test_reset_reads_status_over_its_cap_as_not_clean_and_resets(
 
     assert result == {"head": worktree.base}
     assert not (worktree.root / "untracked").exists()
+
+
+def test_a_reset_under_its_salvage_resets_a_matching_tree_and_then_a_clean_one(
+    worktree: LinkedWorktree, handlers: Handlers
+) -> None:
+    worktree.write("README.md", b"edited\n")
+    worktree.write("draft.txt", b"half done\n")
+    salvaged = str(handlers["salvage"](_salvage_request(worktree))["commit"])
+
+    first = handlers["reset"](_reset_request(worktree, worktree.base, salvage_commit=salvaged))
+    # A repeat finds the clean tree it left: nothing beyond HEAD to record.
+    again = handlers["reset"](_reset_request(worktree, worktree.base, salvage_commit=salvaged))
+
+    assert first == again == {"head": worktree.base}
+    assert run_git(worktree.root, "status", "--porcelain") == ""
+    assert not (worktree.root / "draft.txt").exists()
+    assert run_git(worktree.root, "show", f"{salvaged}:draft.txt") == "half done\n"
+
+
+# Each kind of change a lingering writer can make after the salvage.
+_LATER_CHANGES: dict[str, Callable[[LinkedWorktree], object]] = {
+    "new-file": lambda worktree: worktree.write("late.txt", b"written after the salvage\n"),
+    "deleted-file": lambda worktree: (worktree.root / "src/app.py").unlink(),
+    **_TREE_CHANGES,
+}
+
+
+@pytest.mark.parametrize("change", list(_LATER_CHANGES.values()), ids=list(_LATER_CHANGES))
+def test_a_reset_under_its_salvage_refuses_a_tree_changed_since_the_salvage(
+    worktree: LinkedWorktree, handlers: Handlers, change: Callable[[LinkedWorktree], object]
+) -> None:
+    worktree.write("draft.txt", b"half done\n")
+    salvaged = str(handlers["salvage"](_salvage_request(worktree))["commit"])
+    change(worktree)
+    changed = _add_all_tree(worktree)
+
+    error = expect_op_error(
+        lambda: handlers["reset"](
+            _reset_request(worktree, worktree.base, salvage_commit=salvaged)
+        ),
+        "workspace.tree_changed",
+        permanent=False,
+    )
+
+    assert salvaged in error.message
+    # Nothing was reset: the salvaged file and the later change are still in the worktree.
+    assert (worktree.root / "draft.txt").read_bytes() == b"half done\n"
+    assert _add_all_tree(worktree) == changed
+    assert _head(worktree) == worktree.base
+
+
+def test_a_reset_under_its_salvage_takes_a_tree_only_staged_or_ignored_since(
+    worktree: LinkedWorktree, handlers: Handlers
+) -> None:
+    worktree.write("draft.txt", b"half done\n")
+    salvaged = str(handlers["salvage"](_salvage_request(worktree))["commit"])
+    # Neither changes what a salvage records: staging the draft, and a file git ignores.
+    run_git(worktree.root, "add", "draft.txt")
+    exclude = run_git(worktree.root, "rev-parse", "--git-path", "info/exclude").strip()
+    with (worktree.root / exclude).open("a") as stream:
+        stream.write("*.log\n")
+    worktree.write("build.log", b"ignored\n")
+
+    handlers["reset"](_reset_request(worktree, worktree.base, salvage_commit=salvaged))
+
+    assert run_git(worktree.root, "status", "--porcelain") == ""
+    assert (worktree.root / "build.log").read_bytes() == b"ignored\n"
+
+
+def test_a_reset_under_its_salvage_finishes_a_reset_that_stopped_before_its_clean(
+    worktree: LinkedWorktree, handlers: Handlers
+) -> None:
+    worktree.write("README.md", b"edited\n")
+    worktree.write("draft.txt", b"half done\n")
+    salvaged = str(handlers["salvage"](_salvage_request(worktree))["commit"])
+    # The first reset restored the tracked file, then the host died before ``clean``.
+    run_git(worktree.root, "reset", "-q", "--hard", worktree.base)
+    assert (worktree.root / "draft.txt").exists()
+
+    result = handlers["reset"](_reset_request(worktree, worktree.base, salvage_commit=salvaged))
+
+    # What is left differs from HEAD only as the salvage recorded it: nothing is unrecorded.
+    assert result == {"head": worktree.base}
+    assert run_git(worktree.root, "status", "--porcelain") == ""
+    assert run_git(worktree.root, "show", f"{salvaged}:README.md") == "edited\n"
+
+
+def test_a_reset_under_its_salvage_on_a_clean_tree_takes_no_lock_and_one_status_walk(
+    worktree: LinkedWorktree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handlers = write_handlers(sleep=lambda _seconds: None)
+    worktree.write("draft.txt", b"half done\n")
+    salvaged = str(handlers["salvage"](_salvage_request(worktree))["commit"])
+    handlers["reset"](_reset_request(worktree, worktree.base, salvage_commit=salvaged))
+    lock = worktree.admin_dir / "index.lock"
+    lock.write_text("")
+    walks: list[bytes] = []
+    status = _write_ops._status
+
+    def counted(git: object, **kwargs: object) -> bytes:
+        walks.append(b"status")
+        return status(git, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_write_ops, "_status", counted)
+
+    again = write_handlers(sleep=lambda _seconds: None)["reset"](
+        _reset_request(worktree, worktree.base, "k-r2", salvage_commit=salvaged)
+    )
+
+    assert again == {"head": worktree.base}
+    assert lock.exists()
+    assert walks == [b"status"]
+
+
+def test_a_reset_under_a_commit_no_salvage_ref_names_is_refused(
+    worktree: LinkedWorktree, handlers: Handlers
+) -> None:
+    worktree.write("draft.txt", b"half done\n")
+    tree = run_git(worktree.root, "write-tree").strip()
+    loose = run_git(worktree.root, "commit-tree", "-p", worktree.base, "-m", "loose", tree).strip()
+
+    error = expect_op_error(
+        lambda: handlers["reset"](_reset_request(worktree, worktree.base, salvage_commit=loose)),
+        "workspace.git_failed",
+    )
+
+    assert "not a salvage record" in error.message
+    assert (worktree.root / "draft.txt").read_bytes() == b"half done\n"
+
+
+@pytest.mark.parametrize("target", ["new-head", "salvage-parent"])
+def test_a_reset_under_its_salvage_refuses_a_head_that_moved_since_the_salvage(
+    worktree: LinkedWorktree, handlers: Handlers, target: str
+) -> None:
+    worktree.write("draft.txt", b"half done\n")
+    salvaged = str(handlers["salvage"](_salvage_request(worktree))["commit"])
+    # HEAD moves to a commit holding the salvaged tree: a plain reset to the old HEAD
+    # would drop it from the branch.
+    moved = worktree.commit("outside Coral")
+    commit = moved if target == "new-head" else worktree.base
+
+    expect_op_error(
+        lambda: handlers["reset"](_reset_request(worktree, commit, salvage_commit=salvaged)),
+        "workspace.head_moved",
+        permanent=True,
+    )
+
+    assert _head(worktree) == moved
+    assert run_git(worktree.root, "rev-parse", f"refs/heads/{worktree.branch}").strip() == moved
+
+
+def test_a_reset_under_an_unknown_salvage_fails_and_resets_nothing(
+    worktree: LinkedWorktree, handlers: Handlers
+) -> None:
+    worktree.write("draft.txt", b"half done\n")
+
+    expect_op_error(
+        lambda: handlers["reset"](
+            _reset_request(worktree, worktree.base, salvage_commit="0" * 40)
+        ),
+        "workspace.git_failed",
+    )
+
+    assert (worktree.root / "draft.txt").read_bytes() == b"half done\n"
+
+
+def test_a_host_from_before_the_salvage_precondition_refuses_it_as_invalid_params(
+    worktree: LinkedWorktree,
+) -> None:
+    # An older host's reset took only ``commit``; its strict params refuse the new one.
+    request = _reset_request(worktree, worktree.base, salvage_commit=worktree.base)
+
+    error = expect_op_error(
+        lambda: _target.op_params(request, required=("commit",)),
+        "workspace.invalid_params",
+        permanent=True,
+    )
+
+    assert "salvage_commit" in error.message
 
 
 def test_write_ops_bound_a_status_stalled_on_a_submodule_fifo(

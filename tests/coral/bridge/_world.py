@@ -34,8 +34,8 @@ from coral.bridge.executors import (
     timer_executor,
     turn_fact_executor,
 )
-from coral.bridge.keys import slot_session_id
-from coral.bridge.mapping import RUN_RESYNC, TIMER, TURN_FACT
+from coral.bridge.keys import slot_session_id, store_activation_id
+from coral.bridge.mapping import RECOVERY_RESTART, RUN_RESYNC, TIMER, TURN_FACT
 from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import BridgeCommit, EngineBridge
 from coral.bridge.start import start_engine_run
@@ -43,7 +43,7 @@ from coral.db import CoralBase
 from coral.db.enum_codecs import SessionBindingProgress, WorkKind, WorkStatus
 from coral.engine import fold
 from coral.engine.machines.slot import find_slot
-from coral.engine.types import RunState, TurnEnded
+from coral.engine.types import HandoffEvaluated, HandoffReceived, Input, RunState, TurnEnded
 from coral.gates.executors import gate_publish_executor, gate_withdraw_executor
 from coral.gates.ids import GATE_PUBLISH, GATE_WITHDRAW
 from coral.model.ids import derived_id
@@ -54,11 +54,13 @@ from coral.omni.protocols import (
     SessionState,
     TrackedPrompt,
 )
-from coral.omni.server.turn_facts import TurnFactRecorder
+from coral.omni.server.turn_facts import BoundSessionRefresher, TurnFactRecorder
 from coral.queue import FinishedWork, SqlAlchemyCoralQueueStore
 from coral.queue.drainer import WorkDrainer
 from coral.queue.executors import EffectExecutor, register_executor, unregister_executor
+from coral.reconcile.startup import startup_recovery_sweep
 from coral.recovery.drift import DriftPauser
+from coral.recovery.ladder import restart_executor
 from coral.slots.close import ConfirmedStops
 from coral.slots.executors import (
     CANCEL_SESSIONS,
@@ -88,6 +90,7 @@ from coral.tools.catalog import CHOOSE_ARROW, SUBMIT_HANDOFF
 from coral.tools.dispatch import EngineToolCall, ToolDispatcher
 from coral.tools.handlers import PLANNERS
 from coral.tools.schemas import ToolReply
+from coral.workspace.ops import HostChannelBackend
 from coral.workspace.run_worktree import run_branch_name
 from omnigent.server.session_live_state import SessionStatusEdge
 from tests.coral.omni.fakes import FakeSessionFacade
@@ -100,6 +103,7 @@ from tests.coral.workspace._executor_fakes import (
     FakeIntents,
     RecordingScopeRunner,
 )
+from tests.stores.coral._faults import evict_cached_engine
 
 # A non-zero workspace, so a missing workspace argument cannot pass by default.
 WORKSPACE = 7
@@ -352,6 +356,49 @@ def ids(items: Sequence[WorkItem]) -> set[str]:
     return {item.id for item in items}
 
 
+def blocked(slot_id: str, report: str = "Cannot go on.") -> tuple[Input, ...]:
+    """A blocked handoff of ``slot_id``; with no failure arrow the run pauses for a retry."""
+    activation = slot_id.rsplit(":", 1)[0]
+    body = json.dumps(
+        {"activation_id": activation, "report": report, "status": "blocked"},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        HandoffReceived(slot_id=slot_id, body=body),
+        HandoffEvaluated(slot_id=slot_id, outcome="blocked"),
+    )
+
+
+def briefed(world: World) -> str:
+    """A started two-step run whose implementer's session was created and briefed."""
+    run = start(world)
+    session = {"session_id": "s" * 32, "role": "step", "generation": 1}
+    create = row_of(world, run.id, "create_session", engine_kind="create_session")
+    world.bridge.feed(finished(settle(world, create, WorkStatus.SUCCEEDED, result=session)))
+    sent = {"session_id": "s" * 32, "stable_id": "m1"}
+    brief = row_of(world, run.id, "send_input")
+    world.bridge.feed(finished(settle(world, brief, WorkStatus.SUCCEEDED, result=sent)))
+    return run.id
+
+
+def retried(world: World, slot_id: str = IMPLEMENT) -> str:
+    """A briefed run whose ``slot_id`` blocked and was retried: its restart is queued."""
+    run_id = briefed(world)
+    world.bridge.commit_inputs(
+        workspace_id=WORKSPACE, run_id=run_id, inputs=lambda _snapshot: blocked(slot_id)
+    )
+    activation = slot_id.rsplit(":", 1)[0]
+    result = world.bridge.retry_activation(
+        workspace_id=WORKSPACE,
+        run_id=run_id,
+        actor="user:alice",
+        activation_id=store_activation_id(run_id, activation),
+    )
+    assert (result.outcome, result.code) == ("retried", None), result
+    return run_id
+
+
 # ── the session side ────────────────────────────────────────────────────────
 
 
@@ -531,6 +578,8 @@ class Sessions:
     gates: RecordingGatePublisher = field(default_factory=RecordingGatePublisher)
     drainer: WorkDrainer = field(init=False)
     before_feed: Callable[[FinishedWork], Awaitable[None]] | None = None
+    # The run worktree's host, when not ``host``'s canned replies (real git, say).
+    channel: HostChannelBackend | None = None
 
     def __post_init__(self) -> None:
         self.drainer = WorkDrainer(
@@ -552,7 +601,7 @@ class Sessions:
         """The session engine's executors and the bridge's own, as the lifespan registers them."""
         world, scope = self.world, RecordingScopeRunner()
         pauser = DriftPauser(world.runs, engine=self.threads)
-        channels = FakeChannels(self.host, scope)
+        channels = FakeChannels(self.channel or self.host, scope)
         return {
             CREATE_SESSION: create_session_executor(
                 self.facade, world.runs, pauser, scope, agents=self.agents
@@ -573,6 +622,15 @@ class Sessions:
             ),
             CANCEL_SESSIONS: cancel_sessions_executor(
                 self.dispatch, self.edges, self.bindings, world.runs, scope
+            ),
+            RECOVERY_RESTART: restart_executor(
+                dispatch=self.dispatch,
+                edges=self.edges,
+                channels=channels,
+                bindings=self.bindings,
+                intents=self.intents,
+                run_store=world.runs,
+                scope_runner=scope,
             ),
             TIMER: timer_executor(self.threads),
             RUN_RESYNC: run_resync_executor(self.threads),
@@ -697,7 +755,9 @@ class Sessions:
 
 
 @asynccontextmanager
-async def serving(world: World, *, after: Sessions | None = None) -> AsyncIterator[Sessions]:
+async def serving(
+    world: World, *, after: Sessions | None = None, channel: HostChannelBackend | None = None
+) -> AsyncIterator[Sessions]:
     """
     The world's session side, its executors registered until the block ends.
 
@@ -708,6 +768,7 @@ async def serving(world: World, *, after: Sessions | None = None) -> AsyncIterat
         sessions and host, which outlive a server process, and on the in-memory
         stores its bindings, stable ids and op intents; its edge watchers and its
         published gate prompts are new.
+    :param channel: The run worktree's host channel instead of the canned replies.
     """
     events: list[str] = [] if after is None else after.events
     if after is not None and world.db_uri is None:
@@ -745,6 +806,7 @@ async def serving(world: World, *, after: Sessions | None = None) -> AsyncIterat
         threads=threads,
         dispatcher=ToolDispatcher(StoreDecisionPort(world.bridge), PLANNERS),
         recorder=recorder,
+        channel=channel if channel is not None or after is None else after.channel,
     )
     executors = sessions.executors()
     recorder.start()
@@ -762,6 +824,29 @@ async def serving(world: World, *, after: Sessions | None = None) -> AsyncIterat
             unregister_executor(effect_type, executor)
         recorder.close()
         threads.close()
+
+
+@asynccontextmanager
+async def restarted(crashed: Sessions, *, lease_s: int) -> AsyncIterator[Sessions]:
+    """
+    A new process on the dead one's database, started as the Coral lifespan starts it.
+
+    New engines, stores, bridge and drainer, its clock past the work lease
+    (``lease_s``), the bound-session index refreshed and the startup sweep run.
+    """
+    assert crashed.world.db_uri is not None
+    evict_cached_engine(crashed.world.db_uri)
+    world = World.sql(crashed.world.db_uri)
+    world.clock.now = crashed.world.clock.now + timedelta(seconds=lease_s + 1)
+    async with serving(world, after=crashed) as sessions:
+        BoundSessionRefresher(sessions.bindings, world.bound).refresh()
+        await startup_recovery_sweep(
+            world.runs,
+            world.queue,
+            run_reconciler=sessions.threads.schedule_resync,
+            clock=lambda: world.clock.now.timestamp(),
+        )
+        yield sessions
 
 
 class Actor(Protocol):

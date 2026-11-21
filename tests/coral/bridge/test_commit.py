@@ -19,8 +19,8 @@ from coral.bridge.commit import (
     build_commit,
 )
 from coral.bridge.config import LOCK_TIMEOUT_S, ceil_epoch_seconds
-from coral.bridge.keys import anchor_effect_key, effect_work_id
-from coral.bridge.mapping import UnsupportedStance
+from coral.bridge.keys import anchor_effect_key, effect_work_id, store_activation_id
+from coral.bridge.mapping import RECOVERY_RESTART, UnsupportedStance
 from coral.bridge.service import (
     USER_PAUSE_DETAIL,
     EngineBridge,
@@ -50,6 +50,7 @@ from coral.engine.types import (
     Timer,
     TimerDue,
 )
+from coral.model.ids import effect_session_id
 from coral.recovery.cancel import cancel_run_row
 from coral.recovery.drift import DriftFinding, drift_log_checksum
 from coral.stores.fakes import FakeRunStore
@@ -66,7 +67,10 @@ from tests.coral.bridge._world import (
     IMPLEMENT,
     WORKSPACE,
     World,
+    blocked,
+    briefed,
     finished,
+    retried,
     row_of,
     run_spec,
     settle,
@@ -879,3 +883,65 @@ def test_cancel_of_a_wide_run_whose_engine_never_started_commits(world: World) -
     ]
     assert len(cancels) == 32
     world.assert_fold_matches(run.id)
+
+
+# ── retry_activation ────────────────────────────────────────────────────────
+
+
+def test_a_retry_of_a_blocked_step_bumps_its_slot_and_queues_one_restart(world: World) -> None:
+    run_id = retried(world)
+
+    state = world.assert_fold_matches(run_id)
+    (slot,) = (slot for slot in state.slots if slot.id == IMPLEMENT)
+    assert (slot.status, slot.session_generation) == ("pending", 2)
+    assert _causes(world, run_id) == [("infra", "recovery.restarting")]
+    assert world.run(run_id).status == int(RunStatus.PAUSED)
+    (restart,) = [
+        item
+        for item in world.work(run_id)
+        if json.loads(item.payload)["effect_type"] == RECOVERY_RESTART
+    ]
+    assert restart.slot_generation == 2
+    assert json.loads(restart.payload)["session_id"] == effect_session_id(
+        WORKSPACE, json.loads(_create_row(world, run_id, IMPLEMENT).payload)["effect_key"]
+    )
+
+
+def test_a_retry_naming_no_started_activation_of_the_run_commits_nothing(world: World) -> None:
+    run_id = briefed(world)
+    _commit(world, run_id, *blocked(IMPLEMENT))
+    bare = start_without_engine(world)
+    version = world.run(run_id).version
+    others = [
+        (run_id, "x" * 32),
+        (run_id, store_activation_id("f" * 32, "implement||")),
+        (bare.id, store_activation_id(bare.id, "implement||")),
+    ]
+
+    for target, activation_id in others:
+        result = world.bridge.retry_activation(
+            workspace_id=WORKSPACE, run_id=target, actor="user:alice", activation_id=activation_id
+        )
+        assert (result.outcome, result.code, result.commit) == (
+            "refused",
+            "unknown_activation",
+            None,
+        )
+    assert world.run(run_id).version == version
+
+
+def test_a_retry_the_engine_refuses_reports_the_engines_code(world: World) -> None:
+    run_id = briefed(world)
+    activation = store_activation_id(run_id, "implement||")
+
+    def retry() -> tuple[str, str | None]:
+        result = world.bridge.retry_activation(
+            workspace_id=WORKSPACE, run_id=run_id, actor="user:alice", activation_id=activation
+        )
+        return result.outcome, result.code
+
+    # A running step has nothing to retry; a restarting one is not retried twice.
+    assert retry() == ("refused", "retry_not_allowed")
+    _commit(world, run_id, *blocked(IMPLEMENT))
+    assert retry() == ("retried", None)
+    assert retry() == ("refused", "restart_in_progress")

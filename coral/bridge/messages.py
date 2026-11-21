@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -29,6 +29,7 @@ from coral.engine.machines.decision import walked_arrow_id
 from coral.engine.machines.slot import find_slot
 from coral.model.ir import CompiledArrow, CompiledGraph, CompiledNode
 from coral.queue.run_effects import CONTROL_CHARACTERS
+from coral.workspace.ops import COMMIT_ID, SALVAGE_REF_PREFIX, validate_op_key
 
 TRUNCATED = "… [truncated]"
 _UNSAFE = re.compile("[\x00\ud800-\udfff]")
@@ -58,6 +59,12 @@ _NUDGES: dict[str, str] = {
         "you cannot continue, call coral_submit_handoff with activation_id {activation}."
     ),
 }
+_SALVAGED = (
+    "Coral restarted this step from its last handoff. The previous attempt's uncommitted "
+    "work is saved at {ref}{commit}, and the worktree was reset."
+)
+# The commit is named by this many characters of its id.
+_SALVAGE_COMMIT_CHARS = 12
 _DECISION_OPENINGS: dict[str, str] = {
     "request": "Coral decision request.",
     "reminder": "Reminder: this Coral decision is still waiting for your choice.",
@@ -75,6 +82,33 @@ class _Free:
 _Part = str | _Free
 
 
+@dataclass(frozen=True)
+class SalvageNote:
+    """Where a restart saved the previous attempt's uncommitted work."""
+
+    ref: str
+    commit: str | None
+
+
+def salvage_note(payload: Mapping[str, object]) -> SalvageNote | None:
+    """
+    What a restart salvaged, from its brief's effect payload.
+
+    ``None`` unless ``salvage_ref`` is a salvage ref; a commit that is not a full id is left out.
+    """
+    ref = payload.get("salvage_ref")
+    if not isinstance(ref, str) or not ref.startswith(SALVAGE_REF_PREFIX):
+        return None
+    try:
+        validate_op_key(ref.removeprefix(SALVAGE_REF_PREFIX))
+    except ValueError:
+        return None
+    commit = payload.get("salvage_commit")
+    if not isinstance(commit, str) or COMMIT_ID.fullmatch(commit) is None:
+        commit = None
+    return SalvageNote(ref=ref, commit=commit)
+
+
 def sanitize(text: str) -> str:
     """``text`` without NUL or lone surrogates, which no message can carry."""
     return _UNSAFE.sub("", text)
@@ -86,13 +120,15 @@ def brief_text(
     engine_slot_id: str,
     *,
     request_preview: str,
+    salvage: SalvageNote | None = None,
 ) -> str:
     """
     The brief a slot's new session gets.
 
-    It names the step, the workflow and the activation, gives the goal and the run
-    request, quotes the handoffs and choices that led to the step (newest first),
-    and ends with how to hand off.
+    It names the step, the workflow and the activation, says where a restart saved
+    the previous attempt's work, gives the goal and the run request, quotes the
+    handoffs and choices that led to the step (newest first), and ends with how to
+    hand off.
     """
     activation_id = _activation_of(state, engine_slot_id)
     owner = find_activation(state, activation_id)
@@ -103,7 +139,14 @@ def brief_text(
         _Free(_node_name(node, activation_id)),
         "\nWorkflow: ",
         _Free(graph.name),
-        f"\nActivation id: {activation_id}\n\nGoal:\n",
+        f"\nActivation id: {activation_id}\n\n",
+    ]
+    if salvage is not None:
+        commit = salvage.commit[:_SALVAGE_COMMIT_CHARS] if salvage.commit else None
+        named = _SALVAGED.format(ref=salvage.ref, commit=f" (commit {commit})" if commit else "")
+        parts.append(f"{named}\n\n")
+    parts += [
+        "Goal:\n",
         _Free((node.goal if node is not None else None) or "(none)"),
         "\n\nRun request:\n",
         _Free(request_preview or "(none)"),
@@ -449,11 +492,13 @@ __all__ = [
     "GATE_PROMPT_JSON_CHARS",
     "TRUNCATED",
     "DecisionMessage",
+    "SalvageNote",
     "brief_text",
     "decision_request_text",
     "gate_prompt_text",
     "nudge_text",
     "orchestrator_title",
+    "salvage_note",
     "sanitize",
     "strip_format_characters",
 ]

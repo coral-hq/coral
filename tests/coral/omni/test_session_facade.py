@@ -1097,6 +1097,27 @@ async def test_a_second_session_for_one_slot_and_generation_is_a_binding_conflic
     assert host.launches_for(coral.step_id(seq=3)) == 0
 
 
+async def test_a_retried_slots_next_generation_gets_its_own_session_bound_at_it(
+    coral: _Coral, host: _Host, runner: _Runner
+) -> None:
+    await coral.anchor()
+    first = _completed(await coral.deliver(coral.step_payload()))
+
+    # A restart's create names the slot's new generation under a new effect key.
+    second = _completed(await coral.deliver(coral.step_payload(seq=5, generation=2)))
+
+    assert first == {"session_id": coral.step_id(), "role": "step", "generation": 1}
+    assert second == {"session_id": coral.step_id(seq=5), "role": "step", "generation": 2}
+    bindings = {
+        binding.session_id: binding.session_generation
+        for binding in coral.bindings.list_for_run(WORKSPACE, coral.run.id)
+        if binding.slot_id == SLOT
+    }
+    assert bindings == {coral.step_id(): 1, coral.step_id(seq=5): 2}
+    assert host.launches_for(coral.step_id(seq=5)) == 1
+    assert runner.inits_for(coral.step_id(seq=5)) == 1
+
+
 async def test_a_step_before_its_anchor_is_retryable(
     unlaunched: _Coral, launcher: _RecordingLauncher, host: _Host
 ) -> None:

@@ -12,6 +12,7 @@ from coral.bridge.config import epoch_seconds, epoch_us
 from coral.bridge.keys import decision_request_key, decision_rerequest_key, store_slot_id
 from coral.bridge.mapping import (
     FED_KINDS,
+    RECOVERY_RESTART,
     UNMAPPED_KINDS,
     MapContext,
     UnsupportedStance,
@@ -30,7 +31,11 @@ from coral.engine.types import (
     Effect,
     EffectCompleted,
     EffectFailed,
+    HandoffEvaluated,
+    HandoffReceived,
+    Input,
     PauseRun,
+    Receipt,
     RetryStep,
     RunState,
     SessionFailed,
@@ -39,6 +44,7 @@ from coral.engine.types import (
 from coral.gates.ids import GATE_PUBLISH, GATE_WITHDRAW, gate_visit_id
 from coral.model.ids import derived_id, effect_session_id
 from coral.model.ir import CompiledGraph
+from coral.recovery.ladder import _restart_payload
 from coral.slots.executors import _cancel_payload, _close_payload, _create_payload, _send_payload
 from coral.stores.protocols import WorkItemDraft
 from coral.tools.catalog import STEP_STANCES
@@ -51,6 +57,7 @@ from tests.coral.bridge._scripted_runs import (
     eventful_two_steps,
     exercise,
     fixture_graph,
+    handoff_body,
     replay,
     start_run,
 )
@@ -315,7 +322,141 @@ def test_a_cancel_of_a_slot_without_a_create_names_no_session() -> None:
     assert _cancel_payload(payload) == {"session_id": None, "closed_label": True}
 
 
-@pytest.mark.parametrize("kind", ["notify", "runner_lost", "retry_step", "arm_timer"])
+def _blocked(slot_id: str) -> tuple[Input, ...]:
+    """A blocked handoff of ``slot_id``: with no failure arrow, the run pauses for a retry."""
+    activation = slot_id.rsplit(":", 1)[0]
+    body = handoff_body(activation, "Cannot go on.", status="blocked")
+    return (
+        HandoffReceived(slot_id=slot_id, body=body),
+        HandoffEvaluated(slot_id=slot_id, outcome="blocked"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("engine_slot", "node_id", "writer"),
+    [(IMPLEMENT, "implement", True), (REVIEW, "review", False)],
+)
+def test_a_retry_becomes_one_restart_row_fenced_by_the_new_generation(
+    engine_slot: str, node_id: str, writer: bool
+) -> None:
+    driven = _started()
+    if engine_slot == REVIEW:
+        driven = drive(GRAPH, accept(IMPLEMENT, "implemented"), after=driven)
+    create_key = next(
+        effect.effect_key
+        for effect in driven.state.effects
+        if effect.kind == "create_session" and effect.subject == engine_slot
+    )
+    blocked = drive(GRAPH, _blocked(engine_slot), after=driven)
+    retried = drive(GRAPH, [RetryStep(node_id=node_id)], auto_ack=False, after=blocked)
+    restart = _only(retried, "retry_step")
+    draft = _draft(retried.state, restart)
+
+    _assert_effect_row(draft, restart.effect_key)
+    assert (draft.node_id, draft.scope_key, draft.slot_generation) == (node_id, engine_slot, 2)
+    payload = _payload(draft)
+    # The old generation's session is the one the restart fences.
+    session_id = effect_session_id(WORKSPACE, create_key)
+    assert payload == {
+        "effect_type": RECOVERY_RESTART,
+        "effect_key": restart.effect_key,
+        "engine_kind": "retry_step",
+        "engine_slot_id": engine_slot,
+        "generation": 2,
+        "session_id": session_id,
+        "writer": writer,
+        "expected_head": restart.payload["expected_head"],
+        "close_key": None,
+        "slot_id": store_slot_id(RUN_ID, engine_slot),
+    }
+    assert _restart_payload(payload) == {
+        "session_id": session_id,
+        "writer": writer,
+        "expected_head": None,
+        "generation": 2,
+        "close_key": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("receipt", "named"),
+    [
+        pytest.param({"commit": "c" * 40}, False, id="its-commit-recorded"),
+        pytest.param(None, True, id="no-receipt"),
+        pytest.param({"failed": "workspace.git_failed"}, True, id="failed-without-a-commit"),
+    ],
+)
+def test_a_restart_names_the_slots_close_whose_commit_no_receipt_records(
+    receipt: dict[str, object] | None, named: bool
+) -> None:
+    accepted = drive(GRAPH, accept(IMPLEMENT, "implemented"), auto_ack=False, after=_started())
+    close = _only(accepted, "close_slot")
+    state = accepted.state
+    if receipt is not None:
+        state = state.model_copy(
+            update={"receipts": (*state.receipts, Receipt(key=close.effect_key, payload=receipt))}
+        )
+    restart = Effect(
+        effect_key=f"{RUN_ID}:99:retry_step:{IMPLEMENT}",
+        kind="retry_step",
+        subject=IMPLEMENT,
+        payload={"generation": 2, "expected_head": None},
+    )
+
+    payload = _payload(_draft(state, restart))
+
+    assert payload["close_key"] == (close.effect_key if named else None)
+
+
+def test_a_retry_names_the_newest_written_commit_as_the_restarts_expected_head() -> None:
+    reviewing = drive(GRAPH, [*accept(IMPLEMENT, "implemented")], auto_ack=False, after=_started())
+    close = _only(reviewing, "close_slot")
+    written = "c" * 40
+    closed = drive(
+        GRAPH,
+        [EffectCompleted(effect_key=close.effect_key, payload={"commit": written})],
+        after=reviewing,
+    )
+    blocked = drive(GRAPH, _blocked(REVIEW), after=closed)
+    retried = drive(GRAPH, [RetryStep(node_id="review")], auto_ack=False, after=blocked)
+
+    payload = _payload(_draft(retried.state, _only(retried, "retry_step")))
+
+    assert payload["expected_head"] == written
+
+
+def test_a_brief_after_a_finished_restart_names_the_salvage_ref() -> None:
+    blocked = drive(GRAPH, _blocked(IMPLEMENT), after=_started())
+    retried = drive(GRAPH, [RetryStep(node_id="implement")], auto_ack=False, after=blocked)
+    restart = _only(retried, "retry_step")
+    salvage_ref = f"refs/coral/salvage/{'e' * 32}"
+    finished = drive(
+        GRAPH,
+        [
+            EffectCompleted(
+                effect_key=restart.effect_key,
+                payload={
+                    "salvage_ref": salvage_ref,
+                    "salvage_commit": "f" * 40,
+                    "head_verified": True,
+                },
+            )
+        ],
+        auto_ack=False,
+        after=retried,
+    )
+    create = _only(finished, "create_session")
+    assert _payload(_draft(finished.state, create))["generation"] == 2
+    created = drive(
+        GRAPH, [EffectCompleted(effect_key=create.effect_key)], auto_ack=False, after=finished
+    )
+
+    text = str(_payload(_draft(created.state, _only(created, "send_input")))["text"])
+
+    assert f"saved at {salvage_ref} (commit {'f' * 12})" in text
+
+
+@pytest.mark.parametrize("kind", ["notify", "runner_lost", "arm_timer"])
 def test_kinds_without_an_executor_map_to_no_work(kind: str) -> None:
     started = _started()
     effect = Effect(effect_key=f"{RUN_ID}:9:{kind}:{IMPLEMENT}", kind=kind, subject=IMPLEMENT)
