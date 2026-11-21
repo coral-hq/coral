@@ -2798,10 +2798,12 @@ def test_end_own_process_group_needs_a_group_of_its_own(monkeypatch: pytest.Monk
 _LOST_RUNNER = """
 import os, subprocess, threading
 from omnigent.runner._entry import _run_parent_death_killer
+# Read before announcing: the test may kill the host as soon as it sees the pids.
+host_pid = os.getppid()
 cli = subprocess.Popen(["sleep", "600"])
 print(os.getpid(), cli.pid, flush=True)
 _run_parent_death_killer(
-    os.getppid(), lambda: None, parent_lost=threading.Event(), poll_interval_s=0.05, grace_s=0.05
+    host_pid, lambda: None, parent_lost=threading.Event(), poll_interval_s=0.05, grace_s=0.05
 )
 """
 _HOST = """
