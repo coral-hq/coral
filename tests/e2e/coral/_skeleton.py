@@ -28,7 +28,11 @@ from typing import Any, TypeVar
 import httpx
 import psutil
 import yaml
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
+from coral.db.models.work import WorkerLeaseRow, WorkRow
 from omnigent.testing.process_reaper import _cmdline_references_dir, _is_pytest_process
 from tests._helpers.host import Host, isolated_host
 from tests._helpers.polling import poll_until
@@ -43,6 +47,10 @@ RUNS = "/v1/coral/runs"
 RUN_ID_LABEL = "coral.run_id"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 _ACTIVATION_LINE = re.compile(r"^Activation id: (\S+)$", re.MULTILINE)
+# The host's line for each runner it launches.
+_LAUNCHED_RUNNER = re.compile(
+    r"Launched runner (\S+) for workspace (.+) \(pid=(\d+)\)$", re.MULTILINE
+)
 _BRIEF_OPENING = "Coral step brief."
 # Kept from the test's environment; HOME and data dirs come from the helpers.
 _KEPT_ENV = ("LANG", "LC_ALL", "LC_CTYPE", "TMPDIR")
@@ -63,7 +71,11 @@ _T = TypeVar("_T")
 
 @dataclass
 class Skeleton:
-    """One running stack; ``harness_tmp`` is the host's private harness socket root."""
+    """
+    One running stack; ``harness_tmp`` is the host's private harness socket root.
+
+    Without ``failure_log_tails``, as against a real model, failures carry no log text.
+    """
 
     root: Path
     server: ServerRunner
@@ -71,6 +83,7 @@ class Skeleton:
     client: httpx.Client
     repo: Path
     harness_tmp: Path
+    failure_log_tails: bool = True
 
     def log_tails(self) -> str:
         """The end of every log under the stack root, for failure messages."""
@@ -113,15 +126,29 @@ def minimal_env() -> dict[str, str]:
     return env
 
 
-def write_server_config(path: Path, *, mock_url: str) -> Path:
-    """A server config with the Coral plugin whose own model calls reach only the mock."""
-    config = {
-        "server_plugins": ["coral.server_plugin"],
-        "llm": {
+def write_server_config(
+    path: Path,
+    *,
+    mock_url: str | None,
+    lease_s: int | None = None,
+    grace_s: int | None = None,
+) -> Path:
+    """
+    A server config with the Coral plugin whose own model calls reach only the mock.
+
+    Without ``mock_url`` the server has no model of its own. A lease or grace left
+    out keeps the production default.
+    """
+    config: dict[str, Any] = {"server_plugins": ["coral.server_plugin"]}
+    if mock_url is not None:
+        config["llm"] = {
             "model": "_policy_llm_",
             "connection": {"base_url": f"{mock_url}/v1", "api_key": "mock-key"},
-        },
-    }
+        }
+    if lease_s is not None:
+        config["coral_worker_lease_seconds"] = lease_s
+    if grace_s is not None:
+        config["coral_runner_reconnect_grace_s"] = grace_s
     path.write_text(yaml.safe_dump(config, sort_keys=True))
     return path
 
@@ -266,40 +293,46 @@ def _sigterm_unwinds() -> Iterator[None]:
 def skeleton_stack(
     root: Path,
     *,
-    mock_url: str,
+    mock_url: str | None,
     host_config: Mapping[str, Any],
     host_env: Mapping[str, str | None] | None = None,
+    lease_s: int | None = None,
+    grace_s: int | None = None,
+    failure_log_tails: bool = True,
     health_timeout: float = 60.0,
 ) -> Iterator[Skeleton]:
     """
     Start a Coral server and a host for one test, and tear both down with every process.
 
     The server runs without the allow-listed runner token, so host-launched runners
-    connect with their own. At exit, a SIGTERM included, no process the stack started
-    may survive.
+    connect with their own. Its config, ``root / "server.yaml"``, is read again by every
+    restart. At exit, a SIGTERM included, no process the stack started may survive.
     """
     root.mkdir(parents=True, exist_ok=True)
     # Under /tmp to stay within the AF_UNIX path limit for harness sockets.
     harness_tmp = Path(tempfile.mkdtemp(dir="/tmp", prefix="crl-"))
-    config = write_server_config(root / "server.yaml", mock_url=mock_url)
+    config = write_server_config(
+        root / "server.yaml", mock_url=mock_url, lease_s=lease_s, grace_s=grace_s
+    )
     base_env = minimal_env()
     processes = _StackProcesses((root, harness_tmp))
     with ExitStack() as resources:
         resources.enter_context(_sigterm_unwinds())
         resources.callback(shutil.rmtree, harness_tmp, ignore_errors=True)
         resources.callback(processes.reap)
-        server = resources.enter_context(
-            server_runner(
-                root,
-                server_bootstrap=_SERVER_BOOTSTRAP,
-                server_env={
-                    "OMNIGENT_RUNNER_TUNNEL_TOKEN": None,
-                    "CORAL_E2E_SERVER_CONFIG": str(config),
-                },
-                base_env=base_env,
-                health_timeout=health_timeout,
-                poll_interval=0.25,
-            )
+        started = server_runner(
+            root,
+            server_bootstrap=_SERVER_BOOTSTRAP,
+            server_env={
+                "OMNIGENT_RUNNER_TUNNEL_TOKEN": None,
+                "CORAL_E2E_SERVER_CONFIG": str(config),
+            },
+            base_env=base_env,
+            health_timeout=health_timeout,
+            poll_interval=0.25,
+        )
+        server = _reported(
+            failure_log_tails, "The server's start", lambda: resources.enter_context(started)
         )
         client = resources.enter_context(
             httpx.Client(base_url=server.base_url, trust_env=False, timeout=30.0)
@@ -319,11 +352,35 @@ def skeleton_stack(
                 host.proc.pid, None if server.server is None else server.server.pid
             )
         )
-        host.wait_online(client, timeout=health_timeout, poll_interval=0.25)
+        _reported(
+            failure_log_tails,
+            "The host's start",
+            lambda: host.wait_online(client, timeout=health_timeout, poll_interval=0.25),
+        )
         info = client.get("/v1/coral/info")
         assert info.status_code == 200, info.text
         repo = make_repo(root / "repo")
-        yield Skeleton(root, server, host, client, repo, harness_tmp)
+        yield Skeleton(root, server, host, client, repo, harness_tmp, failure_log_tails)
+
+
+def _reported(log_tails: bool, what: str, step: Callable[[], _T]) -> _T:
+    """
+    Run one start-up step; without log tails, its failure names only the step.
+
+    The shared helpers' own failures quote the stack's logs. Nothing of that
+    failure stays bound in this frame, so even locals in a report show no log text.
+    """
+    if log_tails:
+        return step()
+    try:
+        return step()
+    except AssertionError:
+        raise AssertionError(f"{what} failed; its logs are under the stack root") from None
+
+
+def start_server(skeleton: Skeleton) -> None:
+    """Start the stack's server again on its port, database and config."""
+    _reported(skeleton.failure_log_tails, "The server's restart", skeleton.server.start_server)
 
 
 class _ProbeError(Exception):
@@ -344,7 +401,8 @@ def wait_for(
 
     With ``run_id``, a run that pauses, fails or is cancelled while the probe has nothing
     ends the wait at once. Either failure carries the run's detail, ``claude --version``
-    and the stack's log tails; a probe's own assertion is raised as it is.
+    and, unless the stack turned them off, its log tails; a probe's own assertion is
+    raised as it is.
     """
     found: list[_T] = []
     stopped: list[str] = []
@@ -388,7 +446,8 @@ def _diagnosis(headline: str, skeleton: Skeleton, run_id: str | None) -> str:
             run = skeleton.client.get(f"{RUNS}/{run_id}").text
             details.append(f"Run detail: {run[:6000]}")
     details.append(f"claude --version: {claude_version()}")
-    details.append(skeleton.log_tails())
+    if skeleton.failure_log_tails:
+        details.append(skeleton.log_tails())
     return "\n".join(details)
 
 
@@ -442,8 +501,14 @@ def detail(client: httpx.Client, run_id: str) -> dict[str, Any]:
 
 
 def coral_sessions(client: httpx.Client, run_id: str) -> list[dict[str, Any]]:
-    """Every session labelled with the run, read in full; the list route has no label filter."""
-    listed = client.get("/v1/sessions", params={"kind": "any", "visibility": "all", "limit": 1000})
+    """
+    Every session labelled with the run, archived ones included, read in full; the list
+    route has no label filter.
+    """
+    listed = client.get(
+        "/v1/sessions",
+        params={"kind": "any", "visibility": "all", "include_archived": True, "limit": 1000},
+    )
     assert listed.status_code == 200, listed.text
     sessions = []
     for item in listed.json()["data"]:
@@ -453,6 +518,104 @@ def coral_sessions(client: httpx.Client, run_id: str) -> list[dict[str, Any]]:
         if (body.get("labels") or {}).get(RUN_ID_LABEL) == run_id:
             sessions.append(body)
     return sessions
+
+
+def session(client: httpx.Client, session_id: str) -> dict[str, Any]:
+    response = client.get(f"/v1/sessions/{session_id}")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def server_logs(skeleton: Skeleton) -> list[Path]:
+    """Each server start's own log file, oldest first: the last one is the running server's."""
+    directory = skeleton.server.server_home / ".omnigent" / "logs" / "server"
+    return sorted(directory.glob("server-*.log"))
+
+
+def runner_pid(skeleton: Skeleton, session_id: str) -> int:
+    """
+    The pid of the session's current runner, from the host's own launch line.
+
+    The pid is checked against the launch's workspace and, since each step runner
+    leads its own process group, against that group.
+    """
+    runner_id = session(skeleton.client, session_id)["runner_id"]
+    assert runner_id, f"session {session_id} has no runner"
+    text = skeleton.host.log_path.read_text(errors="replace")
+    [(workspace, pid)] = [
+        (found.group(2), int(found.group(3)))
+        for found in _LAUNCHED_RUNNER.finditer(text)
+        if found.group(1) == runner_id
+    ]
+    assert os.path.realpath(psutil.Process(pid).cwd()) == os.path.realpath(workspace), pid
+    assert os.getpgid(pid) == pid, f"runner {pid} does not lead its process group"
+    return pid
+
+
+def group_members(group_id: int) -> list[psutil.Process]:
+    """The live processes of the process group ``group_id``."""
+    members = []
+    for proc in psutil.process_iter():
+        with contextlib.suppress(psutil.Error, OSError):
+            if os.getpgid(proc.pid) == group_id and proc.status() != psutil.STATUS_ZOMBIE:
+                members.append(proc)
+    return members
+
+
+def group_stopped(group_id: int) -> bool:
+    """Whether the group has members and every one of them is stopped."""
+    members = group_members(group_id)
+    statuses = []
+    for proc in members:
+        with contextlib.suppress(psutil.Error):
+            statuses.append(proc.status())
+    return bool(statuses) and all(status == psutil.STATUS_STOPPED for status in statuses)
+
+
+@dataclass(frozen=True)
+class WorkItem:
+    """
+    One queue row of a run: what it does, its status, when it finished (epoch seconds)
+    and its result, decoded.
+    """
+
+    effect_type: str | None
+    status: int
+    finished_at: int | None
+    result: dict[str, Any] | None
+
+
+def _read_database(skeleton: Skeleton) -> Session:
+    path = skeleton.server.database_uri.removeprefix("sqlite:///")
+    engine = create_engine(
+        f"sqlite:///file:{path}?mode=ro&uri=true",
+        poolclass=NullPool,
+        connect_args={"timeout": 5},
+    )
+    return Session(engine)
+
+
+def work_items(skeleton: Skeleton, run_id: str) -> list[WorkItem]:
+    """The run's queue rows, read from the server's database without writing to it."""
+    with _read_database(skeleton) as db:
+        rows = db.execute(select(WorkRow).where(WorkRow.run_id == run_id)).scalars().all()
+        return [
+            WorkItem(
+                json.loads(row.payload).get("effect_type"),
+                row.status,
+                row.finished_at,
+                None if row.result is None else json.loads(row.result),
+            )
+            for row in rows
+        ]
+
+
+def worker_lease_holder(skeleton: Skeleton) -> str | None:
+    """The worker that holds Coral's leader lease now, if any."""
+    with _read_database(skeleton) as db:
+        leases = db.execute(select(WorkerLeaseRow)).scalars().all()
+        live = [lease.holder_id for lease in leases if lease.expires_at > time.time()]
+        return live[0] if len(live) == 1 else None
 
 
 def _user_texts(request: Mapping[str, Any]) -> list[str]:
@@ -476,6 +639,15 @@ def agent_requests(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
         request
         for request in ledger
         if any(tool.get("name") == HANDOFF_TOOL for tool in request["body"].get("tools") or [])
+    ]
+
+
+def calls_carrying(ledger: list[dict[str, Any]], token: str) -> list[dict[str, Any]]:
+    """The step sessions' own model calls whose user messages carry ``token``."""
+    return [
+        request
+        for request in agent_requests(ledger)
+        if any(token in text for text in _user_texts(request))
     ]
 
 

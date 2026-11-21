@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,13 @@ ROOT = Path(__file__).resolve().parents[2]
 MATRIX = ROOT / ".github" / "scripts" / "ci" / "python-matrix.json"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 LANE = "coral-e2e"
+# The server-SIGKILL proofs run in the lane; the live variant skips there without its opt-in.
+SIGKILL_PROOFS = {
+    "test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate",
+    "test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched",
+}
+# The live proxy's unit test needs no key, so the lane guards the proxy's refusals.
+PROXY_UNIT_TEST = "tests/e2e/coral/test_live_proxy.py"
 
 
 def _groups() -> dict[str, dict[str, str]]:
@@ -27,10 +35,25 @@ def _pytest_steps() -> list[dict[str, Any]]:
 def test_the_lane_runs_the_coral_e2e_files_on_two_workers() -> None:
     lane = _groups()[LANE]
 
-    assert lane["paths"].split() == ["tests/e2e/coral/test_skeleton.py"]
+    # The proxy's quick tests first, so --dist=load spreads the stack tests over both workers.
+    assert lane["paths"].split() == [PROXY_UNIT_TEST, "tests/e2e/coral/test_skeleton.py"]
     assert (lane["workers"], lane["dist"]) == ("2", "load")
     # misc never collects tests/e2e, so the lane is the only CI run of these files.
     assert "--ignore=tests/e2e" in _groups()["misc"]["paths"].split()
+
+
+def test_the_lane_runs_both_server_sigkill_proofs_and_the_proxy_unit_test() -> None:
+    paths = _groups()[LANE]["paths"].split()
+    collected = {
+        node.name
+        for path in paths
+        for node in ast.parse((ROOT / path).read_text()).body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    }
+
+    assert collected >= SIGKILL_PROOFS
+    assert PROXY_UNIT_TEST in paths
+    assert "test_a_failing_live_run_shows_its_key_nowhere_in_the_report" in collected
 
 
 def test_the_lane_installs_the_pinned_claude_cli_from_the_in_repo_action() -> None:

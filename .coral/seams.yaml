@@ -1254,6 +1254,7 @@ seams:
       Adds a `coral` shard running `tests/coral` and excludes `tests/coral` from
       `misc` in `.github/scripts/ci/python-matrix.json`. Adds a `coral-e2e`
       shard that runs the walking-skeleton E2E (`tests/e2e/coral/test_skeleton.py`)
+      and the live proxy's unit test (`tests/e2e/coral/test_live_proxy.py`)
       on two workers with `--dist=load`; `misc` keeps ignoring `tests/e2e`, and
       `tests/coral/test_ci_lane.py` pins the shard (S107 installs its CLI).
     files:
