@@ -7,7 +7,8 @@ executor; engine tool decisions get a smaller pool of their own. A call keeps
 running in its thread when its task is cancelled; bridge commits are idempotent,
 so a repeat is safe. The ``turn_fact`` executor turns a status edge, or a
 re-gather, into the turn fact the engine reconciles, and a failed turn of the
-run's orchestrator into a pause.
+run's orchestrator into a pause. The ``run_resync`` executor also checks the
+run's working runners, when a liveness check is wired.
 """
 
 from __future__ import annotations
@@ -20,11 +21,12 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec, Protocol, TypeVar
 
 from coral.bridge.commit import DRIFT_EFFECT_CODES, EngineSnapshot
 from coral.bridge.config import DRIFT_HOLD, HOLD_RULES
 from coral.bridge.keys import ORCHESTRATOR_SLOT_ID, slot_message_id
+from coral.bridge.mapping import NEXT_RESYNC_AT
 from coral.bridge.orchestrator import failure_inputs, failure_pause, open_decisions
 from coral.bridge.service import LOAD_FAILED_DETAIL, EngineBridge, EngineLoadFailed
 from coral.db.enum_codecs import RunStatus
@@ -38,6 +40,7 @@ from coral.omni.protocols import (
     RunScopeRunner,
     SessionDispatch,
     SessionFacade,
+    SessionState,
     TurnTranscripts,
 )
 from coral.queue.drainer import FinishedWork
@@ -47,6 +50,7 @@ from coral.queue.run_effects import (
     EffectRefused,
     effect_payload,
     invalid_payload,
+    raise_if_cancelling,
     required_text,
     run_scope,
     session_id_field,
@@ -239,12 +243,25 @@ def timer_executor(threads: BridgeThreads) -> EffectExecutor:
     return execute
 
 
-def run_resync_executor(threads: BridgeThreads) -> EffectExecutor:
+class LivenessCheck(Protocol):
+    """Checks a run's working runners after its resync."""
+
+    async def check_run(self, *, workspace_id: int, run_id: str) -> int | None:
+        """The epoch second the run's resync should run again by, or ``None``."""
+        ...
+
+
+def run_resync_executor(
+    threads: BridgeThreads, liveness: LivenessCheck | None = None
+) -> EffectExecutor:
     """
     The ``run_resync`` executor: repair the item's run level-triggered.
 
     Result: what the repair did. A run that cannot be loaded is paused once and the item
-    completes; its next resync comes with the paused run's slower schedule.
+    completes; its next resync comes with the paused run's slower schedule. After a
+    repair, ``liveness`` checks the run's working runners; when a reconnect grace is
+    running the result names when to resync again (``next_resync_at``), which the
+    finished hook schedules. A check that fails is logged and the repair still completes.
     """
 
     async def execute(ctx: ExecutionContext) -> EffectCompleted | EffectFailed:
@@ -259,7 +276,20 @@ def run_resync_executor(threads: BridgeThreads) -> EffectExecutor:
             return _run_missing(ctx)
         except RunContended:
             return _contended(ctx)
-        return EffectCompleted(result=dataclasses.asdict(report))
+        result: dict[str, Any] = dataclasses.asdict(report)
+        if liveness is not None:
+            try:
+                due = await liveness.check_run(workspace_id=ctx.workspace_id, run_id=ctx.run_id)
+            except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- logged
+                # The repair is committed; the next tick checks the runners again.
+                raise_if_cancelling(exc)
+                _logger.warning(
+                    "Coral liveness check of run %s failed: %s", ctx.run_id, type(exc).__name__
+                )
+                due = None
+            if due is not None:
+                result[NEXT_RESYNC_AT] = due
+        return EffectCompleted(result=result)
 
     return execute
 
@@ -308,6 +338,8 @@ def turn_fact_executor(
     its leased effect holds the item (``signal.awaiting_effect``, or ``run.paused`` while
     its run is paused), so the edge applies after the receipt. An archived or deleted
     session pauses the run ``drift`` instead of being read; a closed one is not read.
+    An edge's fact names the runner the session row binds, so a runner loss is keyed
+    by the runner incarnation it lost.
     While a decision waits on the run's orchestrator, an archived or deleted
     orchestrator pauses the run ``drift`` and a failed turn of it pauses the run
     (``orchestrator_paused``); its other turns change nothing (``orchestrator_turn``).
@@ -340,10 +372,13 @@ def turn_fact_executor(
             if awaiting_effect(snapshot.state, signal.engine_slot_id):
                 return _awaiting(snapshot)
             async with run_scope(scope_runner, snapshot.store):
-                why = await _session_gone(snapshot, signal, sources)
+                session = await _session_state(snapshot, signal, sources)
+                why = await _session_gone(snapshot, session, sources)
                 if why is not None:
                     return _turn_result(why)
                 fact, why = await _gather(snapshot, signal, sources)
+            if fact is not None and signal.edge is not None and session.runner_id:
+                fact = fact.model_copy(update={"runner_id": session.runner_id})
             if fact is None:
                 if why == "undecided":
                     _logger.info(
@@ -419,7 +454,8 @@ async def _orchestrator_turn(
     if not open_decisions(snapshot.state):
         return "no_input"
     async with run_scope(sources.scope_runner, snapshot.store):
-        gone = await _session_gone(snapshot, signal, sources)
+        session = await _session_state(snapshot, signal, sources)
+        gone = await _session_gone(snapshot, session, sources)
         if gone is not None:
             return gone
         edge = signal.edge or await _lost_failure(snapshot, signal, sources)
@@ -470,17 +506,22 @@ async def _lost_failure(
     )
 
 
-async def _session_gone(
+async def _session_state(
     snapshot: EngineSnapshot, signal: _TurnSignal, sources: _Sources
+) -> SessionState:
+    return await sources.facade.session_state(
+        workspace_id=snapshot.store.workspace_id, session_id=signal.session_id
+    )
+
+
+async def _session_gone(
+    snapshot: EngineSnapshot, state: SessionState, sources: _Sources
 ) -> str | None:
     """
     ``drift`` after pausing the run for an archived or deleted session, ``session_closed``
     for a closed one, else ``None``: only a live session's transcript is a turn's.
     """
     store = snapshot.store
-    state = await sources.facade.session_state(
-        workspace_id=store.workspace_id, session_id=signal.session_id
-    )
     finding = classify_step(state)
     if finding is not None:
         await sources.drift.pause(
@@ -623,6 +664,7 @@ __all__ = [
     "DECISION_THREAD_NAME",
     "BoundedThreads",
     "BridgeThreads",
+    "LivenessCheck",
     "PoolClosed",
     "bridge_hold_policy",
     "run_resync_executor",

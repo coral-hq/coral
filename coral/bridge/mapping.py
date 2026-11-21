@@ -71,6 +71,8 @@ TURN_FACT = "turn_fact"
 DECISION_ITEM = "decision"
 # The idempotency key of a run's one recurring resync row.
 _RESYNC_KEY = "resync"
+# A resync result's epoch second by which the row should run again (a liveness grace ends).
+NEXT_RESYNC_AT = "next_resync_at"
 _SCOPE_KEY_CHARS = 512
 _ORCHESTRATOR_OWNER = f"slot:{ORCHESTRATOR_SLOT_ID}"
 
@@ -250,6 +252,11 @@ def regather_key(session_id: str, now_s: int) -> str:
     return f"sig:{session_id}:resync:{now_s // REGATHER_BUCKET_S}"
 
 
+def boot_regather_key(session_id: str, boot_id: str) -> str:
+    """A session's first re-gather in a process, whatever re-gather the last one queued."""
+    return f"sig:{session_id}:boot:{boot_id}"
+
+
 def turn_signal_draft(
     *,
     run_id: str,
@@ -412,6 +419,7 @@ def _checked(draft: WorkItemDraft) -> WorkItemDraft:
 __all__ = [
     "DECISION_ITEM",
     "FED_KINDS",
+    "NEXT_RESYNC_AT",
     "RECOVERY_RESTART",
     "RUN_RESYNC",
     "TIMER",
@@ -421,6 +429,7 @@ __all__ = [
     "MappedPayloadTooLarge",
     "UnsupportedStance",
     "anchor_create_draft",
+    "boot_regather_key",
     "decision_message_draft",
     "edge_signal_key",
     "map_effect",

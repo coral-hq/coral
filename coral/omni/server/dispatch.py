@@ -26,7 +26,9 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
-from collections.abc import AsyncGenerator, Mapping, Sequence
+import time
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, override
 
 from coral.model.ids import fallback_message_id
@@ -43,6 +45,7 @@ from coral.omni.protocols import (
     LiveStatus,
     PreSendHook,
     PreSendRequest,
+    RunnerLiveness,
     SendReceipt,
     SessionDispatch,
     TranscriptItem,
@@ -62,7 +65,7 @@ from omnigent.runtime import pending_inputs
 from omnigent.server.routes.sessions import ensure_runner_connected
 from omnigent.server.schemas import SessionEventInput
 from omnigent.server.startup_inputs import EngineEventContext
-from omnigent.stores.conversation_store import ConversationStore
+from omnigent.stores.conversation_store import ConversationStore, runner_seen_is_fresh
 from omnigent.util.session_lifecycle import (
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
@@ -216,6 +219,7 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
         interrupt, stop or close; one raising ``CoralSessionError`` refuses it.
         Required, so a server never forgets the drift hook.
     :param send_timeout_s: The longest one event may take.
+    :param clock: Epoch seconds a runner's liveness stamp is judged fresh against.
     """
 
     def __init__(
@@ -226,12 +230,14 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
         *,
         pre_send_hooks: Sequence[PreSendHook],
         send_timeout_s: float = SEND_TIMEOUT_S,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._app = app
         self._store = conversation_store
         self._runner_router = runner_router
         self._hooks = tuple(pre_send_hooks)
         self._send_timeout_s = send_timeout_s
+        self._clock = clock
 
     @override
     async def send_message(
@@ -492,6 +498,32 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
                 live, response_id=await self._stored_response_id(session_id)
             )
         return live
+
+    @override
+    async def runner_liveness(self, *, workspace_id: int, session_id: str) -> RunnerLiveness:
+        """
+        The session's runner from its metadata row and this replica's tunnel registry.
+
+        The server stamps a live runner from its tunnel's pings and clears the stamp
+        when the tunnel drops, so a runner whose host went away reads as not fresh.
+
+        :raises CoralSessionError: ``session.deleted`` when the session row is gone.
+        """
+        with workspace_scope(workspace_id):
+            found = await asyncio.to_thread(self._store.get_runner_liveness, session_id)
+        if found is None:
+            raise _refused("session.deleted", f"session {session_id} no longer exists")
+        runner_id, stamp = found
+        tunnels = getattr(self._app.state, "tunnel_registry", None)
+        connected = (
+            runner_id is not None and tunnels is not None and tunnels.get(runner_id) is not None
+        )
+        return RunnerLiveness(
+            runner_id=runner_id,
+            connected=connected,
+            last_seen=None if stamp is None else datetime.fromtimestamp(stamp, UTC),
+            fresh=connected or runner_seen_is_fresh(stamp, int(self._clock())),
+        )
 
     async def _stored_response_id(self, session_id: str) -> str | None:
         newest = await asyncio.to_thread(self._store.list_items, session_id, limit=1, order="desc")

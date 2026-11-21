@@ -486,6 +486,10 @@ def test_a_running_run_s_resync_is_due_now_and_a_paused_one_s_every_15_minutes(
             PauseRun(reason="user", detail="look"),
         ),
     )
+    # This process's first schedule of the paused run is due at once.
+    world.bridge.schedule_resync(world.run(other.id))
+    assert _resync_row(world, other.id).available_at == world.clock.epoch
+    settle(world, _resync_row(world, other.id), WorkStatus.SUCCEEDED)
     first_due = world.clock.epoch + PAUSED_RESYNC_DELAY_S
     for _ in range(5):
         world.bridge.schedule_resync(world.run(other.id))
@@ -626,8 +630,11 @@ def test_a_run_whose_rows_do_not_decode_is_paused_on_its_row(
     )
     logs = _runs(world).logs[(WORKSPACE, run.id)]
     assert [row.kind for row in logs].count(int(LogKind.PAUSED)) == 1
-    # One error for the pause; a later failure only warns, and the next resync is 15 min out.
+    # One error for the pause; a later failure only warns. The next resync comes once at
+    # this process's first schedule, then 15 min out.
     assert [record.levelno for record in caplog.records] == [logging.ERROR, logging.WARNING]
+    world.bridge.schedule_resync(paused)
+    settle(world, _resync_row(world, run.id), WorkStatus.SUCCEEDED)
     world.bridge.schedule_resync(paused)
     (row,) = world.queue.get_work([resync_draft(run.id).id], workspace_id=WORKSPACE)
     assert row.available_at == world.clock.epoch + PAUSED_RESYNC_DELAY_S
@@ -869,3 +876,66 @@ def test_a_lost_restart_row_is_queued_again_with_the_same_key(world: World) -> N
         restart.payload,
         restart.slot_generation,
     )
+
+
+def test_a_restarted_bridge_feeds_a_finished_restart_at_once(world: World) -> None:
+    """A restart whose feed was lost in a crash goes on right after a server restart."""
+    run_id = retried(world)
+    world.bridge.schedule_resync(world.run(run_id))
+    settle(world, _resync_row(world, run_id), WorkStatus.SUCCEEDED)
+    restart = row_of(world, run_id, RECOVERY_RESTART)
+    result = {"salvage_ref": None, "salvage_commit": None, "head_verified": True, "head": None}
+    settle(world, restart, WorkStatus.SUCCEEDED, result=result)
+    # This process already scheduled the paused run, so its next resync is 15 minutes out.
+    world.bridge.schedule_resync(world.run(run_id))
+    assert _resync_row(world, run_id).available_at == world.clock.epoch + PAUSED_RESYNC_DELAY_S
+
+    again = EngineBridge(
+        run_store=world.runs, queue_store=world.queue, versions=world.versions, clock=world.clock
+    )
+    again.schedule_resync(world.run(run_id))
+    assert _resync_row(world, run_id).available_at == world.clock.epoch
+    report = again.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+
+    assert report.fed == 1
+    state = world.assert_fold_matches(run_id)
+    assert state.status == "running" and not state.causes
+    creates = [
+        effect
+        for effect in state.effects
+        if effect.kind == "create_session" and effect.payload.get("generation") == 2
+    ]
+    assert len(creates) == 1
+
+
+def test_the_resync_is_rescheduled_sooner_only(world: World) -> None:
+    run = start(world)
+    world.bridge.schedule_resync(world.run(run.id))
+    now = world.clock.epoch
+
+    world.bridge.reschedule_resync(workspace_id=WORKSPACE, run_id=run.id, due_s=now + 90)
+    assert _resync_row(world, run.id).available_at == now
+    settle(world, _resync_row(world, run.id), WorkStatus.SUCCEEDED)
+    world.bridge.reschedule_resync(workspace_id=WORKSPACE, run_id=run.id, due_s=now + 90)
+    world.bridge.reschedule_resync(workspace_id=WORKSPACE, run_id=run.id, due_s=now + 120)
+    row = _resync_row(world, run.id)
+    assert (row.status, row.available_at) == (int(WorkStatus.PENDING), now + 90)
+
+
+def test_a_bridge_that_leads_again_resyncs_a_paused_run_at_once(world: World) -> None:
+    """The interim leader may have left a restart's feed for this one."""
+    run = start(world)
+    world.bridge.commit_inputs(
+        workspace_id=WORKSPACE,
+        run_id=run.id,
+        inputs=lambda _snapshot: (PauseRun(reason="user", detail="look"),),
+    )
+    world.bridge.schedule_resync(world.run(run.id))
+    settle(world, _resync_row(world, run.id), WorkStatus.SUCCEEDED)
+    world.bridge.schedule_resync(world.run(run.id))
+    assert _resync_row(world, run.id).available_at == world.clock.epoch + PAUSED_RESYNC_DELAY_S
+
+    world.bridge.begin_leader_term()
+    world.bridge.schedule_resync(world.run(run.id))
+
+    assert _resync_row(world, run.id).available_at == world.clock.epoch

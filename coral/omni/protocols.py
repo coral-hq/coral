@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from coral.engine.facts import TurnFact
@@ -346,6 +347,24 @@ class LiveStatus:
 
 
 @dataclass(frozen=True)
+class RunnerLiveness:
+    """
+    What the server knows of a session's runner, as the liveness pass reads it.
+
+    :param runner_id: The runner the session is bound to, or ``None``.
+    :param connected: Its tunnel is open on this replica.
+    :param last_seen: The runner's liveness stamp (aware UTC); the server clears it
+        when the tunnel drops.
+    :param fresh: Connected here, or a stamp the server still calls fresh.
+    """
+
+    runner_id: str | None
+    connected: bool
+    last_seen: datetime | None
+    fresh: bool
+
+
+@dataclass(frozen=True)
 class SendReceipt:
     """How a message reached its session: sent now, or found already persisted."""
 
@@ -491,6 +510,14 @@ class SessionDispatch(Protocol):
 
     async def live_status(self, *, session_id: str) -> LiveStatus: ...
 
+    async def runner_liveness(self, *, workspace_id: int, session_id: str) -> RunnerLiveness:
+        """
+        The session's runner as this replica sees it.
+
+        :raises CoralSessionError: ``session.deleted`` when the session row is gone.
+        """
+        ...
+
     async def queued_user_input(
         self, *, session_id: str, user_id: str | None, engine_messages: Mapping[str, bytes]
     ) -> bool:
@@ -568,6 +595,7 @@ __all__ = [
     "RunScopeRunner",
     "RunSpendReader",
     "RunSpendTotals",
+    "RunnerLiveness",
     "SendReceipt",
     "SessionCreateRequest",
     "SessionDispatch",

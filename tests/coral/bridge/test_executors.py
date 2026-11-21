@@ -26,6 +26,7 @@ from coral.bridge.executors import (
     timer_executor,
 )
 from coral.bridge.mapping import (
+    NEXT_RESYNC_AT,
     RUN_RESYNC,
     TIMER,
     MappedPayloadTooLarge,
@@ -386,6 +387,72 @@ async def test_a_resync_with_nothing_to_repair_completes_without_writing(
 
     assert outcomes == [EffectCompleted(result=dataclasses.asdict(ResyncReport()))] * 2
     assert world.run(run.id).version == version
+
+
+class _RecordingLiveness:
+    """A liveness check that records each run it checks and names a scripted time."""
+
+    def __init__(self, due: int | None) -> None:
+        self.due = due
+        self.checked: list[tuple[int, str]] = []
+
+    async def check_run(self, *, workspace_id: int, run_id: str) -> int | None:
+        self.checked.append((workspace_id, run_id))
+        return self.due
+
+
+@pytest.mark.parametrize("due", [None, 1_900_000_000])
+async def test_the_resync_checks_the_runs_runners_after_its_repair(
+    world: World, threads: BridgeThreads, due: int | None
+) -> None:
+    run = start(world)
+    liveness = _RecordingLiveness(due)
+
+    outcome = await run_resync_executor(threads, liveness)(_context(_resync_row(world, run.id)))
+
+    assert liveness.checked == [(WORKSPACE, run.id)]
+    assert isinstance(outcome, EffectCompleted) and outcome.result is not None
+    assert outcome.result.get(NEXT_RESYNC_AT) == due
+
+
+async def test_a_resync_that_cannot_load_its_run_checks_no_runner(
+    world: World, threads: BridgeThreads
+) -> None:
+    run = start(world)
+    _corrupt_engine_log(world, run.id)
+    liveness = _RecordingLiveness(1_900_000_000)
+
+    outcome = await run_resync_executor(threads, liveness)(_context(_resync_row(world, run.id)))
+
+    assert outcome == EffectCompleted()
+    assert liveness.checked == []
+
+
+@pytest.mark.parametrize(
+    ("effect_type", "status", "rescheduled"),
+    [
+        (RUN_RESYNC, WorkStatus.SUCCEEDED, True),
+        (RUN_RESYNC, WorkStatus.FAILED, False),
+        (TIMER, WorkStatus.SUCCEEDED, False),
+    ],
+)
+def test_a_finished_resync_that_names_its_next_time_is_due_again_then(
+    world: World, effect_type: str, status: WorkStatus, rescheduled: bool
+) -> None:
+    run = start(world)
+    row = _resync_row(world, run.id)
+    due = world.clock.epoch + 90
+    done = settle(world, row, status, result={NEXT_RESYNC_AT: due})
+    if effect_type != RUN_RESYNC:
+        done = dataclasses.replace(done, payload=json.dumps({"effect_type": effect_type}))
+
+    world.bridge.feed(finished(done))
+
+    (after,) = world.queue.get_work([resync_draft(run.id).id], workspace_id=WORKSPACE)
+    if rescheduled:
+        assert (after.status, after.available_at) == (int(WorkStatus.PENDING), due)
+    else:
+        assert after.status == int(status)
 
 
 # ── hold policy ──────────────────────────────────────────────────────────────

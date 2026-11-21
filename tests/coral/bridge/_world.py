@@ -29,6 +29,7 @@ from coral.bridge.codec import decode_entries
 from coral.bridge.config import ENGINE_LOG_PAGE, freeze_engine_config
 from coral.bridge.executors import (
     BridgeThreads,
+    LivenessCheck,
     bridge_hold_policy,
     run_resync_executor,
     timer_executor,
@@ -580,6 +581,8 @@ class Sessions:
     before_feed: Callable[[FinishedWork], Awaitable[None]] | None = None
     # The run worktree's host, when not ``host``'s canned replies (real git, say).
     channel: HostChannelBackend | None = None
+    # The resync's runner liveness check, as the session engine wires it.
+    liveness: LivenessCheck | None = None
 
     def __post_init__(self) -> None:
         self.drainer = WorkDrainer(
@@ -633,7 +636,7 @@ class Sessions:
                 scope_runner=scope,
             ),
             TIMER: timer_executor(self.threads),
-            RUN_RESYNC: run_resync_executor(self.threads),
+            RUN_RESYNC: run_resync_executor(self.threads, self.liveness),
             GATE_PUBLISH: gate_publish_executor(
                 self.threads, self.gates, self.bindings, world.runs, scope
             ),
@@ -756,7 +759,11 @@ class Sessions:
 
 @asynccontextmanager
 async def serving(
-    world: World, *, after: Sessions | None = None, channel: HostChannelBackend | None = None
+    world: World,
+    *,
+    after: Sessions | None = None,
+    channel: HostChannelBackend | None = None,
+    liveness: LivenessCheck | None = None,
 ) -> AsyncIterator[Sessions]:
     """
     The world's session side, its executors registered until the block ends.
@@ -769,6 +776,7 @@ async def serving(
         stores its bindings, stable ids and op intents; its edge watchers and its
         published gate prompts are new.
     :param channel: The run worktree's host channel instead of the canned replies.
+    :param liveness: The resync's runner liveness check; none by default.
     """
     events: list[str] = [] if after is None else after.events
     if after is not None and world.db_uri is None:
@@ -807,6 +815,7 @@ async def serving(
         dispatcher=ToolDispatcher(StoreDecisionPort(world.bridge), PLANNERS),
         recorder=recorder,
         channel=channel if channel is not None or after is None else after.channel,
+        liveness=liveness,
     )
     executors = sessions.executors()
     recorder.start()
@@ -827,18 +836,22 @@ async def serving(
 
 
 @asynccontextmanager
-async def restarted(crashed: Sessions, *, lease_s: int) -> AsyncIterator[Sessions]:
+async def restarted(
+    crashed: Sessions, *, lease_s: int, liveness: LivenessCheck | None = None
+) -> AsyncIterator[Sessions]:
     """
     A new process on the dead one's database, started as the Coral lifespan starts it.
 
     New engines, stores, bridge and drainer, its clock past the work lease
     (``lease_s``), the bound-session index refreshed and the startup sweep run.
+
+    :param liveness: The new process's runner liveness check.
     """
     assert crashed.world.db_uri is not None
     evict_cached_engine(crashed.world.db_uri)
     world = World.sql(crashed.world.db_uri)
     world.clock.now = crashed.world.clock.now + timedelta(seconds=lease_s + 1)
-    async with serving(world, after=crashed) as sessions:
+    async with serving(world, after=crashed, liveness=liveness) as sessions:
         BoundSessionRefresher(sessions.bindings, world.bound).refresh()
         await startup_recovery_sweep(
             world.runs,

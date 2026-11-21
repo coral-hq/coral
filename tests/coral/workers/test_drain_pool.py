@@ -853,6 +853,61 @@ async def test_a_drain_worker_that_dies_restarts_leadership(
     assert _statuses(queue, [crashing.id]) == {int(WorkStatus.CLAIMED)}
 
 
+async def test_each_leader_term_starts_with_the_term_hook_before_its_startup_sweep() -> None:
+    run_store = FakeRunStore()
+    queue = FakeQueueStore(run_store=run_store)
+    _start_run(run_store, "active")
+    crashing = _effect("run-a", "a1")
+    queue.enqueue_work([crashing], workspace_id=1, now=int(_START))
+    events: list[str] = []
+
+    async def _step(ctx: ExecutionContext) -> EffectCompleted:
+        raise _Crash()
+
+    def _term() -> None:
+        events.append("term")
+
+    time = VirtualTime(_START)
+    register_executor(_STEP, _step)
+    try:
+        async with _supervisor(
+            run_store,
+            queue,
+            time,
+            drain_concurrency=1,
+            run_reconciler=lambda _run: events.append("sweep"),
+            on_leader_term=_term,
+        ) as supervisor:
+            await _leading(supervisor)
+            # A drain worker dies: the epoch ends and leadership starts again.
+            await poll_until_async(lambda: time.waiting(1.0), timeout_s=budget(10))
+            time.advance(1)
+            await poll_until_async(lambda: events.count("term") == 2, timeout_s=budget(10))
+            await _leading(supervisor)
+    finally:
+        unregister_executor(_STEP, _step)
+
+    assert events[:4] == ["term", "sweep", "term", "sweep"]
+
+
+async def test_a_failing_term_hook_is_logged_and_the_replica_still_leads(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    run_store = FakeRunStore()
+    queue = FakeQueueStore(run_store=run_store)
+
+    def _term() -> None:
+        raise RuntimeError("the hook failed")
+
+    caplog.set_level(logging.ERROR, logger="coral.workers.supervisor")
+    time = VirtualTime(_START)
+    async with _supervisor(run_store, queue, time, on_leader_term=_term) as supervisor:
+        await _leading(supervisor)
+        assert supervisor.is_leader
+
+    assert "Coral leader-term hook failed: RuntimeError: the hook failed" in caplog.text
+
+
 async def test_a_stray_cancellation_fails_its_item_and_the_worker_keeps_draining(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

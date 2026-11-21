@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +27,7 @@ from coral.omni.protocols import (
     ENGINE_MESSAGE_FIRST_LINE,
     CoralSessionError,
     PreSendRequest,
+    RunnerLiveness,
     TurnTranscript,
     engine_message_text,
 )
@@ -771,6 +773,50 @@ async def test_live_status_reads_this_replicas_caches_and_falls_back_to_the_row(
     assert (warm.pending_elicitations, warm.background_work) == (1, True)
     with pytest.raises(CoralSessionError) as deleted:
         await dispatch.live_status(session_id="0" * 32)
+    assert deleted.value.code == "session.deleted"
+
+
+async def test_runner_liveness_reads_the_rows_runner_and_stamp_and_this_replicas_tunnels(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = await _session(client)
+    store = stores.conversation
+    now = 1_900_000_000
+    dispatch = _dispatch(app, stores, clock=lambda: float(now))
+
+    async def read() -> RunnerLiveness:
+        return await dispatch.runner_liveness(workspace_id=WORKSPACE, session_id=session_id)
+
+    unbound = await read()
+    assert store.set_runner_id(session_id, "runner-1")
+    # Another replica's tunnel stamped it within the server's 90 s TTL, then too long ago.
+    store.touch_runner_liveness(["runner-1"], now - 90)
+    fresh = await read()
+    store.touch_runner_liveness(["runner-1"], now - 91)
+    stale = await read()
+    # The tunnel dropped: the server cleared the stamp.
+    store.clear_runner_liveness("runner-1")
+    cleared = await read()
+    tunnels = {"runner-1": object()}
+    monkeypatch.setattr(app.state, "tunnel_registry", SimpleNamespace(get=tunnels.get))
+    connected = await read()
+
+    assert unbound == RunnerLiveness(None, connected=False, last_seen=None, fresh=False)
+    seen = datetime.fromtimestamp(now - 90, UTC)
+    assert fresh == RunnerLiveness("runner-1", connected=False, last_seen=seen, fresh=True)
+    assert stale == RunnerLiveness(
+        "runner-1",
+        connected=False,
+        last_seen=datetime.fromtimestamp(now - 91, UTC),
+        fresh=False,
+    )
+    assert cleared == RunnerLiveness("runner-1", connected=False, last_seen=None, fresh=False)
+    assert connected == RunnerLiveness("runner-1", connected=True, last_seen=None, fresh=True)
+    with pytest.raises(CoralSessionError) as deleted:
+        await dispatch.runner_liveness(workspace_id=WORKSPACE, session_id="0" * 32)
     assert deleted.value.code == "session.deleted"
 
 
