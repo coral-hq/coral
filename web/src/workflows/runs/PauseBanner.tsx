@@ -5,14 +5,17 @@ import {
   isolated,
   nodeLabel,
   pauseCopy,
+  RESTARTING_DETAIL,
   stallSentences,
   type GraphNodeNames,
 } from "../shared/pauseCopy";
 import { activationNodeId, slotNodeId } from "../shared/runIds";
+import { RetryStepButtons, type RetryStepButtonsProps } from "./RetryStepButtons";
 
 // A paused run's banner: why it paused (the first cause, or the run's reason), then what
 // else it waits on: its other causes, steps someone typed into or whose session changed,
-// and decisions the orchestrator has yet to make.
+// and decisions the orchestrator has yet to make. Below them, a Retry for each failed
+// step the run's detail says a retry may restart.
 
 export interface PauseBannerProps {
   /** The run's pause reason, from the stream's header. */
@@ -21,6 +24,11 @@ export interface PauseBannerProps {
   view: RunView | null;
   /** The run's graph, for step names; `null` until it loads. */
   graph: GraphNodeNames | null;
+  runId: string;
+  /** The detail's `retry_activation_ids`; none until the detail loads. */
+  retryActivationIds: RetryStepButtonsProps["activationIds"];
+  /** The detail's slots, which name the steps to retry. */
+  slots: RetryStepButtonsProps["slots"];
 }
 
 /** A step's name for a sentence, isolated, or "a step" when the graph cannot name it. */
@@ -46,10 +54,20 @@ function waitingOn(view: RunView | null, graph: GraphNodeNames | null, body: str
   return [...new Set(lines)].filter((line) => line !== body);
 }
 
-export function PauseBanner({ reason, view, graph }: PauseBannerProps) {
+export function PauseBanner({
+  reason,
+  view,
+  graph,
+  runId,
+  retryActivationIds,
+  slots,
+}: PauseBannerProps) {
   const titleId = useId();
   const copy = pauseCopy(reason, view?.causes[0] ?? null, graph);
   const lines = waitingOn(view, graph, copy.body);
+  const restarting =
+    view?.causes.some((cause) => cause.reason === "infra" && cause.detail === RESTARTING_DETAIL) ??
+    false;
   return (
     <section
       aria-labelledby={titleId}
@@ -69,6 +87,13 @@ export function PauseBanner({ reason, view, graph }: PauseBannerProps) {
             ))}
           </ul>
         )}
+        <RetryStepButtons
+          runId={runId}
+          activationIds={retryActivationIds}
+          slots={slots}
+          graph={graph}
+          restarting={restarting}
+        />
       </div>
     </section>
   );

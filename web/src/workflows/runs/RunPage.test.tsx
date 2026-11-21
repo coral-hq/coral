@@ -10,7 +10,7 @@ import {
   type Location,
   type NavigateFunction,
 } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type * as identityModule from "@/lib/identity";
 import { resetStreamSlotManager, setStreamSlotManagerForTest } from "@/store/streamSlots";
 
@@ -28,7 +28,7 @@ vi.mock("@/hooks/useViewerId", () => ({
 vi.mock("@xyflow/react", () => import("../fixtures/xyflowDouble"));
 vi.mock("@xyflow/react/dist/style.css", () => ({}));
 
-import type { RunDetail, RunHeader } from "../api/generated/coralApi";
+import type { PauseCause, RunDetail, RunHeader, RunView } from "../api/generated/coralApi";
 import {
   countingSlots,
   FakeRunServer,
@@ -53,7 +53,7 @@ import {
   CONTRACT_RESUMED,
   type ContractEvent,
 } from "../fixtures/runViewContract";
-import { LOAD_FAILED_TEXT } from "../shared/pauseCopy";
+import { isolated, LOAD_FAILED_TEXT } from "../shared/pauseCopy";
 import { LIMITED_RETRY_MS, SLOT_RETRIES, SLOT_RETRY_MS } from "../stream/runStream";
 import { RunPage } from "./RunPage";
 
@@ -245,6 +245,87 @@ describe("RunPage", () => {
     expect(screen.queryByRole("region", { name: /^Paused/ })).not.toBeInTheDocument();
     expect(statusRegion()).toHaveTextContent("Needs you");
     expect(button("Pause")).toBeInTheDocument();
+  });
+
+  it("offers Retry as soon as a step blocks, reading the detail again for it", async () => {
+    // WHY: the detail names the steps a retry may restart. A step that blocks changes the
+    // causes but not the gates or slots, and the owner must not wait for the 30 s poll.
+    const view = CONTRACT_DETAIL_GATE_PASS2.view!;
+    const pass2 = CONTRACT_DETAIL_GATE_PASS2.slots[1]!;
+    const blocked: PauseCause = {
+      reason: "failure_path",
+      detail: "blocked",
+      subject: pass2.engine_slot_id,
+    };
+    const body = openStream([snapshot(RUNNING, view, { seq: 13 })]);
+    serveDetail(CONTRACT_DETAIL_GATE_PASS2);
+    const retryUrl = `${DETAIL_URL}/activations/${pass2.activation_id}:retry`;
+    const base = authenticatedFetch.getMockImplementation()!;
+    authenticatedFetch.mockImplementation((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input) === retryUrl
+        ? Promise.resolve(
+            jsonResponse(200, {
+              ...CONTRACT_DETAIL_GATE_PASS2,
+              status: "paused",
+              pause_reason: "infra",
+            }),
+          )
+        : base(input, init),
+    );
+    renderPage();
+    await run();
+    expect(detailReads()).toBe(1);
+    expect(screen.queryByRole("region", { name: /^Paused/ })).not.toBeInTheDocument();
+
+    const paused: RunHeader = {
+      ...RUNNING,
+      status: "paused",
+      pause_reason: "failure_path",
+      version: 13,
+      allowed_actions: ["resume", "cancel"],
+    };
+    serveDetail({
+      ...CONTRACT_DETAIL_GATE_PASS2,
+      status: "paused",
+      pause_reason: "failure_path",
+      causes: [blocked],
+      view: { ...view, status: "paused", causes: [blocked] },
+      retry_activation_ids: [pass2.activation_id],
+    });
+    const entry = {
+      type: "entry",
+      seq: 14,
+      run_version: 13,
+      kind: "engine.handoff_evaluated",
+      actor_kind: "step_agent",
+      actor: null,
+      node_id: "implement",
+      scope_key: pass2.engine_slot_id,
+      at_us: 1_767_269_160_000_000,
+      rejected: null,
+      patch: [
+        { op: "replace", path: "/status", value: "paused" },
+        { op: "add", path: "/causes/0", value: blocked },
+      ],
+    };
+    body.send(
+      wireText([
+        { event: "entry", id: "14", data: JSON.stringify(entry) },
+        { event: "run", id: null, data: JSON.stringify({ ...paused, type: "run" }) },
+      ]),
+    );
+    await run();
+    await run();
+    // Read again at once for the new causes, well before the poll.
+    expect(detailReads()).toBe(2);
+    const banner = screen.getByRole("region", { name: "Paused: step failed" });
+    expect(banner).toHaveTextContent(
+      `${isolated("Implement")} reported that it is blocked. Retry restarts it from its last handoff.`,
+    );
+    fireEvent.click(within(banner).getByRole("button", { name: `Retry ${isolated("Implement")}` }));
+    await run();
+    expect(posts().filter((post) => post.url !== ACK_URL)).toEqual([{ url: retryUrl, body: {} }]);
+    expect(within(banner).getByTestId("run-retry-steps")).toHaveTextContent("Retrying.");
   });
 
   it("says a run it cannot see is not found, and marks nothing read", async () => {
@@ -735,5 +816,282 @@ describe("RunPage", () => {
     renderPage();
     await run();
     expect(actionNames()).toEqual(expected);
+  });
+});
+
+describe("RunPage Retry against the stream", () => {
+  const VIEW = CONTRACT_DETAIL_GATE_PASS2.view!;
+  const PASS_2 = CONTRACT_DETAIL_GATE_PASS2.slots[1]!;
+  const RETRY_URL = `${DETAIL_URL}/activations/${PASS_2.activation_id}:retry`;
+  const STEP = isolated("Implement");
+  const RETRY_NAME = `Retry ${STEP}`;
+  const onPass2 = (reason: PauseCause["reason"], detail: string): PauseCause => ({
+    reason,
+    detail,
+    subject: PASS_2.engine_slot_id,
+  });
+  const BLOCKED = onPass2("failure_path", "blocked");
+  const RESTARTING = onPass2("infra", "recovery.restarting");
+  const HEAD_MOVED = onPass2("failure_path", "restart:workspace.head_moved");
+
+  const pausedHeader = (reason: RunHeader["pause_reason"], version: number): RunHeader => ({
+    ...RUNNING,
+    status: "paused",
+    pause_reason: reason,
+    version,
+    allowed_actions: ["cancel"],
+  });
+
+  /** The detail of the paused run with `causes`, offering a Retry for `retryIds`. */
+  const pausedDetail = (causes: PauseCause[], retryIds: string[]): RunDetail => ({
+    ...CONTRACT_DETAIL_GATE_PASS2,
+    status: "paused",
+    pause_reason: causes[0]?.reason as RunDetail["pause_reason"],
+    causes,
+    view: { ...VIEW, status: "paused", causes },
+    retry_activation_ids: retryIds,
+  });
+
+  /** A run-log entry at `seq` that applies `patch` to the view. */
+  const entry = (seq: number, patch: unknown[]) => ({
+    event: "entry",
+    id: String(seq),
+    data: JSON.stringify({
+      type: "entry",
+      seq,
+      run_version: 13,
+      kind: "engine.effect_completed",
+      actor_kind: "system",
+      actor: null,
+      node_id: "implement",
+      scope_key: PASS_2.engine_slot_id,
+      at_us: 1_767_269_160_000_000 + seq,
+      rejected: null,
+      patch,
+    }),
+  });
+  const headerFrame = (header: RunHeader) => ({
+    event: "run",
+    id: null,
+    data: JSON.stringify({ ...header, type: "run" }),
+  });
+  /** Entries that touch neither the causes, the gates nor the slots. */
+  const unrelated = (from: number) => [
+    entry(from, [{ op: "add", path: "/armed_timer_keys/-", value: `watchdog_remind:${from}` }]),
+    entry(from + 1, [{ op: "replace", path: "/activations/4/status", value: "running" }]),
+  ];
+  const replaceCause = (cause: PauseCause) => [{ op: "replace", path: "/causes/0", value: cause }];
+
+  /** Serve the retry route with `reply`; every other request as the suite serves it. */
+  function serveRetry(reply: () => Promise<Response>) {
+    const base = authenticatedFetch.getMockImplementation()!;
+    authenticatedFetch.mockImplementation((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input) === RETRY_URL ? reply() : base(input, init),
+    );
+  }
+
+  const retryPosts = () => posts().filter((post) => post.url !== ACK_URL);
+  const banner = () => screen.getByRole("region", { name: /^Paused/ });
+  const bannerBody = () => banner().querySelector("h2 + p")?.textContent ?? null;
+  const retryLine = () => screen.queryByTestId("run-retry-steps");
+
+  /** Open the page on the run paused with its step blocked, offered a Retry. */
+  async function openBlocked(): Promise<TestBody> {
+    const view: RunView = { ...VIEW, status: "paused", causes: [BLOCKED] };
+    const body = openStream([snapshot(pausedHeader("failure_path", 13), view, { seq: 13 })]);
+    serveDetail(pausedDetail([BLOCKED], [PASS_2.activation_id]));
+    renderPage();
+    await run();
+    expect(detailReads()).toBe(1);
+    expect(within(banner()).getByRole("button", { name: RETRY_NAME })).toBeEnabled();
+    return body;
+  }
+
+  it("reads the detail once when the causes change, and not for frames that leave them alone", async () => {
+    // WHY: the causes decide the offered Retry; activation progress must never refetch, and a
+    // detail that lags its view waits for the next trigger rather than looping.
+    const body = await openBlocked();
+    body.send(wireText(unrelated(14)));
+    await run(5_000);
+    expect(detailReads()).toBe(1);
+
+    // A read that races the commit still shows the old cause.
+    serveDetail(pausedDetail([BLOCKED], [PASS_2.activation_id]));
+    body.send(wireText([entry(16, replaceCause(HEAD_MOVED))]));
+    await run();
+    expect(detailReads()).toBe(2);
+    body.send(wireText(unrelated(17)));
+    await run(5_000);
+    expect(detailReads()).toBe(2);
+
+    // The next trigger checks again, and a detail that matches ends the rereads.
+    serveDetail(pausedDetail([HEAD_MOVED], [PASS_2.activation_id]));
+    body.send(wireText([headerFrame(pausedHeader("failure_path", 14))]));
+    await run();
+    expect(detailReads()).toBe(3);
+    body.send(wireText([headerFrame(pausedHeader("failure_path", 15)), ...unrelated(19)]));
+    await run(5_000);
+    expect(detailReads()).toBe(3);
+    expect(bannerBody()).toContain("Reset the branch to the commit of its last handoff");
+  });
+
+  it("reads the detail after a taken retry and drops Retry once the detail offers none", async () => {
+    // WHY: the run stays paused while the step restarts; the owner sees the restart, then
+    // Retry again only if the restart fails.
+    const body = await openBlocked();
+    serveRetry(() =>
+      Promise.resolve(
+        jsonResponse(200, {
+          ...CONTRACT_DETAIL_GATE_PASS2,
+          status: "paused",
+          pause_reason: "infra",
+          allowed_actions: ["cancel"],
+        }),
+      ),
+    );
+    serveDetail(pausedDetail([RESTARTING], []));
+    fireEvent.click(within(banner()).getByRole("button", { name: RETRY_NAME }));
+    await run();
+    await run();
+    expect(retryPosts()).toEqual([{ url: RETRY_URL, body: {} }]);
+    expect(detailReads()).toBe(2);
+    expect(within(banner()).queryByRole("button")).toBeNull();
+    expect(retryLine()).toHaveTextContent("Retrying.");
+
+    // The stream shows the restart; the detail already matches it.
+    body.send(
+      wireText([entry(14, replaceCause(RESTARTING)), headerFrame(pausedHeader("infra", 14))]),
+    );
+    await run();
+    expect(detailReads()).toBe(2);
+    expect(screen.getByRole("region", { name: "Paused: infrastructure" })).toBeInTheDocument();
+    expect(bannerBody()).toBe(`Coral is restarting ${STEP} from its last handoff.`);
+    expect(retryLine()).toHaveTextContent("Retrying.");
+
+    // The restart fails: the step is offered again, without the old result.
+    serveDetail(pausedDetail([HEAD_MOVED], [PASS_2.activation_id]));
+    body.send(
+      wireText([
+        entry(15, replaceCause(HEAD_MOVED)),
+        headerFrame(pausedHeader("failure_path", 15)),
+      ]),
+    );
+    await run();
+    await run();
+    expect(detailReads()).toBe(3);
+    expect(bannerBody()).toContain(`so ${STEP} was not restarted.`);
+    expect(within(banner()).getByRole("button", { name: RETRY_NAME })).toBeEnabled();
+    expect(within(retryLine()!).getAllByRole("status")[0]).toBeEmptyDOMElement();
+
+    // The restart ends and the run goes on: the banner goes with its Retry.
+    body.send(
+      wireText([
+        entry(16, [{ op: "remove", path: "/causes/0" }]),
+        headerFrame({ ...RUNNING, version: 16 }),
+      ]),
+    );
+    await run();
+    expect(screen.queryByRole("region", { name: /^Paused/ })).toBeNull();
+    expect(retryPosts()).toHaveLength(1);
+  });
+
+  it("still says Retrying when the stream shows the restart before the retry answers", async () => {
+    // WHY: the stream can beat the POST's answer; the banner explains the restart, the late
+    // answer is still announced, and it neither crashes nor brings back a stale button.
+    const errors = vi.spyOn(console, "error");
+    onTestFinished(() => errors.mockRestore());
+    const body = await openBlocked();
+    let answerRetry!: (response: Response) => void;
+    serveRetry(
+      () =>
+        new Promise<Response>((resolve) => {
+          answerRetry = resolve;
+        }),
+    );
+    fireEvent.click(within(banner()).getByRole("button", { name: RETRY_NAME }));
+    await run();
+    expect(retryPosts()).toHaveLength(1);
+
+    serveDetail(pausedDetail([RESTARTING], []));
+    body.send(
+      wireText([entry(14, replaceCause(RESTARTING)), headerFrame(pausedHeader("infra", 14))]),
+    );
+    await run();
+    await run();
+    expect(detailReads()).toBe(2);
+    expect(within(banner()).queryByRole("button")).toBeNull();
+    expect(bannerBody()).toBe(`Coral is restarting ${STEP} from its last handoff.`);
+
+    await act(async () =>
+      answerRetry(
+        jsonResponse(200, {
+          ...CONTRACT_DETAIL_GATE_PASS2,
+          status: "paused",
+          pause_reason: "infra",
+          allowed_actions: ["cancel"],
+        }),
+      ),
+    );
+    await run();
+    await run();
+    // The answer still refreshes the run and is announced; the banner keeps explaining the restart.
+    expect(detailReads()).toBe(3);
+    expect(within(banner()).queryByRole("button")).toBeNull();
+    expect(within(retryLine()!).getByRole("status")).toHaveTextContent("Retrying.");
+    expect(bannerBody()).toBe(`Coral is restarting ${STEP} from its last handoff.`);
+    expect(errors).not.toHaveBeenCalled();
+    expect(retryPosts()).toHaveLength(1);
+
+    // The restart ends and the run goes on; a later pause starts without the old result.
+    body.send(
+      wireText([
+        entry(15, [
+          { op: "replace", path: "/status", value: "running" },
+          { op: "remove", path: "/causes/0" },
+        ]),
+        headerFrame({ ...RUNNING, version: 15 }),
+      ]),
+    );
+    await run();
+    expect(screen.queryByRole("region", { name: /^Paused/ })).toBeNull();
+    const userPause: PauseCause = { reason: "user", detail: "user", subject: "" };
+    body.send(
+      wireText([
+        entry(16, [
+          { op: "replace", path: "/status", value: "paused" },
+          { op: "add", path: "/causes/0", value: userPause },
+        ]),
+        headerFrame(pausedHeader("user", 16)),
+      ]),
+    );
+    await run();
+    expect(screen.getByRole("region", { name: "Paused: by you" })).toBeInTheDocument();
+    expect(within(retryLine()!).getByRole("status")).toBeEmptyDOMElement();
+  });
+
+  it("keeps Retry disabled while offline, as the run's actions say, until the network is back", async () => {
+    // WHY: the run's actions already say the page is offline; Retry must not look sendable.
+    await openBlocked();
+    const online = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    onTestFinished(() => online.mockRestore());
+    await act(async () => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    const retry = within(banner()).getByRole("button", { name: RETRY_NAME });
+    expect(retry).toBeDisabled();
+    // The run's actions say it; the banner does not repeat it beside its Retry.
+    expect(
+      within(screen.getByTestId("run-actions")).getByText("You’re offline."),
+    ).toBeInTheDocument();
+    expect(within(banner()).queryByText("You’re offline.")).toBeNull();
+    fireEvent.click(retry);
+    await run();
+    expect(retryPosts()).toEqual([]);
+    online.mockReturnValue(true);
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(retry).toBeEnabled();
+    expect(within(screen.getByTestId("run-actions")).queryByText("You’re offline.")).toBeNull();
   });
 });

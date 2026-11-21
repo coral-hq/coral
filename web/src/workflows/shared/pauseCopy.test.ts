@@ -103,7 +103,11 @@ describe("pauseCopy", () => {
       SERVER.failure_path,
     ],
     ["a run that cannot load", cause("failure_path", "engine.load_failed"), LOAD_FAILED_TEXT],
-    ["another failure", cause("failure_path", "blocked", "implement||:0"), SERVER.failure_path],
+    [
+      "another failure",
+      cause("failure_path", "agent.failed", "implement||:0"),
+      SERVER.failure_path,
+    ],
     [
       "a join waiting on a step that cannot run",
       cause(
@@ -169,6 +173,170 @@ describe("pauseCopy", () => {
   ])("says what %s means", (_name, pauseCause, body) => {
     // WHY: the detail codes the engine records get the roadmap's specific copy.
     expect(pauseCopy(pauseCause.reason, pauseCause, CONTRACT_GRAPH).body).toBe(body);
+  });
+
+  const STEP = isolated("Implement");
+  const SLOT = "implement||a4:2:0";
+  // DESIGN §8.11's bodies, each for the cause the engine records, on a slot the graph names.
+  const SES06_COPY: [string, PauseCause, string][] = [
+    [
+      "a step held while its machine is offline",
+      cause("infra", "infra.host_offline", SLOT),
+      `Your machine went offline. Coral will continue ${STEP} when it’s back.`,
+    ],
+    [
+      "a step restarting after a Retry",
+      cause("infra", "recovery.restarting", SLOT),
+      `Coral is restarting ${STEP} from its last handoff.`,
+    ],
+    [
+      "a step that used its runner wakes",
+      cause("infra", "infra.runner_lost", SLOT),
+      `${STEP} keeps losing its runner. Resume tries again; Retry restarts it from its last handoff.`,
+    ],
+    [
+      "a step whose runner is alive but unreachable",
+      cause("infra", "recovery.runner_alive", SLOT),
+      `${STEP}’s runner is running but can’t reach Coral. Resume tries again.`,
+    ],
+    ...["dispatch.stop_unconfirmed", "session.host_offline", "workspace.backend_unavailable"].map(
+      (code): [string, PauseCause, string] => [
+        `a restart that could not reach the machine (${code})`,
+        cause("failure_path", `restart:${code}`, SLOT),
+        `Your machine went offline before ${STEP} could restart. Retry when it’s back.`,
+      ],
+    ),
+    [
+      "a restart refused because the branch moved",
+      cause("failure_path", "restart:workspace.head_moved", SLOT),
+      `The run’s branch moved outside Coral, so ${STEP} was not restarted. Reset the branch to ` +
+        "the commit of its last handoff, then retry; or cancel the run.",
+    ],
+    ...["workspace.tree_changed", "session.not_bound", ""].map(
+      (code): [string, PauseCause, string] => [
+        `another failed restart (${JSON.stringify(code)})`,
+        cause("failure_path", `restart:${code}`, SLOT),
+        `Coral couldn’t restart ${STEP}. Retry tries again.`,
+      ],
+    ),
+    [
+      "a step whose machine cannot run Coral steps",
+      cause("failure_path", "session.host_unsupported", SLOT),
+      `${STEP}’s machine can’t run Coral steps. Update Coral there, then retry.`,
+    ],
+    [
+      "a step that reported it is blocked",
+      cause("failure_path", "blocked", SLOT),
+      `${STEP} reported that it is blocked. Retry restarts it from its last handoff.`,
+    ],
+    [
+      "missing evidence named in the detail",
+      cause("failure_path", "attempts_exhausted:pytest -q, ruff check src", SLOT),
+      `Missing evidence: ${isolated("pytest -q, ruff check src")}.`,
+    ],
+    [
+      "missing evidence the detail cannot name",
+      cause("failure_path", "attempts_exhausted:", SLOT),
+      SERVER.failure_path,
+    ],
+    // R84's bodies for causes the design left generic.
+    [
+      "a step session someone closed",
+      cause("failure_path", "session.closed", SLOT),
+      `${STEP}’s session was closed, so it can’t go on. Retry starts it again from its last handoff.`,
+    ],
+    [
+      "a runner status the host cannot give",
+      cause("infra", "session.runner_status_unknown", SLOT),
+      `Coral couldn’t check ${STEP}’s runner on your machine. Resume tries again.`,
+    ],
+    // Causes with no body of their own keep the reason's copy.
+    ...["session.not_bound", "session.host_not_permitted", "session.deleted"].map(
+      (code): [string, PauseCause, string] => [
+        `a wake refused with ${code}`,
+        cause("failure_path", code, SLOT),
+        SERVER.failure_path,
+      ],
+    ),
+    ["an exhausted wake retry", cause("infra", "run.contended", SLOT), SERVER.infra],
+    ["a turn that kept failing", cause("infra", "infra.transient", SLOT), SERVER.infra],
+  ];
+
+  it.each(SES06_COPY)("says what %s means", (_name, pauseCause, body) => {
+    // WHY: a held, restarting or failed step says what happens next and what the owner can do.
+    expect(pauseCopy(pauseCause.reason, pauseCause, CONTRACT_GRAPH)).toEqual({
+      ...pauseCopy(pauseCause.reason, null, CONTRACT_GRAPH),
+      body,
+    });
+  });
+
+  it.each<[string, PauseCause, string]>([
+    [
+      "a held step",
+      cause("infra", "infra.host_offline", "deploy||:0"),
+      "Your machine went offline. Coral will continue a step when it’s back.",
+    ],
+    [
+      "a restarting step",
+      cause("infra", "recovery.restarting", "x"),
+      "Coral is restarting a step from its last handoff.",
+    ],
+    [
+      "a step losing its runner",
+      cause("infra", "infra.runner_lost", ""),
+      "A step keeps losing its runner. Resume tries again; Retry restarts it from its last handoff.",
+    ],
+    [
+      "an unreachable runner",
+      cause("infra", "recovery.runner_alive", "deploy||:0"),
+      "A step’s runner is running but can’t reach Coral. Resume tries again.",
+    ],
+    [
+      "a moved branch",
+      cause("failure_path", "restart:workspace.head_moved", "deploy||:0"),
+      "The run’s branch moved outside Coral, so a step was not restarted. Reset the branch to " +
+        "the commit of its last handoff, then retry; or cancel the run.",
+    ],
+    [
+      "a failed restart",
+      cause("failure_path", "restart:workspace.tree_changed", "deploy||:0"),
+      "Coral couldn’t restart a step. Retry tries again.",
+    ],
+    [
+      "an unsupported machine",
+      cause("failure_path", "session.host_unsupported", "deploy||:0"),
+      "A step’s machine can’t run Coral steps. Update Coral there, then retry.",
+    ],
+    [
+      "a blocked step",
+      cause("failure_path", "blocked", "deploy||:0"),
+      "A step reported that it is blocked. Retry restarts it from its last handoff.",
+    ],
+    [
+      "a closed step session",
+      cause("failure_path", "session.closed", "deploy||:0"),
+      "A step’s session was closed, so it can’t go on. Retry starts it again from its last handoff.",
+    ],
+    [
+      "an unknown runner status",
+      cause("infra", "session.runner_status_unknown", "deploy||:0"),
+      "Coral couldn’t check a step’s runner on your machine. Resume tries again.",
+    ],
+    [
+      "a restart on an offline machine",
+      cause("failure_path", "restart:session.host_offline", "deploy||:0"),
+      "Your machine went offline before a step could restart. Retry when it’s back.",
+    ],
+  ])("speaks of %s as a step when the graph cannot name it", (_name, pauseCause, body) => {
+    // WHY: names come only from the graph; a slot id or a missing node is never shown.
+    expect(pauseCopy(pauseCause.reason, pauseCause, CONTRACT_GRAPH).body).toBe(body);
+  });
+
+  it("names the step of a SES-06 cause only once the graph loads", () => {
+    // WHY: before the graph arrives the banner still explains the cause, without a name.
+    expect(pauseCopy("infra", cause("infra", "recovery.restarting", SLOT), null).body).toBe(
+      "Coral is restarting a step from its last handoff.",
+    );
   });
 
   it("falls back to the reason's copy for named steps until the graph loads", () => {
@@ -249,6 +417,16 @@ describe("pauseCopy", () => {
       pauseCopy("failure_path", cause("failure_path", "attempts_exhausted", "ls\u202e"), graph)
         .body,
     ).toBe("Missing evidence: \u2068ls\u202e\u2069.");
+    expect(
+      pauseCopy(
+        "failure_path",
+        cause("failure_path", "attempts_exhausted:ls\u202e", "a||:0"),
+        graph,
+      ).body,
+    ).toBe("Missing evidence: \u2068ls\u202e\u2069.");
+    expect(pauseCopy("infra", cause("infra", "recovery.restarting", "a||:0"), graph).body).toBe(
+      "Coral is restarting \u2068Impl\u202eement\u2069 from its last handoff.",
+    );
   });
 
   it("keeps its client-only copy in curly apostrophes and the server's copy byte for byte", () => {
@@ -275,20 +453,44 @@ describe("pauseCopy for odd reasons and details", () => {
   // Each detail code the engine records, with a subject the graph can name.
   const DETAILS: [string, string][] = [
     ["attempts_exhausted", "pytest -q"],
+    ["attempts_exhausted:pytest -q", "implement||a4:2:0"],
     ["engine.load_failed", ""],
     ["approve_change is waiting for implement, which can no longer run.", "implement"],
     ["anchor_archived", ""],
     ["anchor_deleted", ""],
     ["pending_input", "implement||a4:2:0"],
     ["post_close", "implement||a4:1:0"],
+    ["infra.host_offline", "implement||a4:2:0"],
+    ["recovery.restarting", "implement||a4:2:0"],
+    ["infra.runner_lost", "implement||a4:2:0"],
+    ["recovery.runner_alive", "implement||a4:2:0"],
+    ["restart:session.host_offline", "implement||a4:2:0"],
+    ["restart:workspace.head_moved", "implement||a4:2:0"],
+    ["restart:workspace.tree_changed", "implement||a4:2:0"],
+    ["session.host_unsupported", "implement||a4:2:0"],
+    ["blocked", "implement||a4:2:0"],
+    ["session.closed", "implement||a4:2:0"],
+    ["session.runner_status_unknown", "implement||a4:2:0"],
   ];
   const OWNER: Record<string, PauseReasonName> = {
     attempts_exhausted: "failure_path",
+    "attempts_exhausted:pytest -q": "failure_path",
     "engine.load_failed": "failure_path",
     anchor_archived: "drift",
     anchor_deleted: "drift",
     pending_input: "drift",
     post_close: "drift",
+    "infra.host_offline": "infra",
+    "recovery.restarting": "infra",
+    "infra.runner_lost": "infra",
+    "recovery.runner_alive": "infra",
+    "restart:session.host_offline": "failure_path",
+    "restart:workspace.head_moved": "failure_path",
+    "restart:workspace.tree_changed": "failure_path",
+    "session.host_unsupported": "failure_path",
+    blocked: "failure_path",
+    "session.closed": "failure_path",
+    "session.runner_status_unknown": "infra",
   };
 
   it("gives every reason its own body for a detail code another reason owns", () => {

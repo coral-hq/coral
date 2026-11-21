@@ -23,6 +23,7 @@ export interface RunFilters {
 
 type Operation<Name extends keyof CoralOperations> = CoralOperations[Name];
 type RunActionOperation = Operation<`coral_${RunAction}_run`>;
+type RetryOperation = Operation<"coral_retry_activation">;
 type ListRunsQuery = Operation<"coral_list_runs">["query"];
 
 const RUNS_PATH = "/v1/coral/runs" satisfies Operation<"coral_list_runs">["path"];
@@ -35,11 +36,14 @@ const STREAM_PATH =
   "/v1/coral/runs/{run_id}/stream" satisfies Operation<"coral_stream_run">["path"];
 const ANSWER_PATH =
   "/v1/coral/runs/{run_id}/gates/{node_id}:answer" satisfies Operation<"coral_answer_gate">["path"];
+const RETRY_PATH =
+  "/v1/coral/runs/{run_id}/activations/{activation_id}:retry" satisfies RetryOperation["path"];
 const POST: Operation<"coral_start_run">["method"] &
   Operation<"coral_answer_gate">["method"] &
+  RetryOperation["method"] &
   RunActionOperation["method"] = "POST";
-// Resume sends no cap, so every action posts the empty object.
-const NO_ARGUMENTS: RunActionOperation["body"] = {};
+// Resume sends no cap and a retry takes nothing, so every action posts the empty object.
+const NO_ARGUMENTS: RunActionOperation["body"] & RetryOperation["body"] = {};
 /** The longest a client waits on a refusal's `Retry-After`, whatever it asks for. */
 export const MAX_RETRY_AFTER_MS = 60_000;
 /** Runs read per page of the runs list. */
@@ -132,6 +136,10 @@ export const runsListQueryKey = (scope: string, filters: RunFilters) => {
 export const runActionKey = (scope: string, runId: string) =>
   ["coral-run-action", scope, runId] as const;
 
+/** The key of one step's retry requests, so every view of the run sees one in flight. */
+export const runRetryKey = (scope: string, runId: string, activationId: string) =>
+  ["coral-run-retry", scope, runId, activationId] as const;
+
 const actionPath = (action: RunAction): RunActionOperation["path"] => `${RUN_PATH}:${action}`;
 
 /** One path segment for `id`; an id that cannot name one is the run 404 without a request. */
@@ -211,6 +219,19 @@ export async function postRunAction(
   action: RunAction,
 ): Promise<RunActionOperation["response"]> {
   return readJson(await postJson(runUrl(actionPath(action), runId), NO_ARGUMENTS));
+}
+
+/**
+ * Retry a failed step of a run by its store activation id (one of the detail's
+ * `retry_activation_ids`); a refusal keeps its reason in `details.reason`.
+ */
+export async function retryStep(
+  runId: string,
+  activationId: string,
+): Promise<RetryOperation["response"]> {
+  const activationSegment = segment(activationId);
+  const url = runUrl(RETRY_PATH, runId).replace("{activation_id}", () => activationSegment);
+  return readJson(await postJson(url, NO_ARGUMENTS));
 }
 
 /** Answer a visit of a run's gate; a refusal keeps its reason in `details.reason`. */
