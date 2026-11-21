@@ -736,6 +736,16 @@ class FakeRunStore:
                 active = [r for r in active if (r.workspace_id, r.id) > cursor]
             return active[:limit]
 
+    def unfinished_run_hosts(self, *, workspace_id: int) -> frozenset[str]:
+        with self._lock:
+            return frozenset(
+                host_id
+                for key, run in self.runs.items()
+                if key[0] == workspace_id
+                and run.status in UNFINISHED_RUN_STATUSES
+                and (host_id := self.specs[key].host_id) is not None
+            )
+
     def list_alerts(self, run_id: str, *, workspace_id: int | None = None) -> list[AlertRecord]:
         """Every alert of the run, oldest first, as ``SqlAlchemyAlertStore.list_for_run``."""
         ws = self._resolve_ws(workspace_id)

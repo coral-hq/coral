@@ -8,11 +8,7 @@ type WithPageView = <P extends object>(id: string, Component: ComponentType<P>) 
 const WorkflowsPage = lazy(() =>
   import("./desk/WorkflowsDeskPage").then((m) => ({ default: m.WorkflowsDeskPage })),
 );
-const RunPage = lazy(() =>
-  import("./desk/WorkflowRunPlaceholderPage").then((m) => ({
-    default: m.WorkflowRunPlaceholderPage,
-  })),
-);
+const RunPage = lazy(() => import("./runs/RunPage").then((m) => ({ default: m.RunPage })));
 const EditorPage = lazy(() =>
   import("./editor/WorkflowEditorPage").then((m) => ({ default: m.WorkflowEditorPage })),
 );

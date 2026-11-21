@@ -1,0 +1,649 @@
+{
+  "graph": {
+    "ir_version": 1,
+    "workflow_id": "gated",
+    "name": "Gated change",
+    "description": null,
+    "nodes": [
+      {
+        "id": "start",
+        "kind": "start",
+        "name": null,
+        "goal": null,
+        "question": null,
+        "prompt": null,
+        "roster": [],
+        "harness": null,
+        "attempts": null,
+        "concurrency": null,
+        "list_from": null,
+        "parts": [],
+        "outcomes": [],
+        "evidence": null
+      },
+      {
+        "id": "implement",
+        "kind": "step",
+        "name": "Implement",
+        "goal": "Implement the change",
+        "question": null,
+        "prompt": null,
+        "roster": ["implementer"],
+        "harness": null,
+        "attempts": 3,
+        "concurrency": 1,
+        "list_from": null,
+        "parts": [],
+        "outcomes": [],
+        "evidence": {
+          "ir_version": 1,
+          "scope": "per_agent",
+          "items": [
+            { "item_id": "c1", "run": "pytest -q", "may_modify": false, "allow_args": false }
+          ]
+        }
+      },
+      {
+        "id": "approve_change",
+        "kind": "gate",
+        "name": "Approve change",
+        "goal": null,
+        "question": null,
+        "prompt": "Approve the change?",
+        "roster": [],
+        "harness": null,
+        "attempts": null,
+        "concurrency": null,
+        "list_from": null,
+        "parts": [],
+        "outcomes": ["approve", "reject"],
+        "evidence": null
+      },
+      {
+        "id": "end",
+        "kind": "end",
+        "name": null,
+        "goal": null,
+        "question": null,
+        "prompt": null,
+        "roster": [],
+        "harness": null,
+        "attempts": null,
+        "concurrency": null,
+        "list_from": null,
+        "parts": [],
+        "outcomes": [],
+        "evidence": null
+      }
+    ],
+    "arrows": [
+      {
+        "id": "a1",
+        "source": "start",
+        "target": "implement",
+        "label": null,
+        "kind": "forward",
+        "limit": null,
+        "at_limit": null
+      },
+      {
+        "id": "a2",
+        "source": "implement",
+        "target": "approve_change",
+        "label": null,
+        "kind": "forward",
+        "limit": null,
+        "at_limit": null
+      },
+      {
+        "id": "a3",
+        "source": "approve_change",
+        "target": "end",
+        "label": "approve",
+        "kind": "at_limit",
+        "limit": null,
+        "at_limit": null
+      },
+      {
+        "id": "a4",
+        "source": "approve_change",
+        "target": "implement",
+        "label": "reject",
+        "kind": "back",
+        "limit": 2,
+        "at_limit": "a3"
+      }
+    ],
+    "content_hash": "c97fe28262fa8d88fb69ce0cdc09c7c28bce300372a16cbd2f10270e49d01f97",
+    "analysis": {
+      "join_types": [],
+      "loops": [
+        {
+          "back_arrow_id": "a4",
+          "head": "implement",
+          "tail": "approve_change",
+          "body": ["implement", "approve_change"],
+          "limit": 2,
+          "at_limit_arrow_id": "a3",
+          "entry_arrow_ids": ["a1"]
+        }
+      ],
+      "regions": [],
+      "unresolved": [],
+      "label_sets": [
+        {
+          "node_id": "start",
+          "labels": [],
+          "labelled_arrow_ids": [],
+          "unlabelled_arrow_ids": ["a1"]
+        },
+        {
+          "node_id": "implement",
+          "labels": [],
+          "labelled_arrow_ids": [],
+          "unlabelled_arrow_ids": ["a2"]
+        },
+        {
+          "node_id": "approve_change",
+          "labels": ["reject"],
+          "labelled_arrow_ids": ["a4"],
+          "unlabelled_arrow_ids": []
+        }
+      ],
+      "checked_parts": []
+    }
+  },
+  "live": [
+    {
+      "event": "snapshot",
+      "id": "1",
+      "data": "{\"type\":\"snapshot\",\"protocol\":1,\"view_version\":1,\"seq\":1,\"run_version\":2,\"log_version\":1,\"run\":{\"status\":\"running\",\"pause_reason\":null,\"version\":2,\"finished_at\":null,\"allowed_actions\":[\"pause\",\"cancel\"],\"load_error\":null},\"view\":{\"status\":\"running\",\"causes\":[],\"activations\":[{\"id\":\"start||\",\"status\":\"closed\",\"outcome\":\"completed\"},{\"id\":\"implement||a4:1\",\"status\":\"starting\",\"outcome\":null}],\"slots\":[{\"id\":\"implement||a4:1:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}],\"open_decisions\":[],\"open_gates\":[],\"loop_pass_indexes\":[{\"back_arrow_id\":\"a4\",\"item_path\":[],\"iteration_path\":[],\"pass_index\":1}],\"armed_timer_keys\":[]},\"view_error\":null}"
+    },
+    {
+      "event": "entry",
+      "id": "2",
+      "data": "{\"type\":\"entry\",\"seq\":2,\"run_version\":3,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767268860000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"session_created\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "3",
+      "data": "{\"type\":\"entry\",\"seq\":3,\"run_version\":4,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767268860000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"working\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "4",
+      "data": "{\"type\":\"entry\",\"seq\":4,\"run_version\":5,\"kind\":\"engine.handoff_received\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:1:0\",\"at_us\":1767268920000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"evaluating\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "5",
+      "data": "{\"type\":\"entry\",\"seq\":5,\"run_version\":5,\"kind\":\"engine.handoff_evaluated\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:1:0\",\"at_us\":1767268920000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closing\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "6",
+      "data": "{\"type\":\"entry\",\"seq\":6,\"run_version\":6,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767268920000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/1/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/2\",\"value\":{\"id\":\"approve_change||a4:1\",\"status\":\"running\",\"outcome\":null}},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closed\"},{\"op\":\"add\",\"path\":\"/open_gates/0\",\"value\":\"approve_change||a4:1:1\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/0\",\"value\":\"watchdog_remind:approve_change||a4:1\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/1\",\"value\":\"watchdog_alert:approve_change||a4:1\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "7",
+      "data": "{\"type\":\"entry\",\"seq\":7,\"run_version\":7,\"kind\":\"engine.answer_gate\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767268980000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/2/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/2/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/3\",\"value\":{\"id\":\"implement||a4:2\",\"status\":\"starting\",\"outcome\":null}},{\"op\":\"add\",\"path\":\"/slots/1\",\"value\":{\"id\":\"implement||a4:2:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}},{\"op\":\"remove\",\"path\":\"/open_gates/0\",\"value\":null},{\"op\":\"replace\",\"path\":\"/loop_pass_indexes/0/pass_index\",\"value\":2},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/1\",\"value\":null},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/0\",\"value\":null}]}"
+    },
+    {
+      "event": "entry",
+      "id": "8",
+      "data": "{\"type\":\"entry\",\"seq\":8,\"run_version\":8,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767269040000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"session_created\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "9",
+      "data": "{\"type\":\"entry\",\"seq\":9,\"run_version\":9,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767269040000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/3/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"working\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "10",
+      "data": "{\"type\":\"entry\",\"seq\":10,\"run_version\":10,\"kind\":\"engine.handoff_received\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:2:0\",\"at_us\":1767269100000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/3/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"evaluating\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "11",
+      "data": "{\"type\":\"entry\",\"seq\":11,\"run_version\":10,\"kind\":\"engine.handoff_evaluated\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:2:0\",\"at_us\":1767269100000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closing\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "12",
+      "data": "{\"type\":\"entry\",\"seq\":12,\"run_version\":11,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767269100000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/3/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/3/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/4\",\"value\":{\"id\":\"approve_change||a4:2\",\"status\":\"running\",\"outcome\":null}},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closed\"},{\"op\":\"add\",\"path\":\"/open_gates/0\",\"value\":\"approve_change||a4:2:2\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/0\",\"value\":\"watchdog_remind:approve_change||a4:2\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/1\",\"value\":\"watchdog_alert:approve_change||a4:2\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "13",
+      "data": "{\"type\":\"entry\",\"seq\":13,\"run_version\":12,\"kind\":\"engine.pause_run\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767269160000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"paused\"},{\"op\":\"add\",\"path\":\"/causes/0\",\"value\":{\"reason\":\"user\",\"detail\":\"user\",\"subject\":\"\"}}]}"
+    },
+    {
+      "event": "run",
+      "id": null,
+      "data": "{\"status\":\"paused\",\"pause_reason\":\"user\",\"version\":12,\"finished_at\":null,\"allowed_actions\":[\"resume\",\"cancel\"],\"load_error\":null,\"type\":\"run\"}"
+    },
+    {
+      "event": "entry",
+      "id": "14",
+      "data": "{\"type\":\"entry\",\"seq\":14,\"run_version\":13,\"kind\":\"engine.resume_run\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767269220000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"running\"},{\"op\":\"remove\",\"path\":\"/causes/0\",\"value\":null}]}"
+    },
+    {
+      "event": "run",
+      "id": null,
+      "data": "{\"status\":\"running\",\"pause_reason\":null,\"version\":13,\"finished_at\":null,\"allowed_actions\":[\"pause\",\"cancel\"],\"load_error\":null,\"type\":\"run\"}"
+    },
+    {
+      "event": "entry",
+      "id": "15",
+      "data": "{\"type\":\"entry\",\"seq\":15,\"run_version\":14,\"kind\":\"engine.answer_gate\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767269280000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"completed\"},{\"op\":\"replace\",\"path\":\"/activations/4/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/4/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/5\",\"value\":{\"id\":\"end||\",\"status\":\"closed\",\"outcome\":\"completed\"}},{\"op\":\"remove\",\"path\":\"/open_gates/0\",\"value\":null},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/1\",\"value\":null},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/0\",\"value\":null}]}"
+    },
+    {
+      "event": "run",
+      "id": null,
+      "data": "{\"status\":\"completed\",\"pause_reason\":null,\"version\":14,\"finished_at\":1767269280,\"allowed_actions\":[],\"load_error\":null,\"type\":\"run\"}"
+    },
+    { "event": null, "id": null, "data": "[DONE]" }
+  ],
+  "live_raw": "event: snapshot\nid: 1\ndata: {\"type\":\"snapshot\",\"protocol\":1,\"view_version\":1,\"seq\":1,\"run_version\":2,\"log_version\":1,\"run\":{\"status\":\"running\",\"pause_reason\":null,\"version\":2,\"finished_at\":null,\"allowed_actions\":[\"pause\",\"cancel\"],\"load_error\":null},\"view\":{\"status\":\"running\",\"causes\":[],\"activations\":[{\"id\":\"start||\",\"status\":\"closed\",\"outcome\":\"completed\"},{\"id\":\"implement||a4:1\",\"status\":\"starting\",\"outcome\":null}],\"slots\":[{\"id\":\"implement||a4:1:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}],\"open_decisions\":[],\"open_gates\":[],\"loop_pass_indexes\":[{\"back_arrow_id\":\"a4\",\"item_path\":[],\"iteration_path\":[],\"pass_index\":1}],\"armed_timer_keys\":[]},\"view_error\":null}\n\nevent: entry\nid: 2\ndata: {\"type\":\"entry\",\"seq\":2,\"run_version\":3,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767268860000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"session_created\"}]}\n\nevent: entry\nid: 3\ndata: {\"type\":\"entry\",\"seq\":3,\"run_version\":4,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767268860000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"working\"}]}\n\nevent: entry\nid: 4\ndata: {\"type\":\"entry\",\"seq\":4,\"run_version\":5,\"kind\":\"engine.handoff_received\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:1:0\",\"at_us\":1767268920000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"evaluating\"}]}\n\nevent: entry\nid: 5\ndata: {\"type\":\"entry\",\"seq\":5,\"run_version\":5,\"kind\":\"engine.handoff_evaluated\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:1:0\",\"at_us\":1767268920000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closing\"}]}\n\nevent: entry\nid: 6\ndata: {\"type\":\"entry\",\"seq\":6,\"run_version\":6,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767268920000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/1/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/1/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/2\",\"value\":{\"id\":\"approve_change||a4:1\",\"status\":\"running\",\"outcome\":null}},{\"op\":\"replace\",\"path\":\"/slots/0/status\",\"value\":\"closed\"},{\"op\":\"add\",\"path\":\"/open_gates/0\",\"value\":\"approve_change||a4:1:1\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/0\",\"value\":\"watchdog_remind:approve_change||a4:1\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/1\",\"value\":\"watchdog_alert:approve_change||a4:1\"}]}\n\nevent: entry\nid: 7\ndata: {\"type\":\"entry\",\"seq\":7,\"run_version\":7,\"kind\":\"engine.answer_gate\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767268980000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/2/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/2/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/3\",\"value\":{\"id\":\"implement||a4:2\",\"status\":\"starting\",\"outcome\":null}},{\"op\":\"add\",\"path\":\"/slots/1\",\"value\":{\"id\":\"implement||a4:2:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}},{\"op\":\"remove\",\"path\":\"/open_gates/0\",\"value\":null},{\"op\":\"replace\",\"path\":\"/loop_pass_indexes/0/pass_index\",\"value\":2},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/1\",\"value\":null},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/0\",\"value\":null}]}\n\nevent: entry\nid: 8\ndata: {\"type\":\"entry\",\"seq\":8,\"run_version\":8,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767269040000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"session_created\"}]}\n\nevent: entry\nid: 9\ndata: {\"type\":\"entry\",\"seq\":9,\"run_version\":9,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767269040000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/3/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"working\"}]}\n\nevent: entry\nid: 10\ndata: {\"type\":\"entry\",\"seq\":10,\"run_version\":10,\"kind\":\"engine.handoff_received\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:2:0\",\"at_us\":1767269100000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/3/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"evaluating\"}]}\n\nevent: entry\nid: 11\ndata: {\"type\":\"entry\",\"seq\":11,\"run_version\":10,\"kind\":\"engine.handoff_evaluated\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:2:0\",\"at_us\":1767269100000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closing\"}]}\n\nevent: entry\nid: 12\ndata: {\"type\":\"entry\",\"seq\":12,\"run_version\":11,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767269100000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/3/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/3/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/4\",\"value\":{\"id\":\"approve_change||a4:2\",\"status\":\"running\",\"outcome\":null}},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closed\"},{\"op\":\"add\",\"path\":\"/open_gates/0\",\"value\":\"approve_change||a4:2:2\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/0\",\"value\":\"watchdog_remind:approve_change||a4:2\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/1\",\"value\":\"watchdog_alert:approve_change||a4:2\"}]}\n\nevent: entry\nid: 13\ndata: {\"type\":\"entry\",\"seq\":13,\"run_version\":12,\"kind\":\"engine.pause_run\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767269160000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"paused\"},{\"op\":\"add\",\"path\":\"/causes/0\",\"value\":{\"reason\":\"user\",\"detail\":\"user\",\"subject\":\"\"}}]}\n\nevent: run\ndata: {\"status\":\"paused\",\"pause_reason\":\"user\",\"version\":12,\"finished_at\":null,\"allowed_actions\":[\"resume\",\"cancel\"],\"load_error\":null,\"type\":\"run\"}\n\nevent: entry\nid: 14\ndata: {\"type\":\"entry\",\"seq\":14,\"run_version\":13,\"kind\":\"engine.resume_run\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767269220000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"running\"},{\"op\":\"remove\",\"path\":\"/causes/0\",\"value\":null}]}\n\nevent: run\ndata: {\"status\":\"running\",\"pause_reason\":null,\"version\":13,\"finished_at\":null,\"allowed_actions\":[\"pause\",\"cancel\"],\"load_error\":null,\"type\":\"run\"}\n\nevent: entry\nid: 15\ndata: {\"type\":\"entry\",\"seq\":15,\"run_version\":14,\"kind\":\"engine.answer_gate\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767269280000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"completed\"},{\"op\":\"replace\",\"path\":\"/activations/4/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/4/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/5\",\"value\":{\"id\":\"end||\",\"status\":\"closed\",\"outcome\":\"completed\"}},{\"op\":\"remove\",\"path\":\"/open_gates/0\",\"value\":null},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/1\",\"value\":null},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/0\",\"value\":null}]}\n\nevent: run\ndata: {\"status\":\"completed\",\"pause_reason\":null,\"version\":14,\"finished_at\":1767269280,\"allowed_actions\":[],\"load_error\":null,\"type\":\"run\"}\n\ndata: [DONE]\n\n",
+  "live_marks": {
+    "implement_running": 3,
+    "gate1_open": 6,
+    "gate1_answered": 7,
+    "pass2_running": 9,
+    "gate2_open": 12,
+    "paused": 13,
+    "resumed": 14,
+    "gate2_answered": 15,
+    "finished": 15
+  },
+  "resume_after": 6,
+  "resumed": [
+    {
+      "event": "run",
+      "id": null,
+      "data": "{\"status\":\"completed\",\"pause_reason\":null,\"version\":14,\"finished_at\":1767269280,\"allowed_actions\":[],\"load_error\":null,\"type\":\"run\"}"
+    },
+    {
+      "event": "entry",
+      "id": "7",
+      "data": "{\"type\":\"entry\",\"seq\":7,\"run_version\":7,\"kind\":\"engine.answer_gate\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767268980000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/2/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/2/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/3\",\"value\":{\"id\":\"implement||a4:2\",\"status\":\"starting\",\"outcome\":null}},{\"op\":\"add\",\"path\":\"/slots/1\",\"value\":{\"id\":\"implement||a4:2:0\",\"status\":\"pending\",\"pending_input\":false,\"drift\":false}},{\"op\":\"remove\",\"path\":\"/open_gates/0\",\"value\":null},{\"op\":\"replace\",\"path\":\"/loop_pass_indexes/0/pass_index\",\"value\":2},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/1\",\"value\":null},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/0\",\"value\":null}]}"
+    },
+    {
+      "event": "entry",
+      "id": "8",
+      "data": "{\"type\":\"entry\",\"seq\":8,\"run_version\":8,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767269040000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"session_created\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "9",
+      "data": "{\"type\":\"entry\",\"seq\":9,\"run_version\":9,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767269040000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/3/status\",\"value\":\"running\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"working\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "10",
+      "data": "{\"type\":\"entry\",\"seq\":10,\"run_version\":10,\"kind\":\"engine.handoff_received\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:2:0\",\"at_us\":1767269100000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/3/status\",\"value\":\"evaluating\"},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"evaluating\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "11",
+      "data": "{\"type\":\"entry\",\"seq\":11,\"run_version\":10,\"kind\":\"engine.handoff_evaluated\",\"actor_kind\":\"step_agent\",\"actor\":null,\"node_id\":\"implement\",\"scope_key\":\"implement||a4:2:0\",\"at_us\":1767269100000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closing\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "12",
+      "data": "{\"type\":\"entry\",\"seq\":12,\"run_version\":11,\"kind\":\"engine.effect_completed\",\"actor_kind\":\"engine\",\"actor\":null,\"node_id\":null,\"scope_key\":null,\"at_us\":1767269100000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/activations/3/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/3/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/4\",\"value\":{\"id\":\"approve_change||a4:2\",\"status\":\"running\",\"outcome\":null}},{\"op\":\"replace\",\"path\":\"/slots/1/status\",\"value\":\"closed\"},{\"op\":\"add\",\"path\":\"/open_gates/0\",\"value\":\"approve_change||a4:2:2\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/0\",\"value\":\"watchdog_remind:approve_change||a4:2\"},{\"op\":\"add\",\"path\":\"/armed_timer_keys/1\",\"value\":\"watchdog_alert:approve_change||a4:2\"}]}"
+    },
+    {
+      "event": "entry",
+      "id": "13",
+      "data": "{\"type\":\"entry\",\"seq\":13,\"run_version\":12,\"kind\":\"engine.pause_run\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767269160000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"paused\"},{\"op\":\"add\",\"path\":\"/causes/0\",\"value\":{\"reason\":\"user\",\"detail\":\"user\",\"subject\":\"\"}}]}"
+    },
+    {
+      "event": "entry",
+      "id": "14",
+      "data": "{\"type\":\"entry\",\"seq\":14,\"run_version\":13,\"kind\":\"engine.resume_run\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767269220000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"running\"},{\"op\":\"remove\",\"path\":\"/causes/0\",\"value\":null}]}"
+    },
+    {
+      "event": "entry",
+      "id": "15",
+      "data": "{\"type\":\"entry\",\"seq\":15,\"run_version\":14,\"kind\":\"engine.answer_gate\",\"actor_kind\":\"user\",\"actor\":\"alice\",\"node_id\":null,\"scope_key\":null,\"at_us\":1767269280000000,\"rejected\":null,\"patch\":[{\"op\":\"replace\",\"path\":\"/status\",\"value\":\"completed\"},{\"op\":\"replace\",\"path\":\"/activations/4/status\",\"value\":\"closed\"},{\"op\":\"replace\",\"path\":\"/activations/4/outcome\",\"value\":\"completed\"},{\"op\":\"add\",\"path\":\"/activations/5\",\"value\":{\"id\":\"end||\",\"status\":\"closed\",\"outcome\":\"completed\"}},{\"op\":\"remove\",\"path\":\"/open_gates/0\",\"value\":null},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/1\",\"value\":null},{\"op\":\"remove\",\"path\":\"/armed_timer_keys/0\",\"value\":null}]}"
+    },
+    { "event": null, "id": null, "data": "[DONE]" }
+  ],
+  "final_snapshot": [
+    {
+      "event": "snapshot",
+      "id": "15",
+      "data": "{\"type\":\"snapshot\",\"protocol\":1,\"view_version\":1,\"seq\":15,\"run_version\":14,\"log_version\":1,\"run\":{\"status\":\"completed\",\"pause_reason\":null,\"version\":14,\"finished_at\":1767269280,\"allowed_actions\":[],\"load_error\":null},\"view\":{\"status\":\"completed\",\"causes\":[],\"activations\":[{\"id\":\"start||\",\"status\":\"closed\",\"outcome\":\"completed\"},{\"id\":\"implement||a4:1\",\"status\":\"closed\",\"outcome\":\"completed\"},{\"id\":\"approve_change||a4:1\",\"status\":\"closed\",\"outcome\":\"completed\"},{\"id\":\"implement||a4:2\",\"status\":\"closed\",\"outcome\":\"completed\"},{\"id\":\"approve_change||a4:2\",\"status\":\"closed\",\"outcome\":\"completed\"},{\"id\":\"end||\",\"status\":\"closed\",\"outcome\":\"completed\"}],\"slots\":[{\"id\":\"implement||a4:1:0\",\"status\":\"closed\",\"pending_input\":false,\"drift\":false},{\"id\":\"implement||a4:2:0\",\"status\":\"closed\",\"pending_input\":false,\"drift\":false}],\"open_decisions\":[],\"open_gates\":[],\"loop_pass_indexes\":[{\"back_arrow_id\":\"a4\",\"item_path\":[],\"iteration_path\":[],\"pass_index\":2}],\"armed_timer_keys\":[]},\"view_error\":null}"
+    },
+    { "event": null, "id": null, "data": "[DONE]" }
+  ],
+  "detail_gate_pass1": {
+    "run_id": "84170e76f35c7a90d1280a24a7230fc9",
+    "workflow_id": "dddddddddddddddddddddddddddddddd",
+    "version_id": "500b0d8fd9e777a211394991beebda56",
+    "title": "Ship the bridge",
+    "status": "running",
+    "pause_reason": null,
+    "created_at": 1767268800,
+    "updated_at": 1767268920,
+    "finished_at": null,
+    "activation_count": 3,
+    "allowed_actions": ["pause", "cancel"],
+    "spend": {
+      "estimate": true,
+      "usd": 0.84,
+      "live_usd": 0.91,
+      "tokens": {
+        "input": 182000,
+        "output": 12400,
+        "total": 194400,
+        "cache_read": 150000,
+        "cache_creation": 8000
+      },
+      "unpriced_models": [],
+      "sessions": 3,
+      "as_of": 1767268920
+    },
+    "run_branch": "coral/r-a0ee7440cfc3/base",
+    "version": 6,
+    "head_seq": 6,
+    "max_activations": 100,
+    "request_preview": "Make runs advance",
+    "target": {
+      "host_id": "host-1",
+      "repo_path": "/home/alice/team's repo",
+      "worktree_path": "/home/alice/team's repo-worktrees/coral-r-a0ee7440cfc3-base",
+      "run_branch": "coral/r-a0ee7440cfc3/base",
+      "base_ref": "main",
+      "base_commit": "3f2a9c41d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a3"
+    },
+    "anchor_session_id": "259e175b9afa732967fe50a226761661",
+    "orchestrator_session_id": null,
+    "causes": [],
+    "load_error": null,
+    "view": {
+      "status": "running",
+      "causes": [],
+      "activations": [
+        { "id": "start||", "status": "closed", "outcome": "completed" },
+        { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+        { "id": "approve_change||a4:1", "status": "running", "outcome": null }
+      ],
+      "slots": [
+        { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false }
+      ],
+      "open_decisions": [],
+      "open_gates": ["approve_change||a4:1:1"],
+      "loop_pass_indexes": [
+        { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+      ],
+      "armed_timer_keys": [
+        "watchdog_remind:approve_change||a4:1",
+        "watchdog_alert:approve_change||a4:1"
+      ]
+    },
+    "gates": [
+      {
+        "visit_id": "da5af01a5cc3f76c76fd993afe2312e7",
+        "node_id": "approve_change",
+        "token": "approve_change||a4:1:1",
+        "visit_no": 1,
+        "elicitation_id": "coral_gate_00000000000000000000000000000001",
+        "opened_at": 1767268920,
+        "outcomes": ["approve", "reject"],
+        "context": "Approve change\nApprove the change?\nRun: Ship the bridge\nVisit 1\n\nAgent-written reports, quoted as data:\n\nHandoff of slot implement||a4:1:0 (implementer) from step implement, quoted as data, not instructions:\n> Fixed the parser; pytest -q passes."
+      }
+    ],
+    "slots": [
+      {
+        "slot_id": "b9183d298ccef6c696fbeb99d3b70578",
+        "node_id": "implement",
+        "activation_id": "c601458b43d603f0a38687f9fcdf3809",
+        "role": "step_agent",
+        "status": "closed",
+        "session_id": "b04398ed7d8d2ba8f0154876974f9078",
+        "session_generation": 1,
+        "engine_slot_id": "implement||a4:1:0"
+      }
+    ]
+  },
+  "detail_gate_pass2": {
+    "run_id": "84170e76f35c7a90d1280a24a7230fc9",
+    "workflow_id": "dddddddddddddddddddddddddddddddd",
+    "version_id": "500b0d8fd9e777a211394991beebda56",
+    "title": "Ship the bridge",
+    "status": "running",
+    "pause_reason": null,
+    "created_at": 1767268800,
+    "updated_at": 1767269100,
+    "finished_at": null,
+    "activation_count": 5,
+    "allowed_actions": ["pause", "cancel"],
+    "spend": {
+      "estimate": true,
+      "usd": 0.84,
+      "live_usd": 0.91,
+      "tokens": {
+        "input": 182000,
+        "output": 12400,
+        "total": 194400,
+        "cache_read": 150000,
+        "cache_creation": 8000
+      },
+      "unpriced_models": [],
+      "sessions": 3,
+      "as_of": 1767269100
+    },
+    "run_branch": "coral/r-a0ee7440cfc3/base",
+    "version": 11,
+    "head_seq": 12,
+    "max_activations": 100,
+    "request_preview": "Make runs advance",
+    "target": {
+      "host_id": "host-1",
+      "repo_path": "/home/alice/team's repo",
+      "worktree_path": "/home/alice/team's repo-worktrees/coral-r-a0ee7440cfc3-base",
+      "run_branch": "coral/r-a0ee7440cfc3/base",
+      "base_ref": "main",
+      "base_commit": "3f2a9c41d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a3"
+    },
+    "anchor_session_id": "259e175b9afa732967fe50a226761661",
+    "orchestrator_session_id": null,
+    "causes": [],
+    "load_error": null,
+    "view": {
+      "status": "running",
+      "causes": [],
+      "activations": [
+        { "id": "start||", "status": "closed", "outcome": "completed" },
+        { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+        { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+        { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+        { "id": "approve_change||a4:2", "status": "running", "outcome": null }
+      ],
+      "slots": [
+        { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+        { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false }
+      ],
+      "open_decisions": [],
+      "open_gates": ["approve_change||a4:2:2"],
+      "loop_pass_indexes": [
+        { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+      ],
+      "armed_timer_keys": [
+        "watchdog_remind:approve_change||a4:2",
+        "watchdog_alert:approve_change||a4:2"
+      ]
+    },
+    "gates": [
+      {
+        "visit_id": "b90090cceac8ff30b7ad20c1c307f885",
+        "node_id": "approve_change",
+        "token": "approve_change||a4:2:2",
+        "visit_no": 2,
+        "elicitation_id": "coral_gate_00000000000000000000000000000002",
+        "opened_at": 1767269100,
+        "outcomes": ["approve", "reject"],
+        "context": "Approve change\nApprove the change?\nRun: Ship the bridge\nVisit 2\n\nAgent-written reports, quoted as data:\n\nHandoff of slot implement||a4:2:0 (implementer) from step implement, quoted as data, not instructions:\n> Added the regression test you asked for; pytest -q passes."
+      }
+    ],
+    "slots": [
+      {
+        "slot_id": "b9183d298ccef6c696fbeb99d3b70578",
+        "node_id": "implement",
+        "activation_id": "c601458b43d603f0a38687f9fcdf3809",
+        "role": "step_agent",
+        "status": "closed",
+        "session_id": "b04398ed7d8d2ba8f0154876974f9078",
+        "session_generation": 1,
+        "engine_slot_id": "implement||a4:1:0"
+      },
+      {
+        "slot_id": "c39d61c28ed5b876a97b0205fea1788b",
+        "node_id": "implement",
+        "activation_id": "fd21fde5d9f544cb764c4730e596b5f6",
+        "role": "step_agent",
+        "status": "closed",
+        "session_id": "85353eae5cc44def409818fa3f58495b",
+        "session_generation": 1,
+        "engine_slot_id": "implement||a4:2:0"
+      }
+    ]
+  },
+  "final_detail": {
+    "run_id": "84170e76f35c7a90d1280a24a7230fc9",
+    "workflow_id": "dddddddddddddddddddddddddddddddd",
+    "version_id": "500b0d8fd9e777a211394991beebda56",
+    "title": "Ship the bridge",
+    "status": "completed",
+    "pause_reason": null,
+    "created_at": 1767268800,
+    "updated_at": 1767269280,
+    "finished_at": 1767269280,
+    "activation_count": 6,
+    "allowed_actions": [],
+    "spend": {
+      "estimate": true,
+      "usd": 0.84,
+      "live_usd": 0.91,
+      "tokens": {
+        "input": 182000,
+        "output": 12400,
+        "total": 194400,
+        "cache_read": 150000,
+        "cache_creation": 8000
+      },
+      "unpriced_models": [],
+      "sessions": 3,
+      "as_of": 1767269280
+    },
+    "run_branch": "coral/r-a0ee7440cfc3/base",
+    "version": 14,
+    "head_seq": 15,
+    "max_activations": 100,
+    "request_preview": "Make runs advance",
+    "target": {
+      "host_id": "host-1",
+      "repo_path": "/home/alice/team's repo",
+      "worktree_path": "/home/alice/team's repo-worktrees/coral-r-a0ee7440cfc3-base",
+      "run_branch": "coral/r-a0ee7440cfc3/base",
+      "base_ref": "main",
+      "base_commit": "3f2a9c41d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a3"
+    },
+    "anchor_session_id": "259e175b9afa732967fe50a226761661",
+    "orchestrator_session_id": null,
+    "causes": [],
+    "load_error": null,
+    "view": {
+      "status": "completed",
+      "causes": [],
+      "activations": [
+        { "id": "start||", "status": "closed", "outcome": "completed" },
+        { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+        { "id": "approve_change||a4:1", "status": "closed", "outcome": "completed" },
+        { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+        { "id": "approve_change||a4:2", "status": "closed", "outcome": "completed" },
+        { "id": "end||", "status": "closed", "outcome": "completed" }
+      ],
+      "slots": [
+        { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+        { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false }
+      ],
+      "open_decisions": [],
+      "open_gates": [],
+      "loop_pass_indexes": [
+        { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 2 }
+      ],
+      "armed_timer_keys": []
+    },
+    "gates": [],
+    "slots": [
+      {
+        "slot_id": "b9183d298ccef6c696fbeb99d3b70578",
+        "node_id": "implement",
+        "activation_id": "c601458b43d603f0a38687f9fcdf3809",
+        "role": "step_agent",
+        "status": "closed",
+        "session_id": "b04398ed7d8d2ba8f0154876974f9078",
+        "session_generation": 1,
+        "engine_slot_id": "implement||a4:1:0"
+      },
+      {
+        "slot_id": "c39d61c28ed5b876a97b0205fea1788b",
+        "node_id": "implement",
+        "activation_id": "fd21fde5d9f544cb764c4730e596b5f6",
+        "role": "step_agent",
+        "status": "closed",
+        "session_id": "85353eae5cc44def409818fa3f58495b",
+        "session_generation": 1,
+        "engine_slot_id": "implement||a4:2:0"
+      }
+    ]
+  },
+  "outcome": {
+    "run_id": "84170e76f35c7a90d1280a24a7230fc9",
+    "status": "completed",
+    "finished_at": 1767269280,
+    "branch": "coral/r-a0ee7440cfc3/base",
+    "host_id": "host-1",
+    "repo_path": "/home/alice/team's repo",
+    "worktree_path": "/home/alice/team's repo-worktrees/coral-r-a0ee7440cfc3-base",
+    "base_commit": "3f2a9c41d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a3",
+    "head_commit": "9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c",
+    "diff": {
+      "from_commit": "3f2a9c41d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a3",
+      "to_commit": "9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c",
+      "files_changed": 3,
+      "insertions": 42,
+      "deletions": 7,
+      "paths": ["docs/release\\u{202E}notes.md", "src/parser.py", "tests/test_parser.py"],
+      "paths_truncated": false
+    },
+    "diff_unavailable": null,
+    "checkout": {
+      "command": "git -C '/home/alice/team'\"'\"'s repo' checkout --detach refs/heads/coral/r-a0ee7440cfc3/base",
+      "worktree_command": "cd '/home/alice/team'\"'\"'s repo-worktrees/coral-r-a0ee7440cfc3-base'",
+      "unavailable": null
+    }
+  },
+  "pause_messages": {
+    "by_reason": {
+      "gate": "The run is waiting at a gate.",
+      "budget": "The run reached its activation cap.",
+      "plan_limit": "A step reached its plan's usage limit.",
+      "rejected_calls": "A step kept making calls Coral refused.",
+      "infra": "A step kept failing to finish its turn.",
+      "liveness": "A step is waiting for one that can no longer run.",
+      "authority_revoked": "The run lost the authority it was started with.",
+      "merge_conflict": "The run's changes conflict with its base branch.",
+      "failure_path": "A step or one of Coral's own actions failed.",
+      "engine_upgrade": "The run needs a newer Coral engine.",
+      "drift": "A session the run uses was changed outside Coral.",
+      "auth": "A step's harness needs you to sign in again."
+    },
+    "unknown": "The run paused."
+  }
+}

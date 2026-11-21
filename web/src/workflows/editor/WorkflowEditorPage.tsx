@@ -52,6 +52,7 @@ export function WorkflowEditorPage() {
   }
   return (
     <EditorSurface
+      workflowId={workflow.data.id}
       workflowKey={workflowKey}
       name={workflow.data.name}
       initialYaml={workflow.data.yaml}
@@ -61,11 +62,13 @@ export function WorkflowEditorPage() {
 }
 
 function EditorSurface({
+  workflowId,
   workflowKey,
   name,
   initialYaml,
   initialCompiled,
 }: {
+  workflowId: string;
   workflowKey: string;
   name: string;
   initialYaml: string;
@@ -133,7 +136,12 @@ function EditorSurface({
         </div>
       </div>
       <ProblemList diagnostics={diagnostics} error={validation.error} saveError={save.error} />
-      <StartRunDialog workflowKey={workflowKey} open={startOpen} onOpenChange={setStartOpen} />
+      <StartRunDialog
+        workflowId={workflowId}
+        workflowKey={workflowKey}
+        open={startOpen}
+        onOpenChange={setStartOpen}
+      />
     </div>
   );
 }

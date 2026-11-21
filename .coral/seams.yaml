@@ -2902,13 +2902,14 @@ seams:
       - web/src/shell/Sidebar.test.tsx
     budget_lines: 40
     budget_exception:
-      lines: 144
+      lines: 152
       reason: >-
         Changed lines against the upstream base, per file. The production
         files are within budget: App.tsx 3, CommandPalette.tsx 13, Sidebar.tsx
-        34 (S34's share; S80 and S89 change it too). web/src/App.test.tsx (144:
+        34 (S34's share; S80 and S89 change it too). web/src/App.test.tsx (152:
         the Coral desk route matrix, its identity mock and QueryClient wrapper,
-        and the two anchors), web/src/shell/Sidebar.test.tsx (65) and
+        the run page's stream stub, and the three anchors),
+        web/src/shell/Sidebar.test.tsx (65) and
         web/src/shell/CommandPalette.test.tsx (35) hold the tests.
       approver: nicholasjano (delegated)
     anchor_exempt: []
@@ -3061,6 +3062,29 @@ seams:
       - web/src/main.tsx
     tests:
       - web/src/workflows/CoralRuntime.test.tsx
+    budget_lines: 10
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S86
+    title: A run session's Chat header links back to its run
+    owner: WS-WEB
+    status: landed
+    category: coral-specific
+    note: >-
+      ChatHeader.tsx renders web/src/workflows/session/CoralRunChip beside
+      CreatedBySession. On a session that carries Coral's coral.run_id label
+      (a run's anchor, orchestrator or step) it shows "Part of a run · Open
+      run", linking to the run view (a step opens on its own transcript). It
+      reads only the cached session snapshot, asks whether Coral is on only
+      for such a session, and renders nothing for any other session or while
+      Coral is off. ChatHeader has no extension slot, so this is one import and
+      one JSX line.
+    files:
+      - web/src/shell/ChatHeader.tsx
+    tests:
+      - web/src/workflows/session/CoralRunChip.test.tsx
     budget_lines: 10
     anchor_exempt: []
     upstream_first: false

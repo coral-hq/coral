@@ -19,6 +19,16 @@ export interface Analysis {
   unresolved: UnresolvedFact[];
 }
 
+/** How many alerts a bulk mark-as-read changed; 0 for another user's or an unknown run. */
+export interface BulkAckOut {
+  acked: number;
+}
+
+/** The body of marking a run's low-priority alerts read: the run's id. */
+export interface BulkAckRequest {
+  run_id: string;
+}
+
 /** Resolution of a ``list_from`` reference. */
 export interface CheckedPart {
   node_id: string;
@@ -144,8 +154,12 @@ export interface GateAnswerRequest {
   visit_token: string;
 }
 
-/** A gate visit waiting for its answer. */
+/**
+ * A gate visit waiting for its answer. ``context`` is what its approval prompt asks;
+ * ``None`` when the run's engine state cannot be loaded or does not hold the visit.
+ */
 export interface GateOut {
+  context: string | null;
   elicitation_id: string | null;
   node_id: string;
   opened_at: number;
@@ -252,6 +266,34 @@ export interface LoopPassView {
   pass_index: number;
 }
 
+/**
+ * How to check out a run's branch: ``command`` moves the repository's main checkout to
+ * the branch tip (detached), ``worktree_command`` opens the run's worktree. Both are
+ * ``None`` with ``unavailable`` set when no safe command can be built.
+ */
+export interface OutcomeCheckout {
+  command: string | null;
+  unavailable: "no_worktree" | "unsafe_path" | "non_posix_path" | null;
+  worktree_command: string | null;
+}
+
+/**
+ * What a run changed, from ``from_commit`` (its base) to ``to_commit`` (its head when
+ * read). The counts cover the whole diff; ``paths`` holds at most 100 sorted paths,
+ * each shown with backslashes and unsafe or invisible characters as ``\u{XXXX}`` and
+ * cut at 512 characters, and ``paths_truncated`` says whether the host or the server
+ * cut it.
+ */
+export interface OutcomeDiff {
+  deletions: number;
+  files_changed: number;
+  from_commit: string;
+  insertions: number;
+  paths: string[];
+  paths_truncated: boolean;
+  to_commit: string;
+}
+
 export interface PauseCause {
   detail: string;
   reason:
@@ -348,6 +390,7 @@ export interface RunDetail {
     | "auth"
     | null;
   request_preview: string | null;
+  run_branch: string;
   run_id: string;
   slots: SlotOut[];
   spend: RunSpend | null;
@@ -410,6 +453,39 @@ export interface RunHeader {
   version: number;
 }
 
+/**
+ * What one of the caller's runs produced and how to check it out.
+ *
+ * Exactly one of ``diff`` and ``diff_unavailable`` is set. ``branch`` and the host
+ * fields are ``None`` when the run has no worktree of its own; the two paths are also
+ * ``None`` when no command could be built for them. ``head_commit`` is the branch tip
+ * the host reported now.
+ */
+export interface RunOutcome {
+  base_commit: string | null;
+  branch: string | null;
+  checkout: OutcomeCheckout;
+  diff: OutcomeDiff | null;
+  diff_unavailable:
+    | "run_not_finished"
+    | "no_worktree"
+    | "base_unknown"
+    | "host_busy"
+    | "host_offline"
+    | "worktree_missing"
+    | "compare_failed"
+    | "busy"
+    | "failed"
+    | null;
+  finished_at: number | null;
+  head_commit: string | null;
+  host_id: string | null;
+  repo_path: string | null;
+  run_id: string;
+  status: "starting" | "running" | "paused" | "completed" | "failed" | "cancelled";
+  worktree_path: string | null;
+}
+
 /** One page of runs, newest first; page again with ``next_cursor`` until it is null. */
 export interface RunPage {
   data: RunSummary[];
@@ -444,7 +520,7 @@ export interface RunSpendTokens {
 
 export type RunStreamFrame = SnapshotFrame | EntryFrame | RunFrame | ResyncFrame | HeartbeatFrame;
 
-/** A run as its owner's run list shows it. */
+/** A run as its owner's run list shows it; ``run_branch`` is derived from its id. */
 export interface RunSummary {
   activation_count: number;
   allowed_actions: ("pause" | "resume" | "cancel")[];
@@ -465,6 +541,7 @@ export interface RunSummary {
     | "drift"
     | "auth"
     | null;
+  run_branch: string;
   run_id: string;
   spend: RunSpend | null;
   status: "starting" | "running" | "paused" | "completed" | "failed" | "cancelled";
@@ -509,9 +586,13 @@ export interface SavedWorkflowOut {
   workflow_key: string;
 }
 
-/** An agent slot of one of the run's steps. */
+/**
+ * An agent slot of one of the run's steps. ``slot_id`` and ``activation_id`` are store
+ * ids; ``engine_slot_id`` is the id the run view's slots carry.
+ */
 export interface SlotOut {
   activation_id: string;
+  engine_slot_id: string;
   node_id: string;
   role: "step_agent" | "orchestrator" | "verifier" | "merge_resolver";
   session_generation: number;
@@ -685,6 +766,20 @@ export interface CoralOperations {
     errors: 401 | 403 | 404 | 422;
   };
   /**
+   * POST /v1/coral/inbox/ack
+   *
+   * Mark the caller's open low-priority alerts of one run read, as opening the run
+   * does. Alerts that ask for an action or an answer stay open.
+   */
+  coral_ack_alerts: {
+    method: "POST";
+    path: "/v1/coral/inbox/ack";
+    body: BulkAckRequest;
+    status: 200;
+    response: BulkAckOut;
+    errors: 401 | 403 | 404 | 422;
+  };
+  /**
    * POST /v1/coral/inbox/{alert_id}/ack
    *
    * Mark one of the caller's alerts read; marking it again changes nothing.
@@ -831,7 +926,9 @@ export interface CoralOperations {
   /**
    * GET /v1/coral/runs/{run_id}/outcome
    *
-   * Not served yet: the caller's own run answers 501.
+   * What one of the caller's runs produced: its branch, the commands that check it
+   * out, and for a finished run its diff from its base commit, read through its host.
+   * A diff that cannot be read is answered with ``diff_unavailable``, never an error.
    */
   coral_get_run_outcome: {
     method: "GET";
@@ -839,9 +936,9 @@ export interface CoralOperations {
     params: {
       run_id: string;
     };
-    status: never;
-    response: never;
-    errors: 401 | 403 | 404 | 422 | 501 | 503;
+    status: 200;
+    response: RunOutcome;
+    errors: 401 | 403 | 404 | 422 | 503;
   };
   /**
    * GET /v1/coral/runs/{run_id}/stream

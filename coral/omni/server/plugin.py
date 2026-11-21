@@ -36,7 +36,7 @@ from coral.bridge.service import EngineBridge
 from coral.db.migrate import ensure_coral_schema
 from coral.db.models_workflows import CoralBase
 from coral.gates.republish import GateRepublisher
-from coral.omni.protocols import GatePublisher, RunScopeRunner
+from coral.omni.protocols import GatePublisher, HostWorkspaceChannels, RunScopeRunner
 from coral.omni.server.access import account_still_valid, request_viewer
 from coral.omni.server.observations import ChannelsRef, EvidenceChecker
 from coral.omni.server.scopes import OmnigentRunScopeRunner
@@ -330,6 +330,17 @@ def _host_connector(services: ServerServices) -> HostConnector | None:
     return partial(connect_run_worktree_host, host_registry=host_registry, host_store=host_store)
 
 
+def _host_channels(services: ServerServices) -> HostWorkspaceChannels | None:
+    """The host workspace-op channels on the server's host registry; ``None`` without one."""
+    from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
+
+    host_store = getattr(services, "host_store", None)
+    host_registry = getattr(services, "host_registry", None)
+    if host_store is None or host_registry is None:
+        return None
+    return OmnigentHostWorkspaceChannels(host_registry=host_registry, host_store=host_store)
+
+
 def _runs_api(
     bridge: EngineBridge,
     run_store: RunStore,
@@ -338,15 +349,18 @@ def _runs_api(
     *,
     gate_answers: GateAnswers,
     gate_publisher: GatePublisher,
+    channels: HostWorkspaceChannels | None,
 ) -> RunsApi:
     """
     The runs API over the bridge: route calls on their own pool, spend on another.
 
     Starts reach the owner's host through the server's registry, and need a proven
-    account generation where users sign in to accounts. Closing ``stack`` cancels
-    pending spend reads, then closes both pools; a request arriving after that is
-    refused as busy.
+    account generation where users sign in to accounts. Host ids are stored and compared
+    in the form the registry keys them by. Outcomes read diffs through ``channels``, the
+    ones the session engine uses. Closing ``stack`` cancels pending spend reads, then
+    closes both pools; a request arriving after that is refused as busy.
     """
+    from coral.omni._upstream import canonical_host_id
     from omnigent.server.auth import auth_mode
 
     api_threads = BoundedThreads(max_workers=API_THREADS, thread_name_prefix=API_THREAD_NAME)
@@ -364,6 +378,8 @@ def _runs_api(
         gate_publisher=gate_publisher,
         connect_host=_host_connector(services),
         requires_generation=auth_mode(services.auth_provider) == "accounts",
+        workspace_channels=channels,
+        canonical_host_id=canonical_host_id,
     )
 
 
@@ -486,6 +502,7 @@ def _wire_session_engine(
     scope_runner: RunScopeRunner,
     threads: BridgeThreads,
     stack: AsyncExitStack,
+    channels: HostWorkspaceChannels,
     evidence_channels: ChannelsRef | None = None,
 ) -> BoundSessionRefresher:
     """
@@ -496,8 +513,8 @@ def _wire_session_engine(
     from the stance, and drift pauses go through the engine on ``threads``.
     The turn-fact recorder writes a signal for each turn end of a session in
     ``bound``; the returned refresher, which the caller starts, rebuilds it.
-    The evidence check reads worktree fingerprints through the same host
-    channels, set on ``evidence_channels``.
+    Workspace ops go through ``channels``; the evidence check reads worktree
+    fingerprints through the same ones, set on ``evidence_channels``.
     """
     from coral.bridge.executors import turn_fact_executor
     from coral.bridge.mapping import TURN_FACT
@@ -511,7 +528,6 @@ def _wire_session_engine(
         BoundSessionRefresher,
         TurnFactRecorder,
     )
-    from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
     from coral.recovery.drift import DriftPauser, DriftPreSendHook
     from coral.slots.close import ConfirmedStops, StopConfirmedTurnEnd
     from coral.slots.executors import (
@@ -536,8 +552,6 @@ def _wire_session_engine(
     )
     from omnigent.server.session_live_state import register_status_edge_observer
 
-    host_store = services.host_store
-    assert host_store is not None  # checked by _missing_engine_input
     stable_ids = SqlAlchemyStableIdStore(db_uri)
     intents = SqlAlchemyWorkspaceOpIntentStore(db_uri)
     # Resolved at stop time: the dispatch's pre-send hook holds the pauser that holds the stopper.
@@ -553,9 +567,6 @@ def _wire_session_engine(
         services.conversation_store,
         services.runner_router,
         pre_send_hooks=(DriftPreSendHook(facade, bindings, pauser),),
-    )
-    channels = OmnigentHostWorkspaceChannels(
-        host_registry=services.host_registry, host_store=host_store
     )
     if evidence_channels is not None:
         evidence_channels.channels = channels
@@ -744,6 +755,8 @@ async def coral_lifespan(
                 prompts=prompts,
                 stack=stack,
             )
+            # One set of host channels for the session engine and the runs API.
+            channels = _host_channels(services)
             if hasattr(app, "state"):
                 # Its pools close before the gates are unregistered.
                 app.state.coral_runs_api = _runs_api(
@@ -753,12 +766,14 @@ async def coral_lifespan(
                     stack,
                     gate_answers=answers,
                     gate_publisher=publisher,
+                    channels=channels,
                 )
                 app.state.coral_run_stream_hub = _run_stream_hub(
                     bridge, run_store, services, stack
                 )
             missing = _missing_engine_input(app, services)
             if missing is None:
+                assert channels is not None  # the host store and registry are engine inputs
                 refresher = _wire_session_engine(
                     app,
                     services,
@@ -770,6 +785,7 @@ async def coral_lifespan(
                     scope_runner=scope_runner,
                     threads=threads,
                     stack=stack,
+                    channels=channels,
                     evidence_channels=evidence_channels,
                 )
                 stack.push_async_callback(refresher.stop)

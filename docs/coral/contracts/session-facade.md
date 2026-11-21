@@ -983,9 +983,31 @@ through one `allowed_actions` rule; and Resume and Cancel on the Inbox's pause
 card. Activation rows are not projected: the engine state and the run's view
 carry them.
 
+The run view settled its rows ([`runs-api.md`](runs-api.md), "Outcome" and "In
+the web app"; [`run-stream.md`](run-stream.md), "The web client";
+[`gates-and-inbox.md`](gates-and-inbox.md)): a live view of each run with its
+pause causes, the steps a person typed into or whose session changed, and its
+open decisions; each step's transcript (no composer); the runs history; Start Run
+on `POST /runs`; a finished run's outcome, its `diff_stat` read through the
+owner's host and a checkout command a real-git test runs; marking a run's
+run-end alert read when it is opened, through a low-priority bulk ack; and a
+start that reads an adopted worktree's head, so a crash between the worktree
+and the run row no longer loses `base_commit`. What it leaves:
+
+- **No server `stalls[]`.** The view shows pause causes, slots with
+  `pending_input` or `drift`, and open decisions; a stuck decision's watchdog
+  alert reaches the Inbox. A step that is merely slow shows as running.
+- **A budget pause offers Cancel only** in the web, as `allowed_actions` says:
+  resuming with a higher activation cap is `:resume {"cap"}` on the API, and
+  no web control sends it.
+- **Bases lost before the head read existed** stay `null`, and those runs'
+  outcomes answer `base_unknown`; there is no fallback. A base read at a retry
+  is whatever the run branch held then ([`runs-api.md`](runs-api.md),
+  "Residuals").
+
 | Work | Owner |
 |---|---|
-| The run view: stalls, pause causes and a step a person typed into; the run outcome (`GET /v1/coral/runs/{id}/outcome` answers 501) and `diff_stat`; start-dialog wiring; marking a run's alerts read when it is opened; bulk ack ([`runs-api.md`](runs-api.md), [`gates-and-inbox.md`](gates-and-inbox.md)) | CRL-136 |
+| Resuming a budget pause with a raised cap from the web, and the run view's other cuts ([`runs-api.md`](runs-api.md), "Deferred work and owners") | no live ticket |
 | Run requests over 512 characters: a start refuses them today, and briefs carry only `request_preview` | CRL-137 |
 | A pause made on the run row alone has no durable marker: a resync repair between the engine's own pause and its plan probe can take over the row's reason, and the probe then lifts the row | CRL-137 |
 | Run preflight (`POST /v1/coral/runs:preflight` answers 501): the CRL-132 facts need an `AgentSpec` per step, and only `materialize` builds them | CRL-137 |

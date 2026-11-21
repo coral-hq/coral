@@ -1,8 +1,8 @@
-"""The owner's workflow Inbox: open alerts, normal priority first, and marking one read.
+"""The owner's workflow Inbox: open alerts, normal priority first, and marking them read.
 
 Unmounted: the Coral server plugin mounts it under ``/v1/coral`` with its own caller
 and workspace dependencies. The alert store is read per request from
-``app.state.coral_alert_store``; without one both routes answer 404, which clients
+``app.state.coral_alert_store``; without one every route answers 404, which clients
 take as "no workflow feed".
 """
 
@@ -12,13 +12,14 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from coral.alerts.types import AlertAction, AlertKindName, AlertPayload
 from coral.api.errors import CoralApiError, CoralRoute, error_responses
+from coral.api.run_models import RUN_ID
 from coral.db.enum_codecs import decode_alert_kind, decode_alert_priority
 from coral.limits import WarnOnce
 from coral.omni.protocols import Viewer
@@ -75,6 +76,23 @@ class AckRequest(BaseModel):
     """The body of a "mark as read": the empty JSON object."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class BulkAckRequest(BaseModel):
+    """The body of marking a run's low-priority alerts read: the run's id."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Anchored: a field pattern matches anywhere in the value.
+    run_id: Annotated[str, Field(pattern=f"^{RUN_ID.pattern}$")]
+
+
+class BulkAckOut(BaseModel):
+    """How many alerts a bulk mark-as-read changed; 0 for another user's or an unknown run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    acked: int
 
 
 def alert_item(alert: AlertRecord) -> WorkflowAlertOut:
@@ -220,6 +238,27 @@ def create_inbox_router(
             raise CoralApiError("illegal_transition", "Answer the gate to clear this alert.", 409)
         return Response(status_code=204)
 
+    @router.post(
+        "/inbox/ack",
+        operation_id="coral_ack_alerts",
+        response_model=BulkAckOut,
+        responses=error_responses(401, 403, 404, 422),
+    )
+    def ack_run_alerts(
+        request: Request,
+        body: BulkAckRequest,
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> BulkAckOut:
+        """
+        Mark the caller's open low-priority alerts of one run read, as opening the run
+        does. Alerts that ask for an action or an answer stay open.
+        """
+        acked = _alert_store(request).ack_low_for_run(
+            workspace_id=workspace_id, viewer=viewer, run_id=body.run_id, now=clock()
+        )
+        return BulkAckOut(acked=acked)
+
     return router
 
 
@@ -227,6 +266,8 @@ __all__ = [
     "MAX_CURSOR_CHARS",
     "AckRequest",
     "AlertPriorityName",
+    "BulkAckOut",
+    "BulkAckRequest",
     "WorkflowAlertOut",
     "WorkflowInboxPage",
     "alert_item",

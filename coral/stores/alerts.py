@@ -33,6 +33,8 @@ InboxCursor = tuple[int, int, str]
 
 MAX_ALERT_RAISES = 64
 MAX_INBOX_LIMIT = 100
+# Alerts one "mark this run's alerts read" may change, in one transaction.
+MAX_BULK_ACK = 500
 # Cleared by answering them, never by marking them read.
 _UNACKABLE_KINDS = (int(AlertKind.GATE), int(AlertKind.QUESTION))
 _UNRESOLVED_STATUSES = (int(AlertStatus.OPEN), int(AlertStatus.ACKED))
@@ -152,9 +154,15 @@ def generation_clause(
     return recorded.is_(None)
 
 
-def _visible_to(viewer: Viewer, owner: str | None, alert: AlertRecord | AlertRow) -> bool:
+def _owned_by(
+    viewer: Viewer, owner: str | None, owner_user_id: str | None, account_generation: str | None
+) -> bool:
     # Exact comparison: MySQL collations can fold case, accents or trailing spaces.
-    return alert.owner_user_id == owner and generation_matches(alert.account_generation, viewer)
+    return owner_user_id == owner and generation_matches(account_generation, viewer)
+
+
+def _visible_to(viewer: Viewer, owner: str | None, alert: AlertRecord | AlertRow) -> bool:
+    return _owned_by(viewer, owner, alert.owner_user_id, alert.account_generation)
 
 
 def _to_record(row: AlertRow) -> AlertRecord:
@@ -285,6 +293,68 @@ class SqlAlchemyAlertStore:
 
         return run_write_transaction(self._write_session, "ack", _ack)
 
+    def ack_low_for_run(
+        self,
+        *,
+        workspace_id: int,
+        viewer: Viewer,
+        run_id: str,
+        now: int,
+        limit: int = MAX_BULK_ACK,
+    ) -> int:
+        """Mark up to ``limit`` of the viewer's open low-priority alerts of one run read.
+
+        Normal-priority alerts ask the owner to act, and gates and questions clear only
+        when answered, so none of them changes. Another owner's run, or one recorded
+        under a generation the viewer does not prove, marks nothing.
+
+        :returns: How many alerts were marked read.
+        :raises ValueError: ``limit`` is not 1-500.
+        """
+        if not 1 <= limit <= MAX_BULK_ACK:
+            raise ValueError(f"limit must be 1-{MAX_BULK_ACK}, not {limit}")
+        owner = normalize_owner(viewer.user_id)
+        matching = (
+            AlertRow.workspace_id == workspace_id,
+            AlertRow.run_id == run_id,
+            AlertRow.owner_user_id == owner,
+            AlertRow.status == int(AlertStatus.OPEN),
+            AlertRow.priority == int(AlertPriority.LOW),
+            AlertRow.kind.not_in(_UNACKABLE_KINDS),
+            generation_clause(AlertRow.account_generation, viewer),
+        )
+
+        def _ack_low(session: Session) -> int:
+            # Only what the owner check reads: payloads stay in the database.
+            rows = session.execute(
+                select(AlertRow.id, AlertRow.owner_user_id, AlertRow.account_generation)
+                .where(*matching)
+                .limit(limit)
+            ).all()
+            ids = [
+                alert_id
+                for alert_id, owner_user_id, generation in rows
+                if _owned_by(viewer, owner, owner_user_id, generation)
+            ]
+            if not ids:
+                return 0
+            acked = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(AlertRow)
+                    .where(*matching, AlertRow.id.in_(ids))
+                    .values(
+                        status=int(AlertStatus.ACKED),
+                        acked_at=now,
+                        acked_by=owner or LOCAL_USER_ID,
+                    )
+                ),
+            )
+            # Fewer than read: a resolve committed between the read and the update.
+            return acked.rowcount
+
+        return run_write_transaction(self._write_session, "ack_low_for_run", _ack_low)
+
     def list_for_run(self, *, workspace_id: int, run_id: str) -> list[AlertRecord]:
         """Every alert of the run, oldest first.
 
@@ -301,6 +371,7 @@ class SqlAlchemyAlertStore:
 
 __all__ = [
     "MAX_ALERT_RAISES",
+    "MAX_BULK_ACK",
     "MAX_INBOX_LIMIT",
     "AckOutcome",
     "InboxCursor",

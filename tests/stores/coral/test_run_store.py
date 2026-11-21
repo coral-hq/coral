@@ -889,6 +889,45 @@ def test_list_owned_runs_reads_an_index_range_in_order_without_sorting(coral_db_
             assert "TEMP B-TREE" not in plan, plan
 
 
+def _run_on_host(
+    store: RunStore,
+    key: str,
+    host_id: str | None,
+    status: RunStatus,
+    *,
+    workspace_id: int = WORKSPACE,
+) -> CoralRun:
+    spec = RunStartSpec(
+        "wf", "v1", f"Run {key}", "p", workspace_id=workspace_id, user_id=ALICE, host_id=host_id
+    )
+    run = store.start_run(spec, start_key=key, now=NOW)
+    if status != RunStatus.STARTING:
+        _set_status(store, run, status)
+    return run
+
+
+def test_only_a_workspaces_starting_running_or_paused_runs_name_their_hosts(
+    lane: _Lane,
+) -> None:
+    store = lane.store
+    for status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED):
+        _run_on_host(store, f"finished-{status.name}", "host-1", status)
+    _run_on_host(store, "no-host", None, RunStatus.RUNNING)
+    _run_on_host(store, "elsewhere", "host-1", RunStatus.RUNNING, workspace_id=OTHER_WORKSPACE)
+    for status in (RunStatus.STARTING, RunStatus.RUNNING, RunStatus.PAUSED):
+        _run_on_host(store, f"unfinished-{status.name}", f"host-{status.name}", status)
+    # Two live runs on one host name it once.
+    _run_on_host(store, "running-again", "host-RUNNING", RunStatus.RUNNING)
+
+    assert store.unfinished_run_hosts(workspace_id=WORKSPACE) == {
+        "host-STARTING",
+        "host-RUNNING",
+        "host-PAUSED",
+    }
+    assert store.unfinished_run_hosts(workspace_id=OTHER_WORKSPACE) == {"host-1"}
+    assert store.unfinished_run_hosts(workspace_id=999) == frozenset()
+
+
 def _commit_logs(store: RunStore, run: CoralRun, count: int) -> list[RunLogEntry]:
     store.apply_transition(
         run.id,
@@ -980,6 +1019,7 @@ def test_owned_run_lists_and_tolerant_log_reads_run_under_their_query_names(
     try:
         _owned(store, Viewer(ALICE))
         store.read_log(run.id, workspace_id=WORKSPACE, tolerant=True)
+        store.unfinished_run_hosts(workspace_id=WORKSPACE)
     finally:
         event.remove(engine, "before_cursor_execute", capture)
 
@@ -987,4 +1027,5 @@ def test_owned_run_lists_and_tolerant_log_reads_run_under_their_query_names(
         "coral.run_store.list_owned_runs",
         "coral.run_store.read_log",
         "coral.run_store.read_log_isolate_unreadable",
+        "coral.run_store.unfinished_run_hosts",
     ]

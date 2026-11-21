@@ -25,12 +25,22 @@ from typing import Any, Literal, NoReturn, ParamSpec, Protocol, TypeVar
 
 from coral.alerts.types import LOCAL_USER_ID, CallerKey, caller_key, is_owner, normalize_owner
 from coral.api.errors import CoralApiError, run_not_found
+from coral.api.outcome import (
+    DiffRead,
+    OutcomeDiffs,
+    OutcomeTarget,
+    failure_code,
+    no_diff,
+    outcome_target,
+    run_outcome,
+)
 from coral.api.run_models import (
     RUN_ID,
     GateAnswerOut,
     GateAnswerRequest,
     LogPage,
     RunDetail,
+    RunOutcome,
     RunPage,
     RunSummary,
     StartRunRequest,
@@ -66,21 +76,25 @@ from coral.gates.verdict import GateAnswers, GateVerdict, VisitAnswer
 from coral.limits import Slots, WarnOnce
 from coral.model.ids import derived_id
 from coral.model.ir import CompiledGraph
-from coral.omni.protocols import GatePublisher, Viewer
+from coral.omni.protocols import GatePublisher, HostWorkspaceChannels, Viewer
 from coral.queue.run_effects import describe_exception
 from coral.recovery.cancel import cancel_run_row, withdraw_local_prompts
 from coral.runview.types import FINISHED_RUN_STATUSES, RunStatusName
 from coral.stores.protocols import (
+    STORED_TEXT_ERRORS,
     CoralRun,
     GateVisitState,
     InvalidRunCursor,
     RunContended,
     RunNotFound,
     RunStartSpec,
+    RunState,
     RunStore,
     StartKeyConflict,
 )
 from coral.stores.workflows import WorkflowDefinitionStore
+from coral.workspace.host_backend import HostWorkspaceOps
+from coral.workspace.ops import HostChannel, WorkspaceRef
 from coral.workspace.run_worktree import (
     RunWorktree,
     RunWorktreeError,
@@ -104,6 +118,10 @@ MAX_STARTS = 8
 MAX_STARTS_PER_USER = 2
 # A worktree another start is checking out has no run yet; it takes a moment more.
 LOCKED_WORKTREE_RETRY_AFTER_S = 2
+# A start's head read when its worktree reported no commit: the host's deadline, and one
+# deadline over the channel lookup and the read.
+START_HEAD_TIMEOUT_S = 5.0
+START_HEAD_DEADLINE_S = 10.0
 _BUSY_TEXT = "The server is busy; try again."
 _GRAPH_UNREADABLE_TEXT = "The run's workflow graph cannot be read."
 _KEY_CONFLICT_TEXT = "This start key started a run with another request."
@@ -140,6 +158,10 @@ def server_busy(
     return CoralApiError(
         "server_busy", message, 503, details=details, headers={"Retry-After": str(retry_after_s)}
     )
+
+
+def _as_given(host_id: str) -> str:
+    return host_id
 
 
 def _sentence(text: str) -> str:
@@ -362,6 +384,9 @@ class RunsApi:
         connect_host: HostConnector | None = None,
         requires_generation: bool = False,
         starts: StartSlots | None = None,
+        workspace_channels: HostWorkspaceChannels | None = None,
+        outcome_diffs: OutcomeDiffs | None = None,
+        canonical_host_id: Callable[[str], str] | None = None,
     ) -> None:
         """
         :param bridge: Loads runs (reads never write) and commits the owner's actions.
@@ -373,6 +398,13 @@ class RunsApi:
             ``host_offline``.
         :param requires_generation: The server signs users in to accounts, so a start
             needs a request that proves its account generation.
+        :param workspace_channels: The owner's host channels an outcome reads its diff
+            through, and a start the head of a worktree that reported no commit;
+            without them every diff is ``host_offline`` and such a start has no base.
+        :param outcome_diffs: Admits, shares and caches those reads.
+        :param canonical_host_id: A host id in the one form every spelling of it
+            reduces to; a start stores it, and host ids compare in it. Ids are taken
+            as given without it.
         """
         self._bridge = bridge
         self._runs = run_store
@@ -383,6 +415,9 @@ class RunsApi:
         self._connect_host = connect_host
         self._requires_generation = requires_generation
         self._starts = starts or StartSlots()
+        self._channels = workspace_channels
+        self._outcome_diffs = outcome_diffs or OutcomeDiffs()
+        self._canonical_host_id = canonical_host_id or _as_given
         self._graph_unreadable = WarnOnce()
 
     @property
@@ -518,10 +553,55 @@ class RunsApi:
         )
         return log_page(rows, limit=limit)
 
-    async def outcome(self, viewer: Viewer, workspace_id: int, run_id: str) -> NoReturn:
-        """Not served yet; the caller's own runs answer 501, any other the run 404."""
-        await self.owned_run(viewer, workspace_id, run_id)
-        raise CoralApiError("not_implemented", "A run's outcome is not available yet.", 501)
+    async def outcome(self, viewer: Viewer, workspace_id: int, run_id: str) -> RunOutcome:
+        """
+        What the caller's run produced, and the commands that check its branch out.
+
+        The diff is read through the owner's host only for a finished run with a base
+        commit whose host no unfinished run of the workspace uses; whatever stops it is
+        answered as the reason, never as an error. The store reads run on the pool; the
+        host read holds no thread.
+        """
+        run = await self.owned_run(viewer, workspace_id, run_id)
+        state = await self._in_flight.run(viewer, self._stored_state, workspace_id, run_id)
+        target = None if state is None else outcome_target(state)
+        read = await self._outcome_diff(viewer, workspace_id, run, state, target)
+        return run_outcome(run, target, read)
+
+    def _stored_state(self, workspace_id: int, run_id: str) -> RunState | None:
+        """The run's rows, or ``None`` when they are gone or cannot be read."""
+        try:
+            state, _version = self._runs.load_run_state(run_id, workspace_id=workspace_id)
+        except (RunNotFound, *STORED_TEXT_ERRORS):
+            return None
+        return state
+
+    async def _outcome_diff(
+        self,
+        viewer: Viewer,
+        workspace_id: int,
+        run: CoralRun,
+        state: RunState | None,
+        target: OutcomeTarget | None,
+    ) -> DiffRead:
+        if row_status(run) not in FINISHED_RUN_STATUSES:
+            return no_diff("run_not_finished")
+        if state is None or target is None:
+            return no_diff("no_worktree")
+        if target.base_commit is None:
+            return no_diff("base_unknown")
+        if self._channels is None:
+            return no_diff("host_offline")
+        # A live run's evidence reads share the host's two op slots: never compete with them.
+        live_hosts = await self._in_flight.run(
+            viewer, self._runs.unfinished_run_hosts, workspace_id=workspace_id
+        )
+        host = self._canonical_host_id(target.host_id)
+        if any(self._canonical_host_id(live) == host for live in live_hosts):
+            return no_diff("host_busy")
+        return await self._outcome_diffs.read(
+            viewer, state=state, target=target, channels=self._channels
+        )
 
     # ── start ────────────────────────────────────────────────────────────────
 
@@ -581,8 +661,11 @@ class RunsApi:
         except RunNotRunnable as exc:
             raise _not_runnable(exc) from None
         generation = viewer.account_generation if viewer.check_generation else None
+        host_id = self._canonical_host_id(request.host_id)
         try:
-            worktree = await self._worktree(viewer, workspace_id, run_id, request, generation)
+            worktree = await self._worktree(
+                viewer, workspace_id, run_id, request, host_id, generation
+            )
         except RunWorktreeError as exc:
             if not exc.locked:
                 code, status = _WORKTREE_REFUSALS[exc.code]
@@ -597,6 +680,11 @@ class RunsApi:
             raise server_busy(
                 _sentence(exc.message), retry_after_s=LOCKED_WORKTREE_RETRY_AFTER_S
             ) from None
+        base_commit = worktree.start_commit
+        if base_commit is None:
+            base_commit = await self._start_head(
+                viewer, workspace_id, run_id, host_id, generation, request.repo_path, worktree
+            )
         spec = RunStartSpec(
             workflow_id=definition.id,
             version_id="",
@@ -609,11 +697,11 @@ class RunsApi:
             workspace_id=workspace_id,
             user_id=viewer.user_id,
             account_generation=generation,
-            host_id=request.host_id,
+            host_id=host_id,
             repo_path=request.repo_path,
             worktree_path=worktree.path,
             base_ref=request.base_ref,
-            base_commit=worktree.start_commit,
+            base_commit=base_commit,
             run_branch=worktree.branch,
             max_activations=request.max_activations,
         )
@@ -649,6 +737,7 @@ class RunsApi:
         workspace_id: int,
         run_id: str,
         request: StartRunRequest,
+        host_id: str,
         generation: str | None,
     ) -> RunWorktree:
         if self._connect_host is None:
@@ -656,12 +745,60 @@ class RunsApi:
         host = await self._connect_host(
             user_id=viewer.user_id,
             account_generation=generation,
-            host_id=request.host_id,
+            host_id=host_id,
             workspace_id=workspace_id,
         )
         return await create_or_adopt_run_worktree(
             host, repo_root=request.repo_path, run_id=run_id, base_ref=request.base_ref
         )
+
+    async def _start_head(
+        self,
+        viewer: Viewer,
+        workspace_id: int,
+        run_id: str,
+        host_id: str,
+        generation: str | None,
+        repo_path: str,
+        worktree: RunWorktree,
+    ) -> str | None:
+        """
+        The head of a worktree that reported no start commit: an adopted one, or one an
+        older host made. ``None`` when it cannot be read; it never fails the start.
+
+        No run row exists yet, so no engine commit is on the branch. The read goes
+        through the starting owner's host channel and holds no pool thread.
+        """
+        if self._channels is None:
+            return None
+        ref = WorkspaceRef(host_id=host_id, root=worktree.path, branch=worktree.branch)
+        try:
+            async with asyncio.timeout(START_HEAD_DEADLINE_S):
+                channel = await self._channels.channel(
+                    workspace_id=workspace_id,
+                    user_id=viewer.user_id,
+                    account_generation=generation,
+                    host_id=host_id,
+                )
+                ops = HostWorkspaceOps(
+                    channel, repo_root=repo_path, read_timeout_s=START_HEAD_TIMEOUT_S
+                )
+                found = await ops.head(ref, HostChannel(host_id))
+        except Exception as exc:  # noqa: BLE001 -- the start goes on without a base
+            _logger.info(
+                "Coral could not read run %s's start head: %s %s",
+                run_id,
+                type(exc).__name__,
+                failure_code(exc),
+            )
+            return None
+        if found.branch != worktree.branch:
+            _logger.info(
+                "Coral could not read run %s's start head: its worktree holds another branch",
+                run_id,
+            )
+            return None
+        return found.head
 
     async def _replay(self, viewer: Viewer, run: CoralRun, request: StartRunRequest) -> StartedRun:
         """
@@ -704,7 +841,7 @@ class RunsApi:
         read = self._bridge.read(workspace_id=workspace_id, run_id=run_id)
         if read.rows is None:
             return "unreadable"
-        if not _same_start(read.rows.spec, request):
+        if not _same_start(read.rows.spec, request, self._canonical_host_id):
             return "other_request"
         started = replay_start(self._bridge, read, actor=actor)
         if started.version == read.run.version:
@@ -943,11 +1080,17 @@ def _resume_taken(commit: BridgeCommit) -> bool:
     )
 
 
-def _same_start(spec: RunStartSpec, request: StartRunRequest) -> bool:
-    """The request is the one that started the run; a title counts only when given."""
+def _same_start(
+    spec: RunStartSpec, request: StartRunRequest, canonical_host_id: Callable[[str], str]
+) -> bool:
+    """
+    The request is the one that started the run; a title counts only when given, and
+    any spelling of the run's host is the same host.
+    """
     return (
         spec.workflow_id == request.workflow_id
-        and spec.host_id == request.host_id
+        and spec.host_id is not None
+        and canonical_host_id(spec.host_id) == canonical_host_id(request.host_id)
         and spec.repo_path == request.repo_path
         and spec.base_ref == request.base_ref
         and spec.request_preview == request.request

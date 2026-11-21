@@ -463,7 +463,7 @@ OPS-01's generator will maintain this file later.
 | `web/public/licenses/geist-mono-OFL-1.1.txt` | S77 | coral-specific | Added. Verbatim SIL OFL 1.1 text of Geist Mono (`@fontsource-variable/geist-mono`), shipped with the web UI. |
 | `web/public/licenses/newsreader-OFL-1.1.txt` | S77 | coral-specific | Added. Verbatim SIL OFL 1.1 text of Newsreader (`@fontsource-variable/newsreader`), shipped with the web UI. |
 | `web/server-selector-v2.html` | S89b | coral-specific | Window title "Coral — Connect" (S89b). |
-| `web/src/App.test.tsx` | S34 | coral-specific | Coral desk routes: the gated placeholder desk when Coral is on, run and workflow routes instead of the catch-all, an embedded basename, a spinner while Coral info loads, not found when Coral is off or absent (404), `/profiles` only with `profiles_desk`, Retry after a server error, and not found for unknown routes (S34). |
+| `web/src/App.test.tsx` | S34 | coral-specific | Coral desk routes: the gated placeholder desk when Coral is on, the run page (its stream stubbed, so none opens) and the workflow route instead of the catch-all, an embedded basename, a spinner while Coral info loads, not found when Coral is off or absent (404), `/profiles` only with `profiles_desk`, Retry after a server error, and not found for unknown routes (S34). |
 | `web/src/App.tsx` | S34 | coral-specific | Mounts Coral's desk routes (`coralRoutes`, `/workflows` and `/profiles` behind the Coral gate) before the catch-all `NotFoundPage` route (S34). |
 | `web/src/components/BrandLogo.test.tsx` | S79 | coral-specific | Fallback cases expect the Coral mark (S79). |
 | `web/src/components/BrandLogo.tsx` | S79 | coral-specific | The no-logo and failed-logo fallback is `CoralMark` instead of the Otto mascot (S79). |
@@ -530,6 +530,7 @@ OPS-01's generator will maintain this file later.
 | `web/src/server-selector-v2.test.tsx` | S89b | coral-specific | Queries follow the Coral onboarding copy (S89b). |
 | `web/src/shell/AppShell.test.tsx` | S89 | coral-specific | Share-action tests now expect 'Coral server' in the read-only notice and in the sharing-off title (S89). |
 | `web/src/shell/AppShell.tsx` | S89 | coral-specific | The header Share button's sharing-off reason (shareDisabledReason) now reads 'Sharing has been disabled for this <appName> server.' through useAppName() (default Coral) (S89). |
+| `web/src/shell/ChatHeader.tsx` | S86 | coral-specific | Renders Coral's `CoralRunChip` beside `CreatedBySession`: a run's anchor, orchestrator or step session shows "Part of a run · Open run", linking back to the run; any other session, or Coral off, renders nothing (S86). |
 | `web/src/shell/CloseWindowDialog.test.tsx` | S89 | coral-specific | The last-window test now expects "Quit Coral?" and "...closing it quits Coral." (S89). |
 | `web/src/shell/CloseWindowDialog.tsx` | S89 | coral-specific | The last-window close dialog's title and description now name the app via useAppName() ("Quit Coral?", "...closing it quits Coral.") instead of Omnigent (S89). |
 | `web/src/shell/CommandPalette.test.tsx` | S34 | coral-specific | The Coral palette actions are absent until Coral is enabled, and Agent Profiles appears only with `profiles_desk` (S34). |

@@ -927,6 +927,10 @@ class RunStore(Protocol):
         limit: int = 100,
     ) -> list[CoralRun]: ...
 
+    def unfinished_run_hosts(self, *, workspace_id: int) -> frozenset[str]:
+        """The host ids, as stored, of the workspace's starting, running and paused runs."""
+        ...
+
     def list_open_gates_all_workspaces(
         self,
         *,

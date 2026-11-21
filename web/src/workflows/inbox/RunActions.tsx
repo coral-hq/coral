@@ -2,22 +2,30 @@ import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import type { InboxKindUi } from "@/lib/inboxKinds";
-import { isRetryableRequestError } from "@/lib/queryRetry";
 import { ApiError } from "@/lib/sessionsApi";
 import type { RunDetail, RunSummary } from "../api/generated/coralApi";
-import { getRun, postRunAction, runActionKey, runQueryKey } from "../api/runsApi";
+import {
+  getRun,
+  postRunAction,
+  retryRunRead,
+  runActionKey,
+  runQueryKey,
+  runsListPrefixKey,
+  type RunAction,
+} from "../api/runsApi";
+import { useCoralScope } from "../shared/viewerScope";
 import { CardStatusLine } from "./CardStatusLine";
 import { OFFLINE_TEXT, useOnline } from "./useOnline";
 import { WORKFLOW_INBOX_QUERY_KEY } from "./useWorkflowInbox";
 
 // Resume and Cancel run on a pause alert's card, offered exactly as the run's
-// `allowed_actions` allow. The run is read only while the card is open.
+// `allowed_actions` allow. The run is read only while the card is open. The run
+// view passes the actions its stream allows, and offers Pause too.
 
 /** How long a read run stays fresh before reopening the card reads it again. */
 const RUN_STALE_MS = 10_000;
 const UPDATE_FAILED_TEXT = "Couldn’t update the run.";
-
-type CardAction = "resume" | "cancel";
+const NO_ACTIONS: readonly RunAction[] = Object.freeze([]);
 
 interface Outcome {
   text: string;
@@ -25,8 +33,9 @@ interface Outcome {
 }
 
 /** What an accepted action tells the owner, from the run it returned. */
-export function runResultText(action: CardAction, run: RunSummary): string {
+export function runResultText(action: RunAction, run: RunSummary): string {
   if (action === "cancel") return "Cancelled.";
+  if (action === "pause") return "Paused.";
   // A resume that clears one cause of several leaves the run paused for the rest.
   return run.status === "paused" ? "The run is still paused." : "Resumed.";
 }
@@ -41,26 +50,49 @@ export function runActionErrorText(error: unknown): string {
   return UPDATE_FAILED_TEXT;
 }
 
-/** One retry for a failure a retry can fix; a 404 or another refusal is final. */
-const retryRunRead = (failureCount: number, error: unknown) =>
-  failureCount < 1 && isRetryableRequestError(error);
-
 /** The run moved on (409) or is gone (404), so its actions are read again. */
 const rereadsRun = (error: unknown) =>
   error instanceof ApiError && (error.status === 409 || error.status === 404);
 
-export interface RunActionsProps {
+interface RunActionsBaseProps {
   runId: string;
-  /** The card is open; the run is read only then. */
-  expanded: boolean;
   ui: InboxKindUi;
+  /** Offer Pause when the run allows it. */
+  withPause?: boolean;
+  /** The buttons' component ids are `<prefix>.<button>`. */
+  componentIdPrefix?: string;
   /** The card's own actions, shown after the run's. */
-  children: ReactNode;
+  children?: ReactNode;
 }
 
+/** The actions come from a read of the run, made only while the card is open. */
+interface ReadRunActionsProps extends RunActionsBaseProps {
+  expanded: boolean;
+  allowed?: undefined;
+}
+
+/** The actions come from the caller's view of the run, which is never read here. */
+interface GivenRunActionsProps extends RunActionsBaseProps {
+  expanded?: boolean;
+  allowed: readonly RunAction[];
+}
+
+export type RunActionsProps = ReadRunActionsProps | GivenRunActionsProps;
+
 /** The run's status line and action row; Cancel run asks once before it posts. */
-export function RunActions({ runId, expanded, ui, children }: RunActionsProps) {
+export function RunActions({
+  runId,
+  expanded = true,
+  ui,
+  allowed,
+  withPause = false,
+  componentIdPrefix = "inbox.workflow_alert",
+  children,
+}: RunActionsProps) {
   const queryClient = useQueryClient();
+  const { scope, ready: viewerKnown } = useCoralScope();
+  const runKey = runQueryKey(scope, runId);
+  const actionKey = runActionKey(scope, runId);
   const online = useOnline();
   const questionId = useId();
   const statusRef = useRef<HTMLParagraphElement>(null);
@@ -68,44 +100,48 @@ export function RunActions({ runId, expanded, ui, children }: RunActionsProps) {
   const keepRef = useRef<HTMLButtonElement>(null);
   const refocusCancel = useRef(false);
   // This card's own request, set at the click so a second click finds the buttons disabled.
-  const [pending, setPending] = useState<CardAction | null>(null);
+  const [pending, setPending] = useState<RunAction | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const run = useQuery({
-    queryKey: runQueryKey(runId),
+    queryKey: runKey,
     queryFn: ({ signal }) => getRun(runId, signal),
-    enabled: expanded,
+    enabled: expanded && viewerKnown && allowed === undefined,
     staleTime: RUN_STALE_MS,
     retry: retryRunRead,
   });
   const action = useMutation({
-    mutationKey: runActionKey(runId),
-    mutationFn: (name: CardAction) => postRunAction(runId, name),
+    mutationKey: actionKey,
+    mutationFn: (name: RunAction) => postRunAction(runId, name),
     // Sent at once, as a plain request: never held back until React Query sees the network.
     networkMode: "always",
     // These run even if the card closed meanwhile, so the run and the Inbox still refresh.
     onSuccess: (summary) => {
       // Only what the summary decides; the refetch brings the detail's other fields.
       queryClient.setQueryData<RunDetail>(
-        runQueryKey(runId),
+        runKey,
         (detail) =>
           detail && { ...detail, status: summary.status, allowed_actions: summary.allowed_actions },
       );
-      void queryClient.invalidateQueries({ queryKey: runQueryKey(runId) });
+      void queryClient.invalidateQueries({ queryKey: runKey });
+      void queryClient.invalidateQueries({ queryKey: runsListPrefixKey(scope) });
       void queryClient.invalidateQueries({ queryKey: WORKFLOW_INBOX_QUERY_KEY });
     },
     onError: (error) => {
-      if (rereadsRun(error)) void queryClient.invalidateQueries({ queryKey: runQueryKey(runId) });
+      if (rereadsRun(error)) void queryClient.invalidateQueries({ queryKey: runKey });
     },
   });
   // A request sent before the card was last closed is still this run's.
-  const inFlight = useIsMutating({ mutationKey: runActionKey(runId) }) > 0;
+  const inFlight = useIsMutating({ mutationKey: actionKey }) > 0;
   const busy = pending !== null || inFlight;
-  const ready = online && !busy;
+  // The viewer's arrival re-keys the action, which would drop a request sent before it.
+  const ready = online && !busy && viewerKnown;
   // A failed read hides the buttons: nothing then says what the run allows.
-  const allowed = run.isError ? [] : (run.data?.allowed_actions ?? []);
-  const canResume = allowed.includes("resume");
-  const canCancel = allowed.includes("cancel");
+  const offered = allowed ?? (run.isError ? NO_ACTIONS : (run.data?.allowed_actions ?? NO_ACTIONS));
+  const canPause = withPause && offered.includes("pause");
+  const canResume = offered.includes("resume");
+  const canCancel = offered.includes("cancel");
+  const componentId = (button: string) => `${componentIdPrefix}.${button}`;
   const confirmWithdrawn = confirming && !canCancel;
 
   useEffect(() => {
@@ -126,7 +162,7 @@ export function RunActions({ runId, expanded, ui, children }: RunActionsProps) {
     if (focused === null || focused === document.body) statusRef.current?.focus();
   }, [confirmWithdrawn]);
 
-  const perform = (name: CardAction) => {
+  const perform = (name: RunAction) => {
     if (!ready) return;
     setPending(name);
     // Cleared first, so the same text again is announced again.
@@ -180,7 +216,7 @@ export function RunActions({ runId, expanded, ui, children }: RunActionsProps) {
               loading={pending === "cancel"}
               disabled={!ready}
               onClick={() => perform("cancel")}
-              componentId="inbox.workflow_alert.confirm_cancel"
+              componentId={componentId("confirm_cancel")}
             >
               Cancel run
             </Button>
@@ -191,7 +227,7 @@ export function RunActions({ runId, expanded, ui, children }: RunActionsProps) {
               className={ui.outlineAction}
               disabled={busy}
               onClick={keepRunning}
-              componentId="inbox.workflow_alert.keep_running"
+              componentId={componentId("keep_running")}
             >
               Keep running
             </Button>
@@ -199,6 +235,19 @@ export function RunActions({ runId, expanded, ui, children }: RunActionsProps) {
         </div>
       )}
       <ui.InboxActions>
+        {!showConfirm && canPause && (
+          <Button
+            variant="outline"
+            size="xs"
+            className={ui.outlineAction}
+            loading={pending === "pause"}
+            disabled={!ready}
+            onClick={() => perform("pause")}
+            componentId={componentId("pause")}
+          >
+            Pause
+          </Button>
+        )}
         {!showConfirm && canResume && (
           <Button
             size="xs"
@@ -206,7 +255,7 @@ export function RunActions({ runId, expanded, ui, children }: RunActionsProps) {
             loading={pending === "resume"}
             disabled={!ready}
             onClick={() => perform("resume")}
-            componentId="inbox.workflow_alert.resume"
+            componentId={componentId("resume")}
           >
             Resume
           </Button>
@@ -219,7 +268,7 @@ export function RunActions({ runId, expanded, ui, children }: RunActionsProps) {
             className={ui.outlineAction}
             disabled={!ready}
             onClick={askToCancel}
-            componentId="inbox.workflow_alert.cancel"
+            componentId={componentId("cancel")}
           >
             Cancel run
           </Button>

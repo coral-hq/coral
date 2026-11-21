@@ -82,6 +82,7 @@ PINNED: dict[str, tuple[str, str]] = {
         "omnigent.server.routes._auth_helpers",
         "(user_id: 'str | None') -> 'str | None'",
     ),
+    "canonical_host_id": ("omnigent.server.host_registry", "(host_id: 'str') -> 'str'"),
     "create_worktree_on_host": (
         "omnigent.server.routes._host_worktree",
         "(*, host_registry: 'HostRegistry', host_conn: 'HostConnection', repo_path: 'str',"
@@ -152,6 +153,7 @@ VALUES = {"APPROVAL_EVENT_TYPE": "approval"}
 ALIASES = {
     "APPROVAL_EVENT_TYPE": "_APPROVAL_TYPE",
     "RUNNER_SESSION_EVENT_TYPES": "_RUNNER_SESSION_EVENT_TYPES",
+    "canonical_host_id": "_canonical_host_id",
     "label_key_skeleton": "_label_key_skeleton",
     "pending_elicitation_count": "count_for",
 }

@@ -6,27 +6,46 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkflowsApiError } from "../api/client";
 import type * as ClientModule from "../api/client";
 import { PR_REVIEW_TEMPLATE } from "../api/msw/handlers";
+import type * as RunsApiModule from "../api/runsApi";
 
 const api = vi.hoisted(() => ({ listWorkflows: vi.fn(), saveWorkflow: vi.fn() }));
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ClientModule>()),
   ...api,
 }));
+const runsApi = vi.hoisted(() => ({ listRuns: vi.fn() }));
+vi.mock("../api/runsApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof RunsApiModule>()),
+  ...runsApi,
+}));
+vi.mock("@/hooks/useViewerId", () => ({
+  useViewerId: () => "alice",
+  useIdentityReady: () => true,
+}));
 
 import { WorkflowsDeskPage } from "./WorkflowsDeskPage";
 
 function Where() {
-  return <p data-testid="where">{useLocation().pathname}</p>;
+  const location = useLocation();
+  return <p data-testid="where">{`${location.pathname}${location.search}`}</p>;
 }
 
-function renderDesk() {
+function renderDesk(path = "/workflows") {
   return render(
     <QueryClientProvider
       client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
     >
-      <MemoryRouter initialEntries={["/workflows"]}>
+      <MemoryRouter initialEntries={[path]}>
         <Routes>
-          <Route path="/workflows" element={<WorkflowsDeskPage />} />
+          <Route
+            path="/workflows"
+            element={
+              <>
+                <WorkflowsDeskPage />
+                <Where />
+              </>
+            }
+          />
           <Route path="*" element={<Where />} />
         </Routes>
       </MemoryRouter>
@@ -47,6 +66,8 @@ const summary = (key: string, runnable = true) => ({
 beforeEach(() => {
   api.listWorkflows.mockReset();
   api.saveWorkflow.mockReset();
+  runsApi.listRuns.mockReset();
+  runsApi.listRuns.mockResolvedValue({ data: [], next_cursor: null });
 });
 afterEach(cleanup);
 
@@ -70,11 +91,50 @@ describe("WorkflowsDeskPage", () => {
     expect(await screen.findByText("No workflows yet")).toBeInTheDocument();
   });
 
-  it("shows Runs as coming soon", async () => {
+  it("shows the runs history in the Runs tab, and keeps the tab in the URL", async () => {
+    // WHY: a person finds any of their runs, and a reload stays on the tab.
     api.listWorkflows.mockResolvedValue([]);
     renderDesk();
+    expect(runsApi.listRuns).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("tab", { name: "Runs" }));
-    expect(await screen.findByText("Coming soon.")).toBeInTheDocument();
+    expect(await screen.findByText("No runs yet. Start one from a workflow.")).toBeInTheDocument();
+    expect(runsApi.listRuns).toHaveBeenCalledWith(
+      { statuses: [], workflowId: null },
+      undefined,
+      expect.anything(),
+    );
+    expect(screen.getByTestId("where")).toHaveTextContent("/workflows?tab=runs");
+
+    await userEvent.click(screen.getByRole("tab", { name: "Your Workflows" }));
+    expect(await screen.findByText("No workflows yet")).toBeInTheDocument();
+    expect(screen.getByTestId("where").textContent).toBe("/workflows");
+  });
+
+  it("opens on the tab the URL names, and on Your Workflows for an unknown one", async () => {
+    api.listWorkflows.mockResolvedValue([]);
+    renderDesk("/workflows?tab=templates");
+    expect(await screen.findByText("PR review")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Templates" })).toHaveAttribute("aria-selected", "true");
+    cleanup();
+
+    renderDesk("/workflows?tab=bogus");
+    expect(await screen.findByText("No workflows yet")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Your Workflows" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("drops the runs filters when it leaves the Runs tab, and keeps other parameters", async () => {
+    // WHY: the filters belong to the runs list, not to the other tabs' URLs.
+    api.listWorkflows.mockResolvedValue([]);
+    renderDesk("/workflows?tab=runs&status=paused&ref=mail");
+    expect(await screen.findByText("No runs match these filters.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Templates" }));
+    // Parameters the desk does not own stay.
+    expect(screen.getByTestId("where").textContent).toBe("/workflows?tab=templates&ref=mail");
+    await userEvent.click(screen.getByRole("tab", { name: "Your Workflows" }));
+    expect(screen.getByTestId("where").textContent).toBe("/workflows?ref=mail");
   });
 
   it("offers the PR review starter and opens it in the editor once saved", async () => {

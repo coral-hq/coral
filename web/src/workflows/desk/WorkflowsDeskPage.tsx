@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useNavigate } from "@/lib/routing";
+import { useNavigate, useSearchParams } from "@/lib/routing";
 import {
   WORKFLOWS_QUERY_KEY,
   listTemplates,
@@ -16,10 +16,32 @@ import {
 import type { WorkflowSummary, WorkflowTemplate } from "../api/workflowTypes";
 import { CORAL_LABELS } from "../nav/labels";
 import { workflowPath } from "../nav/coralPaths";
+import { RunsTable } from "../runs/list/RunsTable";
+import { ALL_RUNS, searchWithRunFilters } from "../runs/list/runFilters";
 
 const TEMPLATES_QUERY_KEY = ["coral-templates"] as const;
 
+// The open tab rides `?tab=`, so a reload or a shared link keeps it; Your Workflows is the
+// default and leaves the URL plain.
+const TAB_PARAM = "tab";
+const DESK_TABS = ["workflows", "runs", "templates"] as const;
+type DeskTab = (typeof DESK_TABS)[number];
+const DEFAULT_TAB: DeskTab = "workflows";
+
+const isDeskTab = (value: string | null): value is DeskTab =>
+  (DESK_TABS as readonly (string | null)[]).includes(value);
+
 export function WorkflowsDeskPage() {
+  const [search, setSearch] = useSearchParams();
+  const requested = search.get(TAB_PARAM);
+  const tab = isDeskTab(requested) ? requested : DEFAULT_TAB;
+  // A new tab drops the runs filters, which belong to the Runs tab, and keeps other params.
+  const openTab = (next: string) => {
+    const params = searchWithRunFilters(search, ALL_RUNS);
+    if (isDeskTab(next) && next !== DEFAULT_TAB) params.set(TAB_PARAM, next);
+    else params.delete(TAB_PARAM);
+    setSearch(params);
+  };
   return (
     <PageScroll
       maxWidthClassName="max-w-[960px]"
@@ -30,7 +52,7 @@ export function WorkflowsDeskPage() {
         title={CORAL_LABELS.workflows}
         description="Multi-agent workflows you can run and inspect."
       />
-      <Tabs defaultValue="workflows" componentId="coral.desk.tabs">
+      <Tabs value={tab} onValueChange={openTab} componentId="coral.desk.tabs">
         <TabsList variant="line">
           <TabsTrigger value="workflows">Your Workflows</TabsTrigger>
           <TabsTrigger value="runs">Runs</TabsTrigger>
@@ -40,7 +62,7 @@ export function WorkflowsDeskPage() {
           <YourWorkflows />
         </TabsContent>
         <TabsContent value="runs">
-          <p className="py-16 text-center text-muted-foreground text-ui">Coming soon.</p>
+          <RunsTable />
         </TabsContent>
         <TabsContent value="templates">
           <Templates />
