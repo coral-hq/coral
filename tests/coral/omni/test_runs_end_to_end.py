@@ -647,6 +647,8 @@ def test_a_deleted_account_s_stream_ends_at_its_next_recheck_and_cannot_reconnec
                     lambda c: c.kinds()[-1] == "heartbeat",
                     timeout_s=TIMEOUT_S,
                 )
+                # The heartbeat can go out before that wake's account check runs.
+                await poll_until_async(lambda: checks == [True], timeout_s=TIMEOUT_S)
                 deleted = await http.delete("/auth/users/alice", headers=admin)
                 fake_time.advance(RECHECK_S)
                 await _to_end(stream, client)
