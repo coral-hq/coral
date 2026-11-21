@@ -475,14 +475,14 @@ written only by the stream client), `["coral-run-graph", scope, id]`,
   the run is unfinished and the page visible (for spend), and when the view and the detail
   disagree on gates or slots, at most every 2 s. Spend is shown, never capped.
 - **The step drawer** (`?agent=<session>&node=<node>`, `runs/agents/StepDrawer.tsx`). It
-  opens only a session the run's own slots list, shows its transcript read-only (no
+  opens only a session the run's own slots list, shows its transcript and prompts (no
   composer) with "Open in Chat", and keeps the URL on the run, so AppShell stays out of chat
   mode. While open it retains its session, so the run stream's eviction never takes it;
   closing releases the stream of a session the drawer opened, never after "Open in Chat"
   and never the chat store's active conversation. A run session's Chat header links back
   to its run (S86, `session/CoralRunChip.tsx`).
 - **The outcome panel** (`runs/outcome/OutcomePanel.tsx`), for a finished run only: the
-  outcome is read once the stream or the detail says the run finished, and again after
+  outcome is read once the stream or the detail says the run finished, not again after
   `[DONE]`. It shows the branch, base → head (12 characters), "N files changed, +I −D", the
   first 20 paths then "and N more", the server's `command` and `worktree_command` verbatim
   with copy buttons that copy exactly what is shown, the hint under the command, and a note
@@ -499,7 +499,8 @@ written only by the stream client), `["coral-run-graph", scope, id]`,
   With one page loaded it polls every 10 s while a run on it is starting or running, every
   60 s while only paused runs are unsettled, and reads once more after 5 s when the first
   read lacked a run's spend (the list serves cached spend only, and the app never refetches
-  on window focus); with more pages loaded, "Refresh" goes back to the first.
+  on window focus); with more pages loaded, "Refresh" goes back to the first. A start, and
+  a pause, resume, cancel or gate answer that succeeds, invalidates `["coral-runs", scope]`.
 - **Opening a run** marks its low-priority run-end alert read once the detail has
   loaded, through `POST /v1/coral/inbox/ack` ([`gates-and-inbox.md`](gates-and-inbox.md)).
 - **Start Run** (`start/StartRunDialog.tsx`) posts `{workflow_id, start_key, host_id,

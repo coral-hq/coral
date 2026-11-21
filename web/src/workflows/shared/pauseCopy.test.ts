@@ -6,6 +6,7 @@ import {
   LOAD_FAILED_TEXT,
   PAUSE_MESSAGES,
   pauseCopy,
+  stallSentences,
   UNKNOWN_PAUSE_TEXT,
   type PauseReasonName,
 } from "./pauseCopy";
@@ -303,5 +304,31 @@ describe("pauseCopy for odd reasons and details", () => {
         ).toBe(plain);
       }
     }
+  });
+});
+
+describe("stallSentences", () => {
+  const STEP = isolated("Implement");
+
+  it("names the step in each thing that stalls it, in one order", () => {
+    // WHY: the banner and the step list say the same sentences about a step.
+    expect(stallSentences(STEP, { pendingInput: true, drift: true, decisionOpen: true })).toEqual([
+      `Someone typed into ${STEP}’s session.`,
+      `${STEP}’s session was changed outside Coral.`,
+      `Waiting for the orchestrator to choose at ${STEP}.`,
+    ]);
+    expect(stallSentences(STEP, {})).toEqual([]);
+  });
+
+  it("leaves out the plain typed-into sentence when a cause already says it", () => {
+    // WHY: the cause names the same event in longer words; other causes do not.
+    const typedInto = cause("drift", "pending_input", "implement||a4:2:0");
+    const archived = cause("drift", "anchor_archived");
+    expect(stallSentences(STEP, { pendingInput: true, drift: true, causes: [typedInto] })).toEqual([
+      `${STEP}’s session was changed outside Coral.`,
+    ]);
+    expect(stallSentences(STEP, { pendingInput: true, causes: [archived] })).toEqual([
+      `Someone typed into ${STEP}’s session.`,
+    ]);
   });
 });

@@ -1,5 +1,5 @@
 import type { authenticatedFetch } from "@/lib/identity";
-import { ApiError, parseRetryAfterMs } from "@/lib/sessionsApi";
+import { parseRetryAfterMs } from "@/lib/sessionsApi";
 import { withStallGuard } from "@/lib/sse";
 import type { StreamSlot, StreamSlotManager } from "@/store/streamSlots";
 import type {
@@ -9,7 +9,7 @@ import type {
   RunView,
   SnapshotFrame,
 } from "../api/generated/coralApi";
-import { MAX_RETRY_AFTER_MS, runStreamUrl } from "../api/runsApi";
+import { isRunNotFound, MAX_RETRY_AFTER_MS, runStreamUrl } from "../api/runsApi";
 import { isFinishedRunStatus } from "../shared/runStatus";
 import { parseStreamEvent, UnsupportedStreamError, type StreamItem } from "./frames";
 import { SseParser, type SseEvent } from "./sseParser";
@@ -456,7 +456,7 @@ class RunStreamController {
     try {
       detail = await untilAborted(this.deps.readDetail(signal), signal);
     } catch (error) {
-      if (!signal.aborted && error instanceof ApiError && error.status === 404) {
+      if (!signal.aborted && isRunNotFound(error)) {
         return this.finish("not_found");
       }
       return "polled";

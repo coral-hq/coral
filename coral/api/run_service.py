@@ -29,6 +29,7 @@ from coral.api.outcome import (
     DiffRead,
     OutcomeDiffs,
     OutcomeTarget,
+    failure_code,
     no_diff,
     outcome_target,
     run_outcome,
@@ -75,12 +76,7 @@ from coral.gates.verdict import GateAnswers, GateVerdict, VisitAnswer
 from coral.limits import Slots, WarnOnce
 from coral.model.ids import derived_id
 from coral.model.ir import CompiledGraph
-from coral.omni.protocols import (
-    GatePublisher,
-    HostAccessRefused,
-    HostWorkspaceChannels,
-    Viewer,
-)
+from coral.omni.protocols import GatePublisher, HostWorkspaceChannels, Viewer
 from coral.queue.run_effects import describe_exception
 from coral.recovery.cancel import cancel_run_row, withdraw_local_prompts
 from coral.runview.types import FINISHED_RUN_STATUSES, RunStatusName
@@ -98,7 +94,7 @@ from coral.stores.protocols import (
 )
 from coral.stores.workflows import WorkflowDefinitionStore
 from coral.workspace.host_backend import HostWorkspaceOps
-from coral.workspace.ops import HostChannel, WorkspaceOpError, WorkspaceRef
+from coral.workspace.ops import HostChannel, WorkspaceRef
 from coral.workspace.run_worktree import (
     RunWorktree,
     RunWorktreeError,
@@ -789,13 +785,11 @@ class RunsApi:
                 )
                 found = await ops.head(ref, HostChannel(host_id))
         except Exception as exc:  # noqa: BLE001 -- the start goes on without a base
-            # Only the fixed codes: host and git messages can hold paths.
-            code = exc.code if isinstance(exc, (HostAccessRefused, WorkspaceOpError)) else ""
             _logger.info(
                 "Coral could not read run %s's start head: %s %s",
                 run_id,
                 type(exc).__name__,
-                code,
+                failure_code(exc),
             )
             return None
         if found.branch != worktree.branch:

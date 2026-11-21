@@ -17,6 +17,7 @@ vi.mock("@/lib/randomUUID", () => ({
     return `key-${keys.made}`;
   },
 }));
+vi.mock("@/hooks/useViewerId", () => ({ useViewerId: () => "alice" }));
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: () => ({
     isPending: false,
@@ -53,12 +54,19 @@ vi.mock("@/shell/WorkspacePickerDialog", () => ({
 }));
 
 import type { RunSummary } from "../api/generated/coralApi";
-import { MAX_RETRY_AFTER_MS } from "../api/runsApi";
+import { MAX_RETRY_AFTER_MS, runsListQueryKey } from "../api/runsApi";
 import { jsonResponse } from "../fixtures/runStreamServer";
+import { coralScope } from "../shared/viewerScope";
 import { StartRunDialog } from "./StartRunDialog";
 
 const WORKFLOW_ID = "0123456789abcdef0123456789abcdef";
 const RUN_ID = "84170e76f35c7a90d1280a24a7230fc9";
+
+/** The runs history's unfiltered first page, which a start makes stale. */
+const RUNS_LIST_KEY = runsListQueryKey(coralScope("alice", "/"), {
+  statuses: [],
+  workflowId: null,
+});
 
 const SUMMARY: RunSummary = {
   run_id: RUN_ID,
@@ -138,6 +146,7 @@ function tree(open: boolean, onOpenChange: (open: boolean) => void) {
 
 function renderDialog() {
   const client = new QueryClient();
+  client.setQueryData(RUNS_LIST_KEY, { pages: [], pageParams: [] });
   const onOpenChange = vi.fn();
   const view = render(
     <QueryClientProvider client={client}>{tree(true, onOpenChange)}</QueryClientProvider>,
@@ -146,7 +155,8 @@ function renderDialog() {
     view.rerender(
       <QueryClientProvider client={client}>{tree(open, onOpenChange)}</QueryClientProvider>,
     );
-  return { onOpenChange, reopen };
+  const runsListStale = () => client.getQueryState(RUNS_LIST_KEY)?.isInvalidated;
+  return { onOpenChange, reopen, runsListStale };
 }
 
 const run = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
@@ -225,12 +235,14 @@ describe("StartRunDialog", () => {
     expect(authenticatedFetch).not.toHaveBeenCalled();
   });
 
-  it("posts the start once and opens the new run", async () => {
-    // WHY: the server needs the stored workflow id and the repository root, with a start key.
-    const { onOpenChange } = renderDialog();
+  it("posts the start once, opens the new run and refreshes the runs history", async () => {
+    // WHY: the server needs the stored workflow id and the repository root, with a start key;
+    // the history must list the new run when the person goes back to it.
+    const { onOpenChange, runsListStale } = renderDialog();
     await run();
     await chooseHost("Laptop");
     await chooseFolder("/repo", "h1");
+    expect(runsListStale()).toBe(false);
     fireEvent.click(startButton());
     fireEvent.click(startButton());
     await run();
@@ -245,6 +257,7 @@ describe("StartRunDialog", () => {
     ]);
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(screen.getByTestId("where")).toHaveTextContent(`/workflows/runs/${RUN_ID}`);
+    expect(runsListStale()).toBe(true);
   });
 
   it("opens the run a replayed start key answers", async () => {
@@ -544,7 +557,7 @@ describe("StartRunDialog", () => {
     // links to it instead.
     const reply = held();
     answers = [() => reply.promise];
-    const { reopen, onOpenChange } = renderDialog();
+    const { reopen, onOpenChange, runsListStale } = renderDialog();
     await run();
     await chooseHost("Laptop");
     await chooseFolder("/repo", "h1");
@@ -558,6 +571,7 @@ describe("StartRunDialog", () => {
     await run();
     expect(screen.getByTestId("where")).toHaveTextContent("/elsewhere");
     expect(onOpenChange).not.toHaveBeenCalled();
+    expect(runsListStale()).toBe(true);
     expect(notices).toHaveLength(1);
     cleanup();
     render(<MemoryRouter>{notices[0]}</MemoryRouter>);

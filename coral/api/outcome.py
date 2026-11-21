@@ -208,6 +208,11 @@ def run_outcome(run: CoralRun, target: OutcomeTarget | None, read: DiffRead) -> 
     )
 
 
+def failure_code(exc: BaseException) -> str:
+    """A host read failure's fixed code for a log line, else ``""``: messages can hold paths."""
+    return exc.code if isinstance(exc, (HostAccessRefused, WorkspaceOpError)) else ""
+
+
 def _failure(exc: Exception, *, comparing: bool) -> OutcomeUnavailable:
     """
     Why a read that raised ``exc`` has no diff. Git's failure or refused params count as
@@ -351,7 +356,7 @@ class OutcomeDiffs:
                 "Coral could not read run %s's outcome: %s %s",
                 state.run_id,
                 type(exc).__name__,
-                getattr(exc, "code", ""),
+                failure_code(exc),
             )
             # The head is known exactly when diff_stat was sent.
             return DiffRead(head, None, _failure(exc, comparing=head is not None))
@@ -388,6 +393,7 @@ __all__ = [
     "OutcomeTarget",
     "checkout_commands",
     "display_path",
+    "failure_code",
     "no_diff",
     "outcome_target",
     "run_outcome",

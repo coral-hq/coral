@@ -4,7 +4,7 @@ import { authenticatedFetch } from "@/lib/identity";
 import { awaitReconnectDelay, isPageHidden } from "@/lib/reconnectBackoff";
 import { conversationRegistry, type ConversationRegistry } from "@/store/conversationRegistry";
 import { getStreamSlotManager } from "@/store/streamSlots";
-import { getRun, runOutcomeQueryKey, runQueryKey, runViewQueryKey } from "../api/runsApi";
+import { getRun, runQueryKey, runViewQueryKey } from "../api/runsApi";
 import { useCoralScope } from "../shared/viewerScope";
 import {
   abortableSleep,
@@ -74,7 +74,7 @@ export interface UseRunStreamOptions {
 
 /**
  * The live view of run `runId` for the current viewer. Nothing starts until the viewer is
- * known. On `[DONE]` the run's detail and outcome are invalidated and `onDone` is called.
+ * known. On `[DONE]` the run's detail is invalidated and `onDone` is called.
  * Call it once per run page: each call holds its own stream slot.
  */
 export function useRunStream(runId: string, options: UseRunStreamOptions = {}): RunStreamState {
@@ -104,8 +104,8 @@ export function useRunStream(runId: string, options: UseRunStreamOptions = {}): 
       queryClient.setQueryData(viewKey, state);
       // The controller reports `done` once, then stops.
       if (state.status !== "done") return;
+      // The outcome is read only once the run finished, so `[DONE]` cannot make it stale.
       void queryClient.invalidateQueries({ queryKey: runQueryKey(scope, runId) });
-      void queryClient.invalidateQueries({ queryKey: runOutcomeQueryKey(scope, runId) });
       onDone.current?.();
     });
   }, [queryClient, scope, ready, runId, restartKey]);

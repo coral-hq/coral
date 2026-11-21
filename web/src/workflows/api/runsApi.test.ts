@@ -17,6 +17,7 @@ import {
   runGraphQueryKey,
   runOutcomeQueryKey,
   runQueryKey,
+  runsListPrefixKey,
   runsListQueryKey,
   runStreamUrl,
   runViewQueryKey,
@@ -71,6 +72,8 @@ describe("run query keys", () => {
     expect(runGraphQueryKey(SCOPE, RUN_ID)).toEqual(["coral-run-graph", SCOPE, RUN_ID]);
     expect(runOutcomeQueryKey(SCOPE, RUN_ID)).toEqual(["coral-run-outcome", SCOPE, RUN_ID]);
     expect(runsListQueryKey(SCOPE, filters)).toEqual(["coral-runs", SCOPE, filters]);
+    // Every filtered list starts with the prefix a start or an action invalidates.
+    expect(runsListQueryKey(SCOPE, filters).slice(0, 2)).toEqual(runsListPrefixKey(SCOPE));
     expect(runActionKey(SCOPE, RUN_ID)).toEqual(["coral-run-action", SCOPE, RUN_ID]);
   });
 

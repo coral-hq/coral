@@ -124,6 +124,33 @@ function driftBody(cause: PauseCauseLike, graph: GraphNodeNames | null): string 
   return PAUSE_MESSAGES.drift;
 }
 
+/** What stalls a step besides its pause causes; a flag left out is false. */
+export interface StepStall {
+  /** Someone typed into the step's session. */
+  pendingInput?: boolean;
+  /** The step's session was changed outside Coral. */
+  drift?: boolean;
+  /** The orchestrator has a decision to make at the step. */
+  decisionOpen?: boolean;
+  /** The pause causes about the step. */
+  causes?: readonly PauseCauseLike[];
+}
+
+/**
+ * What stalls a step, in sentences naming `step` (its name, isolated). A typed-into cause
+ * already says the step was typed into, in longer words, so the plain sentence is left out.
+ */
+export function stallSentences(step: string, stall: StepStall): string[] {
+  const typedIntoCause = (stall.causes ?? []).some(
+    (cause) => cause.reason === "drift" && cause.detail === "pending_input",
+  );
+  const lines: string[] = [];
+  if (stall.pendingInput && !typedIntoCause) lines.push(`Someone typed into ${step}’s session.`);
+  if (stall.drift) lines.push(`${step}’s session was changed outside Coral.`);
+  if (stall.decisionOpen) lines.push(`Waiting for the orchestrator to choose at ${step}.`);
+  return lines;
+}
+
 /** The banner body for `reason`, made specific by `cause`'s detail when it has one. */
 function body(reason: PauseReasonName, cause: PauseCauseLike | null, graph: GraphNodeNames | null) {
   switch (reason) {

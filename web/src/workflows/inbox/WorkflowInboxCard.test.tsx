@@ -9,7 +9,7 @@ import { ApiError } from "@/lib/sessionsApi";
 import type * as sessionsApiModule from "@/lib/sessionsApi";
 import type { InboxKindUi } from "@/lib/inboxKinds";
 import type { RunDetail, RunSummary } from "../api/generated/coralApi";
-import { CoralRequestError, runQueryKey } from "../api/runsApi";
+import { CoralRequestError, runQueryKey, runsListPrefixKey } from "../api/runsApi";
 import type { WorkflowAlert } from "../api/types";
 import {
   CONTRACT_INBOX_PAGE,
@@ -209,6 +209,10 @@ describe("WorkflowGateCard", () => {
     expect(screen.queryByLabelText("Note")).not.toBeInTheDocument();
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["conversations"] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["coral-inbox"] });
+    // The runs history shows the run's new state the next time it shows.
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: runsListPrefixKey(coralScope("alice", "/")),
+    });
   });
 
   it("sends no note when none was written", async () => {
@@ -874,12 +878,17 @@ describe("WorkflowAlertCard run actions", () => {
     expect(screen.getByRole("link", { name: /Open run/ })).toHaveClass("outline-action");
   });
 
-  it("resumes with an empty body, announces it and refreshes the Inbox and the run", async () => {
+  it("resumes with an empty body, announces it and refreshes the Inbox, the run and the runs list", async () => {
     // WHY: the owner resumes from the Inbox and sees the result without leaving it.
     serveRun([RESUMABLE, RUNNING], wire(200, summaryOf(RUNNING)));
     const { queryClient } = renderRunCard();
     const inboxKey = ["coral-inbox", "viewer-scope"];
     queryClient.setQueryData(inboxKey, { alerts: [] });
+    const runsListKey = [
+      ...runsListPrefixKey(coralScope("alice", "/")),
+      { statuses: [], workflowId: null },
+    ];
+    queryClient.setQueryData(runsListKey, { pages: [], pageParams: [] });
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const resume = await screen.findByRole("button", { name: "Resume" });
     // Taken before the click: the pending button's spinner is a status too.
@@ -895,6 +904,7 @@ describe("WorkflowAlertCard run actions", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["coral-inbox"] });
     expect(queryClient.getQueryState(inboxKey)?.isInvalidated).toBe(true);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: RUN_KEY });
+    expect(queryClient.getQueryState(runsListKey)?.isInvalidated).toBe(true);
     await waitFor(() => expect(actionNames()).toEqual(["Cancel run", "Mark as read"]));
     await waitFor(() => expect(reads()).toEqual([RUN_URL, RUN_URL]));
   });

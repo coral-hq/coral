@@ -153,7 +153,7 @@ describe("useRunStream", () => {
     expect(onDone).not.toHaveBeenCalled();
   });
 
-  it("on [DONE], invalidates the run's detail and outcome and tells its caller once", async () => {
+  it("on [DONE], invalidates the run's detail, not its outcome, and tells its caller once", async () => {
     const client = new QueryClient();
     const detailKey = runQueryKey(SCOPE, RUN_ID);
     const outcomeKey = runOutcomeQueryKey(SCOPE, RUN_ID);
@@ -164,7 +164,8 @@ describe("useRunStream", () => {
     renderStream({ client, onDone });
     await run();
     expect(client.getQueryState(detailKey)?.isInvalidated).toBe(true);
-    expect(client.getQueryState(outcomeKey)?.isInvalidated).toBe(true);
+    // A finished run's outcome does not change; a reread adds nothing and can come back `busy`.
+    expect(client.getQueryState(outcomeKey)?.isInvalidated).toBe(false);
     expect(onDone).toHaveBeenCalledTimes(1);
   });
 

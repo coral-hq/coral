@@ -18,8 +18,10 @@ import { Textarea } from "@/components/ui/textarea";
 import type { InboxKindUi, InboxTileTone } from "@/lib/inboxKinds";
 import { Link } from "@/lib/routing";
 import { approve } from "@/lib/sessionsApi";
+import { runsListPrefixKey } from "../api/runsApi";
 import type { WorkflowAlert, WorkflowAlertKind } from "../api/types";
 import { runPath } from "../nav/coralPaths";
+import { useCoralScope } from "../shared/viewerScope";
 import { CardStatusLine } from "./CardStatusLine";
 import { gateCardState, type GateSubmission } from "./cardState";
 import { RunActions } from "./RunActions";
@@ -89,6 +91,7 @@ export function WorkflowGateCard({
 }: WorkflowGateCardProps) {
   const view = gateView(data);
   const queryClient = useQueryClient();
+  const { scope } = useCoralScope();
   const online = useOnline();
   const noteId = useId();
   const statusRef = useRef<HTMLParagraphElement>(null);
@@ -127,6 +130,7 @@ export function WorkflowGateCard({
         setSubmission({ status: "answered", label: decision });
         void queryClient.invalidateQueries({ queryKey: ["conversations"] });
         void queryClient.invalidateQueries({ queryKey: WORKFLOW_INBOX_QUERY_KEY });
+        void queryClient.invalidateQueries({ queryKey: runsListPrefixKey(scope) });
       },
       (error: unknown) => setSubmission({ status: "failed", error }),
     );

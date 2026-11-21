@@ -2,7 +2,13 @@ import { ShieldCheckIcon } from "lucide-react";
 import { useId } from "react";
 import type { CompiledGraph } from "../api/generated/coralApi";
 import { nodeStatusText, passText, type NodeOverlay } from "../canvas/runOverlay";
-import { nodeLabel, pauseCopy, type GraphNodeNames } from "../shared/pauseCopy";
+import {
+  isolated,
+  nodeLabel,
+  pauseCopy,
+  stallSentences,
+  type GraphNodeNames,
+} from "../shared/pauseCopy";
 import { cn } from "@/lib/utils";
 
 // The run's steps as a list beside the canvas, carrying the same state for anyone who does
@@ -16,19 +22,10 @@ export interface RunStepListProps {
   onSelectNode: (nodeId: string) => void;
 }
 
-/** What stalls a step, once each: typed into, changed, a decision to make, its causes. */
-export function stallLines(overlay: NodeOverlay, graph: GraphNodeNames | null): string[] {
-  const lines: string[] = [];
-  // A typed-into cause says the same, naming the step.
-  const typedIntoCause = overlay.causes.some(
-    (cause) => cause.reason === "drift" && cause.detail === "pending_input",
-  );
-  if (overlay.pendingInput && !typedIntoCause)
-    lines.push("Someone typed into this step’s session.");
-  if (overlay.drift) lines.push("This step’s session was changed outside Coral.");
-  if (overlay.decisionOpen) lines.push("Waiting for the orchestrator to choose.");
-  for (const cause of overlay.causes) lines.push(pauseCopy(cause.reason, cause, graph).body);
-  return [...new Set(lines)];
+/** What stalls the step named `step`, once each: typed into, changed, a decision, its causes. */
+function stallLines(step: string, overlay: NodeOverlay, graph: GraphNodeNames | null): string[] {
+  const causes = overlay.causes.map((cause) => pauseCopy(cause.reason, cause, graph).body);
+  return [...new Set([...stallSentences(isolated(step), overlay), ...causes])];
 }
 
 export function RunStepList({ graph, overlay, selectedNodeId, onSelectNode }: RunStepListProps) {
@@ -47,7 +44,8 @@ export function RunStepList({ graph, overlay, selectedNodeId, onSelectNode }: Ru
           const entry = overlay.get(node.id);
           if (!entry) return null;
           const selected = node.id === selectedNodeId;
-          const stalls = stallLines(entry, graph);
+          const name = nodeLabel(graph, node.id) ?? node.id;
+          const stalls = stallLines(name, entry, graph);
           return (
             <li
               key={node.id}
@@ -67,7 +65,7 @@ export function RunStepList({ graph, overlay, selectedNodeId, onSelectNode }: Ru
               >
                 <span className="flex w-full items-center gap-1.5">
                   <span className="min-w-0 truncate text-ui font-medium text-foreground">
-                    {nodeLabel(graph, node.id) ?? node.id}
+                    {name}
                   </span>
                   {entry.evidence && (
                     <span className="flex shrink-0 items-center text-muted-foreground">

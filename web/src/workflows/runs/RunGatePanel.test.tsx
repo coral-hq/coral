@@ -9,6 +9,7 @@ vi.mock("@/lib/identity", async (importActual) => ({
   ...(await importActual<typeof identityModule>()),
   authenticatedFetch,
 }));
+vi.mock("@/hooks/useViewerId", () => ({ useViewerId: () => "alice" }));
 
 import type { GateOut, RunDetail, RunView } from "../api/generated/coralApi";
 import { jsonResponse } from "../fixtures/runStreamServer";

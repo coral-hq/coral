@@ -10,6 +10,7 @@ import {
   retryRunRead,
   runActionKey,
   runQueryKey,
+  runsListPrefixKey,
   type RunAction,
 } from "../api/runsApi";
 import { useCoralScope } from "../shared/viewerScope";
@@ -123,6 +124,7 @@ export function RunActions({
           detail && { ...detail, status: summary.status, allowed_actions: summary.allowed_actions },
       );
       void queryClient.invalidateQueries({ queryKey: runKey });
+      void queryClient.invalidateQueries({ queryKey: runsListPrefixKey(scope) });
       void queryClient.invalidateQueries({ queryKey: WORKFLOW_INBOX_QUERY_KEY });
     },
     onError: (error) => {

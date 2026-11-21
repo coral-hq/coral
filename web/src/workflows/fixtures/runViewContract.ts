@@ -54,7 +54,7 @@ export type AlertedPauseReason = Exclude<NonNullable<RunHeader["pause_reason"]>,
 
 /**
  * What a pause alert says for each reason but `user`, and for a reason it cannot name: the
- * fallback bodies step 5's copy table must match. The rest of the copy is the table's own.
+ * fallback bodies `shared/pauseCopy.ts` must match. The rest of its copy is its own.
  */
 export const CONTRACT_PAUSE_MESSAGES: {
   readonly by_reason: Readonly<Record<AlertedPauseReason, string>>;

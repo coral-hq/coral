@@ -24,7 +24,7 @@ import { RosterChip } from "../../shared/RosterChip";
 import { DRAWER_PANEL_CLASS, drawerRoot } from "./StepDrawerFallback";
 import { agentName, runSession, slotStatusLine } from "./stepSessions";
 
-// A read-only transcript of one step's session beside the run, opened by `?agent=`. The
+// One step session's transcript beside the run, with no composer, opened by `?agent=`. The
 // URL stays on the run, so AppShell never enters chat mode. While open, the drawer keeps
 // its session's stream from being evicted; closing it gives back only a stream it opened
 // itself, and none the person took to its Chat page, which binds the same stream at once.

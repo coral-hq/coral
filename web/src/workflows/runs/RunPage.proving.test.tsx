@@ -595,6 +595,8 @@ describe("Live run view proving tests", () => {
       expect(page()).toHaveAttribute("data-stream", "done");
       expect(pillKind()).toBe("completed");
       expectRecordedOutcome();
+      // The snapshot's `[DONE]` follows at once and reads it no second time.
+      expect(outcomeReads()).toBe(1);
       fireEvent.click(within(outcome()).getByTestId("run-outcome-checkout-copy"));
       await run();
       expect(writeText).toHaveBeenCalledWith(CONTRACT_OUTCOME.checkout.command);
@@ -612,9 +614,8 @@ describe("Live run view proving tests", () => {
       await run();
       await run();
       expect(page()).toHaveAttribute("data-stream", "done");
-      // The mount's read and the `[DONE]` refetch may coalesce; nothing reads more.
-      expect(outcomeReads()).toBeGreaterThan(0);
-      expect(outcomeReads()).toBeLessThanOrEqual(2);
+      // Read once, when the finished header mounts the panel; `[DONE]` reads nothing more.
+      expect(outcomeReads()).toBe(1);
       expectRecordedOutcome();
       expect(server.streamRequests()).toHaveLength(1);
     });

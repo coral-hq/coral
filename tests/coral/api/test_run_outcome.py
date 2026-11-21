@@ -623,6 +623,14 @@ async def test_each_host_failure_answers_its_code(
     assert read == DiffRead(head, None, code)
 
 
+class _CodedError(Exception):
+    """A failure whose own ``code`` attribute is free text, not one of the fixed codes."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 async def test_a_failed_read_logs_its_type_and_code_and_never_a_path(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -631,15 +639,19 @@ async def test_a_failed_read_logs_its_type_and_code_and_never_a_path(
     )
     _refusing_host, refusing = _host()
     refusing.refusal = HostAccessRefused("not_permitted", f"host {PATH_ERROR!r} is not yours")
+    _coded_host, coded = _host({"diff_stat": _CodedError(PATH_ERROR)})
 
     with caplog.at_level(logging.DEBUG):
         await _read(OutcomeDiffs(), channels)
         await _read(OutcomeDiffs(), refusing)
+        await _read(OutcomeDiffs(), coded)
 
     logged = [record.getMessage() for record in caplog.records]
+    # Only a host or workspace failure's code is logged, the same rule as a start's head read.
     assert logged == [
         f"Coral could not read run {RUN_ID}'s outcome: WorkspaceOpError workspace.git_failed",
         f"Coral could not read run {RUN_ID}'s outcome: HostAccessRefused not_permitted",
+        f"Coral could not read run {RUN_ID}'s outcome: _CodedError ",
     ]
     assert all(record.exc_info is None for record in caplog.records)
     assert "/home/alice" not in caplog.text

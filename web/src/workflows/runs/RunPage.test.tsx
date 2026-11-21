@@ -28,7 +28,7 @@ vi.mock("@/hooks/useViewerId", () => ({
 vi.mock("@xyflow/react", () => import("../fixtures/xyflowDouble"));
 vi.mock("@xyflow/react/dist/style.css", () => ({}));
 
-import type { RunDetail, RunHeader, RunView } from "../api/generated/coralApi";
+import type { RunDetail, RunHeader } from "../api/generated/coralApi";
 import {
   countingSlots,
   FakeRunServer,
@@ -53,7 +53,7 @@ import {
   CONTRACT_RESUMED,
   type ContractEvent,
 } from "../fixtures/runViewContract";
-import { isolated, LOAD_FAILED_TEXT, PAUSE_MESSAGES } from "../shared/pauseCopy";
+import { LOAD_FAILED_TEXT } from "../shared/pauseCopy";
 import { LIMITED_RETRY_MS, SLOT_RETRIES, SLOT_RETRY_MS } from "../stream/runStream";
 import { RunPage } from "./RunPage";
 
@@ -76,8 +76,6 @@ let server: FakeRunServer;
 let slots: CountingSlots;
 /** The detail read's answer; a fresh response each time. */
 let detailReply: () => Promise<Response>;
-/** Each POST's answer in turn; an unanswered POST is a 500. */
-let postAnswers: (() => Promise<Response>)[];
 
 const answer = (status: number, body: unknown) => () => Promise.resolve(jsonResponse(status, body));
 
@@ -165,12 +163,11 @@ beforeEach(() => {
   vi.setSystemTime((CONTRACT_DETAIL_GATE_PASS1.created_at + 125) * 1000);
   server = new FakeRunServer();
   serveDetail(CONTRACT_DETAIL_GATE_PASS1);
-  postAnswers = [];
   authenticatedFetch.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (init?.method === "POST") {
       if (url === ACK_URL) return Promise.resolve(jsonResponse(200, { acked: 1 }));
-      return (postAnswers.shift() ?? answer(500, {}))();
+      return answer(500, {})();
     }
     if (url === DETAIL_URL) return detailReply();
     if (url === GRAPH_URL) return Promise.resolve(jsonResponse(200, CONTRACT_GRAPH));
@@ -214,7 +211,7 @@ describe("RunPage", () => {
     expect(statusRegion()).toHaveTextContent("Needs you");
     expect(screen.getByTestId("run-elapsed")).toHaveTextContent("Elapsed 2m 5s");
     expect(screen.getByTestId("run-spend")).toHaveTextContent("Spend so far (estimate) $0.84");
-    expect(button("Pause")).toBeInTheDocument();
+    expect(button("Pause")).toHaveAttribute("data-component-id", "workflows.run.pause");
     expect(button("Cancel run")).toBeInTheDocument();
     expect(button("Resume")).not.toBeInTheDocument();
   });
@@ -248,92 +245,6 @@ describe("RunPage", () => {
     expect(screen.queryByRole("region", { name: /^Paused/ })).not.toBeInTheDocument();
     expect(statusRegion()).toHaveTextContent("Needs you");
     expect(button("Pause")).toBeInTheDocument();
-  });
-
-  it("lists every cause, typed-into and changed steps, and open decisions in the banner", async () => {
-    // WHY: everything the run waits on is visible without reading a transcript.
-    const view = CONTRACT_DETAIL_GATE_PASS2.view!;
-    const paused: RunView = {
-      ...view,
-      status: "paused",
-      causes: [
-        { reason: "budget", detail: "", subject: "" },
-        { reason: "drift", detail: "pending_input", subject: "implement||a4:2:0" },
-      ],
-      slots: [
-        { ...view.slots[0]!, drift: true },
-        { ...view.slots[1]!, pending_input: true },
-      ],
-      open_decisions: ["implement||a4:2"],
-    };
-    const header: RunHeader = {
-      ...RUNNING,
-      status: "paused",
-      pause_reason: "budget",
-      allowed_actions: ["cancel"],
-    };
-    serveDetail(CONTRACT_DETAIL_GATE_PASS2);
-    openStream([snapshot(header, paused, { seq: 12 })]);
-    renderPage();
-    await run();
-    const banner = screen.getByRole("region", { name: "Paused: activation cap" });
-    expect(banner).toHaveTextContent(PAUSE_MESSAGES.budget);
-    expect(
-      within(banner)
-        .getAllByRole("listitem")
-        .map((item) => item.textContent),
-    ).toEqual([
-      `Someone typed into ${isolated("Implement")}’s session while Coral was finishing it.`,
-      `${isolated("Implement")}’s session was changed outside Coral.`,
-      `Waiting for the orchestrator to choose at ${isolated("Implement")}.`,
-    ]);
-    expect(button("Cancel run")).toBeInTheDocument();
-    expect(button("Resume")).not.toBeInTheDocument();
-  });
-
-  it("pauses once, with the button disabled while the request is out", async () => {
-    // WHY: a second click must not send a second pause.
-    let release: (response: Response) => void = () => {};
-    postAnswers = [
-      () =>
-        new Promise((resolve) => {
-          release = resolve;
-        }),
-    ];
-    openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
-    renderPage();
-    await run();
-    // A pending button shows a spinner, which joins its accessible name.
-    const pause = () => screen.getByRole("button", { name: /Pause/ });
-    expect(pause()).toHaveAttribute("data-component-id", "workflows.run.pause");
-    fireEvent.click(pause());
-    await run();
-    expect(pause()).toBeDisabled();
-    fireEvent.click(pause());
-    await run();
-    expect(posts()).toEqual([{ url: `${DETAIL_URL}:pause`, body: {} }]);
-    const summary = { ...CONTRACT_DETAIL_GATE_PASS1, status: "paused", pause_reason: "user" };
-    release(jsonResponse(200, summary));
-    await run();
-    expect(screen.getByText("Paused.")).toBeInTheDocument();
-  });
-
-  it("asks before it cancels", async () => {
-    // WHY: a cancel stops every step and cannot be undone.
-    postAnswers = [
-      answer(200, { ...CONTRACT_DETAIL_GATE_PASS1, status: "cancelled", allowed_actions: [] }),
-    ];
-    openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
-    renderPage();
-    await run();
-    fireEvent.click(button("Cancel run")!);
-    expect(
-      screen.getByRole("group", { name: "Cancel this run? Its steps stop." }),
-    ).toBeInTheDocument();
-    expect(posts()).toEqual([]);
-    fireEvent.click(button("Cancel run")!);
-    await run();
-    expect(posts()).toEqual([{ url: `${DETAIL_URL}:cancel`, body: {} }]);
   });
 
   it("says a run it cannot see is not found, and marks nothing read", async () => {
@@ -470,16 +381,6 @@ describe("RunPage", () => {
     expect(statusRegion()).toHaveTextContent(
       "This page is out of date. Reload it for live updates.",
     );
-  });
-
-  it("offers only Cancel for a run whose state cannot be loaded", async () => {
-    // WHY: nothing but a cancel can act on a run the engine cannot read.
-    openStream([snapshot({ ...RUNNING, load_error: "engine.load_failed" }, null)]);
-    renderPage();
-    await run();
-    expect(screen.getByText(LOAD_FAILED_TEXT)).toBeInTheDocument();
-    expect(button("Cancel run")).toBeInTheDocument();
-    expect(button("Pause")).not.toBeInTheDocument();
   });
 
   it("says the run is being set up while it starts with nothing to show", async () => {
@@ -660,24 +561,12 @@ describe("RunPage", () => {
     expect(acks()).toHaveLength(2);
   });
 
-  it("shows the run's steps on the canvas and in the step list once the view arrives", async () => {
-    // WHY: the graph and its list carry where the run is, from the stream.
-    openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
-    renderPage();
-    await run();
-    expect(screen.getAllByTestId("rf-node")).toHaveLength(CONTRACT_GRAPH.nodes.length);
-    const steps = screen.getByRole("region", { name: "Steps" });
-    expect(within(steps).getByRole("button", { name: /^Approve change/ })).toHaveTextContent(
-      "Waiting for you",
-    );
-    expect(screen.queryByTestId("run-node-panel")).toBeNull();
-  });
-
   it("shows nothing of the graph for a run whose state cannot be loaded", async () => {
     // WHY: with no view, every node would read "Not started", which is not known.
     openStream([snapshot({ ...RUNNING, load_error: "engine.load_failed" }, null)]);
     renderPage();
     await run();
+    expect(screen.getByText(LOAD_FAILED_TEXT)).toBeInTheDocument();
     expect(screen.queryByTestId("run-canvas")).toBeNull();
     expect(screen.queryByRole("region", { name: "Steps" })).toBeNull();
   });

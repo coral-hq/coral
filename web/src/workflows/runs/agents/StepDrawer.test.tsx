@@ -196,7 +196,7 @@ afterEach(() => {
 
 describe("StepDrawer", () => {
   it.each(["session_created", "briefed", "working", "evaluating", "closing", "closed"] as const)(
-    "shows a %s step's transcript read-only, with no composer",
+    "shows a %s step's transcript with no composer",
     (status) => {
       // WHY: steering is out of scope; the drawer is for reading in every slot state.
       seedSession(S2);
@@ -495,7 +495,7 @@ describe("StepDrawer", () => {
   });
 
   it("shows a step's question form as its Chat page does, with its typed answer", () => {
-    // WHY (R44): every prompt kind renders as on the step's Chat page; a question takes a
+    // WHY: every prompt kind renders as on the step's Chat page; a question takes a
     // typed answer, which goes to the step's session. Escape there keeps the typing.
     const submitApproval = vi.fn<ChatState["submitApproval"]>().mockResolvedValue(undefined);
     useChatStore.setState({ submitApproval });
@@ -537,7 +537,7 @@ describe("StepDrawer", () => {
   });
 
   it("shows a step's session-wide permission choices as its Chat page does", () => {
-    // WHY (R44): these change how the step's session asks for the rest of its life; the
+    // WHY: these change how the step's session asks for the rest of its life; the
     // drawer shows them as the Chat page does, and the human brief lists them.
     const permission: ElicitationBlock = {
       ...pendingApproval,

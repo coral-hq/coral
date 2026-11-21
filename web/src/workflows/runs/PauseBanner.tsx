@@ -1,7 +1,13 @@
 import { CirclePauseIcon } from "lucide-react";
 import { useId } from "react";
 import type { RunView } from "../api/generated/coralApi";
-import { isolated, nodeLabel, pauseCopy, type GraphNodeNames } from "../shared/pauseCopy";
+import {
+  isolated,
+  nodeLabel,
+  pauseCopy,
+  stallSentences,
+  type GraphNodeNames,
+} from "../shared/pauseCopy";
 import { activationNodeId, slotNodeId } from "../shared/runIds";
 
 // A paused run's banner: why it paused (the first cause, or the run's reason), then what
@@ -26,26 +32,16 @@ function stepName(graph: GraphNodeNames | null, nodeId: string | null): string {
 /** Everything else the paused run waits on, once each, leaving out what `body` says. */
 function waitingOn(view: RunView | null, graph: GraphNodeNames | null, body: string): string[] {
   if (view === null) return [];
-  const lines: string[] = [];
-  // A typed-into cause already names its slot, in longer words.
-  const typedIntoCauses = new Set<string>();
-  for (const cause of view.causes) {
-    lines.push(pauseCopy(cause.reason, cause, graph).body);
-    if (cause.reason === "drift" && cause.detail === "pending_input") {
-      typedIntoCauses.add(cause.subject);
-    }
-  }
+  const lines = view.causes.map((cause) => pauseCopy(cause.reason, cause, graph).body);
   for (const slot of view.slots) {
-    const step = stepName(graph, slotNodeId(slot.id));
-    if (slot.pending_input && !typedIntoCauses.has(slot.id)) {
-      lines.push(`Someone typed into ${step}’s session.`);
-    }
-    if (slot.drift) lines.push(`${step}’s session was changed outside Coral.`);
+    const causes = view.causes.filter((cause) => cause.subject === slot.id);
+    const stall = { pendingInput: slot.pending_input, drift: slot.drift, causes };
+    lines.push(...stallSentences(stepName(graph, slotNodeId(slot.id)), stall));
   }
   for (const decision of view.open_decisions) {
     const nodeId = activationNodeId(decision) ?? decision;
     const name = isolated(nodeLabel(graph, nodeId) ?? nodeId);
-    lines.push(`Waiting for the orchestrator to choose at ${name}.`);
+    lines.push(...stallSentences(name, { decisionOpen: true }));
   }
   return [...new Set(lines)].filter((line) => line !== body);
 }

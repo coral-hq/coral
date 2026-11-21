@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,8 +17,9 @@ import { Link, useNavigate } from "@/lib/routing";
 import { ApiError } from "@/lib/sessionsApi";
 import { WorkspacePickerDialog } from "@/shell/WorkspacePickerDialog";
 import type { StartRunRequest } from "../api/generated/coralApi";
-import { CoralRequestError, MAX_RETRY_AFTER_MS, startRun } from "../api/runsApi";
+import { CoralRequestError, MAX_RETRY_AFTER_MS, runsListPrefixKey, startRun } from "../api/runsApi";
 import { runPath } from "../nav/coralPaths";
+import { useCoralScope } from "../shared/viewerScope";
 
 // Starts a workflow on a host's repository through `POST /v1/coral/runs`. The start key
 // makes the POST idempotent: a retry of the same inputs replays the run it started, and a
@@ -91,6 +92,8 @@ export function StartRunDialog({
   onOpenChange,
 }: StartRunDialogProps) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { scope } = useCoralScope();
   const hosts = useHosts({ enabled: open });
   const [hostId, setHostId] = useState<string | null>(null);
   const [repoPath, setRepoPath] = useState<string | null>(null);
@@ -105,6 +108,8 @@ export function StartRunDialog({
   const start = useMutation({
     mutationFn: (request: StartRunRequest) => startRun(request),
     onSuccess: ({ run_id }) => {
+      // The runs history lists the new run the next time it shows.
+      void queryClient.invalidateQueries({ queryKey: runsListPrefixKey(scope) });
       if (!showing.current) {
         showToast(runStartedNotice(run_id));
         return;

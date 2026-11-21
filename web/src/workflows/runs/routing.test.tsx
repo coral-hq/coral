@@ -255,16 +255,6 @@ describe("the run page's step drawer", () => {
     }
   });
 
-  it("pushes the run's URL without the drawer on Close, keeping the selected step", async () => {
-    renderRoute(`${RUN_PATH}?agent=${S2}&node=implement`);
-    fireEvent.click(within(await drawer()).getByRole("button", { name: "Close" }));
-    expect(here()).toBe(`${RUN_PATH}?node=implement`);
-    expect(screen.queryByRole("complementary")).toBeNull();
-    // A push: Back opens the drawer again.
-    act(() => void navigate(-1));
-    expect(within(await drawer()).getByTestId("side-chat-pane")).toHaveTextContent(S2);
-  });
-
   it("opens a step's session linked without a node, as its Chat page links it", async () => {
     renderRoute(`${RUN_PATH}?agent=${S1}`);
     expect(within(await drawer()).getByTestId("side-chat-pane")).toHaveTextContent(S1);

@@ -987,7 +987,7 @@ The run view settled its rows ([`runs-api.md`](runs-api.md), "Outcome" and "In
 the web app"; [`run-stream.md`](run-stream.md), "The web client";
 [`gates-and-inbox.md`](gates-and-inbox.md)): a live view of each run with its
 pause causes, the steps a person typed into or whose session changed, and its
-open decisions; a read-only transcript of each step; the runs history; Start Run
+open decisions; each step's transcript (no composer); the runs history; Start Run
 on `POST /runs`; a finished run's outcome, its `diff_stat` read through the
 owner's host and a checkout command a real-git test runs; marking a run's
 run-end alert read when it is opened, through a low-priority bulk ack; and a

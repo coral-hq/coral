@@ -1,6 +1,7 @@
 import { authenticatedFetch } from "@/lib/identity";
 import { isRetryableRequestError } from "@/lib/queryRetry";
 import { ApiError, apiErrorFromResponse } from "@/lib/sessionsApi";
+import { isRecord } from "@/lib/toolValue";
 import type { CoralOperations, RunDetail } from "./generated/coralApi";
 
 // The runs API client (`/v1/coral/runs`). A refusal in Coral's envelope is thrown as a
@@ -63,10 +64,6 @@ export class CoralRequestError extends ApiError {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** The `details` of Coral's envelope (which always sends the key), else `undefined`. */
 function coralDetails(body: unknown): Record<string, unknown> | null | undefined {
   if (!isRecord(body) || !isRecord(body.error)) return undefined;
@@ -121,11 +118,14 @@ export const runGraphQueryKey = (scope: string, runId: string) =>
 export const runOutcomeQueryKey = (scope: string, runId: string) =>
   ["coral-run-outcome", scope, runId] as const;
 
+/** The prefix of every runs list key in `scope`, which a start or a run action makes stale. */
+export const runsListPrefixKey = (scope: string) => ["coral-runs", scope] as const;
+
 /** The key of the runs list under `filters`; the same status set in any order is one key. */
 export const runsListQueryKey = (scope: string, filters: RunFilters) => {
   const statuses: readonly RunStatus[] = [...new Set(filters.statuses)].sort();
   const normalized: RunFilters = { statuses, workflowId: filters.workflowId };
-  return ["coral-runs", scope, normalized] as const;
+  return [...runsListPrefixKey(scope), normalized] as const;
 };
 
 /** The key of a run's pause, resume and cancel requests, so every view of the run sees one in flight. */

@@ -91,11 +91,11 @@ describe("RunStepList", () => {
         .queryAllByTestId("run-step-stall")
         .map((element) => element.textContent);
     expect(stalls("implement")).toEqual([
-      "Someone typed into this step’s session.",
-      "This step’s session was changed outside Coral.",
+      `Someone typed into ${isolated("Implement")}’s session.`,
+      `${isolated("Implement")}’s session was changed outside Coral.`,
     ]);
     expect(stalls("approve_change")).toEqual([
-      "Waiting for the orchestrator to choose.",
+      `Waiting for the orchestrator to choose at ${isolated("Approve change")}.`,
       PAUSE_MESSAGES.budget,
     ]);
     expect(stalls("start")).toEqual([]);

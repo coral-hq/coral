@@ -262,7 +262,7 @@ built:
   key's only writer, without structural sharing (which would turn an own `__proto__`
   member into a prototype). A remount within 5 minutes resumes from it with
   `Last-Event-ID`. In limited mode the detail read lands in the detail's key. On `[DONE]`
-  the hook invalidates the run's detail and outcome.
+  the hook invalidates the run's detail.
 - **Proof.** `stream/runStream.test.ts` and `stream/useRunStream.test.tsx` drive the
   controller over the live recording in `runView.contract.json` (one stream read while
   the run went through both gates, a pause and a resume, written by
