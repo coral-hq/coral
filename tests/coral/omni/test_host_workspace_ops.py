@@ -27,6 +27,7 @@ from coral.model.ids import effect_op_key
 from coral.omni.host.ops import workspace_op_handlers
 from coral.omni.process_map import DISABLE_HOST_ENTRY_POINTS_ENV
 from coral.omni.protocols import HostAccessRefused
+from coral.omni.server.host_access import OwnerHost
 from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue.conformance import run_executor_conformance
@@ -61,6 +62,7 @@ from omnigent.host.workspace_ops import (
     WorkspaceOpRequest,
 )
 from omnigent.server import host_registry as host_registry_module
+from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from tests.coral.omni.host.ops._worktrees import (
     INITIAL_FILES,
@@ -493,7 +495,7 @@ async def test_a_commit_with_only_ignored_and_runtime_files_is_empty_on_the_star
 async def _reset_for_a_run_without_an_owner(
     engine: _Engine, worktree: LinkedWorktree
 ) -> EffectOutcome:
-    """Reset the worktree for a run started with auth off; the host row still names an owner."""
+    """Reset the worktree for a run of the single local user, on the host row the test set."""
     run = start_run(
         engine.run_store,
         workspace_id=_WORKSPACE_ID,
@@ -527,15 +529,47 @@ async def test_a_run_without_an_owner_never_reaches_an_owned_connection(
     assert tunnel.frames == []
 
 
-async def test_a_run_without_an_owner_reaches_an_ownerless_connection(
+async def test_a_run_without_an_owner_reaches_the_single_local_users_connection(
     engine: _Engine, worktree: LinkedWorktree, tunnel: _HostTunnel
 ) -> None:
-    tunnel.connect(owner=None, generation=None)
+    """A single-user server stores and connects its hosts as its local user."""
+    tunnel.host_rows.rows[(_WORKSPACE_ID, _HOST_ID)] = _host_row(
+        user_id=RESERVED_USER_LOCAL, generation=None
+    )
+    tunnel.connect(owner=RESERVED_USER_LOCAL, generation=None)
 
     reset = _completed(await _reset_for_a_run_without_an_owner(engine, worktree))
 
     assert reset == {"head": worktree.base}
     assert tunnel.ops() == ["reset"]
+
+
+@pytest.mark.parametrize(
+    ("run_owner", "connection_owner", "reaches"),
+    [
+        (None, RESERVED_USER_LOCAL, True),
+        (None, "bob@example.com", False),
+        (_OWNER, RESERVED_USER_LOCAL, False),
+    ],
+    ids=["ownerless-run-local-host", "ownerless-run-other-users-host", "owned-run-local-host"],
+)
+async def test_only_an_ownerless_runs_host_scope_names_the_local_user(
+    tunnel: _HostTunnel, run_owner: str | None, connection_owner: str, reaches: bool
+) -> None:
+    """With no account generations to tell users apart, the owner's name alone decides."""
+    tunnel.connect(owner=connection_owner, generation=None)
+    owner_host = OwnerHost(
+        host_registry=tunnel.registry,
+        host_id=_HOST_ID,
+        workspace_id=_WORKSPACE_ID,
+        user_id=run_owner,
+        account_generation=None,
+    )
+    conn = owner_host.current()
+    assert conn is not None
+
+    with owner_host.owner_scope():
+        assert host_registry_module.host_owner_scope_matches(conn) is reaches
 
 
 async def test_every_op_is_sent_under_the_run_owners_host_scope(

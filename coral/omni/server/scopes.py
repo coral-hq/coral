@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from coral.omni.protocols import RunScopeRunner
+from coral.omni.server.access import omnigent_owner
 from omnigent.db.account_authority import account_authority_scope
 from omnigent.db.db_models import workspace_scope
 from omnigent.server.host_registry import host_owner_scope
@@ -29,7 +30,7 @@ class OmnigentRunScopeRunner(RunScopeRunner):
         with (
             workspace_scope(workspace_id),
             account_authority_scope(user_id, account_generation),
-            host_owner_scope(user_id, account_generation),
+            host_owner_scope(omnigent_owner(user_id), account_generation),
         ):
             yield
 

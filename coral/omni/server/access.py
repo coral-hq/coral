@@ -17,6 +17,7 @@ from omnigent.server.auth import (
     RESERVED_USER_LOCAL,
     AuthProvider,
     authentication_requires_identity,
+    local_single_user_enabled,
 )
 from omnigent.server.permissions import check_session_access
 from omnigent.stores.conversation_store import ConversationStore
@@ -35,6 +36,25 @@ def resolve_user_id(
     if auth_provider is None:
         return None
     return auth_provider.get_user_id(connection)
+
+
+def ownerless_runs_allowed() -> bool:
+    """Whether a run without an owner may make sessions: only on a single-user server."""
+    return local_single_user_enabled()
+
+
+def omnigent_owner(user_id: str | None) -> str | None:
+    """
+    The name Omnigent's own checks know a run owner by.
+
+    Coral stores the single local user as no owner (:func:`viewer_for`). A single-user
+    server's grants, hosts, user agents and request-free events name that user
+    ``"local"``, so an ownerless run acts as ``"local"`` there. Elsewhere an ownerless
+    run is refused before it acts, and ``None`` stays ``None``.
+    """
+    if user_id is None and ownerless_runs_allowed():
+        return RESERVED_USER_LOCAL
+    return user_id
 
 
 def viewer_for(user_id: str | None, auth_provider: AuthProvider | None) -> Viewer | None:

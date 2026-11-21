@@ -13,20 +13,22 @@ changes a bundle cannot strand it.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
+import sys
 import threading
 from collections import OrderedDict
+from collections.abc import Sequence
+from pathlib import Path
 
+import yaml
 from pydantic import ValidationError
 
+import coral
+import omnigent
 from coral.omni.protocols import CoralSessionError
-from coral.omni.server.bundles import (
-    MaterializedAgent,
-    StepBundleRejected,
-    agent_owner,
-    materialize,
-    ownerless_runs_allowed,
-)
+from coral.omni.server.access import omnigent_owner, ownerless_runs_allowed
+from coral.omni.server.bundles import MaterializedAgent, StepBundleRejected, materialize
 from coral.profiles.bundle_spec import (
     ENGINE_PREFIX,
     Stance,
@@ -73,7 +75,36 @@ def _bundle(
         ) from None
     step_stance = Stance(stance)
     config_yaml = build_step_bundle_yaml(ref, step_stance, model=None, provider=None)
-    return config_yaml, step_stance, step_agent_name(ref)
+    return _with_read_paths(config_yaml, _checkout_read_paths()), step_stance, step_agent_name(ref)
+
+
+def checkout_read_paths(packages: Sequence[Path], prefix: Path) -> tuple[str, ...]:
+    """
+    The package directories a step's OS sandbox must read: those outside ``prefix``.
+
+    An editable checkout imports ``omnigent`` and ``coral`` from the repository, which
+    the sandbox otherwise hides from its own helpers. Only the package directories are
+    granted, never the repository root, which may hold ``.env`` files.
+    """
+    root = prefix.resolve()
+    outside = {package.resolve() for package in packages}
+    return tuple(sorted(str(path) for path in outside if not path.is_relative_to(root)))
+
+
+@functools.cache
+def _checkout_read_paths() -> tuple[str, ...]:
+    packages = (Path(omnigent.__file__).parent, Path(coral.__file__).parent)
+    return checkout_read_paths(packages, Path(sys.prefix))
+
+
+def _with_read_paths(config_yaml: bytes, read_paths: tuple[str, ...]) -> bytes:
+    """The bundle with ``read_paths`` granted to its OS sandbox; unchanged without any."""
+    if not read_paths:
+        return config_yaml
+    config = yaml.safe_load(config_yaml)
+    sandbox = config["os_env"]["sandbox"]
+    sandbox["read_paths"] = sorted({*sandbox.get("read_paths", ()), *read_paths})
+    return yaml.safe_dump(config, sort_keys=True, allow_unicode=True).encode("utf-8")
 
 
 class OmnigentStepAgents:
@@ -125,7 +156,7 @@ class OmnigentStepAgents:
         return await asyncio.to_thread(
             self._resolve,
             workspace_id,
-            agent_owner(owner),
+            omnigent_owner(owner),
             stance,
             (workflow_slug, node_id, roster_index),
             session_id,

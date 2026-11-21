@@ -1,0 +1,52 @@
+"""The ``coral-e2e`` CI lane runs the walking-skeleton E2E with the pinned claude CLI."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from tests.e2e.coral._skeleton import REQUIRE_CLI_ENV
+
+ROOT = Path(__file__).resolve().parents[2]
+MATRIX = ROOT / ".github" / "scripts" / "ci" / "python-matrix.json"
+CI = ROOT / ".github" / "workflows" / "ci.yml"
+LANE = "coral-e2e"
+
+
+def _groups() -> dict[str, dict[str, str]]:
+    return {row["group"]: row for row in json.loads(MATRIX.read_text())}
+
+
+def _pytest_steps() -> list[dict[str, Any]]:
+    return yaml.safe_load(CI.read_text())["jobs"]["pytest"]["steps"]
+
+
+def test_the_lane_runs_the_coral_e2e_files_on_two_workers() -> None:
+    lane = _groups()[LANE]
+
+    assert lane["paths"].split() == ["tests/e2e/coral/test_skeleton.py"]
+    assert (lane["workers"], lane["dist"]) == ("2", "load")
+    # misc never collects tests/e2e, so the lane is the only CI run of these files.
+    assert "--ignore=tests/e2e" in _groups()["misc"]["paths"].split()
+
+
+def test_the_lane_installs_the_pinned_claude_cli_from_the_in_repo_action() -> None:
+    steps = _pytest_steps()
+    [claude] = [step for step in steps if step.get("id") == "claude_cli"]
+    [node] = [step for step in steps if str(step.get("uses", "")).startswith("actions/setup-node")]
+    [summary] = [step for step in steps if "steps.claude_cli.outputs.version" in str(step)]
+
+    assert claude["uses"] == "./.github/actions/setup-harness-cli"
+    assert claude["with"] == {"harness": "claude"}
+    assert claude["if"] == f"matrix.group == '{LANE}'"
+    assert f"matrix.group == '{LANE}'" in node["if"]
+    assert summary["if"] == f"matrix.group == '{LANE}'"
+    assert "GITHUB_STEP_SUMMARY" in summary["run"]
+    # The E2E then fails, rather than skips, on a CLI that installed but does not run.
+    assert f"{REQUIRE_CLI_ENV}=1" in summary["run"] and "GITHUB_ENV" in summary["run"]
+    # Both run before the tests.
+    run_pytest = next(index for index, step in enumerate(steps) if step["name"] == "Run pytest")
+    assert steps.index(node) < steps.index(claude) < steps.index(summary) < run_pytest

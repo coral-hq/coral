@@ -52,6 +52,7 @@ from coral.omni.protocols import (
     queued_input_decision,
     turn_transcript_of,
 )
+from coral.omni.server.access import omnigent_owner
 from coral.signals.turn_facts import UNDECIDED
 from coral.stores.stable_ids import content_checksum
 from omnigent.db.db_models import workspace_scope
@@ -195,6 +196,16 @@ def _pending_entry(session_id: str, stable_id: str) -> Mapping[str, Any] | None:
         if entry.get("pending_id") == pending_id:
             return entry
     return None
+
+
+def _engine_context(app: Any, user_id: str | None) -> EngineEventContext:
+    """
+    The run owner as the server's access checks read it (:func:`omnigent_owner`).
+
+    The local user is usually an admin, so an ownerless run's reach rests on its
+    session ids, which come only from the run's own bindings.
+    """
+    return EngineEventContext(app, omnigent_owner(user_id))
 
 
 class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
@@ -343,7 +354,7 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
                 await self._connect_runner(conv)
                 with contextlib.ExitStack() as in_flight:
                     return await self._app.state.session_event_dispatch(
-                        EngineEventContext(self._app, user_id), session_id, event, in_flight
+                        _engine_context(self._app, user_id), session_id, event, in_flight
                     )
         except TimeoutError:
             raise _refused(
@@ -405,7 +416,7 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
         try:
             async with asyncio.timeout(self._send_timeout_s):
                 await self._app.state.session_event_dispatch(
-                    EngineEventContext(self._app, user_id),
+                    _engine_context(self._app, user_id),
                     session_id,
                     SessionEventInput(type=event_type),
                     None,

@@ -45,7 +45,7 @@ from omnigent.runtime import init as init_runtime
 from omnigent.runtime import pending_elicitations, pending_inputs
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
-from omnigent.server.auth import UnifiedAuthProvider
+from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_LOCAL, UnifiedAuthProvider
 from omnigent.server.routes import sessions as sessions_routes
 from omnigent.server.routes._sessions import helpers as session_helpers
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
@@ -688,6 +688,54 @@ async def test_stop_is_owner_checked_repeat_safe_and_unconfirmed_is_retryable(
         "dispatch.stop_unconfirmed",
         True,
     )
+
+
+async def test_an_ownerless_runs_messages_act_as_a_single_user_servers_local_user(
+    stores: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, forwarded: list[dict[str, Any]]
+) -> None:
+    """A served single-user server has an auth provider, and its local user owns the session."""
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    app = _app(stores, auth=True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as local:
+        session_id = await _session(local)
+    dispatch = _dispatch(app, stores)
+
+    try:
+        receipt = await _send(dispatch, session_id, BRIEF)
+        await dispatch.stop(session_id=session_id, user_id=None)
+    finally:
+        _forget(session_id)
+
+    assert (receipt.item_id, receipt.delivery) == (STABLE_ID, "sent")
+    assert [_text(body) for body in _messages(forwarded)] == [engine_message_text(BRIEF)]
+
+
+async def test_outside_a_single_user_server_an_ownerless_run_never_acts_as_the_local_user(
+    stores: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, forwarded: list[dict[str, Any]]
+) -> None:
+    """A multi-user server's local user holds no identity, even where it holds a grant."""
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    app = _app(stores, auth=True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-Forwarded-Email": ALICE}
+    ) as alice:
+        session_id = await _session(alice)
+    stores.permission.grant(RESERVED_USER_LOCAL, session_id, LEVEL_OWNER)
+    dispatch = _dispatch(app, stores)
+
+    try:
+        with pytest.raises(CoralSessionError) as sent:
+            await _send(dispatch, session_id, BRIEF)
+        with pytest.raises(CoralSessionError) as stopped:
+            await dispatch.stop(session_id=session_id, user_id=None)
+    finally:
+        _forget(session_id)
+
+    assert (sent.value.code, sent.value.retryable) == ("dispatch.not_permitted", False)
+    assert (stopped.value.code, stopped.value.retryable) == ("dispatch.not_permitted", False)
+    assert _messages(forwarded) == []
 
 
 async def test_live_status_reads_this_replicas_caches_and_falls_back_to_the_row(

@@ -126,7 +126,7 @@ class _OwnerHostChannel(HostChannelBackend):
         except HostWorkspaceOpsUnsupportedError as exc:
             raise host_capability_unavailable(host_id) from exc
         except HostWorkspaceOpNotPermittedError as exc:
-            # Auth is off here but the connection has an owner: never send to it.
+            # The connection is not the run owner's: never send to it.
             raise HostAccessError("not_permitted", host_not_available(host_id)) from exc
         except HostWorkspaceOpUnavailableError as exc:
             code: WorkspaceErrorCode = (

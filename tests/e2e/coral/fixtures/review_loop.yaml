@@ -1,0 +1,31 @@
+id: review-loop
+name: Implement with review loop
+nodes:
+  - {id: start, kind: start}
+  - id: implement
+    kind: step
+    name: Implement
+    goal: "Create greeting.txt containing the line hello coral, run grep -q 'hello coral' greeting.txt, then hand off. {impl_token}"
+    roster: [implementer]
+    done_when: {commands: [{run: "grep -q 'hello coral' greeting.txt"}]}
+  - id: review
+    kind: step
+    name: Review
+    goal: "Check that greeting.txt contains hello coral without changing any file; hand off with label approved or changes_requested. {review_token}"
+    roster: [reviewer]
+  - id: approve_change
+    kind: gate
+    name: Approve change
+    prompt: Approve the change?
+    outcomes: [approve, reject]
+  - {id: end, kind: end}
+arrows:
+  - {id: a1, from: start, to: implement}
+  - {id: a2, from: implement, to: review}
+  - {id: a3, from: review, to: approve_change, label: approved}
+  - {id: a4, from: review, to: implement, label: changes_requested, back: true, limit: 2, at_limit: a7}
+  - {id: a5, from: approve_change, to: end, label: approve}
+  # The validator allows one back arrow per loop, so a rejected change ends the run.
+  - {id: a6, from: approve_change, to: end, label: reject}
+  # At the loop's limit the review goes to the gate; an at-limit arrow is not a label choice.
+  - {id: a7, from: review, to: approve_change}

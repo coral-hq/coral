@@ -185,7 +185,7 @@ class HostWorkspaceChannels(Protocol):
 
         Callers take every argument from the stored run, never from a payload.
 
-        :param user_id: ``None`` only when auth is off, which skips the owner checks.
+        :param user_id: The run owner; ``None`` is a single-user server's local user.
         :raises HostAccessRefused: ``not_permitted`` when the owner may not use the host.
         """
         ...
@@ -281,7 +281,7 @@ class SessionCreateRequest:
     One ``create_session`` effect, with its identity taken from the stored run.
 
     :param effect_key: Derives a step's session id; an anchor's id comes from ``run_id``.
-    :param user_id: The run owner, or ``None`` when auth is off.
+    :param user_id: The run owner, or ``None`` for a single-user server's local user.
     :param title: The session title; a step's is unique under the anchor.
     :param host_id: A step's host, from the run spec.
     :param workspace: A step's canonical run worktree, from the run spec.

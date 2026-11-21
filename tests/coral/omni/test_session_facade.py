@@ -668,9 +668,10 @@ async def test_step_child_is_bound_but_unlaunched_until_the_owner_scoped_launch(
     }
     assert conv.title == f"{SLOT} · {conv.id[:TITLE_ID_SUFFIX_CHARS]}"
     assert conv.reasoning_effort == "high"
+    # The run has no owner; its host connected as the local user, whom the scope names.
     assert (call["workspace_id"], call["host_owner_scope"], call["user_id"]) == (
         WORKSPACE,
-        (True, None),
+        (True, (RESERVED_USER_LOCAL, WORKSPACE)),
         None,
     )
     grant = unlaunched.stores.permission.get(RESERVED_USER_LOCAL, conv.id)
@@ -1739,14 +1740,15 @@ OWNER_GENERATION = "g1"
 class _OwnedHost:
     """The owner's host connection on the app's registry, answered in process (auth on)."""
 
-    def __init__(self, app: FastAPI) -> None:
+    def __init__(self, app: FastAPI, owner: str = OWNER) -> None:
         self._app = app
+        self.owner = owner
         self.launch_frames: list[HostLaunchRunnerFrame] = []
         self._answering: list[asyncio.Task[None]] = []
 
-    def connect(self, generation: str) -> None:
+    def connect(self, generation: str | None) -> None:
         """Register a connection held by ``generation`` of the owner, replacing any earlier one."""
-        with account_authority_scope(OWNER, generation):
+        with account_authority_scope(self.owner, generation):
             conn = self._app.state.host_registry.register(
                 host_id=_HOST_ID,
                 ws=_FakeWebSocket(),  # type: ignore[arg-type]
@@ -1756,7 +1758,7 @@ class _OwnedHost:
                     name="laptop",
                     capabilities=[CORAL_RUNNER_TOKEN],
                 ),
-                owner=OWNER,
+                owner=self.owner,
                 workspace_id=WORKSPACE,
             )
         self._answering.append(asyncio.create_task(self._answer(conn)))
@@ -1868,6 +1870,62 @@ async def test_with_auth_on_the_owner_holds_the_grants_and_omnigent_checks_them_
     assert coral.progress(coral.step_id(seq=4)) is None
     assert coral.conversation(coral.step_id(seq=4)) is None
     assert len(owned_host.launch_frames) == 1
+
+
+async def test_an_ownerless_run_launches_on_a_single_user_servers_host_with_auth_on(
+    app: FastAPI,
+    stores: _Stores,
+    db_uri: str,
+    runner: _Runner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """That server's local user holds the grants and the host Omnigent's launch check reads."""
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    with account_authority_scope(RESERVED_USER_LOCAL, None):
+        stores.host.upsert_on_connect(host_id=_HOST_ID, name="laptop", user_id=RESERVED_USER_LOCAL)
+    local_host = _OwnedHost(app, owner=RESERVED_USER_LOCAL)
+    local_host.connect(None)
+    try:
+        coral = _Coral(app, stores, db_uri, auth_on=True)
+        await coral.anchor()
+        step = _completed(await coral.deliver(coral.step_payload()))["session_id"]
+        # Once the server stops being single-user, the same step's relaunch is refused.
+        monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER")
+        for runner_id in app.state.tunnel_registry.online_runner_ids():
+            app.state.tunnel_registry.deregister(runner_id)
+        conv = stores.conversation.get_conversation(step)
+        assert conv is not None
+        with pytest.raises(CoralSessionError) as multi_user:
+            await coral.facade._launcher.launch(conv, user_id=None)
+    finally:
+        await local_host.close()
+
+    assert stores.permission.get(RESERVED_USER_LOCAL, coral.anchor_id) is not None
+    assert [frame.session_id for frame in local_host.launch_frames] == [step]
+    assert coral.progress(step) == SessionBindingProgress.INITIALIZED
+    assert runner.inits_for(step) == 1
+    assert multi_user.value.code == "session.host_not_permitted"
+
+
+async def test_an_ownerless_run_never_launches_on_another_users_host_with_auth_on(
+    app: FastAPI,
+    stores: _Stores,
+    db_uri: str,
+    owned_host: _OwnedHost,
+    runner: _Runner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single-user server's local user reaches only the hosts it connected itself."""
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    coral = _Coral(app, stores, db_uri, auth_on=True)
+    await coral.anchor()
+
+    refused = _failed(await coral.deliver(coral.step_payload()))
+
+    assert (refused.error_code, refused.retryable) == ("session.host_not_permitted", False)
+    assert OWNER not in refused.message
+    assert owned_host.launch_frames == []
+    assert runner.inits_for(coral.step_id()) == 0
 
 
 @pytest.mark.usefixtures("coral_policy_registry")

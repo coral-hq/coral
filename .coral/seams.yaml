@@ -1246,19 +1246,31 @@ seams:
     upstream_candidate: false
 
   - id: S39d
-    title: Dedicated coral CI matrix group and misc ignore
+    title: Dedicated coral CI matrix groups and misc ignore
     owner: WS-OPS
     status: landed
     category: coral-specific
     note: >-
       Adds a `coral` shard running `tests/coral` and excludes `tests/coral` from
-      `misc` in `.github/scripts/ci/python-matrix.json`.
+      `misc` in `.github/scripts/ci/python-matrix.json`. Adds a `coral-e2e`
+      shard that runs the walking-skeleton E2E (`tests/e2e/coral/test_skeleton.py`)
+      on two workers with `--dist=load`; `misc` keeps ignoring `tests/e2e`, and
+      `tests/coral/test_ci_lane.py` pins the shard (S107 installs its CLI).
     files:
       - .github/scripts/ci/python-matrix.json
       - tests/scripts/test_dependency_ci.py
     tests:
       - tests/scripts/test_dependency_ci.py
+      - tests/coral/test_ci_lane.py
     budget_lines: 10
+    budget_exception:
+      lines: 13
+      reason: >-
+        .github/scripts/ci/python-matrix.json (12 added lines, 1 changed): the
+        two five- and six-line shard rows (`coral`, `coral-e2e`) and the
+        `--ignore=tests/coral` on `misc`'s paths line. Later steps only lengthen
+        the `coral-e2e` paths line, so the count stays.
+      approver: nicholasjano (delegated)
     anchor_exempt:
       - .github/scripts/ci/python-matrix.json
     upstream_first: false
@@ -3164,6 +3176,31 @@ seams:
         tests (the call and its transaction, a failing carrier's rollback, no
         call without a rotation or on re-creation, and unregister scope).
       approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S107
+    title: The coral-e2e CI shard installs the pinned claude CLI
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      The `coral-e2e` shard (S39d) runs the real `claude` CLI against the mock
+      model. Its `pytest` job sets up Node for that shard and installs `claude`
+      through the in-repo `./.github/actions/setup-harness-cli`: the version
+      pinned in its manifest, installed with `npm ci --ignore-scripts` from a
+      sha512-locked lockfile, then the verified package's own `install.cjs`;
+      its two third-party steps (`actions/cache/restore`, `actions/cache/save`)
+      are SHA-pinned. The job then writes the installed version to the job
+      summary and sets `CORAL_E2E_REQUIRE_CLI=1`, so the E2E fails rather than
+      skips on a CLI that does not run. The other shards' cross-repo action
+      references are unchanged. About 21 changed lines.
+    files:
+      - .github/workflows/ci.yml
+    tests:
+      - tests/coral/test_ci_lane.py
+    budget_lines: 40
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
