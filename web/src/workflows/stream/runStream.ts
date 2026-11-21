@@ -9,7 +9,7 @@ import type {
   RunView,
   SnapshotFrame,
 } from "../api/generated/coralApi";
-import { runStreamUrl } from "../api/runsApi";
+import { MAX_RETRY_AFTER_MS, runStreamUrl } from "../api/runsApi";
 import { isFinishedRunStatus } from "../shared/runStatus";
 import { parseStreamEvent, UnsupportedStreamError, type StreamItem } from "./frames";
 import { SseParser, type SseEvent } from "./sseParser";
@@ -62,7 +62,7 @@ export const SLOT_RETRIES = 5;
 export const SLOT_RETRY_MS = 200;
 /** Consecutive 429 or 503 answers before live updates are limited. */
 export const REFUSALS_BEFORE_LIMITED = 3;
-export const MAX_RETRY_AFTER_MS = 60_000;
+export { MAX_RETRY_AFTER_MS };
 /** While limited: how often the detail is read, and the stream tried again. */
 export const LIMITED_POLL_MS = 5_000;
 export const LIMITED_RETRY_MS = 30_000;

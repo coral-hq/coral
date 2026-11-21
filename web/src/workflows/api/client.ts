@@ -1,14 +1,11 @@
 import { authenticatedFetch } from "@/lib/identity";
 import type {
-  PreflightResult,
-  StartRunRequest,
-  StartRunResult,
   ValidateResponse,
   WorkflowDetail,
   WorkflowSummary,
   WorkflowTemplate,
 } from "./workflowTypes";
-import { stubPreflight, stubStartRun, stubTemplates } from "./msw/handlers";
+import { stubTemplates } from "./msw/handlers";
 
 const BASE = "/v1/coral";
 
@@ -89,17 +86,8 @@ export async function saveWorkflow(yaml: string): Promise<WorkflowSummary & Vali
   return readJson(await postYaml("/workflows", yaml), "save workflow");
 }
 
-// Templates, preflight and runs have no backend yet; these resolve locally so the
-// UI shape is final and only these three bodies change when the APIs land.
-
+// Templates have no backend yet; this resolves locally so only its body changes when the
+// API lands.
 export function listTemplates(): Promise<WorkflowTemplate[]> {
   return stubTemplates();
-}
-
-export function runPreflight(request: StartRunRequest): Promise<PreflightResult> {
-  return stubPreflight(request);
-}
-
-export function startRun(request: StartRunRequest): Promise<StartRunResult> {
-  return stubStartRun(request);
 }

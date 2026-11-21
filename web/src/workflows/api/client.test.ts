@@ -9,8 +9,6 @@ import {
   getWorkflowByKey,
   listTemplates,
   listWorkflows,
-  runPreflight,
-  startRun,
   validateWorkflow,
 } from "./client";
 
@@ -50,12 +48,8 @@ describe("workflows client", () => {
     await expect(validateWorkflow("x")).rejects.toMatchObject({ status: 500 });
   });
 
-  it("serves templates, preflight and runs locally until their APIs exist", async () => {
+  it("serves templates locally until their API exists", async () => {
     expect((await listTemplates())[0].id).toBe("pr-review");
-    const request = { workflow_key: "demo", host_id: "h1", workspace_path: "/repo" };
-    expect((await runPreflight(request)).ok).toBe(true);
-    expect((await runPreflight({ ...request, workspace_path: "" })).ok).toBe(false);
-    expect((await startRun(request)).run_id).toMatch(/^stub-run-/);
     expect(authenticatedFetch).not.toHaveBeenCalled();
   });
 });

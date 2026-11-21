@@ -42,7 +42,15 @@ vi.mock("../canvas/FlowCanvas", () => ({
   ),
 }));
 vi.mock("../start/StartRunDialog", () => ({
-  StartRunDialog: ({ open }: { open: boolean }) => (open ? <div>start dialog</div> : null),
+  StartRunDialog: ({
+    open,
+    workflowId,
+    workflowKey,
+  }: {
+    open: boolean;
+    workflowId: string;
+    workflowKey: string;
+  }) => (open ? <div>{`start dialog for ${workflowKey} (${workflowId})`}</div> : null),
 }));
 
 import { WorkflowEditorPage } from "./WorkflowEditorPage";
@@ -133,11 +141,12 @@ describe("WorkflowEditorPage", () => {
   });
 
   it("opens Start Run once the unchanged workflow validates as runnable", async () => {
+    // WHY: a start names the stored definition's id, which the route's key resolved to.
     renderEditor();
     const start = await screen.findByRole("button", { name: "Start Run" });
     await waitFor(() => expect(start).toBeEnabled(), SLOW);
     fireEvent.click(start);
-    expect(screen.getByText("start dialog")).toBeInTheDocument();
+    expect(screen.getByText("start dialog for demo (w1)")).toBeInTheDocument();
   });
 
   it("saves edits", async () => {

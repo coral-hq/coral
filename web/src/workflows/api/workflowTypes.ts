@@ -102,25 +102,3 @@ export interface WorkflowTemplate {
   description: string;
   yaml: string;
 }
-
-export interface PreflightItem {
-  id: string;
-  label: string;
-  ok: boolean;
-  detail?: string;
-}
-
-export interface PreflightResult {
-  ok: boolean;
-  items: PreflightItem[];
-}
-
-export interface StartRunRequest {
-  workflow_key: string;
-  host_id: string;
-  workspace_path: string;
-}
-
-export interface StartRunResult {
-  run_id: string;
-}

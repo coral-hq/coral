@@ -39,6 +39,8 @@ const POST: Operation<"coral_start_run">["method"] &
   RunActionOperation["method"] = "POST";
 // Resume sends no cap, so every action posts the empty object.
 const NO_ARGUMENTS: RunActionOperation["body"] = {};
+/** The longest a client waits on a refusal's `Retry-After`, whatever it asks for. */
+export const MAX_RETRY_AFTER_MS = 60_000;
 /** Runs read per page of the runs list. */
 export const RUNS_PAGE_SIZE: NonNullable<ListRunsQuery["limit"]> = 25;
 // Dot segments would be resolved away by URL parsing, leaving the run's path.
