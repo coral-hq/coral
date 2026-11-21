@@ -11,7 +11,7 @@ import {
   TimerIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ElicitationMessage } from "@/components/blocks/ElicitationMessage";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -57,6 +57,14 @@ function GatePrompt({ message }: { message: string }) {
   );
 }
 
+/** How the run page answers a gate: through the runs route, which needs no prompt id. */
+export interface RunViewGate {
+  /** Post the answer; a refusal rejects with its error. `note` is `null` when none was written. */
+  answer: (outcome: string, note: string | null) => Promise<unknown>;
+  /** Shown under the gate's prompt: what was checked before the work reached the gate. */
+  evidence?: ReactNode;
+}
+
 export interface WorkflowGateCardProps {
   data: WorkflowGateEntryData;
   /** Epoch seconds. */
@@ -65,9 +73,11 @@ export interface WorkflowGateCardProps {
   expanded: boolean;
   onToggle: () => void;
   ui: InboxKindUi;
+  /** On the run page: answer through it, and leave out the Inbox's link to the run and notice. */
+  runView?: RunViewGate;
 }
 
-/** One workflow gate: its context, and an answer posted to the anchor's prompt. */
+/** One workflow gate: its context, and an answer posted to the anchor's prompt or the run. */
 export function WorkflowGateCard({
   data,
   at,
@@ -75,6 +85,7 @@ export function WorkflowGateCard({
   expanded,
   onToggle,
   ui,
+  runView,
 }: WorkflowGateCardProps) {
   const view = gateView(data);
   const queryClient = useQueryClient();
@@ -88,8 +99,8 @@ export function WorkflowGateCard({
   const isOwner = data.alert !== null || owner === null || owner === viewerId;
   const state = gateCardState({ isOwner, online, submission });
   const { elicitationId, sessionId } = view;
-  const showForm =
-    state.showForm && elicitationId !== null && sessionId !== null && view.outcomes.length > 0;
+  const answerable = runView !== undefined || (elicitationId !== null && sessionId !== null);
+  const showForm = state.showForm && answerable && view.outcomes.length > 0;
   const waitingHours =
     view.openedAt === null ? 0 : Math.floor((Date.now() / 1000 - view.openedAt) / 3600);
 
@@ -97,12 +108,21 @@ export function WorkflowGateCard({
     if (submission.status === "failed") statusRef.current?.focus();
   }, [submission]);
 
-  const submit = (decision: string) => {
-    if (!state.canSubmit || elicitationId === null || sessionId === null) return;
-    setSubmission({ status: "submitting" });
+  /** The answer's request: through the run page, else to the anchor's prompt; `null` without one. */
+  const send = (decision: string, written: string | null): Promise<unknown> | null => {
+    if (runView) return runView.answer(decision, written);
+    if (elicitationId === null || sessionId === null) return null;
     const content: Record<string, unknown> = { decision };
-    if (note.trim() !== "") content.note = note;
-    approve(sessionId, elicitationId, { action: "accept", content }).then(
+    if (written !== null) content.note = written;
+    return approve(sessionId, elicitationId, { action: "accept", content });
+  };
+
+  const submit = (decision: string) => {
+    if (!state.canSubmit) return;
+    const sent = send(decision, note.trim() === "" ? null : note);
+    if (sent === null) return;
+    setSubmission({ status: "submitting" });
+    sent.then(
       () => {
         setSubmission({ status: "answered", label: decision });
         void queryClient.invalidateQueries({ queryKey: ["conversations"] });
@@ -133,6 +153,7 @@ export function WorkflowGateCard({
         )}
       </div>
       {view.message && <GatePrompt message={view.message} />}
+      {runView?.evidence}
       {showForm && (
         <div className="flex flex-col gap-1.5">
           <label htmlFor={noteId} className="text-sm text-muted-foreground">
@@ -153,9 +174,11 @@ export function WorkflowGateCard({
         message={state.message}
         failed={state.kind === "refused" || state.kind === "error"}
       />
-      <p className="text-xs text-muted-foreground">Coral notifies you while the app is open.</p>
+      {!runView && (
+        <p className="text-xs text-muted-foreground">Coral notifies you while the app is open.</p>
+      )}
       <ui.InboxActions>
-        {view.runId && (
+        {!runView && view.runId && (
           <Button asChild variant="outline" size="xs" className={ui.outlineAction}>
             <Link
               to={runPath(view.runId, { node: view.nodeId ?? undefined, panel: "gate" })}
@@ -174,7 +197,7 @@ export function WorkflowGateCard({
               className={outcome === "approve" ? ui.primaryAction : ui.outlineAction}
               disabled={!state.canSubmit}
               onClick={() => submit(outcome)}
-              componentId="inbox.workflow_gate.answer"
+              componentId={runView ? "workflows.run.gate.answer" : "inbox.workflow_gate.answer"}
             >
               {outcome}
             </Button>

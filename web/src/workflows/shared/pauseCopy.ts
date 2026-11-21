@@ -1,4 +1,5 @@
 import type { RunHeader } from "../api/generated/coralApi";
+import { slotNodeId } from "./runIds";
 
 // What a paused run's pill and banner say. Specific copy where the cause's detail code is
 // one the engine records, else the server's pause alert copy (`PAUSE_MESSAGES` in
@@ -71,6 +72,15 @@ function isPauseReasonName(reason: string): reason is PauseReasonName {
 }
 
 /**
+ * `text` between first-strong isolate marks (U+2068 … U+2069), for a name or command
+ * written into fixed copy: its own right-to-left or override characters cannot reorder
+ * the words around it.
+ */
+export function isolated(text: string): string {
+  return `\u2068${text}\u2069`;
+}
+
+/**
  * A node's name as the graph gives it, its id when the name is missing or blank, or `null`
  * when the graph has no such node.
  */
@@ -80,24 +90,9 @@ export function nodeLabel(graph: GraphNodeNames | null, nodeId: string): string 
   return node.name?.trim() ? node.name : node.id;
 }
 
-/** The node of an activation id `<node>|<item>|<iteration>`; `null` without that form. */
-export function activationNodeId(activationId: string): string | null {
-  const bar = activationId.indexOf("|");
-  return bar > 0 ? activationId.slice(0, bar) : null;
-}
-
-/**
- * The node of an engine slot id `<activation>:<index>`, whose activation is
- * `<node>|<item>|<iteration>`; `null` when the id has neither form.
- */
-export function slotNodeId(slotId: string): string | null {
-  const end = slotId.lastIndexOf(":");
-  return end < 0 ? null : activationNodeId(slotId.slice(0, end));
-}
-
 function failureBody(cause: PauseCauseLike): string {
   if (cause.detail === "attempts_exhausted" && cause.subject !== "") {
-    return `Missing evidence: ${cause.subject}.`;
+    return `Missing evidence: ${isolated(cause.subject)}.`;
   }
   if (cause.detail === "engine.load_failed") return LOAD_FAILED_TEXT;
   return PAUSE_MESSAGES.failure_path;
@@ -108,7 +103,7 @@ function livenessBody(cause: PauseCauseLike, graph: GraphNodeNames | null): stri
   const join = match && nodeLabel(graph, match[1]!);
   const source = match && nodeLabel(graph, match[2]!);
   if (join === null || source === null) return PAUSE_MESSAGES.liveness;
-  return `${join} is waiting for ${source}, which can no longer run.`;
+  return `${isolated(join)} is waiting for ${isolated(source)}, which can no longer run.`;
 }
 
 function driftBody(cause: PauseCauseLike, graph: GraphNodeNames | null): string {
@@ -121,10 +116,10 @@ function driftBody(cause: PauseCauseLike, graph: GraphNodeNames | null): string 
   const nodeId = slotNodeId(cause.subject);
   const step = nodeId === null ? null : nodeLabel(graph, nodeId);
   if (step !== null && cause.detail === "pending_input") {
-    return `Someone typed into ${step}’s session while Coral was finishing it.`;
+    return `Someone typed into ${isolated(step)}’s session while Coral was finishing it.`;
   }
   if (step !== null && cause.detail === "post_close") {
-    return `${step}’s session kept working after its step closed.`;
+    return `${isolated(step)}’s session kept working after its step closed.`;
   }
   return PAUSE_MESSAGES.drift;
 }

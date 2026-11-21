@@ -2,11 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { PauseCause, RunHeader } from "../api/generated/coralApi";
 import { CONTRACT_GRAPH, CONTRACT_PAUSE_MESSAGES } from "../fixtures/runViewContract";
 import {
-  activationNodeId,
+  isolated,
   LOAD_FAILED_TEXT,
   PAUSE_MESSAGES,
   pauseCopy,
-  slotNodeId,
   UNKNOWN_PAUSE_TEXT,
   type PauseReasonName,
 } from "./pauseCopy";
@@ -95,7 +94,7 @@ describe("pauseCopy", () => {
     [
       "missing evidence",
       cause("failure_path", "attempts_exhausted", "pytest -q, ruff check src"),
-      "Missing evidence: pytest -q, ruff check src.",
+      `Missing evidence: ${isolated("pytest -q, ruff check src")}.`,
     ],
     [
       "missing evidence it cannot name",
@@ -111,12 +110,12 @@ describe("pauseCopy", () => {
         "approve_change is waiting for implement, which can no longer run.",
         "implement",
       ),
-      "Approve change is waiting for Implement, which can no longer run.",
+      `${isolated("Approve change")} is waiting for ${isolated("Implement")}, which can no longer run.`,
     ],
     [
       "a join on unnamed nodes",
       cause("liveness", "end is waiting for start, which can no longer run.", "start"),
-      "end is waiting for start, which can no longer run.",
+      `${isolated("end")} is waiting for ${isolated("start")}, which can no longer run.`,
     ],
     [
       "a join on a node the graph lacks",
@@ -137,12 +136,12 @@ describe("pauseCopy", () => {
     [
       "a step someone typed into",
       cause("drift", "pending_input", "implement||a4:2:0"),
-      "Someone typed into Implement’s session while Coral was finishing it.",
+      `Someone typed into ${isolated("Implement")}’s session while Coral was finishing it.`,
     ],
     [
       "a step that kept working",
       cause("drift", "post_close", "implement||a4:1:0"),
-      "Implement’s session kept working after its step closed.",
+      `${isolated("Implement")}’s session kept working after its step closed.`,
     ],
     ["a typed-into slot it cannot read", cause("drift", "pending_input", "x"), SERVER.drift],
     [
@@ -231,44 +230,30 @@ describe("pauseCopy", () => {
         cause("liveness", "a is waiting for b, which can no longer run.", "b"),
         graph,
       ).body,
-    ).toBe("a is waiting for b, which can no longer run.");
+    ).toBe(`${isolated("a")} is waiting for ${isolated("b")}, which can no longer run.`);
     expect(pauseCopy("drift", cause("drift", "post_close", "a||:0"), graph).body).toBe(
-      "a’s session kept working after its step closed.",
+      `${isolated("a")}’s session kept working after its step closed.`,
     );
+  });
+
+  it("isolates a step name or command written into its copy", () => {
+    // WHY: names and commands come from the workflow's YAML; a right-to-left override in
+    // one must not reorder the fixed words after it.
+    const graph = { nodes: [{ id: "a", name: "Impl\u202eement" }] };
+    expect(isolated("Impl\u202eement")).toBe("\u2068Impl\u202eement\u2069");
+    expect(pauseCopy("drift", cause("drift", "post_close", "a||:0"), graph).body).toBe(
+      "\u2068Impl\u202eement\u2069’s session kept working after its step closed.",
+    );
+    expect(
+      pauseCopy("failure_path", cause("failure_path", "attempts_exhausted", "ls\u202e"), graph)
+        .body,
+    ).toBe("Missing evidence: \u2068ls\u202e\u2069.");
   });
 
   it("keeps its client-only copy in curly apostrophes and the server's copy byte for byte", () => {
     // WHY: the web's own copy uses ’, while the alert copy must equal the server's exactly.
     expect(LOAD_FAILED_TEXT).toBe("This run can’t be loaded. You can still cancel it.");
     expect(PAUSE_MESSAGES.plan_limit).toBe("A step reached its plan's usage limit.");
-  });
-});
-
-describe("activationNodeId", () => {
-  it.each<[string, string | null]>([
-    ["choose||", "choose"],
-    ["review|items/0|1", "review"],
-    ["choose", null],
-    ["|x|", null],
-    ["", null],
-  ])("reads the node of activation %j", (activationId, nodeId) => {
-    // WHY: open decisions are activation ids, and the banner names their node.
-    expect(activationNodeId(activationId)).toBe(nodeId);
-  });
-});
-
-describe("slotNodeId", () => {
-  it.each<[string, string | null]>([
-    ["implement||a4:2:0", "implement"],
-    ["review|items/0|:1", "review"],
-    ["implement||a4:2", "implement"],
-    ["implement:0", null],
-    ["", null],
-    [":0", null],
-    ["|x|:0", null],
-  ])("reads the node of slot %j", (slotId, nodeId) => {
-    // WHY: a slot is `<activation>:<index>` and an activation `<node>|<item>|<iteration>`.
-    expect(slotNodeId(slotId)).toBe(nodeId);
   });
 });
 

@@ -1,7 +1,15 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
-import { MemoryRouter, Route, Routes, useNavigate, type NavigateFunction } from "react-router-dom";
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  type Location,
+  type NavigateFunction,
+} from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as identityModule from "@/lib/identity";
 import { resetStreamSlotManager, setStreamSlotManagerForTest } from "@/store/streamSlots";
@@ -16,6 +24,9 @@ vi.mock("@/hooks/useViewerId", () => ({
   useViewerId: () => viewer.id,
   useIdentityReady: () => true,
 }));
+// xyflow needs layout APIs jsdom lacks; the double renders each custom node with its data.
+vi.mock("@xyflow/react", () => import("../fixtures/xyflowDouble"));
+vi.mock("@xyflow/react/dist/style.css", () => ({}));
 
 import type { RunDetail, RunHeader, RunView } from "../api/generated/coralApi";
 import {
@@ -23,6 +34,8 @@ import {
   FakeRunServer,
   jsonResponse,
   liveThrough,
+  liveUpTo,
+  snapshotEvent as snapshot,
   sseResponse,
   testBody,
   wireText,
@@ -40,7 +53,7 @@ import {
   CONTRACT_RESUMED,
   type ContractEvent,
 } from "../fixtures/runViewContract";
-import { LOAD_FAILED_TEXT, PAUSE_MESSAGES } from "../shared/pauseCopy";
+import { isolated, LOAD_FAILED_TEXT, PAUSE_MESSAGES } from "../shared/pauseCopy";
 import { LIMITED_RETRY_MS, SLOT_RETRIES, SLOT_RETRY_MS } from "../stream/runStream";
 import { RunPage } from "./RunPage";
 
@@ -83,34 +96,6 @@ function posts(): { url: string; body: unknown }[] {
 
 const acks = () => posts().filter((post) => post.url === ACK_URL);
 
-/** A snapshot frame as the stream sends it. */
-function snapshot(
-  header: RunHeader,
-  view: RunView | null,
-  options: { seq?: number; protocol?: number } = {},
-): ContractEvent {
-  const seq = options.seq ?? 6;
-  const frame = {
-    type: "snapshot",
-    protocol: options.protocol ?? 1,
-    view_version: 1,
-    seq,
-    run_version: header.version,
-    log_version: 1,
-    run: header,
-    view,
-    view_error: view === null ? "engine.load_failed" : null,
-  };
-  return { event: "snapshot", id: String(seq), data: JSON.stringify(frame) };
-}
-
-/** The live recording through entry `seq` and the header frames sent right after it. */
-function liveUpTo(seq: number): ContractEvent[] {
-  let end = liveThrough(seq).length;
-  while (end < CONTRACT_LIVE.length && CONTRACT_LIVE[end]!.event === "run") end += 1;
-  return CONTRACT_LIVE.slice(0, end);
-}
-
 /** Keep the stream open after `events`, as a live tail does. */
 function openStream(events: readonly ContractEvent[]): TestBody {
   const body = testBody();
@@ -121,17 +106,20 @@ function openStream(events: readonly ContractEvent[]): TestBody {
 
 /** The router's `navigate`, captured so a test can move to another run. */
 let navigate: NavigateFunction = () => {};
+/** The router's location, captured so a test can see where the page sent it. */
+let location: Location | null = null;
 
-function CaptureNavigate() {
+function CaptureRouter() {
   navigate = useNavigate();
+  location = useLocation();
   return null;
 }
 
-function pageTree(client: QueryClient, strict: boolean) {
+function pageTree(client: QueryClient, strict: boolean, path: string) {
   const tree = (
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[`/workflows/runs/${RUN_ID}`]}>
-        <CaptureNavigate />
+      <MemoryRouter initialEntries={[path]}>
+        <CaptureRouter />
         <Routes>
           <Route path="/workflows/runs/:runId" element={<RunPage />} />
         </Routes>
@@ -141,11 +129,12 @@ function pageTree(client: QueryClient, strict: boolean) {
   return strict ? <StrictMode>{tree}</StrictMode> : tree;
 }
 
-function renderPage(options: { strict?: boolean } = {}) {
+function renderPage(options: { strict?: boolean; path?: string } = {}) {
   const client = new QueryClient();
   const strict = options.strict ?? false;
-  const { rerender } = render(pageTree(client, strict));
-  return { client, rerender: () => rerender(pageTree(client, strict)) };
+  const path = options.path ?? `/workflows/runs/${RUN_ID}`;
+  const { rerender } = render(pageTree(client, strict, path));
+  return { client, rerender: () => rerender(pageTree(client, strict, path)) };
 }
 
 const detailReads = () =>
@@ -159,13 +148,15 @@ const run = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
 /** The live recording after the first gate opens, through `[DONE]`. */
 const afterGate1 = () => CONTRACT_LIVE.slice(liveThrough(CONTRACT_LIVE_MARKS.gate1_open).length);
 
-/** The page's buttons, in order: on a ready page, the run's actions. */
+/** The run's actions, in order. */
 const actionNames = () =>
-  within(screen.getByTestId("workflow-run-page"))
+  within(screen.getByTestId("run-actions"))
     .queryAllByRole("button")
     .map((element) => element.textContent);
 
 const page = () => screen.getByTestId("workflow-run-page");
+const canvasNode = (nodeId: string) =>
+  screen.getAllByTestId("rf-node").find((element) => element.dataset.id === nodeId)!;
 const statusRegion = () => screen.getByTestId("run-status");
 const button = (name: string) => screen.queryByRole("button", { name });
 
@@ -292,9 +283,9 @@ describe("RunPage", () => {
         .getAllByRole("listitem")
         .map((item) => item.textContent),
     ).toEqual([
-      "Someone typed into Implement’s session while Coral was finishing it.",
-      "Implement’s session was changed outside Coral.",
-      "Waiting for the orchestrator to choose at Implement.",
+      `Someone typed into ${isolated("Implement")}’s session while Coral was finishing it.`,
+      `${isolated("Implement")}’s session was changed outside Coral.`,
+      `Waiting for the orchestrator to choose at ${isolated("Implement")}.`,
     ]);
     expect(button("Cancel run")).toBeInTheDocument();
     expect(button("Resume")).not.toBeInTheDocument();
@@ -667,6 +658,180 @@ describe("RunPage", () => {
     await run(5_000);
     expect(server.streamRequests()).toHaveLength(2);
     expect(acks()).toHaveLength(2);
+  });
+
+  it("shows the run's steps on the canvas and in the step list once the view arrives", async () => {
+    // WHY: the graph and its list carry where the run is, from the stream.
+    openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
+    renderPage();
+    await run();
+    expect(screen.getAllByTestId("rf-node")).toHaveLength(CONTRACT_GRAPH.nodes.length);
+    const steps = screen.getByRole("region", { name: "Steps" });
+    expect(within(steps).getByRole("button", { name: /^Approve change/ })).toHaveTextContent(
+      "Waiting for you",
+    );
+    expect(screen.queryByTestId("run-node-panel")).toBeNull();
+  });
+
+  it("shows nothing of the graph for a run whose state cannot be loaded", async () => {
+    // WHY: with no view, every node would read "Not started", which is not known.
+    openStream([snapshot({ ...RUNNING, load_error: "engine.load_failed" }, null)]);
+    renderPage();
+    await run();
+    expect(screen.queryByTestId("run-canvas")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Steps" })).toBeNull();
+  });
+
+  it("pushes ?node= when a step is selected, from the list or the canvas, and shows its panel", async () => {
+    // WHY: the selection lives in the URL, so Back returns to the run as it was.
+    openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
+    renderPage({ path: `/workflows/runs/${RUN_ID}?panel=gate` });
+    await run();
+    const steps = screen.getByRole("region", { name: "Steps" });
+    fireEvent.click(within(steps).getByRole("button", { name: /^Implement/ }));
+    await run();
+    expect(location?.search).toBe("?node=implement");
+    expect(screen.getByRole("region", { name: "Implement" })).toHaveAttribute(
+      "data-node-id",
+      "implement",
+    );
+    expect(within(steps).getByRole("button", { name: /^Implement/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    const gateNode = screen
+      .getAllByTestId("rf-node")
+      .find((element) => element.dataset.id === "approve_change")!;
+    fireEvent.click(gateNode);
+    await run();
+    expect(location?.search).toBe("?node=approve_change");
+    expect(screen.getByRole("region", { name: "Approve change" })).toBeInTheDocument();
+    act(() => navigate(-1));
+    await run();
+    expect(location?.search).toBe("?node=implement");
+  });
+
+  it("keeps the selected step, its panel and the focus on it as the stream moves on", async () => {
+    // WHY: patches redraw the steps; the owner's place on the page stays where it was.
+    const body = openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
+    renderPage({ path: `/workflows/runs/${RUN_ID}?node=implement` });
+    await run();
+    const steps = screen.getByRole("region", { name: "Steps" });
+    const implement = within(steps).getByRole("button", { name: /^Implement/ });
+    implement.focus();
+    const key = location?.key;
+    expect(screen.getByTestId("run-node-state")).toHaveTextContent(
+      "Step · Completed · pass 1 of 2",
+    );
+    body.send(
+      wireText(
+        CONTRACT_LIVE.slice(
+          liveThrough(CONTRACT_LIVE_MARKS.gate1_open).length,
+          liveThrough(CONTRACT_LIVE_MARKS.pass2_running).length,
+        ),
+      ),
+    );
+    await run();
+    expect(within(steps).getByRole("button", { name: /^Implement/ })).toBe(implement);
+    expect(implement).toHaveFocus();
+    expect(implement).toHaveAttribute("aria-current", "true");
+    expect(screen.getByTestId("run-node-state")).toHaveTextContent("Step · Running · pass 2 of 2");
+    expect(within(canvasNode("implement")).getByTestId("flow-node")).toHaveAttribute(
+      "data-selected",
+      "true",
+    );
+    expect(location?.key).toBe(key);
+    expect(location?.search).toBe("?node=implement");
+  });
+
+  it("adds no history entry when the selected step is selected again", async () => {
+    // WHY: a repeated click must not leave Back entries that seem to do nothing.
+    openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
+    renderPage();
+    await run();
+    const opened = location?.key;
+    const implement = () =>
+      within(screen.getByRole("region", { name: "Steps" })).getByRole("button", {
+        name: /^Implement/,
+      });
+    fireEvent.click(implement());
+    await run();
+    const selected = location?.key;
+    expect(selected).not.toBe(opened);
+    fireEvent.click(implement());
+    fireEvent.click(canvasNode("implement"));
+    await run();
+    expect(location?.key).toBe(selected);
+    act(() => navigate(-1));
+    await run();
+    expect(location?.key).toBe(opened);
+    expect(location?.search).toBe("");
+  });
+
+  it("keeps the steps, gates and actions working when the graph cannot be laid out", async () => {
+    // WHY: the layout recurses per rank and overflows the stack on a very deep graph; the
+    // rest of the run page must not go down with the canvas.
+    // React reports the caught render error through the console and a window error event.
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const reported = (event: ErrorEvent) => event.preventDefault();
+    window.addEventListener("error", reported);
+    const chain = Array.from({ length: 2_000 }, (_unused, index) => ({
+      ...CONTRACT_GRAPH.nodes[1]!,
+      id: `n${index}`,
+      name: `Step ${index}`,
+      evidence: null,
+    }));
+    const deep = {
+      ...CONTRACT_GRAPH,
+      nodes: [...CONTRACT_GRAPH.nodes, ...chain],
+      arrows: chain.slice(1).map((node, index) => ({
+        ...CONTRACT_GRAPH.arrows[0]!,
+        id: `x${index}`,
+        source: chain[index]!.id,
+        target: node.id,
+      })),
+    };
+    const base = authenticatedFetch.getMockImplementation()!;
+    authenticatedFetch.mockImplementation((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input) === GRAPH_URL ? Promise.resolve(jsonResponse(200, deep)) : base(input, init),
+    );
+    try {
+      openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
+      renderPage();
+      await run();
+      expect(within(screen.getByTestId("run-canvas")).getByRole("alert")).toHaveTextContent(
+        "Unable to display the run's graph.",
+      );
+      const steps = screen.getByRole("region", { name: "Steps" });
+      expect(within(steps).getByRole("button", { name: /^Approve change/ })).toHaveTextContent(
+        "Waiting for you",
+      );
+      expect(screen.getByTestId("run-gate")).toBeInTheDocument();
+      expect(actionNames()).toEqual(["Pause", "Cancel run"]);
+    } finally {
+      window.removeEventListener("error", reported);
+      quiet.mockRestore();
+    }
+  }, 30_000);
+
+  it("ignores a ?node= the graph does not hold", async () => {
+    // WHY: a stale or hand-edited link must not select a node that is not there.
+    openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
+    renderPage({ path: `/workflows/runs/${RUN_ID}?node=ghost&panel=gate` });
+    await run();
+    expect(screen.queryByTestId("run-node-panel")).toBeNull();
+    expect(screen.getByTestId("run-gate")).not.toHaveFocus();
+  });
+
+  it("focuses the named gate's card when opened with ?node=&panel=gate", async () => {
+    // WHY: the Inbox's "Open run" lands on the gate it named, ready to answer.
+    openStream(liveThrough(CONTRACT_LIVE_MARKS.gate1_open));
+    renderPage({ path: `/workflows/runs/${RUN_ID}?node=approve_change&panel=gate` });
+    await run();
+    const gate = screen.getByTestId("run-gate");
+    expect(gate).toHaveAttribute("data-node-id", "approve_change");
+    expect(gate).toHaveFocus();
+    expect(within(gate).getByRole("button", { name: "approve" })).toBeEnabled();
   });
 
   it.each<[RunHeader["allowed_actions"], RunHeader["load_error"], string[]]>([

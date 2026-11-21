@@ -2,7 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PauseCause, RunView } from "../api/generated/coralApi";
 import { CONTRACT_DETAIL_GATE_PASS2, CONTRACT_GRAPH } from "../fixtures/runViewContract";
-import { PAUSE_MESSAGES, type GraphNodeNames } from "../shared/pauseCopy";
+import { isolated, PAUSE_MESSAGES, type GraphNodeNames } from "../shared/pauseCopy";
 import { PauseBanner } from "./PauseBanner";
 
 const OPEN_VIEW = CONTRACT_DETAIL_GATE_PASS2.view!;
@@ -75,8 +75,8 @@ describe("PauseBanner", () => {
     ];
     renderBanner("user", pausedView({ slots }));
     expect(items()).toEqual([
-      "Someone typed into Implement’s session.",
-      "Implement’s session was changed outside Coral.",
+      `Someone typed into ${isolated("Implement")}’s session.`,
+      `${isolated("Implement")}’s session was changed outside Coral.`,
     ]);
   });
 
@@ -90,8 +90,8 @@ describe("PauseBanner", () => {
     ];
     renderBanner("drift", pausedView({ causes: [USER_CAUSE, cause], slots }));
     expect(items()).toEqual([
-      "Someone typed into Implement’s session while Coral was finishing it.",
-      "Someone typed into Implement’s session.",
+      `Someone typed into ${isolated("Implement")}’s session while Coral was finishing it.`,
+      `Someone typed into ${isolated("Implement")}’s session.`,
     ]);
   });
 
@@ -99,8 +99,8 @@ describe("PauseBanner", () => {
     // WHY: an open decision is the run waiting on its orchestrator, not stuck.
     renderBanner("user", pausedView({ open_decisions: ["choose||", "pick||x|0"] }));
     expect(items()).toEqual([
-      "Waiting for the orchestrator to choose at Choose path.",
-      "Waiting for the orchestrator to choose at pick.",
+      `Waiting for the orchestrator to choose at ${isolated("Choose path")}.`,
+      `Waiting for the orchestrator to choose at ${isolated("pick")}.`,
     ]);
   });
 

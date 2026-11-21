@@ -9,7 +9,7 @@ import { ApiError } from "@/lib/sessionsApi";
 import type * as sessionsApiModule from "@/lib/sessionsApi";
 import type { InboxKindUi } from "@/lib/inboxKinds";
 import type { RunDetail, RunSummary } from "../api/generated/coralApi";
-import { runQueryKey } from "../api/runsApi";
+import { CoralRequestError, runQueryKey } from "../api/runsApi";
 import type { WorkflowAlert } from "../api/types";
 import {
   CONTRACT_INBOX_PAGE,
@@ -20,7 +20,7 @@ import { coralScope } from "../shared/viewerScope";
 import { RunActions, type RunActionsProps } from "./RunActions";
 import { parseWorkflowInboxPage } from "./workflowInboxApi";
 import { workflowEntries, type WorkflowGateEntryData } from "./workflowEntries";
-import { WorkflowAlertCard, WorkflowGateCard } from "./WorkflowInboxCard";
+import { WorkflowAlertCard, WorkflowGateCard, type RunViewGate } from "./WorkflowInboxCard";
 
 const approve = vi.hoisted(() => vi.fn());
 // Real ApiError, so refusals take the production parse path.
@@ -104,7 +104,11 @@ function renderCard(node: ReactNode, queryClient = new QueryClient()) {
 
 function renderGate(
   data: WorkflowGateEntryData = gateData(),
-  { viewerId = "alice", expanded = true }: { viewerId?: string | null; expanded?: boolean } = {},
+  {
+    viewerId = "alice",
+    expanded = true,
+    runView,
+  }: { viewerId?: string | null; expanded?: boolean; runView?: RunViewGate } = {},
 ) {
   return renderCard(
     <WorkflowGateCard
@@ -114,6 +118,7 @@ function renderGate(
       expanded={expanded}
       onToggle={() => {}}
       ui={UI}
+      runView={runView}
     />,
   );
 }
@@ -518,6 +523,83 @@ describe("WorkflowGateCard", () => {
         .getAllByRole("button")
         .map((button) => button.textContent),
     ).toEqual(["ship", "hold", "drop"]);
+  });
+});
+
+describe("WorkflowGateCard in the run view", () => {
+  /** A gate as the run page builds it: no alert and no prompt id, the owner's own run. */
+  const RUN_GATE: WorkflowGateEntryData = {
+    type: "gate",
+    elicitationId: null,
+    alert: null,
+    prompt: {
+      sessionId: ANCHOR.id,
+      message: "Approve change\nApprove the change?",
+      outcomes: ["approve", "reject"],
+      runId: GATE_ALERT.run_id,
+      runTitle: "Ship the bridge",
+      nodeId: "approve_change",
+      runOwner: null,
+      openedAt: GATE_ALERT.created_at,
+    },
+  };
+
+  function renderRunGate(answer: (outcome: string, note: string | null) => Promise<unknown>) {
+    return renderGate(RUN_GATE, { viewerId: null, runView: { answer, evidence: <p>checks</p> } });
+  }
+
+  it("answers through the run view, with no prompt id, and never through the anchor", async () => {
+    // WHY: the run page answers on the runs route by the visit's token, not the prompt.
+    const answer = vi.fn().mockResolvedValue({ result: "accepted" });
+    renderRunGate(answer);
+    fireEvent.change(screen.getByLabelText("Note"), { target: { value: "Looks good" } });
+    const approveButton = screen.getByRole("button", { name: "approve" });
+    expect(approveButton).toHaveAttribute("data-component-id", "workflows.run.gate.answer");
+    fireEvent.click(approveButton);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Answered: approve."));
+    expect(answer).toHaveBeenCalledExactlyOnceWith("approve", "Looks good");
+    expect(approve).not.toHaveBeenCalled();
+  });
+
+  it("passes no note when none was written", async () => {
+    // WHY: an empty note is not part of the answer.
+    const answer = vi.fn().mockResolvedValue({ result: "accepted" });
+    renderRunGate(answer);
+    fireEvent.click(screen.getByRole("button", { name: "reject" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Answered: reject."));
+    expect(answer).toHaveBeenCalledExactlyOnceWith("reject", null);
+  });
+
+  it("shows the run view's evidence, and no Open run link or Inbox notice", () => {
+    // WHY: on the run page the card is already beside the run.
+    renderRunGate(vi.fn());
+    const card = screen.getByTestId("inbox-workflow-gate");
+    expect(card).toHaveTextContent("Approve the change?");
+    expect(within(card).getByText("checks")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Open run/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("Coral notifies you while the app is open.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the form after a refusal whose reason says retrying helps", async () => {
+    // WHY: the runs route's reason rides in details.reason, which the card reads.
+    const answer = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new CoralRequestError("The run is paused.", 409, "illegal_transition", {
+          reason: "run_paused",
+        }),
+      )
+      .mockResolvedValueOnce({ result: "accepted" });
+    renderRunGate(answer);
+    fireEvent.click(screen.getByRole("button", { name: "approve" }));
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "The run is paused. Resume it, then answer.",
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "approve" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Answered: approve."));
+    expect(answer).toHaveBeenCalledTimes(2);
   });
 });
 

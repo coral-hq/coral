@@ -1,13 +1,8 @@
 import { CirclePauseIcon } from "lucide-react";
 import { useId } from "react";
 import type { RunView } from "../api/generated/coralApi";
-import {
-  activationNodeId,
-  nodeLabel,
-  pauseCopy,
-  slotNodeId,
-  type GraphNodeNames,
-} from "../shared/pauseCopy";
+import { isolated, nodeLabel, pauseCopy, type GraphNodeNames } from "../shared/pauseCopy";
+import { activationNodeId, slotNodeId } from "../shared/runIds";
 
 // A paused run's banner: why it paused (the first cause, or the run's reason), then what
 // else it waits on: its other causes, steps someone typed into or whose session changed,
@@ -22,9 +17,10 @@ export interface PauseBannerProps {
   graph: GraphNodeNames | null;
 }
 
-/** A step's name for a sentence, or "a step" when the graph cannot name it. */
+/** A step's name for a sentence, isolated, or "a step" when the graph cannot name it. */
 function stepName(graph: GraphNodeNames | null, nodeId: string | null): string {
-  return (nodeId === null ? null : nodeLabel(graph, nodeId)) ?? "a step";
+  const name = nodeId === null ? null : nodeLabel(graph, nodeId);
+  return name === null ? "a step" : isolated(name);
 }
 
 /** Everything else the paused run waits on, once each, leaving out what `body` says. */
@@ -48,7 +44,8 @@ function waitingOn(view: RunView | null, graph: GraphNodeNames | null, body: str
   }
   for (const decision of view.open_decisions) {
     const nodeId = activationNodeId(decision) ?? decision;
-    lines.push(`Waiting for the orchestrator to choose at ${nodeLabel(graph, nodeId) ?? nodeId}.`);
+    const name = isolated(nodeLabel(graph, nodeId) ?? nodeId);
+    lines.push(`Waiting for the orchestrator to choose at ${name}.`);
   }
   return [...new Set(lines)].filter((line) => line !== body);
 }

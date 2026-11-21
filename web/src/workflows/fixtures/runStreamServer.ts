@@ -1,4 +1,5 @@
 import type { StreamSlot, StreamSlotManager } from "@/store/streamSlots";
+import type { RunHeader, RunView } from "../api/generated/coralApi";
 import { CONTRACT_LIVE, type ContractEvent } from "./runViewContract";
 
 // Test-side pieces for serving the recorded run stream to the web's stream client: the
@@ -22,6 +23,34 @@ export function liveThrough(seq: number): ContractEvent[] {
   const end = CONTRACT_LIVE.findIndex((event) => event.id === String(seq));
   if (end < 0) throw new Error(`the live recording has no event ${seq}`);
   return CONTRACT_LIVE.slice(0, end + 1);
+}
+
+/** The live recording through entry `seq` and the header frames sent right after it. */
+export function liveUpTo(seq: number): ContractEvent[] {
+  let end = liveThrough(seq).length;
+  while (end < CONTRACT_LIVE.length && CONTRACT_LIVE[end]!.event === "run") end += 1;
+  return CONTRACT_LIVE.slice(0, end);
+}
+
+/** A snapshot frame as the stream sends it; a `null` view is a run that cannot load. */
+export function snapshotEvent(
+  header: RunHeader,
+  view: RunView | null,
+  options: { seq?: number; protocol?: number } = {},
+): ContractEvent {
+  const seq = options.seq ?? 6;
+  const frame = {
+    type: "snapshot",
+    protocol: options.protocol ?? 1,
+    view_version: 1,
+    seq,
+    run_version: header.version,
+    log_version: 1,
+    run: header,
+    view,
+    view_error: view === null ? "engine.load_failed" : null,
+  };
+  return { event: "snapshot", id: String(seq), data: JSON.stringify(frame) };
 }
 
 /** A response body the test writes to, ends or breaks. */

@@ -1,13 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import { CircleAlertIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CoralPageHeader } from "@/brand/CoralPageHeader";
 import { PageScroll } from "@/components/PageScroll";
+import { RenderErrorBoundary } from "@/components/RenderErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { useParams } from "@/lib/routing";
+import { useLocation, useNavigate, useParams, useSearchParams } from "@/lib/routing";
 import { getRunGraph, retryRunRead, runGraphQueryKey } from "../api/runsApi";
+import { FlowCanvas } from "../canvas/FlowCanvas";
+import { runOverlay } from "../canvas/runOverlay";
 import { RunActions } from "../inbox/RunActions";
+import { runPath } from "../nav/coralPaths";
 import { LOAD_FAILED_TEXT } from "../shared/pauseCopy";
 import { useCoralScope } from "../shared/viewerScope";
 import type { RunStreamStatus } from "../stream/runStream";
@@ -15,7 +19,9 @@ import { useRunStream } from "../stream/useRunStream";
 import type { StalenessMarks } from "./detailStaleness";
 import { runViewCardUi } from "./gateCardUi";
 import { PauseBanner } from "./PauseBanner";
+import { RunGatePanel, type GateFocus } from "./RunGatePanel";
 import { RunHeaderBar } from "./RunHeaderBar";
+import { RunNodePanel } from "./RunNodePanel";
 import {
   connectionNotice,
   LOAD_FAILED_PAGE_TEXT,
@@ -23,13 +29,15 @@ import {
   runPageState,
   type RunPageState,
 } from "./runPageState";
+import { RunStepList } from "./RunStepList";
 import { useAckRunAlerts } from "./useAckRunAlerts";
 import { useDetailFailure, useRunDetail } from "./useRunDetail";
 
 // The live view of one run at `/workflows/runs/:runId`. Its status, pause reason, causes
 // and allowed actions come only from the stream's header and view; the detail supplies the
 // title, spend, gates and slots. Before the stream's first frame the detail's status shows
-// as provisional, with no actions.
+// as provisional, with no actions. The selected node rides `?node=`; `?panel=gate` asks to
+// show that node's open gate.
 
 export function RunPage() {
   const { runId = "" } = useParams<{ runId: string }>();
@@ -62,6 +70,31 @@ function RunPageBody({ runId }: { runId: string }) {
   useAckRunAlerts(runId, detail.data, doneSeen);
 
   const { header, view, viewError } = stream;
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const overlay = useMemo(
+    () => (graph.data && view ? runOverlay(graph.data, view) : null),
+    [graph.data, view],
+  );
+  const nodeParam = searchParams.get("node");
+  // Only a node the graph holds is selected; a stale link selects nothing.
+  const selectedNodeId = nodeParam !== null && overlay?.has(nodeParam) ? nodeParam : null;
+  const showGate = searchParams.get("panel") === "gate";
+  const gateFocus = useMemo<GateFocus | null>(
+    () =>
+      showGate && selectedNodeId !== null ? { nodeId: selectedNodeId, key: location.key } : null,
+    [showGate, selectedNodeId, location.key],
+  );
+  // Selecting the selected step again adds no history entry.
+  const selectNode = useCallback(
+    (nodeId: string) => {
+      if (nodeId !== selectedNodeId) void navigate(runPath(runId, { node: nodeId }));
+    },
+    [navigate, runId, selectedNodeId],
+  );
+  const refetchDetail = detail.refetch;
+  const onAnswerSettled = useCallback(() => void refetchDetail(), [refetchDetail]);
   const state = runPageState({
     detailError: detailFailure,
     detailLoaded: detail.data !== undefined,
@@ -139,7 +172,7 @@ function RunPageBody({ runId }: { runId: string }) {
         statusRef={statusRef}
         actions={
           header === null ? null : (
-            <div className="flex flex-col items-end gap-1">
+            <div data-testid="run-actions" className="flex flex-col items-end gap-1">
               <RunActions
                 runId={runId}
                 ui={runViewCardUi}
@@ -165,6 +198,51 @@ function RunPageBody({ runId }: { runId: string }) {
           <PauseBanner reason={header.pause_reason} view={view} graph={graph.data ?? null} />
         )}
         {settingUp && <p className="text-ui text-muted-foreground">Setting up the run…</p>}
+        {run && (
+          <RunGatePanel
+            runId={runId}
+            detail={run}
+            view={view}
+            graph={graph.data ?? null}
+            selectedNodeId={selectedNodeId}
+            focus={gateFocus}
+            onAnswerSettled={onAnswerSettled}
+            focusFallback={statusRef}
+          />
+        )}
+        {graph.data && overlay && (
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <div
+              data-testid="run-canvas"
+              className="h-[360px] overflow-hidden rounded-xl border border-border md:h-[460px]"
+            >
+              {/* A graph the layout cannot place leaves the steps, gates and actions working. */}
+              <RenderErrorBoundary name="the run's graph" resetKey={graph.data.content_hash}>
+                <FlowCanvas
+                  compiled={graph.data}
+                  overlay={overlay}
+                  selectedNodeId={selectedNodeId}
+                  onSelectNode={selectNode}
+                />
+              </RenderErrorBoundary>
+            </div>
+            <div className="flex min-w-0 flex-col gap-4">
+              <RunStepList
+                graph={graph.data}
+                overlay={overlay}
+                selectedNodeId={selectedNodeId}
+                onSelectNode={selectNode}
+              />
+              {selectedNodeId !== null && (
+                <RunNodePanel
+                  graph={graph.data}
+                  nodeId={selectedNodeId}
+                  overlay={overlay.get(selectedNodeId) ?? null}
+                />
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </RunPageFrame>
   );
