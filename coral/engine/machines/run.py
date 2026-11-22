@@ -42,6 +42,9 @@ def start_run(
         return _repeat_start(state, command)
     if graph.analysis.unresolved:
         return refuse(state, "graph.unresolved")
+    # ENG-08 lands dark: SES-10 lifts this when structure executors exist.
+    if graph.analysis.requires_structure_runtime:
+        return refuse(state, "structure.runtime_required")
     start = next((node for node in graph.nodes if node.kind == "start"), None)
     if start is None:
         return refuse(state, "not_supported")
