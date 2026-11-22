@@ -177,8 +177,8 @@ describe("pauseCopy", () => {
 
   const STEP = isolated("Implement");
   const SLOT = "implement||a4:2:0";
-  // DESIGN §8.11's bodies, each for the cause the engine records, on a slot the graph names.
-  const SES06_COPY: [string, PauseCause, string][] = [
+  // Each step cause's body, for the detail the engine records, on a slot the graph names.
+  const STEP_CAUSE_COPY: [string, PauseCause, string][] = [
     [
       "a step held while its machine is offline",
       cause("infra", "infra.host_offline", SLOT),
@@ -239,7 +239,7 @@ describe("pauseCopy", () => {
       cause("failure_path", "attempts_exhausted:", SLOT),
       SERVER.failure_path,
     ],
-    // R84's bodies for causes the design left generic.
+    // Specific bodies for causes that would otherwise keep the reason's copy.
     [
       "a step session someone closed",
       cause("failure_path", "session.closed", SLOT),
@@ -262,7 +262,7 @@ describe("pauseCopy", () => {
     ["a turn that kept failing", cause("infra", "infra.transient", SLOT), SERVER.infra],
   ];
 
-  it.each(SES06_COPY)("says what %s means", (_name, pauseCause, body) => {
+  it.each(STEP_CAUSE_COPY)("says what %s means", (_name, pauseCause, body) => {
     // WHY: a held, restarting or failed step says what happens next and what the owner can do.
     expect(pauseCopy(pauseCause.reason, pauseCause, CONTRACT_GRAPH)).toEqual({
       ...pauseCopy(pauseCause.reason, null, CONTRACT_GRAPH),
@@ -332,7 +332,7 @@ describe("pauseCopy", () => {
     expect(pauseCopy(pauseCause.reason, pauseCause, CONTRACT_GRAPH).body).toBe(body);
   });
 
-  it("names the step of a SES-06 cause only once the graph loads", () => {
+  it("names a step cause's step only once the graph loads", () => {
     // WHY: before the graph arrives the banner still explains the cause, without a name.
     expect(pauseCopy("infra", cause("infra", "recovery.restarting", SLOT), null).body).toBe(
       "Coral is restarting a step from its last handoff.",

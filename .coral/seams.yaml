@@ -3285,7 +3285,7 @@ seams:
         spared pids, the clock, a zygote runner's real harness, a bwrap
         sandbox (Linux), a recycled pid behind the spawn record, and the orphan
         reaper's two-sweep rule around the pass.
-        tests/runner/test_runner_entry.py (164 added lines): the
+        tests/runner/test_runner_entry.py (166 added lines): the
         parent-death matrix, the read-once mark, the PID 1 and non-leader
         guards and a real host SIGKILL. The other four files are within budget.
       approver: nicholasjano (delegated)

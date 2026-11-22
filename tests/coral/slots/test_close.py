@@ -485,7 +485,7 @@ async def test_an_earlier_turns_late_end_edge_ends_only_a_guessed_wait_that_saw_
 
     outcome = await env.close(edges=edges, bounds=bounds, interrupt=False)
 
-    # A guess takes any end edge it sees (R89); a known response keeps CRL-128's rule.
+    # A guessed response id takes any end edge it sees; a known one ignores other responses'.
     assert outcome.forced_stop is forced_stop
     assert "interrupt" not in env.events
     assert env.main_events() == ["set_closed", "stop", "commit", "queued_user_input"]

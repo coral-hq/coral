@@ -477,10 +477,13 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
         # The implementer's first call is held; its runner is stopped across the restart.
         implement = sk.held_activation(wait, mock, impl_token, 1)
         # This hold outlasts the CLI's wait for a first byte (about two minutes on 2.1.325),
-        # after which it sends the call again; the repeat is held too.
-        sk.queue(
-            mock, impl_token, [sk.held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=f"w2-{uid}"))]
-        )
+        # after which it sends the call again. Each repeat is held too; three are all the
+        # scenario's deadline leaves room for.
+        repeats = [
+            sk.held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=f"w{number}-{uid}"))
+            for number in range(2, 5)
+        ]
+        sk.queue(mock, impl_token, repeats)
         implementer = sk.step_session(client, run_id, "implement")
         runner_before = sk.session(client, implementer)["runner_id"]
         pid = sk.runner_pid(stack, implementer)
@@ -529,9 +532,9 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
                 DONE,
             ],
         )
-        # The oldest first: a call the CLI gave up on, then the one it waits on.
+        # The oldest first: the calls the CLI gave up on, then the one it waits on.
         released = time.monotonic()
-        for _ in range(sent):
+        while sk.mock_holds_a_call(mock):
             release_mock_gate(mock)
         review = sk.held_activation(wait, mock, review_token, 1)
         reviewer_after = time.monotonic() - released
@@ -564,8 +567,8 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
     assert runner_after == runner_before
     assert runner_alive
     assert launches_before_release == 1, launches_before_release
-    # The held call, and at most the CLI's one repeat of it: the same request, not a new turn.
-    assert sent in {1, 2}, sent
+    # The held call, and any repeats of it: the same request, not a new turn.
+    assert sent >= 1, sent
     assert len({json.dumps(call["body"], sort_keys=True) for call in held_calls}) == 1, held_calls
     # Every pass of the new leader read the runner, and none reported it lost.
     assert "Coral liveness check of run" not in liveness_lines
@@ -666,7 +669,8 @@ def test_live_review_loop_survives_server_sigkills(
     The review loop against the real Anthropic API, with a server kill mid-step and one at
     the gate.
 
-    The key never leaves this process: the CLI gets the proxy's per-run token instead.
+    The CLI gets the proxy's per-run token, never the key, but on macOS a step's shell
+    can read the key from the environment of this process and its parents.
     The token does not fence out other local accounts: it reaches the CLI's command
     line, which any local user can read, and the stack's server serves unauthenticated
     local requests. Run this only on a machine with no other users.

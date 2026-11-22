@@ -262,7 +262,7 @@ describe("PauseBanner", () => {
   });
 });
 
-describe("PauseBanner for each SES-06 cause", () => {
+describe("PauseBanner for each step cause", () => {
   const STEP = isolated("Implement");
   const TITLES: Record<string, string> = {
     infra: "Paused: infrastructure",

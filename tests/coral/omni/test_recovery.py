@@ -1,6 +1,6 @@
 """A retried step restarts in process: fenced, salvaged and reset, then briefed, across crashes.
 
-L3 on the CRL-149 world (``tests/coral/bridge/_world.py``) over a SQL database: the
+L3 on the bridge test world (``tests/coral/bridge/_world.py``) over a SQL database: the
 real bridge, drainer, hold policy and executors, the restart among them. The sessions
 are the world's fakes (its binding facade over ``FakeSessionFacade`` and the fake
 dispatch); the run worktree is a real linked git worktree served by Coral's own host

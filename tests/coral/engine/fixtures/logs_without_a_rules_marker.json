@@ -1,5 +1,5 @@
 {
- "about": "Runs logged by the engine before start entries named their rules (step 1 of CRL-137), with the state and view each folded to then. Every later engine must fold them to the same state and view.",
+ "about": "Runs logged by the engine before start entries named their rules, with the state and view each folded to then. Every later engine must fold them to the same state and view.",
  "engine_config": {
   "max_activations": 100,
   "rejected_call_limit": 3

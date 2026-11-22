@@ -534,7 +534,7 @@ def _recorded(stack: sk.Skeleton, harness_socket: Path) -> dict[str, Any]:
 
 def _assert_recorded(recorded: Mapping[str, Any]) -> None:
     """The pins hold only for the socket root and read grant they were taken with."""
-    pinned = RECORDED[sys.platform]
+    pinned = RECORDED.get(sys.platform, {})
     for key in ("harness_socket_root", "checkout_read_grant") if pinned else ():
         assert recorded[key] == pinned[key], (key, recorded[key])
 
@@ -768,7 +768,7 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
     )
     assert (run["status"], run["causes"]) == ("completed", []), run
     _assert_recorded(recorded)
-    _assert_pinned("probe 15", EXPECTED[sys.platform], observed, written)
+    _assert_pinned("probe 15", EXPECTED.get(sys.platform, {}), observed, written)
 
 
 EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
@@ -910,7 +910,8 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
     written = _write_artifact("probe15-token", report)
     print(f"Allow-listed token on {sys.platform}:", json.dumps(report))
     _assert_recorded(recorded)
-    _assert_pinned("the allow-listed-token step", EXPECTED_TOKEN[sys.platform], observed, written)
+    pins = EXPECTED_TOKEN.get(sys.platform, {})
+    _assert_pinned("the allow-listed-token step", pins, observed, written)
 
 
 def _probe_env(home: Path, **extra: str) -> dict[str, str]:

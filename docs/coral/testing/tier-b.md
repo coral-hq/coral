@@ -199,11 +199,12 @@ its basetemp holds the key, reporting a count only, then deletes the basetemp.
 (its `--settings` key helper), which any local account can read, and the
 stack's server serves unauthenticated local requests. So while a live run
 lasts, another account on the machine could read the token and spend through
-the proxy. The key itself stays in the test process. There is no spend cap.
-Removing the key from the test's environment does not scrub the initial
-environment block of pytest, or of the shell and tools that started it, which
-another process of the same user can read; a live step whose sandbox lets it
-read other processes' environments (macOS, CRL-165) could read the key there. The proxy path is the
+the proxy. There is no spend cap. No process the test starts is given the key,
+but the key is not confined to the test process: removing it from the test's
+environment does not scrub the initial environment block of pytest, or of the
+shell and tools that started it, which another process of the same user can
+read. On macOS a step's shell can read the environments of the test process and
+its parents, and so the key (probe 15, CRL-165). The proxy path is the
 claude-sdk gateway path (it sets a base URL), so a host with only
 `ANTHROPIC_API_KEY` and no base URL is not exercised.
 

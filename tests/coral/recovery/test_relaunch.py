@@ -469,7 +469,7 @@ async def test_a_replica_that_leads_again_gives_a_missing_runner_a_full_grace(
 async def test_a_runner_the_wake_found_back_that_drops_before_any_pass_is_lost_again(
     world: World, working: tuple[Sessions, str], caplog: pytest.LogCaptureFixture
 ) -> None:
-    """R65 through the engine's own record: no pass ever sees the runner connected."""
+    """A loss after a reconnect is a new loss, though no pass ever sees the runner connected."""
     sessions, run_id = working
     runner = _runner(sessions, run_id)
     liveness = _pass(sessions)
