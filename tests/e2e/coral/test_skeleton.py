@@ -36,6 +36,7 @@ from coral.bridge.mapping import NEXT_RESYNC_AT
 from coral.db.enum_codecs import WorkStatus
 from tests.e2e.conftest import get_mock_message_requests, release_mock_gate
 from tests.e2e.coral import _skeleton as sk
+from tests.e2e.coral._claude_config_probe import HOOK, KEY
 from tests.e2e.coral._live_proxy import LiveProxy, Secret, live_proxy
 
 # Absolute deadline for the whole scenario, below the marker's limit.
@@ -117,6 +118,31 @@ def _checkout(stack: sk.Skeleton, run_id: str) -> tuple[subprocess.CompletedProc
     return done, outcome
 
 
+# A plugin hook and a session key in the host's home, which no step may change.
+def _claude_canaries(home: Path) -> tuple[str, list[str]]:
+    return (home / HOOK).read_text(), sorted(path.name for path in (home / KEY).parent.iterdir())
+
+
+def _plant_claude_canaries(home: Path) -> tuple[str, list[str]]:
+    for relative, text in ((HOOK, '{"hooks": {}}'), (KEY, '{"peerToken": "canary"}')):
+        (home / relative).parent.mkdir(parents=True, exist_ok=True)
+        (home / relative).write_text(text)
+    return _claude_canaries(home)
+
+
+def _step_claude_config(stack: sk.Skeleton, run_id: str) -> dict[str, Any]:
+    """Where the implement step's live CLI keeps its Claude config."""
+    session_id = sk.step_session(stack.client, run_id, "implement")
+    environ = sk.step_processes(sk.runner_pid(stack, session_id))["cli"].environ()
+    config_dir = Path(environ.get("CLAUDE_CONFIG_DIR", ""))
+    return {
+        "name": config_dir.name,
+        "in_scratch": Path(environ.get("TMPDIR", "/nonexistent")) in config_dir.parents,
+        "in_home": config_dir.is_relative_to(stack.host.home),
+        "has_config": (config_dir / ".claude.json").is_file(),
+    }
+
+
 def _sigkill_server(stack: sk.Skeleton) -> None:
     """Kill the server outright, then start it again on its port, database and config."""
     server = stack.server.server
@@ -153,6 +179,7 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
         tmp_path / "stack", mock_url=mock, host_config=sk.mock_auth(mock), lease_s=SHORT_LEASE_S
     ) as stack:
         client = stack.client
+        canaries = _plant_claude_canaries(stack.host.home)
         run_id = sk.start_review_loop(
             stack, impl_token=impl_token, review_token=review_token, start_key=f"skeleton-{uid}"
         )
@@ -165,6 +192,7 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
             (env.get("DISABLE_AUTOUPDATER"), env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             for env in sk.cli_environs(stack.root)
         }
+        step_config = _step_claude_config(stack, run_id)
         sk.queue(
             mock,
             impl_token,
@@ -237,10 +265,20 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
         reviewer_wrote = (worktree / "owned.txt").exists()
         checkout, outcome = _checkout(stack, run_id)
         greeting = (stack.repo / "greeting.txt").read_text() if checkout.returncode == 0 else None
+        canaries_after = _claude_canaries(stack.host.home)
 
     assert (run["status"], run["causes"]) == ("completed", []), run
     # The step's CLI ran with its self-update and non-essential traffic off.
     assert cli_switches == {("1", "1")}, cli_switches
+    # Its Claude config was a private dir in its scratch, and the home's canaries held.
+    private = {
+        "name": "claude_config_dir",
+        "in_scratch": True,
+        "in_home": False,
+        "has_config": True,
+    }
+    assert step_config == private, step_config
+    assert canaries_after == canaries, canaries_after
     # One evidence rejection, then the same activation's handoff is accepted.
     [rejected] = sk.result_texts(mock, early)
     [accepted] = sk.result_texts(mock, done)

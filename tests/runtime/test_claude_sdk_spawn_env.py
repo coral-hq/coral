@@ -298,6 +298,7 @@ def test_coral_spec_requires_an_api_credential(
 
     assert env["HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL"] == "1"
     assert env["HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK"] == "1"
+    assert env["HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG"] == "1"  # CORAL(S113)
 
 
 def test_non_coral_spec_leaves_the_api_credential_optional(
@@ -314,3 +315,4 @@ def test_non_coral_spec_leaves_the_api_credential_optional(
 
     assert "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL" not in env
     assert "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK" not in env
+    assert "HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG" not in env  # CORAL(S113)
