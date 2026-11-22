@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from pydantic import JsonValue
 
@@ -537,6 +537,7 @@ def note_usage_limited(
     table = outcomes("plan.usage_limit", slot.id, now, policy)
     paused = record_pause(state, cause.reason, cause.detail, cause.subject)
     armed = arm_plan_probe(paused, slot.id, slot.session_generation, now, policy)
+    armed = _pin_plan_probe_due(armed, slot.id, command.resets_at)
     return _commit_outbox(
         armed,
         base=state,
@@ -595,6 +596,7 @@ def note_session_failed(
             # A past-due probe that has not fired yet must not clear the new pause at once.
             updated = drop_slot_backoff(updated, (slot.id,), (PLAN_PROBE,))
             updated = arm_plan_probe(updated, slot.id, slot.session_generation, now, policy)
+            updated = _pin_plan_probe_due(updated, slot.id, command.resets_at)
     if not armed:
         table = tuple(effect for effect in table if effect.kind != "arm_timer")
     if cause is not None:
@@ -1177,6 +1179,20 @@ def _session_runner_lost(
         "runner_id": command.runner_id,
     }
     return _lose_runner(state, slot, command.fact_key, payload, (key, command.fact_key))
+
+
+def _pin_plan_probe_due(state: RunState, slot_id: str, resets_at: float | None) -> RunState:
+    """When the harness reported a reset time, fire the plan probe at ``resets_at + 60s``."""
+    if resets_at is None:
+        return state
+    due = datetime.fromtimestamp(resets_at, tz=UTC) + timedelta(seconds=60)
+    timers = []
+    for timer in state.timers:
+        if timer.kind == PLAN_PROBE and timer.subject == slot_id:
+            timers.append(timer.model_copy(update={"due_at": due}))
+        else:
+            timers.append(timer)
+    return state.model_copy(update={"timers": tuple(timers)})
 
 
 def _lose_runner(

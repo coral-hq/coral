@@ -215,6 +215,10 @@ class EvaluationContext:
         policies should skip only explicit ``False`` to preserve those
         callers. The relay skips empty and whitespace-only segments.
         Surfaced as ``event["context"]["turn_final"]``.
+    :param subagent: Native Task/sub-agent identity stamped by a hook, e.g.
+        ``{"agent_id": "…", "agent_type": "…"}`` or ``{"thread_id": "…"}``.
+        Surfaced as ``event["context"]["subagent"]``. ``None`` when the
+        call is not from a sub-agent (or the hook did not stamp one).
     """
 
     phase: Phase
@@ -233,6 +237,7 @@ class EvaluationContext:
     conversation_id: str | None = None
     conversation_title: str | None = None
     turn_final: bool | None = None
+    subagent: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

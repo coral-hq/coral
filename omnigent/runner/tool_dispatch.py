@@ -602,6 +602,15 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             function = _string_object_dict(schema.get("function"))
             if function is not None and function.get("name") in _NATIVE_RELAY_BUILTIN_TOOLS:
                 _append(function)
+        # Coral (and other) extension tools for params.coral native steps (S9).
+        if isinstance(getattr(spec, "params", None), dict) and "coral" in spec.params:
+            from omnigent.tools.extensions import extension_tool_sets
+
+            for tool_set in extension_tool_sets(spec):
+                for tool in tool_set.tools:
+                    function = _string_object_dict(tool.get("function"))
+                    if function is not None:
+                        _append(function)
     else:
         from omnigent.tools.builtins.policy import SysAddPolicyTool, SysPolicyRegistryTool
 

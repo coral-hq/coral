@@ -47,12 +47,19 @@ class CoralToolProvider:
         decls = self._decls.get(stance, ()) if stance is not None else ()
         if not decls:
             return None
-        # Native relays never carry extension tools, so their prompt must not name them.
-        from omnigent.harness_aliases import is_native_harness
+        # Schemas feed both the SDK MCP surface and the native relay (S9).
+        # Other native harnesses without Coral step mode omit the set entirely.
+        from omnigent.harness_aliases import canonicalize_harness, is_native_harness
 
         harness = getattr(getattr(spec, "executor", None), "harness_kind", None)
         if isinstance(harness, str) and is_native_harness(harness):
-            return None
+            params = getattr(spec, "params", None)
+            if not (
+                (canonicalize_harness(harness) or harness) == "claude-native"
+                and isinstance(params, dict)
+                and "coral" in params
+            ):
+                return None
         return ExtensionToolSet(
             tools=tuple(decl.schema() for decl in decls),
             framework_instructions=tuple(dict.fromkeys(decl.instructions for decl in decls)),

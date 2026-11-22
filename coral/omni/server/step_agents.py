@@ -54,7 +54,12 @@ def _not_supported(stance: str, reason: str) -> CoralSessionError:
 
 
 def _bundle(
-    stance: str, workflow_slug: str | None, node_id: str | None, roster_index: int | None
+    stance: str,
+    workflow_slug: str | None,
+    node_id: str | None,
+    roster_index: int | None,
+    *,
+    claude_native_steps: bool = False,
 ) -> tuple[bytes, Stance, str]:
     """The bundle's ``config.yaml``, stance and agent name; a step's comes from its reference."""
     if stance == ORCHESTRATOR_STANCE:
@@ -74,7 +79,13 @@ def _bundle(
             stance, f"the step reference is invalid ({', '.join(fields)})"
         ) from None
     step_stance = Stance(stance)
-    config_yaml = build_step_bundle_yaml(ref, step_stance, model=None, provider=None)
+    config_yaml = build_step_bundle_yaml(
+        ref,
+        step_stance,
+        model=None,
+        provider=None,
+        harness="claude-native" if claude_native_steps else None,
+    )
     return _with_read_paths(config_yaml, _checkout_read_paths()), step_stance, step_agent_name(ref)
 
 
@@ -112,6 +123,7 @@ class OmnigentStepAgents:
     Materializes a step's stance as the run owner's agent, in a thread, cached per bundle.
 
     :param conversation_store: Reads a retried create's session, whose agent it keeps.
+    :param claude_native_steps: When true, implementer/reviewer bundles use claude-native.
     """
 
     def __init__(
@@ -121,11 +133,13 @@ class OmnigentStepAgents:
         *,
         conversation_store: ConversationStore | None = None,
         max_entries: int = STEP_AGENT_CACHE_ENTRIES,
+        claude_native_steps: bool = False,
     ) -> None:
         self._agents = agent_store
         self._artifacts = artifact_store
         self._conversations = conversation_store
         self._max_entries = max_entries
+        self._claude_native_steps = claude_native_steps
         self._cache: OrderedDict[tuple[int, str | None, str], MaterializedAgent] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -170,7 +184,9 @@ class OmnigentStepAgents:
         step: tuple[str | None, str | None, int | None],
         session_id: str | None,
     ) -> str:
-        config_yaml, bundle_stance, name = _bundle(stance, *step)
+        config_yaml, bundle_stance, name = _bundle(
+            stance, *step, claude_native_steps=self._claude_native_steps
+        )
         # Agent rows belong to a workspace: use the run's, whatever the caller's scope.
         with workspace_scope(workspace_id):
             if session_id is not None:

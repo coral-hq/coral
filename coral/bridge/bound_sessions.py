@@ -87,6 +87,33 @@ class BoundSessions:
         """One dict read; safe on any thread, never blocks."""
         return self._entries.get((workspace_id, session_id))
 
+    def session_ids(self) -> set[str]:
+        """Every currently indexed session id (any workspace). Safe for observers."""
+        return {session_id for (_workspace_id, session_id) in self._entries}
+
+    def entries_for(self, session_id: str) -> list[tuple[int, BoundSession]]:
+        """Every ``(workspace_id, bound)`` currently indexed under *session_id*."""
+        return [
+            (workspace_id, bound)
+            for (workspace_id, keyed_id), bound in self._entries.items()
+            if keyed_id == session_id
+        ]
+
+    def rekey(self, workspace_id: int, old_session_id: str, new_session_id: str) -> None:
+        """Move an index entry from *old_session_id* to *new_session_id* when present."""
+        if old_session_id == new_session_id:
+            return
+        old_key = (workspace_id, old_session_id)
+        new_key = (workspace_id, new_session_id)
+        with self._lock:
+            bound = self._entries.pop(old_key, None)
+            if bound is None:
+                return
+            self._pushes += 1
+            if self._rebuilding:
+                self._recent.append((self._pushes, new_key, bound))
+            self._entries[new_key] = bound
+
     def push(self, workspace_id: int, session_id: str, bound: BoundSession) -> None:
         """Index a session whose create just completed."""
         key = (workspace_id, session_id)

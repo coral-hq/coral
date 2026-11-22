@@ -2470,6 +2470,7 @@ def build_hook_settings(
     launch_effort: str | None = None,
     subagent_router_dir: Path | None = None,
     turn_routing: bool = False,
+    policy_failure_mode: str | None = None,
 ) -> _JsonObject:
     """
     Build invocation-local Claude Code hook settings.
@@ -2524,9 +2525,15 @@ def build_hook_settings(
         routing round trip (25s worst case on a degraded server) in front of
         every prompt of every native session, to be told every time that the
         session does not route.
+    :param policy_failure_mode: ``ask`` (default) or ``fail_closed`` for
+        policy-hook outages. Written into ``permission_hook.json`` when a
+        server URL is present so the evaluate-policy hook can choose.
     :returns: JSON-serializable Claude settings fragment.
     """
+    from omnigent.native.native_policy_hook import normalize_policy_failure_mode
+
     python = python_executable or sys.executable
+    failure_mode = normalize_policy_failure_mode(policy_failure_mode)
     # -I (isolated mode) prevents Python from adding the session's
     # working directory to sys.path, which would shadow the installed
     # omnigent package with a local checkout in the cwd (e.g. a
@@ -2655,6 +2662,7 @@ def build_hook_settings(
             {
                 "ap_server_url": ap_server_url,
                 "ap_auth_headers": ap_auth_headers or {},
+                "policy_failure_mode": failure_mode,
                 "updated_at": time.time(),
             },
         )
@@ -2935,6 +2943,7 @@ def augment_claude_args(
     allowed_tools: tuple[str, ...] = (),
     subagent_router_dir: Path | None = None,
     turn_routing: bool = False,
+    policy_failure_mode: str | None = None,
 ) -> list[str]:
     """
     Return Claude CLI args with Omnigent MCP/hook/skill injection.
@@ -2989,6 +2998,8 @@ def augment_claude_args(
         Routing on, threaded to :func:`build_hook_settings` so the
         ``UserPromptSubmit`` first-message routing hook is registered.
         ``False`` keeps every prompt off the routing round trip.
+    :param policy_failure_mode: ``ask`` or ``fail_closed`` for policy-hook
+        outages; threaded to :func:`build_hook_settings`.
     :returns: Augmented argument list for the terminal resource.
     """
     hook_settings = build_hook_settings(
@@ -3004,6 +3015,7 @@ def augment_claude_args(
         launch_effort=_launch_effort_arg(claude_args),
         subagent_router_dir=subagent_router_dir,
         turn_routing=turn_routing,
+        policy_failure_mode=policy_failure_mode,
     )
     args = _merge_disallowed_tools(list(claude_args), _OMNIGENT_DISALLOWED_TOOLS)
     args = _merge_allowed_tools(args, allowed_tools)
@@ -8359,19 +8371,33 @@ def _tool_relay_handler_factory(
                 _EVALUATE_POLICY_RETRY_BUDGET_S,
                 _EVALUATE_POLICY_RETRY_INITIAL_BACKOFF_S,
                 _EVALUATE_POLICY_RETRY_MAX_BACKOFF_S,
+                POLICY_FAILURE_MODE_FAIL_CLOSED,
                 evaluation_response_to_hook_output,
-                fail_ask_hook_output,
                 hook_payload_to_evaluation_request,
+                normalize_policy_failure_mode,
+                policy_unavailable_hook_output,
             )
 
             raw_event = payload.get("hook_event_name")
             hook_event = raw_event if isinstance(raw_event, str) else ""
+            failure_mode = None
+            if bridge_dir is not None:
+                failure_mode = read_permission_hook_config(bridge_dir).get("policy_failure_mode")
+            closed = normalize_policy_failure_mode(failure_mode) == POLICY_FAILURE_MODE_FAIL_CLOSED
             if policy_client is None or session_id is None:
-                self._respond_hook_output(None)
+                self._respond_hook_output(
+                    policy_unavailable_hook_output(hook_event, failure_mode, "relay not ready")
+                    if closed
+                    else None
+                )
                 return
             eval_request = hook_payload_to_evaluation_request(hook_event, payload)
             if eval_request is None:
-                self._respond_hook_output(None)
+                self._respond_hook_output(
+                    policy_unavailable_hook_output(hook_event, failure_mode, "no policy opinion")
+                    if closed
+                    else None
+                )
                 return
             context = eval_request["event"]["context"]
             context["harness"] = "claude-native"
@@ -8444,7 +8470,9 @@ def _tool_relay_handler_factory(
                     last_error,
                     extra={"session_id": session_id},
                 )
-                self._respond_hook_output(fail_ask_hook_output(hook_event, last_error))
+                self._respond_hook_output(
+                    policy_unavailable_hook_output(hook_event, failure_mode, last_error)
+                )
                 return
             if bridge_dir is not None and relay_session_active:
                 policy_allow_cache.record(bridge_dir, cache_generation, verdict, requested_at)

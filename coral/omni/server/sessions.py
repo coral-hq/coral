@@ -89,7 +89,11 @@ from omnigent.db.db_models import workspace_scope
 from omnigent.entities import Conversation
 from omnigent.entities.conversation import USER_SESSION_TITLE_MAX_CHARS
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.harness_aliases import is_claude_sdk_harness_name, is_native_harness
+from omnigent.harness_aliases import (
+    canonicalize_harness,
+    is_claude_sdk_harness_name,
+    is_native_harness,
+)
 from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_LOCAL
 from omnigent.server.host_registry import HostConnection
 from omnigent.server.routes.sessions import announce_projects_changed, ensure_runner_connected
@@ -407,12 +411,14 @@ class OmnigentSessionFacade(SessionFacade):
         launcher: StepLauncher | None = None,
         slot_generations: SlotGenerations | None = None,
         dispatch: Callable[[], SessionDispatch] | None = None,
+        claude_native_steps: bool = False,
     ) -> None:
         self._services = services
         self._bindings = bindings
         self._launcher = launcher or OmnigentStepLauncher(app, services)
         self._slot_generations = slot_generations
         self._dispatch = dispatch
+        self._claude_native_steps = claude_native_steps
         self._auth_on = services.auth_provider is not None
         self._anchor_agent_lock = asyncio.Lock()
         self._anchor_agent_ids: dict[int, str] = {}
@@ -640,11 +646,19 @@ class OmnigentSessionFacade(SessionFacade):
             )
         except OmnigentError:
             raise _bad_spec(agent.id) from None
-        if harness is None or is_native_harness(harness):
+        canonical = canonicalize_harness(harness) or harness
+        native_step_ok = (
+            self._claude_native_steps
+            and canonical == "claude-native"
+            and request.slot_role != "orchestrator"
+        )
+        if harness is None or (is_native_harness(harness) and not native_step_ok):
             raise _refused(
                 "session.harness_not_supported",
                 f"agent {agent.id} runs on {harness or 'an unknown harness'}; "
-                "Coral steps need a headless harness",
+                "Coral steps need a headless harness"
+                if not self._claude_native_steps
+                else "Claude-native is only for steps when claude_native_steps is on",
             )
         spec = await self._loaded_spec(agent)
         _require_coral_bundle(agent.id, spec, harness, request.slot_role)
@@ -1403,17 +1417,22 @@ def _require_coral_bundle(
     agent_id: str, spec: AgentSpec, harness: str, slot_role: str | None
 ) -> None:
     """
-    Refuse an agent that is not a claude-sdk Coral bundle whose stance fits the slot role.
+    Refuse an agent that is not a Coral step/orchestrator bundle whose stance fits the slot.
 
-    Such a bundle turns on claude-sdk's tool-policy hook, so the run's policies
-    see its native tool calls as well as its Omnigent ones.
+    Claude-sdk bundles keep the tool-policy hook. Claude-native step bundles
+    (when ``claude_native_steps`` is on) use fail-closed native hooks instead.
+    Orchestrators stay claude-sdk only.
 
     :raises CoralSessionError: ``session.agent_not_supported``, naming the first broken rule.
     """
+    from omnigent.harness_aliases import canonicalize_harness
+
     # The stances the catalog offers this slot's engine tools to.
     wanted = frozenset({ORCHESTRATOR_STANCE}) if slot_role == "orchestrator" else STEP_STANCES
     stance = generated_stance(spec.params)
-    if not is_claude_sdk_harness_name(harness):
+    canonical = canonicalize_harness(harness) or harness
+    native_step = canonical == "claude-native" and slot_role != "orchestrator"
+    if not is_claude_sdk_harness_name(harness) and not native_step:
         problem = f"it runs on {harness}, not claude-sdk"
     elif stance is None:
         problem = "it has no params.coral.generated.stance"
