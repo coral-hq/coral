@@ -3697,59 +3697,54 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
   - id: S115
     title: Every bwrap or seatbelt claude CLI keeps its Claude config in a private dir, seeded for non-Coral agents
     owner: WS-INTEGRATION
     status: landed
     category: coral-specific
     note: >-
-      Before this seam a non-Coral claude-sdk CLI wrap still granted read and
-      write on ~/.claude/{plugins,sessions,session-env,backups}, ~/.claude.json
-      and .credentials.json, and a user MCP server from ~/.claude.json, started
+      Before this seam a non-Coral claude-sdk CLI wrap granted read and write
+      on ~/.claude/{plugins,sessions,session-env,backups}, ~/.claude.json and
+      .credentials.json, and a user MCP server from ~/.claude.json, started
       inside the wrap, rewrote a plugin hook, planted a session-env script and
       rewrote .claude.json (measured on macOS 27.2.1 with a throwaway home and
       claude 2.1.325). sandbox.py: scratch_dir_seed names (entry, absolute
       source file) pairs that the in-wrap pass copies into S113's private dir
       as fresh 0600 files before scratch_dir_files; the copy follows no link,
       does not block on a FIFO, and takes only a regular file this user owns
-      and no one else can write, so a missing or tampered seed fails the
-      launch; with_scratch_dir_env grants each source as a read root; the field
-      travels the launcher wire and survives clones, and a malformed one fails
-      the launch. Executor: both wrap paths isolate by default on every backend
-      but Windows' job object, which confines no files and keeps the shared
-      grants, as does an explicit isolate_config=False, which no production
-      caller passes. A non-Coral spec whose skills load user settings (all, a
-      list or a malformed filter) gets a seed from the global config the CLI
-      would read: the user's mcpServers, userID and legacy env (without the
-      config dir names), and for every project only its trust and MCP
-      enable/disable keys that are not at the CLI's default, so a server the
-      user disabled stays off and projects with nothing set are left out.
-      Project mcpServers (which the CLI does not load with these setting
-      sources), oauthAccount, primaryApiKey and every other key are never
-      copied; a relative or empty CLAUDE_CONFIG_DIR is refused as the source,
-      and a config over 16 MB or too deeply nested to parse gives an empty seed
-      and a warning. Construction reads and makes nothing. Just before each
-      wrapped launch the seed is written through mkstemp into a 0700 dir made
-      exclusively at the first launch; close removes it, and a launch after
-      close fails instead of making it again. skills none and Coral get an
-      empty dir, and Coral keeps S113 unchanged. Under the old wrap only those
-      MCP servers reached the CLI (measured), so nothing it used is lost. A
-      stored subscription login does not reach these CLIs: a warning at
-      construction, when no credential is in sight, and the auth error say to
-      use an API key, a gateway or CLAUDE_CODE_OAUTH_TOKEN, and the error names
-      a token that is set but was not accepted. A seeded MCP server that the
-      host's sign-in manager reports is named in a warning, since its sign-in
-      stays in the host's store. Not covered: Windows (shared grants, as
-      before); CLIs that run unwrapped by design or degrade (CRL-183); MCP
-      OAuth tokens in the credential store, beyond that warning; the copied MCP
-      servers' env, arguments and headers, and the paths of projects with a
-      trust or MCP key set, which code in the sandbox can read (CRL-167);
-      CLAUDE_CODE_OAUTH_TOKEN, which the host forwards to every runner and the
-      wrap may read (CRL-167); an absolute forwarded CLAUDE_CONFIG_DIR under a
-      sandbox write root; spec read_paths that cover $TMPDIR, which then reach
-      other executors' seeds; leftover scratches and seed dirs after a kill
-      (CRL-179); project config in the working dir (CRL-181); and the inbox
-      sockets (CRL-174). No CI lane runs macOS (CRL-170).
+      and no one else can write; with_scratch_dir_env grants each source as a
+      read root; the field travels the launcher wire and survives clones, and
+      a malformed one fails the launch. Executor: both wrap paths isolate by
+      default on every backend but Windows' job object, which confines no
+      files and keeps the shared grants; no production caller passes
+      isolate_config=False. A non-Coral spec whose skills load user settings
+      gets a seed filtered from the global config the CLI would read: the
+      user's mcpServers, userID and legacy env, and per project only the trust
+      and MCP enable/disable keys not at their default. Project mcpServers,
+      oauthAccount, primaryApiKey, any Claude sign-in credential and every
+      other key are never copied. An unusable config, one over 16 MB
+      included, gives an empty seed, so no user MCP servers, and a warning in
+      the runner log. The seed is written just before each wrapped launch and
+      removed on close. skills none and Coral get an empty dir, and Coral
+      keeps S113 unchanged. Under the old wrap only those MCP servers reached
+      the CLI (measured), so it loads the same MCP servers as before.
+      Breaking: a stored subscription login no longer reaches these CLIs, and
+      on Linux neither do the MCP OAuth sign-ins in the CLI's credential
+      store. A start warning and the auth error name an API key, a gateway or
+      CLAUDE_CODE_OAUTH_TOKEN, and a seeded MCP server that the host signs in
+      is named in a warning. The Sentinel and scanner example configs carry
+      the auth note. Main residuals: CLIs that run unwrapped by design (no
+      ticket) or because their sandbox could not be applied (CRL-183); the
+      seed copy's secrets and CLAUDE_CODE_OAUTH_TOKEN, both readable in the
+      sandbox (CRL-167); a seed copy left in a launch scratch by the SDK's -v
+      check at each connect, or after a kill (CRL-179); a working dir or path
+      grant above the home, which the top-level dotfile mask does not cover
+      (CRL-184);
+      project config in the working dir (CRL-181); and the inbox sockets
+      (CRL-174). No CI lane runs macOS (CRL-170). Mechanism, evidence and the
+      full residual list: ADR-05, "Addendum: CRL-178 Claude config isolation
+      for every sandboxed agent".
     files:
       - omnigent/inner/sandbox.py
       - omnigent/inner/claude_sdk_executor.py
@@ -3757,6 +3752,8 @@ seams:
       - tests/inner/test_sandbox.py
       - tests/inner/test_claude_sdk_executor.py
       - tests/inner/sandbox/test_sandbox_behavior.py
+      - examples/sentinel/config.yaml
+      - examples/sentinel/agents/scanner/config.yaml
     tests:
       - tests/inner/test_sandbox.py
       - tests/inner/test_claude_sdk_executor.py
@@ -3766,9 +3763,8 @@ seams:
     budget_exception:
       lines: 563
       reason: >-
-        Counted with git diff --numstat origin/development (S114 does not touch
-        these files, except the behaviour test, whose 52 lines are counted
-        against this seam's base). tests/inner/test_claude_sdk_executor.py (563
+        Counted with git diff --numstat origin/development.
+        tests/inner/test_claude_sdk_executor.py (563
         changed lines): the seed filter against a config with every kind of
         key, keys at their unset value and config dir names in env, and a
         credential file no open call may touch; the config path (CLAUDE_CONFIG_DIR,
@@ -3793,7 +3789,9 @@ seams:
         symlink, FIFO, directory, group-writable, foreign) and a copy that never
         writes through an existing target. The other files are within budget:
         omnigent/inner/sandbox.py 120, tests/conftest.py 53,
-        tests/inner/sandbox/test_sandbox_behavior.py 52.
+        tests/inner/sandbox/test_sandbox_behavior.py 52,
+        examples/sentinel/config.yaml 4,
+        examples/sentinel/agents/scanner/config.yaml 4.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
