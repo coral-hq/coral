@@ -173,8 +173,11 @@ def write_server_config(
     return path
 
 
-def make_repo(path: Path) -> Path:
-    """A one-commit git repository that ignores the user's git configuration."""
+def make_repo(path: Path, files: Mapping[str, bytes] | None = None) -> Path:
+    """
+    A one-commit git repository that ignores the user's git configuration; ``files``
+    join the README in that commit.
+    """
     env = {
         **minimal_env(),
         "HOME": str(path.parent),
@@ -187,12 +190,14 @@ def make_repo(path: Path) -> Path:
     }
     path.mkdir(parents=True)
     (path / "README.md").write_text("Coral walking skeleton\n")
+    for name, data in (files or {}).items():
+        (path / name).write_bytes(data)
     for argv in (
         ["init", "-q", "-b", "main"],
         # Set, a runner skips its untracked-cache probe, whose scratch directory would
         # otherwise sit in the worktree while a fast scripted turn ends.
         ["config", "core.untrackedCache", "true"],
-        ["add", "README.md"],
+        ["add", "--", "README.md", *(files or {})],
         ["commit", "-q", "-m", "init"],
     ):
         subprocess.run(["git", "-C", str(path), *argv], check=True, env=env, capture_output=True)
@@ -286,7 +291,7 @@ class _StackProcesses:
             with contextlib.suppress(psutil.Error):
                 proc.kill()
         _, survivors = psutil.wait_procs(alive, timeout=5)
-        names = [" ".join(_argv(proc))[:200] for proc in survivors]
+        names = process_names(survivors)
         assert not names, f"Stack processes survived teardown: {names}"
 
 
@@ -320,13 +325,17 @@ def skeleton_stack(
     grace_s: int | None = None,
     failure_log_tails: bool = True,
     health_timeout: float = 60.0,
+    allowlisted_token: str | None = None,
+    repo_files: Mapping[str, bytes] | None = None,
 ) -> Iterator[Skeleton]:
     """
     Start a Coral server and a host for one test, and tear both down with every process.
 
     The server runs without the allow-listed runner token, so host-launched runners
-    connect with their own. Its config, ``root / "server.yaml"``, is read again by every
-    restart. At exit, a SIGTERM included, no process the stack started may survive.
+    connect with their own, unless ``allowlisted_token`` is given: the server then keeps
+    it as ``OMNIGENT_RUNNER_TUNNEL_TOKEN``. Its config, ``root / "server.yaml"``, is read
+    again by every restart. ``repo_files`` join the repository's first commit. At exit,
+    a SIGTERM included, no process the stack started may survive.
     """
     root.mkdir(parents=True, exist_ok=True)
     # Under /tmp to stay within the AF_UNIX path limit for harness sockets.
@@ -343,13 +352,14 @@ def skeleton_stack(
         resources.callback(shutil.rmtree, harness_tmp, ignore_errors=True)
         resources.callback(shutil.rmtree, stack_tmp, ignore_errors=True)
         resources.callback(processes.reap)
+        server_env: dict[str, str | None] = {"CORAL_E2E_SERVER_CONFIG": str(config)}
+        if allowlisted_token is None:
+            server_env["OMNIGENT_RUNNER_TUNNEL_TOKEN"] = None
         started = server_runner(
             root,
             server_bootstrap=_SERVER_BOOTSTRAP,
-            server_env={
-                "OMNIGENT_RUNNER_TUNNEL_TOKEN": None,
-                "CORAL_E2E_SERVER_CONFIG": str(config),
-            },
+            server_env=server_env,
+            binding_token=allowlisted_token,
             base_env=base_env,
             health_timeout=health_timeout,
             poll_interval=0.25,
@@ -391,7 +401,7 @@ def skeleton_stack(
         launch = HostLaunch(tuple(host.proc.args), launched.environ(), launched.cwd())
         info = client.get("/v1/coral/info")
         assert info.status_code == 200, info.text
-        repo = make_repo(root / "repo")
+        repo = make_repo(root / "repo", repo_files)
         yield Skeleton(
             root,
             server,
@@ -534,9 +544,11 @@ def claude_version() -> str:
     return done.stdout.strip() or f"exit {done.returncode}"
 
 
-def review_loop_yaml(*, impl_token: str, review_token: str) -> str:
-    """The review-loop workflow with each step's routing token in its goal."""
-    text = (FIXTURES / "review_loop.yaml").read_text()
+def review_loop_yaml(
+    *, impl_token: str, review_token: str, fixture: str = "review_loop.yaml"
+) -> str:
+    """The review-loop workflow, or ``fixture``, with each step's routing token in its goal."""
+    text = (FIXTURES / fixture).read_text()
     return text.replace("{impl_token}", impl_token).replace("{review_token}", review_token)
 
 
@@ -572,12 +584,28 @@ def detail(client: httpx.Client, run_id: str) -> dict[str, Any]:
     return response.json()
 
 
+def step_session(client: httpx.Client, run_id: str, node_id: str) -> str:
+    """The session of the node's only slot so far."""
+    [session_id] = [
+        slot["session_id"]
+        for slot in detail(client, run_id)["slots"]
+        if slot["node_id"] == node_id
+    ]
+    return session_id
+
+
 def start_review_loop(
-    skeleton: Skeleton, *, impl_token: str, review_token: str, start_key: str
+    skeleton: Skeleton,
+    *,
+    impl_token: str,
+    review_token: str,
+    start_key: str,
+    fixture: str = "review_loop.yaml",
 ) -> str:
-    """Store the review-loop workflow and start it on the stack's repository; return the run id."""
+    """Store the review-loop workflow, or ``fixture``, start it on the repo; return the run id."""
     workflow_id = save_workflow(
-        skeleton.client, review_loop_yaml(impl_token=impl_token, review_token=review_token)
+        skeleton.client,
+        review_loop_yaml(impl_token=impl_token, review_token=review_token, fixture=fixture),
     )
     return start_run(
         skeleton.client,
@@ -765,6 +793,57 @@ def group_tree_ended(group_id: int, tree: Iterable[psutil.Process]) -> bool:
 def argvs(processes: Iterable[psutil.Process]) -> list[list[str]]:
     """The command line of each process; empty for one that is gone."""
     return [_argv(proc) for proc in processes]
+
+
+def process_names(processes: Iterable[psutil.Process]) -> list[str]:
+    """``pid:name`` of each process, for a failure message that must not show a command line."""
+    labels = []
+    for proc in processes:
+        try:
+            labels.append(f"{proc.pid}:{proc.name()}")
+        except psutil.Error:
+            labels.append(f"{proc.pid}:gone")
+    return labels
+
+
+def claude_clis(processes: Iterable[psutil.Process]) -> list[psutil.Process]:
+    """The ``claude`` CLIs among ``processes``: its binary, or node running its script."""
+    return [
+        proc
+        for proc in processes
+        if any(os.path.basename(arg) == "claude" for arg in _argv(proc)[:2])
+    ]
+
+
+def _group_of(proc: psutil.Process) -> int | None:
+    try:
+        return os.getpgid(proc.pid)
+    except OSError:
+        return None
+
+
+def step_processes(runner: int) -> dict[str, psutil.Process]:
+    """
+    A step's own processes: its runner, its one ``claude`` CLI, the harness (the CLI's
+    farthest ancestor in the runner's group) and the launcher the harness started it with.
+    """
+    tree = group_tree(runner)
+    clis = claude_clis(tree)
+    assert len(clis) == 1, f"{len(clis)} claude CLIs in {process_names(tree)}"
+    chain = [clis[0], *clis[0].parents()]
+    in_group = [
+        index
+        for index, proc in enumerate(chain)
+        if proc.pid != runner and _group_of(proc) == runner
+    ]
+    assert in_group and in_group[-1] > 0, f"no harness above the CLI: {process_names(chain)}"
+    harness_at = in_group[-1]
+    return {
+        "runner": psutil.Process(runner),
+        "harness": chain[harness_at],
+        "launcher": chain[harness_at - 1],
+        "cli": chain[0],
+    }
 
 
 def group_stopped(group_id: int) -> bool:

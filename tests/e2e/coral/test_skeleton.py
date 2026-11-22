@@ -71,16 +71,6 @@ LIVE_MODEL = "CORAL_E2E_LIVE_MODEL"
 LEASE_KEYS = {"coral_worker_lease_seconds", "coral_runner_reconnect_grace_s"}
 
 
-def _step_session(client: httpx.Client, run_id: str, node_id: str) -> str:
-    """The session of the node's only slot so far."""
-    [session_id] = [
-        slot["session_id"]
-        for slot in sk.detail(client, run_id)["slots"]
-        if slot["node_id"] == node_id
-    ]
-    return session_id
-
-
 def _anchor_prompt(client: httpx.Client, run_id: str) -> tuple[str, dict[str, Any]] | None:
     """The anchor's id and its pending gate prompt, if one is pending."""
     anchor = sk.detail(client, run_id)["anchor_session_id"]
@@ -332,7 +322,7 @@ def test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate(
 
         wait(third_call_held, "the implementer's third call")
         kinds_at_kill = sk.log_kinds(client, run_id)
-        implementer = _step_session(client, run_id, "implement")
+        implementer = sk.step_session(client, run_id, "implement")
         runner_before = sk.session(client, implementer)["runner_id"]
         starts = len(sk.server_logs(stack))
         _sigkill_server(stack)
@@ -491,7 +481,7 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
         sk.queue(
             mock, impl_token, [sk.held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=f"w2-{uid}"))]
         )
-        implementer = _step_session(client, run_id, "implement")
+        implementer = sk.step_session(client, run_id, "implement")
         runner_before = sk.session(client, implementer)["runner_id"]
         pid = sk.runner_pid(stack, implementer)
         leader_before = sk.worker_lease_holder(stack)

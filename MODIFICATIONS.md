@@ -18,7 +18,7 @@ OPS-01's generator will maintain this file later.
 | `.github/ISSUE_TEMPLATE/bug_report.yml` | S94 | coral-specific | The version field asks for the Coral commit. |
 | `.github/ISSUE_TEMPLATE/config.yml` | S94 | coral-specific | The contact links point to Coral's Discussions and documentation. |
 | `.github/dependabot.yml` | S100 | coral-specific | Every update entry is off for now (limit 0, ignores every dependency); Coral takes dependency updates from Omnigent's upstream syncs. |
-| `.github/scripts/ci/python-matrix.json` | S39d | coral-specific | Adds the `coral` shard (`tests/coral`) and ignores `tests/coral` in `misc`; adds the `coral-e2e` shard for the walking-skeleton E2E, the runner-loss E2E and the live proxy's unit test (S39d). |
+| `.github/scripts/ci/python-matrix.json` | S39d | coral-specific | Adds the `coral` shard (`tests/coral`) and ignores `tests/coral` in `misc`; adds the `coral-e2e` shard for the walking-skeleton E2E, the runner-loss E2E, the sandbox probe and the live proxy's unit test (S39d). |
 | `.github/workflows/ci.yml` | S99, S39c, S107 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main` (S99). Collects coverage for `coral` alongside `omnigent` (S39c). Sets up Node and the pinned `claude` CLI from the in-repo action for the `coral-e2e` shard, records its version in the job summary and makes the E2E require it (S107). |
 | `.github/workflows/lint.yml` | S99 | coral-specific | Runs after merges to `development`, Coral's integration branch, as well as `main`. |
 | `.github/workflows/security-gate.yml` | S99 | coral-specific | Reads its trust rules from the default branch (`development`) instead of `main`. |

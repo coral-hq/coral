@@ -180,15 +180,6 @@ def _wakes(stack: sk.Skeleton, run_id: str) -> list[sk.WorkItem]:
     return [item for item in sk.work_items(stack, run_id) if item.effect_type == "recovery.wake"]
 
 
-def _clis(tree: list[psutil.Process]) -> list[list[str]]:
-    """The ``claude`` CLIs in ``tree``: its binary, or node running its script."""
-    return [
-        argv
-        for argv in sk.argvs(tree)
-        if any(os.path.basename(arg) == "claude" for arg in argv[:2])
-    ]
-
-
 def _runner_tree(pid: int) -> list[psutil.Process]:
     """
     The runner's process tree, once it is shown to be the step's own: the runner leads a
@@ -196,7 +187,7 @@ def _runner_tree(pid: int) -> list[psutil.Process]:
     """
     tree = sk.group_tree(pid)
     assert pid != os.getpgrp() and len(sk.group_members(pid)) >= 2, sk.argvs(tree)
-    assert _clis(tree), sk.argvs(tree)
+    assert sk.claude_clis(tree), sk.argvs(tree)
     return tree
 
 
