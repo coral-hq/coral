@@ -372,9 +372,14 @@ async def test_pane_liveness_reads_the_requested_pane(
         "test pane did not exit",
     )
 
-    assert bridge._claude_pane_state(socket_path, target) == (
-        (False, True, "7") if target_exited else (True, False, None)
-    )
+    # Older tmux builds leave pane_dead_status empty after the pane is dead.
+    pane_state = bridge._claude_pane_state(socket_path, target)
+    if target_exited:
+        assert pane_state.alive is False
+        assert pane_state.exited is True
+        assert pane_state.exit_status in {None, "7"}
+    else:
+        assert pane_state == (True, False, None)
     assert await _tmux_session_alive(socket_path, target) is not target_exited
     assert await _check_pane_dead_definitive(socket_path, target) is target_exited
 
