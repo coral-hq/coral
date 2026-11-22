@@ -7058,6 +7058,9 @@ async def test_an_isolated_cli_its_sandbox_cannot_wrap_never_starts(
     from omnigent.inner.claude_sdk_executor import CORAL_SANDBOX_UNAVAILABLE_CODE
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 
+    monkeypatch.setattr(  # never read the caller's real Claude settings
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda cwd=None: {}
+    )
     if fault != "no-system-claude":
         _break_wrap(monkeypatch, fault)
     sandbox = OSEnvSandboxSpec(type="linux_bwrap", allow_network=fault != "network-off")

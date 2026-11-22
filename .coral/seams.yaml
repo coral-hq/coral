@@ -3592,9 +3592,9 @@ seams:
       - tests/e2e/coral/test_tier_b_executor.py
     budget_lines: 120
     budget_exception:
-      lines: 340
+      lines: 343
       reason: >-
-        tests/inner/test_claude_sdk_executor.py (340 changed lines): the wrap
+        tests/inner/test_claude_sdk_executor.py (343 changed lines): the wrap
         grant tests for both backends and the Linux tight wrap, isolated and
         not, with a seeded config home; the table that pins the refusal rule
         to every wrap outcome (wraps, no os_env, operator opt-out, sandbox

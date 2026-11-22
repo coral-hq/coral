@@ -245,7 +245,8 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     config_dir = Path(named.removeprefix("config_dir "))
     assert config_dir.name == "claude_config_dir" and scratch.resolve() in config_dir.parents
     assert probe.tree(home) == before, "the step changed the home"
-    services = (workspace / "security.log").read_text().splitlines()
+    log = workspace / "security.log"
+    services = log.read_text().splitlines() if log.exists() else []
     assert services or sys.platform != "darwin", "the security stub saw no lookup"
     assert all(re.fullmatch(r"Claude Code.*-[0-9a-f]{8}", name) for name in services), services
     [*_, result] = tool_results(
