@@ -74,7 +74,7 @@ dataclass from `ops.py`.
 | `read` | READ | `path`, `at_commit=None` | `ReadResult(path, content, sha256)` | no `op_key` |
 | `commit` | WRITE | `op_key`, `expected_head`, `message`, `trailers=None`, `run_id=None`, `attempt_id=None` | `CommitResult(commit, empty)` | returns HEAD when HEAD is the op's verified record |
 | `salvage` | WRITE | `op_key` | `SalvageResult(ref, commit)` | returns the commit at `refs/coral/salvage/<op_key>` when it is the op's verified record |
-| `reset` | WRITE | `op_key`, `commit` | `ResetResult(head)` | no-op: HEAD is already at `commit` and the tree is clean |
+| `reset` | WRITE | `op_key`, `commit`, `salvage_commit=None` | `ResetResult(head)` | no-op: HEAD is already at `commit` and the tree is clean (under a salvage: records nothing beyond HEAD) |
 | `merge` | WRITE | `op_key`, `source_ref`, `message` | `MergeResult(status, merge_commit, conflicts)` | `already_applied` |
 | `check` | WRITE | `op_key`, `argv`, `timeout_s` | `CheckResult(exit_code, timed_out, stdout_tail, stderr_tail, duration_ms)` | runs again; `op_key` names the job, and the caller records the result in its K21 effect |
 
@@ -328,6 +328,31 @@ marked with a test name.
     untracked `.coral/` before it applies the exclusion. A salvage never
     captures `.coral/runtime/`, so cleaning it would lose it. `reset` is not a
     clean slate for an untrusted attempt (see "Fingerprint blind spots").
+
+    **Under a salvage.** With `salvage_commit` the reset is a compare-and-swap
+    on that salvage, decided under the op's own worktree lock before
+    `reset --hard` (`_require_salvaged`, `coral/omni/host/ops/_write_ops.py`):
+    - `salvage_commit` must be a `refs/coral/salvage/` ref's commit, else
+      `workspace.git_failed`
+      (`test_a_reset_under_a_commit_no_salvage_ref_names_is_refused`);
+    - HEAD must be `commit` and the salvage's parent, else a permanent
+      `workspace.head_moved`, so the branch never loses a commit
+      (`test_a_reset_under_its_salvage_refuses_a_head_that_moved_since_the_salvage`);
+    - every path the tree records differently from HEAD must be as the salvage
+      recorded it, else a retryable `workspace.tree_changed`: salvage again
+      (`test_a_reset_under_its_salvage_refuses_a_tree_changed_since_the_salvage`).
+      A reset that stopped before its `clean` therefore passes on a repeat
+      (`test_a_reset_under_its_salvage_finishes_a_reset_that_stopped_before_its_clean`);
+    - a tree that records nothing beyond HEAD, with no merge, cherry-pick or
+      revert pending, returns at once, decided from the same read
+      (`test_a_reset_under_its_salvage_on_a_clean_tree_takes_no_lock_and_one_status_walk`).
+
+    These tests are in `tests/coral/omni/host/ops/test_write_ops.py`; the
+    conformance suite holds the fake and the host to the same rule
+    (`test_reset_under_a_salvage_resets_only_the_tree_the_salvage_holds`). A
+    host whose `reset` does not take `salvage_commit` refuses it as
+    `workspace.invalid_params`, so a retry on it fails without a reset
+    (`test_a_host_from_before_the_salvage_precondition_refuses_it_as_invalid_params`).
 11. **`merge`.**
     1. A `source_ref` already contained in HEAD returns `already_applied`, and
        nothing changes
@@ -657,7 +682,7 @@ worktree's `.git` file. No sandbox grants the common dir.
   | --- | --- | --- |
   | `commit` | HEAD's trailers `Coral-Op: <op_key>` and `Coral-Op-Params: <digest>` | HEAD only; HEAD's parent is `expected_head`, then the digest must match |
   | `salvage` | ref `refs/coral/salvage/<op_key>` | its commit's parent is HEAD |
-  | `reset` | postcondition | HEAD already at `commit` with a clean tree: nothing to do |
+  | `reset` | postcondition | HEAD already at `commit` with a clean tree: nothing to do; under a salvage the compare-and-swap decides from its own read |
   | `merge` | postcondition | `source_ref` already an ancestor of HEAD: `already_applied` |
   | `check` | none | not idempotent; the caller records the result in the K21 effect |
 
@@ -721,6 +746,8 @@ to the code: an offline host may be back later.
 | `workspace.timeout` | the backend's own deadline for a git op passed (a `check` overrun is `CheckResult.timed_out` instead); on the host channel also another git process holding a lock past the lock budget, or another op still running on the worktree; always retryable |
 | `workspace.op_key_conflict` | an op key's record does not match the op |
 | `workspace.target_mismatch` | the target is not verified: unknown root, main worktree, not the toplevel, a branch outside `coral/` or another branch, a host channel to another host, or HEAD is not `expected_head` (also when the branch moves while a commit is written) |
+| `workspace.tree_changed` | a reset under a salvage found a path the salvage did not record as it now is; retryable: salvage again |
+| `workspace.head_moved` | a reset under a salvage found HEAD other than its `commit` or the salvage's parent; always permanent. The restart ladder also raises it when HEAD is not the run's expected head |
 
 Invalid params raise `ValueError`, including those the host itself catches
 (`workspace.invalid_params` on the wire). Non-`bool` executor flags, and an executor
@@ -768,7 +795,8 @@ is not built (SPK-04's CRL-128 decision record).
 - The host serves READ ops too: in a default agent sandbox `.git` is masked,
   so a session shell could not run them, and D-K13-2 is still open.
 - At restart, `salvage` and `reset` run at ladder step 4, after the old
-  session is fenced, through a `HostChannel` executor.
+  session is fenced, through a `HostChannel` executor (see "Restart ladder"
+  below).
 - A host that does not advertise `workspace_ops:1`, or whose Coral handlers
   are switched off (`CORAL_DISABLE_HOST_ENTRY_POINTS`), answers every op with
   a permanent `workspace.capability_unavailable`; it never makes a silent
@@ -792,6 +820,34 @@ is not built (SPK-04's CRL-128 decision record).
   `tmp_pack_*` file in the user's `objects/pack/`. The engine never deletes
   it (it may belong to another git); `git gc` prunes it after two weeks. The
   100 MiB staging limit bounds each one.
+
+### Restart ladder
+
+A retried writer's `recovery.restart` row (`coral/recovery/ladder.py`) sends
+these ops on the host channel once the fence confirmed the old session's stop.
+The ladder's order, its rounds, what it records and how a repeat resumes are in
+[`session-facade.md`](session-facade.md), "Restarts and runner loss"; this is
+the host-op view.
+
+| Op | Params | Codes, and what they mean to the restart |
+| --- | --- | --- |
+| `head` | none | HEAD other than the run's expected head, or than a commit this slot's own unreported close made, fails the restart `workspace.head_moved`; nothing is salvaged or reset |
+| `commit`, the close's own op sent again | the close's own params (`op_key`, `expected_head`, `message`, `run_id`, `attempt_id`) | Asked only when HEAD is not the expected head. It answers with HEAD when HEAD is its verified record, which confirms the unreported close; `workspace.op_key_conflict` also confirms it, and `workspace.target_mismatch` does not |
+| `salvage` | `op_key` with the round's qualifier: `salvage`, `salvage-2`, `salvage-3` | No commit (a clean tree) ends the restart without a reset |
+| `reset` | `op_key` with the qualifier `reset-<round>`, `commit=<verified head>`, `salvage_commit=<that round's salvage>` | `workspace.tree_changed`: the tree moved after the salvage, so the next round starts, and after the third the restart fails with the tree left as it is. `workspace.invalid_params`: a host whose `reset` does not take `salvage_commit`; the restart fails and nothing is reset. Any other refusal, such as the compare-and-swap's `workspace.head_moved` (`reset`, "Under a salvage", above), fails the restart with its code |
+
+Every code becomes the run's `failure_path` / `restart:<code>` cause, which a
+Retry clears. The writes the reset's compare-and-swap cannot see are residuals
+of the ladder ([`session-facade.md`](session-facade.md), "Residuals and
+limitations": "A write while the host resets is lost" and "A stop in progress
+reads as stopped").
+
+**Salvage refs are kept.** Each Retry leaves at most three
+`refs/coral/salvage/<op key>` refs in the user's repository. Nothing prunes
+them. They record every non-ignored untracked file, so anything an agent wrote
+there, secrets included, and `git push --mirror` publishes them. Agent
+sandboxes mask `.git`, so the new session reads the ref only through the
+brief's text. Showing the ref in the web and its retention are CRL-158.
 
 ## Fingerprint blind spots
 
@@ -941,7 +997,7 @@ WSP-02 extends it.
   | `fingerprint` | `level` (`"L1"` only) | `{level, digest, head, dirty_count}` |
   | `commit` | `expected_head`, `message`, `trailers` (`[[key, value], …]`), `run_id\|null`, `attempt_id\|null`; `op_key` | `{commit, empty}` |
   | `salvage` | none; `op_key` | `{ref, commit\|null}` |
-  | `reset` | `commit`; `op_key` | `{head}` |
+  | `reset` | `commit`, optional `salvage_commit`; `op_key` | `{head}` |
 
 - **Failure codes.** Frame level: `unknown_op` (no handler: the engine reads
   it as `workspace.capability_unavailable`), `invalid_request`,

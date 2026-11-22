@@ -8,12 +8,13 @@ test inherits and which CI job runs it.
 | Tier A: unit, API, validation | `tests/coral/` | SQLite | default `pytest` shards | `just coral test` |
 | DB lanes | `tests/stores/coral/` | SQLite, Postgres, CockroachDB, MySQL | default `pytest` shards (SQLite); `stores-postgres`, `stores-crdb-*`, `stores-mysql` in `.github/workflows/ci.yml` | `just coral test-db`, `just coral test-crdb` |
 | Split fixture contract | `tests/stores/coral/test_split_layout.py` (`coral_split_db`) | SQLite operational DB and SQLite conversation DB | default `pytest` shards; no dedicated job yet | `just coral test-split` |
-| Tier B: real `claude` CLI against `mock_llm_server` | `tests/e2e/coral/` | server-owned | e2e gate (`.github/workflows/e2e.yml` runs `tests/e2e/`) | `just coral test-e2e` |
-| Tier C: claude-native | `tests/e2e/coral/` | server-owned | e2e gate | no tests yet |
-| Tier D: credentialed claude-sdk live bench | not created yet | n/a | not wired | none |
+| Tier B: real `claude` CLI against `mock_llm_server` | `tests/e2e/coral/` | server-owned | the walking-skeleton proofs and the live proxy's unit test (`test_live_proxy.py`) in the `coral-e2e` group of the `pytest` job (`.github/scripts/ci/python-matrix.json`); the other files run in no CI lane (the inherited `E2E Tests` workflow is disabled on this fork) | `just coral test-e2e` |
+| Tier C: claude-native | `tests/e2e/coral/` | server-owned | not wired (the inherited e2e gate is disabled on this fork) | no tests yet |
+| Tier D: credentialed claude-sdk live bench | `tests/e2e/coral/test_skeleton.py::test_live_review_loop_survives_server_sigkills` only, opt-in | server-owned | not wired (a credentialed lane is CRL-156) | `just coral e2e-live`, only on a machine with no other users |
 
-Tier B rules, including what it cannot prove yet, are in
-`docs/coral/testing/tier-b.md`.
+Tier B rules, including the `coral-e2e` lane, the walking-skeleton stack, the
+live variant and its token-gated proxy, and what Tier B cannot prove yet, are
+in `docs/coral/testing/tier-b.md`. No CI lane runs the live test.
 
 ## Fixtures for DB-lane tests
 
