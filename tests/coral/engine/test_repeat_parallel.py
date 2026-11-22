@@ -71,7 +71,7 @@ def test_cancel_region_one_effect_per_active_subject() -> None:
     assert effects[1].payload["split_node_id"] == "split"
 
 
-def test_list_from_graphs_set_structure_runtime_and_refuse_start() -> None:
+def test_list_from_graphs_set_structure_runtime_flag() -> None:
     graph, _ = compile_text(
         workflow_text(
             [
@@ -88,10 +88,10 @@ def test_list_from_graphs_set_structure_runtime_and_refuse_start() -> None:
         )
     )
     assert graph.analysis.requires_structure_runtime is True
+    # SES-10 lifted the StartRun refuse; structure executors own the runtime.
     started = drive(
         graph,
         [StartRun(run_id="run-1", start_key="start-1", version_hash="h", rules=RULES)],
     )
-    assert started.state.status is None
-    assert started.log[-1].rejection is not None
-    assert started.log[-1].rejection.code == "structure.runtime_required"
+    assert started.state.status == "running"
+    assert started.log[-1].rejection is None

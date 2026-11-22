@@ -256,6 +256,14 @@ def _effect_completed(
         return complete_restart(graph, state, effect, command)
     if effect.kind == "runner_lost":
         return complete_wake(graph, state, effect, command)
+    if effect.kind == "structure.start_item":
+        from coral.structure.items import apply_start_item
+
+        return apply_start_item(graph, state, effect)
+    if effect.kind == "structure.cancel_region":
+        from coral.structure.regions import apply_cancel_region
+
+        return apply_cancel_region(graph, state, effect)
     return complete_effect(graph, state, effect, command)
 
 

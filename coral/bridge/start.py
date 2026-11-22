@@ -351,11 +351,6 @@ def _gates(graph: CompiledGraph) -> list[CompiledNode]:
 def _graph_refusals(graph: CompiledGraph) -> Iterator[RunNotRunnable]:
     if graph.analysis.unresolved:
         yield RunNotRunnable("graph.unresolved", graph.analysis.unresolved[0].message)
-    if graph.analysis.requires_structure_runtime:
-        yield RunNotRunnable(
-            "structure.runtime_required",
-            "this workflow needs repeat structure runtime (SES-10); it cannot start yet",
-        )
     if not any(node.kind == "start" for node in graph.nodes):
         yield RunNotRunnable("graph.no_start", "the workflow has no start node")
     for node in _steps(graph):

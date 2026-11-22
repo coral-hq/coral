@@ -69,6 +69,9 @@ UNMAPPED_KINDS: Mapping[str, str] = MappingProxyType(
     {
         "notify": "alerts come from the commit; a decision's reminder goes to the orchestrator",
         "arm_timer": "timer rows come from the run's armed timers",
+        # SES-10: completed via EffectCompleted → coral.structure apply_*; workers land later.
+        "structure.start_item": "structure runtime applies start_item on effect completion",
+        "structure.cancel_region": "structure runtime applies cancel_region on effect completion",
     }
 )
 # The row of a ``retry_step``: fence the old session, salvage and reset (``coral.recovery``).
