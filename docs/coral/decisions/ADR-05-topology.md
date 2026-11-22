@@ -827,8 +827,8 @@ macOS change too.
 Only the claude CLI ran under the rules. Coral's host-ops git jail builds its
 own profile and does not get them.
 
-**What was measured.** Env and argv reads only; nothing here measures the
-residuals below.
+**What was measured.** Reads of other processes' environments, arguments and
+open-file paths only; nothing here measures the residuals below.
 
 - Probe 15, two local runs (`EXPECTED["darwin"]`): `runner_environ`,
   `cli_environ`, `host_environ` and `own_cli_environ`, and each one's `.api_key`

@@ -720,8 +720,8 @@ def _build_profile(
             "(allow process-fork)",
             "(allow process-exec*)",
             # CORAL(S111): (deny default) leaves process-info open for every pid, and with it
-            # other processes' arguments and environments. Against the deny-wins note above, the
-            # allows after this deny override it for self and pid listing, so the order matters.
+            # other processes' arguments and environments. The more specific allows below keep
+            # self and pid listing; keep them with this deny.
             "(deny process-info*)",
             "(allow process-info* (target self))",
             "(allow process-info-listpids)",
