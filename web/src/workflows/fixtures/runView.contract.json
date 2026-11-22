@@ -150,7 +150,8 @@
           "unlabelled_arrow_ids": []
         }
       ],
-      "checked_parts": []
+      "checked_parts": [],
+      "requires_structure_runtime": false
     }
   },
   "live": [

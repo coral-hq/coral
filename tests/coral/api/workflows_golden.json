@@ -24,6 +24,7 @@
         ],
         "loops": [],
         "regions": [],
+        "requires_structure_runtime": false,
         "unresolved": []
       },
       "arrows": [
@@ -149,6 +150,7 @@
         ],
         "loops": [],
         "regions": [],
+        "requires_structure_runtime": false,
         "unresolved": []
       },
       "arrows": [
@@ -280,6 +282,7 @@
         ],
         "loops": [],
         "regions": [],
+        "requires_structure_runtime": false,
         "unresolved": []
       },
       "arrows": [
@@ -454,6 +457,7 @@
         ],
         "loops": [],
         "regions": [],
+        "requires_structure_runtime": false,
         "unresolved": [
           {
             "arrow_ids": [],

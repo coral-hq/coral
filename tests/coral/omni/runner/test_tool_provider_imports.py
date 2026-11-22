@@ -62,7 +62,7 @@ def test_entry_point_advertises_the_runner_token_without_database_modules(
         params = {"coral": {"generated": {"stance": "implementer"}}}
         tool_sets = extension_tool_sets(AgentSpec(spec_version=1, params=params))
         names = [tool["function"]["name"] for tool_set in tool_sets for tool in tool_set.tools]
-        assert names == ["coral_submit_handoff"], names
+        assert names == ["coral_submit_handoff", "coral_message_agent"], names
         extra = loaded_outside(
             before,
             {
