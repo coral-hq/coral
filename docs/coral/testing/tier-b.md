@@ -202,11 +202,13 @@ lasts, another account on the machine could read the token and spend through
 the proxy. There is no spend cap. No process the test starts is given the key,
 but the key is not confined to the test process: removing it from the test's
 environment does not scrub the initial environment block of pytest, or of the
-shell and tools that started it, which another process of the same user can
-read. On macOS a step's shell can read the environments of the test process and
-its parents, and so the key (probe 15, CRL-165). The proxy path is the
-claude-sdk gateway path (it sets a base URL), so a host with only
-`ANTHROPIC_API_KEY` and no base URL is not exercised.
+shell and tools that started it, which another process of the same user outside
+the sandbox can read (CRL-167). A step's shell cannot read it directly: on macOS
+27.2.1 since CRL-165 (S111, probe 15; no CI lane runs macOS, CRL-170), and on
+Linux because of pid namespaces. On a single-user server, though, a step can
+act as the owner (CRL-159). The
+proxy path is the claude-sdk gateway path (it sets a base URL), so a host with
+only `ANTHROPIC_API_KEY` and no base URL is not exercised.
 
 ## The harness is claude-sdk
 

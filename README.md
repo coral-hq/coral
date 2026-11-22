@@ -41,12 +41,16 @@ The workflow engine is designed and is next on the
 [design](docs/coral/roadmap/coral-design.md). There are no releases yet, so
 run Coral from source.
 
-On macOS, until CRL-165 and CRL-166 land, run Coral steps only on content you
-trust: a step's shell can read other processes' environments, your model API
-key among them, and reach other sessions' harness sockets. On a single-user
-server a step can act as you, the owner, so a human gate is a workflow step,
-not a security control. See the
-[ADR-05 addendum](docs/coral/decisions/ADR-05-topology.md#addendum-crl-137-probe-verdicts-2026-11-21).
+Run Coral steps only on content you trust. On macOS a step's shell can still
+connect to other sessions' harness sockets, which is enough to drive their
+turns (CRL-166), and can read and write your clipboard (CRL-171). Since CRL-165
+it can no longer read other processes' environments or command lines. That was
+measured on macOS 27.2.1 only, and no CI lane runs macOS (CRL-170). Your model
+API key is still in those environments and command lines, where processes
+outside the sandbox can read it (CRL-167). On a single-user server, on any
+platform, a step can act as you, the owner, so neither a human gate nor the
+sandbox is a security control there (CRL-159). See the
+[ADR-05 addendum](docs/coral/decisions/ADR-05-topology.md#addendum-crl-165-process-reads-on-macos-2026-11-22).
 
 ## Run Coral from source
 

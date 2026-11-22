@@ -3384,3 +3384,63 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S111
+    title: The macOS sandbox keeps other processes' command lines and environments unreadable
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 27.2.1 only: seatbelt admits sysctl(KERN_PROCARGS2 or
+      KERN_PROCARGS, pid), checked as kern.procargs2.<pid> and
+      kern.procargs.<pid>, when either sysctl-read allows the name or
+      process-info allows the target, and (deny default) does not cover
+      process-info. So a sandboxed shell read every same-user process's argv
+      and exec-time environment: a sibling runner's (the host's environment),
+      each claude CLI's (the model API key) and the host daemon's. A
+      sysctl-read deny alone changes nothing. pgrep (a sysmond client) printed
+      any command line through com.apple.sysmond, and launchctl print printed
+      a same-user launchd job's environment and arguments (measured on a
+      throwaway job; from code, the host LaunchAgent holds credentials there).
+      Every profile _build_profile emits (the os_env step shell and every
+      spawn-time CLI wrap; not the host-ops git jail, which builds its own)
+      now denies process-info* except for the process itself and pid listing
+      (process-info-listpids), the kern.procargs* sysctls, and
+      com.apple.sysmond* lookups. Inside the sandbox another process's argv,
+      environment, path, cwd, fd list and fd paths are unreadable, the
+      process's own children included; proc_name, proc_pidpath and psutil
+      memory and CPU reads fail on other pids; pgrep, pkill, lsof -p,
+      launchctl print and launchctl blame fail (dumpstate measured with the
+      pidinfo deny only). Own reads, pid listing and kinfo (ppid, name,
+      status, start time) still work. It is designed and verified for env and
+      argv reads (fd paths were also measured closed): the secrets stay in
+      exec-time environments and argv, where unsandboxed processes still read
+      them. An unknown operation fails profile compilation, but a renamed
+      service or sysctl name would make a rule a silent no-op; the behaviour
+      test detects that only on a Mac that runs it, and no CI lane runs macOS
+      (CRL-170).
+    files:
+      - omnigent/inner/seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_seatbelt_sandbox.py
+    tests:
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 120
+    budget_exception:
+      lines: 230
+      reason: >-
+        tests/inner/sandbox/test_sandbox_behavior.py (230 changed lines): the
+        reader script that tries seven reads of another process (both procargs
+        sysctls, psutil environ and cmdline, pgrep -lf, launchctl print and
+        proc_pidfdinfo) and its own, a throwaway launchd job with its cleanup
+        and a sweep of the jobs and plist dirs a killed run leaves, and the
+        test that runs the reader outside and inside the sandbox, through the
+        os_env helper and the CLI wrap, against a marker-holding child. The
+        other files are within budget: omnigent/inner/seatbelt_sandbox.py 11,
+        tests/inner/test_seatbelt_sandbox.py 23.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

@@ -1,7 +1,9 @@
 """A forwarding proxy that lets the live E2E's CLI reach the Anthropic API without its key.
 
-No process the test starts is given the key, but on macOS a step's shell can read it from
-the environment of this process and its parents. The host, and so every CLI it starts, gets
+No process the test starts is given the key, but a same-user process outside the sandbox can
+read it from the environment of this process and its parents. A step's shell cannot read it
+directly: on macOS 27.2.1 because of seam S111, and on Linux because of pid namespaces. On a
+single-user server, though, a step can act as the owner. The host, and so every CLI it starts, gets
 a random per-run token as its API key and this proxy's loopback URL as its base URL; the
 proxy swaps the token for the key on the way to one fixed upstream. It admits only that
 token, as ``x-api-key`` (the CLI's header) or else as a bearer token (the runner's model

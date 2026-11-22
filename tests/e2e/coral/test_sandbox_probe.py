@@ -99,58 +99,28 @@ class Pin:
 
 # Owner tickets, by the exposure a pinned reachable shows.
 SOCKET_OWNER = "CRL-166"  # a step connects to another session's harness socket
-PROCESS_READ_OWNER = "CRL-165"  # a step reads other processes' environments
-SECRET_OWNER = "CRL-167"  # the model API key in an environment or command line a step reads
-TOKEN_OWNER = "CRL-168"  # the allow-listed runner token in the step runner's environment
 SERVER_OWNER = "CRL-159"  # a single-user server takes any local process as its owner
-
-# The credential-like names in a claude-sdk CLI's environment, as a step reads them.
-_CLI_NAMES = Pin(
-    ",".join(
-        (
-            "CLAUDE_CODE_API_KEY_HELPER_TTL_MS",
-            "HARNESS_CLAUDE_SDK_AGENT_NAME",
-            "HARNESS_CLAUDE_SDK_API_KEY_HELPER",
-            "HARNESS_CLAUDE_SDK_BUNDLE_DIR",
-            "HARNESS_CLAUDE_SDK_CWD",
-            "HARNESS_CLAUDE_SDK_GATEWAY",
-            "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND",
-            "HARNESS_CLAUDE_SDK_GATEWAY_BASE_URL",
-            "HARNESS_CLAUDE_SDK_OS_ENV",
-            "HARNESS_CLAUDE_SDK_PERMISSION_MODE",
-            "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL",
-            "HARNESS_CLAUDE_SDK_SKILLS_FILTER",
-            "HARNESS_CLAUDE_SDK_SYSTEM_PROMPT_PRESET",
-            "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK",
-        )
-    )
-)
 
 EXPECTED: dict[str, dict[str, Pin]] = {
     # Pinned from one local run on macOS 27.2.1 with claude 2.1.325 (seatbelt).
     "darwin": {
         "harness_socket": Pin("reachable", SOCKET_OWNER),
-        "runner_environ": Pin("reachable", PROCESS_READ_OWNER),
-        # The test host's environment holds none; a real host's exported names land here.
-        "runner_environ.names": Pin("none"),
-        "runner_environ.api_key": Pin("not_present"),
-        "runner_environ.argv_api_key": Pin("not_present"),
-        "cli_environ": Pin("reachable", PROCESS_READ_OWNER),
-        "cli_environ.names": _CLI_NAMES,
-        "cli_environ.api_key": Pin("reachable", SECRET_OWNER),
-        "cli_environ.argv_api_key": Pin("reachable", SECRET_OWNER),
-        "host_environ": Pin("reachable", PROCESS_READ_OWNER),
-        "host_environ.names": Pin("none"),
-        "host_environ.api_key": Pin("not_present"),
-        "host_environ.argv_api_key": Pin("not_present"),
-        "own_cli_environ": Pin("reachable", PROCESS_READ_OWNER),
-        "own_cli_environ.names": _CLI_NAMES,
-        "own_cli_environ.api_key": Pin("reachable", SECRET_OWNER),
-        "own_cli_environ.argv_api_key": Pin("reachable", SECRET_OWNER),
+        "runner_environ": Pin("denied"),
+        "runner_environ.api_key": Pin("denied"),
+        "runner_environ.argv_api_key": Pin("denied"),
+        "cli_environ": Pin("denied"),
+        "cli_environ.api_key": Pin("denied"),
+        "cli_environ.argv_api_key": Pin("denied"),
+        "host_environ": Pin("denied"),
+        "host_environ.api_key": Pin("denied"),
+        "host_environ.argv_api_key": Pin("denied"),
+        "own_cli_environ": Pin("denied"),
+        "own_cli_environ.api_key": Pin("denied"),
+        "own_cli_environ.argv_api_key": Pin("denied"),
         "credential_files.claude": Pin("denied"),
         "credential_files.omnigent_secrets": Pin("denied"),
         "credential_files.host_tunnel": Pin("denied"),
-        # Only the config file: the same key is reachable in every CLI's environment.
+        # The config file only; the CLIs' copies of the key are the .api_key checks.
         "config_api_key": Pin("denied"),
         "bridge_dir": Pin("denied"),
         "server_loopback": Pin("reachable", SERVER_OWNER),
@@ -655,8 +625,8 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
         probe_digest = _sha256(PROBE.read_bytes())
         tunnel = canaries.pop("credential_files.host_tunnel")
         config = home / ".omnigent" / "config.yaml"
-        # Processes whose environment and command line the step reads, with the API key's
-        # digest: the reviewer's runner and CLI, the host daemon and the step's own CLI.
+        # Processes whose environment and command line the step tries to read, with the API
+        # key's digest: the reviewer's runner and CLI, the host daemon and the step's own CLI.
         processes = {
             "runner_environ": runner,
             "cli_environ": _one_cli(runner),
@@ -775,8 +745,7 @@ EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
     # Pinned from one local run on macOS 27.2.1 with claude 2.1.325 (seatbelt).
     "darwin": {
         "step_runs": Pin("true"),
-        "runner_environ": Pin("reachable", TOKEN_OWNER),
-        "runner_environ.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
+        "runner_environ": Pin("denied"),
         "shell_env_names": Pin("not_present"),
         "shell_env_names.names": Pin("none"),
         "runner.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
@@ -852,7 +821,7 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         recorded = _recorded(stack, _harness_socket(stack, implementer))
         names = {f"{role}.names": _token_names(proc) for role, proc in step.items()}
         runner = step["runner"].pid
-        # The shell's own runner, as the step reads it: where the allow-listed token sits.
+        # The shell's own runner, as the step tries to read it: where the allow-listed token sits.
         targets = [
             Target("control_file", "file", PROBE.name, f"sha256:{_sha256(PROBE.read_bytes())}"),
             Target("control_environ", "environ", "self"),

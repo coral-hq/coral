@@ -650,6 +650,29 @@ def test_profile_no_unix_socket_deny_when_list_empty(tmp_path: Path) -> None:
     assert "(deny network-outbound (remote unix-socket" not in profile
 
 
+# CORAL(S111): other processes' command lines and environments stay unreadable
+@pytest.mark.parametrize("allow_network", [True, False])
+def test_profile_keeps_other_processes_arguments_and_environments_unreadable(
+    tmp_path: Path, allow_network: bool
+) -> None:
+    """
+    Seatbelt admits ``kern.procargs*.<pid>`` when either ``sysctl-read`` or the
+    target's ``process-info`` allows it, so both are denied, with the process itself
+    and pid listing re-allowed; ``sysmond`` hands command lines to ``pgrep``.
+    """
+    policy = _make_policy(tmp_path, allow_network=allow_network)
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+    deny_info = "(deny process-info*)"
+    deny_args = '(deny sysctl-read (sysctl-name-prefix "kern.procargs"))'
+    deny_sysmond = '(deny mach-lookup (global-name-prefix "com.apple.sysmond"))'
+    for rule in (deny_info, deny_args, deny_sysmond, "(allow process-info-listpids)"):
+        assert lines.count(rule) == 1, rule
+    for exception in ("(allow process-info* (target self))", "(allow process-info-listpids)"):
+        assert lines.index(deny_info) < lines.index(exception)
+    assert lines.index(deny_args) > lines.index("(allow sysctl-read)")
+    assert lines.index(deny_sysmond) > lines.index("(allow mach-lookup)")
+
+
 def test_profile_network_section_for_active_egress_emits_narrow_allows(
     tmp_path: Path,
 ) -> None:

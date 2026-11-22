@@ -719,7 +719,12 @@ def _build_profile(
             ";; filters and rejects the helper interpreter under deny-default.",
             "(allow process-fork)",
             "(allow process-exec*)",
+            # CORAL(S111): (deny default) leaves process-info open for every pid, and with it
+            # other processes' arguments and environments. The more specific allows below keep
+            # self and pid listing; keep them with this deny.
+            "(deny process-info*)",
             "(allow process-info* (target self))",
+            "(allow process-info-listpids)",
             "(allow signal (target self))",
             "",
             ";; Mach / IPC / sysctl baseline. Verified empirically as the",
@@ -755,9 +760,15 @@ def _build_profile(
             ";; or codesigning-based entitlement gating outside the",
             ";; sandbox layer.",
             "(allow mach-lookup)",
+            # CORAL(S111): sysmond hands any process's command line to pgrep and pkill. A
+            # per-service deny does work under (version 1) (measured on macOS 27.2.1).
+            '(deny mach-lookup (global-name-prefix "com.apple.sysmond"))',
             "(allow ipc-posix-shm)",
             "(allow ipc-posix-sem)",
             "(allow sysctl-read)",
+            # CORAL(S111): kern.procargs[2].<pid> is admitted when either sysctl-read or the
+            # target's process-info allows it, so the process-info deny needs this one too.
+            '(deny sysctl-read (sysctl-name-prefix "kern.procargs"))',
             "(allow file-ioctl)",
             # M7 (security 2026-07-15): Bun's WriteStream constructor calls fstat(2) on
             # its inherited pipe file descriptors (stdout/stderr) at startup for ANSI
