@@ -270,8 +270,8 @@ def test_build_codex_remote_args_resume_omits_positional_launch_prompt(
         codex_args=(
             "--model",
             "gpt-5.4-mini",
-            "--remote-auth-token-env",
-            "CODEX_REMOTE_TOKEN",
+            "--image",
+            "shot.png",
             launch_prompt,
             "--sandbox",
             "read-only",
@@ -289,9 +289,10 @@ def test_build_codex_remote_args_resume_omits_positional_launch_prompt(
     )
     assert args[args.index("--model") + 1] == "gpt-5.4-mini", args
     assert args[args.index("-c") + 1] == 'model_provider="omnigent"', args
-    # The auth-token env-var name is the option's value: it must survive so
-    # ``resume`` stays the subcommand rather than being swallowed as the value.
-    assert args[args.index("--remote-auth-token-env") + 1] == "CODEX_REMOTE_TOKEN", args
+    # An option's value must survive so ``resume`` stays the subcommand rather
+    # than being swallowed as the value. CORAL(S114): Omnigent now reserves
+    # ``--remote-auth-token-env``, so a different value-taking option stands in.
+    assert args[args.index("--image") + 1] == "shot.png", args
 
 
 @pytest.mark.parametrize(

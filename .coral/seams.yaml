@@ -3623,3 +3623,76 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+  - id: S114
+    title: The codex-native app-server WebSocket requires a per-spawn capability token
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 26.3.1 with codex-cli 0.171.0 and opencode 2.1.4: a
+      sandboxed step with the network on reaches every loopback TCP listener,
+      and the codex-native app-server WebSocket was the one Omnigent listener
+      that took no secret, so a step could start, steer or interrupt another
+      session's turns. A loopback ws:// app-server (the session one and the
+      discovery ones) now starts with --ws-auth capability-token
+      --ws-token-file, its token a fresh secrets.token_urlsafe(32) in a 0600
+      file under <data dir>/codex-native/ws-tokens/<port> (0700 dir, symlinked
+      or foreign ancestors refused); the token never goes on argv and the file
+      is removed when that app-server stops. CodexAppServerClient.connect
+      sends it as a Bearer only to a loopback IP-literal ws:// port with a
+      token file, through a logger that never logs headers at DEBUG, so no
+      call site changes; the route-turn hook command carries the data dir,
+      since codex strips OMNIGENT_* from its env; the TUI gets --remote-auth-token-env
+      OMNIGENT_CODEX_WS_TOKEN only when a token exists, and the variable in
+      its environment, and a caller may no longer pass that flag. A codex
+      whose app-server --help has no --ws-auth (probed once per binary) logs
+      one warning naming its version and runs without a token, as before; a
+      probe that cannot run is not cached and passes --ws-auth anyway.
+      claude-native's relays, the runner's direct-attach listener and opencode
+      serve already refuse a caller without their secret; the behaviour test
+      pins all four and that the step cannot read the codex token file or the
+      relay's bridge.json. Not covered: a codex without --ws-auth, a sandbox
+      read grant over the data dir or a data dir inside a workspace, codex's
+      own tool sandbox (workspace-write reads the whole disk), the
+      token in the TUI's environment (S111 on macOS, the pid namespace on
+      Linux; off-env delivery is CRL-173), same-user processes outside the
+      sandbox (CRL-173, CRL-159), a configured app-server wrapper that runs a
+      different codex than codex_path, the old codex-native unix socket that
+      no current code starts, unknown loopback listeners, other programs'
+      loopback services (CRL-174) and UDP. Linux was not measured, and no CI
+      lane runs macOS (CRL-170).
+    files:
+      - omnigent/harnesses/codex_native/app_server.py
+      - omnigent/harnesses/codex_native/launch_args.py
+      - tests/harnesses/codex_native/app_server/test_ws_auth.py
+      - tests/harnesses/codex_native/session/test_launch_config.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+    tests:
+      - tests/harnesses/codex_native/app_server/test_ws_auth.py
+      - tests/harnesses/codex_native/session/test_launch_config.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+    budget_lines: 120
+    budget_exception:
+      lines: 340
+      reason: >-
+        tests/inner/sandbox/test_sandbox_behavior.py (294 changed lines): the
+        probe script that reaches each listener, calls it without its secret,
+        reads the secrets it can and calls with them; and the test that starts
+        a throwaway tool relay with its bridge.json, a direct-attach listener,
+        opencode serve with throwaway homes and a real codex app-server through
+        the S114 argv, checks each rightful client before and after, and runs
+        the probe outside and inside through the os_env helper and the CLI
+        wrap. tests/harnesses/codex_native/app_server/test_ws_auth.py (340
+        lines, new): the unit tests the PR plan lists, with a fake codex for
+        the capability probe and a throwaway websockets server for the Bearer.
+        omnigent/harnesses/codex_native/app_server.py (166 changed lines): the
+        token path, mint, read and remove helpers, the cached capability probe
+        with its warning, the argv flags, the client header, removal at close
+        and discovery stop, the TUI env var and the remote flag in the three
+        --remote forms, and the data dir on the route-turn hook. The other files are within budget:
+        omnigent/harnesses/codex_native/launch_args.py 15,
+        tests/harnesses/codex_native/session/test_launch_config.py 11.
+      approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
