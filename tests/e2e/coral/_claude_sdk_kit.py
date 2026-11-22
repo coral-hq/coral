@@ -20,7 +20,8 @@ from typing import Any
 import claude_agent_sdk
 
 from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor, _find_system_claude
-from omnigent.inner.executor import ExecutorError, TurnComplete
+from omnigent.inner.datamodel import OSEnvSpec
+from omnigent.inner.executor import ExecutorError, ToolSpec, TurnComplete
 from tests.e2e.conftest import (
     _mock_llm_server_process,
     configure_mock_llm,
@@ -130,16 +131,28 @@ def mock_only_env(
 
 
 def make_executor(
-    workspace: Path, *, model: str, permission_mode: str, coral: bool = False
+    workspace: Path,
+    *,
+    model: str,
+    permission_mode: str,
+    coral: bool = False,
+    os_env: OSEnvSpec | None = None,
+    isolate_claude_config: bool = False,
+    api_key_helper: str = MOCK_API_KEY_HELPER,
 ) -> ClaudeSDKExecutor:
-    """The executor the harness builds; ``coral`` sets the flags a ``params.coral`` spec sets."""
+    """
+    The executor the harness builds; ``coral`` sets the credential and policy flags a
+    ``params.coral`` spec sets, and ``isolate_claude_config`` its private config dir.
+    """
     return ClaudeSDKExecutor(
         cwd=str(workspace),
+        os_env=os_env,
         model=model,
         permission_mode=permission_mode,
-        api_key_helper=MOCK_API_KEY_HELPER,
+        api_key_helper=api_key_helper,
         require_api_credential=coral,
         tool_call_policy_hook=coral,
+        isolate_claude_config=isolate_claude_config,
     )
 
 
@@ -173,9 +186,11 @@ def tool_results(message_requests: list[dict], *, call_id: str) -> list[str]:
     return found
 
 
-async def collect_turn(executor: ClaudeSDKExecutor, text: str, *, session_id: str) -> list:
+async def collect_turn(
+    executor: ClaudeSDKExecutor, text: str, *, session_id: str, tools: list[ToolSpec] | None = None
+) -> list:
     messages = [{"role": "user", "content": text, "session_id": session_id}]
-    return [event async for event in executor.run_turn(messages, [], "")]
+    return [event async for event in executor.run_turn(messages, tools or [], "")]
 
 
 def cli_versions() -> dict[str, str]:

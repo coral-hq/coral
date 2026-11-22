@@ -4122,7 +4122,8 @@ class _PassingWrapBackend:
         return ["sandbox", "--", *argv]
 
 
-def _granted_policy(monkeypatch, tmp_path: Path, backend_type: str):
+# CORAL(S113): isolate asks for the private config dir
+def _granted_policy(monkeypatch, tmp_path: Path, backend_type: str, *, isolate: bool = False):
     """The policy the CLI wrap is built from, with HOME, TMPDIR and the socket root in tmp_path."""
     import dataclasses
 
@@ -4146,8 +4147,11 @@ def _granted_policy(monkeypatch, tmp_path: Path, backend_type: str):
         return "/tmp/launcher"
 
     monkeypatch.setattr("omnigent.inner.claude_sdk_executor.create_exec_launcher", _capture)
-    prepared = prepare_claude_cli_path("/usr/bin/claude", _wrap_probe_spec())
+    prepared = prepare_claude_cli_path(
+        "/usr/bin/claude", _wrap_probe_spec(), isolate_config=isolate
+    )
     assert prepared.enable_native_tools is True
+    assert prepared.config_isolated is isolate  # CORAL(S113)
     return captured["sandbox"]
 
 
@@ -4184,6 +4188,153 @@ def test_prepare_claude_cli_path_leaves_bwraps_private_tmp_alone(monkeypatch, tm
     policy = _granted_policy(monkeypatch, tmp_path, "linux_bwrap")
 
     assert (policy.launch_tmpdir_env, policy.launch_tmpdir_parent) == (None, None)
+
+
+# CORAL(S113): an isolated wrap grants nothing of the user's Claude config home
+def _seed_claude_home(home: Path) -> list[Path]:
+    """A config home with the two files today's wrap grants; returns what was seeded."""
+    (home / ".claude").mkdir(parents=True)
+    seeded = [home / ".claude.json", home / ".claude" / ".credentials.json"]
+    for path in seeded:
+        path.write_text("{}")
+    return seeded
+
+
+def _claude_home_grants(policy, home: Path) -> list[Path]:
+    claude_home = (home / ".claude").resolve()
+    return [
+        path
+        for path in _granted_paths(policy)
+        if path == (home / ".claude.json").resolve() or path.is_relative_to(claude_home)
+    ]
+
+
+@pytest.mark.parametrize("backend_type", ["darwin_seatbelt", "linux_bwrap"])
+@pytest.mark.parametrize("isolate", [True, False])
+def test_an_isolated_cli_wrap_grants_nothing_of_the_claude_config_home(
+    monkeypatch, tmp_path, backend_type: str, isolate: bool
+) -> None:
+    """Only ~/.npm/_logs stays, each launch gets CLAUDE_CONFIG_DIR, and ~/.claude is untouched."""
+    home = tmp_path / "home"
+    seeded = _seed_claude_home(home)
+    policy = _granted_policy(monkeypatch, tmp_path, backend_type, isolate=isolate)
+
+    grants = _claude_home_grants(policy, home)
+    if isolate:
+        assert grants == [], grants
+        assert sorted((home / ".claude").iterdir()) == seeded[1:]
+        assert (home / ".npm" / "_logs").resolve() in policy.write_roots
+        assert (policy.scratch_dir_env, policy.scratch_dir_files) == (
+            "CLAUDE_CONFIG_DIR",
+            ("projects",),
+        )
+    else:
+        assert len(grants) == 2 * 4 + len(seeded), grants
+        assert (policy.scratch_dir_env, policy.scratch_dir_files) == (None, ())
+
+
+@pytest.mark.parametrize("isolate", [True, False])
+def test_an_isolated_tight_cli_wrap_grants_nothing_of_the_claude_config_home(
+    monkeypatch, tmp_path, isolate: bool
+) -> None:
+    from omnigent.inner.claude_sdk_executor import prepare_tight_cli_process_path
+
+    home = tmp_path / "home"
+    seeded = _seed_claude_home(home)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.resolve_sandbox", lambda *a, **k: _active_policy()
+    )
+    captured = {}
+
+    def _capture(path, sandbox):
+        captured["sandbox"] = sandbox
+        return "/tmp/launcher"
+
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor.create_exec_launcher", _capture)
+    assert prepare_tight_cli_process_path("/usr/bin/claude", isolate_config=isolate) == (
+        "/tmp/launcher"
+    )
+
+    policy = captured["sandbox"]
+    assert bool(_claude_home_grants(policy, home)) is not isolate
+    assert (policy.scratch_dir_env == "CLAUDE_CONFIG_DIR") is isolate
+    if isolate:
+        assert sorted((home / ".claude").iterdir()) == seeded[1:]
+
+
+def _break_wrap(monkeypatch, fault: str) -> None:
+    """Leave the CLI unwrapped: by the operator's choice, by design, or by a fault."""
+    import dataclasses
+
+    if fault == "operator-opt-out":
+        monkeypatch.setenv("OMNIGENT_CLAUDE_SDK_NO_SANDBOX", "1")
+        return
+
+    def _resolve(spec, cwd):
+        if fault == "resolve-fails":
+            raise OSError("darwin_seatbelt requires sandbox-exec on PATH")
+        allow_network = spec.sandbox.allow_network
+        return dataclasses.replace(
+            _active_policy(), active=fault != "inactive", allow_network=allow_network
+        )
+
+    class _RefusingBackend:
+        def wrap_launcher_argv(self, *args, **kwargs):
+            raise OSError("would require widening the sandbox read view")
+
+    backend = _RefusingBackend() if fault == "probe-fails" else _PassingWrapBackend()
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor.resolve_sandbox", _resolve)
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor.get_backend", lambda name: backend)
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.create_exec_launcher", lambda path, sandbox: "/l"
+    )
+
+
+# Each case's sandbox spec changes, whether the spec asks for a wrap, and whether it wraps.
+_WRAP_CASES = {
+    "wraps": ({}, True, True),
+    "no-os-env": (None, False, False),
+    "operator-opt-out": ({}, False, False),
+    "sandbox-none": ({"type": "none"}, False, False),
+    "network-off": ({"allow_network": False}, False, False),
+    "resolve-fails": ({}, True, False),
+    "inactive": ({}, True, False),
+    "probe-fails": ({}, True, False),
+}
+
+
+@pytest.mark.parametrize("case", list(_WRAP_CASES))
+def test_only_a_wrap_fault_leaves_a_requested_wrap_unapplied(monkeypatch, tmp_path, case) -> None:
+    """
+    The refusal rule and the wrap's early returns name the same by-design cases, so an
+    isolated CLI is refused exactly when a fault left it unwrapped.
+    """
+    import dataclasses
+
+    from omnigent.inner.claude_sdk_executor import (
+        _claude_cli_sandbox_requested,
+        prepare_claude_cli_path,
+    )
+
+    changes, asks, wraps = _WRAP_CASES[case]
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _break_wrap(monkeypatch, case)
+    spec = _wrap_probe_spec()
+    if changes is None:
+        spec = None
+    else:
+        spec = dataclasses.replace(spec, sandbox=dataclasses.replace(spec.sandbox, **changes))
+
+    prepared = prepare_claude_cli_path("/usr/bin/claude", spec, isolate_config=True)
+
+    assert _claude_cli_sandbox_requested(spec) is asks
+    assert (prepared.cli_path, prepared.config_isolated) == (
+        "/l" if wraps else "/usr/bin/claude",
+        wraps,
+    )
+    assert not (tmp_path / "home" / ".claude").exists()
 
 
 @pytest.mark.parametrize(("parent", "warns"), [("h", False), ("h" * 40, True)])
@@ -6797,6 +6948,194 @@ async def test_coral_spec_with_os_sandbox_reaches_the_cli(monkeypatch, sandbox_t
 
     assert not [e for e in events if isinstance(e, ExecutorError)], events
     assert len(fake_sdk.created_clients) == 1
+
+
+# CORAL(S113): an isolated CLI gets only a private config dir, and starts only in its sandbox.
+_CONFIG_NAMES = ("CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+
+
+def _isolation_executor(monkeypatch, tmp_path: Path, *, cli: str | None, os_env=None, **kwargs):
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor._find_system_claude", lambda: cli)
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+    return ClaudeSDKExecutor(
+        api_key_helper="printf %s sk-ant-test", skills_filter="none", os_env=os_env, **kwargs
+    )
+
+
+# tight-*: no os_env; the tight wrap returns a launcher on Linux, the real CLI on macOS or a fault.
+# off-host: the names come from the host's environment only, not the user's settings.
+@pytest.mark.parametrize(
+    "mode", ["wrapped", "unwrapped", "tight-wrapped", "tight-unwrapped", "off", "off-host"]
+)
+async def test_an_isolated_cli_gets_only_its_own_claude_config_dir(monkeypatch, tmp_path, mode):
+    """Neither name reaches an isolated CLI from the environment or the user's settings."""
+    from omnigent.inner.claude_sdk_executor import PreparedClaudeCli
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    off = mode.startswith("off")
+    user_dir = str(tmp_path / "user-claude")
+    for name in _CONFIG_NAMES:
+        monkeypatch.setenv(name, user_dir)
+    settings = {} if mode == "off-host" else dict.fromkeys(_CONFIG_NAMES, "settings-dir")
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda cwd=None: settings
+    )
+    launcher = PreparedClaudeCli(str(tmp_path / "launcher"), True, config_isolated=True)
+    asked: list[bool] = []
+
+    def _prepare(cli, spec, *, isolate_config=False):
+        asked.append(isolate_config)
+        return launcher
+
+    def _prepare_tight(cli, *, cwd=None, isolate_config=False):
+        asked.append(isolate_config)
+        return launcher.cli_path if mode == "tight-wrapped" else cli
+
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor.prepare_claude_cli_path", _prepare)
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.prepare_tight_cli_process_path", _prepare_tight
+    )
+    wrapped = mode in ("wrapped", "tight-wrapped")
+    no_cli = mode == "unwrapped" or off
+    executor = _isolation_executor(
+        monkeypatch,
+        tmp_path,
+        cli=None if no_cli else "/usr/bin/claude",
+        os_env=OSEnvSpec(cwd=str(tmp_path), sandbox=OSEnvSandboxSpec())
+        if mode == "wrapped"
+        else None,
+        isolate_claude_config=not off,
+    )
+
+    events, _, spawn_envs = await _turn_with_recording_sdk(executor)
+    [spawn_env] = spawn_envs
+    own = spawn_env.get("CLAUDE_CONFIG_DIR")
+    own_dir = Path(own) if own and mode in ("unwrapped", "tight-unwrapped") else None
+    private = own_dir is not None and own_dir.is_absolute() and _is_private(own_dir)
+    await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert [os.environ[name] for name in _CONFIG_NAMES] == [user_dir, user_dir]
+    assert asked == ([] if no_cli else [True]), "the wrap was not asked to isolate"
+    if off:
+        kept = [user_dir] * 2 if mode == "off-host" else ["settings-dir"] * 2
+        assert [spawn_env.get(name) for name in _CONFIG_NAMES] == kept
+        return
+    store = spawn_env.get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+    if wrapped:
+        # The launcher sets both in the wrap.
+        assert (own, store) == (None, None)
+    else:
+        assert private, f"the unwrapped CLI's config dir is not its own private dir: {own}"
+        assert store == own and own_dir is not None and not own_dir.exists()
+
+
+def _is_private(path: Path) -> bool:
+    """A 0700 dir whose ``projects`` is a file, so the CLI cannot spill tool results there."""
+    return (path.stat().st_mode & 0o777) == 0o700 and (path / "projects").is_file()
+
+
+@pytest.mark.parametrize(
+    ("fault", "refused"),
+    [
+        ("no-system-claude", True),
+        ("resolve-fails", True),
+        ("probe-fails", True),
+        ("inactive", True),
+        ("operator-opt-out", False),
+        ("network-off", False),
+    ],
+)
+async def test_an_isolated_cli_its_sandbox_cannot_wrap_never_starts(
+    monkeypatch, tmp_path, fault, refused
+):
+    """A wrap that fails is refused; an unwrapped CLI by design runs on its own config dir."""
+    from omnigent.inner.claude_sdk_executor import CORAL_SANDBOX_UNAVAILABLE_CODE
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    monkeypatch.setattr(  # never read the caller's real Claude settings
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda cwd=None: {}
+    )
+    if fault != "no-system-claude":
+        _break_wrap(monkeypatch, fault)
+    sandbox = OSEnvSandboxSpec(type="linux_bwrap", allow_network=fault != "network-off")
+    executor = _isolation_executor(
+        monkeypatch,
+        tmp_path,
+        cli=None if fault == "no-system-claude" else "/usr/bin/claude",
+        os_env=OSEnvSpec(cwd=str(tmp_path), sandbox=sandbox),
+        require_api_credential=True,
+        isolate_claude_config=True,
+    )
+
+    events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    await executor.close()
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    if refused:
+        assert [(e.code, e.retryable) for e in errors] == [(CORAL_SANDBOX_UNAVAILABLE_CODE, False)]
+        assert "cannot run in its OS sandbox" in errors[0].message
+        assert fake_sdk.created_clients == []
+    else:
+        assert errors == [] and len(spawn_envs) == 1
+        assert spawn_envs[0]["CLAUDE_CONFIG_DIR"].startswith(tempfile.gettempdir())
+
+
+async def test_a_concurrent_connect_cannot_hand_a_cli_the_hosts_config_names(
+    monkeypatch, tmp_path
+):
+    """
+    One connect restores the host's values while another is still connecting. The second
+    CLI still gets only the private dir, because the options name it under both names.
+    """
+    user_dir = str(tmp_path / "user-claude")
+    for name in _CONFIG_NAMES:
+        monkeypatch.setenv(name, user_dir)
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda cwd=None: {}
+    )
+    executor = _isolation_executor(monkeypatch, tmp_path, cli=None, isolate_claude_config=True)
+    fake_sdk = _make_recovery_fake_sdk()
+    second_connecting, first_returning = asyncio.Event(), asyncio.Event()
+    seen: dict[str, tuple[str | None, dict[str, str]]] = {}
+
+    class _RacingClient(fake_sdk.ClaudeSDKClient):
+        async def connect(self):
+            role = "second" if second_connecting.is_set() or "first" in seen else "first"
+            seen.setdefault(role, (None, {}))
+            if role == "first":
+                await second_connecting.wait()
+            else:
+                second_connecting.set()
+                # The first connect returns, and restores the host's values, before this resumes.
+                await first_returning.wait()
+            spawn_env = {**os.environ, **(self.options.env or {})}
+            seen[role] = (os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"), spawn_env)
+            if role == "first":
+                first_returning.set()
+
+    async def _turn(session_id: str) -> list:
+        messages = [{"role": "user", "content": "hi", "session_id": session_id}]
+        return [event async for event in executor.run_turn(messages, [], "")]
+
+    fake_sdk.ClaudeSDKClient = _RacingClient
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        turns = await asyncio.gather(_turn("first"), _turn("second"))
+    private = str(executor._unwrapped_claude_config_dir)
+    await executor.close()
+
+    assert all(any(isinstance(e, TurnComplete) for e in events) for events in turns), turns
+    (first_host_value, first_env), (second_host_value, second_env) = seen["first"], seen["second"]
+    # The first CLI spawned inside its unset window; the second after the first's restore.
+    assert (first_host_value, second_host_value) == (None, user_dir), "the race did not happen"
+    for env in (first_env, second_env):
+        assert [env.get(name) for name in _CONFIG_NAMES] == [private, private]
+    assert [os.environ[name] for name in _CONFIG_NAMES] == [user_dir, user_dir]
 
 
 # CORAL(S21): Coral specs check every tool call against TOOL_CALL policy from PreToolUse.

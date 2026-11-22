@@ -502,13 +502,15 @@ def test_bundle_dir_unset_passes_none(
     [
         ("HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL", "require_api_credential"),
         ("HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK", "tool_call_policy_hook"),
+        # CORAL(S113)
+        ("HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG", "isolate_claude_config"),
     ],
 )
 @pytest.mark.parametrize(("value", "expected"), [("1", True), ("", False), (None, False)])
 def test_coral_credential_and_policy_flags_thread_through(
     monkeypatch: pytest.MonkeyPatch, env_name: str, kwarg: str, value: str | None, expected: bool
 ) -> None:
-    """CORAL(S13, S21): the Coral flags reach the executor."""
+    """CORAL(S13, S21, S113): the Coral flags reach the executor."""
     if value is None:
         monkeypatch.delenv(env_name, raising=False)
     else:

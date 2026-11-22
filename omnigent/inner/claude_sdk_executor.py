@@ -36,6 +36,7 @@ import os
 import pathlib
 import shutil
 import sys
+import tempfile  # CORAL(S113)
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
@@ -95,6 +96,7 @@ from .executor import (
 )
 from .native_attachments import framework_notices, unresolved_attachment_marker
 from .sandbox import (
+    SandboxPolicy,  # CORAL(S113)
     _resolve_sandbox_type,
     create_exec_launcher,
     get_backend,
@@ -103,6 +105,7 @@ from .sandbox import (
     with_additional_write_files,
     with_additional_write_roots,
     with_launch_tmpdir,
+    with_scratch_dir_env,  # CORAL(S113)
 )
 
 logger = logging.getLogger(__name__)
@@ -133,6 +136,12 @@ CORAL_SANDBOX_UNAVAILABLE_CODE = "coral_sandbox_unavailable"
 CORAL_POLICY_HOOK_UNAVAILABLE_CODE = "coral_policy_hook_unavailable"
 _CORAL_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec"}
 _SUBSCRIPTION_TOKEN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
+# CORAL(S113): an isolated CLI's Claude config is a private dir, never the user's
+_CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
+_CLAUDE_CONFIG_ENV = (_CLAUDE_CONFIG_DIR_ENV, "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+# CORAL(S113): a file there, so the CLI reports an oversized tool result as unsaved
+# instead of naming a saved copy the model has no tool to open
+_CLAUDE_CONFIG_BLOCKED_NAMES = ("projects",)
 
 CLAUDE_AUTH_FAILED_CODE = "claude_sdk_auth_failed"
 CLAUDE_AUTH_FAILED_TITLE = "Claude Code could not authenticate"
@@ -841,6 +850,19 @@ def _sandbox_disabled_by_env() -> bool:
     return False
 
 
+def _claude_cli_sandbox_requested(spec: OSEnvSpec | None) -> bool:
+    """
+    CORAL(S113): whether *spec* asks for a CLI wrap that only a fault would skip.
+
+    The operator's bypass, ``sandbox.type: none`` and a network-denying sandbox leave the CLI
+    unwrapped by design. Keep in step with :func:`prepare_claude_cli_path`'s early returns.
+    """
+    if spec is None or spec.type != "caller_process" or os.environ.get(_NO_SANDBOX_ENV):
+        return False
+    sandbox_spec = spec.sandbox or OSEnvSandboxSpec()
+    return sandbox_spec.type != "none" and sandbox_spec.allow_network
+
+
 def _terminate_process_tree(process: _Process | None) -> None:
     _proc.terminate_tree(process)
 
@@ -1006,10 +1028,13 @@ class PreparedClaudeCli:
         Edit, …).  ``False`` when the sandbox cannot be applied (e.g. network
         denied, unsupported platform) — the caller should then leave native
         tools disabled.
+    :param config_isolated: CORAL(S113): the wrap keeps the CLI's Claude config in its
+        launcher's private dir.
     """
 
     cli_path: str | None
     enable_native_tools: bool
+    config_isolated: bool = False  # CORAL(S113)
 
 
 def _ensure_sdk() -> ModuleType:
@@ -1517,14 +1542,15 @@ def _parse_optional_int(value: str | None) -> int | None:
         return None
 
 
-def _claude_internal_write_roots() -> list[pathlib.Path]:
-    """Writable roots the Claude CLI needs for its own local session state."""
+def _claude_internal_write_roots(*, include_config: bool = True) -> list[pathlib.Path]:
+    """Writable roots the Claude CLI needs for its own local session state.
 
+    CORAL(S113): ``include_config=False`` leaves out, and creates nothing under, ``~/.claude``.
+    """
+
+    config_names = ("backups", "plugins", "session-env", "sessions") if include_config else ()
     roots = [
-        pathlib.Path.home() / ".claude" / "backups",
-        pathlib.Path.home() / ".claude" / "plugins",
-        pathlib.Path.home() / ".claude" / "session-env",
-        pathlib.Path.home() / ".claude" / "sessions",
+        *(pathlib.Path.home() / ".claude" / name for name in config_names),
         pathlib.Path.home() / ".npm" / "_logs",
         # CORAL(S109): no per-user temp dir: one is shared by every session; see
         # _claude_launch_tmpdir_parent for the CLI's own dir per launch.
@@ -1595,6 +1621,8 @@ def _resolve_sandbox_cwd(spec_cwd: str | None) -> pathlib.Path:
 def prepare_claude_cli_path(
     real_cli_path: str | None,
     spec: OSEnvSpec | None,
+    *,
+    isolate_config: bool = False,  # CORAL(S113)
 ) -> PreparedClaudeCli:
     """Wrap the Claude CLI in the agent's configured sandbox when possible.
 
@@ -1611,6 +1639,9 @@ def prepare_claude_cli_path(
         binary, or ``None`` when no CLI is available.
     :param spec: The agent's ``os_env`` spec.  Only ``caller_process`` specs
         with a compatible sandbox are eligible for wrapping.
+    :param isolate_config: CORAL(S113): grant nothing of the user's Claude config home;
+        the launcher gives each CLI launch its own config dir instead. A new unwrapped-by-design
+        return must also change :func:`_claude_cli_sandbox_requested`.
     :returns: A :class:`PreparedClaudeCli` naming the effective CLI path and
         whether native tools should be enabled.
     """
@@ -1644,9 +1675,12 @@ def prepare_claude_cli_path(
         # whole native-tool process tree inside a network-denying sandbox.
         return PreparedClaudeCli(cli_path=real_cli_path, enable_native_tools=False)
 
-    sandbox = with_additional_read_roots(sandbox, _claude_internal_write_roots())
-    sandbox = with_additional_write_roots(sandbox, _claude_internal_write_roots())
-    sandbox = with_additional_write_files(sandbox, _claude_internal_write_files())
+    if isolate_config:
+        sandbox = _with_private_claude_config(sandbox)  # CORAL(S113)
+    else:
+        sandbox = with_additional_read_roots(sandbox, _claude_internal_write_roots())
+        sandbox = with_additional_write_roots(sandbox, _claude_internal_write_roots())
+        sandbox = with_additional_write_files(sandbox, _claude_internal_write_files())
     # CORAL(S109): the CLI ignores TMPDIR and seatbelt shares the host's /tmp, so each launch
     # gets its own dir; bwrap's /tmp is already a private tmpfs per launch.
     if sandbox.backend_type == "darwin_seatbelt":
@@ -1674,6 +1708,21 @@ def prepare_claude_cli_path(
     return PreparedClaudeCli(
         cli_path=create_exec_launcher(real_cli_path, sandbox),
         enable_native_tools=True,
+        config_isolated=isolate_config,  # CORAL(S113)
+    )
+
+
+def _with_private_claude_config(sandbox: SandboxPolicy) -> SandboxPolicy:
+    """CORAL(S113): only ``~/.npm/_logs``; the launcher gives each launch its own config dir."""
+    sandbox = with_additional_write_roots(
+        sandbox, _claude_internal_write_roots(include_config=False)
+    )
+    # Both names, so an inherited secure-storage dir cannot move the keychain item off it.
+    return with_scratch_dir_env(
+        sandbox,
+        _CLAUDE_CONFIG_DIR_ENV,
+        files=_CLAUDE_CONFIG_BLOCKED_NAMES,
+        extra_envs=_CLAUDE_CONFIG_ENV[1:],
     )
 
 
@@ -1681,8 +1730,12 @@ def prepare_tight_cli_process_path(
     real_cli_path: str | None,
     *,
     cwd: str | None = None,
+    isolate_config: bool = False,  # CORAL(S113)
 ) -> str | None:
-    """Wrap the Claude CLI in a tight default sandbox without enabling tools."""
+    """Wrap the Claude CLI in a tight default sandbox without enabling tools.
+
+    CORAL(S113): ``isolate_config`` as for :func:`prepare_claude_cli_path`.
+    """
 
     if real_cli_path is None:
         return None
@@ -1722,8 +1775,11 @@ def prepare_tight_cli_process_path(
     else:
         if not sandbox.active:
             return real_cli_path
-        sandbox = with_additional_write_roots(sandbox, _claude_internal_write_roots())
-        sandbox = with_additional_write_files(sandbox, _claude_internal_write_files())
+        if isolate_config:
+            sandbox = _with_private_claude_config(sandbox)  # CORAL(S113)
+        else:
+            sandbox = with_additional_write_roots(sandbox, _claude_internal_write_roots())
+            sandbox = with_additional_write_files(sandbox, _claude_internal_write_files())
         return create_exec_launcher(real_cli_path, sandbox)
 
 
@@ -1849,6 +1905,7 @@ class ClaudeSDKExecutor(Executor):
         system_prompt_preset: str | None = None,
         require_api_credential: bool = False,
         tool_call_policy_hook: bool = False,
+        isolate_claude_config: bool = False,  # CORAL(S113)
     ) -> None:
         """Create a ClaudeSDKExecutor.
 
@@ -1930,6 +1987,10 @@ class ClaudeSDKExecutor(Executor):
             tool_call_policy_hook: Check every non-Omnigent tool call against
                 TOOL_CALL policy from a PreToolUse hook, which the CLI runs in
                 every permission mode, unlike ``can_use_tool``.
+            isolate_claude_config: CORAL(S113): keep the CLI's Claude config in a
+                private directory instead of the user's: per launch inside a sandbox
+                wrap, else this executor's own. Refuse turns when *os_env* configures a
+                sandbox that could not wrap the CLI.
         """
         # Fail loud: a Databricks model requires the gateway transport.
         if not gateway and model is not None and is_databricks_model_id(model):
@@ -1946,6 +2007,11 @@ class ClaudeSDKExecutor(Executor):
         # CORAL(S13, S21)
         self._require_api_credential = require_api_credential
         self._tool_call_policy_hook = tool_call_policy_hook
+        # CORAL(S113): whether the wrap gives each launch its own config dir, and the
+        # executor's own dir for a CLI that runs unwrapped
+        self._isolate_claude_config = isolate_claude_config
+        self._claude_config_isolated = False
+        self._unwrapped_claude_config_dir: pathlib.Path | None = None
         self._cwd = cwd
         self._os_env_spec = os_env
         self._os_env = os_env is not None
@@ -2003,8 +2069,10 @@ class ClaudeSDKExecutor(Executor):
                 prepared = prepare_claude_cli_path(
                     self._cli_path,
                     self._os_env_spec,
+                    isolate_config=isolate_claude_config,  # CORAL(S113)
                 )
                 self._os_env = prepared.enable_native_tools
+                self._claude_config_isolated = prepared.config_isolated  # CORAL(S113)
                 if prepared.cli_path != self._cli_path:
                     self._cli_wrapper_path = prepared.cli_path
                     self._cli_path = prepared.cli_path
@@ -2012,6 +2080,11 @@ class ClaudeSDKExecutor(Executor):
                 wrapped_cli = prepare_tight_cli_process_path(
                     self._cli_path,
                     cwd=self._cwd,
+                    isolate_config=isolate_claude_config,  # CORAL(S113)
+                )
+                # CORAL(S113): before _cli_path names the wrapper
+                self._claude_config_isolated = (
+                    isolate_claude_config and wrapped_cli != self._cli_path
                 )
                 if wrapped_cli != self._cli_path:
                     self._cli_wrapper_path = wrapped_cli
@@ -2021,6 +2094,18 @@ class ClaudeSDKExecutor(Executor):
             logger.info("Using system claude CLI: %s", self._cli_path)
         else:
             logger.info("No system claude found; SDK will use bundled CLI")
+        # CORAL(S113): a sandbox the spec configures that did not wrap the CLI is a fault
+        self._claude_wrap_failure: str | None = None
+        if (
+            isolate_claude_config
+            and not self._claude_config_isolated
+            and _claude_cli_sandbox_requested(self._os_env_spec)
+        ):
+            self._claude_wrap_failure = (
+                "no system claude CLI is installed, and the SDK's bundled one cannot be wrapped"
+                if self._cli_path is None
+                else "the sandbox could not wrap it; the runner log has the cause"
+            )
 
         # True when the gateway transport was derived from a ~/.databrickscfg
         # profile (no gateway host or base URL supplied directly). Gates the
@@ -2084,6 +2169,23 @@ class ClaudeSDKExecutor(Executor):
         if isinstance(wrapper_path, str):
             with suppress(Exception):
                 pathlib.Path(wrapper_path).unlink(missing_ok=True)
+        with suppress(Exception):
+            self._remove_unwrapped_claude_config_dir()  # CORAL(S113)
+
+    def _claude_config_dir_for_unwrapped_cli(self) -> pathlib.Path:
+        """CORAL(S113): this executor's own 0700 Claude config dir, for a CLI it cannot wrap."""
+        if self._unwrapped_claude_config_dir is None:
+            path = pathlib.Path(tempfile.mkdtemp(prefix="omnigent-claude-config-"))
+            for name in _CLAUDE_CONFIG_BLOCKED_NAMES:
+                (path / name).touch(mode=0o600, exist_ok=False)
+            self._unwrapped_claude_config_dir = path
+        return self._unwrapped_claude_config_dir
+
+    def _remove_unwrapped_claude_config_dir(self) -> None:
+        """CORAL(S113): remove the dir; a later turn makes a fresh one."""
+        path, self._unwrapped_claude_config_dir = self._unwrapped_claude_config_dir, None
+        if path is not None:
+            shutil.rmtree(path, ignore_errors=True)
 
     async def _route_options_through_gateway_shim(self, options: SdkOptions) -> None:
         """
@@ -2172,6 +2274,10 @@ class ClaudeSDKExecutor(Executor):
                     # CORAL(S13): no subscription token reaches a Coral spec's CLI
                     if self._require_api_credential:
                         for name in _SUBSCRIPTION_TOKEN_ENV:
+                            env_stack.enter_context(_unset_env_var(name))
+                    # CORAL(S113): nor a config dir the host forwards
+                    if self._isolate_claude_config:
+                        for name in _CLAUDE_CONFIG_ENV:
                             env_stack.enter_context(_unset_env_var(name))
                     if isinstance(sdk_env, dict) and "CLAUDE_CODE_USE_GATEWAY" in sdk_env:
                         env_stack.enter_context(
@@ -2344,6 +2450,7 @@ class ClaudeSDKExecutor(Executor):
         if self._gateway_shim is not None:
             await self._gateway_shim.aclose()
             self._gateway_shim = None
+        self._remove_unwrapped_claude_config_dir()  # CORAL(S113)
 
     async def interrupt_session(self, session_key: str) -> bool:
         state = self._clients.get(session_key)
@@ -3146,6 +3253,15 @@ class ClaudeSDKExecutor(Executor):
         if refusal is not None:
             yield refusal
             return
+        # CORAL(S113): a CLI its configured sandbox could not wrap never starts unwrapped
+        if self._claude_wrap_failure is not None:
+            yield ExecutorError(
+                message=f"This step's Claude CLI cannot run in its OS sandbox: "
+                f"{self._claude_wrap_failure}.",
+                code=CORAL_SANDBOX_UNAVAILABLE_CODE,
+                retryable=False,
+            )
+            return
         # Teach Claude Code this gateway's spellings so no model surface routes
         # to an id the gateway rejects: pins for the family aliases, rewrites
         # for the canonical ids the CLI names itself (the refusal-fallback).
@@ -3216,6 +3332,14 @@ class ClaudeSDKExecutor(Executor):
         if self._require_api_credential:
             for name in _SUBSCRIPTION_TOKEN_ENV:
                 env.pop(name, None)
+        # CORAL(S113): the launcher or this executor names the config dir; user settings cannot
+        if self._isolate_claude_config:
+            for name in _CLAUDE_CONFIG_ENV:
+                env.pop(name, None)
+            if not self._claude_config_isolated:
+                # Set, not only unset: a concurrent connect can restore the host's values.
+                dir_path = str(self._claude_config_dir_for_unwrapped_cli())
+                env.update(dict.fromkeys(_CLAUDE_CONFIG_ENV, dir_path))
         max_output_tokens = cfg.extra.get("max_tokens")
         if max_output_tokens is not None:
             max_output_tokens = int(max_output_tokens)

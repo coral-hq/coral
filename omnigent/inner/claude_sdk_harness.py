@@ -132,6 +132,8 @@ _ENV_API_KEY_HELPER = "HARNESS_CLAUDE_SDK_API_KEY_HELPER"
 _ENV_REQUIRE_API_CREDENTIAL = "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL"
 # CORAL(S21): set for Coral specs; gates every tool call on policy in every permission mode
 _ENV_TOOL_CALL_POLICY_HOOK = "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK"
+# CORAL(S113): set for Coral specs; the CLI keeps its Claude config in a private dir
+_ENV_ISOLATE_CLAUDE_CONFIG = "HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG"
 
 # Default permission mode for the Claude SDK. ``"auto"`` auto-approves
 # tool calls with background safety checks that verify actions align
@@ -308,6 +310,7 @@ def _build_claude_sdk_executor() -> Executor:
         # CORAL(S13, S21)
         require_api_credential=os.environ.get(_ENV_REQUIRE_API_CREDENTIAL) == "1",
         tool_call_policy_hook=os.environ.get(_ENV_TOOL_CALL_POLICY_HOOK) == "1",
+        isolate_claude_config=os.environ.get(_ENV_ISOLATE_CLAUDE_CONFIG) == "1",  # CORAL(S113)
     )
 
 

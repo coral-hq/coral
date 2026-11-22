@@ -511,6 +511,9 @@ def test_policy_clones_keep_every_field(tmp_path: pathlib.Path) -> None:
         "credential_source_paths": [path / "s"],
         "launch_tmpdir_env": "X",
         "launch_tmpdir_parent": path / "l",
+        "scratch_dir_env": "CLAUDE_CONFIG_DIR",  # CORAL(S113)
+        "scratch_dir_files": ("z",),
+        "scratch_dir_extra_envs": ("CLAUDE_SECURESTORAGE_CONFIG_DIR",),
         "credential_proxy": CredentialProxySpec(entries=[]),
         "git_ssh": [binding],
         "mask_scan_skip_roots": [path / "w"],
@@ -1127,3 +1130,123 @@ def test_run_launcher_removes_the_launch_dir_when_the_target_exits(
     assert seen["tmpdir"] == str(launch_dir)
     assert not launch_dir.exists() and not scratch.exists()
     assert (tmp_path / "h").is_dir()
+
+
+# CORAL(S113): the launcher gives the target a private dir in its scratch, removed with it
+def _scratch_dir_policy() -> SandboxPolicy:
+    from omnigent.inner.sandbox import with_scratch_dir_env
+
+    policy = dataclasses.replace(_noop_policy(), backend_type="darwin_seatbelt", active=True)
+    return with_scratch_dir_env(
+        policy,
+        "CLAUDE_CONFIG_DIR",
+        files=["projects"],
+        extra_envs=["CLAUDE_SECURESTORAGE_CONFIG_DIR"],
+    )
+
+
+def test_scratch_dir_fields_survive_the_wire_and_clones(tmp_path: pathlib.Path) -> None:
+    """The fields travel the launcher wire and every clone; an old payload asks for no dir."""
+    fields = ("scratch_dir_env", "scratch_dir_files", "scratch_dir_extra_envs")
+    decoded = SandboxPolicy.from_jsonable(_scratch_dir_policy().to_jsonable())
+    for copy in (decoded, *_with_every_clone(decoded, [tmp_path])):
+        assert [getattr(copy, name) for name in fields] == [
+            "CLAUDE_CONFIG_DIR",
+            ("projects",),
+            ("CLAUDE_SECURESTORAGE_CONFIG_DIR",),
+        ]
+    for old in (_noop_policy().to_jsonable(), {}):
+        for name in fields:
+            old.pop(name, None)
+        decoded = SandboxPolicy.from_jsonable(old)
+        assert [getattr(decoded, name) for name in fields] == [None, (), ()]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"scratch_dir_env": ""},
+        {"scratch_dir_env": "claude_config_dir"},
+        {"scratch_dir_env": "../X"},
+        {"scratch_dir_env": 7},
+        {"scratch_dir_env": "CLAUDE_CONFIG_DIR", "scratch_dir_files": ["../projects"]},
+        {"scratch_dir_env": "CLAUDE_CONFIG_DIR", "scratch_dir_files": [".."]},
+        {"scratch_dir_env": "CLAUDE_CONFIG_DIR", "scratch_dir_files": "projects"},
+        {"scratch_dir_env": "CLAUDE_CONFIG_DIR", "scratch_dir_files": None},
+        {"scratch_dir_env": None, "scratch_dir_files": ["projects"]},
+        {"scratch_dir_env": "CLAUDE_CONFIG_DIR", "scratch_dir_extra_envs": ["lower"]},
+        {"scratch_dir_env": "CLAUDE_CONFIG_DIR", "scratch_dir_extra_envs": ["../X"]},
+        {"scratch_dir_env": "CLAUDE_CONFIG_DIR", "scratch_dir_extra_envs": "Y"},
+        {"scratch_dir_env": None, "scratch_dir_extra_envs": ["Y"]},
+        {"scratch_dir_env": "PATH"},
+        {"scratch_dir_env": "CLAUDE_CONFIG_DIR", "scratch_dir_extra_envs": ["HOME"]},
+    ],
+)
+def test_a_malformed_scratch_dir_field_is_refused(fields: dict[str, object]) -> None:
+    """A payload that names its private dir wrongly fails the launch instead of losing the dir."""
+    from omnigent.inner.sandbox import with_scratch_dir_env
+
+    with pytest.raises(ValueError, match="scratch_dir"):
+        SandboxPolicy.from_jsonable({**_noop_policy().to_jsonable(), **fields})
+    env_name = fields["scratch_dir_env"]
+    files = fields.get("scratch_dir_files", [])
+    extra_envs = fields.get("scratch_dir_extra_envs", [])
+    with pytest.raises(ValueError, match="scratch_dir"):
+        with_scratch_dir_env(_noop_policy(), env_name, files=files, extra_envs=extra_envs)  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+@pytest.mark.parametrize("target_fails", [False, True])
+def test_run_launcher_gives_the_target_a_private_dir_in_its_scratch(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, target_fails: bool
+) -> None:
+    """The in-wrap pass overrides inherited values, and the dir goes with the scratch."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    seen: dict[str, object] = {}
+
+    def _run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+        private = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
+        seen["dir"] = str(private)
+        seen["store"] = os.environ["CLAUDE_SECURESTORAGE_CONFIG_DIR"]
+        seen["mode"] = private.stat().st_mode & 0o777
+        seen["projects_is_file"] = (private / "projects").is_file()
+        with contextlib.suppress(OSError):
+            (private / "projects" / "key").mkdir(parents=True)
+            seen["projects_creatable"] = True
+        if target_fails:
+            raise OSError("target vanished")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr("omnigent.inner.sandbox.activate_sandbox", lambda _policy: None)
+    monkeypatch.setattr("omnigent.inner.sandbox.subprocess.run", _run)
+    wrapped_env = {
+        "OMNIGENT_LAUNCHER_SPAWN_WRAPPED": "1",
+        "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR": str(scratch),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "home" / ".claude"),
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(tmp_path / "home"),
+    }
+    with mock.patch.dict(os.environ, wrapped_env):
+        encoded = _encoded(_scratch_dir_policy())
+        with pytest.raises(OSError) if target_fails else contextlib.nullcontext():
+            assert run_launcher(encoded, "/bin/true", []) == 0
+
+    assert seen["dir"] == seen["store"] == str(scratch.absolute() / "claude_config_dir")
+    assert os.path.isabs(str(seen["dir"]))
+    assert seen["mode"] == 0o700 and seen["projects_is_file"] is True
+    assert "projects_creatable" not in seen
+    assert not scratch.exists()
+    assert not (tmp_path / "home").exists()
+
+
+def test_run_launcher_refuses_a_private_dir_without_a_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no scratch to hold it, the target never starts on a default config dir."""
+    target_runs: list[list[str]] = []
+    monkeypatch.setattr("omnigent.inner.sandbox.subprocess.run", target_runs.append)
+    policy = dataclasses.replace(_scratch_dir_policy(), backend_type="none", active=False)
+
+    with mock.patch.dict(os.environ), pytest.raises(RuntimeError, match="no scratch dir"):
+        run_launcher(_encoded(policy), "/bin/true", [])
+    assert target_runs == []
