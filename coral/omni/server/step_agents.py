@@ -31,12 +31,15 @@ from coral.omni.server.access import omnigent_owner, ownerless_runs_allowed
 from coral.omni.server.bundles import MaterializedAgent, StepBundleRejected, materialize
 from coral.profiles.bundle_spec import (
     ENGINE_PREFIX,
+    ProfileOverlay,
     Stance,
     StepRef,
     build_seed_bundle_yaml,
     build_step_bundle_yaml,
     step_agent_name,
 )
+from coral.profiles.refs import parse_roster_entry
+from coral.stores.profiles import SqlProfileStore
 from coral.tools.catalog import ORCHESTRATOR_STANCE, STEP_STANCES
 from omnigent.db.db_models import workspace_scope
 from omnigent.stores.agent_store import AgentStore
@@ -54,7 +57,11 @@ def _not_supported(stance: str, reason: str) -> CoralSessionError:
 
 
 def _bundle(
-    stance: str, workflow_slug: str | None, node_id: str | None, roster_index: int | None
+    stance: str,
+    workflow_slug: str | None,
+    node_id: str | None,
+    roster_index: int | None,
+    profile: ProfileOverlay | None = None,
 ) -> tuple[bytes, Stance, str]:
     """The bundle's ``config.yaml``, stance and agent name; a step's comes from its reference."""
     if stance == ORCHESTRATOR_STANCE:
@@ -74,7 +81,9 @@ def _bundle(
             stance, f"the step reference is invalid ({', '.join(fields)})"
         ) from None
     step_stance = Stance(stance)
-    config_yaml = build_step_bundle_yaml(ref, step_stance, model=None, provider=None)
+    config_yaml = build_step_bundle_yaml(
+        ref, step_stance, model=None, provider=None, profile=profile
+    )
     return _with_read_paths(config_yaml, _checkout_read_paths()), step_stance, step_agent_name(ref)
 
 
@@ -120,9 +129,11 @@ class OmnigentStepAgents:
         artifact_store: ArtifactStore,
         *,
         conversation_store: ConversationStore | None = None,
+        profiles: SqlProfileStore | None = None,
         max_entries: int = STEP_AGENT_CACHE_ENTRIES,
     ) -> None:
         self._agents = agent_store
+        self._profiles = profiles
         self._artifacts = artifact_store
         self._conversations = conversation_store
         self._max_entries = max_entries
@@ -139,15 +150,21 @@ class OmnigentStepAgents:
         node_id: str | None,
         roster_index: int | None,
         session_id: str | None = None,
+        run_id: str | None = None,
+        profile: str | None = None,
     ) -> str:
         """
         The agent id of the stance's bundle, stored as ``owner``'s agent in ``workspace_id``.
 
         :param session_id: The session the create makes. When an earlier try wrote it
             and it runs the owner's agent of this bundle's name, that agent is kept.
+        :param run_id: The step's run, whose pin names ``profile``'s revision.
+        :param profile: A profile ref (``reviewer/strict``): the bundle carries the
+            revision ``run_id`` pinned at its start, never the latest one.
         :raises CoralSessionError: Permanent ``session.invalid`` for an ownerless run
             outside a single-user server; permanent ``session.agent_not_supported`` when the
-            stance or step cannot name a bundle, or the bundle breaks a step rule.
+            stance or step cannot name a bundle, a profile has no pinned revision, or the
+            bundle breaks a step rule.
         """
         if owner is None and not ownerless_runs_allowed():
             raise CoralSessionError(
@@ -160,6 +177,7 @@ class OmnigentStepAgents:
             stance,
             (workflow_slug, node_id, roster_index),
             session_id,
+            (run_id, profile),
         )
 
     def _resolve(
@@ -169,8 +187,10 @@ class OmnigentStepAgents:
         stance: str,
         step: tuple[str | None, str | None, int | None],
         session_id: str | None,
+        pinned: tuple[str | None, str | None],
     ) -> str:
-        config_yaml, bundle_stance, name = _bundle(stance, *step)
+        overlay = self._pinned_overlay(workspace_id, stance, *pinned)
+        config_yaml, bundle_stance, name = _bundle(stance, *step, overlay)
         # Agent rows belong to a workspace: use the run's, whatever the caller's scope.
         with workspace_scope(workspace_id):
             if session_id is not None:
@@ -204,6 +224,35 @@ class OmnigentStepAgents:
             while len(self._cache) > self._max_entries:
                 self._cache.popitem(last=False)
         return agent.agent_id
+
+    def _pinned_overlay(
+        self, workspace_id: int, stance: str, run_id: str | None, profile: str | None
+    ) -> ProfileOverlay | None:
+        """The revision of ``profile`` that ``run_id`` pinned; ``None`` for a bare stance."""
+        if profile is None:
+            return None
+        parsed = parse_roster_entry(profile)
+        if parsed is None or parsed[1] is None:
+            return None
+        missing = CoralSessionError(
+            "session.agent_not_supported",
+            f"Profile missing: {profile} has no revision pinned for this run",
+        )
+        if self._profiles is None or run_id is None or parsed[0] != stance:
+            raise missing
+        revision_id = self._profiles.run_pin(
+            workspace_id=workspace_id, run_id=run_id, profile_ref=profile
+        )
+        revision = (
+            None
+            if revision_id is None
+            else self._profiles.get_revision(workspace_id=workspace_id, revision_id=revision_id)
+        )
+        if revision is None:
+            raise missing
+        return ProfileOverlay(
+            revision.profile_ref, revision.id, revision.revision_no, revision.spec
+        )
 
     def _session_agent(self, session_id: str, owner: str | None, name: str) -> str | None:
         """The agent an earlier try's session runs, when it is the owner's agent of ``name``."""

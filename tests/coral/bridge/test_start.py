@@ -21,9 +21,11 @@ from coral.bridge.config import (
 from coral.bridge.service import EngineBridge
 from coral.bridge.start import (
     RunNotRunnable,
+    check_profiles,
     check_startable,
     live_slot_bound,
     live_work_bound,
+    start_engine_run,
     worst_effect_key_length,
 )
 from coral.db.enum_codecs import ActorKind, LogKind, RunStatus, SlotStatus, WorkKind
@@ -31,6 +33,7 @@ from coral.engine.types import EngineConfig
 from coral.model.canonical import canonical_bytes, content_hash
 from coral.model.ir import Analysis, CompiledGraph, LoopInfo, UnresolvedFact
 from coral.model.loader import MAX_DOCUMENT_BYTES
+from coral.profiles.spec import ProfileSpec
 from coral.stores.fakes import FakeRunStore
 from coral.stores.protocols import CoralRun, RunStartSpec, StartKeyConflict
 from coral.stores.workflow_versions import pinned_version_id
@@ -181,7 +184,9 @@ def test_an_ownerless_start_needs_the_auth_less_switch(world: World) -> None:
         ),
         ("#" * (MAX_DOCUMENT_BYTES + 1), "workflow.too_large"),
         (_linear(step("plan", ["planner"])), "profile.unsupported"),
+        (_linear(step("plan", ["reviewer/Strict"])), "profile.unsupported"),
         (_linear(step("pair", ["implementer", "implementer"])), "graph.concurrent_writers"),
+        (_linear(step("pair", ["implementer/a", "implementer"])), "graph.concurrent_writers"),
         (
             _region(step("left", ["implementer"]), step("right", ["implementer"])),
             "graph.concurrent_writers",
@@ -205,7 +210,9 @@ def test_an_ownerless_start_needs_the_auth_less_switch(world: World) -> None:
         "not_runnable",
         "oversized_yaml",
         "unsupported_profile",
+        "invalid_profile_ref",
         "two_writers_in_a_roster",
+        "two_writers_one_a_profile",
         "two_writers_in_a_region",
         "33_slots_in_a_node",
         "33_slots_in_a_region",
@@ -808,3 +815,92 @@ def test_another_user_s_start_with_the_same_key_starts_that_user_s_own_run(
     with pytest.raises(StartKeyConflict):
         start(world, spec=run_spec(user="bob"), actor="bob")
     assert world.run(bob.id) == bob
+
+
+_PROFILED = _linear(step("review", ["reviewer/strict"]))
+
+
+def _save(world: World, instructions: str, base: int | None) -> str:
+    revision, _created = world.profiles.save_revision(
+        workspace_id=WORKSPACE,
+        profile_ref="reviewer/strict",
+        owner=run_spec().user_id,
+        spec=ProfileSpec(name="Strict", instructions=instructions),
+        base_revision_no=base,
+    )
+    return revision.id
+
+
+def _pin(world: World, run_id: str) -> str | None:
+    return world.profiles.run_pin(
+        workspace_id=WORKSPACE, run_id=run_id, profile_ref="reviewer/strict"
+    )
+
+
+def test_a_start_pins_the_latest_revision_of_each_profile(world: World) -> None:
+    _save(world, "one", None)
+    latest = _save(world, "two", 1)
+
+    run = start(world, _PROFILED)
+
+    assert run.status == int(RunStatus.RUNNING)
+    assert _pin(world, run.id) == latest
+    check_profiles(world.bridge, compile_text(_PROFILED)[0], workspace_id=WORKSPACE, owner="alice")
+
+
+def test_a_retried_start_keeps_the_pins_its_first_try_wrote(world: World) -> None:
+    first = _save(world, "one", None)
+    # The first try pinned, then stopped before it stored the run.
+    world.profiles.pin_run(
+        workspace_id=WORKSPACE,
+        run_id=run_id_for(),
+        owner=run_spec().user_id,
+        refs=["reviewer/strict"],
+    )
+    _save(world, "two", 1)
+
+    run = start(world, _PROFILED)
+    again = start(world, _PROFILED)
+
+    assert again.id == run.id
+    assert _pin(world, run.id) == first
+
+
+def test_a_missing_profile_refuses_the_start_and_the_pre_check(world: World) -> None:
+    graph = check_startable(_PROFILED, run_id=run_id_for())
+
+    with pytest.raises(RunNotRunnable, match="install or replace reviewer/strict") as raised:
+        start(world, _PROFILED)
+    assert raised.value.code == "profile.missing"
+    with pytest.raises(RunNotRunnable) as checked:
+        check_profiles(world.bridge, graph, workspace_id=WORKSPACE, owner=run_spec().user_id)
+    assert checked.value.code == "profile.missing"
+    assert world.runs.get_run(run_id_for(), workspace_id=WORKSPACE) is None
+
+
+def test_another_owner_s_profile_is_missing(world: World) -> None:
+    world.profiles.save_revision(
+        workspace_id=WORKSPACE,
+        profile_ref="reviewer/strict",
+        owner="mallory@example.com",
+        spec=ProfileSpec(name="Strict"),
+        base_revision_no=None,
+    )
+    with pytest.raises(RunNotRunnable) as raised:
+        start(world, _PROFILED)
+    assert raised.value.code == "profile.missing"
+
+
+def test_a_bridge_without_a_profile_store_refuses_a_profile(world: World) -> None:
+    bare = EngineBridge(run_store=world.runs, queue_store=world.queue, versions=world.versions)
+    with pytest.raises(RunNotRunnable) as raised:
+        start_engine_run(
+            bare,
+            spec=run_spec(),
+            yaml_text=_PROFILED,
+            start_key=START_KEY,
+            actor="user:alice",
+        )
+    assert raised.value.code == "profile.missing"
+    with pytest.raises(RunNotRunnable):
+        check_profiles(bare, compile_text(_PROFILED)[0], workspace_id=WORKSPACE, owner=None)

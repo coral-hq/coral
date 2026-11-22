@@ -76,6 +76,7 @@ from coral.slots.executors import (
     send_input_executor,
 )
 from coral.stores.fakes import FakeQueueStore, FakeRunStore
+from coral.stores.profiles import SqlProfileStore
 from coral.stores.protocols import (
     CoralRun,
     QueueStore,
@@ -145,6 +146,7 @@ class World:
     bridge: EngineBridge
     # The bridge's bound-session index, which its create feedback fills.
     bound: BoundSessions
+    profiles: SqlProfileStore
     # The database of a SQL world; ``None`` on the in-memory stores.
     db_uri: str | None = None
 
@@ -158,6 +160,7 @@ class World:
             runs,
             FakeQueueStore(run_store=runs),
             SqlAlchemyWorkflowVersionStore(engine),
+            SqlProfileStore(engine),
             gate_ids=gate_ids,
         )
 
@@ -167,6 +170,7 @@ class World:
             SqlAlchemyCoralRunStore(db_uri),
             SqlAlchemyCoralQueueStore(db_uri),
             SqlAlchemyWorkflowVersionStore(db_uri),
+            SqlProfileStore(db_uri),
             db_uri=db_uri,
             gate_ids=gate_ids,
         )
@@ -177,6 +181,7 @@ class World:
         runs: RunStore,
         queue: QueueStore,
         versions: SqlAlchemyWorkflowVersionStore,
+        profiles: SqlProfileStore,
         *,
         db_uri: str | None = None,
         gate_ids: Callable[[], str] | None = None,
@@ -189,6 +194,7 @@ class World:
             versions=versions,
             clock=clock,
             bound_sessions=bound,
+            profiles=profiles,
             **({} if gate_ids is None else {"gate_elicitation_ids": gate_ids}),
         )
         return cls(
@@ -198,6 +204,7 @@ class World:
             clock=clock,
             bridge=bridge,
             bound=bound,
+            profiles=profiles,
             db_uri=db_uri,
         )
 

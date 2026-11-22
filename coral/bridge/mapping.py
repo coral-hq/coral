@@ -47,10 +47,11 @@ from coral.engine import types as engine
 from coral.engine.machines.activation import find_activation
 from coral.engine.machines.slot import find_slot
 from coral.model.ir import CompiledGraph
+from coral.profiles.refs import roster_stance
 from coral.signals.turn_facts import EdgeFacts
 from coral.slots.executors import CANCEL_SESSIONS, CLOSE_SLOT, CREATE_SESSION, SEND_INPUT
 from coral.stores.protocols import WorkItemDraft
-from coral.tools.catalog import ORCHESTRATOR_STANCE, STEP_STANCES
+from coral.tools.catalog import ORCHESTRATOR_STANCE
 
 # Effects whose outcome is fed back to the engine as a completion or a failure.
 FED_KINDS = frozenset(
@@ -308,11 +309,12 @@ def _create(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft:
     slot = find_slot(ctx.state, effect.subject)
     profile = slot.profile if slot is not None else str(effect.payload.get("profile", ""))
     # The stance picks the session's bundle and tools, so only a step stance gets one.
-    if profile not in STEP_STANCES:
+    stance = roster_stance(profile)
+    if stance is None:
         raise UnsupportedStance(f"slot {effect.subject} has no step stance")
     fields = {
         "role": "step",
-        "stance": profile,
+        "stance": stance,
         "workflow_slug": ctx.graph.workflow_id,
         "node_id": _node_id(ctx, effect),
         "roster_index": roster_index(effect.subject),
@@ -320,6 +322,9 @@ def _create(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft:
         "slot_role": slot_role(profile).name.lower(),
         "generation": slot.session_generation if slot is not None else 1,
     }
+    if profile != stance:
+        # The step's agent is built from the revision of this profile its run pinned.
+        fields["profile"] = profile
     return _slot_draft(ctx, effect, CREATE_SESSION, fields)
 
 

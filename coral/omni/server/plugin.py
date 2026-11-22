@@ -45,6 +45,7 @@ from coral.omni.server.usage import OmnigentRunSpend
 from coral.queue.executors import EffectExecutor
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.recovery.relaunch import DEFAULT_RECONNECT_GRACE_S, LivenessPass, LivenessRef
+from coral.stores.profiles import SqlProfileStore
 from coral.stores.protocols import QueueStore, RunStore
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import FreshBindingLookup, SqlAlchemySessionBindingStore
@@ -687,6 +688,7 @@ def _wire_session_engine(
         services.agent_store,
         services.artifact_store,
         conversation_store=services.conversation_store,
+        profiles=SqlProfileStore(db_uri),
     )
     executors: dict[str, EffectExecutor] = {
         CREATE_SESSION: create_session_executor(
@@ -820,6 +822,7 @@ async def coral_lifespan(
                 queue_store=queue_store,
                 versions=SqlAlchemyWorkflowVersionStore(storage_location),
                 bound_sessions=bound,
+                profiles=SqlProfileStore(storage_location),
             )
             server_config = getattr(services, "server_config", None)
             workers = drain_concurrency(server_config)
