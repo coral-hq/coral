@@ -41,16 +41,27 @@ The workflow engine is designed and is next on the
 [design](docs/coral/roadmap/coral-design.md). There are no releases yet, so
 run Coral from source.
 
-Run Coral steps only on content you trust. On macOS a step's shell can still
-connect to other sessions' harness sockets, which is enough to drive their
-turns (CRL-166), and can read and write your clipboard (CRL-171). Since CRL-165
-it can no longer read other processes' environments or command lines. That was
-measured on macOS 27.2.1 only, and no CI lane runs macOS (CRL-170). Your model
-API key is still in those environments and command lines, where processes
-outside the sandbox can read it (CRL-167). On a single-user server, on any
-platform, a step can act as you, the owner, so neither a human gate nor the
-sandbox is a security control there (CRL-159). See the
-[ADR-05 addendum](docs/coral/decisions/ADR-05-topology.md#addendum-crl-165-process-reads-on-macos-2026-11-22).
+Run Coral steps only on content you trust. On macOS a step's shell can read
+and write your clipboard (CRL-171), and it can still connect to other programs'
+local sockets, such as Docker Desktop's, a tmux server started with
+`tmux -S <path>`, or a Claude Code session's message inbox (CRL-174). Since
+CRL-165 it can no longer read other processes' environments or command lines.
+Since CRL-166 it can no longer connect to the harness sockets of other Omnigent
+sessions under this host's socket root or the default `/tmp/omnigent-<uid>`, to
+other Omnigent terminals' tmux servers, or to your own tmux server's default
+socket (`tmux-<uid>`, with `-L` labels and `TMUX_TMPDIR`). Both were measured
+on macOS 27.2.1 only, and no CI lane runs macOS (CRL-170). Your model API key
+is still in those environments and command lines, where processes outside the
+sandbox can read it (CRL-167). From the code, not measured: on either platform
+a step with network on can still reach Omnigent's loopback TCP listeners
+(CRL-177), on macOS also the codex-native harness's socket (CRL-177), and on
+Linux other programs' abstract sockets (CRL-174); and on either platform a
+claude-sdk step can write the plugins and sessions in your real `~/.claude`,
+and your own Claude Code runs those plugins' hooks outside the sandbox
+(CRL-176). On a single-user server, on any platform, a step can act as you,
+the owner, so neither a human gate nor the sandbox is a security control there
+(CRL-159). See the
+[ADR-05 addendum](docs/coral/decisions/ADR-05-topology.md#addendum-crl-166-harness-sockets-on-macos-2026-11-22).
 
 ## Run Coral from source
 

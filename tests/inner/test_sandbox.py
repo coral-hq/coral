@@ -452,6 +452,236 @@ def test_with_denied_unix_sockets_resolves_dedupes_and_is_pure() -> None:
     assert augmented is not policy
 
 
+# CORAL(S112): the harness socket roots every resolved policy denies
+def _with_every_clone(policy: SandboxPolicy, paths: list[pathlib.Path]) -> list[SandboxPolicy]:
+    from omnigent.inner.sandbox import (
+        with_additional_read_roots,
+        with_additional_write_files,
+        with_additional_write_roots,
+    )
+
+    return [
+        with_additional_read_roots(policy, paths),
+        with_additional_write_roots(policy, paths),
+        with_additional_write_files(policy, paths),
+    ]
+
+
+def test_sandbox_policy_round_trips_deny_unix_socket_roots(tmp_path: pathlib.Path) -> None:
+    """The roots survive the launcher wire and every clone; an old payload has none."""
+    roots = [pathlib.Path("/private/tmp/crl-x"), pathlib.Path("/private/tmp/omnigent-1")]
+    policy = dataclasses.replace(_noop_policy(), deny_unix_socket_roots=roots)
+    decoded = SandboxPolicy.from_jsonable(policy.to_jsonable())
+    assert decoded.deny_unix_socket_roots == roots
+    for clone in _with_every_clone(decoded, [tmp_path]):
+        assert clone.deny_unix_socket_roots == roots
+        assert clone.deny_unix_socket_roots is not decoded.deny_unix_socket_roots
+    assert SandboxPolicy.from_jsonable(_noop_policy().to_jsonable()).deny_unix_socket_roots is None
+    assert SandboxPolicy.from_jsonable({}).deny_unix_socket_roots is None
+
+
+def test_policy_clones_keep_every_field(tmp_path: pathlib.Path) -> None:
+    """A field the clone forgets to copy fails here, whichever field is added next."""
+    from omnigent.inner.datamodel import CredentialProxySpec, GitSshBinding
+
+    path = tmp_path.resolve() / "p"
+    binding = GitSshBinding("h", 22, "git", "r", frozenset({"fetch"}), "/i", "/k")
+    values = {
+        "backend_type": "darwin_seatbelt",
+        "active": True,
+        "read_roots": [path / "r"],
+        "write_roots": [path / "w"],
+        "write_files": [path / "f"],
+        "allow_network": False,
+        "copy_on_write_roots": [path / "c"],
+        "copy_on_write_namespace": (1, 2, 3),
+        "cwd_allow_hidden": [".venv"],
+        "cwd_hidden_scan_max_entries": 7,
+        "cwd_hidden_scan_overflow": "error",
+        "cwd_hidden_scan_recursive": True,
+        "mask_paths": [path / "m"],
+        "env_passthrough": ["A"],
+        "spawn_env_allowlist": ["B"],
+        "bind_host_proc": True,
+        "egress_relay_port": 9,
+        "egress_socket_path": "/e.sock",
+        "git_ssh_socket_path": "/g.sock",
+        "deny_unix_socket_paths": [path / "d.sock"],
+        "deny_unix_socket_roots": [path / "root"],
+        "credential_source_paths": [path / "s"],
+        "launch_tmpdir_env": "X",
+        "launch_tmpdir_parent": path / "l",
+        "credential_proxy": CredentialProxySpec(entries=[]),
+        "git_ssh": [binding],
+        "mask_scan_skip_roots": [path / "w"],
+        "private_tmpdir": path / "t",
+    }
+    assert set(values) == {field.name for field in dataclasses.fields(SandboxPolicy)}
+    policy = SandboxPolicy(**values)  # type: ignore[arg-type]
+    for clone in _with_every_clone(policy, []):
+        assert clone == policy
+        assert clone is not policy
+
+
+def test_with_denied_unix_socket_roots_resolves_dedupes_and_is_pure() -> None:
+    from omnigent.inner.sandbox import with_denied_unix_socket_roots, with_denied_unix_sockets
+
+    policy = _noop_policy()
+    root = pathlib.Path("/tmp/crl-x")
+
+    augmented = with_denied_unix_socket_roots(policy, [root, root])
+
+    assert augmented.deny_unix_socket_roots == [root.resolve(strict=False)]
+    assert augmented.deny_unix_socket_paths is None
+    assert policy.deny_unix_socket_roots is None
+    assert augmented is not policy
+    # Both deny lists keep their earlier entries when extended (the shared merge step).
+    other = pathlib.Path("/tmp/crl-y")
+    extended = with_denied_unix_sockets(with_denied_unix_sockets(augmented, [root]), [other, root])
+    extended = with_denied_unix_socket_roots(extended, [other, root])
+    both = [root.resolve(strict=False), other.resolve(strict=False)]
+    assert extended.deny_unix_socket_roots == both
+    assert extended.deny_unix_socket_paths == both
+
+
+def _resolved_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, setting: str | None, kind: str
+) -> list[pathlib.Path] | None:
+    return _resolved_policy(monkeypatch, tmp_path, setting, kind).deny_unix_socket_roots
+
+
+def _resolved_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, setting: str | None, kind: str
+) -> SandboxPolicy:
+    from omnigent.inner import sandbox
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    class _ActiveBackend:
+        def resolve(self, spec: OSEnvSpec, cwd: pathlib.Path) -> SandboxPolicy:
+            return dataclasses.replace(_noop_policy(), backend_type="darwin_seatbelt", active=True)
+
+    monkeypatch.setattr(sandbox, "_get_backend", lambda name: _ActiveBackend())
+    monkeypatch.setattr(sandbox, "_WARNED_ROOT_SETTINGS", set())
+    if setting is None:
+        monkeypatch.delenv("OMNIGENT_HARNESS_TMP_PARENT", raising=False)
+    else:
+        monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", setting)
+    spec = OSEnvSpec(type="caller_process", sandbox=OSEnvSandboxSpec(type=kind))
+    return sandbox.resolve_sandbox(spec, tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX harness socket roots")
+def test_resolve_sandbox_denies_the_harness_socket_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    default = pathlib.Path(f"/tmp/omnigent-{os.getuid()}").resolve(strict=False)
+    configured = pathlib.Path("/tmp/crl-roots-test")
+
+    roots = _resolved_roots(monkeypatch, tmp_path, str(configured), "darwin_seatbelt")
+
+    assert roots == [configured.resolve(strict=False), default]
+    assert _resolved_roots(monkeypatch, tmp_path, None, "darwin_seatbelt") == [default]
+    assert _resolved_roots(monkeypatch, tmp_path, str(default), "darwin_seatbelt") == [default]
+    assert _resolved_roots(monkeypatch, tmp_path, str(configured), "none") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX harness socket roots")
+@pytest.mark.parametrize("setting", ["loop", "~nosuchuser_omnigent/x", "deleted_cwd", "rel", "/"])
+def test_harness_socket_roots_never_raise_and_keep_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    caplog: pytest.LogCaptureFixture,
+    setting: str,
+) -> None:
+    """A bad setting cannot fail ``resolve_sandbox`` into an unsandboxed run; it warns."""
+    default = pathlib.Path(f"/tmp/omnigent-{os.getuid()}").resolve(strict=False)
+    kept = {"rel": [(tmp_path / "rel").resolve()], "/": [pathlib.Path("/")]}.get(setting, [])
+    if setting == "loop":
+        setting = str(tmp_path / "loop")
+        pathlib.Path(setting).symlink_to(setting)
+    elif setting == "deleted_cwd":
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        setting = "rel"
+    else:
+        monkeypatch.chdir(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.sandbox"):
+        roots = _resolved_roots(monkeypatch, tmp_path, setting, "darwin_seatbelt")
+
+    assert roots == [*kept, default]
+    warnings = [record.getMessage() for record in caplog.records]
+    assert any("harness socket root" in message for message in warnings), warnings
+    assert not any(str(tmp_path) in message for message in warnings), warnings
+    caplog.clear()
+    from omnigent.inner.sandbox import _harness_socket_roots
+
+    assert _harness_socket_roots() == roots
+    assert not caplog.records, "the same setting warned twice in one process"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX harness socket roots")
+def test_resolve_sandbox_stays_confined_when_realpath_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A root swapped mid-resolve (``realpath`` does not guard ``readlink``) keeps its spelling."""
+    from omnigent.inner import sandbox
+
+    real_realpath = os.path.realpath
+
+    def swapped(path: object, *args: object, **kwargs: object) -> str:
+        if "crl-roots-test" in str(path) or "omnigent-" in str(path):
+            raise FileNotFoundError(2, "swapped while resolving")
+        return real_realpath(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sandbox.os.path, "realpath", swapped)
+    policy = _resolved_policy(monkeypatch, tmp_path, "/tmp/crl-roots-test", "darwin_seatbelt")
+    monkeypatch.undo()
+
+    default = pathlib.Path(f"/tmp/omnigent-{os.getuid()}")
+    assert (policy.active, policy.backend_type) == (True, "darwin_seatbelt")
+    assert policy.deny_unix_socket_roots == [pathlib.Path("/tmp/crl-roots-test"), default]
+
+
+def test_with_private_tmpdir_grants_and_records_the_scratch(tmp_path: pathlib.Path) -> None:
+    """CORAL(S112): the scratch is a write root and named, but never sent over the wire."""
+    from omnigent.inner.sandbox import with_private_tmpdir
+
+    policy = with_private_tmpdir(_noop_policy(), tmp_path / "scratch")
+
+    resolved = (tmp_path / "scratch").resolve(strict=False)
+    assert (policy.private_tmpdir, policy.write_roots) == (resolved, [resolved])
+    assert "private_tmpdir" not in policy.to_jsonable()
+    assert _noop_policy().private_tmpdir is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX harness socket roots")
+def test_harness_socket_roots_never_raise_on_a_looping_default_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A symlink loop at the per-user default root, which anyone can plant in ``/tmp``, is kept."""
+    from omnigent.runtime.harnesses import paths
+
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    monkeypatch.setattr(paths, "harness_tmp_parent", lambda env=None: loop)
+
+    assert _resolved_roots(monkeypatch, tmp_path, None, "darwin_seatbelt") == [loop]
+
+
+# CORAL(S112): a failed import of the harness paths leaves the default to the profile builder
+def test_harness_socket_roots_never_raise_when_the_harness_paths_cannot_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.inner.sandbox import _harness_socket_roots
+
+    monkeypatch.setitem(sys.modules, "omnigent.runtime.harnesses.paths", None)
+
+    assert _harness_socket_roots() == []
+
+
 def test_with_spawn_env_allowlist_sets_sorted_deduped_copy() -> None:
     """``with_spawn_env_allowlist`` normalizes names and never mutates
     the input policy; ``None`` means "didn't opt in" and returns the

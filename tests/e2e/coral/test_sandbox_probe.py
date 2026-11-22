@@ -98,13 +98,12 @@ class Pin:
 
 
 # Owner tickets, by the exposure a pinned reachable shows.
-SOCKET_OWNER = "CRL-166"  # a step connects to another session's harness socket
 SERVER_OWNER = "CRL-159"  # a single-user server takes any local process as its owner
 
 EXPECTED: dict[str, dict[str, Pin]] = {
     # Pinned from one local run on macOS 27.2.1 with claude 2.1.325 (seatbelt).
     "darwin": {
-        "harness_socket": Pin("reachable", SOCKET_OWNER),
+        "harness_socket": Pin("denied"),
         "runner_environ": Pin("denied"),
         "runner_environ.api_key": Pin("denied"),
         "runner_environ.argv_api_key": Pin("denied"),
@@ -1111,7 +1110,7 @@ def test_lines_that_are_not_verdict_tokens_count_only_as_strays() -> None:
 
 def test_the_pin_comparator_names_owners_and_directions() -> None:
     pins = {
-        "socket": Pin("reachable", SOCKET_OWNER),
+        "socket": Pin("reachable", SERVER_OWNER),
         "file": Pin("denied"),
         "env.names": Pin("A_API_KEY,B_API_KEY"),
     }

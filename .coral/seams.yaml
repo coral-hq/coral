@@ -3444,3 +3444,91 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S112
+    title: The sandbox keeps AF_UNIX harness sockets under the configured and default roots, other terminals' tmux servers and the user's default tmux socket unreachable
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 27.2.1 only: with allow_network true the seatbelt
+      profile's (allow network*) admitted an AF_UNIX connect to any same-user
+      socket, so a step's shell reached another session's harness socket,
+      which has no bearer on POSIX and drives that conversation (turn
+      injection, then the victim's own runner submits its handoff), and
+      netstat -f unix listed every socket path. resolve_sandbox now gives
+      every active policy deny_unix_socket_roots, the configured and the
+      per-user default harness root, carried over the launcher wire and
+      through clones. Resolving them never raises: a configured root that
+      cannot be resolved is left out with a warning (once per setting and
+      process), a path swapped while it resolves keeps its plain spelling, and
+      the default is always kept, so a bad or raced setting cannot fail
+      resolve_sandbox into an unsandboxed run. Seatbelt denies each root as a
+      subpath of its real path, and the per-user default root even for a
+      policy that carries no roots (an old launcher payload), after every
+      socket allow; plus Omnigent's terminal and tmux-replies sockets and the
+      user's default tmux socket (tmux-<uid>/<label>) by path-regex, and the
+      net.local sysctls. Where (allow network*) applied, the scratch the child gets as
+      $TMPDIR (recorded on the policy by the os_env helper and the launcher
+      host pass) and each write root inside a denied root (S109's CLI launch
+      dir) are allowed again after those denies, unless that dir is or holds
+      the temp dir, or holds a denied root or a deny-listed socket. The literal
+      deny_unix_socket_paths denies stay last and now also deny writing the
+      socket path and its dir, so a pane can rename neither its own tmux
+      socket nor its private dir away from the deny, while files in that dir
+      stay editable (measured). Seatbelt matches the resolved path; a
+      directory path-literal and a {n} regex quantifier are silent no-ops. The
+      process's own sockets in its scratch, clip.sock, DNS and a full
+      claude-sdk turn are unaffected. bwrap ignores the field: --tmpfs /tmp
+      already hides the default root. Not covered: AF_UNIX harness sockets
+      under another instance's own root, a harness root inside a sandbox write
+      root, a root created as a symlink after the profile is built, a Linux
+      root under a path bwrap binds and processes outside the sandbox
+      (CRL-173), socket paths found through fsgetpath and other programs'
+      sockets, a tmux server on a custom -S path among them (CRL-174), the
+      codex-native app-server socket and loopback TCP listeners (CRL-177), and
+      other terminals' clip.sock (CRL-171). No CI lane runs macOS (CRL-170).
+    files:
+      - omnigent/inner/os_env.py
+      - omnigent/inner/sandbox.py
+      - omnigent/inner/seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+    tests:
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 120
+    budget_exception:
+      lines: 258
+      reason: >-
+        tests/inner/sandbox/test_sandbox_behavior.py (258 changed lines): the
+        probe script that connects to each throwaway socket, binds and
+        connects its own in the scratch, a nested terminal shape, a write root
+        under the harness root and the launch dir, renames a deny-listed
+        socket and its dir, edits files in that dir and reads netstat; the
+        throwaway listener with its clean stop; and the test that runs the
+        probe outside and inside, through the os_env helper and the CLI wrap
+        with a launch dir and a pane dir in its $TMPDIR.
+        tests/inner/test_sandbox.py (230 changed lines): the wire and clone
+        test, the test that a clone keeps every policy field, the helper
+        tests, the resolve_sandbox test, the never-raise and warn-once cases
+        (a symlink loop at either root, ~nosuchuser, a deleted cwd, a relative
+        root, a broad root, a path swapped while it resolves) and the
+        scratch-recording test. tests/inner/test_seatbelt_sandbox.py (193
+        changed lines): the placement test in four network modes, the guard
+        cases, the pane-shaped test, the always-denied default root and its
+        drift test, and the narrowed empty-list test.
+        omnigent/inner/sandbox.py (154 changed lines): the root and scratch
+        fields with their docstrings, the wire and clone, the shared
+        resolve-and-dedupe step, the root form of the helper, the
+        never-raising root resolution with its once-per-setting warnings, and
+        the scratch recording in the launcher host pass. The other files are
+        within budget: omnigent/inner/seatbelt_sandbox.py 75,
+        omnigent/inner/os_env.py 5.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
