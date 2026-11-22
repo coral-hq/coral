@@ -129,6 +129,8 @@ class Analysis(_Frozen):
     unresolved: tuple[UnresolvedFact, ...] = ()
     label_sets: tuple[LabelSet, ...] = ()
     checked_parts: tuple[CheckedPart, ...] = ()
+    # True when the graph needs SES-10 structure runtime (repeat / parallel cancel).
+    requires_structure_runtime: bool = False
 
 
 class CompiledGraph(_Frozen):

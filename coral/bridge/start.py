@@ -70,7 +70,12 @@ _WRITER = "implementer"
 # Arrows region analysis does not follow.
 _NON_STRUCTURAL = frozenset({"back", "failure"})
 # Effect kinds a slot's effects use; the longest bounds the worst-case key.
-_SLOT_KINDS = (*FED_KINDS, "cancel_sessions", *UNMAPPED_KINDS)
+# Structure kinds are region-scoped, not ``{run}:{seq}:{kind}:{slot}``, so omit them.
+_SLOT_KINDS = tuple(
+    name
+    for name in (*FED_KINDS, "cancel_sessions", *UNMAPPED_KINDS)
+    if not name.startswith("structure.")
+)
 # Digits allowed for an engine seq and for an unlimited loop's pass index.
 _SEQ_DIGITS = 10
 _UNLIMITED_PASS_DIGITS = 6

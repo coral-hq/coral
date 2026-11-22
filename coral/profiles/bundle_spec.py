@@ -155,6 +155,7 @@ def _bundle_yaml(
     model: str | None,
     provider: str | None,
     profile: ProfileSpec | None = None,
+    harness: str | None = None,
 ) -> bytes:
     seed = load_seed(stance.value)
     config = copy.deepcopy(dict(seed.config))
@@ -168,6 +169,21 @@ def _bundle_yaml(
         }
     }
     executor = _section(config, "executor")
+    executor_config = _section(executor, "config")
+    if harness is not None:
+        executor_config["harness"] = harness
+    if harness == "claude-native":
+        # Run-owned native steps: fail closed and skip the TUI permission prompt.
+        executor_config["permission_mode"] = "bypassPermissions"
+        executor_config["policy_failure_mode"] = "fail_closed"
+        from coral.tools.catalog import CATALOG, tools_for_stance
+
+        # Written for Omnigent launch (S11); Omnigent must not import coral/.
+        allowed: list[str] = []
+        for decl in tools_for_stance(CATALOG, stance.value):
+            allowed.append(decl.name)
+            allowed.append(f"mcp__omnigent__{decl.name}")
+        executor_config["native_preapproved"] = list(dict.fromkeys(allowed))
     if model is not None:
         executor["model"] = model
     if provider is not None:
@@ -185,6 +201,7 @@ def build_step_bundle_yaml(
     model: str | None,
     provider: str | None,
     profile: ProfileOverlay | None = None,
+    harness: str | None = None,
 ) -> bytes:
     """
     Build the ``config.yaml`` bytes for one workflow step's agent.
@@ -197,6 +214,8 @@ def build_step_bundle_yaml(
         never goes into a bundle.
     :param profile: The pinned profile revision to overlay on the seed, or
         ``None`` for the bare stance. Its model, when set, replaces *model*.
+    :param harness: Optional harness override, e.g. ``"claude-native"`` when
+        ``claude_native_steps`` is on. ``None`` keeps the seed's harness.
     :returns: Canonical YAML (sorted keys), identical for identical inputs.
     """
     generated: dict[str, object] = {
@@ -217,6 +236,7 @@ def build_step_bundle_yaml(
         model=model,
         provider=provider,
         profile=profile.spec if profile is not None else None,
+        harness=harness,
     )
 
 

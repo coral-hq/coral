@@ -1192,10 +1192,12 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     """
     _skip_httpx_cli_import()
     from omnigent.native.native_policy_hook import (
+        POLICY_FAILURE_MODE_FAIL_CLOSED,
         evaluation_response_to_hook_output,
-        fail_ask_hook_output,
         hook_payload_to_evaluation_request,
+        normalize_policy_failure_mode,
         policy_hook_reauth,
+        policy_unavailable_hook_output,
         post_evaluate_with_retry,
         read_relay_policy_config,
         relay_policy_evaluate_url,
@@ -1217,15 +1219,25 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     # Read before the session identity: a session switch picks a new
     # generation, so an answer for the previous session opens no window.
     cache_generation = policy_allow_cache.generation(bridge_dir)
-    session_id = read_active_session_id(bridge_dir)
-    if not session_id:
+    config = read_permission_hook_config(bridge_dir)
+    failure_mode = config.get("policy_failure_mode")
+    closed = normalize_policy_failure_mode(failure_mode) == POLICY_FAILURE_MODE_FAIL_CLOSED
+    hook_event = payload.get("hook_event_name", "")
+
+    def _fail_unavailable(detail: str | None = None) -> int:
+        out = policy_unavailable_hook_output(hook_event, failure_mode, detail)
+        if out is not None:
+            sys.stdout.write(json.dumps(out))
         return 0
 
-    hook_event = payload.get("hook_event_name", "")
+    session_id = read_active_session_id(bridge_dir)
+    if not session_id:
+        return _fail_unavailable("missing session id") if closed else 0
+
     eval_request = hook_payload_to_evaluation_request(hook_event, payload)
     if eval_request is None:
         # Unrecognized hook event — no policy to evaluate.
-        return 0
+        return _fail_unavailable("no policy opinion") if closed else 0
 
     # Stamp the live model from this session's statusLine capture.
     context = eval_request["event"]["context"]
@@ -1233,12 +1245,6 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     status_model = read_claude_status_model(bridge_dir)
     if status_model:
         context["model"] = status_model
-
-    def _fail_closed(detail: str | None = None) -> int:
-        out = fail_ask_hook_output(hook_event, detail)
-        if out is not None:
-            sys.stdout.write(json.dumps(out))
-        return 0
 
     # Prefer the relay; fall back to direct server call when relay not yet up.
     relay = read_relay_policy_config(bridge_dir)
@@ -1251,10 +1257,9 @@ def _main_evaluate_policy(argv: list[str]) -> int:
         }
         reauth = None
     else:
-        config = read_permission_hook_config(bridge_dir)
         ap_server_url = config.get("ap_server_url")
         if not isinstance(ap_server_url, str) or not ap_server_url:
-            return 0
+            return _fail_unavailable("missing server URL") if closed else 0
         headers = {}
         raw_headers = config.get("ap_auth_headers")
         if isinstance(raw_headers, dict):
@@ -1279,16 +1284,16 @@ def _main_evaluate_policy(argv: list[str]) -> int:
         reauth=reauth,
     )
     if resp is None:
-        return _fail_closed(api_error or (reauth.failure_reason if reauth else None))
+        return _fail_unavailable(api_error or (reauth.failure_reason if reauth else None))
     if not resp.content:
         print("omnigent evaluate-policy hook: empty Coral response", file=sys.stderr)
-        return _fail_closed()
+        return _fail_unavailable()
 
     try:
         eval_response = resp.json()
     except json.JSONDecodeError:
         print("omnigent evaluate-policy hook: malformed Coral response", file=sys.stderr)
-        return _fail_closed()
+        return _fail_unavailable()
 
     # Through the relay the server evaluated the relay's session, which can
     # trail a session switch.

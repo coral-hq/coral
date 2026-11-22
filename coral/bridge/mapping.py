@@ -55,13 +55,24 @@ from coral.tools.catalog import ORCHESTRATOR_STANCE
 
 # Effects whose outcome is fed back to the engine as a completion or a failure.
 FED_KINDS = frozenset(
-    {"create_session", "send_input", "close_slot", "nudge", "retry_step", "runner_lost"}
+    {
+        "create_session",
+        "send_input",
+        "close_slot",
+        "nudge",
+        "steer",
+        "retry_step",
+        "runner_lost",
+    }
 )
 # Effects that queue no work yet, and why; each is logged when it is committed.
 UNMAPPED_KINDS: Mapping[str, str] = MappingProxyType(
     {
         "notify": "alerts come from the commit; a decision's reminder goes to the orchestrator",
         "arm_timer": "timer rows come from the run's armed timers",
+        # SES-10: completed via EffectCompleted → coral.structure apply_*; workers land later.
+        "structure.start_item": "structure runtime applies start_item on effect completion",
+        "structure.cancel_region": "structure runtime applies cancel_region on effect completion",
     }
 )
 # The row of a ``retry_step``: fence the old session, salvage and reset (``coral.recovery``).
@@ -124,6 +135,11 @@ def map_effect(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft | None:
         reason = "resume" if ctx.state.status == "paused" else effect.payload.get("reason")
         text = nudge_text(ctx.state, effect.subject, reason if isinstance(reason, str) else None)
         return _slot_draft(ctx, effect, SEND_INPUT, _message(ctx, effect, "nudge", text))
+    if effect.kind == "steer":
+        text = effect.payload.get("text")
+        if not isinstance(text, str) or not text:
+            return None
+        return _slot_draft(ctx, effect, SEND_INPUT, _message(ctx, effect, "steer", text))
     if effect.kind == "close_slot":
         fields = {
             "session_id": slot_session_id(ctx.workspace_id, ctx.state, effect.subject),

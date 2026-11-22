@@ -441,7 +441,7 @@ async def _follow_a_run(
             "unavailable": None,
         },
     }
-    # A finished run retries nothing; preflight is not served yet.
+    # A finished run retries nothing; empty preflight bodies fail validation.
     assert (retry_finished.status_code, retry_finished.json()["error"]) == (
         409,
         {
@@ -450,7 +450,7 @@ async def _follow_a_run(
             "details": {"status": "completed", "pause_reason": None},
         },
     )
-    assert (preflight.status_code, preflight.json()["error"]["code"]) == (501, "not_implemented")
+    assert (preflight.status_code, preflight.json()["error"]["code"]) == (422, "validation_failed")
 
     assert _actions(cancelled.json()) == ("cancelled", None, []), cancelled.text
     assert _actions(cancelled_again.json()) == ("cancelled", None, [])

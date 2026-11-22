@@ -35,6 +35,7 @@ from coral.engine.types import (
     HandoffEvaluated,
     HandoffReceived,
     Input,
+    MessageAgent,
     PauseRun,
     Receipt,
     RetryStep,
@@ -602,7 +603,22 @@ def _runs_emitting_every_kind() -> list[tuple[CompiledGraph, Driven]]:
         node_id="triage", label="approved", reason="fine", iteration_path=("a6:1",)
     )
     driven.append((gated, drive(gated, [approve, CancelRun()], after=reviewing)))
+    # TLS-04 MessageAgent → steer; structure.* stay dark until fan-out is reducer-wired.
+    driven.append(
+        (
+            GRAPH,
+            drive(
+                GRAPH,
+                [MessageAgent(from_slot_id="orchestrator", to_slot_id=IMPLEMENT, text="ping")],
+                after=_started(),
+            ),
+        )
+    )
     return driven
+
+
+# ENG-08 helpers name these; the reducer does not emit them from fixture runs yet.
+_DARK_KINDS = frozenset({"structure.start_item", "structure.cancel_region"})
 
 
 def test_every_effect_the_engine_emits_is_mapped_or_named_unmapped() -> None:
@@ -620,8 +636,22 @@ def test_every_effect_the_engine_emits_is_mapped_or_named_unmapped() -> None:
                     continue  # refused, as the stance test shows
                 draft = map_effect(_ctx(step.after, graph=graph), effect)
                 assert (draft is None) is (effect.kind in UNMAPPED_KINDS), effect.kind
-    # The runs above reach every kind, so a stale list of kinds fails here too.
-    assert seen == known
+    # Fixture runs reach every non-dark kind; dark kinds may stay unseen until workers emit them.
+    assert seen <= known
+    assert known - _DARK_KINDS <= seen
+
+
+def test_structure_kinds_stay_named_unmapped_until_workers_emit_them() -> None:
+    ctx = _ctx(_started().state)
+    for kind in _DARK_KINDS:
+        effect = Effect(
+            effect_key=f"{RUN_ID}:1:{kind}:subject",
+            kind=kind,
+            subject="subject",
+            payload={},
+        )
+        assert map_effect(ctx, effect) is None
+        assert kind in UNMAPPED_KINDS
 
 
 def test_the_anchor_create_is_due_at_once_and_names_the_anchor() -> None:

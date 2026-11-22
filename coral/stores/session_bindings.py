@@ -121,6 +121,10 @@ class SessionBindings(Protocol):
 
     def list_for_run(self, workspace_id: int, run_id: str) -> list[SessionBinding]: ...
 
+    def transfer(
+        self, workspace_id: int, old_session_id: str, new_session_id: str
+    ) -> SessionBinding: ...
+
 
 @runtime_checkable
 class SessionBindingLookup(Protocol):
@@ -377,6 +381,52 @@ class SqlAlchemySessionBindingStore:
                 .order_by(asc(SessionBindingRow.role), asc(SessionBindingRow.session_id))
             ).all()
             return [_to_binding(row) for row in rows]
+
+    def transfer(
+        self, workspace_id: int, old_session_id: str, new_session_id: str
+    ) -> SessionBinding:
+        """Move a step binding from *old_session_id* to *new_session_id* (same generation).
+
+        Used after native ``/clear`` supersession so the run stays attached. The old
+        row is removed in the same transaction so the slot-generation unique index
+        stays satisfied.
+
+        :raises BindingNotFound: when no binding is stored for the old session.
+        :raises ValueError: when the ids are equal or the new id is already bound.
+        """
+        if old_session_id == new_session_id:
+            raise ValueError("transfer requires distinct session ids")
+        now = int(self._clock())
+
+        def _transfer(session: Session) -> SessionBinding:
+            old = session.get(
+                SessionBindingRow, (workspace_id, old_session_id), with_for_update=True
+            )
+            if old is None:
+                raise BindingNotFound(f"no binding for session {old_session_id}")
+            existing = session.get(SessionBindingRow, (workspace_id, new_session_id))
+            if existing is not None:
+                raise ValueError(f"session {new_session_id} is already bound")
+            moved = SessionBinding(
+                workspace_id=old.workspace_id,
+                session_id=new_session_id,
+                run_id=old.run_id,
+                role=SessionBindingRole(old.role),
+                slot_id=old.slot_id,
+                slot_role=None if old.slot_role is None else SlotRole(old.slot_role),
+                effect_cksum=bytes(old.effect_cksum),
+                session_generation=old.session_generation,
+                host_id=old.host_id,
+                progress=SessionBindingProgress(old.progress),
+                created_at=old.created_at,
+                updated_at=now,
+            )
+            session.delete(old)
+            session.flush()
+            session.add(_to_row(moved))
+            return moved
+
+        return run_write_transaction(self._write_session, "transfer", _transfer)
 
     def list_bound_sessions(
         self, *, cursor: tuple[int, str] | None = None, limit: int = 500

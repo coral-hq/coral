@@ -569,6 +569,7 @@ def test_policy_hook_config_round_trips(bridge_dir: Path) -> None:
     assert config == {
         "ap_server_url": "http://127.0.0.1:8787",
         "ap_auth_headers": {"Authorization": "Bearer abc"},
+        "policy_failure_mode": "ask",
     }
 
 

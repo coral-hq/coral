@@ -39,6 +39,11 @@ from coral.api.run_models import (
     GateAnswerOut,
     GateAnswerRequest,
     LogPage,
+    PreflightEstimate,
+    PreflightFix,
+    PreflightItemOut,
+    PreflightRequest,
+    PreflightResponse,
     RunDetail,
     RunOutcome,
     RunPage,
@@ -76,7 +81,7 @@ from coral.gates.verdict import GateAnswers, GateVerdict, VisitAnswer
 from coral.limits import Slots, WarnOnce
 from coral.model.ids import derived_id
 from coral.model.ir import CompiledGraph
-from coral.omni.protocols import GatePublisher, HostWorkspaceChannels, Viewer
+from coral.omni.protocols import GatePublisher, HostWorkspaceChannels, Viewer, WorkflowPreflight
 from coral.queue.run_effects import describe_exception
 from coral.recovery.cancel import cancel_run_row, withdraw_local_prompts
 from coral.runview.types import FINISHED_RUN_STATUSES, RunStatusName
@@ -93,6 +98,7 @@ from coral.stores.protocols import (
     StartKeyConflict,
 )
 from coral.stores.workflows import WorkflowDefinitionStore
+from coral.validate.preflight import PreflightReport
 from coral.workspace.host_backend import HostWorkspaceOps
 from coral.workspace.ops import HostChannel, WorkspaceRef
 from coral.workspace.run_worktree import (
@@ -394,6 +400,7 @@ class RunsApi:
         workspace_channels: HostWorkspaceChannels | None = None,
         outcome_diffs: OutcomeDiffs | None = None,
         canonical_host_id: Callable[[str], str] | None = None,
+        workflow_preflight: WorkflowPreflight | None = None,
     ) -> None:
         """
         :param bridge: Loads runs (reads never write) and commits the owner's actions.
@@ -412,6 +419,8 @@ class RunsApi:
         :param canonical_host_id: A host id in the one form every spelling of it
             reduces to; a start stores it, and host ids compare in it. Ids are taken
             as given without it.
+        :param workflow_preflight: Host and credential checks for ``:preflight``; without
+            it every preflight reports the host offline.
         """
         self._bridge = bridge
         self._runs = run_store
@@ -425,6 +434,7 @@ class RunsApi:
         self._channels = workspace_channels
         self._outcome_diffs = outcome_diffs or OutcomeDiffs()
         self._canonical_host_id = canonical_host_id or _as_given
+        self._workflow_preflight = workflow_preflight
         self._graph_unreadable = WarnOnce()
 
     @property
@@ -611,6 +621,51 @@ class RunsApi:
         )
 
     # ── start ────────────────────────────────────────────────────────────────
+
+    async def preflight(
+        self,
+        viewer: Viewer,
+        workspace_id: int,
+        request: PreflightRequest,
+        *,
+        definitions: WorkflowDefinitionStore,
+    ) -> PreflightResponse:
+        """
+        Check whether one of the caller's workflows can start on ``host_id``.
+
+        Builds step specs without storing agents or creating a worktree. Refuses with
+        the same workflow ownership and startability rules as :meth:`start`.
+        """
+        owner = normalize_owner(viewer.user_id)
+        definition = await self._in_flight.run(
+            viewer,
+            definitions.get,
+            workspace_id=workspace_id,
+            workflow_id=request.workflow_id,
+            owner=owner,
+        )
+        if definition is None or definition.user_id != owner:
+            raise CoralApiError("not_found", WORKFLOW_NOT_FOUND, 404)
+        if not definition.runnable:
+            raise _not_runnable(RunNotRunnable("workflow.invalid", "the workflow cannot run"))
+        # Shape checks need a run id; this one is never stored.
+        shape_run_id = derived_id("coral-preflight", viewer.user_id or "", request.workflow_id)
+        try:
+            graph = await self._in_flight.run(
+                viewer, check_startable, definition.yaml_text, run_id=shape_run_id
+            )
+        except RunNotRunnable as exc:
+            raise _not_runnable(exc) from None
+        host_id = self._canonical_host_id(request.host_id)
+        if self._workflow_preflight is None:
+            raise server_busy()
+        try:
+            report, sessions = await self._workflow_preflight.check(
+                workflow_key=definition.workflow_key, graph=graph, host_id=host_id
+            )
+        except RunNotRunnable as exc:
+            raise _not_runnable(exc) from None
+        return _preflight_response(report, sessions)
 
     async def start(
         self,
@@ -1105,6 +1160,27 @@ def _rule_text(exc: RunNotRunnable) -> str:
 def _not_runnable(exc: RunNotRunnable) -> CoralApiError:
     return CoralApiError(
         "not_runnable", _sentence(_rule_text(exc)), 422, details={"rule": exc.code}
+    )
+
+
+def _preflight_response(report: PreflightReport, sessions: int) -> PreflightResponse:
+    """Map the pure report into the API response, with a session-count estimate."""
+    return PreflightResponse(
+        ok=report.ok,
+        items=tuple(
+            PreflightItemOut(
+                check=item.check,
+                status=item.status,
+                message=item.message,
+                fix=(
+                    None
+                    if item.fix is None
+                    else PreflightFix(target=item.fix.target, href=item.fix.href)
+                ),
+            )
+            for item in report.items
+        ),
+        estimate=PreflightEstimate(sessions=sessions),
     )
 
 

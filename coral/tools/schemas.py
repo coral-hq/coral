@@ -23,6 +23,14 @@ ARTIFACT_MAX = 1024
 # coral_choose_arrow field bounds, shared by its schema and its planner.
 DECISION_ID_MAX = 512
 REASON_MAX = 4000
+# coral_message_agent / assign_* field bounds (TLS-04).
+MESSAGE_TEXT_MAX = 8000
+MESSAGE_TO_MAX = 512
+REPLY_TO_MAX = 512
+ASSIGN_REASON_MAX = 2000
+ASSIGN_TASK_MAX = 8000
+ASSIGN_PROFILE_MAX = 64
+ASSIGN_COUNT_MAX = 20
 
 SUBMIT_HANDOFF_PARAMETERS: Mapping[str, object] = {
     "type": "object",
@@ -103,6 +111,107 @@ CHOOSE_ARROW_PARAMETERS: Mapping[str, object] = {
     "additionalProperties": False,
 }
 
+MESSAGE_AGENT_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "to": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MESSAGE_TO_MAX,
+            "description": '"orchestrator" or a member id from your brief, e.g. "review/codex#1".',
+        },
+        "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MESSAGE_TEXT_MAX,
+            "description": "The message to deliver.",
+        },
+        "reply_to": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": REPLY_TO_MAX,
+            "description": "Optional id of the message you are replying to.",
+        },
+    },
+    "required": ["to", "text"],
+    "additionalProperties": False,
+}
+
+ASSIGN_AGENTS_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "activation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": ACTIVATION_ID_MAX,
+            "description": "The activation waiting for roster assignment.",
+        },
+        "assignments": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ASSIGN_PROFILE_MAX,
+                    },
+                    "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": ASSIGN_COUNT_MAX,
+                    },
+                },
+                "required": ["profile", "count"],
+                "additionalProperties": False,
+            },
+            "description": "Profiles and counts within the authored up-to bounds.",
+        },
+        "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": ASSIGN_REASON_MAX,
+            "description": "Why these agents are being assigned.",
+        },
+    },
+    "required": ["activation_id", "assignments", "reason"],
+    "additionalProperties": False,
+}
+
+ASSIGN_TASK_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "activation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": ACTIVATION_ID_MAX,
+            "description": "The activation in merge_conflict that needs re-tasking.",
+        },
+        "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MESSAGE_TO_MAX,
+            "description": "The member id to re-task, e.g. implementer#1.",
+        },
+        "task": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": ASSIGN_TASK_MAX,
+            "description": "What the member should do in its worktree.",
+        },
+        "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": ASSIGN_REASON_MAX,
+            "description": "Why this member is being re-tasked.",
+        },
+    },
+    "required": ["activation_id", "member", "task", "reason"],
+    "additionalProperties": False,
+}
+
 # Reply reasons. Only handoff.invalid counts toward a slot's rejected-call streak.
 HANDOFF_INVALID = "handoff.invalid"
 TOOL_ILLEGAL = "tool.illegal"
@@ -159,6 +268,9 @@ class ToolReply:
     :param next: What the agent should do now.
     :param field: The one argument a ``handoff.invalid`` or ``tool.illegal`` names.
     :param duplicate: True when this repeats an earlier accepted call.
+    :param message_id: Delivery id for an accepted ``coral_message_agent`` call.
+    :param delivery: Delivery state for an accepted message (``queued``).
+    :param members: Assigned member ids for an accepted ``coral_assign_agents``.
     """
 
     accepted: bool
@@ -170,6 +282,9 @@ class ToolReply:
     duplicate: bool = False
     loop: LoopUse | None = None
     redirected: bool = False
+    message_id: str | None = None
+    delivery: str | None = None
+    members: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.accepted and self.reason is not None:
@@ -178,6 +293,8 @@ class ToolReply:
             raise ValueError(f"unknown reply reason {self.reason!r}")
         if not all(isinstance(value, str) for value in self.allowed_values):
             raise ValueError("allowed values must be strings")
+        if not all(isinstance(value, str) for value in self.members):
+            raise ValueError("members must be strings")
 
     def to_json(self) -> str:
         """Sorted-key JSON. The optional fields appear only when set."""
@@ -197,6 +314,12 @@ class ToolReply:
             body["loop"] = {"used": self.loop.used, "limit": self.loop.limit}
         if self.redirected:
             body["redirected"] = True
+        if self.message_id is not None:
+            body["message_id"] = self.message_id
+        if self.delivery is not None:
+            body["delivery"] = self.delivery
+        if self.members:
+            body["members"] = list(self.members)
         return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
     @classmethod
@@ -218,6 +341,9 @@ class ToolReply:
         duplicate = body.get("duplicate", False)
         redirected = body.get("redirected", False)
         loop = body.get("loop")
+        message_id = body.get("message_id")
+        delivery = body.get("delivery")
+        members = body.get("members", [])
         if not (
             isinstance(accepted, bool)
             and (reason is None or isinstance(reason, str))
@@ -227,6 +353,10 @@ class ToolReply:
             and (message is None or isinstance(message, str))
             and isinstance(duplicate, bool)
             and isinstance(redirected, bool)
+            and (message_id is None or isinstance(message_id, str))
+            and (delivery is None or isinstance(delivery, str))
+            and isinstance(members, list)
+            and all(isinstance(item, str) for item in members)
         ):
             raise ValueError("not a Coral tool reply")
         return cls(
@@ -239,11 +369,23 @@ class ToolReply:
             duplicate=duplicate,
             loop=None if loop is None else _loop_use(loop),
             redirected=redirected,
+            message_id=message_id,
+            delivery=delivery,
+            members=tuple(members),
         )
 
 
 _REQUIRED_KEYS = frozenset({"accepted", "reason", "allowed_values", "next"})
-_REPLY_KEYS = _REQUIRED_KEYS | {"field", "message", "duplicate", "loop", "redirected"}
+_REPLY_KEYS = _REQUIRED_KEYS | {
+    "field",
+    "message",
+    "duplicate",
+    "loop",
+    "redirected",
+    "message_id",
+    "delivery",
+    "members",
+}
 
 
 def _loop_use(value: object) -> LoopUse:

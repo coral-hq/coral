@@ -29,6 +29,8 @@ from coral.api.run_models import (
     GateAnswerOut,
     GateAnswerRequest,
     LogPage,
+    PreflightRequest,
+    PreflightResponse,
     ResumeRequest,
     RunDetail,
     RunOutcome,
@@ -144,14 +146,25 @@ def create_runs_router(
     @router.post(
         "/runs:preflight",
         operation_id="coral_preflight_run",
-        status_code=501,
-        response_class=Response,
-        responses=error_responses(401, 403, 422, 501),
-        dependencies=[caller],
+        response_model=PreflightResponse,
+        responses=error_responses(401, 403, 404, 422, 503),
     )
-    async def preflight_run(_body: EmptyRequest) -> Response:
-        """Not served yet."""
-        raise CoralApiError("not_implemented", "Run preflight is not available yet.", 501)
+    async def preflight_run(
+        request: Request,
+        response: Response,
+        body: PreflightRequest,
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> PreflightResponse:
+        """
+        Check whether one of the caller's workflows can start on their host, without
+        starting a run: auth, host, OS sandbox and system Claude, plus a session estimate.
+        """
+        report = await _runs_api(request).preflight(
+            viewer, workspace_id, body, definitions=definitions
+        )
+        response.headers["Cache-Control"] = _NO_STORE
+        return report
 
     @router.post(
         "/runs/{run_id}:pause",

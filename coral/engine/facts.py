@@ -29,6 +29,8 @@ class TurnSnapshot(BaseModel):
     session_id: str | None = None
     generation: int | None = None
     response_id: str | None = None
+    # Unix epoch seconds when a plan/usage limit lifts, when the harness reported one.
+    resets_at: float | None = None
 
 
 class TurnFact(TurnSnapshot):

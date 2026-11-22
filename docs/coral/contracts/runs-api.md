@@ -37,10 +37,10 @@ Every route is under `/v1/coral`, tagged `coral`, and has an `operationId`.
 | `POST /runs/{run_id}/gates/{node_id}:answer` | `coral_answer_gate` | 200 `GateAnswerOut` |
 | `POST /runs/{run_id}/activations/{activation_id}:retry` | `coral_retry_activation` | 200 `RunSummary` ("Actions") |
 | `GET /runs/{run_id}/outcome` | `coral_get_run_outcome` | 200 `RunOutcome` ("Outcome") |
-| `POST /runs:preflight` | `coral_preflight_run` | 501 |
+| `POST /runs:preflight` | `coral_preflight_run` | 200 `PreflightResponse` |
 
-- Every POST takes a JSON body. Pause, cancel, retry and preflight take `{}`; resume takes
-  `{}` or `{"cap": 1..1000}`.
+- Every POST takes a JSON body. Pause, cancel and retry take `{}`; resume takes
+  `{}` or `{"cap": 1..1000}`; preflight takes `{workflow_id, host_id}`.
 - Run reads and writes send `Cache-Control: private, no-store`. The graph sends
   `Cache-Control: private, no-cache` and `ETag: "<version_id>"`.
 - The spec is `coral/api/openapi.json` (OpenAPI 3.1, no `servers` block). Regenerate it and
@@ -74,7 +74,8 @@ Every route is under `/v1/coral`, tagged `coral`, and has an `operationId`.
 - Without `app.state.coral_runs_api` (before the lifespan publishes it, or with no
   operational database) every runs route answers that 404 after the caller check and
   request validation. After the lifespan exits, its pools are closed and the routes answer
-  503 `server_busy`. `:preflight` names no run, so it answers 501.
+  503 `server_busy`. `:preflight` names no run, so without the runs API it answers that
+  same 404 after the caller check and request validation.
 - `:retry` checks `activation_id` as 32 lowercase hex with the rest of the request (422,
   before the owner check). Coral never echoes the id and never writes it to its own logs;
   the server's access log records the request line, path included, as it does for every
@@ -104,7 +105,6 @@ Every refusal from a Coral route has one shape (`CoralRoute`, `coral/api/errors.
 | `worktree_failed` | 409 | The host could not create the worktree, and it is not locked |
 | `payload_too_large` | 413 | A workflow save that is too large |
 | `stream_limit` | 429 | Stream caps or the connect rate (`Retry-After: 5`) |
-| `not_implemented` | 501 | `:preflight` |
 | `host_offline` | 503 | No host connector, or the host is offline |
 | `server_busy` | 503 | Caps, a 30 s timeout, `RunContended`, a closed pool, a gate's `run_busy`; `Retry-After: 1`, `2` for a worktree another start holds locked, `5` for a stream while the server shuts down |
 
@@ -582,7 +582,8 @@ written only by the stream client), `["coral-run-graph", scope, id]`,
 - **Start Run** (`start/StartRunDialog.tsx`) posts `{workflow_id, start_key, host_id,
   repo_path}`. The start key is a new `randomUUID()` when the dialog opens and whenever the
   host or folder changes, and the same on a retry, so a retried POST replays. 201 or 200
-  opens the run. It sends no preflight (`:preflight` answers 501).
+  opens the run. Once a host is chosen it posts `{workflow_id, host_id}` to
+  `:preflight` and shows the report; Start stays disabled while `ok` is false.
 - **Proof** (Vitest and RTL, over `runView.contract.json`, which
   `tests/coral/api/run_view_contract.py` records from the real stream, serializers and
   outcome assembler, checked by `tests/coral/api/test_run_view_contract.py`):
@@ -700,7 +701,6 @@ exactly the mounted Coral routes, is typed, and that the TS types are current.
 
 | Work | Owner |
 |---|---|
-| Run preflight (`POST /runs:preflight` answers 501): the CRL-132 facts need an `AgentSpec` per step, and only `materialize` builds them | CRL-151 |
 | Run requests over 512 characters (refused today, never cut) | CRL-152 |
 | A durable marker for a pause made on the run row alone | CRL-153 |
 | Retry for causes no step owns (anchor, orchestrator, gate and run-level failures stay Cancel-only) | CRL-155 |

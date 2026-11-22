@@ -61,6 +61,7 @@ _PURE_PREFIXES: tuple[str, ...] = (
     "coral.evidence.messages",
     "coral.rules.catalog",
     "coral.workspace.ops",
+    "coral.structure",
     "coral.harness.registry",
     "coral.identity",
     "coral.runview.types",

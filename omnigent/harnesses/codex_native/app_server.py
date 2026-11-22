@@ -2625,6 +2625,7 @@ class CodexNativeAppServer:
     developer_instructions: str | None = None
     ap_server_url: str | None = None
     ap_auth_headers: dict[str, str] | None = None
+    policy_failure_mode: str | None = None
     python_executable: str | None = None
     listen_url: str | None = None
     proc: asyncio.subprocess.Process | None = None
@@ -2876,6 +2877,7 @@ class CodexNativeAppServer:
                     self.bridge_dir,
                     ap_server_url=self.ap_server_url,
                     ap_auth_headers=self.ap_auth_headers or {},
+                    policy_failure_mode=self.policy_failure_mode,
                 )
         if self.reconcile_process_registry:
             reconcile_codex_native_process_registry()
@@ -4212,6 +4214,7 @@ def build_codex_native_server(
     session_id: str | None = None,
     ap_server_url: str | None = None,
     ap_auth_headers: dict[str, str] | None = None,
+    policy_failure_mode: str | None = None,
     python_executable: str | None = None,
     codex_path: str | None = None,
     extra_config_overrides: list[str] | None = None,
@@ -4346,6 +4349,7 @@ def build_codex_native_server(
         developer_instructions=developer_instructions,
         ap_server_url=ap_server_url,
         ap_auth_headers=ap_auth_headers,
+        policy_failure_mode=policy_failure_mode,
         python_executable=python_executable,
         pinned_model=pinned_model,
         pinned_effort=reasoning_effort,

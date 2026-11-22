@@ -426,6 +426,19 @@ def _host_connector(services: ServerServices) -> HostConnector | None:
     return partial(connect_run_worktree_host, host_registry=host_registry, host_store=host_store)
 
 
+def _workflow_preflight(services: ServerServices):
+    """Host and credential preflight over the server's host registry."""
+    from coral.omni.server.preflight import OmniWorkflowPreflight
+    from omnigent.server.host_registry import HostRegistry
+
+    registry = getattr(services, "host_registry", None) or HostRegistry()
+    server_config = getattr(services, "server_config", None) or {}
+    return OmniWorkflowPreflight(
+        registry,
+        claude_native_steps=bool(resolve_sub_features(server_config).get("claude_native_steps")),
+    )
+
+
 def _host_channels(services: ServerServices) -> HostWorkspaceChannels | None:
     """The host workspace-op channels on the server's host registry; ``None`` without one."""
     from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
@@ -476,6 +489,7 @@ def _runs_api(
         requires_generation=auth_mode(services.auth_provider) == "accounts",
         workspace_channels=channels,
         canonical_host_id=canonical_host_id,
+        workflow_preflight=_workflow_preflight(services),
     )
 
 
@@ -602,6 +616,7 @@ def _wire_session_engine(
     evidence_channels: ChannelsRef | None = None,
     liveness: LivenessRef | None = None,
     reconnect_grace_s: int = DEFAULT_RECONNECT_GRACE_S,
+    claude_native_steps: bool = False,
 ) -> BoundSessionRefresher:
     """
     Build the session engine and register its executors, then its status-edge observers.
@@ -666,7 +681,12 @@ def _wire_session_engine(
     pauser = DriftPauser(run_store, engine=threads, on_anchor_bound=anchor_runner_stopper)
     # The dispatch's relaunch path holds the facade and the relauncher, so both resolve it late.
     facade = OmnigentSessionFacade(
-        app, services, bindings, slot_generations=queue_store, dispatch=lambda: dispatch
+        app,
+        services,
+        bindings,
+        slot_generations=queue_store,
+        dispatch=lambda: dispatch,
+        claude_native_steps=claude_native_steps,
     )
     relauncher = OmnigentStepRelauncher(
         facade, services, bindings, run_store, dispatch=lambda: dispatch
@@ -689,6 +709,7 @@ def _wire_session_engine(
         services.artifact_store,
         conversation_store=services.conversation_store,
         profiles=SqlProfileStore(db_uri),
+        claude_native_steps=claude_native_steps,
     )
     executors: dict[str, EffectExecutor] = {
         CREATE_SESSION: create_session_executor(
@@ -916,6 +937,35 @@ async def coral_lifespan(
                 app.state.coral_run_stream_hub = _run_stream_hub(
                     bridge, run_store, services, stack
                 )
+            # HRN-07: observe native /clear supersession for Coral-bound sessions.
+            from coral.omni.server.rotation import (
+                SupersessionFollower,
+                follow_bound_supersession,
+                register_follower,
+            )
+
+            def _enqueue_rotation(old_id: str, new_id: str, reason: str) -> None:
+                logging.getLogger("coral.omni.server.rotation").info(
+                    "coral supersession follow queued old=%s new=%s reason=%s",
+                    old_id,
+                    new_id,
+                    reason,
+                )
+                follow_bound_supersession(
+                    old_id=old_id,
+                    new_id=new_id,
+                    bound=bound,
+                    bindings=bindings,
+                    policy_store=services.policy_store,
+                )
+
+            stack.callback(
+                register_follower(
+                    SupersessionFollower(
+                        bound_session_ids=bound.session_ids, enqueue=_enqueue_rotation
+                    )
+                )
+            )
             missing = _missing_engine_input(app, services)
             if missing is None:
                 assert channels is not None  # the host store and registry are engine inputs
@@ -934,6 +984,9 @@ async def coral_lifespan(
                     evidence_channels=evidence_channels,
                     liveness=liveness,
                     reconnect_grace_s=grace_s,
+                    claude_native_steps=bool(
+                        resolve_sub_features(services.server_config).get("claude_native_steps")
+                    ),
                 )
                 stack.push_async_callback(refresher.stop)
                 await refresher.start()
