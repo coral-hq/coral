@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from coral.validate.preflight import (
     API_KEY_REQUIRED_MESSAGE,
     SANDBOX_UNREPORTED_MESSAGE,
+    SYSTEM_CLAUDE_MISSING_MESSAGE,
     PreflightFacts,
     PreflightItem,
     PreflightReport,
@@ -26,6 +27,7 @@ def _facts(**overrides: object) -> PreflightFacts:
         "credential": "api_key",
         "host_online": True,
         "sandbox": "seatbelt",
+        "system_claude": True,
         "steps": (SDK_SANDBOXED,),
     }
     values.update(overrides)
@@ -68,10 +70,10 @@ def test_invalid_credential_carries_the_detail() -> None:
     assert "provider 'team' is not declared" in auth.message
 
 
-def test_offline_host_fails_host_and_sandbox_with_connect_host() -> None:
-    report = run_preflight(_facts(host_online=False, sandbox=None))
+def test_offline_host_fails_host_sandbox_and_system_claude_with_connect_host() -> None:
+    report = run_preflight(_facts(host_online=False, sandbox=None, system_claude=None))
 
-    for check in ("host_online", "sandbox"):
+    for check in ("host_online", "sandbox", "system_claude"):
         item = _item(report, check)
         assert item.status == "fail"
         assert item.fix is not None and item.fix.target == "connect_host"
@@ -112,8 +114,30 @@ def test_no_claude_sdk_step_skips_the_auth_check() -> None:
 def test_all_good_reports_every_check_ok_in_order() -> None:
     report = run_preflight(_facts(steps=(SDK_PLAIN, SDK_SANDBOXED)))
 
-    assert [item.check for item in report.items] == ["auth", "host_online", "sandbox"]
+    assert [item.check for item in report.items] == [
+        "auth",
+        "host_online",
+        "sandbox",
+        "system_claude",
+    ]
     assert all(item.status == "ok" and item.fix is None for item in report.items)
+    assert report.ok is True
+
+
+def test_missing_system_claude_fails_sandboxed_claude_steps() -> None:
+    report = run_preflight(_facts(system_claude=False))
+
+    item = _item(report, "system_claude")
+    assert item.status == "fail"
+    assert item.message == SYSTEM_CLAUDE_MISSING_MESSAGE
+    assert item.fix is not None and item.fix.target == "install_harness"
+    assert "Claude Code" not in item.message
+
+
+def test_plain_claude_steps_skip_system_claude_check() -> None:
+    report = run_preflight(_facts(system_claude=False, steps=(SDK_PLAIN,)))
+
+    assert [item.check for item in report.items] == ["auth", "host_online"]
     assert report.ok is True
 
 

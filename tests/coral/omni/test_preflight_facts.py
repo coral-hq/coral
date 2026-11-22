@@ -51,10 +51,20 @@ def _coral_step(
     return StepPlan(step_ref=step_ref, spec=spec)
 
 
-def _online_registry(capabilities: list[str]) -> HostRegistry:
+def _online_registry(
+    capabilities: list[str],
+    *,
+    configured_harnesses: dict[str, object] | None = None,
+) -> HostRegistry:
     registry = HostRegistry()
     hello = HostHelloFrame(
-        version="0.22.0", frame_protocol_version=1, name="laptop", capabilities=capabilities
+        version="0.22.0",
+        frame_protocol_version=1,
+        name="laptop",
+        capabilities=capabilities,
+        configured_harnesses=configured_harnesses
+        if configured_harnesses is not None
+        else {"claude-native": True},
     )
     registry.register(HOST_ID, FakeWebSocket(), hello, owner="alice")
     return registry
@@ -190,3 +200,21 @@ async def test_subscription_only_host_needs_an_api_key(config_home: Path) -> Non
     assert report.ok is False
     failures = [(item.check, item.fix.target) for item in report.items if item.fix is not None]
     assert failures == [("auth", "add_api_key")]
+
+
+async def test_missing_system_claude_is_gathered_from_harness_readiness(
+    config_home: Path,
+) -> None:
+    facts = await gather_preflight_facts(
+        _online_registry(
+            ["os_sandbox:darwin_seatbelt"],
+            configured_harnesses={"claude-native": "binary-missing"},
+        ),
+        host_id=HOST_ID,
+        steps=[_coral_step(os_env=OSEnvSpec(cwd="."))],
+    )
+
+    assert facts.system_claude is False
+    report = run_preflight(facts)
+    failures = [(item.check, item.fix.target) for item in report.items if item.fix is not None]
+    assert ("system_claude", "install_harness") in failures

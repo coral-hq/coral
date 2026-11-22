@@ -190,7 +190,11 @@ def test_plugin_mounts_the_run_writes_behind_authentication_with_one_404_before_
             without_auth.post(route, json=body),
         ):
             assert (response.status_code, response.content) == (404, not_found)
-    # Preflight names no run: it is not served yet for any caller.
-    assert with_auth.post("/v1/coral/runs:preflight", json={}).status_code == 401
-    preflight = without_auth.post("/v1/coral/runs:preflight", json={})
-    assert preflight.json()["error"]["code"] == "not_implemented"
+    # Preflight names no run but still needs the runs API; before the lifespan it is 404.
+    preflight_body = {"workflow_id": "a" * 32, "host_id": "h"}
+    assert with_auth.post("/v1/coral/runs:preflight", json=preflight_body).status_code == 401
+    for response in (
+        with_auth.post("/v1/coral/runs:preflight", json=preflight_body, headers=signed_in),
+        without_auth.post("/v1/coral/runs:preflight", json=preflight_body),
+    ):
+        assert (response.status_code, response.content) == (404, not_found)

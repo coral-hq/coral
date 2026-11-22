@@ -16,13 +16,15 @@ FixTarget = Literal[
     "install_bwrap",
     "fix_workflow",
 ]
-CheckName = Literal["auth", "host_online", "sandbox"]
+CheckName = Literal["auth", "host_online", "sandbox", "system_claude"]
 CheckStatus = Literal["ok", "warn", "fail"]
 CredentialKind = Literal["api_key", "provider", "none", "invalid"]
 SandboxBackend = Literal["bwrap", "seatbelt"]
 HostSandbox = Literal["bwrap", "seatbelt", "none"]
 
 CLAUDE_SDK_HARNESS = "claude-sdk"
+CLAUDE_NATIVE_HARNESS = "claude-native"
+CLAUDE_HARNESSES = frozenset({CLAUDE_SDK_HARNESS, CLAUDE_NATIVE_HARNESS})
 CLAUDE_SDK_CAPABILITIES: dict[str, object] = {
     "tool_call_gating": "all_tools",
     "fs_sandbox_backends": ("bwrap", "seatbelt"),
@@ -39,6 +41,14 @@ SANDBOX_MISSING_MESSAGE = (
 SANDBOX_UNREPORTED_MESSAGE = (
     "The host does not report its OS sandbox. Update Coral on the host to run steps "
     "that read or change files."
+)
+SYSTEM_CLAUDE_MISSING_MESSAGE = (
+    "Sandboxed Claude steps need a system Claude CLI on the host "
+    "(install Claude, or set OMNIGENT_CLAUDE_PATH). The SDK's bundled CLI cannot be wrapped."
+)
+SYSTEM_CLAUDE_UNREPORTED_MESSAGE = (
+    "The host does not report whether a system Claude CLI is installed. "
+    "Update Coral on the host to run sandboxed Claude steps."
 )
 
 _OS_SANDBOX_PREFIX = "os_sandbox:"
@@ -87,6 +97,8 @@ class PreflightFacts(_Frozen):
     credential_step_ref: str | None = None
     host_online: bool
     sandbox: HostSandbox | None
+    # Whether the host has a system ``claude`` CLI. ``None`` when offline or unreported.
+    system_claude: bool | None = None
     steps: tuple[StepNeeds, ...]
 
 
@@ -145,12 +157,37 @@ def _sandbox_item(facts: PreflightFacts) -> PreflightItem:
     )
 
 
+def _needs_system_claude(steps: tuple[StepNeeds, ...]) -> bool:
+    """Sandboxed Claude steps wrap a system CLI; the SDK's bundled one cannot be wrapped."""
+    return any(step.needs_fs_sandbox and step.harness in CLAUDE_HARNESSES for step in steps)
+
+
+def _system_claude_item(facts: PreflightFacts) -> PreflightItem:
+    if not facts.host_online:
+        return _fail(
+            "system_claude",
+            "The system Claude CLI is checked once the host connects.",
+            "connect_host",
+        )
+    if facts.system_claude is None:
+        return _fail("system_claude", SYSTEM_CLAUDE_UNREPORTED_MESSAGE, "update_host")
+    if not facts.system_claude:
+        return _fail("system_claude", SYSTEM_CLAUDE_MISSING_MESSAGE, "install_harness")
+    return PreflightItem(
+        check="system_claude",
+        status="ok",
+        message="The host has a system Claude CLI for sandboxed steps.",
+    )
+
+
 def run_preflight(facts: PreflightFacts) -> PreflightReport:
-    """Check auth, host and sandbox in that order, one item per applicable check."""
+    """Check auth, host, sandbox and system Claude in that order, one item per applicable check."""
     items: list[PreflightItem] = []
     if any(step.harness == CLAUDE_SDK_HARNESS for step in facts.steps):
         items.append(_auth_item(facts))
     items.append(_host_item(facts))
     if any(step.needs_fs_sandbox for step in facts.steps):
         items.append(_sandbox_item(facts))
+    if _needs_system_claude(facts.steps):
+        items.append(_system_claude_item(facts))
     return PreflightReport(items=tuple(items))

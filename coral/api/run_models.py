@@ -195,6 +195,56 @@ class EmptyRequest(_In):
     """The body of an action that takes no arguments: the empty JSON object."""
 
 
+class PreflightRequest(_In):
+    """
+    A preflight of one of the caller's workflows on a host, without starting a run.
+
+    ``host_id`` names the host whose readiness and OS sandbox are checked; no
+    worktree is created.
+    """
+
+    workflow_id: Annotated[str, Field(pattern=WORKFLOW_ID_PATTERN)]
+    host_id: HostId
+
+
+class PreflightEstimate(_Out):
+    """How many sessions a one-pass start of this workflow needs; no spend history yet."""
+
+    sessions: Annotated[int, Field(ge=0, strict=True)]
+
+
+class PreflightFix(_Out):
+    """One named fix for a failed preflight check."""
+
+    target: Literal[
+        "install_harness",
+        "sign_in",
+        "add_api_key",
+        "connect_host",
+        "update_host",
+        "install_bwrap",
+        "fix_workflow",
+    ]
+    href: str | None = None
+
+
+class PreflightItemOut(_Out):
+    """One preflight check and its result."""
+
+    check: Literal["auth", "host_online", "sandbox", "system_claude"]
+    status: Literal["ok", "warn", "fail"]
+    message: str
+    fix: PreflightFix | None = None
+
+
+class PreflightResponse(_Out):
+    """HRN-02's preflight report plus a session-count estimate."""
+
+    ok: bool
+    items: tuple[PreflightItemOut, ...]
+    estimate: PreflightEstimate
+
+
 class GateAnswerRequest(_In):
     """An answer to one visit of a gate: the visit's token, the chosen outcome and a note."""
 
@@ -839,6 +889,11 @@ __all__ = [
     "OutcomeCheckout",
     "OutcomeDiff",
     "OutcomeUnavailable",
+    "PreflightEstimate",
+    "PreflightFix",
+    "PreflightItemOut",
+    "PreflightRequest",
+    "PreflightResponse",
     "ResumeRequest",
     "RunDetail",
     "RunOutcome",

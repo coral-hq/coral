@@ -168,6 +168,26 @@ def check_hygiene(spec: AgentSpec, stance: Stance) -> None:
         )
 
 
+def _spec_from_bundle(bundle: bytes, stance: Stance) -> AgentSpec:
+    """Validate and hygiene-check a packed step bundle."""
+    try:
+        spec = validate_agent_bundle(bundle, enforce_handler_allowlist=True)
+    except OmnigentError as exc:
+        raise StepBundleRejected(f"{stance.value} bundle failed validation: {exc}") from exc
+    check_hygiene(spec, stance)
+    return spec
+
+
+def parse_step_spec(config_yaml: bytes, stance: Stance) -> AgentSpec:
+    """
+    Validate a step bundle into an ``AgentSpec`` without storing it.
+
+    Same pack, validate and hygiene path as :func:`materialize`, for callers
+    (run preflight) that need the spec and must not create an agent row.
+    """
+    return _spec_from_bundle(pack_bundle(config_yaml), stance)
+
+
 def materialize(
     agent_store: AgentStore,
     artifact_store: ArtifactStore,
@@ -189,11 +209,7 @@ def materialize(
         cannot hold user agents.
     """
     bundle = pack_bundle(config_yaml)
-    try:
-        spec = validate_agent_bundle(bundle, enforce_handler_allowlist=True)
-    except OmnigentError as exc:
-        raise StepBundleRejected(f"{stance.value} bundle failed validation: {exc}") from exc
-    check_hygiene(spec, stance)
+    spec = _spec_from_bundle(bundle, stance)
     agent = uploaded_agent_for(
         agent_store, artifact_store, owner=owner, spec=spec, bundle_bytes=bundle
     )

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,15 +17,23 @@ import { Link, useNavigate } from "@/lib/routing";
 import { ApiError } from "@/lib/sessionsApi";
 import { WorkspacePickerDialog } from "@/shell/WorkspacePickerDialog";
 import type { StartRunRequest } from "../api/generated/coralApi";
-import { CoralRequestError, MAX_RETRY_AFTER_MS, runsListPrefixKey, startRun } from "../api/runsApi";
+import {
+  CoralRequestError,
+  MAX_RETRY_AFTER_MS,
+  preflightQueryKey,
+  preflightRun,
+  runsListPrefixKey,
+  startRun,
+} from "../api/runsApi";
 import { runPath } from "../nav/coralPaths";
 import { useCoralScope } from "../shared/viewerScope";
+import { PreflightList } from "./PreflightList";
 
 // Starts a workflow on a host's repository through `POST /v1/coral/runs`. The start key
 // makes the POST idempotent: a retry of the same inputs replays the run it started, and a
 // new opening or another host or folder gets a new key. The inputs are locked while a start
 // is in flight. A start that lands after the dialog closed leaves the person where they are,
-// with a notice linking to the run. Preflight is not offered yet.
+// with a notice linking to the run. Preflight runs once a host is chosen and gates Start.
 
 const GENERIC_REFUSAL = "Couldn't start the run. Try again.";
 
@@ -105,6 +113,12 @@ export function StartRunDialog({
   // Open and mounted: where a landing start may still take the person to its run.
   const showing = useRef(open);
 
+  const preflight = useQuery({
+    queryKey: preflightQueryKey(scope, workflowId, hostId ?? ""),
+    queryFn: ({ signal }) => preflightRun({ workflow_id: workflowId, host_id: hostId! }, signal),
+    enabled: open && hostId !== null,
+  });
+
   const start = useMutation({
     mutationFn: (request: StartRunRequest) => startRun(request),
     onSuccess: ({ run_id }) => {
@@ -152,6 +166,9 @@ export function StartRunDialog({
       : null;
   // Locked while a start is in flight, so its answer always belongs to the inputs shown.
   const locked = start.isPending;
+  const preflightOk = preflight.data?.ok === true;
+  const preflightBlocking =
+    hostId !== null && (preflight.isPending || preflight.isError || !preflightOk);
   // A refusal of other inputs says nothing about these; the same inputs keep their hold.
   const changeInputs = (nextHostId: string | null, nextRepoPath: string | null) => {
     if (posting.current || (nextHostId === hostId && nextRepoPath === repoPath)) return;
@@ -211,6 +228,33 @@ export function StartRunDialog({
             </div>
           </section>
 
+          {hostId !== null && (
+            <section className="flex flex-col gap-2">
+              <h3 className="font-medium text-foreground text-ui">Preflight</h3>
+              {preflight.isPending ? (
+                <Spinner className="size-4 text-muted-foreground" aria-label="Checking host" />
+              ) : preflight.isError ? (
+                <p className="text-destructive text-ui" role="alert">
+                  Couldn't check this host.{" "}
+                  <Button
+                    variant="link"
+                    className="h-auto p-0 text-destructive underline"
+                    onClick={() => void preflight.refetch()}
+                  >
+                    Retry
+                  </Button>
+                </p>
+              ) : preflight.data != null ? (
+                <>
+                  <PreflightList items={preflight.data.items} />
+                  <p className="text-muted-foreground text-xs">
+                    About {preflight.data.estimate.sessions} sessions for one pass.
+                  </p>
+                </>
+              ) : null}
+            </section>
+          )}
+
           {start.isError && (
             <p className="text-destructive text-ui" role="alert">
               {startRefusalText(start.error)}
@@ -224,9 +268,9 @@ export function StartRunDialog({
             <Button
               componentId="coral.start_run.submit"
               loading={start.isPending}
-              disabled={request === null || holdMs > 0}
+              disabled={request === null || holdMs > 0 || preflightBlocking}
               onClick={() => {
-                if (request === null || posting.current) return;
+                if (request === null || posting.current || preflightBlocking) return;
                 posting.current = true;
                 start.mutate(request);
               }}

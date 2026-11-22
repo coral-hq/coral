@@ -13,7 +13,9 @@ from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from coral.engine.facts import TurnFact
+from coral.model.ir import CompiledGraph
 from coral.signals.turn_facts import TurnTranscript
+from coral.validate.preflight import PreflightReport
 from coral.workspace.ops import HostChannelBackend
 
 HostAccessCode = Literal["not_permitted", "host_offline"]
@@ -608,6 +610,25 @@ class SessionEdgeWatcher(Protocol):
         ...
 
 
+@runtime_checkable
+class WorkflowPreflight(Protocol):
+    """Builds step specs and gathers host facts for ``POST /v1/coral/runs:preflight``."""
+
+    async def check(
+        self,
+        *,
+        workflow_key: str,
+        graph: CompiledGraph,
+        host_id: str,
+    ) -> tuple[PreflightReport, int]:
+        """
+        Return the preflight report and a one-pass session-count estimate.
+
+        :raises: A bridge ``RunNotRunnable`` when a step bundle cannot be built.
+        """
+        ...
+
+
 # Receives each turn fact of a watched session; the server sets none (turn facts persist
 # through the ``coral.turn_facts`` observer).
 TurnFactSink = Callable[[TurnFact], None]
@@ -654,6 +675,7 @@ __all__ = [
     "TurnTranscript",
     "TurnTranscripts",
     "Viewer",
+    "WorkflowPreflight",
     "engine_message_text",
     "queued_input_decision",
     "turn_transcript_of",

@@ -53,7 +53,7 @@ def _not_supported(stance: str, reason: str) -> CoralSessionError:
     )
 
 
-def _bundle(
+def step_bundle_yaml(
     stance: str,
     workflow_slug: str | None,
     node_id: str | None,
@@ -184,7 +184,7 @@ class OmnigentStepAgents:
         step: tuple[str | None, str | None, int | None],
         session_id: str | None,
     ) -> str:
-        config_yaml, bundle_stance, name = _bundle(
+        config_yaml, bundle_stance, name = step_bundle_yaml(
             stance, *step, claude_native_steps=self._claude_native_steps
         )
         # Agent rows belong to a workspace: use the run's, whatever the caller's scope.
