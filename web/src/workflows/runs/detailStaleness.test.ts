@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { RunDetail, RunHeader, RunView } from "../api/generated/coralApi";
+import type { PauseCause, RunDetail, RunHeader, RunView } from "../api/generated/coralApi";
 import { CONTRACT_DETAIL_GATE_PASS1 } from "../fixtures/runViewContract";
 import { applyViewPatch, type JsonObject } from "../stream/viewPatch";
 import { detailIsStale, isStalenessTrigger } from "./detailStaleness";
@@ -66,6 +66,52 @@ describe("detailIsStale", () => {
     expect(detailIsStale(noSession, VIEW)).toBe(true);
   });
 
+  it("is stale when the view's pause causes differ from the detail's", () => {
+    // WHY: the causes decide which steps the detail offers to retry, so a step that blocks
+    // or a restart that fails must reread it rather than wait for the 30 s poll.
+    const blocked = { reason: "failure_path", detail: "blocked", subject: "implement||a4:2:0" };
+    const paused = patched(VIEW, [
+      { op: "replace", path: "/status", value: "paused" },
+      { op: "add", path: "/causes/0", value: blocked },
+    ]);
+    expect(detailIsStale(DETAIL, paused)).toBe(true);
+    const failedRestart = { ...blocked, detail: "restart:workspace.head_moved" };
+    const restarted = patched(paused, [{ op: "replace", path: "/causes/0", value: failedRestart }]);
+    expect(detailIsStale(detailWith({ causes: paused.causes }), restarted)).toBe(true);
+    expect(detailIsStale(detailWith({ causes: restarted.causes }), restarted)).toBe(false);
+    expect(detailIsStale(detailWith({ causes: restarted.causes }), VIEW)).toBe(true);
+  });
+
+  it("compares the causes by value and in order, by reason, detail and subject", () => {
+    // WHY: the detail's causes are a fresh JSON copy of the view's, so only a real change in
+    // what a cause says, or which comes first, may reread it.
+    const blocked: PauseCause = {
+      reason: "failure_path",
+      detail: "blocked",
+      subject: "implement||a4:2:0",
+    };
+    const closed: PauseCause = {
+      reason: "failure_path",
+      detail: "session.closed",
+      subject: "implement||a4:1:0",
+    };
+    const view = patched(VIEW, [
+      { op: "add", path: "/causes/-", value: blocked },
+      { op: "add", path: "/causes/-", value: closed },
+    ]);
+    const copy = JSON.parse(JSON.stringify(view.causes)) as RunView["causes"];
+    expect(detailIsStale(detailWith({ causes: copy }), view)).toBe(false);
+    expect(detailIsStale(detailWith({ causes: [closed, blocked] }), view)).toBe(true);
+    expect(detailIsStale(detailWith({ causes: [blocked] }), view)).toBe(true);
+    for (const changed of [
+      { ...closed, reason: "infra" as const },
+      { ...closed, detail: "session.deleted" },
+      { ...closed, subject: "implement||a4:2:0" },
+    ]) {
+      expect(detailIsStale(detailWith({ causes: [blocked, changed] }), view)).toBe(true);
+    }
+  });
+
   it("is never stale for a run with no view", () => {
     // WHY: an unloadable run has nothing to compare, so it must not refetch.
     expect(detailIsStale(DETAIL, null)).toBe(false);
@@ -87,7 +133,7 @@ describe("isStalenessTrigger", () => {
   });
 
   it("fires when an entry touches the gates or the slots", () => {
-    // WHY: those are the only view parts the detail mirrors.
+    // WHY: the detail mirrors those view parts.
     const marks = { view: VIEW, header: HEADER };
     const slots = patched(VIEW, [{ op: "replace", path: "/slots/0/status", value: "working" }]);
     const gates = patched(VIEW, [{ op: "remove", path: "/open_gates/0" }]);
@@ -95,7 +141,20 @@ describe("isStalenessTrigger", () => {
     expect(isStalenessTrigger(marks, { view: gates, header: HEADER })).toBe(true);
   });
 
-  it("stays quiet for an entry that touches neither, or no change", () => {
+  it("fires when an entry touches the causes", () => {
+    // WHY: a cause can change while the header stays the same, such as a second step blocking.
+    const marks = { view: VIEW, header: HEADER };
+    const causes = patched(VIEW, [
+      {
+        op: "add",
+        path: "/causes/0",
+        value: { reason: "failure_path", detail: "blocked", subject: "implement||a4:2:0" },
+      },
+    ]);
+    expect(isStalenessTrigger(marks, { view: causes, header: HEADER })).toBe(true);
+  });
+
+  it("stays quiet for an entry that touches none of them, or no change", () => {
     // WHY: activation progress alone never refetches the detail, so a lasting mismatch cannot loop.
     const marks = { view: VIEW, header: HEADER };
     const activations = patched(VIEW, [
@@ -104,6 +163,27 @@ describe("isStalenessTrigger", () => {
     expect(isStalenessTrigger(marks, { view: activations, header: HEADER })).toBe(false);
     expect(isStalenessTrigger(marks, { view: VIEW, header: HEADER })).toBe(false);
     expect(isStalenessTrigger(marks, { view: null, header: HEADER })).toBe(false);
+  });
+
+  it("stays quiet for entries after a cause change that leave the causes alone", () => {
+    // WHY: once a cause change has been checked, timers and activation progress never ask
+    // again, even while the detail still lags the view.
+    const blocked = { reason: "failure_path", detail: "blocked", subject: "implement||a4:2:0" };
+    const paused = patched(VIEW, [{ op: "add", path: "/causes/0", value: blocked }]);
+    const timers = patched(paused, [
+      { op: "add", path: "/armed_timer_keys/-", value: "watchdog_remind:implement||a4:2" },
+    ]);
+    const progress = patched(timers, [
+      { op: "replace", path: "/activations/2/status", value: "evaluating" },
+    ]);
+    expect(timers.causes).toBe(paused.causes);
+    expect(
+      isStalenessTrigger({ view: paused, header: HEADER }, { view: timers, header: HEADER }),
+    ).toBe(false);
+    expect(
+      isStalenessTrigger({ view: timers, header: HEADER }, { view: progress, header: HEADER }),
+    ).toBe(false);
+    expect(detailIsStale(DETAIL, progress)).toBe(true);
   });
 
   it("fires when a view arrives after none", () => {

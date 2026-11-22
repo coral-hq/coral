@@ -2,9 +2,13 @@
 
 Every engine event goes through ``app.state.session_event_dispatch`` (the
 server's own event handler) as an ``EngineEventContext`` for the run owner,
-so the server's access, closed-session, input-policy and relaunch checks
-apply as for a person. The caller runs inside the run's scopes, so a relaunch
-can only reach the owner's host.
+so the server's access, closed-session and input-policy checks apply as for a
+person. The caller runs inside the run's scopes, so a relaunch can only reach
+the owner's host. Coral's own sends bring a step's lost runner back only through
+the step relauncher, which checks the binding, the slot, the host's Coral token
+and the old runner first; other sessions wake as the server's own message path
+would wake them. Once the relauncher answered, the server's own handler still
+forwards the message, and can relaunch a runner that dropped in between.
 
 A message is sent once under the stable id the engine recorded before
 sending. Before each send the dispatch reads the item (or queued entry)
@@ -26,9 +30,12 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
-from collections.abc import AsyncGenerator, Mapping, Sequence
+import time
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, override
 
+from coral.db.enum_codecs import SessionBindingRole
 from coral.model.ids import fallback_message_id
 from coral.omni._upstream import (
     _session_active_response_cache,
@@ -43,8 +50,10 @@ from coral.omni.protocols import (
     LiveStatus,
     PreSendHook,
     PreSendRequest,
+    RunnerLiveness,
     SendReceipt,
     SessionDispatch,
+    StepRelauncher,
     TranscriptItem,
     TurnTranscript,
     TurnTranscripts,
@@ -52,7 +61,9 @@ from coral.omni.protocols import (
     queued_input_decision,
     turn_transcript_of,
 )
+from coral.omni.server.access import omnigent_owner
 from coral.signals.turn_facts import UNDECIDED
+from coral.stores.session_bindings import SessionBindingLookup
 from coral.stores.stable_ids import content_checksum
 from omnigent.db.db_models import workspace_scope
 from omnigent.entities import Conversation, ConversationItem, ErrorData, MessageData
@@ -61,7 +72,7 @@ from omnigent.runtime import pending_inputs
 from omnigent.server.routes.sessions import ensure_runner_connected
 from omnigent.server.schemas import SessionEventInput
 from omnigent.server.startup_inputs import EngineEventContext
-from omnigent.stores.conversation_store import ConversationStore
+from omnigent.stores.conversation_store import ConversationStore, runner_seen_is_fresh
 from omnigent.util.session_lifecycle import (
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
@@ -197,6 +208,16 @@ def _pending_entry(session_id: str, stable_id: str) -> Mapping[str, Any] | None:
     return None
 
 
+def _engine_context(app: Any, user_id: str | None) -> EngineEventContext:
+    """
+    The run owner as the server's access checks read it (:func:`omnigent_owner`).
+
+    The local user is usually an admin, so an ownerless run's reach rests on its
+    session ids, which come only from the run's own bindings.
+    """
+    return EngineEventContext(app, omnigent_owner(user_id))
+
+
 class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
     """
     The engine's session events on this server.
@@ -205,6 +226,9 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
         interrupt, stop or close; one raising ``CoralSessionError`` refuses it.
         Required, so a server never forgets the drift hook.
     :param send_timeout_s: The longest one event may take.
+    :param clock: Epoch seconds a runner's liveness stamp is judged fresh against.
+    :param relauncher: Brings back the runner of a session with a step binding in
+        ``bindings`` before a send; both or neither.
     """
 
     def __init__(
@@ -215,12 +239,20 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
         *,
         pre_send_hooks: Sequence[PreSendHook],
         send_timeout_s: float = SEND_TIMEOUT_S,
+        clock: Callable[[], float] = time.time,
+        relauncher: StepRelauncher | None = None,
+        bindings: SessionBindingLookup | None = None,
     ) -> None:
+        if (relauncher is None) != (bindings is None):
+            raise ValueError("a step relauncher needs the bindings that name its steps")
         self._app = app
         self._store = conversation_store
         self._runner_router = runner_router
         self._hooks = tuple(pre_send_hooks)
         self._send_timeout_s = send_timeout_s
+        self._clock = clock
+        self._relauncher = relauncher
+        self._bindings = bindings
 
     @override
     async def send_message(
@@ -269,7 +301,7 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
                     "stable_id": send_id,
                 },
             )
-            result = await self._send(conv, user_id, event)
+            result = await self._send(workspace_id, conv, user_id, event)
         if result.get("denied") is True:
             raise _refused(
                 "dispatch.policy_denied",
@@ -335,15 +367,15 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
         return not newest.data or newest.data[0].id != item_id
 
     async def _send(
-        self, conv: Conversation, user_id: str | None, event: SessionEventInput
+        self, workspace_id: int, conv: Conversation, user_id: str | None, event: SessionEventInput
     ) -> dict[str, Any]:
         session_id = conv.id
         try:
             async with asyncio.timeout(self._send_timeout_s):
-                await self._connect_runner(conv)
+                await self._connect_runner(workspace_id, conv)
                 with contextlib.ExitStack() as in_flight:
                     return await self._app.state.session_event_dispatch(
-                        EngineEventContext(self._app, user_id), session_id, event, in_flight
+                        _engine_context(self._app, user_id), session_id, event, in_flight
                     )
         except TimeoutError:
             raise _refused(
@@ -360,8 +392,24 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
                     ) from exc
             raise await self._failure(exc, session_id) from exc
 
-    async def _connect_runner(self, conv: Conversation) -> None:
-        """Wake the session's runner as a message would; a host refusal is permanent."""
+    async def _connect_runner(self, workspace_id: int, conv: Conversation) -> None:
+        """
+        Bring the session's runner up for a message; a host refusal is permanent.
+
+        A Coral step goes through the step relauncher, at its binding's generation, so
+        this send never launches it past the relauncher's checks.
+        """
+        if self._relauncher is not None and self._bindings is not None:
+            binding = await asyncio.to_thread(
+                self._bindings.find_by_session, workspace_id, conv.id
+            )
+            if binding is not None and binding.role is SessionBindingRole.STEP:
+                await self._relauncher.ensure_runner(
+                    workspace_id=workspace_id,
+                    session_id=conv.id,
+                    generation=binding.session_generation,
+                )
+                return
         try:
             await ensure_runner_connected(
                 session_id=conv.id,
@@ -405,7 +453,7 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
         try:
             async with asyncio.timeout(self._send_timeout_s):
                 await self._app.state.session_event_dispatch(
-                    EngineEventContext(self._app, user_id),
+                    _engine_context(self._app, user_id),
                     session_id,
                     SessionEventInput(type=event_type),
                     None,
@@ -457,7 +505,9 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
 
         A running turn's response id comes from this replica's cache, else from
         the store: the newest item's, unless that is a user message (its turn
-        has written nothing yet), when it stays unknown.
+        has written nothing yet), when it stays unknown. Only the cache's id is
+        ``response_observed``: a server restarted mid-turn stores the rest of that
+        turn under ids of its own, so the store's newest one may name no turn.
 
         :raises CoralSessionError: ``session.deleted`` when the row is gone.
         """
@@ -475,12 +525,39 @@ class OmnigentSessionDispatch(SessionDispatch, TurnTranscripts):
             blocked_on=(blocked_on or None) if blocked_on is not None else conv.blocked_on,
             pending_elicitations=pending or (0 if warm else conv.pending_elicitation_count or 0),
             background_work=bool(conv.background_work_running),
+            response_observed=response_id is not None,
         )
         if live.status == "running" and response_id is None:
             return dataclasses.replace(
                 live, response_id=await self._stored_response_id(session_id)
             )
         return live
+
+    @override
+    async def runner_liveness(self, *, workspace_id: int, session_id: str) -> RunnerLiveness:
+        """
+        The session's runner from its metadata row and this replica's tunnel registry.
+
+        The server stamps a live runner from its tunnel's pings and clears the stamp
+        when the tunnel drops, so a runner whose host went away reads as not fresh.
+
+        :raises CoralSessionError: ``session.deleted`` when the session row is gone.
+        """
+        with workspace_scope(workspace_id):
+            found = await asyncio.to_thread(self._store.get_runner_liveness, session_id)
+        if found is None:
+            raise _refused("session.deleted", f"session {session_id} no longer exists")
+        runner_id, stamp = found
+        tunnels = getattr(self._app.state, "tunnel_registry", None)
+        connected = (
+            runner_id is not None and tunnels is not None and tunnels.get(runner_id) is not None
+        )
+        return RunnerLiveness(
+            runner_id=runner_id,
+            connected=connected,
+            last_seen=None if stamp is None else datetime.fromtimestamp(stamp, UTC),
+            fresh=connected or runner_seen_is_fresh(stamp, int(self._clock())),
+        )
 
     async def _stored_response_id(self, session_id: str) -> str | None:
         newest = await asyncio.to_thread(self._store.list_items, session_id, limit=1, order="desc")

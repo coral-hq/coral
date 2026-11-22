@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import JsonValue
 
 from coral.engine.facts import turn_key_generation
@@ -12,7 +14,7 @@ from coral.engine.machines.activation import (
     replace_activation,
     routes_by_label,
 )
-from coral.engine.machines.run import record_pause, refuse, refuse_unknown
+from coral.engine.machines.run import receipt_only, record_pause, refuse, refuse_unknown
 from coral.engine.timers import INFRA_BACKOFF, PLAN_PROBE, drop_slot_backoff
 from coral.engine.types import (
     ActivationStatus,
@@ -37,15 +39,23 @@ from coral.signals.nudge import decide, turn_ended_snapshot
 
 # A slot's facts wait while its latest effect of these kinds has no receipt.
 _LEASED_KINDS = frozenset({"send_input", "create_session", "nudge"})
+# What a restart salvaged rides from its create to the new session's brief.
+_SALVAGE_FIELDS = ("salvage_ref", "salvage_commit")
 
 
 def complete_effect(
     graph: CompiledGraph, state: RunState, effect: Effect, command: EffectCompleted
 ) -> ApplyResult:
-    """Apply a completed ``create_session``, ``send_input``, ``close_slot``, or ``nudge``."""
+    """Apply a completed ``create_session``, ``send_input``, ``close_slot``, or ``nudge``.
+
+    An effect of a generation a retry replaced only records its receipt, so a close's
+    commit still reaches the receipts for the next retry's expected head.
+    """
     slot = find_slot(state, effect.subject)
     if slot is None:
         return refuse_unknown(state)
+    if is_stale_slot_effect(state, effect, slot):
+        return receipt_only(state, effect.effect_key, dict(command.payload))
     if effect.kind == "create_session" and slot.status == "pending":
         return _session_created(state, effect, slot, command.payload)
     if effect.kind == "send_input" and slot.status == "session_created":
@@ -126,7 +136,7 @@ def note_turn_ended(state: RunState, command: TurnEnded, config: EngineConfig) -
     )
     kinds = (INFRA_BACKOFF,) if limited else (INFRA_BACKOFF, PLAN_PROBE)
     recovered = drop_slot_backoff(state, (slot.id,), kinds)
-    updated = _map_slot(recovered, slot.id, status="evaluating", failed_turn=None, nudges=nudges)
+    updated = map_slot(recovered, slot.id, status="evaluating", failed_turn=None, nudges=nudges)
     if capped:
         updated = record_pause(updated, "rejected_calls", "nudge_limit", slot.id)
     receipt = Receipt(key=command.fact_key, payload={"status": "evaluating"})
@@ -168,7 +178,7 @@ def receive_handoff(
         labels = _step_labels(graph, state, slot)
         if command.label not in labels:
             return refuse(state, "handoff.invalid", labels)
-    updated = _map_slot(
+    updated = map_slot(
         state,
         slot.id,
         status="evaluating",
@@ -205,7 +215,7 @@ def evaluate_handoff(
         subject=slot.id,
         payload={"interrupt": True, "closed_label": True},
     )
-    updated = _map_slot(base, slot.id, status="closing")
+    updated = map_slot(base, slot.id, status="closing")
     updated = updated.model_copy(update={"seq": seq, "effects": (*updated.effects, close)})
     return ApplyResult(state=_rephase(updated, slot.activation_id), effects=(close,))
 
@@ -243,7 +253,7 @@ def return_to_working(state: RunState, slot_id: str) -> RunState:
     slot = find_slot(state, slot_id)
     if slot is None:
         return state
-    updated = _map_slot(state, slot_id, status="working", handoff=None, handoff_label=None)
+    updated = map_slot(state, slot_id, status="working", handoff=None, handoff_label=None)
     return _rephase(updated, slot.activation_id)
 
 
@@ -252,7 +262,7 @@ def note_post_close(state: RunState, command: PostCloseActivity) -> ApplyResult:
     slot = find_slot(state, command.slot_id)
     if slot is None or slot.status != "closed" or state.status != "running":
         return refuse_unknown(state)
-    drifted = _map_slot(state, slot.id, drift=True)
+    drifted = map_slot(state, slot.id, drift=True)
     paused = record_pause(drifted, "drift", "post_close", slot.id)
     return ApplyResult(state=paused.model_copy(update={"seq": state.seq + 1}))
 
@@ -278,7 +288,7 @@ def finish_pending_closes(
             break
         for slot in state.slots:
             if slot.activation_id == owner_id and slot.status == "closing" and slot.pending_input:
-                state = _map_slot(state, slot.id, status="closed", pending_input=False)
+                state = map_slot(state, slot.id, status="closed", pending_input=False)
         state, spawned = _settle_activation(graph, state, owner_id)
         effects.extend(spawned)
     return state, tuple(effects)
@@ -286,7 +296,7 @@ def finish_pending_closes(
 
 def mark_failed_turn(state: RunState, slot_id: str, fact_key: str) -> RunState:
     """Remember the turn that failed so a later return to work re-prompts it."""
-    return _map_slot(state, slot_id, failed_turn=fact_key)
+    return map_slot(state, slot_id, failed_turn=fact_key)
 
 
 def awaiting_effect(state: RunState, slot_id: str) -> bool:
@@ -315,6 +325,50 @@ def find_slot(state: RunState, slot_id: str) -> Slot | None:
     return None
 
 
+def reports_an_ended_outage(
+    slot: Slot, runner_id: str | None, observed_at: datetime | None
+) -> bool:
+    """A late loss report: about a runner a wake relaunched away from, or seen before it came back.
+
+    A fact row can lag, so a report may be applied after its wake's result; it must not
+    count as a new loss.
+    """
+    if runner_id is not None and runner_id in slot.retired_runners:
+        return True
+    ended = slot.outage_ended_at
+    return ended is not None and observed_at is not None and observed_at < ended
+
+
+def effect_generation(effect: Effect) -> int | None:
+    """The session generation an effect was emitted for, if its payload names one."""
+    value = effect.payload.get("generation")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def effect_slot_generation(state: RunState, effect: Effect) -> int:
+    """The session generation a slot's effect belongs to.
+
+    The one its payload names, else the newest generation a retry of the slot had
+    started when the effect was emitted, else the first.
+    """
+    named = effect_generation(effect)
+    if named is not None:
+        return named
+    seq = effect_seq(effect)
+    generation = 1
+    for item in state.effects:
+        if item.kind == "retry_step" and item.subject == effect.subject and effect_seq(item) < seq:
+            generation = max(generation, effect_generation(item) or 1)
+    return generation
+
+
+def is_stale_slot_effect(state: RunState, effect: Effect, slot: Slot) -> bool:
+    """An effect of a generation a retry replaced. A log without a retry has none."""
+    return effect_slot_generation(state, effect) < slot.session_generation
+
+
 def _session_created(
     state: RunState,
     effect: Effect,
@@ -325,15 +379,18 @@ def _session_created(
     if not isinstance(run_id, str):
         return refuse_unknown(state)
     seq = state.seq + 1
+    brief_payload: dict[str, JsonValue] = {
+        "node_id": _text(effect.payload, "node_id"),
+        "profile": slot.profile,
+        "goal": _text(effect.payload, "goal"),
+    }
+    if isinstance(effect.payload.get("salvage_ref"), str):
+        brief_payload.update({name: effect.payload.get(name) for name in _SALVAGE_FIELDS})
     brief = Effect(
         effect_key=effect_key(run_id, seq, "send_input", slot.id),
         kind="send_input",
         subject=slot.id,
-        payload={
-            "node_id": _text(effect.payload, "node_id"),
-            "profile": slot.profile,
-            "goal": _text(effect.payload, "goal"),
-        },
+        payload=brief_payload,
     )
     updated = _commit(
         state,
@@ -392,7 +449,7 @@ def _nudged(
         seq=state.seq + 1,
     )
     if waiting:
-        updated = _rephase(_map_slot(updated, slot.id, failed_turn=None), slot.activation_id)
+        updated = _rephase(map_slot(updated, slot.id, failed_turn=None), slot.activation_id)
     return ApplyResult(state=updated, receipt_key=effect.effect_key)
 
 
@@ -442,7 +499,7 @@ def _commit(
     changes: dict[str, object] = {"status": status}
     if pending_input is not None:
         changes["pending_input"] = pending_input
-    mapped = _map_slot(state, slot.id, **changes)
+    mapped = map_slot(state, slot.id, **changes)
     return mapped.model_copy(
         update={
             "seq": seq,
@@ -466,7 +523,7 @@ def _reset_streak(state: RunState, slot_id: str) -> RunState:
     )
 
 
-def _map_slot(state: RunState, slot_id: str, **changes: object) -> RunState:
+def map_slot(state: RunState, slot_id: str, **changes: object) -> RunState:
     return state.model_copy(
         update={
             "slots": tuple(

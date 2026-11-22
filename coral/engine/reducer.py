@@ -7,8 +7,14 @@ from datetime import datetime
 from coral.engine.lifecycle import (
     apply_timer_due,
     cancel_run,
+    complete_restart,
+    complete_wake,
+    fail_restart,
+    fail_wake,
     note_infra_exhausted,
     note_rejection,
+    note_runner_held,
+    note_runner_hold_ended,
     note_runner_lost,
     note_session_failed,
     note_usage_limited,
@@ -29,8 +35,13 @@ from coral.engine.machines import (
     receive_handoff,
     start_run,
 )
-from coral.engine.machines.run import refuse, refuse_unknown
-from coral.engine.machines.slot import guard_handoff, note_turn_ended
+from coral.engine.machines.run import receipt_only, refuse, refuse_unknown
+from coral.engine.machines.slot import (
+    find_slot,
+    guard_handoff,
+    is_stale_slot_effect,
+    note_turn_ended,
+)
 from coral.engine.projection import project, view_patch
 from coral.engine.timers import sync_watchdogs
 from coral.engine.types import (
@@ -54,6 +65,8 @@ from coral.engine.types import (
     RejectionObserved,
     ResumeRun,
     RetryStep,
+    RunnerHeld,
+    RunnerHoldEnded,
     RunnerLost,
     RunState,
     SessionFailed,
@@ -153,7 +166,7 @@ def _dispatch(
     if isinstance(command, ResumeRun):
         return resume_run(graph, state, command)
     if isinstance(command, RetryStep):
-        return retry_step(graph, state, command)
+        return retry_step(state, command)
     if isinstance(command, TimerDue):
         return apply_timer_due(graph, state, command, now, config.timer_policy)
     if isinstance(command, RejectionObserved):
@@ -162,6 +175,10 @@ def _dispatch(
         return note_turn_ended(state, command, config)
     if isinstance(command, RunnerLost):
         return note_runner_lost(state, command)
+    if isinstance(command, RunnerHeld):
+        return note_runner_held(state, command)
+    if isinstance(command, RunnerHoldEnded):
+        return note_runner_hold_ended(graph, state, command)
     if isinstance(command, UsageLimited):
         return note_usage_limited(state, command, now, config.timer_policy)
     if isinstance(command, WaitingWithoutElicitation):
@@ -199,6 +216,10 @@ def _effect_completed(
     effect = _find_effect(state, command.effect_key)
     if effect is None:
         return refuse_unknown(state)
+    if effect.kind == "retry_step":
+        return complete_restart(graph, state, effect, command)
+    if effect.kind == "runner_lost":
+        return complete_wake(graph, state, effect, command)
     return complete_effect(graph, state, effect, command)
 
 
@@ -213,6 +234,14 @@ def _effect_failed(state: RunState, command: EffectFailed) -> ApplyResult:
     effect = _find_effect(state, command.effect_key)
     if effect is None:
         return refuse_unknown(state)
+    if effect.kind == "retry_step":
+        return fail_restart(state, effect, command)
+    slot = find_slot(state, effect.subject)
+    if slot is not None and is_stale_slot_effect(state, effect, slot):
+        # A failure of a generation a retry replaced is kept for audit and pauses nothing.
+        return receipt_only(state, effect.effect_key, {"failed": command.code, "stale": True})
+    if effect.kind == "runner_lost":
+        return fail_wake(state, effect, command)
     return fail_effect(state, effect, command)
 
 

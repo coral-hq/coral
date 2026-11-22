@@ -13,10 +13,12 @@ import {
   getRunOutcome,
   listRuns,
   postRunAction,
+  retryStep,
   runActionKey,
   runGraphQueryKey,
   runOutcomeQueryKey,
   runQueryKey,
+  runRetryKey,
   runsListPrefixKey,
   runsListQueryKey,
   runStreamUrl,
@@ -27,6 +29,7 @@ import {
 import type { RunSummary, StartRunRequest } from "./generated/coralApi";
 
 const RUN_ID = "84170e76f35c7a90d1280a24a7230fc9";
+const ACTIVATION_ID = "c601458b43d603f0a38687f9fcdf3809";
 
 const SUMMARY: RunSummary = {
   run_id: RUN_ID,
@@ -75,6 +78,12 @@ describe("run query keys", () => {
     // Every filtered list starts with the prefix a start or an action invalidates.
     expect(runsListQueryKey(SCOPE, filters).slice(0, 2)).toEqual(runsListPrefixKey(SCOPE));
     expect(runActionKey(SCOPE, RUN_ID)).toEqual(["coral-run-action", SCOPE, RUN_ID]);
+    expect(runRetryKey(SCOPE, RUN_ID, ACTIVATION_ID)).toEqual([
+      "coral-run-retry",
+      SCOPE,
+      RUN_ID,
+      ACTIVATION_ID,
+    ]);
   });
 
   it("gives another viewer other keys", () => {
@@ -84,6 +93,15 @@ describe("run query keys", () => {
     }
     expect(runsListQueryKey(OTHER_VIEWER, ALL_RUNS)).not.toEqual(runsListQueryKey(SCOPE, ALL_RUNS));
     expect(runActionKey(OTHER_VIEWER, RUN_ID)).not.toEqual(runActionKey(SCOPE, RUN_ID));
+    expect(runRetryKey(OTHER_VIEWER, RUN_ID, ACTIVATION_ID)).not.toEqual(
+      runRetryKey(SCOPE, RUN_ID, ACTIVATION_ID),
+    );
+  });
+
+  it("gives each step's retry its own key, apart from the run's actions", () => {
+    // WHY: one retry in flight must not disable another step's Retry or the run's actions.
+    expect(runRetryKey(SCOPE, RUN_ID, "a1")).not.toEqual(runRetryKey(SCOPE, RUN_ID, "a2"));
+    expect(runRetryKey(SCOPE, RUN_ID, "a1").slice(0, 3)).not.toEqual(runActionKey(SCOPE, RUN_ID));
   });
 
   it("files one status set under one list key, in any order and with repeats", () => {
@@ -401,6 +419,57 @@ describe("gate answers", () => {
   });
 });
 
+describe("step retries", () => {
+  it("posts an empty JSON object to the activation's :retry route", async () => {
+    // WHY: the banner's Retry restarts one failed step; the route takes no arguments.
+    authenticatedFetch.mockResolvedValue(
+      json({ ...SUMMARY, status: "paused", pause_reason: "infra", allowed_actions: ["cancel"] }),
+    );
+    const summary = await retryStep(RUN_ID, ACTIVATION_ID);
+    expect(summary).toMatchObject({ status: "paused", allowed_actions: ["cancel"] });
+    const { url, init } = sent();
+    expect(url).toBe(`/v1/coral/runs/${RUN_ID}/activations/${ACTIVATION_ID}:retry`);
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
+    expect(JSON.parse(init.body as string)).toEqual({});
+  });
+
+  it("escapes the run and activation ids in the path", async () => {
+    // WHY: each id must stay one path segment.
+    authenticatedFetch.mockResolvedValue(json(SUMMARY));
+    await retryStep("r/1", "a:b/c?d#e");
+    expect(sent().url).toBe("/v1/coral/runs/r%2F1/activations/a%3Ab%2Fc%3Fd%23e:retry");
+  });
+
+  it.each(["", ".", ".."])("refuses the id %j without a request", async (id) => {
+    // WHY: URL parsing resolves dot segments, so these ids would leave the step's path.
+    await expect(retryStep(RUN_ID, id)).rejects.toMatchObject({ status: 404 });
+    await expect(retryStep(id, ACTIVATION_ID)).rejects.toMatchObject({ status: 404 });
+    expect(authenticatedFetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps a refused retry's message and reason", async () => {
+    // WHY: the banner shows the server's message for a conflict, such as a restart under way.
+    authenticatedFetch.mockResolvedValue(
+      json(
+        envelope("illegal_transition", "The step is already restarting.", {
+          status: "paused",
+          pause_reason: "infra",
+          reason: "restart_in_progress",
+        }),
+        409,
+      ),
+    );
+    await expect(retryStep(RUN_ID, ACTIVATION_ID)).rejects.toMatchObject({
+      name: "CoralRequestError",
+      status: 409,
+      code: "illegal_transition",
+      message: "The step is already restarting.",
+      details: { reason: "restart_in_progress" },
+    });
+  });
+});
+
 describe("starting a run", () => {
   const REQUEST: StartRunRequest = {
     workflow_id: "a".repeat(32),
@@ -449,6 +518,7 @@ describe("every client's refusals", () => {
     ["getRunGraph", () => getRunGraph(RUN_ID)],
     ["getRunOutcome", () => getRunOutcome(RUN_ID)],
     ["postRunAction", () => postRunAction(RUN_ID, "pause")],
+    ["retryStep", () => retryStep(RUN_ID, ACTIVATION_ID)],
     ["answerGate", () => answerGate(RUN_ID, "approve_change", GATE_ANSWER)],
     ["startRun", () => startRun(START)],
   ];

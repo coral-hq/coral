@@ -24,6 +24,7 @@ import omnigent.server.routes._host_worktree as host_worktree
 import omnigent.server.routes._workspace_validation as workspace_validation
 from coral.omni.server.worktrees import connect_run_worktree_host
 from coral.workspace.run_worktree import (
+    RUN_BRANCH_PREFIX,
     RepoBinding,
     RunWorktree,
     RunWorktreeError,
@@ -34,7 +35,7 @@ from coral.workspace.run_worktree import (
 )
 from omnigent.db.account_authority import AccountAuthority, account_authority_scope
 from omnigent.db.db_models import current_workspace_id
-from omnigent.host.connect import HostProcess
+from omnigent.host.connect import _CORAL_RUN_REF, HostProcess
 from omnigent.host.frames import (
     HOST_CAPABILITIES,
     HostCreateWorktreeFrame,
@@ -224,6 +225,17 @@ async def _failure(tunnel: _Tunnel, repo_root: str) -> RunWorktreeError:
 @pytest.mark.parametrize("run_id", ["run-1", "ü/../~:^ x.lock"])
 def test_run_branch_name_is_a_valid_git_branch(run_id: str) -> None:
     validate_branch_name(run_branch_name(run_id))
+
+
+@pytest.mark.parametrize("run_id", ["run-1", "ü/../~:^ x.lock", "f" * 32])
+def test_the_host_marks_a_checkout_of_any_run_branch_as_a_coral_step(run_id: str) -> None:
+    # The host repeats the run branch rule, since Omnigent cannot import Coral.
+    branch = run_branch_name(run_id)
+    run12 = branch.removeprefix(RUN_BRANCH_PREFIX).split("/")[0]
+    one_digit_short = branch.replace(run12, run12[:-1], 1)
+
+    assert _CORAL_RUN_REF.match(f"refs/heads/{branch}")
+    assert not _CORAL_RUN_REF.match(f"refs/heads/{one_digit_short}")
 
 
 async def test_first_call_creates_the_sibling_worktree_and_the_next_adopts_it(

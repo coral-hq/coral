@@ -30,6 +30,7 @@ from coral.bridge.executors import (
     BoundedThreads,
     BridgeThreads,
     bridge_hold_policy,
+    crosses_host_wait,
 )
 from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import EngineBridge
@@ -43,6 +44,7 @@ from coral.omni.server.scopes import OmnigentRunScopeRunner
 from coral.omni.server.usage import OmnigentRunSpend
 from coral.queue.executors import EffectExecutor
 from coral.queue.store import SqlAlchemyCoralQueueStore
+from coral.recovery.relaunch import DEFAULT_RECONNECT_GRACE_S, LivenessPass, LivenessRef
 from coral.stores.protocols import QueueStore, RunStore
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import FreshBindingLookup, SqlAlchemySessionBindingStore
@@ -51,6 +53,10 @@ from coral.stores.workflows import SqlWorkflowDefinitionStore, WorkflowDefinitio
 from coral.tools.dispatch import ThreadRunner
 from coral.tools.port import RunDecisionPort
 from coral.workers.supervisor import MAX_DRAIN_CONCURRENCY, WorkerSupervisor
+from coral.workers.worker_lease import (
+    DEFAULT_WORKER_LEASE_SECONDS,
+    DEFAULT_WORKER_RENEW_INTERVAL_S,
+)
 from omnigent.db.db_models import current_workspace_id
 from omnigent.process_logging import data_dir
 from omnigent.server.server_plugins import ServerPluginRegistration, ServerServices
@@ -84,6 +90,17 @@ EVIDENCE_THREAD_NAME = "coral-evidence"
 # runs advance at once (1 to MAX_DRAIN_CONCURRENCY).
 DRAIN_CONCURRENCY_CONFIG_KEY = "coral_drain_concurrency"
 DEFAULT_DRAIN_CONCURRENCY = 4
+# Server config: the leader lease in seconds. A restarted server leads, and recovers runs,
+# once the dead leader's lease has run out.
+WORKER_LEASE_CONFIG_KEY = "coral_worker_lease_seconds"
+MIN_WORKER_LEASE_S = 10
+MAX_WORKER_LEASE_S = 600
+# Below this the lease leaves little margin for clock skew between replicas.
+SHORT_WORKER_LEASE_S = 60
+# Server config: how long a working step's runner may stay missing before it is lost.
+RECONNECT_GRACE_CONFIG_KEY = "coral_runner_reconnect_grace_s"
+MIN_RECONNECT_GRACE_S = 30
+MAX_RECONNECT_GRACE_S = 600
 # The server stores the session engine builds on; anchors need the project store.
 _ENGINE_SERVICES = (
     "agent_store",
@@ -126,22 +143,84 @@ class _ProcessLifespan:
 _PROCESS_LIFESPAN = _ProcessLifespan()
 
 
+def _config_int(
+    server_config: Mapping[str, Any] | None, key: str, *, default: int, low: int, high: int
+) -> int:
+    """
+    The integer server config ``key``, or ``default`` when unset.
+
+    :raises ValueError: for a value that is not an integer from ``low`` to ``high``.
+    """
+    value = (server_config or {}).get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer")
+    if not low <= value <= high:
+        raise ValueError(f"{key} must be from {low} to {high}")
+    return value
+
+
 def drain_concurrency(server_config: Mapping[str, Any] | None) -> int:
     """
     The drain pool's size from ``coral_drain_concurrency``, or the default when unset.
 
     :raises ValueError: for a value that is not an integer from 1 to the pool's maximum.
     """
-    value = (server_config or {}).get(DRAIN_CONCURRENCY_CONFIG_KEY)
-    if value is None:
-        return DEFAULT_DRAIN_CONCURRENCY
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{DRAIN_CONCURRENCY_CONFIG_KEY} must be an integer")
-    if not 1 <= value <= MAX_DRAIN_CONCURRENCY:
-        raise ValueError(
-            f"{DRAIN_CONCURRENCY_CONFIG_KEY} must be from 1 to {MAX_DRAIN_CONCURRENCY}"
+    return _config_int(
+        server_config,
+        DRAIN_CONCURRENCY_CONFIG_KEY,
+        default=DEFAULT_DRAIN_CONCURRENCY,
+        low=1,
+        high=MAX_DRAIN_CONCURRENCY,
+    )
+
+
+def worker_lease_seconds(server_config: Mapping[str, Any] | None) -> int:
+    """
+    The leader lease from ``coral_worker_lease_seconds``, or 120 when unset.
+
+    A lease below 60 seconds logs one warning: a replica whose clock runs ahead of the
+    leader's by more than a quarter of the lease can take over a lease still held.
+
+    :raises ValueError: for a value that is not an integer from 10 to 600.
+    """
+    lease = _config_int(
+        server_config,
+        WORKER_LEASE_CONFIG_KEY,
+        default=DEFAULT_WORKER_LEASE_SECONDS,
+        low=MIN_WORKER_LEASE_S,
+        high=MAX_WORKER_LEASE_S,
+    )
+    if lease < SHORT_WORKER_LEASE_S:
+        _logger.warning(
+            "%s is %d s: replica clocks must agree within %g s, a quarter of the lease; "
+            "keep them NTP-synced",
+            WORKER_LEASE_CONFIG_KEY,
+            lease,
+            lease / 4,
         )
-    return value
+    return lease
+
+
+def worker_renew_interval_s(lease_seconds: int) -> float:
+    """How often the leader renews its lease: every 30 s, or a quarter of a shorter lease."""
+    return min(DEFAULT_WORKER_RENEW_INTERVAL_S, lease_seconds / 4)
+
+
+def runner_reconnect_grace_s(server_config: Mapping[str, Any] | None) -> int:
+    """
+    The reconnect grace from ``coral_runner_reconnect_grace_s``, or 90 when unset.
+
+    :raises ValueError: for a value that is not an integer from 30 to 600.
+    """
+    return _config_int(
+        server_config,
+        RECONNECT_GRACE_CONFIG_KEY,
+        default=DEFAULT_RECONNECT_GRACE_S,
+        low=MIN_RECONNECT_GRACE_S,
+        high=MAX_RECONNECT_GRACE_S,
+    )
 
 
 def _create_workflow_engine() -> Engine:
@@ -290,14 +369,30 @@ def _register_executors(
         stack.callback(unregister_executor, effect_type, executor)
 
 
-def _wire_bridge(threads: BridgeThreads, stack: AsyncExitStack) -> None:
-    """Register the bridge's own executors: its timers and its per-run resync."""
+def _wire_bridge(threads: BridgeThreads, stack: AsyncExitStack, liveness: LivenessRef) -> None:
+    """
+    Register the bridge's own executors: its timers and its per-run resync.
+
+    The resync checks runner liveness through ``liveness``, which the session engine
+    sets once it is wired.
+    """
     from coral.bridge.executors import run_resync_executor, timer_executor
     from coral.bridge.mapping import RUN_RESYNC, TIMER
 
     _register_executors(
-        {TIMER: timer_executor(threads), RUN_RESYNC: run_resync_executor(threads)}, stack
+        {TIMER: timer_executor(threads), RUN_RESYNC: run_resync_executor(threads, liveness)},
+        stack,
     )
+
+
+def _leader_term(bridge: EngineBridge, liveness: LivenessRef) -> Callable[[], None]:
+    """What a replica starts afresh each time it leads: the bridge's records and the clocks."""
+
+    def begin() -> None:
+        bridge.begin_leader_term()
+        liveness.reset()
+
+    return begin
 
 
 def _wire_registration_carrier(stack: AsyncExitStack) -> None:
@@ -504,6 +599,8 @@ def _wire_session_engine(
     stack: AsyncExitStack,
     channels: HostWorkspaceChannels,
     evidence_channels: ChannelsRef | None = None,
+    liveness: LivenessRef | None = None,
+    reconnect_grace_s: int = DEFAULT_RECONNECT_GRACE_S,
 ) -> BoundSessionRefresher:
     """
     Build the session engine and register its executors, then its status-edge observers.
@@ -514,13 +611,16 @@ def _wire_session_engine(
     The turn-fact recorder writes a signal for each turn end of a session in
     ``bound``; the returned refresher, which the caller starts, rebuilds it.
     Workspace ops go through ``channels``; the evidence check reads worktree
-    fingerprints through the same ones, set on ``evidence_channels``.
+    fingerprints through the same ones, set on ``evidence_channels``. The resync's
+    runner liveness check is set on ``liveness``, with ``reconnect_grace_s``. Coral's own
+    paths launch a step's runner again only through the one relauncher, which the wake
+    and every engine send share.
     """
     from coral.bridge.executors import turn_fact_executor
-    from coral.bridge.mapping import TURN_FACT
+    from coral.bridge.mapping import RECOVERY_RESTART, RECOVERY_WAKE, TURN_FACT
     from coral.omni.server.anchor_runner import AnchorRunnerStopper
     from coral.omni.server.dispatch import OmnigentSessionDispatch
-    from coral.omni.server.sessions import OmnigentSessionFacade
+    from coral.omni.server.sessions import OmnigentSessionFacade, OmnigentStepRelauncher
     from coral.omni.server.status_edges import CoralStatusEdges
     from coral.omni.server.step_agents import OmnigentStepAgents
     from coral.omni.server.turn_facts import (
@@ -529,6 +629,8 @@ def _wire_session_engine(
         TurnFactRecorder,
     )
     from coral.recovery.drift import DriftPauser, DriftPreSendHook
+    from coral.recovery.ladder import restart_executor
+    from coral.recovery.relaunch import wake_executor
     from coral.slots.close import ConfirmedStops, StopConfirmedTurnEnd
     from coral.slots.executors import (
         CANCEL_SESSIONS,
@@ -561,12 +663,20 @@ def _wire_session_engine(
         dispatch=lambda: dispatch,
     )
     pauser = DriftPauser(run_store, engine=threads, on_anchor_bound=anchor_runner_stopper)
-    facade = OmnigentSessionFacade(app, services, bindings)
+    # The dispatch's relaunch path holds the facade and the relauncher, so both resolve it late.
+    facade = OmnigentSessionFacade(
+        app, services, bindings, slot_generations=queue_store, dispatch=lambda: dispatch
+    )
+    relauncher = OmnigentStepRelauncher(
+        facade, services, bindings, run_store, dispatch=lambda: dispatch
+    )
     dispatch = OmnigentSessionDispatch(
         app,
         services.conversation_store,
         services.runner_router,
         pre_send_hooks=(DriftPreSendHook(facade, bindings, pauser),),
+        relauncher=relauncher,
+        bindings=bindings,
     )
     if evidence_channels is not None:
         evidence_channels.channels = channels
@@ -607,6 +717,24 @@ def _wire_session_engine(
         ),
         WORKSPACE_SALVAGE: salvage_executor(channels, run_store, scope_runner),
         WORKSPACE_RESET: reset_executor(channels, run_store, scope_runner),
+        RECOVERY_RESTART: restart_executor(
+            dispatch=dispatch,
+            edges=edges,
+            channels=channels,
+            bindings=bindings,
+            intents=intents,
+            run_store=run_store,
+            scope_runner=scope_runner,
+        ),
+        RECOVERY_WAKE: wake_executor(
+            threads=threads,
+            relauncher=relauncher,
+            dispatch=dispatch,
+            facade=facade,
+            drift=pauser,
+            run_store=run_store,
+            scope_runner=scope_runner,
+        ),
         TURN_FACT: turn_fact_executor(
             threads,
             bindings=bindings,
@@ -620,6 +748,9 @@ def _wire_session_engine(
     }
     # A cancelled run is finished when its cancel_sessions items are claimed.
     _register_executors(executors, stack, runs_after_terminal=frozenset({CANCEL_SESSIONS}))
+    if liveness is not None:
+        liveness.current = LivenessPass(threads, dispatch, grace_s=reconnect_grace_s)
+        stack.callback(setattr, liveness, "current", None)
     recorder = TurnFactRecorder(bound, queue_store)
     recorder.start()
     # Pushed before the observer registers, so it closes after the observer is removed.
@@ -630,6 +761,7 @@ def _wire_session_engine(
     refresher = BoundSessionRefresher(bindings, bound)
     app.state.coral_session_facade = facade
     app.state.coral_session_dispatch = dispatch
+    app.state.coral_step_relauncher = relauncher
     app.state.coral_status_edges = edges
     app.state.coral_confirmed_stops = stops
     app.state.coral_turn_fact_recorder = recorder
@@ -689,7 +821,10 @@ async def coral_lifespan(
                 versions=SqlAlchemyWorkflowVersionStore(storage_location),
                 bound_sessions=bound,
             )
-            workers = drain_concurrency(getattr(services, "server_config", None))
+            server_config = getattr(services, "server_config", None)
+            workers = drain_concurrency(server_config)
+            lease_s = worker_lease_seconds(server_config)
+            grace_s = runner_reconnect_grace_s(server_config)
             # Each drain worker may wait on one bridge call; the pool never starves them.
             threads = BridgeThreads(bridge, max_workers=max(BRIDGE_THREADS, workers))
             stack.callback(threads.close)
@@ -704,6 +839,7 @@ async def coral_lifespan(
             # The gate prompts this process shows, which the republisher does not re-send.
             prompts = LocalGatePrompts()
             bindings = SqlAlchemySessionBindingStore(storage_location)
+            liveness = LivenessRef()
             supervisor = WorkerSupervisor(
                 run_store,
                 queue_store,
@@ -714,8 +850,12 @@ async def coral_lifespan(
                 run_reconciler=threads.schedule_resync,
                 on_finished=threads.feed,
                 hold_policy=bridge_hold_policy,
+                hold_restart=crosses_host_wait,
                 drain_concurrency=workers,
                 resync_interval_s=RESYNC_INTERVAL_S,
+                lease_seconds=lease_s,
+                renew_interval_s=worker_renew_interval_s(lease_s),
+                on_leader_term=_leader_term(bridge, liveness),
             )
             if hasattr(app, "state"):
                 app.state.coral_run_store = run_store
@@ -740,7 +880,9 @@ async def coral_lifespan(
                 gate_answering=answering,
                 evidence=evidence,
             )
-            _wire_bridge(threads, stack)
+            _wire_bridge(threads, stack, liveness)
+            if hasattr(app, "state"):
+                app.state.coral_runner_liveness = liveness
             _wire_registration_carrier(stack)
             answers = _wire_gates(
                 app,
@@ -787,6 +929,8 @@ async def coral_lifespan(
                     stack=stack,
                     channels=channels,
                     evidence_channels=evidence_channels,
+                    liveness=liveness,
+                    reconnect_grace_s=grace_s,
                 )
                 stack.push_async_callback(refresher.stop)
                 await refresher.start()

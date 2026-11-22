@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from coral.engine.facts import TurnFact
@@ -185,7 +186,7 @@ class HostWorkspaceChannels(Protocol):
 
         Callers take every argument from the stored run, never from a payload.
 
-        :param user_id: ``None`` only when auth is off, which skips the owner checks.
+        :param user_id: The run owner; ``None`` is a single-user server's local user.
         :raises HostAccessRefused: ``not_permitted`` when the owner may not use the host.
         """
         ...
@@ -281,7 +282,7 @@ class SessionCreateRequest:
     One ``create_session`` effect, with its identity taken from the stored run.
 
     :param effect_key: Derives a step's session id; an anchor's id comes from ``run_id``.
-    :param user_id: The run owner, or ``None`` when auth is off.
+    :param user_id: The run owner, or ``None`` for a single-user server's local user.
     :param title: The session title; a step's is unique under the anchor.
     :param host_id: A step's host, from the run spec.
     :param workspace: A step's canonical run worktree, from the run spec.
@@ -336,13 +337,39 @@ class SessionState:
 
 @dataclass(frozen=True)
 class LiveStatus:
-    """A session's live status, as a close or cancel reads it."""
+    """
+    A session's live status, as a close or cancel reads it.
+
+    :param response_observed: ``response_id`` came from this replica's own cache, which
+        its edges fill; Omnigent can briefly keep an earlier turn's id there, so it is
+        not proof of the running turn. ``False`` when it is a guess from the stored
+        items, which after a server restart mid-turn can name no turn at all.
+    """
 
     status: str | None
     response_id: str | None
     blocked_on: str | None
     pending_elicitations: int
     background_work: bool
+    response_observed: bool
+
+
+@dataclass(frozen=True)
+class RunnerLiveness:
+    """
+    What the server knows of a session's runner, as the liveness pass reads it.
+
+    :param runner_id: The runner the session is bound to, or ``None``.
+    :param connected: Its tunnel is open on this replica.
+    :param last_seen: The runner's liveness stamp (aware UTC); the server clears it
+        when the tunnel drops.
+    :param fresh: Connected here, or a stamp the server still calls fresh.
+    """
+
+    runner_id: str | None
+    connected: bool
+    last_seen: datetime | None
+    fresh: bool
 
 
 @dataclass(frozen=True)
@@ -491,6 +518,14 @@ class SessionDispatch(Protocol):
 
     async def live_status(self, *, session_id: str) -> LiveStatus: ...
 
+    async def runner_liveness(self, *, workspace_id: int, session_id: str) -> RunnerLiveness:
+        """
+        The session's runner as this replica sees it.
+
+        :raises CoralSessionError: ``session.deleted`` when the session row is gone.
+        """
+        ...
+
     async def queued_user_input(
         self, *, session_id: str, user_id: str | None, engine_messages: Mapping[str, bytes]
     ) -> bool:
@@ -499,6 +534,37 @@ class SessionDispatch(Protocol):
 
         :param engine_messages: Each stable id the engine recorded for the session
             and the sha256 of the exact text it sent under it.
+        """
+        ...
+
+
+# How a lost step's runner was brought back: it was connected after all, or relaunched.
+RunnerRelaunch = Literal["connected", "relaunched"]
+
+
+@runtime_checkable
+class StepRelauncher(Protocol):
+    """How Coral's own paths launch a step's runner after its create (K4 subset)."""
+
+    async def ensure_runner(
+        self,
+        *,
+        workspace_id: int,
+        session_id: str,
+        generation: int,
+        ensure_lease: Callable[[], Awaitable[None]] | None = None,
+    ) -> RunnerRelaunch:
+        """
+        Relaunch the step session's runner in place, unless it is connected.
+
+        Its run, owner and host come from the stored run and binding, never the caller.
+        Before any launch the binding must be the step's at ``generation``, the slot
+        still at it, the session open, the run owner's host connected with the Coral
+        token, and the old runner not alive there.
+
+        :param ensure_lease: Called before each side effect (the stop, the launch).
+        :raises CoralSessionError: A typed refusal, e.g. retryable
+            ``session.host_offline`` or ``recovery.runner_alive``.
         """
         ...
 
@@ -568,6 +634,8 @@ __all__ = [
     "RunScopeRunner",
     "RunSpendReader",
     "RunSpendTotals",
+    "RunnerLiveness",
+    "RunnerRelaunch",
     "SendReceipt",
     "SessionCreateRequest",
     "SessionDispatch",
@@ -579,6 +647,7 @@ __all__ = [
     "SlotRoleName",
     "StatusEdgeView",
     "StepAgentResolver",
+    "StepRelauncher",
     "TrackedPrompt",
     "TranscriptItem",
     "TurnFactSink",

@@ -41,6 +41,13 @@ The workflow engine is designed and is next on the
 [design](docs/coral/roadmap/coral-design.md). There are no releases yet, so
 run Coral from source.
 
+On macOS, until CRL-165 and CRL-166 land, run Coral steps only on content you
+trust: a step's shell can read other processes' environments, your model API
+key among them, and reach other sessions' harness sockets. On a single-user
+server a step can act as you, the owner, so a human gate is a workflow step,
+not a security control. See the
+[ADR-05 addendum](docs/coral/decisions/ADR-05-topology.md#addendum-crl-137-probe-verdicts-2026-11-21).
+
 ## Run Coral from source
 
 You need Python 3.12 and [uv](https://docs.astral.sh/uv/). The web UI also

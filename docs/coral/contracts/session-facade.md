@@ -2,8 +2,9 @@
 
 - **Status:** Draft v1, live. `coral_lifespan` registers the seven executors,
   the engine bridge's `timer`, `run_resync` and `turn_fact` executors, the
-  gate executors `gate_publish` and `gate_withdraw`, and the status-edge
-  observers below. The engine bridge queues their work from each
+  restart ladder's `recovery.restart` and the wake's `recovery.wake`
+  executors, the gate executors `gate_publish` and `gate_withdraw`, and the
+  status-edge observers below. The engine bridge queues their work from each
   run's engine log and folds their outcomes back (see "The engine bridge").
 - **Code:** protocols and value types in `coral/omni/protocols.py`; the
   facade in `coral/omni/server/sessions.py`; dispatch in
@@ -11,7 +12,10 @@
   `coral/omni/server/status_edges.py`; close and cancel in
   `coral/slots/close.py`; executors in `coral/slots/executors.py` and
   `coral/workspace/executors.py`; shared executor steps in
-  `coral/queue/run_effects.py`; drift in `coral/recovery/drift.py`; the engine
+  `coral/queue/run_effects.py`; drift in `coral/recovery/drift.py`; the
+  restart ladder in `coral/recovery/ladder.py`; the liveness pass and the wake
+  in `coral/recovery/relaunch.py`; the step relauncher
+  (`OmnigentStepRelauncher`) in `coral/omni/server/sessions.py`; the engine
   bridge in `coral/bridge/`; step agents in `coral/omni/server/step_agents.py`;
   the turn-fact recorder in `coral/omni/server/turn_facts.py`; gates and
   alerts in `coral/gates/`, `coral/alerts/` and `coral/omni/server/gates.py`;
@@ -54,7 +58,10 @@
      `OmnigentStepAgents`, which resolves a step's stance to the run owner's
      agent;
    - the seven executors (`cancel_sessions` with `runs_after_terminal`, see
-     Finished runs) and the bridge's `turn_fact` executor;
+     Finished runs), the bridge's `turn_fact` executor, and the
+     `recovery.restart` and `recovery.wake` executors; one
+     `OmnigentStepRelauncher` serves both the wake and the dispatch, and the
+     resync runs the `LivenessPass` (see "Restarts and runner loss");
    - the turn-fact recorder, then the S1 observers `"coral"`
      (`CoralStatusEdges.observe`), `"coral.confirmed_stops"`
      (`ConfirmedStops.observe`) and `"coral.turn_facts"`
@@ -89,11 +96,12 @@ its registrations ([`plugin.md`](plugin.md)).
 
 The built objects are on `app.state`: `coral_run_store`, `coral_queue_store`,
 `coral_worker_supervisor`, `coral_engine_bridge`, `coral_bound_sessions`,
-`coral_gate_publisher`, `coral_gate_prompts` and `coral_alert_store` (which the
-workflow Inbox routes read), and with the session engine also
-`coral_session_facade`, `coral_session_dispatch`, `coral_status_edges`,
-`coral_confirmed_stops`, `coral_turn_fact_recorder` and
-`coral_bound_session_refresher`.
+`coral_runner_liveness` (the liveness pass's reference, which holds a pass
+once the session engine is wired), `coral_gate_publisher`, `coral_gate_prompts` and
+`coral_alert_store` (which the workflow Inbox routes read), and with the
+session engine also `coral_session_facade`, `coral_session_dispatch`,
+`coral_status_edges`, `coral_confirmed_stops`, `coral_turn_fact_recorder`,
+`coral_bound_session_refresher` and `coral_step_relauncher`.
 
 ## Ids
 
@@ -146,12 +154,14 @@ The engine bridge meets each of these (see "The engine bridge").
   `effect.invalid_payload`, never a silent success. The bridge names the
   session the slot's latest create derives, also while that create is in
   flight; a session this run never bound counts as cancelled.
-- **Reset after salvage (SES-06, CRL-137).** Enqueue `workspace.reset` only after
-  `workspace.salvage` for the same session completed. The reset executor
-  cannot see the salvage and checks nothing about it. A salvage whose
-  `git_failed` would repeat fails permanently, so it is never retried. The
-  bridge queues no `workspace.*` item: a writer's commit runs inside its
-  `close_slot`.
+- **Reset after salvage (SES-06).** The bridge queues no `workspace.*` item: a
+  writer's commit runs inside its `close_slot`, and a retried step's salvage
+  and reset run inside its `recovery.restart` row, in that order, with the
+  salvage commit as the reset's precondition (see "Restarts and runner
+  loss"). The standalone `workspace.reset` executor cannot see a salvage and
+  checks nothing about it; a caller that queues it must enqueue it only after
+  `workspace.salvage` for the same session completed. A salvage whose
+  `git_failed` would repeat fails permanently, so it is never retried.
 - **One worker.** The torn-row repair assumes one item of a run in flight at
   a time: the `coral.worker.primary` lease admits one leader, and its drain
   workers never run two items of one run at once.
@@ -172,8 +182,10 @@ The engine bridge meets each of these (see "The engine bridge").
 - **Coral hosts.** The run owner's host must advertise `coral_runner:2`
   (Coral's tool provider, [`plugin.md`](plugin.md)); an older or Coral-less
   host, or one with `CORAL_DISABLE_HOST_ENTRY_POINTS` set, is
-  `session.host_unsupported`. Only a create checks it (see Residuals and
-  limitations).
+  `session.host_unsupported`. A create checks it before any row and again
+  before the launch, and every later launch of a step's runner that Coral makes checks it
+  too: a send that must launch one, and a relaunch (`require_coral_runner`; see
+  Residuals and limitations).
 
 ## Executors
 
@@ -210,9 +222,12 @@ side effect, so valid input never reaches `effect.result_too_large`.
 **Paused runs.** `create_session` and `send_input` refuse a paused run with
 retryable `run.paused`. `close_slot` and `cancel_sessions` still run: a close
 finishes an accepted handoff, and a cancel is how a paused run ends. The
-`workspace.*` executors also run while a run is paused. The bridge queues no
-`workspace.*` item; whether such WRITE effects wait for a paused run is for
-the restart ladder (SES-06) to decide.
+`workspace.*` executors and `recovery.restart` also run while a run is paused:
+a retry keeps its run paused until its restart finished
+(`test_the_restart_runs_while_its_run_is_paused`,
+`tests/coral/recovery/test_ladder.py`). `recovery.wake` runs while its run is
+paused only for host-offline holds, of any slot; any other pause is a
+retryable `run.paused`.
 
 **Finished runs.** The drainer abandons a finished run's items as
 `run.terminal`, except an effect type registered with `runs_after_terminal`:
@@ -258,7 +273,14 @@ holds some codes without spending an attempt, whatever their retryable flag
 | `session.agent_not_supported` | no | The agent's spec does not have a Coral step bundle's shape: claude-sdk, `params.coral.generated.stance` fitting the slot role (`orchestrator` for an orchestrator slot; `implementer` or `reviewer` for the others), and the bundle hygiene rules. A structural check, not a provenance one. Checked after the native refusal, before any row. |
 | `session.harness_not_configured`, `session.workspace_missing` | no | The host refused the step's launch, or dispatch's runner wake before a send, for these reasons. |
 | `session.host_not_permitted` | no | The host is unknown (an id no host can have included), another user's, another registration's or a managed sandbox. |
-| `session.host_unsupported` | no | The owner's live host connection does not advertise `coral_runner:2`: update Coral on that host, or unset `CORAL_DISABLE_HOST_ENTRY_POINTS` there. Checked before any row, and again before the launch. |
+| `session.host_unsupported` | no | The owner's live host connection does not advertise `coral_runner:2`: update Coral on that host, or unset `CORAL_DISABLE_HOST_ENTRY_POINTS` there. Checked before any row, again before the launch, and on every relaunch (`require_coral_runner`). |
+| `session.not_bound` | no | A relaunch of a session whose binding is not a step's, not `initialized`, or at another generation, or whose run is gone. |
+| `session.closed` | no | A relaunch or wake of a step session labelled `omnigent.closed`, also one closed while it relaunched. The wake's failure pauses `failure_path`, which a Retry clears. |
+| `session.runner_status_unknown` | yes | The host did not answer a runner-status query, or answered anything but `alive`, `sign_in_pending`, `dead` or `unknown`. |
+| `session.runner_changed` | yes | The session's row names another runner than the one the relaunch asked the host about; nothing was stopped. |
+| `recovery.runner_alive` | yes | The host says the old runner is alive (`alive`, `sign_in_pending`) while it is not connected. Held, never superseded (see Holds). |
+| `recovery.host_offline` | yes | A wake whose step's host is offline. Held; the slot is held `infra.host_offline` (see "Restarts and runner loss"). |
+| `slot.generation_mismatch` | no | The abandon code of a row whose slot moved to a newer generation: the drainer's lease check, the relaunch's checks before and after its launch, and a create whose slot moved meanwhile (the session is labelled closed and its runner stopped). No outcome is fed for an abandoned row, except an abandoned `recovery.restart` of the slot's current generation. |
 | `session.owner_revoked` | no | The run owner's account was revoked or re-registered. |
 | `session.invalid` | no | An ownerless run outside a single-user server; a step run with no worktree on a host; a server with no project store or no host access; another refusal. |
 | `dispatch.runner_unavailable` | yes | The runner did not take the event in 120 s, or the server answered `RUNNER_UNAVAILABLE` (a relaunch refusal included), `HOST_OFFLINE`, `WRONG_REPLICA` or `CONFLICT`. |
@@ -368,6 +390,32 @@ with the commit it already made and the run goes on.
 **Cancel:** a running turn is interrupted and given 30 s to settle; then the
 session is closed (when `closed_label`) and stopped, confirmed. An open prompt
 is not waited on.
+
+**A response id this replica did not see.** `LiveStatus.response_observed`
+(`coral/omni/protocols.py`) says whether `response_id` came from this
+replica's own cache, which its edges fill. A server restarted during a turn
+never sees that turn start: it stores the rest of the turn under made-up ids,
+so its live read falls back to the newest stored item's id, which may name no
+turn (`response_observed: false`). The close then waits for the session's next
+end edge, whatever response it names, and interrupts without an id
+(`_awaited_response`, `coral/slots/close.py`); `cancel_session` does the same.
+A known id keeps the rule that an outcome for another response never ends the
+wait. Proof: `test_a_guessed_response_ends_the_wait_at_the_turns_own_end_edge`,
+`test_a_guessed_response_is_not_used_to_pick_the_turn_to_interrupt` and
+`test_a_known_response_waits_out_another_responses_outcome`
+(`tests/coral/slots/test_close.py`), and the in-process
+`test_a_close_after_a_restart_mid_turn_ends_at_the_turns_own_end_edge`
+(`tests/coral/omni/test_ac2_stop_cancel_end_to_end.py`). Limits:
+
+- With a guessed id, any end edge published once the close watches ends the
+  wait, an earlier turn's late outcome included
+  (`test_an_earlier_turns_late_end_edge_ends_only_a_guessed_wait_that_saw_it`).
+  The stop then ends a turn that is still running, and a writer's later edits
+  still show as `post_accept_edits`. No Omnigent path is known to publish
+  such a late outcome.
+- An observed id is not proof of the running turn: Omnigent can briefly keep
+  an earlier turn's id in its cache, and a close that reads in that instant
+  waits on the ended turn under the known-id rule.
 
 **Commit gate.** `workspace.commit`'s turn-end check (`StopConfirmedTurnEnd`)
 answers `True` only for an `idle` session whose stop a close confirmed in this
@@ -492,22 +540,29 @@ generation, so the drainer abandons a stale one; every payload stays under
 | `nudge` | EFFECT `send_input`, `kind: nudge` | the effect key | same |
 | `close_slot` | EFFECT `close_slot`, `interrupt` and `closed_label` true | the effect key | same |
 | `cancel_sessions` | EFFECT `cancel_sessions`, `session_id` of the slot's latest create, else `null` | the effect key | none: the run is finished |
+| `retry_step` | EFFECT `recovery.restart`, fenced by the slot's new generation: `engine_slot_id`, `generation`, `session_id` (the slot's latest create, still the old generation's, or `null`), `writer`, `expected_head` (nullable), `close_key` (the slot's newest close whose commit never reached a receipt, or `null`) | the effect key | `EffectCompleted` `{salvage_ref, salvage_commit, head_verified, head}`, or `EffectFailed`; an abandoned row of the slot's current generation is fed as a permanent failure |
+| `runner_lost` | EFFECT `recovery.wake`, fenced by the generation that lost the runner: `engine_slot_id`, `generation`, `session_id`, `runner_id` (nullable) | the effect key | `EffectCompleted` `{outcome: skipped \| runner_back \| relaunched, turn_running, seen_at}`, or `EffectFailed` |
 | The orchestrator | EFFECT `create_session`: stance `orchestrator`, slot `orchestrator`, generation 1, due at once | `<run_id>:orchestrator:1:create_session` | A failure pauses the run (`orchestrator:<code>`) |
 | A decision's request, reminder or re-request | EFFECT `send_input` to the orchestrator | `<run_id>:decision_request:<decision>`; the watchdog `notify`'s key; `<run_id>:decision_rerequest:<decision>:<run version>` | A failure pauses the run (`decision:<code>`) while the decision is open |
 | An armed timer | TIMER `timer`, due at its deadline | `timer:<key>:<generation>:<due_at_us>` | The executor commits `TimerDue` |
-| A bound session's turn end; a re-gather | SIGNAL `turn_fact` | `sig:<session>:<response or origin>:<status>:<observed_at_ms>`; `sig:<session>:resync:<five-minute bucket>` | The executor reconciles the turn |
+| A bound session's turn end; a re-gather | SIGNAL `turn_fact` | `sig:<session>:<response or origin>:<status>:<observed_at_ms>`; `sig:<session>:resync:<five-minute bucket>`; a run's first re-gather in a leader term `sig:<session>:boot:<boot id>` | The executor reconciles the turn |
 | The run's repair | SIGNAL `run_resync`, one recurring row per run | `resync` | The executor runs the resync |
 | `publish_gate` | EFFECT `gate_publish`, payload the visit's row id only | the effect key | Never fed to the engine; a final failure pauses the run (`gate:<code>`) while its visit is live |
 | `withdraw_gate` | EFFECT `gate_withdraw`, run after the run ended too | the effect key | Never fed; a failure never pauses the run |
 
-`notify` (other than a decision reminder), `runner_lost` and `retry_step` queue
-no work yet; each is logged when committed. Alerts come from the commit itself,
+`notify` (other than a decision reminder) queues no work; it is logged when
+committed (`UNMAPPED_KINDS`, `coral/bridge/mapping.py`). Alerts come from the commit itself,
 not from `notify` ([`gates-and-inbox.md`](gates-and-inbox.md)). `arm_timer`
 needs none: timer rows come from the run's armed timers. Briefs carry the
 step's goal, the run request (its `request_preview`, at most 512 characters),
 the reports that led to the step and the label and reason of a decision that
 sent the run there, quoted line by line as data; every brief and nudge repeats
-the activation id.
+the activation id. A retried step's brief also says "Coral restarted this step
+from its last handoff. The previous attempt's uncommitted work is saved at
+<ref> (commit <first 12>), and the worktree was reset.", built only from a
+`refs/coral/salvage/` ref and a full commit id (`salvage_note`,
+`coral/bridge/messages.py`). Agent sandboxes mask `.git`, so the new session
+cannot read that ref itself.
 
 **Feedback.** The drainer finishes a row first; then the bridge's hook folds
 its outcome (`coral/bridge/feedback.py`). A SUCCEEDED row becomes
@@ -520,10 +575,11 @@ create pushes its session into the bound-session index. Only a resume revives
 a FAILED row of an unreceipted effect, and a FAILED `gate_publish` of a live
 visit.
 
-**Holds** (`bridge_hold_policy`). A refused item with one of these codes is
-re-pended without spending its attempt. Its horizon counts from
-`held_since`, the first refusal of the current hold; past it the item takes
-the normal retries and a final failure pauses the run.
+**Holds** (`bridge_hold_policy`, `HOLD_RULES` in `coral/bridge/config.py`). A
+refused item with one of these codes is re-pended without spending its
+attempt. Its horizon counts from `held_since`, the first refusal of the
+current hold; past it the item takes the normal retries and a final failure
+pauses the run.
 
 | Code | Held for | Horizon | Ended by |
 |---|---|---|---|
@@ -533,9 +589,24 @@ the normal retries and a final failure pauses the run.
 | `session.host_offline`, `session.turn_state_unknown` | 30 s | 30 min | the next try |
 | `executor.missing` | 60 s | 30 min | the next try |
 | `signal.awaiting_effect`, `timer.early` | 5 s | none | the next try |
+| `recovery.host_offline` (a wake whose host is offline) | 30 s | none | the host's return |
+| `recovery.runner_alive` (a wake whose old runner the host calls alive) | 30 s | 10 min | the runner reconnecting, or the host calling it gone |
+
+`held_since` starts afresh only when a re-pend moves the row into or out of a
+wait for an offline host (`HOST_WAIT_HOLDS`: `session.host_offline`,
+`recovery.host_offline`), so time spent waiting for a host never counts
+toward another code's horizon, while a normal retry between two holds, or two
+horizon codes in turn, keeps the first start
+(`test_two_horizon_codes_that_alternate_stay_bounded_by_the_first_holds_start`,
+`tests/coral/bridge/test_executors.py`;
+`test_each_hold_code_runs_its_own_horizon_across_offline_alive_offline_alive`,
+`tests/coral/recovery/test_relaunch.py`).
 
 An effect held just after a resume released the holds is released by the
-run's next resync.
+run's next resync. A commit that leaves a run paused only by host-offline
+holds, having cleared some other cause, also releases its `run.paused` rows,
+so a waiting wake checks its host again at once
+(`test_a_resume_that_leaves_the_host_hold_re_checks_the_host_within_30_seconds`).
 
 **Drain pool and resync.** The supervisor runs `coral_drain_concurrency`
 workers (default 4; [`plugin.md`](plugin.md)), never two items of one run at
@@ -549,6 +620,30 @@ holds of a running run; re-gathers the turn of each working slot of a running
 run, and of the orchestrator a decision waits on, once every five minutes; and
 writes the projection when the rows differ. Hourly, finished SIGNAL and TIMER
 rows older than 24 hours are purged; EFFECT rows stay.
+
+**Leader terms.** One replica leads at a time under the `coral.worker.primary`
+lease, `coral_worker_lease_seconds` long (10-600, default 120; renewed every
+`min(30, lease / 4)` s; [`plugin.md`](plugin.md)). A restarted server leads,
+and recovers runs, once the dead leader's lease has run out. At the start of
+every term, before the startup sweep, the leader starts its records afresh
+(`EngineBridge.begin_leader_term`, `LivenessRef.reset`): a new boot id, no
+runner clocks, no record of earlier re-gathers or schedules. So in a new term
+a running run's first re-gather is due at once, keyed
+`sig:<session>:boot:<boot id>` and repeated, not re-keyed, for the rest of that
+five-minute bucket, and the run is recorded only after its signals were
+queued; a paused run's first resync is due at once too, so a restart's feed
+that a crash lost is fed right away
+(`test_a_restarted_bridge_re_gathers_a_working_slot_at_once_and_not_again_in_the_bucket`,
+`test_a_run_is_marked_re_gathered_only_after_its_signals_are_queued`,
+`tests/coral/bridge/test_turn_facts.py`;
+`test_a_restarted_bridge_feeds_a_finished_restart_at_once`,
+`test_a_bridge_that_leads_again_resyncs_a_paused_run_at_once`,
+`tests/coral/bridge/test_resync.py`). That costs one resync of every
+unfinished run at the start of a term, bounded by the drain concurrency.
+After a successful resync of a running run the liveness pass runs (see
+"Restarts and runner loss"); while one of its clocks runs, the resync's result
+carries `next_resync_at` (epoch seconds) and the finished hook moves the row
+to that time when it is sooner.
 
 **Turn facts.** `TurnFactRecorder` (`coral/omni/server/turn_facts.py`) is the
 S1 observer `"coral.turn_facts"`. For each published edge it does one dict
@@ -586,17 +681,91 @@ Omnigent's own `turn failed (status NNN)`, `runner returned status NNN` and
 
 **What a resume clears.** `ResumeRun` clears the causes `user`,
 `rejected_calls`, `infra`, `auth`, `drift`, `plan_limit` and
-`authority_revoked`; `budget` only with a higher activation cap; and a step's
-failed turn no rule names (`failure_path`, detail `agent.failed`, until steps
-can be retried: CRL-137). A resume that returns the run to running re-prompts
-each failed or stopped step once. Every other `failure_path` cause (a
-permanent effect failure such as `dispatch.policy_denied` or
-`session.host_unsupported`, a permanent anchor or orchestrator failure, a
-commit that cannot be built) and `liveness` need a retry (CRL-137); until then
-such a run can only be cancelled. A run paused `failure_path` with detail
-`engine.load_failed` cannot be resumed; the runs API's `:cancel` cancels it on
-its row alone ([`runs-api.md`](runs-api.md), "Actions"). `engine_upgrade` is
-cleared by neither.
+`authority_revoked`, and `budget` only with a higher activation cap
+(`resume_clears`, `coral/engine/lifecycle.py`). It never clears a cause that
+holds a slot, `infra` / `infra.host_offline` or `infra` /
+`recovery.restarting`, and never any `failure_path` cause, a step's failed
+turn no rule names (`agent.failed`) included
+(`test_resume_never_clears_a_steps_failed_turn_and_a_retry_restarts_the_step`,
+`test_resume_clears_no_failure_path_cause`,
+`tests/coral/engine/test_lifecycle.py`). A resume that returns the run to
+running re-prompts each failed or stopped step once. A step's `failure_path`
+or `liveness` cause, and any `infra` cause a step owns, is cleared by a Retry
+of that step (below). Causes no step owns stay Cancel-only: a permanent anchor,
+orchestrator or gate failure (`anchor:*`, `orchestrator:*`, `gate:*`), a
+commit that cannot be built, and other run-level `failure_path` pauses
+(subject `""`) (`test_a_cause_no_step_owns_is_not_retryable`; CRL-155). A
+run paused `failure_path` with detail `engine.load_failed` can be neither
+resumed nor retried; the runs API's `:cancel` cancels it on its row alone
+([`runs-api.md`](runs-api.md), "Actions"). `engine_upgrade` is cleared by
+neither. A run whose log was written before these rules (its `StartRun` carries
+no rules marker) folds with the previous rules, which let Resume clear
+`agent.failed`, so a stored run never changes state on upgrade (the
+`rules < RULES` branch of `resume_clears`, `coral/engine/lifecycle.py`; its
+previous edge runner-loss rule is `coral/engine/previous_rules.py`).
+
+**Retry.** `RetryStep` restarts one failed step activation in a new session
+generation; the runs API sends it ([`runs-api.md`](runs-api.md), "Actions").
+`retryable_activations(state)` is the one rule: empty unless the run is paused
+and no slot holds; otherwise the step activations named, in cause order, by a
+cause whose reason is `infra`, `failure_path` or `liveness` (a slot subject
+names its activation, an activation subject itself, a node subject that node's
+newest activation), keeping only activations with slots that did not close
+`completed` or `skipped`. Gates and decisions never qualify; a step that
+closed `failed` does. A retry clears every cause of the retried step (those
+whose subject is one of its slots, the activation itself or its node), plus its
+slots' `drift` / `pending_input`, and nothing else: another failed step keeps
+the run paused (`test_retrying_one_of_two_failed_steps_clears_only_its_cause`,
+`test_retry_refuses_a_completed_step_a_gate_and_a_decision`). It refuses
+`host_offline_hold` while a slot is held offline, `restart_in_progress` while
+any slot restarts, and `retry_not_allowed` otherwise
+(`test_a_retry_while_a_restart_or_a_host_hold_stands_is_refused`). A taken
+retry bumps each of the activation's slots to `session_generation + 1`, sets it
+`pending` with its handoff, label, pending input, failed turn, nudges and wake
+count cleared, resets the activation's attempts, records the cause `infra` /
+`recovery.restarting` / slot (so the run stays paused) and emits one
+`retry_step {generation, phases, expected_head}` per slot. A wake keeps the
+attempts; only a retry resets them.
+
+**The restarting pause.** Four invariants keep a retried step's old session
+from acting between the retry and its fence, each with a test:
+
+1. Only a finished restart, a failed or abandoned restart, or a terminal input
+   removes `recovery.restarting`: Resume does not clear it, a Retry is refused
+   `restart_in_progress`, and holds and other completions remove only their own
+   causes
+   (`test_only_finishing_or_failing_the_restart_or_a_terminal_input_ends_the_restarting_pause`,
+   `tests/coral/engine/test_lifecycle.py`).
+2. The pause lifts only after the fence confirmed the old session's stop and
+   labelled it `omnigent.closed`, or found no session, an unbound one or a
+   deleted one
+   (`test_the_restarting_pause_lifts_only_after_the_old_session_is_closed_and_stopped`,
+   `tests/coral/omni/test_recovery.py`).
+3. A failed restart stays paused, Retry-only, and the next Retry makes the next
+   generation and fences the same old session
+   (`test_a_failed_restart_stays_paused_for_a_retry_that_fences_the_same_session`).
+4. A create of the old generation in flight at the retry leaves no live,
+   unlabelled session: its row is abandoned at its next lease check, a create
+   whose slot moved is labelled closed and stopped, and a late completion is
+   receipt-only
+   (`test_a_create_in_flight_at_the_retry_never_leaves_a_live_unlabelled_session`).
+
+From the retry until the restart is claimed, the old session's tool calls are
+denied `[run.paused]`; after the restart, `[session.closed]`
+(`test_a_retried_writer_is_fenced_salvaged_reset_and_briefed_at_generation_two`).
+A finished restart drops the slot's restarting cause and emits the next
+generation's `create_session` with `generation` and, when it salvaged,
+`salvage_ref` and `salvage_commit`; the create's completion briefs the new
+session with the salvage paragraph. When the run runs again it finishes
+pending closes and re-prompts as a resume does. A failed restart, or an
+ABANDONED `recovery.restart` row of the slot's current generation, which the
+resync feeds as a permanent failure with the row's code, replaces the
+restarting cause with `failure_path` / `restart:<code>` (code bounded to 128
+characters), Retry-only
+(`test_an_abandoned_restart_ends_the_restarting_pause_at_the_next_resync`,
+`tests/coral/bridge/test_resync.py`). Abandoned rows of older generations stay
+skipped. A completion or failure fed for an effect of an older generation is
+recorded and changes no cause.
 
 **The orchestrator.** The commit that opens a run's first decision names
 `orchestrator_session_id` and queues the orchestrator's create (bundle
@@ -628,6 +797,225 @@ each of these points on every database lane, and
 `tests/stores/coral/test_bridge_fold.py` checks that the stored log folds to
 the stored state.
 
+### Restarts and runner loss (SES-06)
+
+**The restart row** (`recovery.restart`, `coral/recovery/ladder.py`) runs once
+per `retry_step`, while its run is paused. The drainer re-reads the slot's
+generation at every lease check of a slot row and abandons a row whose slot
+moved on (`slot.generation_mismatch`), so a restart, wake or close that lost a
+race to a newer retry acts no further
+(`test_a_slot_row_superseded_while_it_runs_stops_at_its_next_lease_check`,
+`tests/coral/queue/test_drainer.py`). In order, each phase safe to repeat:
+
+1. **Fence** the old session (`fence_session`, shared with `cancel_sessions`):
+   end a running turn, label it `omnigent.closed` and stop its runner,
+   confirmed. The host ends a Coral step runner's process group before it
+   confirms (see "Runner process groups"). An unconfirmed stop fails retryably
+   with nothing salvaged; a slot with no session, an unbound session or a
+   deleted one counts as fenced.
+2. A **reader** ends here: `{salvage_ref: null, salvage_commit: null,
+   head_verified: false, head: null}`.
+3. **Head check.** HEAD must be the expected head: the newest commit the
+   run's receipts record (a writer close's string `commit`, or a restart's kept
+   `head`; readers' closes carry `null` and are skipped; `_expected_head`,
+   `coral/engine/lifecycle.py`), else the run's `base_commit` (the ladder's
+   fallback, `coral/recovery/ladder.py`). So a review
+   loop's second pass compares against the writer's commit, not the reviewer's
+   null close
+   (`test_a_review_loops_second_pass_restarts_from_the_first_pass_commit`).
+   A commit this slot's own close made but never fed back also passes, when
+   both Coral records agree: the close's op intent names the expected head, and
+   the close's own commit op, sent again, answers with HEAD as its record
+   (`test_a_head_at_the_steps_own_unreported_close_commit_is_kept`). Any other
+   HEAD is a permanent `workspace.head_moved` with nothing salvaged, and its
+   message never advises resetting a Coral commit away
+   (`test_a_head_coral_did_not_commit_is_head_moved_and_never_advised_away`).
+   With no expected head and no base, the restart goes on against HEAD and
+   records `head_verified: false`. The verified head is recorded (an op intent)
+   before anything is salvaged.
+4. **Salvage, then reset under the salvage**, in up to three rounds
+   (`MAX_SALVAGE_ROUNDS`). Each round salvages under its own op key (`salvage`,
+   `salvage-2`, `salvage-3`), records its reset as an op intent, then sends the
+   host's `reset` with `salvage_commit` as a compare-and-swap
+   ([`workspace-ops.md`](workspace-ops.md), "Restart ladder"). A
+   `workspace.tree_changed` starts the next round; after the third the restart
+   fails permanently `workspace.tree_changed` with the tree left as it is. A
+   clean salvage skips the reset. The finished restart's salvage is recorded
+   once it ends. Nothing is salvaged after a successful reset: a repeat after a
+   crash resumes at the last recorded round, and a finished restart names the
+   same ref
+   (`test_nothing_is_salvaged_after_a_reset_and_a_repeat_names_the_same_record`,
+   `test_a_repeat_after_a_crash_at_every_call_boundary_gives_the_uncrashed_result`,
+   `tests/coral/recovery/test_ladder.py`;
+   `test_a_crash_at_any_restart_phase_still_reaches_generation_two_once`,
+   `tests/coral/omni/test_recovery.py`).
+
+The row's result is `{salvage_ref, salvage_commit, head_verified, head}`.
+Coral's own log lines for it carry the run id, the phase and codes only. A failure becomes the cause
+`failure_path` / `restart:<code>`; the web's texts for these are in
+[`runs-api.md`](runs-api.md), "In the web app".
+
+**Detecting a lost runner.** Two detectors feed one loss:
+
+- **The edge.** A failed edge whose class is `infra.runner_lost` (the server
+  saw the runner go) becomes a `SessionFailed` carrying the session row's
+  `runner_id`, logged as `engine.session_failed`.
+- **The liveness pass** (`LivenessPass`, `coral/recovery/relaunch.py`). After
+  each successful resync of a running run it reads each working slot's runner
+  that is not waiting on an effect (`SessionDispatch.runner_liveness`, at most
+  `MAX_LIVE_SLOTS` reads). A runner neither connected on this replica nor fresh
+  by the server's own rule starts a clock at this process's first sighting;
+  the stamp's age is never used, because the server clears it on a disconnect
+  and, while the runner's host is offline, holds the turn without any edge.
+  Once `coral_runner_reconnect_grace_s` (30-600, default 90) has passed, the
+  pass commits one liveness-only `TurnFact`, logged as `engine.runner_lost`.
+  A clock watches one outage, keyed by the session, its runner and the slot's
+  connection epoch, and ends when the runner is connected or fresh again, the
+  engine ends the outage, the slot stops working, the session or runner
+  changes, or the run stops running. A report counts once the engine holds the
+  loss; one it dropped is made again at the next pass. A read error is logged
+  with the run id and the error type, and keeps the clock. Each pass that
+  starts or reports a clock logs `Coral liveness of run <id>: <n> runner
+  clock(s) started, <m> runner(s) lost, <k> loss(es) already recorded, <r>
+  report(s) to make again`.
+
+Both key a loss `runner:<session>:<generation>:<runner id>:<connection
+epoch>` (`runner_loss_key`, `coral/engine/facts.py`; with no runner id, the
+turn's response tail stands in). So a laptop sleep, seen first by the liveness
+pass and then by Omnigent's own disconnect report for the same runner, is one
+loss and one wake (`test_a_liveness_loss_and_an_edge_for_one_runner_are_one_loss`,
+`test_one_sleep_held_across_its_edge_is_one_loss_and_the_next_outage_is_new`,
+`tests/coral/engine/test_reconcile.py`), and a runner lost again after it came
+back is a second loss (`test_a_runner_lost_again_after_it_came_back_is_a_new_loss`).
+A report observed before the wake saw the runner back belongs to the ended
+outage and records only its receipt
+(`test_an_edge_that_lands_after_its_wake_saw_the_runner_back_is_not_a_second_loss`).
+In the host-outage E2E, Omnigent's own disconnect report after the host's
+return is absorbed the same way. A slot wakes at most three times per
+generation (`MAX_WAKES`): the fourth loss pauses `infra` / `infra.runner_lost`
+/ slot instead, which Resume and Retry both clear. Losses held on an offline
+host count toward it
+(`test_losses_held_on_an_offline_host_still_count_toward_the_fourth`).
+
+**The wake** (`recovery.wake`, `wake_executor`). Each `runner_lost` effect's
+row, in order:
+
+1. A slot that is gone, not `working` or at another generation: `skipped`.
+2. A run paused for anything but host-offline holds: retryable `run.paused`.
+3. The session's state: archived or deleted pauses the run `drift` and skips;
+   closed fails the wake permanently `session.closed` (Retry).
+4. `StepRelauncher.ensure_runner` (below): `connected` is `runner_back`, a new
+   runner `relaunched`. Then the wake reads the live status, so a turn that
+   already runs (the runner's own, after a reconnect) is reported
+   `turn_running: true` and not re-prompted; otherwise the engine re-prompts the
+   step once with the `runner_lost` nudge.
+5. `session.host_offline` commits `RunnerHeld` once (cause `infra` /
+   `infra.host_offline` / slot, Cancel only) and holds the row
+   `recovery.host_offline`. Any other answer ends that hold
+   (`RunnerHoldEnded`) before the wake goes on or fails. A wake that ends
+   without the runner (skipped, permanent, out of retries) also ends its
+   slot's hold, so a hold never outlives its wake
+   (`test_a_hold_ends_when_its_wake_ends_without_the_runner`).
+
+While a wake of the slot's generation has no result, no infra stage re-prompts
+that slot (`test_no_infra_stage_re_prompts_a_slot_while_its_wake_is_in_flight`).
+Each wake logs `Coral woke run <id>'s step: <outcome>`.
+
+**Hold latency.** A host that goes offline drops its runners' tunnels with no
+edge, so the hold starts at the liveness pass's first sighting (the next resync
+tick, at most 60 s) plus the grace: measured at about 86 s with a 30 s grace
+(`test_an_offline_host_holds_the_step_and_its_return_relaunches_it`,
+`tests/e2e/coral/test_runner_loss.py`). It ends at the wake's next 30 s
+re-check after the host returns, about 29 s measured there. While held, Resume
+never clears the hold, Retry is refused `host_offline_hold`, and the slot's
+infra backoff is disarmed.
+
+**The `runner_lost` nudge** says "Your runner stopped and Coral restarted it.
+Continue the step; when it is done, call coral_submit_handoff with activation_id
+<id>." (`_NUDGES`, `coral/bridge/messages.py`). It also goes to a step whose
+runner reconnected by itself (`runner_back` with no turn running), where
+nothing was restarted, and a slot brought back while another slot holds the run
+gets the resume text instead. Both wordings are accepted as they are.
+
+**The one relaunch path.** After its create, Coral's own paths launch a step's
+runner again only through `OmnigentStepRelauncher.ensure_runner`
+(`coral/omni/server/sessions.py`), in the same session: the wake, and
+`OmnigentSessionDispatch._connect_runner` for any engine send to a session
+with a step binding (`coral/omni/server/dispatch.py`;
+`test_a_send_to_a_coral_step_brings_its_runner_back_only_through_the_relauncher`,
+`tests/coral/omni/test_dispatch.py`). Every other session keeps Omnigent's
+`ensure_runner_connected`. Before any side effect, in order:
+
+1. The binding by session must be a step's, `initialized`, at the asked
+   generation (else `session.not_bound`); the run row gives the owner, the
+   account registration and the host.
+2. The session row must exist, not be archived (drift) or closed
+   (`session.closed`), and `binding.host_id == conv.host_id == run host`,
+   compared in canonical form (else `session.host_not_permitted`).
+3. A connected runner answers `connected`.
+4. The slot's current generation: moved on is abandoned
+   (`slot.generation_mismatch`).
+5. `_owner_host`: the host authorization, the owner's live connection
+   (retryable `session.host_offline`) and the Coral token
+   (`require_coral_runner`, `session.host_unsupported`).
+6. The host is asked about the old runner, under the owner's scope:
+   `alive` or `sign_in_pending` is retryable `recovery.runner_alive`; no answer,
+   or any answer but `dead` or `unknown`, is retryable
+   `session.runner_status_unknown`; `dead` or `unknown` (the host lost track of
+   it, which counts as dead) leads to a confirmed stop of exactly that runner.
+   A session row with no `runner_id` skips the query and goes straight to the
+   stop. If the row names another runner by then, nothing is stopped
+   (`session.runner_changed`, or `connected`).
+7. The facade's own launch (`_launch`: drift re-checks, the owner's host and
+   token again, the lease, the owner's scope). A relaunch resumes no turn from
+   the runner's history: Coral re-prompts it
+   (`test_a_relaunch_resumes_no_turn_from_history_so_its_re_prompt_is_its_one_turn`).
+8. After the launch the slot generation and the session row are read again:
+   a moved slot, a closed session or a deleted one gets its new runner stopped
+   and is refused; a launch that kept the old runner, because it came back, is
+   `connected`.
+
+The refusals are pinned by
+`test_a_relaunch_is_refused_before_any_stop_or_launch`
+(`tests/coral/omni/test_session_facade.py`), the token among them
+(`host_without_the_token`). A create binds only while its slot is still at the
+create's generation: one the slot left meanwhile is labelled closed, its runner
+stopped best effort, and its row abandoned.
+
+**Runner process groups** (seam S108, `.coral/seams.yaml`). Every runner leads
+its own process group; a zygote-forked runner stays in the zygote's session, and
+the harnesses the zygote forks for it join its group. The host marks a runner as
+a Coral step runner at spawn when its workspace is a checkout on a Coral run
+branch (`_is_coral_run_workspace`, `omnigent/host/connect.py`), and ends that
+runner's recorded group on every exit: when its watcher sees it exit, clean or
+not; when a stop of it (the fence, a relaunch's stop) returns or times out,
+before the stop is answered; before a status query answers `dead`; and at the
+host's shutdown cleanup. A marked runner whose host dies ends the group it leads
+as its last act (`omnigent/runner/_entry.py`). Runners outside such a
+checkout are signalled exactly as before; a non-Coral session opened in a run
+worktree is marked too. A Coral step therefore
+loses every process left in its group when its runner exits for any reason,
+background processes its agent started included; a process that starts its own
+session escapes, except inside a bwrap sandbox, whose pid namespace ends with
+it. Tests: `tests/host/test_connect.py`
+(`test_only_a_coral_step_runners_group_ends_with_it`,
+`test_a_runner_lost_to_sigkill_takes_its_own_group_and_nothing_else`,
+`test_runner_status_answers_dead_only_after_the_lost_group_ended`,
+`test_a_lost_runners_bwrap_sandbox_ends_with_it_setsid_children_included`),
+`tests/host/test_runner_zygote.py` and
+`test_a_runner_lost_with_its_host_ends_its_own_group_only`
+(`tests/runner/test_runner_entry.py`).
+
+**Proofs on real processes** (`tests/e2e/coral/test_runner_loss.py`, the
+`coral-e2e` lane): a step runner's group SIGKILLed is relaunched in the same
+session within about a second, with one loss and one wake; a host daemon
+SIGKILLed holds the step with Cancel only, and its return relaunches it as one
+loss; a retried blocked step is fenced, salvaged, reset and briefed as
+generation 2. In process, the same paths run over the bridge test world's
+fakes (`tests/coral/bridge/_world.py`) and over the real
+`OmnigentSessionFacade`, relauncher and dispatch on an in-process server
+(`tests/coral/omni/test_recovery.py`).
+
 ### Also known
 
 - **macOS move-aside and `git worktree prune`.** A WRITE op renames the
@@ -653,8 +1041,9 @@ the stored state.
   `test_gate_routes_accounts.py`).
 - **Error texts.** The 529, 429 and 401 texts the classifier reads are the
   shapes traced in the claude-sdk and runner code, not captured from a real
-  run. A text no rule reads pauses `failure_path` (`agent.failed`), which a
-  resume clears and re-prompts.
+  run: every Tier B model call is scripted (CRL-156 captures the real ones). A
+  text no rule reads pauses `failure_path` (`agent.failed`), which a Retry of
+  that step clears.
 
 ## Run protection
 
@@ -930,10 +1319,82 @@ test until someone classifies it.
 - **`coral_runner:2` is self-reported.** The host token check is a
   compatibility gate, not an authorization boundary: steps still need a live
   connection to a host the run owner owns, with a matching account
-  registration, that is not a managed sandbox. Only a create checks it: a step
-  whose host later runs an older Coral is not refused on a send or a
-  relaunch, gets no engine tools there, and the nudge cap pauses its run
-  (`rejected_calls`).
+  registration, that is not a managed sandbox. A create, a send that must
+  launch a runner, and a relaunch check it (`require_coral_runner`); a send to
+  a step whose runner is connected does not. A runner on a host running an
+  older Coral gets no engine tools, so its turns end without a handoff and the
+  nudge cap pauses its run (`rejected_calls`); a relaunch there fails
+  `session.host_unsupported`.
+- **"One relaunch path" covers Coral's own paths only.** A person's message to
+  an open step session, Omnigent's resource and `retry_session` routes, and an
+  engine send whose runner drops after `ensure_runner` answered `connected`
+  can still launch a step's runner through Omnigent's own launch, without the
+  token, slot or "alive" checks. That launch still lands only on the owner's
+  host, closed sessions are refused (see "Relaunch of a closed session"), and
+  Omnigent's automatic relaunch when a host returns skips steps, which are
+  sub-agent sessions. Closing it needs an Omnigent seam (CRL-162).
+- **A stop in progress reads as stopped.** The host forgets a runner when its
+  stop starts, before the stop's group sweep ends, so for one sweep pass a
+  status query answers `unknown` and a second stop `failed: unknown runner`.
+  The fence accepts an early "stopped" there, and the relaunch takes that
+  `unknown` as dead and can start a new runner beside the old group for that
+  pass. The old runner's `/mcp` and events are already fenced by runner-id
+  rotation (except on a server with the allow-listed runner token, below), and
+  a dying shell command's write lands in the step's own worktree: after a
+  relaunch the re-prompted step sees it, and after a fence the reset's
+  compare-and-swap refuses it and salvages again. A host-side "stop in
+  progress" answer would close it (CRL-163).
+- **`unknown` counts as dead.** A host that lost track of a runner (after its
+  own restart, say) answers `unknown`, and the relaunch goes ahead. A runner
+  that survived that way is fenced on the server only by runner-id rotation,
+  which a server with the allow-listed `OMNIGENT_RUNNER_TUNNEL_TOKEN` does not
+  enforce: it accepts that token for every session
+  (`omnigent/server/mcp_identity.py`). ADR-05's CRL-137 addendum records what
+  such a server does with a Coral step.
+- **A write while the host resets is lost.** The host's reset checks the tree
+  against the salvage and then resets; a write landing between that read and
+  the end of its `clean` is not recorded. Once the runner's group is gone,
+  only a person can write there; while a stop reported early still sweeps the
+  group (above), a dying command can too. A write after the reset is never
+  salvaged; it stays in the worktree for the next generation. A crash between a successful
+  reset and its `salvaged` record, plus a write in that gap, makes the repeat
+  salvage only that write.
+- **A restart on an offline host fails, with the host-offline text.** The
+  fence's stop and the host ops are retried, not held, so a host that stays
+  offline through a restart's retries (about two minutes) fails it
+  `restart:dispatch.stop_unconfirmed` or `restart:workspace.backend_unavailable`,
+  Retry-only, with the host-offline text. Nothing was salvaged or reset.
+- **A lost restart feed waits for the next resync.** A restart row that
+  finished, or was abandoned, before its feed reached the engine is fed by the
+  run's resync: at once in a new leader term, else within 15 minutes for a
+  paused run.
+- **A create across a leader change.** Rows of one run are serialized within a
+  process, not across processes. During a handover, a create still running on
+  the old leader past its last lease check could write its row after the new
+  leader's fence found no binding; its next lease check, or the facade's
+  generation check after its launch, stops it before the step can act. The
+  window is one side effect wide.
+- **Two turns after a relaunch.** A relaunch resumes no turn from history, and
+  the wake does not re-prompt a turn already running. If Omnigent's own
+  runner-connect start of the history turn wins the race, avoiding a second
+  turn rests on the wake's live-status read seeing that turn.
+- **A session deleted just after its relaunch** fails the wake permanently
+  instead of pausing the run for drift; the run is paused Retry-only.
+- **The relaunch's sends carry no lease.** `_connect_runner` passes no lease
+  check (the send checked it just before), and each engine send to a step
+  reads its binding, run row and session first. A stop of a just-launched
+  runner whose session closed is best effort: an unacknowledged one leaves an
+  idle runner on a closed session, which nothing can prompt.
+- **Clocks live in memory.** A restart or a new leader term starts every
+  liveness clock afresh, so a runner that is still reconnecting gets a full
+  grace. A runner that drops and returns between two passes is not seen, and
+  flaps inside one outage are one outage
+  (`test_a_flapping_runner_is_lost_only_when_one_outage_outlasts_its_grace`).
+- **Linux steps run their CLI outside the runner's group.** bwrap
+  (`--new-session`, `omnigent/inner/bwrap_sandbox.py`) puts the in-sandbox
+  launcher and the `claude` CLI in a session of their own. They end through
+  bwrap's die-with-parent once the group's `bwrap` is killed, just after the
+  group sweep rather than with it; the reset's compare-and-swap is the backstop.
 - **The agent is checked at create.** After that the mutation guard keeps a
   `coral__` agent as the engine wrote it: edits are refused, and a delete needs
   `force=true`. No drift pause follows (bundle drift is SES-09's). A live step
@@ -944,16 +1405,24 @@ test until someone classifies it.
 - **Same-user steps.** A step's shell runs as the run owner on the owner's
   host. A shell the claude-sdk sandbox does not confine can act as its
   siblings and as the owner: it can drive a sibling's turn, handoff included,
-  through that sibling's harness socket, and it can read a runner's
-  environment (`/proc/<pid>/environ` on Linux, `ps eww` on macOS), which holds
-  the runner's tunnel binding token. That token proves the runner on `/mcp`
-  and, on a server whose authentication can mint tokens (accounts or OIDC),
-  mints an owner JWT (`POST /v1/runners/{runner_id}/token`), so the reader can call the server as
-  the run owner on any route. Handoff and gate integrity therefore hold
-  against other users and on the server's own path, not against such a step,
-  and an owner-authenticated gate answer, resume or cancel does not prove a
-  person took it. ADR-05 records this as probe 15's decision, with its owners
-  ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md)).
+  through that sibling's harness socket, and it can read other processes'
+  environments and command lines. On the zygote path a runner's or harness's
+  environment, as another process reads it, is the host daemon's whole
+  environment; on the direct-spawn fallback it holds the runner's tunnel
+  binding token and the host's initial bearer. A binding token proves the
+  runner on `/mcp` and, on a server whose authentication can mint tokens
+  (accounts or OIDC), mints an owner JWT (`POST /v1/runners/{runner_id}/token`),
+  so the reader can call the server as the run owner on any route. Handoff and
+  gate integrity therefore hold against other users and on the server's own
+  path, not against such a step, and an owner-authenticated gate answer,
+  resume or cancel does not prove a person took it. ADR-05's probe 15 measured
+  what the macOS sandbox and the `coral-e2e` lane's Linux sandbox let a step
+  reach on single-user servers, with an owner for each exposure
+  ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
+  "Addendum: CRL-137 probe verdicts"). On both platforms a step reaches the
+  server, so on a single-user server it still acts as the owner, a Linux step
+  included (next item). Whether to run Coral steps on untrusted content on
+  macOS before CRL-165 and CRL-166 land is an open owner decision.
 - **Servers that require no identity.** With authentication off, or on a
   single-user header server, every request without credentials is the local
   user. Any process of that user that can reach the server (a step shell the
@@ -1005,18 +1474,39 @@ and the run row no longer loses `base_commit`. What it leaves:
   is whatever the run branch held then ([`runs-api.md`](runs-api.md),
   "Residuals").
 
+The restart ladder (SES-06) settled its rows: a retry fences, salvages and
+resets before the next generation starts, with the reset a compare-and-swap on
+the salvage ("Restarts and runner loss"); a lost runner is relaunched in its
+session through one path that checks the host token (ADR-05 probe (f),
+[`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md)); a
+retried slot's new session is bound with the slot's current
+`session_generation` ([`engine-tools.md`](engine-tools.md), rule (a)); a
+retry clears every cause of the retried step, and a resume never clears
+`agent.failed` ("What a resume clears"); the runs API's `:retry`
+([`runs-api.md`](runs-api.md)). A real claude-sdk step's runner-only traffic
+passes the event guard end to end: no `sending it a '…' event` refusal in the
+server log of the review loop, the SIGKILL proofs or a relaunch
+(`tests/e2e/coral/test_skeleton.py`, `tests/e2e/coral/test_runner_loss.py`).
+With `core.untrackedCache` preset, no Tier B run paused `drift` on the lane's
+or a local Mac's hosts; without it, a runner's first start can look like a
+drift (CRL-161).
+
 | Work | Owner |
 |---|---|
 | Resuming a budget pause with a raised cap from the web, and the run view's other cuts ([`runs-api.md`](runs-api.md), "Deferred work and owners") | no live ticket |
-| Run requests over 512 characters: a start refuses them today, and briefs carry only `request_preview` | CRL-137 |
-| A pause made on the run row alone has no durable marker: a resync repair between the engine's own pause and its plan probe can take over the row's reason, and the probe then lifts the row | CRL-137 |
-| Run preflight (`POST /v1/coral/runs:preflight` answers 501): the CRL-132 facts need an `AgentSpec` per step, and only `materialize` builds them | CRL-137 |
-| Restart ladder (SES-06): reset only after a completed salvage; relaunch (ADR-05 probe (f)), which must check the host token; `runner_lost` and `retry_step` work (a retry clears every `failure_path` cause, and a resume then stops clearing a step's `agent.failed`; the runs API's `:retry` answers 501 until then), binding a retried slot's new session with the slot's current `session_generation` (port rule (a), [`engine-tools.md`](engine-tools.md)); replacing an orchestrator, with keys and a fence scoped to its generation; backoff for an orchestrator's transient failures, which pause the run at once; winding down the anchor and orchestrator sessions after a run ends | CRL-137 |
-| Tier B: the real 529, 429 and 401 texts the classifier reads, and worktree fingerprint noise on real hosts, which pauses writer steps `drift` (`pending_input`) | CRL-137 |
-| ADR-05 probe 15 residuals: the sandbox probe on macOS seatbelt and Linux bwrap (sibling harness sockets, sibling runners' environments, bridge dirs, the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials), before the walking skeleton is done | CRL-137 |
-| Label a gate Enforced only when that probe passes and the server requires identity, with steps holding no owner credential; never on single-user or auth-off servers. No gate is labelled Enforced today | RUL-02 |
-| A force-deleted `coral__` agent leaves the live steps that run it unable to hand off, with only `/mcp` failing closed, until the nudge cap pauses the run: consult the required-policy provider on the no-agent branch keyed on the binding, or stop the run's sessions on a forced delete | CRL-137 |
-| Runner proof has two predicates (S49's `runner_proven` and the events route's bound-runner check); prove end to end that a real claude-sdk step's runner-only traffic passes the event guard | CRL-137 |
+| Run requests over 512 characters: a start refuses them today, and briefs carry only `request_preview` | CRL-152 |
+| A pause made on the run row alone has no durable marker: a resync repair between the engine's own pause and its plan probe can take over the row's reason, and the probe then lifts the row | CRL-153 |
+| Run preflight (`POST /v1/coral/runs:preflight` answers 501): the CRL-132 facts need an `AgentSpec` per step, and only `materialize` builds them | CRL-151 |
+| The orchestrator's lifecycle: replacing it, with keys and a fence scoped to its generation; backoff for its transient failures, which pause the run at once; winding down the anchor and orchestrator sessions after a run ends; and a Retry for the causes no step owns (`anchor:*`, `orchestrator:*`, `gate:*`, run-level `failure_path`), which stay Cancel-only | CRL-155 |
+| Tier B against the real API: the 529, 429 and 401 texts the classifier reads, a credentialed scheduled lane, and the opt-in Tier B samples in `coral-e2e` | CRL-156 |
+| A runner's first start in a repo probes git's untracked cache for about 6 s; a turn that ends inside it looks like a drift (`pending_input`). The E2E presets `core.untrackedCache=true` | CRL-161 |
+| Omnigent's own launch paths reach a step's runner without Coral's checks ("One relaunch path", Residuals) | CRL-162 |
+| A relaunch or a fence that meets another stop of the same runner in progress ("A stop in progress reads as stopped", Residuals) | CRL-163 |
+| Probe 15's exposures: a step reads other processes' environments and command lines on macOS (CRL-165); a step connects to a same-user harness's socket on macOS, which residual (a) says is enough to drive its turn (CRL-166); secrets in exec-time environments and argv, the model API key among them (CRL-167); the allow-listed runner token on Coral-bound sessions (CRL-168) | CRL-165, CRL-166, CRL-167, CRL-168 |
+| Probe 15 on servers that require identity (owner-JWT minting after an environment read, the CLI's stored credentials), and labelling a gate Enforced only when that passes and steps hold no owner credential; never on single-user or auth-off servers. No gate is labelled Enforced today | CRL-159 (RUL-02) |
+| A force-deleted `coral__` agent leaves the live steps that run it unable to hand off, with only `/mcp` failing closed, until the nudge cap pauses the run: consult the required-policy provider on the no-agent branch keyed on the binding, or stop the run's sessions on a forced delete | CRL-154 |
+| Showing the salvage ref in the web, and the retention and cleanup of `refs/coral/salvage/*` ([`workspace-ops.md`](workspace-ops.md), "Restart ladder") | CRL-158 |
+| Separate worktrees per agent, and parallel writers (ADR-05 probe (a), separate-worktrees half) | CRL-140 |
 | Host channel `fingerprint(L2)`, `merge`, `check`, and the backend swap (WSP-02/WSP-07); the macOS move-aside after a host crash and `git worktree prune` (see "Also known") | CRL-141 |
 | Native-harness steps (HRN-03), after probe 15 runs on native steps | CRL-138 |
 | `external_session_status` outcome pass-through (HRN-05) | CRL-146 |

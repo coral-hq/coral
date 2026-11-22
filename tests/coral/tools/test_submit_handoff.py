@@ -306,11 +306,12 @@ async def test_stale_generation_is_rejected_cleanly_and_not_counted(
     _refused(counted, "handoff.invalid")
     blocked = await dispatcher.dispatch(_call(_blocked(), op="op-2", binding=old))
     assert blocked.accepted
-    # The blocked step paused the run; the operator retries it with a new session.
+    # The blocked step paused the run; the operator retries it with a new session, and the
+    # run stays paused until the old one is fenced.
     port.apply(RetryStep(node_id="work"))
     assert (_slot(port).session_generation, port.state().status, _streak(port)) == (
         2,
-        "running",
+        "paused",
         1,
     )
     version, log_length, stored = port.row().version, len(port.log()), port.stored_replies()
@@ -725,20 +726,20 @@ async def test_label_rules_follow_how_the_step_routes(
 async def test_an_old_session_is_superseded_after_its_accepted_step_is_retried(
     port: InMemoryDecisionPort, dispatcher: ToolDispatcher, caplog: pytest.LogCaptureFixture
 ) -> None:
-    port.add_run(_plain())
+    pair = _graph(
+        [start(), step("work", roster=["implementer", "reviewer"]), step("ship"), end()],
+        [arrow("a1", "start", "work"), arrow("a2", "work", "ship"), arrow("a4", "ship", "end")],
+    )
+    port.add_run(pair)
     accepted = await dispatcher.dispatch(_call(_done(), op="op-1"))
     assert accepted == ToolReply(accepted=True, next=STOP)
     close = next(effect for effect in port.state().effects if effect.kind == "close_slot")
     port.apply(EffectCompleted(effect_key=close.effect_key, payload={"pending_input": False}))
-    # The next step blocks and pauses the run; the operator retries ``work`` with a new session.
-    ship = "ship||:0"
-    for kind in ("create_session", "send_input"):
-        effects = port.state().effects
-        started = next(item for item in effects if item.kind == kind and item.subject == ship)
-        port.apply(EffectCompleted(effect_key=started.effect_key))
+    # The step's other slot blocks and pauses the run; the operator retries the whole step.
+    other = "work||:1"
     port.apply(
-        HandoffReceived(slot_id=ship, body="blocked"),
-        HandoffEvaluated(slot_id=ship, outcome="blocked"),
+        HandoffReceived(slot_id=other, body="blocked"),
+        HandoffEvaluated(slot_id=other, outcome="blocked"),
     )
     port.apply(RetryStep(node_id="work"))
     assert (_slot(port).session_generation, _slot(port).handoff) == (2, None)

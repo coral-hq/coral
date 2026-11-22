@@ -34,6 +34,12 @@ openapi-check:
 test-e2e:
     cd .. && uv run --no-sync pytest tests/e2e/coral --reruns 0 -rs -n 2 --dist=loadscope
 
+# Run the review-loop E2E once against the real Anthropic API. Export ANTHROPIC_API_KEY in your own shell first.
+# The CLI reaches the API through a token-gated loopback proxy, but on macOS a step can read the key from the test's environment.
+# Only on a machine with no other users: they could read the proxy's token or use the local server.
+e2e-live:
+    cd .. && CORAL_E2E_LIVE=1 uv run --no-sync pytest tests/e2e/coral/test_skeleton.py::test_live_review_loop_survives_server_sigkills --reruns 0 -rs --no-showlocals
+
 # Print the fast claude-sdk probe verdicts (mock base URL, tool gate, MCP timeout) as JSON.
 probe-claude-sdk:
     cd .. && uv run --no-sync python docs/coral/decisions/probes/spike_04.py

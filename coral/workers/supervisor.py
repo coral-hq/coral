@@ -14,6 +14,7 @@ from coral.omni.protocols import RunScopeRunner
 from coral.queue.drainer import (
     DEFAULT_EXECUTION_LIMIT_S,
     HoldPolicy,
+    HoldRestart,
     WorkDrainer,
     WorkFinishedHook,
 )
@@ -101,6 +102,8 @@ class WorkerSupervisor:
     :param resync_interval_s: ``None`` turns off the resync task and the purge.
     :param execution_limit_s: How long one attempt of an item may run; ``None``: no limit.
     :param wait: The timed wait every loop uses; tests pass a virtual clock's.
+    :param on_leader_term: Called each time this replica starts leading, before the
+        startup sweep, so state kept from an earlier term starts afresh.
     """
 
     def __init__(
@@ -127,10 +130,12 @@ class WorkerSupervisor:
         drain_concurrency: int = 4,
         on_finished: WorkFinishedHook | None = None,
         hold_policy: HoldPolicy | None = None,
+        hold_restart: HoldRestart | None = None,
         resync_interval_s: float | None = 60.0,
         retention_s: int = 86_400,
         execution_limit_s: float | None = DEFAULT_EXECUTION_LIMIT_S,
         wait: EventWait = _wait_any_event,
+        on_leader_term: Callable[[], None] | None = None,
     ) -> None:
         if not 1 <= drain_concurrency <= MAX_DRAIN_CONCURRENCY:
             raise ValueError(f"drain_concurrency must be 1-{MAX_DRAIN_CONCURRENCY}")
@@ -162,6 +167,7 @@ class WorkerSupervisor:
             clock=clock,
             on_finished=on_finished,
             hold_policy=hold_policy,
+            hold_restart=hold_restart,
             execution_limit_s=execution_limit_s,
             sleep=_sleep_with(wait),
         )
@@ -175,6 +181,7 @@ class WorkerSupervisor:
         self._resync_interval_s = resync_interval_s
         self._retention_s = retention_s
         self._wait = wait
+        self._on_leader_term = on_leader_term
         # Workers claim one at a time, excluding the runs this process has in flight.
         self._claim_lock = asyncio.Lock()
         self._busy_runs: set[str] = set()
@@ -268,6 +275,7 @@ class WorkerSupervisor:
         # Renewing from the start, so a long startup sweep cannot outlast the lease.
         start("coral-lease-renewal", self._renewal_loop())
         try:
+            self._begin_leader_term()
             try:
                 self.last_startup_report = await startup_recovery_sweep(
                     self._run_store,
@@ -307,6 +315,14 @@ class WorkerSupervisor:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _begin_leader_term(self) -> None:
+        if self._on_leader_term is None:
+            return
+        try:
+            self._on_leader_term()
+        except Exception as exc:  # noqa: BLE001 -- logged; leading goes on
+            _logger.error("Coral leader-term hook failed: %s", describe_exception(exc))
 
     async def _renewal_loop(self) -> None:
         """Renew the lease; a failed renewal is retried until the lease's last quarter."""

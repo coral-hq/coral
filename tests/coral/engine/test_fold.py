@@ -2,22 +2,32 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
+from pathlib import Path
+
+import pytest
 
 from coral.engine import empty_state, fold, transition
+from coral.engine.projection import RunView, project
 from coral.engine.types import (
+    PREVIOUS_RULES,
+    RULES,
     EffectCompleted,
     EffectFailed,
     EngineConfig,
     HandoffEvaluated,
     HandoffReceived,
+    LogEntry,
     PauseRun,
     ResumeRun,
+    RunState,
     SessionFailed,
     StartRun,
     TimerDue,
     TurnEnded,
 )
+from coral.model.ir import CompiledGraph
 from tests.coral.engine.drive import NOW, drive
 from tests.coral.workflow_builders import (
     arrow,
@@ -30,7 +40,7 @@ from tests.coral.workflow_builders import (
 )
 
 CONFIG = EngineConfig()
-RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1")
+RUN = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1", rules=RULES)
 SLOT = "work||:0"
 
 
@@ -278,3 +288,34 @@ def test_replaying_failures_reprompts_and_a_pending_close_repeats_every_entry() 
         assert tuple(replayed) == finished.log
         assert state == finished.state
     assert fold(graph, finished.log, CONFIG) == finished.state
+
+
+_OLD_LOGS = Path(__file__).parent / "fixtures" / "logs_without_a_rules_marker.json"
+_OLD = json.loads(_OLD_LOGS.read_text())
+
+
+@pytest.mark.parametrize("name", sorted(_OLD["runs"]))
+def test_a_log_without_a_rules_marker_folds_to_its_old_state_and_view(name: str) -> None:
+    recorded = _OLD["runs"][name]
+    graph = CompiledGraph.model_validate_json(recorded["graph"])
+    log = [LogEntry.model_validate_json(body) for body in recorded["log"]]
+    start_entry = json.loads(recorded["log"][0])["input"]
+    assert (start_entry["kind"], "rules" in start_entry) == ("start_run", False)
+
+    folded = fold(graph, log, EngineConfig.model_validate(_OLD["engine_config"]))
+
+    assert folded == RunState.model_validate(recorded["state"])
+    assert project(folded) == RunView.model_validate(recorded["view"])
+    assert folded.rules == PREVIOUS_RULES
+
+
+def test_a_new_run_names_its_rules_in_its_start_entry() -> None:
+    graph = compile_text(fixture_text("minimal"))[0]
+    driven = drive(graph, [RUN])
+    stored = json.loads(driven.log[0].model_dump_json())
+    assert stored["input"]["rules"] == RULES
+    assert driven.state.rules == RULES
+    replayed = fold(
+        graph, [LogEntry.model_validate_json(entry.model_dump_json()) for entry in driven.log]
+    )
+    assert replayed == driven.state

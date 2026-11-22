@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,15 +23,19 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
+from coral.db.enum_codecs import SessionBindingProgress, SessionBindingRole, SlotRole
 from coral.model.ids import fallback_message_id
 from coral.omni.protocols import (
     ENGINE_MESSAGE_FIRST_LINE,
     CoralSessionError,
     PreSendRequest,
+    RunnerLiveness,
     TurnTranscript,
     engine_message_text,
 )
+from coral.omni.server import dispatch as dispatch_module
 from coral.omni.server.dispatch import QUEUED_INPUT_SCAN_LIMIT, OmnigentSessionDispatch
+from coral.stores.session_bindings import SessionBinding
 from coral.stores.stable_ids import content_checksum
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID
 from omnigent.entities import MessageData, NewConversationItem
@@ -45,7 +51,7 @@ from omnigent.runtime import init as init_runtime
 from omnigent.runtime import pending_elicitations, pending_inputs
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
-from omnigent.server.auth import UnifiedAuthProvider
+from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_LOCAL, UnifiedAuthProvider
 from omnigent.server.routes import sessions as sessions_routes
 from omnigent.server.routes._sessions import helpers as session_helpers
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
@@ -56,6 +62,7 @@ from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.policy_store.sqlalchemy_store import SqlAlchemyPolicyStore
 from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
+from tests.coral.omni.fakes import FakeRelauncher
 from tests.server.helpers import create_session_for_agent, create_test_agent
 from tests.server.integration.test_policy_deny_lifecycle_e2e import _attach_deny_policy
 from tests.server.integration.test_sessions_web_send_stable_id import _stub_runner
@@ -690,6 +697,54 @@ async def test_stop_is_owner_checked_repeat_safe_and_unconfirmed_is_retryable(
     )
 
 
+async def test_an_ownerless_runs_messages_act_as_a_single_user_servers_local_user(
+    stores: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, forwarded: list[dict[str, Any]]
+) -> None:
+    """A served single-user server has an auth provider, and its local user owns the session."""
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    app = _app(stores, auth=True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as local:
+        session_id = await _session(local)
+    dispatch = _dispatch(app, stores)
+
+    try:
+        receipt = await _send(dispatch, session_id, BRIEF)
+        await dispatch.stop(session_id=session_id, user_id=None)
+    finally:
+        _forget(session_id)
+
+    assert (receipt.item_id, receipt.delivery) == (STABLE_ID, "sent")
+    assert [_text(body) for body in _messages(forwarded)] == [engine_message_text(BRIEF)]
+
+
+async def test_outside_a_single_user_server_an_ownerless_run_never_acts_as_the_local_user(
+    stores: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, forwarded: list[dict[str, Any]]
+) -> None:
+    """A multi-user server's local user holds no identity, even where it holds a grant."""
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    app = _app(stores, auth=True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-Forwarded-Email": ALICE}
+    ) as alice:
+        session_id = await _session(alice)
+    stores.permission.grant(RESERVED_USER_LOCAL, session_id, LEVEL_OWNER)
+    dispatch = _dispatch(app, stores)
+
+    try:
+        with pytest.raises(CoralSessionError) as sent:
+            await _send(dispatch, session_id, BRIEF)
+        with pytest.raises(CoralSessionError) as stopped:
+            await dispatch.stop(session_id=session_id, user_id=None)
+    finally:
+        _forget(session_id)
+
+    assert (sent.value.code, sent.value.retryable) == ("dispatch.not_permitted", False)
+    assert (stopped.value.code, stopped.value.retryable) == ("dispatch.not_permitted", False)
+    assert _messages(forwarded) == []
+
+
 async def test_live_status_reads_this_replicas_caches_and_falls_back_to_the_row(
     app: FastAPI, stores: SimpleNamespace, client: httpx.AsyncClient
 ) -> None:
@@ -720,9 +775,54 @@ async def test_live_status_reads_this_replicas_caches_and_falls_back_to_the_row(
     assert (cold.pending_elicitations, cold.background_work) == (2, True)
     # This replica's edges win: not parked, one approval open, the active response known.
     assert (warm.status, warm.response_id, warm.blocked_on) == ("running", "resp_1", None)
+    assert (cold.response_observed, warm.response_observed) == (False, True)
     assert (warm.pending_elicitations, warm.background_work) == (1, True)
     with pytest.raises(CoralSessionError) as deleted:
         await dispatch.live_status(session_id="0" * 32)
+    assert deleted.value.code == "session.deleted"
+
+
+async def test_runner_liveness_reads_the_rows_runner_and_stamp_and_this_replicas_tunnels(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = await _session(client)
+    store = stores.conversation
+    now = 1_900_000_000
+    dispatch = _dispatch(app, stores, clock=lambda: float(now))
+
+    async def read() -> RunnerLiveness:
+        return await dispatch.runner_liveness(workspace_id=WORKSPACE, session_id=session_id)
+
+    unbound = await read()
+    assert store.set_runner_id(session_id, "runner-1")
+    # Another replica's tunnel stamped it within the server's 90 s TTL, then too long ago.
+    store.touch_runner_liveness(["runner-1"], now - 90)
+    fresh = await read()
+    store.touch_runner_liveness(["runner-1"], now - 91)
+    stale = await read()
+    # The tunnel dropped: the server cleared the stamp.
+    store.clear_runner_liveness("runner-1")
+    cleared = await read()
+    tunnels = {"runner-1": object()}
+    monkeypatch.setattr(app.state, "tunnel_registry", SimpleNamespace(get=tunnels.get))
+    connected = await read()
+
+    assert unbound == RunnerLiveness(None, connected=False, last_seen=None, fresh=False)
+    seen = datetime.fromtimestamp(now - 90, UTC)
+    assert fresh == RunnerLiveness("runner-1", connected=False, last_seen=seen, fresh=True)
+    assert stale == RunnerLiveness(
+        "runner-1",
+        connected=False,
+        last_seen=datetime.fromtimestamp(now - 91, UTC),
+        fresh=False,
+    )
+    assert cleared == RunnerLiveness("runner-1", connected=False, last_seen=None, fresh=False)
+    assert connected == RunnerLiveness("runner-1", connected=True, last_seen=None, fresh=True)
+    with pytest.raises(CoralSessionError) as deleted:
+        await dispatch.runner_liveness(workspace_id=WORKSPACE, session_id="0" * 32)
     assert deleted.value.code == "session.deleted"
 
 
@@ -744,7 +844,59 @@ async def test_a_cold_live_status_reads_the_running_response_from_the_store(
     writing = await dispatch.live_status(session_id=session_id)
 
     assert (started.status, started.response_id) == ("running", None)
+    # A guess from the store: after a restart mid-turn it may name no turn.
     assert (writing.status, writing.response_id) == ("running", "resp_store")
+    assert (started.response_observed, writing.response_observed) == (False, False)
+
+
+async def test_only_this_replicas_own_response_is_observed_whatever_the_store_holds(
+    app: FastAPI, stores: SimpleNamespace, client: httpx.AsyncClient
+) -> None:
+    session_id = await _session(client)
+    dispatch = _dispatch(app, stores)
+    stores.conversation.append(session_id, [_item("assistant", response_id="turn_after_restart")])
+
+    # A running edge reached this replica without naming its response.
+    sessions_routes._session_status_cache[session_id] = "running"
+    try:
+        unnamed = await dispatch.live_status(session_id=session_id)
+        sessions_routes._session_active_response_cache[session_id] = "resp_live"
+        named = await dispatch.live_status(session_id=session_id)
+    finally:
+        _forget(session_id)
+
+    assert (unnamed.status, unnamed.response_id, unnamed.response_observed) == (
+        "running",
+        "turn_after_restart",
+        False,
+    )
+    assert (named.response_id, named.response_observed) == ("resp_live", True)
+
+
+async def test_an_interrupt_naming_no_response_reaches_a_turn_whose_stored_guess_moved(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    forwarded: list[dict[str, Any]],
+) -> None:
+    # A restarted server stores each item of the running turn under a new id of its own.
+    session_id = await _session(client)
+    dispatch = _dispatch(app, stores)
+    store = stores.conversation
+    store.set_session_live_status(session_id, "running")
+    store.append(session_id, [_item("assistant", response_id="turn_a")])
+    read = await dispatch.live_status(session_id=session_id)
+    store.append(session_id, [_item("assistant", response_id="turn_b")])
+
+    stale = await dispatch.interrupt(session_id=session_id, user_id=None, response_id="turn_a")
+    unnamed = await dispatch.interrupt(session_id=session_id, user_id=None)
+
+    assert (read.response_id, read.response_observed) == ("turn_a", False)
+    # Naming the guess would miss the turn; naming none interrupts whatever runs.
+    assert (stale, unnamed) == (False, True)
+    assert [body for body in forwarded if body.get("type") == "interrupt"] == [
+        {"type": "interrupt"}
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1088,3 +1240,179 @@ def _forget(session_id: str) -> None:
         sessions_routes._session_blocked_on_cache,
     ):
         cache.pop(session_id, None)
+
+
+# ── A step's runner comes back only through the relauncher ──────────────────
+
+
+@dataclass
+class _StepBindings:
+    """The binding lookup: ``steps`` names each step session and its generation.
+
+    :param anchors: Sessions bound as a run's anchor.
+    :param orchestrators: Step sessions that are a run's orchestrator.
+    """
+
+    steps: dict[str, int] = field(default_factory=dict)
+    lookups: list[tuple[int, str]] = field(default_factory=list)
+    anchors: set[str] = field(default_factory=set)
+    orchestrators: set[str] = field(default_factory=set)
+
+    def find_by_session(self, workspace_id: int, session_id: str) -> SessionBinding | None:
+        self.lookups.append((workspace_id, session_id))
+        if session_id in self.anchors:
+            return SessionBinding(
+                workspace_id=workspace_id,
+                session_id=session_id,
+                run_id=RUN_ID,
+                role=SessionBindingRole.ANCHOR,
+                slot_id=None,
+                slot_role=None,
+                effect_cksum=b"\0" * 32,
+                session_generation=1,
+                host_id=None,
+                progress=SessionBindingProgress.INITIALIZED,
+                created_at=0,
+                updated_at=0,
+            )
+        generation = self.steps.get(session_id)
+        if generation is None:
+            return None
+        orchestrator = session_id in self.orchestrators
+        return SessionBinding(
+            workspace_id=workspace_id,
+            session_id=session_id,
+            run_id=RUN_ID,
+            role=SessionBindingRole.STEP,
+            slot_id="orchestrator" if orchestrator else "implement||:0",
+            slot_role=SlotRole.ORCHESTRATOR if orchestrator else SlotRole.STEP_AGENT,
+            effect_cksum=b"\0" * 32,
+            session_generation=generation,
+            host_id=None,
+            progress=SessionBindingProgress.INITIALIZED,
+            created_at=0,
+            updated_at=0,
+        )
+
+    def reads_fresh(self) -> bool:
+        return True
+
+
+async def test_a_send_to_a_coral_step_brings_its_runner_back_only_through_the_relauncher(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    forwarded: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = await _session(client)
+    relauncher = FakeRelauncher(answers=["relaunched"])
+    woken: list[str] = []
+
+    async def server_wake(**kwargs: Any) -> Any:
+        woken.append(kwargs["session_id"])
+        raise AssertionError("a Coral step must not take the server's own launch path")
+
+    monkeypatch.setattr(dispatch_module, "ensure_runner_connected", server_wake)
+    dispatch = _dispatch(
+        app, stores, relauncher=relauncher, bindings=_StepBindings({session_id: 3})
+    )
+
+    await _send(dispatch, session_id, "Brief.")
+
+    assert relauncher.calls == [(WORKSPACE, session_id, 3)]
+    assert woken == []
+    assert [_text(body) for body in _messages(forwarded)] == [engine_message_text("Brief.")]
+
+
+async def test_a_relaunch_refusal_forwards_nothing(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    forwarded: list[dict[str, Any]],
+) -> None:
+    session_id = await _session(client)
+    refusal = CoralSessionError("session.host_unsupported", "update Coral on that host")
+    dispatch = _dispatch(
+        app,
+        stores,
+        relauncher=FakeRelauncher(answers=[refusal]),
+        bindings=_StepBindings({session_id: 1}),
+    )
+
+    with pytest.raises(CoralSessionError) as refused:
+        await _send(dispatch, session_id, "Brief.")
+
+    assert (refused.value.code, refused.value.retryable) == ("session.host_unsupported", False)
+    assert _messages(forwarded) == []
+
+
+async def test_a_session_that_is_no_coral_step_wakes_as_the_server_would(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    forwarded: list[dict[str, Any]],
+) -> None:
+    session_id = await _session(client)
+    relauncher = FakeRelauncher()
+    bindings = _StepBindings()
+
+    await _send(
+        _dispatch(app, stores, relauncher=relauncher, bindings=bindings), session_id, "Hi."
+    )
+
+    assert bindings.lookups == [(WORKSPACE, session_id)]
+    assert relauncher.calls == []
+    assert len(_messages(forwarded)) == 1
+
+
+def test_a_relauncher_needs_the_bindings_that_name_its_steps(
+    app: FastAPI, stores: SimpleNamespace
+) -> None:
+    with pytest.raises(ValueError, match="bindings"):
+        _dispatch(app, stores, relauncher=FakeRelauncher())
+    with pytest.raises(ValueError, match="bindings"):
+        _dispatch(app, stores, bindings=_StepBindings())
+
+
+async def test_a_send_to_the_orchestrator_brings_its_runner_back_through_the_relauncher(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    forwarded: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = await _session(client)
+    relauncher = FakeRelauncher(answers=["connected"])
+
+    async def server_wake(**kwargs: Any) -> Any:
+        raise AssertionError("the orchestrator, a step session, must not take the server's path")
+
+    monkeypatch.setattr(dispatch_module, "ensure_runner_connected", server_wake)
+    bindings = _StepBindings({session_id: 1}, orchestrators={session_id})
+
+    await _send(
+        _dispatch(app, stores, relauncher=relauncher, bindings=bindings), session_id, "Hi."
+    )
+
+    assert relauncher.calls == [(WORKSPACE, session_id, 1)]
+    assert len(_messages(forwarded)) == 1
+
+
+async def test_a_send_to_a_run_anchor_wakes_as_the_server_would(
+    app: FastAPI,
+    stores: SimpleNamespace,
+    client: httpx.AsyncClient,
+    forwarded: list[dict[str, Any]],
+) -> None:
+    session_id = await _session(client)
+    relauncher = FakeRelauncher()
+    bindings = _StepBindings(anchors={session_id})
+
+    await _send(
+        _dispatch(app, stores, relauncher=relauncher, bindings=bindings), session_id, "Hi."
+    )
+
+    assert bindings.lookups == [(WORKSPACE, session_id)]
+    assert relauncher.calls == []
+    assert len(_messages(forwarded)) == 1

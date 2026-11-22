@@ -293,12 +293,23 @@ class HostWorkspaceOps(WorkspaceOps):
 
     @override
     async def reset(
-        self, ref: WorkspaceRef, executor: OpExecutor, *, op_key: str, commit: str
+        self,
+        ref: WorkspaceRef,
+        executor: OpExecutor,
+        *,
+        op_key: str,
+        commit: str,
+        salvage_commit: str | None = None,
     ) -> ResetResult:
         check_op_host("reset", executor)
         validate_op_key(op_key)
         validate_commit_id(commit)
-        payload = await self._write(ref, executor, "reset", op_key, commit=commit)
+        params: dict[str, object] = {"commit": commit}
+        if salvage_commit is not None:
+            validate_commit_id(salvage_commit)
+            # Only sent when given: a host without the precondition refuses the param.
+            params["salvage_commit"] = salvage_commit
+        payload = await self._write(ref, executor, "reset", op_key, **params)
         head = payload.commit_id("head")
         if head != commit:
             raise payload.malformed("head")

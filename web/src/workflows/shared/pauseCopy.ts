@@ -2,8 +2,9 @@ import type { RunHeader } from "../api/generated/coralApi";
 import { slotNodeId } from "./runIds";
 
 // What a paused run's pill and banner say. Specific copy where the cause's detail code is
-// one the engine records, else the server's pause alert copy (`PAUSE_MESSAGES` in
-// `coral/alerts/rules.py`), else "The run paused.".
+// one the engine records, naming the cause's step ("a step" when the graph cannot), else
+// the server's pause alert copy (`PAUSE_MESSAGES` in `coral/alerts/rules.py`), else "The
+// run paused.".
 
 /** A reason the run row can be paused for. */
 export type PauseReasonName = NonNullable<RunHeader["pause_reason"]>;
@@ -66,6 +67,17 @@ const LABELS: Readonly<Record<PauseReasonName, string>> = {
 };
 
 const LIVENESS_DETAIL = /^(\S+) is waiting for (\S+), which can no longer run\.$/;
+/** The `infra` detail of a step that a Retry is restarting. */
+export const RESTARTING_DETAIL = "recovery.restarting";
+// The detail prefixes the engine adds a code or the missing evidence after.
+const RESTART_FAILED_PREFIX = "restart:";
+const EXHAUSTED_PREFIX = "attempts_exhausted:";
+// A restart that failed with one of these codes could not reach the step's machine.
+const HOST_OFFLINE_RESTART_CODES: ReadonlySet<string> = new Set([
+  "dispatch.stop_unconfirmed",
+  "session.host_offline",
+  "workspace.backend_unavailable",
+]);
 
 function isPauseReasonName(reason: string): reason is PauseReasonName {
   return Object.hasOwn(LABELS, reason);
@@ -90,12 +102,78 @@ export function nodeLabel(graph: GraphNodeNames | null, nodeId: string): string 
   return node.name?.trim() ? node.name : node.id;
 }
 
-function failureBody(cause: PauseCauseLike): string {
-  if (cause.detail === "attempts_exhausted" && cause.subject !== "") {
-    return `Missing evidence: ${isolated(cause.subject)}.`;
+/** The step a cause's slot subject names, isolated, or `null` when the graph cannot name it. */
+function causeStep(cause: PauseCauseLike, graph: GraphNodeNames | null): string | null {
+  const nodeId = slotNodeId(cause.subject);
+  const name = nodeId === null ? null : nodeLabel(graph, nodeId);
+  return name === null ? null : isolated(name);
+}
+
+function restartFailedBody(code: string, step: string | null): string {
+  if (HOST_OFFLINE_RESTART_CODES.has(code)) {
+    return `Your machine went offline before ${step ?? "a step"} could restart. Retry when it’s back.`;
   }
-  if (cause.detail === "engine.load_failed") return LOAD_FAILED_TEXT;
+  if (code === "workspace.head_moved") {
+    return (
+      `The run’s branch moved outside Coral, so ${step ?? "a step"} was not restarted. ` +
+      "Reset the branch to the commit of its last handoff, then retry; or cancel the run."
+    );
+  }
+  return `Coral couldn’t restart ${step ?? "a step"}. Retry tries again.`;
+}
+
+/** The missing evidence a cause names, or `null` for a cause of another kind. */
+function missingEvidence({ detail, subject }: PauseCauseLike): string | null {
+  if (detail.startsWith(EXHAUSTED_PREFIX)) return detail.slice(EXHAUSTED_PREFIX.length);
+  // Runs paused before the ids moved into the detail name them as the subject.
+  return detail === "attempts_exhausted" ? subject : null;
+}
+
+function failureBody(cause: PauseCauseLike, graph: GraphNodeNames | null): string {
+  const { detail } = cause;
+  const missing = missingEvidence(cause);
+  if (missing !== null) {
+    return missing === "" ? PAUSE_MESSAGES.failure_path : `Missing evidence: ${isolated(missing)}.`;
+  }
+  if (detail === "engine.load_failed") return LOAD_FAILED_TEXT;
+  const step = causeStep(cause, graph);
+  if (detail.startsWith(RESTART_FAILED_PREFIX)) {
+    return restartFailedBody(detail.slice(RESTART_FAILED_PREFIX.length), step);
+  }
+  if (detail === "session.host_unsupported") {
+    return `${step ?? "A step"}’s machine can’t run Coral steps. Update Coral there, then retry.`;
+  }
+  if (detail === "session.closed") {
+    return (
+      `${step ?? "A step"}’s session was closed, so it can’t go on. ` +
+      "Retry starts it again from its last handoff."
+    );
+  }
+  if (detail === "blocked") {
+    return `${step ?? "A step"} reported that it is blocked. Retry restarts it from its last handoff.`;
+  }
   return PAUSE_MESSAGES.failure_path;
+}
+
+function infraBody(cause: PauseCauseLike, graph: GraphNodeNames | null): string {
+  const step = causeStep(cause, graph);
+  switch (cause.detail) {
+    case "infra.host_offline":
+      return `Your machine went offline. Coral will continue ${step ?? "a step"} when it’s back.`;
+    case RESTARTING_DETAIL:
+      return `Coral is restarting ${step ?? "a step"} from its last handoff.`;
+    case "infra.runner_lost":
+      return (
+        `${step ?? "A step"} keeps losing its runner. ` +
+        "Resume tries again; Retry restarts it from its last handoff."
+      );
+    case "recovery.runner_alive":
+      return `${step ?? "A step"}’s runner is running but can’t reach Coral. Resume tries again.`;
+    case "session.runner_status_unknown":
+      return `Coral couldn’t check ${step ?? "a step"}’s runner on your machine. Resume tries again.`;
+    default:
+      return PAUSE_MESSAGES.infra;
+  }
 }
 
 function livenessBody(cause: PauseCauseLike, graph: GraphNodeNames | null): string {
@@ -113,13 +191,12 @@ function driftBody(cause: PauseCauseLike, graph: GraphNodeNames | null): string 
   if (cause.detail === "anchor_deleted") {
     return "The run’s session was deleted. The run can only be cancelled.";
   }
-  const nodeId = slotNodeId(cause.subject);
-  const step = nodeId === null ? null : nodeLabel(graph, nodeId);
+  const step = causeStep(cause, graph);
   if (step !== null && cause.detail === "pending_input") {
-    return `Someone typed into ${isolated(step)}’s session while Coral was finishing it.`;
+    return `Someone typed into ${step}’s session while Coral was finishing it.`;
   }
   if (step !== null && cause.detail === "post_close") {
-    return `${isolated(step)}’s session kept working after its step closed.`;
+    return `${step}’s session kept working after its step closed.`;
   }
   return PAUSE_MESSAGES.drift;
 }
@@ -157,7 +234,9 @@ function body(reason: PauseReasonName, cause: PauseCauseLike | null, graph: Grap
     case "user":
       return UNKNOWN_PAUSE_TEXT;
     case "failure_path":
-      return cause ? failureBody(cause) : PAUSE_MESSAGES.failure_path;
+      return cause ? failureBody(cause, graph) : PAUSE_MESSAGES.failure_path;
+    case "infra":
+      return cause ? infraBody(cause, graph) : PAUSE_MESSAGES.infra;
     case "liveness":
       return cause ? livenessBody(cause, graph) : PAUSE_MESSAGES.liveness;
     case "drift":
@@ -167,7 +246,6 @@ function body(reason: PauseReasonName, cause: PauseCauseLike | null, graph: Grap
       return `${PAUSE_MESSAGES.plan_limit} Coral retries periodically.`;
     case "engine_upgrade":
       return "Coral was upgraded; this run cannot continue.";
-    case "infra":
     case "auth":
     case "budget":
     case "rejected_calls":

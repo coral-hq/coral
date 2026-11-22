@@ -2,14 +2,211 @@
 
 Tier B tests run the real `ClaudeSDKExecutor` and the real `claude` CLI with
 `tests/server/integration/mock_llm_server.py` as the only model endpoint. They
-live in `tests/e2e/coral/` and run in the e2e gate. Run them locally with:
+live in `tests/e2e/coral/`. The walking-skeleton proofs among them, and the live
+proxy's unit test (`test_live_proxy.py`), run in CI in the `coral-e2e` group (below). The other Tier B files run only locally: the
+inherited `E2E Tests` workflow is disabled on this fork. Run them all locally
+with:
 
 ```bash
 uv run --no-sync pytest tests/e2e/coral --reruns 0 -rs -n 2 --dist=loadscope
 ```
 
-Each test skips when `claude` is not on `PATH`. The stack sample also skips
-unless `CORAL_TIER_B_STACK_SAMPLE=1` is set (see below).
+Each test that starts the CLI skips when `claude` is not on `PATH`;
+`test_live_proxy.py` and `test_claude_sdk_kit.py` need no CLI. The walking-skeleton tests
+(`test_skeleton.py`, `test_runner_loss.py`, `test_sandbox_probe.py`) fail
+instead when `CORAL_E2E_REQUIRE_CLI=1` is set, as the lane sets it. The stack
+sample also skips unless `CORAL_TIER_B_STACK_SAMPLE=1` is set (see below), and
+the live variant unless `CORAL_E2E_LIVE=1` and `ANTHROPIC_API_KEY` are set.
+
+## The `coral-e2e` lane
+
+`.github/scripts/ci/python-matrix.json` has a `coral-e2e` group in the
+`pytest` job of `.github/workflows/ci.yml`. It runs, on two workers with
+`--dist=load`:
+
+- `tests/e2e/coral/test_live_proxy.py`: the live proxy's unit tests, with a
+  fake upstream and a fake key;
+- `tests/e2e/coral/test_skeleton.py`: the review loop end to end, and the server
+  SIGKILL proofs;
+- `tests/e2e/coral/test_runner_loss.py`: a lost runner, a lost host and a step
+  retry;
+- `tests/e2e/coral/test_sandbox_probe.py`: ADR-05's probe 15.
+
+Explicit paths override `addopts`'s `--ignore=tests/e2e` (`pyproject.toml`). The proxy's file comes
+first so that `--dist=load` spreads the stack tests over both workers; the
+order is meant to keep the two longest tests apart.
+`tests/coral/test_ci_lane.py` pins the row, that the lane collects every proof
+and the proxy's unit tests, and that it installs the CLI from the in-repo
+action. The job's steps for this group:
+
+- Node 22, then `claude` from `./.github/actions/setup-harness-cli`
+  (`harness: claude`): version 2.1.295 from its `manifest.json`, installed from
+  a lockfile with sha512 integrity. The version goes into the job summary.
+- `bubblewrap` and `kernel.apparmor_restrict_unprivileged_userns=0`, as for
+  every group, so the claude-sdk OS sandbox is Linux bwrap.
+- `OMNIGENT_TEST_TIMEOUT_SCALE=4`, `CORAL_E2E_REQUIRE_CLI=1`, `--timeout=300`,
+  `ANTHROPIC_API_KEY` unset, and `artifacts/` uploaded even on failure (probe
+  15 writes its verdicts there). The job runs pytest with `--showlocals`, so
+  the tests' own frames hold canaries and tokens only in redacted `Secret`s;
+  the stack helpers' frames hold the raw per-run values, so only a failure in
+  a stack's start or teardown can print them. Its checkout
+  does not set `persist-credentials: false`, as for every `pytest` group
+  (CRL-160).
+
+Budgets: each test's absolute deadlines stay within 240 s (the default-lease
+proof within 360 s, under `timeout(420, method="signal")`), and the group
+within 15 minutes with its setup. Measured locally the CI way on macOS: the
+row in about 265 s; the default-lease proof about 188 s, the host outage about
+130 s, the SIGKILL proof about 36 s, the retry about 21 s, the happy path about
+18 s, the runner kill about 13 s, probe 15 about 11 s and the allow-listed-token
+test about 9 s. A test that cannot meet its budget moves to a lower layer, not
+to a nightly lane.
+
+## The walking-skeleton stack
+
+`tests/e2e/coral/_skeleton.py` holds the mechanics. Each helper takes its
+inputs from the caller; faults and assertions stay in the tests.
+
+- `skeleton_stack(root, *, mock_url, host_config, host_env, ...)` starts a
+  server subprocess with the Coral plugin (`server_runner`, a fixed port and
+  database across restarts), a host daemon with an isolated home
+  (`isolated_host`) and a temporary git repository, all under the stack's
+  root, and waits for the host online and `GET /v1/coral/info`. The server
+  removes the allow-listed runner token unless `allowlisted_token` is given.
+- Every stack gets a private short harness socket root,
+  `mkdtemp(dir="/tmp", prefix="crl-")` (`OMNIGENT_HARNESS_TMP_PARENT`, under the
+  AF_UNIX path limit), and its own `TMPDIR` (`prefix="crl-t-"`), both removed
+  with the stack. No recipe sets `OMNIGENT_HARNESS_TMP_PARENT` by hand.
+- `minimal_env()` is the base environment, with no credential: `PATH` with
+  python, git, `claude` and `node` and the system directories, the locale
+  names and `TMPDIR` (the stack then gives its own), and
+  `DISABLE_AUTOUPDATER=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. The
+  happy path asserts both switches reach the step's live CLI.
+- At exit, a SIGTERM included, no process the stack started may survive: the
+  stack fails if a server, host, runner, CLI or tool process of it is left.
+- `start_server(skeleton)` restarts the server after a test's
+  `server.kill(); server.wait()`; `respawn_host(skeleton)` restarts the host
+  daemon from its first launch's own argv, environment and working directory,
+  so it reuses the same home and identity (`isolated_host` refuses an existing
+  identity).
+- `runner_pid(skeleton, session_id)` reads the host's launch line for the
+  session's current runner and asserts the pid leads its group.
+- `wait_for(fn, *, deadline, what)` waits to an absolute deadline. Its failure
+  adds the run's detail, `claude --version` and, for a mock stack only, the
+  server, host and runner log tails.
+- Every E2E test uses `timeout(<n>, method="signal")` with deadlines summing
+  below it: the default `thread` method `os._exit`s and skips teardown.
+- `make_repo` presets `core.untrackedCache=true`. A runner's first start in a
+  repository otherwise probes the untracked cache for about 6 s, and a
+  scripted turn that ends inside that window looks like a drift (CRL-161).
+
+**Scripting the steps.** One isolated mock per test. Each step's queue is keyed
+by a unique token in its goal, the reviewer's longer, with `required_tools` so
+the CLI's side requests cannot drain it. Each step's first call is held until
+its brief arrives, so the test reads the activation id from the brief instead
+of predicting it. Calls are told apart by the brief's activation line, the
+`runner_lost` nudge after a relaunch, and the salvage paragraph of a retried
+step's brief. No scripted report carries a token.
+
+**Held calls and the CLI's watchdog.** The claude CLI abandons a model call
+that gets no response headers for about 120 s and sends it again (measured with
+CLI 2.1.325; the lane runs 2.1.295). A test that holds a call longer must hold
+the repeat too and release both; the default-lease proof does, and checks that
+the two held calls carry the same body.
+
+**Runner-loss faults.** A runner-loss test captures the runner's process tree
+(its group and every descendant) before the fault, runs the fault only when
+the tree holds the step's `claude` and at least two group members, and then
+waits until the group and the captured tree have ended before it releases the
+mock (`group_tree`, `group_tree_ended`). On Linux the CLI is a descendant, not
+a group member: bwrap's `--new-session` gives it its own session, and it ends
+through bwrap's die-with-parent after the group sweep.
+
+**The proofs and what each crosses.** Each E2E crosses a process boundary the
+lower layers cannot: a server SIGKILL, host git ops, host-launched runners and
+their process trees.
+
+| Test | Fault | What it shows |
+|---|---|---|
+| `test_skeleton.py::test_the_review_loop_runs_end_to_end_on_a_real_stack` | none | implementer → evidence check (refused, then accepted) → read-only reviewer (a write refused, one `changes_requested` pass) → gate (an unknown outcome refused, then approved) → completed run whose checkout command works; one session per slot activation, each briefed once; no drift pause; no refused runner event |
+| `test_skeleton.py::test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate` | server SIGKILL with a model call held, then at the open gate; 10 s lease | the same runner reconnects and its handoff is accepted; the gate's visit id, token and prompt id are unchanged and it is answered once; zero duplicate sessions; no `runner_lost` |
+| `test_skeleton.py::test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched` | the runner's group `SIGSTOP`ped, server SIGKILL, restart with the production lease and grace, `SIGCONT` 20 s after the new leader's first liveness pass | no `runner_lost`, no wake row, the same runner id |
+| `test_runner_loss.py::test_a_killed_step_runner_is_relaunched_in_the_same_session` | `killpg` of the step runner | one loss, one wake `relaunched`, the same session and generation, a new runner id; the run never pauses |
+| `test_runner_loss.py::test_an_offline_host_holds_the_step_and_its_return_relaunches_it` | host daemon SIGKILL; 30 s grace | the hold (`infra` / `infra.host_offline`, Cancel only, `:resume` and `:retry` 409), then `respawn_host`, the hold ends and the same session is relaunched as one loss |
+| `test_runner_loss.py::test_retrying_a_blocked_step_fences_salvages_resets_and_briefs_a_new_session` | a blocked handoff, then `:retry` | paused `recovery.restarting` until the restart finished; the old session closed and its tree gone; one salvage ref holding the old attempt's file; a reset worktree; generation 2 in a new session whose brief names the ref |
+| `test_sandbox_probe.py` (two stack tests) | none | ADR-05's probe 15 verdicts, pinned per platform |
+
+The review loop is a test fixture, `tests/e2e/coral/fixtures/review_loop.yaml`
+("Implement with review loop": implement, review with a `changes_requested`
+back arrow, an approval gate). The packaged template and Simulate are
+CRL-157.
+
+**Probe 15's choreography.** The implementer's first call and the reviewer's
+calls are held, and the mock releases only the oldest held call, so the test
+releases one call at a time and orders the holds until the implementer's probe
+call is the oldest. The host-side controls then run, the probe call is
+released, its result is read from the mock's ledger, the controls run again
+with the reviewer still held, and only then is the reviewer let go. Every
+target needs a host-side control; a target that went missing fails as a failed
+control, never as a verdict. Without pins for the platform, each stack test
+writes `artifacts/probe15-<platform>.json` (and
+`artifacts/probe15-token-<platform>.json`) when `artifacts/` exists, as in CI,
+and fails "not pinned"; pins are taken from those files, with every
+`reachable` given its owner ticket. They hold verdict tokens and the recorded
+versions only.
+
+## The live variant
+
+`test_skeleton.py::test_live_review_loop_survives_server_sigkills` runs the
+review loop against the real Anthropic API, with a server SIGKILL while the
+implementer's session runs and another at the open gate. It skips unless
+`CORAL_E2E_LIVE=1` and `ANTHROPIC_API_KEY` are set; `CORAL_E2E_LIVE_MODEL`, if
+set, becomes the host's `ANTHROPIC_MODEL`. Export the key in your own shell,
+then:
+
+```bash
+just coral e2e-live
+```
+
+The recipe runs that one test with `--reruns 0 -rs --no-showlocals`. **Run it
+only on a machine with no other users.** It is kept collectible, so the lane
+collects it and it skips there; no lane runs it with a key.
+
+**Where the key goes** (`tests/e2e/coral/_live_proxy.py`). The fixture reads
+the key once into a `Secret` whose repr is redacted, removes it from the test's
+environment, and starts a proxy inside the test process on `127.0.0.1`. The
+host's `auth:` is `{type: api_key, api_key: <per-run token>, base_url:
+<proxy>}`, so the host and every CLI it starts get a random
+`secrets.token_urlsafe(32)` token, never the key. The proxy:
+
+- admits only that token, as `x-api-key` or else as a bearer token (the
+  runner's model listing sends one), compared in constant time, else 401;
+- forwards only `POST /v1/messages` and `GET /v1/models`, else 404, to
+  `https://api.anthropic.com` alone, with certificate checks on and no
+  redirects followed, sending the key as `x-api-key` and neither token header;
+- caps request bodies at 1 MiB and upstream calls at 4 at once, refuses a body
+  cut short, writes no TLS key log, and logs nothing itself;
+- closes at teardown and cuts any connection still open.
+
+Its unit tests, which run in the lane, cover each refusal
+(`tests/e2e/coral/test_live_proxy.py`), and
+`test_a_failing_live_run_shows_its_key_nowhere_in_the_report` checks that a
+failing live run's report, with `-l --tb=long`, never shows a fake key. Live
+failures carry no log tails. At teardown the test asserts that no file under
+its basetemp holds the key, reporting a count only, then deletes the basetemp.
+
+**What the token does not fence.** The token reaches the CLI's command line
+(its `--settings` key helper), which any local account can read, and the
+stack's server serves unauthenticated local requests. So while a live run
+lasts, another account on the machine could read the token and spend through
+the proxy. There is no spend cap. No process the test starts is given the key,
+but the key is not confined to the test process: removing it from the test's
+environment does not scrub the initial environment block of pytest, or of the
+shell and tools that started it, which another process of the same user can
+read. On macOS a step's shell can read the environments of the test process and
+its parents, and so the key (probe 15, CRL-165). The proxy path is the
+claude-sdk gateway path (it sets a base URL), so a host with only
+`ANTHROPIC_API_KEY` and no base URL is not exercised.
 
 ## The harness is claude-sdk
 
@@ -123,6 +320,17 @@ the `coral_runner:2` token, which a host with Coral installed advertises in its
 hello; the Tier B gate does not check it yet.
 
 ## What Tier B cannot prove yet
+
+Every model call is scripted, so Tier B does not show real model behaviour
+(following a brief, choosing tools and handoff labels, how often a reviewer
+loops), the direct API-key path without a gateway, real error texts and
+retries for 401, 429, 529 and overloaded answers (CRL-156), real streaming
+latency against the CLI's own watchdogs, or real spend. The kills land only
+while the CLI waits for a model answer: none lands while an MCP call to the
+server is in flight (the handoff's own POST included) or while a step's
+session is being created or briefed. Every kill restarts the only server, so a
+leader change between live replicas is covered in process only
+(`tests/coral/omni/test_recovery.py`).
 
 - TOOL_CALL policy on connector MCP tools. The probe showed that
   `_can_use_tool_gate` is not called in `auto` or `bypassPermissions`. In

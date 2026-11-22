@@ -16,6 +16,7 @@ import { RenderErrorBoundary } from "@/components/RenderErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useLocation, useNavigate, useParams, useSearchParams } from "@/lib/routing";
+import type { SlotOut } from "../api/generated/coralApi";
 import { getRunGraph, retryRunRead, runGraphQueryKey } from "../api/runsApi";
 import { FlowCanvas } from "../canvas/FlowCanvas";
 import { runOverlay } from "../canvas/runOverlay";
@@ -52,12 +53,16 @@ const StepDrawer = lazy(() =>
   import("./agents/StepDrawer").then((module) => ({ default: module.StepDrawer })),
 );
 
+// Until the detail loads, the banner offers no Retry.
+const NO_RETRIES: readonly string[] = Object.freeze([]);
+const NO_SLOTS: readonly SlotOut[] = Object.freeze([]);
+
 // The live view of one run at `/workflows/runs/:runId`. Its status, pause reason, causes
 // and allowed actions come only from the stream's header and view; the detail supplies the
-// title, spend, gates and slots. Before the stream's first frame the detail's status shows
-// as provisional, with no actions. The selected node rides `?node=`; `?panel=gate` asks to
-// show that node's open gate; `?agent=` opens a step session's transcript in a drawer. A
-// finished run shows its outcome.
+// title, spend, gates, slots and the steps a Retry may restart. Before the stream's first
+// frame the detail's status shows as provisional, with no actions. The selected node rides
+// `?node=`; `?panel=gate` asks to show that node's open gate; `?agent=` opens a step
+// session's transcript in a drawer. A finished run shows its outcome.
 
 export function RunPage() {
   const { runId = "" } = useParams<{ runId: string }>();
@@ -225,7 +230,14 @@ function RunPageBody({ runId }: { runId: string }) {
           </p>
         )}
         {loadFailed === null && header?.status === "paused" && (
-          <PauseBanner reason={header.pause_reason} view={view} graph={graph.data ?? null} />
+          <PauseBanner
+            reason={header.pause_reason}
+            view={view}
+            graph={graph.data ?? null}
+            runId={runId}
+            retryActivationIds={run?.retry_activation_ids ?? NO_RETRIES}
+            slots={run?.slots ?? NO_SLOTS}
+          />
         )}
         {settingUp && <p className="text-ui text-muted-foreground">Setting up the run…</p>}
         {isFinishedRunStatus(status) && <OutcomePanel runId={runId} />}

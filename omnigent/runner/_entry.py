@@ -1222,6 +1222,7 @@ def _run_parent_death_killer(
     idle_grace_s: float = _GRACEFUL_SHUTDOWN_TUNNEL_TIMEOUT_S + 5.0,
     finish_work_max_s: float = 1800.0,
     exit_fn: Callable[[int], None] = os._exit,
+    parent_lost: threading.Event | None = None,
 ) -> None:
     """Force the runner to exit once its parent (host daemon) dies.
 
@@ -1270,6 +1271,9 @@ def _run_parent_death_killer(
     :param finish_work_max_s: Bound on finishing in-flight work, e.g. ``1800``.
     :param exit_fn: Hard-exit function, defaults to :func:`os._exit`;
         injectable so tests can observe it without killing the runner.
+    :param parent_lost: For a runner whose group ends with it: set once the
+        parent is gone (not adopted), so the runner's exit, the hard exit
+        included, ends the group it leads. ``None`` records nothing.
     :returns: None.
     """
     while not _parent_is_orphaned(parent_pid):
@@ -1305,6 +1309,8 @@ def _run_parent_death_killer(
             if request_idle_shutdown is not None:
                 request_shutdown = request_idle_shutdown
                 grace_s = idle_grace_s
+    if parent_lost is not None:
+        parent_lost.set()  # CORAL(S108)
     request_shutdown()
     time.sleep(grace_s)
     # The hard exit is a backstop reached only when graceful shutdown did not
@@ -1320,7 +1326,33 @@ def _run_parent_death_killer(
     # os._exit skips buffer flushing, so flush logs first for diagnosability.
     with contextlib.suppress(Exception):
         sys.stderr.flush()
+    if parent_lost is not None and parent_lost.is_set():
+        _end_own_process_group()  # CORAL(S108)
     exit_fn(0)
+
+
+# CORAL(S108): a Coral step runner outliving its host takes the group it leads with it.
+def _end_own_process_group() -> None:
+    """SIGKILL the process group this runner leads, the runner included.
+
+    Its harness, CLI and tool commands would otherwise outlive the host. A runner
+    that shares its group (leads none of its own), or is PID 1, signals nothing.
+    """
+    if IS_WINDOWS or os.getpid() <= 1 or os.getpgrp() != os.getpid():
+        return
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    with contextlib.suppress(OSError):
+        os.killpg(os.getpid(), signal.SIGKILL)
+
+
+# CORAL(S108): read once and dropped, so nothing the runner starts inherits the flag.
+def _runner_group_ends_with_it() -> bool:
+    """Return whether the host marked this runner's group to end with it."""
+    from omnigent.runner.identity import RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR
+
+    return os.environ.pop(RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR, None) == "1"
 
 
 def _work_still_active(has_active_work: Callable[[], bool]) -> bool:
@@ -1903,6 +1935,8 @@ async def _run_tunnel_from_env() -> None:
     auth_token = auth_token_factory() if auth_token_factory is not None else None
     binding_token = _runner_tunnel_binding_token_from_env()
     parent_pid = _runner_parent_pid_from_env()
+    # CORAL(S108): a Coral step runner ends its group when it outlives its host.
+    parent_lost = threading.Event() if _runner_group_ends_with_it() else None
     runner_id = get_stable_runner_id()
 
     # Initialize OTel tracing in the runner process so the ExecutorAdapter
@@ -2167,6 +2201,7 @@ async def _run_tunnel_from_env() -> None:
                 "finish_work": finish_work_event,
                 "has_active_work": _has_active_work,
                 "request_idle_shutdown": _request_finished_work_shutdown,
+                "parent_lost": parent_lost,  # CORAL(S108)
             },
             name=f"runner-parent-killer:{parent_pid}",
             daemon=True,
@@ -2215,7 +2250,11 @@ async def _run_tunnel_from_env() -> None:
         if direct_attach_listener is not None:
             with contextlib.suppress(Exception):
                 await direct_attach_listener.stop()
-        await _lifespan_cm.__aexit__(None, None, None)
+        try:
+            await _lifespan_cm.__aexit__(None, None, None)
+        finally:
+            if parent_lost is not None and parent_lost.is_set():
+                _end_own_process_group()  # CORAL(S108)
 
 
 def _install_signal_handlers(

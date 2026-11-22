@@ -1,0 +1,22 @@
+id: sandbox-probe
+name: Probe a step's sandbox beside a live sibling
+nodes:
+  - {id: start, kind: start}
+  - id: implement
+    kind: step
+    name: Implement
+    goal: "Run sh probe15.sh with the targets you are given, then hand off. {impl_token}"
+    roster: [implementer]
+  - id: review
+    kind: step
+    name: Review
+    goal: "Read README.md without changing any file, then hand off. {review_token}"
+    roster: [reviewer]
+  - {id: end, kind: end}
+# Parallel branches from start that join at end, so the reviewer is live while the
+# implementer probes.
+arrows:
+  - {id: a1, from: start, to: implement}
+  - {id: a2, from: start, to: review}
+  - {id: a3, from: implement, to: end}
+  - {id: a4, from: review, to: end}

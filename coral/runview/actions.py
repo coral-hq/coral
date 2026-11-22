@@ -17,9 +17,10 @@ from coral.runview.types import FINISHED_RUN_STATUSES, PauseReasonName, RunActio
 
 # Row reasons that are the engine's first cause and that ResumeRun clears without a cap.
 # ``drift`` and ``failure_path`` are left out: a pause made on the row alone writes them,
-# and one can sit on an engine paused for ``budget``, which needs a cap.
+# and one can sit on an engine paused for ``budget``, which needs a cap. ``infra`` is left
+# out too: the row cannot tell a host hold or a restart, which Resume never clears.
 LIST_RESUMABLE_REASONS: frozenset[PauseReasonName] = frozenset(
-    {"user", "rejected_calls", "infra", "auth", "plan_limit", "authority_revoked"}
+    {"user", "rejected_calls", "auth", "plan_limit", "authority_revoked"}
 )
 _LIVE: tuple[RunAction, ...] = ("pause", "cancel")
 _RESUMABLE: tuple[RunAction, ...] = ("resume", "cancel")

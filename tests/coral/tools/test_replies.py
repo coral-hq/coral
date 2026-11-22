@@ -8,6 +8,7 @@ import pytest
 
 from coral.engine import transition
 from coral.engine.types import (
+    RULES,
     ChooseArrow,
     EffectCompleted,
     HandoffEvaluated,
@@ -164,7 +165,7 @@ def _rejections() -> list[Rejection]:
             ],
         )
     )[0]
-    run = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1")
+    run = StartRun(run_id="run-1", start_key="start-1", version_hash="hash-1", rules=RULES)
     working = drive(graph, [run]).state
     pending = drive(graph, [run], auto_ack=False).state
     evaluating = drive(graph, [run, HandoffReceived(slot_id="work||:0", body="b")]).state

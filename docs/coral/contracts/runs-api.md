@@ -1,7 +1,7 @@
 # Contract K7 (subset): the runs API
 
 - **Status:** Draft v1, live. A run's owner can start, list, read, pause, resume and
-  cancel the run, answer its gates, follow it as a stream and, once it ends, read what it
+  cancel the run, retry a failed step, answer its gates, follow it as a stream and, once it ends, read what it
   produced with a command that checks it out. Anyone else gets one fixed 404 and learns
   nothing about the run.
 - **Code:** routes in `coral/api/runs.py`; the service, its pools and its caps in
@@ -35,7 +35,7 @@ Every route is under `/v1/coral`, tagged `coral`, and has an `operationId`.
 | `POST /runs/{run_id}:resume` | `coral_resume_run` | 200 `RunSummary` |
 | `POST /runs/{run_id}:cancel` | `coral_cancel_run` | 200 `RunSummary` |
 | `POST /runs/{run_id}/gates/{node_id}:answer` | `coral_answer_gate` | 200 `GateAnswerOut` |
-| `POST /runs/{run_id}/activations/{activation_id}:retry` | `coral_retry_activation` | 501 |
+| `POST /runs/{run_id}/activations/{activation_id}:retry` | `coral_retry_activation` | 200 `RunSummary` ("Actions") |
 | `GET /runs/{run_id}/outcome` | `coral_get_run_outcome` | 200 `RunOutcome` ("Outcome") |
 | `POST /runs:preflight` | `coral_preflight_run` | 501 |
 
@@ -75,8 +75,10 @@ Every route is under `/v1/coral`, tagged `coral`, and has an `operationId`.
   operational database) every runs route answers that 404 after the caller check and
   request validation. After the lifespan exits, its pools are closed and the routes answer
   503 `server_busy`. `:preflight` names no run, so it answers 501.
-- `:retry` checks `activation_id` as 32 lowercase hex with the rest of the request (422).
-  It never echoes or logs the id.
+- `:retry` checks `activation_id` as 32 lowercase hex with the rest of the request (422,
+  before the owner check). Coral never echoes the id and never writes it to its own logs;
+  the server's access log records the request line, path included, as it does for every
+  path id. The id is a derived hash that grants nothing without the run's ownership.
 
 ## Errors
 
@@ -97,12 +99,12 @@ Every refusal from a Coral route has one shape (`CoralRoute`, `coral/api/errors.
 | `not_a_git_repo` | 400 | The start's repository is not a git repository |
 | `start_key_conflict` | 409 | The start key was used with another request, or by an older registration of the same user id; a key whose run cannot be read back (`details.reason: "engine.load_failed"`) |
 | `workflow_key_taken` | 409 | A save of a key another owner holds |
-| `illegal_transition` | 409 | An action the run cannot take (`details.status`, `pause_reason`, and `reason` when known); a gate `already_answered`, `no_longer_waiting` or `run_paused` (`details.reason`); an Inbox ack of an open gate alert |
+| `illegal_transition` | 409 | An action the run cannot take (`details.status`, `pause_reason`, and `reason` when known); a refused retry (`details.reason`, "Actions"); a gate `already_answered`, `no_longer_waiting` or `run_paused` (`details.reason`); an Inbox ack of an open gate alert |
 | `stale_visit` | 409 | A gate visit asked again since |
 | `worktree_failed` | 409 | The host could not create the worktree, and it is not locked |
 | `payload_too_large` | 413 | A workflow save that is too large |
 | `stream_limit` | 429 | Stream caps or the connect rate (`Retry-After: 5`) |
-| `not_implemented` | 501 | `:retry`, `:preflight` |
+| `not_implemented` | 501 | `:preflight` |
 | `host_offline` | 503 | No host connector, or the host is offline |
 | `server_busy` | 503 | Caps, a 30 s timeout, `RunContended`, a closed pool, a gate's `run_busy`; `Retry-After: 1`, `2` for a worktree another start holds locked, `5` for a stream while the server shuts down |
 
@@ -110,7 +112,7 @@ Every refusal from a Coral route has one shape (`CoralRoute`, `coral/api/errors.
   422.
 - Any other `HTTPException` with a 4xx status is `validation_failed`. Other errors go to the
   server's own 500 handler. A write that fails this way logs only `describe_exception` and
-  raises a new error without its cause, so no statement parameters reach a log.
+  raises a new error without its cause, so Coral's own logs carry no statement parameters.
 - **A path or method no Coral route matches is outside `CoralRoute`.** In the Omnigent
   server it gets Omnigent's own 404, `{"error":{"code":"not_found","message":"Not found"}}`,
   without `details`; a wrong method on a Coral path gets this 404 too. An app holding only
@@ -209,6 +211,12 @@ it can only be cancelled." A client should not pick a new key for it.
   `{"reason": "failure_path", "detail": "engine.load_failed", "subject": ""}` and only
   Cancel. `target`, `max_activations` and `request_preview` are `null` when its stored rows
   cannot be read. Spend waits up to 10 s.
+- **`retry_activation_ids`** on the detail: the store activation ids of the failed steps a
+  retry may restart now, in cause order (`retryable_activations` mapped through
+  `store_activation_id`, `coral/api/run_models.py`). It is empty while the run is not
+  paused, while a host hold or a restart stands, when the run cannot be loaded, and for a
+  finished row. Map an id to its step through `slots[].activation_id`. The stream and
+  `RunView` do not carry it; a client reads the detail again after an action.
 - **Fields the web reads.** Every `RunSummary` (list, detail, action and start answers)
   carries `run_branch`, always `run_branch_name(run_id)` (`coral/r-<12 hex>/base`),
   computed and never read from a row. Each `gates` item carries `context`: the text the
@@ -243,8 +251,38 @@ no-op.
 | `:pause` | A finished run is 409. A paused run is a 200 no-op. Otherwise the bridge pauses it for the user (`PauseRun(reason="user")`, starting it first if needed): 200, or 409 with the engine's refusal code. A run that cannot be loaded is 409 `reason: engine.load_failed`, and that write pauses its row `failure_path`, as every bridge write does. |
 | `:resume` | A finished run is 409. A run not paused is a 200 no-op. Otherwise 200 when the engine took the resume or the row left `paused`; a resume that clears one cause of several leaves the run paused, and the answer shows it. Else 409 `reason: resume_not_allowed`. A run that cannot be loaded is 409 `reason: engine.load_failed`. A `cap` out of bounds is 422. |
 | `:cancel` | A cancelled run is a 200 no-op. A completed or failed run is 409. Otherwise the bridge cancels it. A run the bridge cannot load, or whose rows are gone, is cancelled on its row alone (below): 200. |
+| `:retry` | Retries one failed step, named by its store activation id (one of the detail's `retry_activation_ids`): the bridge commits `RetryStep` (`EngineBridge.retry_activation`). A taken retry answers 200 `RunSummary`, still paused (`infra`): the run stays paused while the step's old session is fenced and its work saved, then the step's next session generation starts ([`session-facade.md`](session-facade.md), "Retry"). Refusals below. |
 
 The 409 for a finished run says "The run is completed." (or failed, or cancelled).
+
+**`:retry` refusals** (`RunsApi.retry`, `coral/api/run_service.py`). Every 409 is
+`illegal_transition` with `details` `{status, pause_reason}` and, except for a run already
+finished when read, `reason`. Every answer sends `Cache-Control: private, no-store`. A
+refused retry commits nothing, except the `failure_path` pause of a run that cannot be
+loaded or whose commit cannot be built.
+
+| Case | Answer | `details.reason` | Message |
+|---|---|---|---|
+| Another user's run, or an unknown run | the fixed 404 | | "Run not found." |
+| A malformed activation id | 422 `validation_failed` | | |
+| A run already finished when read | 409 | none | "The run is completed." (or failed, or cancelled) |
+| A run cancelled while the retry commits | 409 | `run_terminal` | "The run is cancelled." |
+| A run that cannot be loaded | 409 | `engine.load_failed` | "The run cannot be loaded; it can only be cancelled." (its row is paused `failure_path`, as every bridge write does) |
+| An id that is no activation of this run (another run's included), or any id before the engine started | 409 | `unknown_activation` | "The run has no such step." |
+| A step a retry does not restart now: a completed step, a gate, a decision, a run not paused | 409 | `retry_not_allowed` | "This step cannot be retried now." |
+| A host-offline hold on any step | 409 | `host_offline_hold` | "The run's machine is offline; steps can be retried once it is back." |
+| A restart in progress on any step | 409 | `restart_in_progress` | "A step of this run is restarting; try again when it is done." |
+| A retry whose commit cannot be built | 409 | `unbuildable` | "This step cannot be retried now." (the run is paused `failure_path`) |
+| Busy | 503 `server_busy` | | |
+
+Proof: `tests/coral/api/test_runs_api.py` (`test_a_retry_the_run_cannot_take_is_refused_with_its_reason`,
+`test_a_retry_naming_a_malformed_activation_is_refused_before_any_work`,
+`test_a_retry_that_meets_a_cancel_is_refused_and_queues_no_restart`,
+`test_a_retry_after_the_run_ended_is_refused_before_the_engine_is_asked`,
+`test_a_host_hold_on_one_step_keeps_another_failed_step_from_its_retry`) and
+`tests/coral/omni/test_runs_end_to_end.py`. A retry only restarts a paused run's step, and
+a finished run is never retried, so an outcome read needs no re-check of its run's
+status.
 
 **Store-only cancel** (`cancel_run_row`). One commit on an unfinished row:
 
@@ -404,10 +442,13 @@ the action answers and the stream's `run` frames. `pause` is never offered on a 
 | paused | not paused (a pause on the row alone) | `resume`, `cancel` |
 | paused | paused, and some cause a resume clears | `resume`, `cancel` |
 | paused | paused, and no cause a resume clears | `cancel` |
-| paused | not loaded (a list item) | `resume`, `cancel` when the row's reason is `user`, `rejected_calls`, `infra`, `auth`, `plan_limit` or `authority_revoked`; else `cancel` |
+| paused | not loaded (a list item) | `resume`, `cancel` when the row's reason is `user`, `rejected_calls`, `auth`, `plan_limit` or `authority_revoked`; else `cancel` |
 
 A list item offers a subset of what its detail offers, for a run that loads (see
-"Residuals"). A run paused only at its activation
+"Residuals"). A list item never offers Resume for `infra` (`LIST_RESUMABLE_REASONS`):
+its row cannot tell a host hold or a restart, which Resume never clears. Retry is not an
+`allowed_actions` value: the detail's `retry_activation_ids` names what a retry may
+restart. A run paused only at its activation
 cap (`budget`) is not offered Resume: `:resume` needs a higher `cap`, and the detail's
 `causes` and `max_activations` let a client offer it.
 
@@ -473,7 +514,42 @@ written only by the stream client), `["coral-run-graph", scope, id]`,
   gate is answered inline through `:answer` with the visit's token
   ([`gates-and-inbox.md`](gates-and-inbox.md)). The detail is read again every 30 s while
   the run is unfinished and the page visible (for spend), and when the view and the detail
-  disagree on gates or slots, at most every 2 s. Spend is shown, never capped.
+  disagree on gates, slots or pause causes, at most every 2 s. Spend is shown, never capped.
+- **Retry** (`runs/RetryStepButtons.tsx`, in the paused banner). One "Retry <step>"
+  button per id in the detail's `retry_activation_ids`, the step named through
+  `slots[].activation_id` and the graph, isolated, or "Retry a step" when it cannot be
+  named. Each posts `{}` to `:retry` (`retryStep` in `api/runsApi.ts`, mutation key
+  `["coral-run-retry", scope, run id, activation id]`), so a retry never disables Pause,
+  Resume or Cancel. One request per button is in flight; a button is disabled while the
+  browser is offline or the viewer unknown. The banner's status line says "Retrying." on a
+  200 and shows the server's message on a 409, and stays mounted, so an answer that
+  arrives after its button is gone is still announced. The page reads the detail again
+  when the stream's causes change (`runs/detailStaleness.ts`). The banner explains each cause
+  (`shared/pauseCopy.ts`; `<step>` is the step's isolated name, "a step" or "A step" when
+  unnamed):
+
+  | Cause | Text |
+  |---|---|
+  | `infra` / `infra.host_offline` | "Your machine went offline. Coral will continue <step> when it’s back." |
+  | `infra` / `recovery.restarting` | "Coral is restarting <step> from its last handoff." |
+  | `infra` / `infra.runner_lost` | "<step> keeps losing its runner. Resume tries again; Retry restarts it from its last handoff." |
+  | `infra` / `recovery.runner_alive` | "<step>’s runner is running but can’t reach Coral. Resume tries again." |
+  | `infra` / `session.runner_status_unknown` | "Coral couldn’t check <step>’s runner on your machine. Resume tries again." |
+  | `failure_path` / `restart:dispatch.stop_unconfirmed`, `restart:session.host_offline`, `restart:workspace.backend_unavailable` | "Your machine went offline before <step> could restart. Retry when it’s back." |
+  | `failure_path` / `restart:workspace.head_moved` | "The run’s branch moved outside Coral, so <step> was not restarted. Reset the branch to the commit of its last handoff, then retry; or cancel the run." |
+  | `failure_path` / any other `restart:<code>` | "Coral couldn’t restart <step>. Retry tries again." |
+  | `failure_path` / `session.host_unsupported` | "<step>’s machine can’t run Coral steps. Update Coral there, then retry." |
+  | `failure_path` / `session.closed` | "<step>’s session was closed, so it can’t go on. Retry starts it again from its last handoff." |
+  | `failure_path` / `blocked` | "<step> reported that it is blocked. Retry restarts it from its last handoff." |
+  | `failure_path` / `attempts_exhausted:<ids>` (or the ids as subject, as older runs recorded it) | "Missing evidence: <ids>." |
+
+  Every other cause, the wake's other refusals (`session.not_bound`,
+  `session.host_not_permitted`, `session.deleted`, `slot.generation_mismatch`) included,
+  keeps its reason's general text. The host-offline restart text also shows for a
+  `dispatch.stop_unconfirmed` whose runner did not answer, or a permanent
+  `workspace.backend_unavailable` from a host that is online. Two unnamed steps get two
+  identical "Retry a step" buttons. Retry is offered only in the run view's banner, not
+  on an Inbox card or a list item.
 - **The step drawer** (`?agent=<session>&node=<node>`, `runs/agents/StepDrawer.tsx`). It
   opens only a session the run's own slots list, shows its transcript and prompts (no
   composer) with "Open in Chat", and keeps the URL on the run, so AppShell stays out of chat
@@ -525,7 +601,11 @@ read, started again with its key (200, and 409 for another request), followed li
 paused, resumed and answered to its end; another is cancelled; another user gets the same
 404 bytes on every runs route; the finished gate run's outcome names its branch and
 checkout command (it recorded no base, so `base_unknown`), and the detail's gate carries
-its prompt's text as `context`. `tests/coral/api/test_runs_api.py` holds the per-route
+its prompt's text as `context`; a blocked step's owner retries it, another user gets the
+404, and the run waits on the restart it queued
+(`test_the_owner_retries_a_blocked_step_and_the_run_waits_on_the_restart_it_queued`).
+`tests/e2e/coral/test_runner_loss.py` retries a blocked step on a real server, host and CLI
+through to a completed run. `tests/coral/api/test_runs_api.py` holds the per-route
 cases, the real-git outcome and the start-head reads; `tests/coral/api/test_run_outcome.py`
 the checkout and path rules, the read's admission, single flight, deadlines, cache, error
 map and logs; and `tests/coral/api/test_openapi_drift.py` checks that the spec lists
@@ -535,8 +615,9 @@ exactly the mounted Coral routes, is typed, and that the TS types are current.
 
 - **Servers that require no identity, and same-user steps.** Any local process of the user,
   or a step shell that can reach the server, can act as the owner
-  ([`gates-and-inbox.md`](gates-and-inbox.md), "Residuals"). This is tied to CRL-137's
-  sandbox probe.
+  ([`gates-and-inbox.md`](gates-and-inbox.md), "Residuals"; ADR-05's probe 15 measured
+  a step shell reaching the server, CRL-159). `:retry` is one more owner action; a retried step's old session is refused while the run is
+  paused.
 - **Workflows.** Legacy unowned workflows are readable by every caller in the workspace and
   claimed by their first saver. On a single-user server every workflow is saved unowned, so
   turning identity on later makes them legacy rows. A re-created account with the same user
@@ -559,7 +640,7 @@ exactly the mounted Coral routes, is typed, and that the TS types are current.
   crash between the worktree and the run row, the retry reads the adopted worktree's head.
   Any manual change to the run branch before the run row is written (a commit, a reset, a
   pull, a rebase) becomes the base, so a reset to an older commit makes the outcome
-  include commits the run did not make. A same-key retry that names another `base_ref`
+  include commits the run did not make. A same-key start retry that names another `base_ref`
   adopts the branch the first attempt made: `base_commit` is that branch's real start,
   while `base_ref` records the retry's value. Rows that lost their base before this read
   existed keep `null` and answer `base_unknown`; there is no fallback.
@@ -577,8 +658,9 @@ exactly the mounted Coral routes, is typed, and that the TS types are current.
 - **The checkout command can run code the run wrote.** Tracked hook scripts or hook-manager
   config in the run's commits run in the owner's shell when they paste the command. Step
   shells already run as the owner on that host today (the first residual), so this adds
-  little now; once CRL-137's sandbox confines steps it is a way out of the sandbox. Carry
-  it into that work; a variant with `-c core.hooksPath=/dev/null` would be a design change.
+  little now; once the sandbox confines steps it is a way out of the sandbox. Carry it into
+  that work (CRL-165, CRL-166); a variant with `-c core.hooksPath=/dev/null` would be a
+  design change.
 - **The run view's drawer shows every pending prompt a step session has**, as its Chat
   page does: question forms with typed answers, plan-review feedback, schema forms, and
   session-wide permission choices ("Accept & allow all edits", "Approve & switch to auto
@@ -619,10 +701,11 @@ exactly the mounted Coral routes, is typed, and that the TS types are current.
 
 | Work | Owner |
 |---|---|
-| Run preflight (`POST /runs:preflight` answers 501): the CRL-132 facts need an `AgentSpec` per step, and only `materialize` builds them | CRL-137 |
-| Step retry (`:retry` answers 501), the restart ladder and the run view's Retry; once a run can be retried, re-check its status inside an outcome read | CRL-137 |
-| Run requests over 512 characters (refused today, never cut) | CRL-137 |
-| A durable marker for a pause made on the run row alone | CRL-137 |
+| Run preflight (`POST /runs:preflight` answers 501): the CRL-132 facts need an `AgentSpec` per step, and only `materialize` builds them | CRL-151 |
+| Run requests over 512 characters (refused today, never cut) | CRL-152 |
+| A durable marker for a pause made on the run row alone | CRL-153 |
+| Retry for causes no step owns (anchor, orchestrator, gate and run-level failures stay Cancel-only) | CRL-155 |
+| Showing a retried step's salvage ref in the run view | CRL-158 |
 | A request-body size cap for every Coral POST: FastAPI parses a body before a route's dependencies | CRL-150 |
 | Workflow sharing (K7's view and edit matrix) | CRL-148 |
 | Run view cuts: live steering in the drawer (Phase 2); the guarantees panel; the phone layout; Run again; the inspector's Step, Decision and Log tabs and the event timeline; per-command evidence (command, exit code, time); the orchestrator pane; resuming a budget pause with a raised cap; workflow version numbers; analytics; axe | no live ticket |

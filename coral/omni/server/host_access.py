@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from coral.omni.protocols import HostAccessRefused
+from coral.omni.server.access import omnigent_owner
 from omnigent.db.db_models import workspace_scope
 from omnigent.server.host_registry import HostConnection, HostRegistry, host_owner_scope
 from omnigent.stores.host_store import Host, HostStore
@@ -40,8 +41,9 @@ async def authorize_owner_host(
     Callers take ``user_id``, ``account_generation`` and ``workspace_id`` from
     the stored run, never from a request or payload.
 
-    :param user_id: The run owner. ``None`` only when auth is disabled, which
-        skips the owner and generation checks, as Omnigent does.
+    :param user_id: The run owner. ``None`` is the single local user, checked as
+        :func:`omnigent_owner` names it; only a server with no single local user,
+        where no ownerless run can act, skips the owner and generation checks.
     :param account_generation: The owner's account registration saved with the
         run. A host row from another registration of the same user id is
         refused, as ``fire.py`` refuses it for scheduled tasks.
@@ -57,10 +59,11 @@ async def authorize_owner_host(
         raise HostAccessError("not_permitted", host_not_available(host_id)) from None
     with workspace_scope(workspace_id):
         host = await asyncio.to_thread(host_store.get_host, host_id)
+    owner = omnigent_owner(user_id)
     # One message for unknown and foreign hosts, so neither is revealed.
     if host is None or (
-        user_id is not None
-        and (host.user_id != user_id or host.account_generation != account_generation)
+        owner is not None
+        and (host.user_id != owner or host.account_generation != account_generation)
     ):
         raise HostAccessError("not_permitted", host_not_available(host_id))
     if host.sandbox_provider is not None:
@@ -103,8 +106,9 @@ class OwnerHost:
         conn = self.current()
         if conn is None:
             raise HostAccessError("host_offline", f"host {self.host_id!r} is not connected")
-        if self.user_id is not None and (conn.owner, conn.account_generation) != (
-            self.user_id,
+        owner = omnigent_owner(self.user_id)
+        if owner is not None and (conn.owner, conn.account_generation) != (
+            owner,
             self.account_generation,
         ):
             raise HostAccessError("not_permitted", host_not_available(self.host_id))
@@ -115,6 +119,6 @@ class OwnerHost:
         """Make ``HostRegistry.send_text`` refuse any connection but the authorized owner's."""
         with (
             workspace_scope(self.workspace_id),
-            host_owner_scope(self.user_id, self.account_generation),
+            host_owner_scope(omnigent_owner(self.user_id), self.account_generation),
         ):
             yield

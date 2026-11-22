@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import signal  # CORAL(S108)
 import subprocess
 import sys
 import threading
@@ -69,6 +70,7 @@ from omnigent.harness_aliases import (
 )
 from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailability
 from omnigent.host import HOST_FATAL_EXIT_CODE
+from omnigent.host import git_worktree as _git_worktree  # CORAL(S108)
 from omnigent.host import workspace_ops as _workspace_ops  # CORAL(S40)
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 from omnigent.host.frames import (
@@ -204,6 +206,7 @@ from omnigent.runner.identity import (
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_FINISH_WORK_SIGNAL,
+    RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR,  # CORAL(S108)
     RUNNER_HOST_OWNS_GLOBAL_CLEANUP_ENV_VAR,
     RUNNER_ID_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
@@ -440,6 +443,115 @@ def _zombie_create_time(pid: int) -> float | None:
         if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
             return _proc.process_create_time(pid)
     return None
+
+
+# CORAL(S108): a Coral step runs in its run's worktree, checked out on the run branch
+# ``coral/r-<run12>/...`` (``coral.workspace.run_worktree.RUN_BRANCH_PREFIX``).
+_CORAL_RUN_REF = re.compile(r"refs/heads/coral/r-[0-9a-f]{12}/")
+# A reftable repository's HEAD files hold this stub; only git resolves the branch.
+_REFTABLE_HEAD_STUB = "refs/heads/.invalid"
+_CORAL_RUN_REF_GIT_TIMEOUT_S = 5.0
+
+
+def _is_coral_run_workspace(workspace: Path) -> bool:
+    """Return whether *workspace* lies in a checkout on a Coral run branch.
+
+    Reads the checkout's ``HEAD`` file (through a linked worktree's ``.git``
+    file), and asks git for a reftable repository's. A detached, unreadable or
+    unresolvable checkout counts as not Coral's.
+
+    :param workspace: A launch's workspace, e.g. ``Path("/src/app-worktrees/r-0a1b")``.
+    """
+    ref = _checkout_head_ref(workspace)
+    if ref == _REFTABLE_HEAD_STUB:
+        try:
+            result = _git_worktree._run_git(
+                ["symbolic-ref", "-q", "HEAD"],
+                cwd=str(workspace),
+                timeout=_CORAL_RUN_REF_GIT_TIMEOUT_S,
+            )
+        except WorktreeError:
+            return False
+        ref = result.stdout.strip() if result.returncode == 0 else None
+    return ref is not None and _CORAL_RUN_REF.match(ref) is not None
+
+
+def _checkout_head_ref(workspace: Path) -> str | None:
+    """Return the ref the HEAD file of *workspace*'s checkout names, else ``None``."""
+    for directory in (workspace, *workspace.parents):
+        dot_git = directory / ".git"
+        try:
+            if dot_git.is_dir():
+                head = dot_git / "HEAD"
+            elif dot_git.is_file():
+                pointer = dot_git.read_bytes()[:4096].strip()
+                if not pointer.startswith(b"gitdir:"):
+                    return None
+                git_dir = Path(os.fsdecode(pointer[len(b"gitdir:") :].strip()))
+                head = (directory / git_dir if not git_dir.is_absolute() else git_dir) / "HEAD"
+            else:
+                continue
+            content = head.read_bytes()[:4096].decode(errors="replace").strip()
+        except OSError:
+            return None
+        return content[len("ref: ") :].strip() if content.startswith("ref: ") else None
+    return None
+
+
+# CORAL(S108): start stamps count from boot on Linux with psutil 7, else from the epoch.
+@functools.cache
+def _start_stamps_count_from_boot() -> bool:
+    own = _proc.process_create_time(os.getpid())
+    return own is not None and own < psutil.boot_time()
+
+
+def _start_stamp_now() -> float:
+    """Return the current time on the clock of :func:`_proc.process_create_time`."""
+    boot_clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if boot_clock is not None and _start_stamps_count_from_boot():
+        return time.clock_gettime(boot_clock)
+    return time.time()
+
+
+# CORAL(S108): a gone runner's leftovers are signalled one by one, never a reused pid.
+def _kill_lost_group_members(
+    runner_id: str, group_id: int, started: float, exited: float, spared: frozenset[int]
+) -> int:
+    """SIGKILL what is left of a gone runner's process group.
+
+    The leader is already reaped, so a ``killpg`` could reach a group that has
+    reused its id. Each member is signalled through :mod:`psutil`, which refuses
+    a reused pid, and only when it started between the runner's start and its
+    observed exit: such a member shows the group never ended.
+
+    :param runner_id: The gone runner, for the log line.
+    :param group_id: The group recorded at spawn (the runner's pid).
+    :param started: The runner's start stamp from :func:`_proc.process_create_time`.
+    :param exited: :func:`_start_stamp_now` when the exit was observed.
+    :param spared: Pids never signalled: this host, the zygote, other runners.
+    :returns: How many processes were signalled.
+    """
+    killed = 0
+    try:
+        for proc in psutil.process_iter():
+            pid = proc.pid
+            if pid <= 1 or pid in spared:
+                continue
+            try:
+                if os.getpgid(pid) != group_id:
+                    continue
+                created = _proc.process_create_time(pid)
+                if created is None or not started <= created <= exited:
+                    continue
+                proc.send_signal(signal.SIGKILL)
+            except (OSError, psutil.Error):
+                continue
+            killed += 1
+    except Exception:  # a failed sweep must not lose the exit report
+        _logger.warning("Could not end the group of runner %s", runner_id, exc_info=True)
+    if killed:
+        _logger.info("Killed %d leftover process(es) of runner %s", killed, runner_id)
+    return killed
 
 
 def _read_log_tail(path: Path, max_bytes: int = _LOG_TAIL_MAX_BYTES) -> str:
@@ -774,6 +886,10 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # which turns off MCP tool search and loads every tool schema eagerly.
         "CLAUDE_CODE_USE_GATEWAY",
         "ENABLE_TOOL_SEARCH",
+        # CORAL(S110): Claude CLI switches that turn off its self-update and non-essential
+        # traffic. Non-secret booleans, forwarded by exact name only.
+        "DISABLE_AUTOUPDATER",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         # Kubernetes config path. A filesystem path (typically
         # ``~/.kube/config``), not a bearer secret — the file *contains*
         # cluster certs/tokens but the env var is just a path string,
@@ -1231,6 +1347,10 @@ class _RunnerHandle:
         or superseded launches, even after the exit watcher pops them.
     :param create_time: Process start time recorded while the runner was
         alive, used to reject a reused PID before signalling a forked runner.
+    :param group_id: CORAL(S108): the runner's own process group, recorded at
+        spawn only when the runner leads it; ``None`` means pid-only signals.
+    :param group_kill: CORAL(S108): the one pass that ends a Coral step runner's group.
+    :param coral_step: CORAL(S108): a Coral step runner, whose group ends with it.
     """
 
     proc: subprocess.Popen[bytes] | ZygoteRunnerProc
@@ -1239,6 +1359,9 @@ class _RunnerHandle:
     connect_marker: Path | None = None
     stop_requested: bool = False
     create_time: float | None = None
+    group_id: int | None = None
+    group_kill: asyncio.Task[int] | None = None
+    coral_step: bool = False
 
 
 @dataclass(frozen=True)
@@ -2236,6 +2359,12 @@ class HostProcess:
             harness_tmp_parent=self._harness_tmp_parent,
             inference_config=frame.inference_config,
         )
+        # CORAL(S108): a Coral step runner's group ends with it, and the runner knows it.
+        coral_step = await self._run_host_subprocess_in_thread(
+            functools.partial(_is_coral_run_workspace, workspace)
+        )
+        if coral_step:
+            env[RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR] = "1"
         if frame.inference_config is not None:
             try:
                 inference_path = await asyncio.to_thread(
@@ -2348,6 +2477,8 @@ class HostProcess:
             session_id=frame.session_id or None,
             connect_marker=_connect_marker_path(log_path),
             create_time=_proc.process_create_time(proc.pid),
+            group_id=self._runner_group_at_spawn(proc.pid),  # CORAL(S108)
+            coral_step=coral_step,  # CORAL(S108)
         )
         launch_context = current_scheduled_run()
         with scheduled_run_scope(None, session_id=frame.session_id):
@@ -2613,6 +2744,8 @@ class HostProcess:
         # zygote-forked one — run them off the loop so a wedged zygote can't
         # freeze the daemon's control handler.
         await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
+        # CORAL(S108): a stopped Coral step runner's group ends before the stop is answered.
+        await self._end_runner_group(frame.runner_id, handle)
         _logger.info("Stopped runner %s", frame.runner_id)
         _print_host_status(
             f"  ↓ Runner stopped: {frame.runner_id}",
@@ -2645,6 +2778,7 @@ class HostProcess:
         async def _stop_and_log() -> None:
             try:
                 await self._stop_runner_and_trigger(handle.proc, "runner_superseded")
+                await self._end_runner_group(runner_id, handle)  # CORAL(S108)
                 _logger.info(
                     "Stopped superseded runner %s for session %s",
                     runner_id,
@@ -2706,6 +2840,84 @@ class HostProcess:
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=5.0)
 
+    # CORAL(S108): a runner's group is recorded only when the runner leads its own.
+    def _runner_group_at_spawn(self, pid: int) -> int | None:
+        """Return a just-spawned runner's group id when it leads a group of its own.
+
+        A runner that shares a group, this host's or the zygote's included, gets
+        pid-only signals (``None``). The id is never looked up again.
+
+        :param pid: The runner's pid.
+        :returns: ``pid`` when it is the runner's own group id, else ``None``.
+        """
+        if not IS_POSIX:
+            return None
+        try:
+            group = os.getpgid(pid)
+        except OSError:
+            return None
+        foreign = {os.getpgrp()}
+        zygote_pid = self._zygote.pid if self._zygote is not None else None
+        if zygote_pid is not None:
+            foreign.add(zygote_pid)
+            with contextlib.suppress(OSError):
+                foreign.add(os.getpgid(zygote_pid))
+        return group if group == pid and group not in foreign else None
+
+    # CORAL(S108): a Coral step runner's own group ends whenever the runner does.
+    def _runner_group_sweep(
+        self, runner_id: str, handle: _RunnerHandle
+    ) -> Callable[[], int] | None:
+        """Return the sweep that ends a gone Coral step runner's group, or ``None``.
+
+        ``None`` for any other runner, for one without a group of its own, and for a
+        group id that is now this host's, the zygote's or another tracked runner's.
+        Call it once the runner's exit (or the end of its stop) has been observed.
+
+        :param runner_id: The runner, e.g. ``"runner_abc123..."``.
+        :param handle: Its handle, tracked or just claimed by a stop.
+        """
+        group_id, started = handle.group_id, handle.create_time
+        if not handle.coral_step or group_id is None or started is None:
+            return None
+        others = [other for other in self._runners.values() if other is not handle]
+        refused = {os.getpgrp(), *(other.group_id for other in others)}
+        spared = {os.getpid(), *(other.proc.pid for other in others)}
+        zygote_pid = self._zygote.pid if self._zygote is not None else None
+        if zygote_pid is not None:
+            spared.add(zygote_pid)
+            with contextlib.suppress(OSError):
+                refused.add(os.getpgid(zygote_pid))
+        if group_id in refused:
+            return None
+        return functools.partial(
+            _kill_lost_group_members,
+            runner_id,
+            group_id,
+            started,
+            _start_stamp_now(),
+            frozenset(spared),
+        )
+
+    async def _end_runner_group(self, runner_id: str, handle: _RunnerHandle) -> None:
+        """End a gone Coral step runner's group, once per handle.
+
+        The exit watcher, status queries and stops share the pass, so the host
+        never reports the runner gone or stopped before it is done.
+
+        :param runner_id: The runner, e.g. ``"runner_abc123..."``.
+        :param handle: Its handle, whose exit has been observed.
+        """
+        group_kill = handle.group_kill
+        if group_kill is None:
+            sweep = self._runner_group_sweep(runner_id, handle)
+            if sweep is None:
+                return
+            group_kill = handle.group_kill = asyncio.create_task(
+                asyncio.to_thread(sweep), name=f"runner-group:{runner_id}"
+            )
+        await asyncio.shield(group_kill)
+
     def _track_pending_runner_launch(
         self, runner_id: str, completion: asyncio.Future[None]
     ) -> None:
@@ -2752,6 +2964,9 @@ class HostProcess:
             # zygote-forked one — so run it off the loop, matching
             # _watch_runner / _handle_stop, lest a slow zygote stall the daemon.
             status = "alive" if await asyncio.to_thread(handle.proc.poll) is None else "dead"
+            if status == "dead" and self._runners.get(frame.runner_id) is handle:
+                # CORAL(S108): a Coral step runner's group ends before the host reports it dead.
+                await self._end_runner_group(frame.runner_id, handle)
             if (
                 status == "alive"
                 and not handle.stop_requested
@@ -2801,6 +3016,11 @@ class HostProcess:
         if self._runners.get(runner_id) is not handle:
             # _handle_stop (or _cleanup_runners) removed it first —
             # an intentional termination, not a crash to report.
+            return
+        # CORAL(S108): end a Coral step runner's group while it is still tracked, so a
+        # status query waits for the same pass; a stop may claim it meanwhile.
+        await self._end_runner_group(runner_id, handle)
+        if self._runners.get(runner_id) is not handle:
             return
         self._runners.pop(runner_id)
         self._trigger_maintenance("runner_exited")
@@ -5344,6 +5564,11 @@ class HostProcess:
                 handle.proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 handle.proc.kill()
+        # CORAL(S108): a Coral step runner's group ends with it on shutdown too.
+        sweeps = [self._runner_group_sweep(rid, handle) for rid, handle in self._runners.items()]
+        for sweep in sweeps:
+            if sweep is not None:
+                sweep()
         self._runners.clear()
 
     async def _connect_and_serve(self) -> None:

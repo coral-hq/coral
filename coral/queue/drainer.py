@@ -66,6 +66,15 @@ DEFAULT_EXECUTION_LIMIT_S = 900.0
 # An item claimed this many times the attempt limit without settling (each crash,
 # lost lease or error after the claim spends an attempt) fails without running again.
 _CLAIMS_PER_ATTEMPT_LIMIT = 2
+GENERATION_MISMATCH = "slot.generation_mismatch"
+
+
+class SlotSuperseded(Exception):
+    """A lease check found the row's slot at another generation: the row acts no further."""
+
+
+# What ``_execute`` returns for a row a lease check found superseded.
+_SUPERSEDED = EffectFailed(error_code=GENERATION_MISMATCH, message="the slot moved on")
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,9 @@ WorkFinishedHook = Callable[[FinishedWork], Awaitable[None]]
 # attempt, or ``None`` for the normal retry. ``item.held_since`` starts a horizon. It
 # runs on the event loop, so it must not block (no store reads).
 HoldPolicy = Callable[[WorkItem, EffectFailed, int], int | None]
+# ``(item, code)``: whether re-pending the item with ``code`` starts or ends a wait the hold
+# rules measure on its own, so its ``held_since`` starts afresh.
+HoldRestart = Callable[[WorkItem, str], bool]
 
 
 def _bounded(failure: EffectFailed) -> EffectFailed:
@@ -166,6 +178,8 @@ class WorkDrainer:
 
     :param on_finished: Called after each finish to SUCCEEDED or FAILED; its errors are logged.
     :param hold_policy: Asked first for every failure, a missing executor included.
+    :param hold_restart: Whether a re-pend starts or ends a wait the hold rules measure
+        on its own; its ``held_since`` then starts afresh.
     :param execution_limit_s: An attempt still running after this long is cancelled
         and ends as a retryable ``executor.timeout``; ``None`` sets no limit.
     :param sleep: The timed sleep of the heartbeat and the limit; tests pass a virtual one.
@@ -188,6 +202,7 @@ class WorkDrainer:
         max_backoff_s: float = 300.0,
         on_finished: WorkFinishedHook | None = None,
         hold_policy: HoldPolicy | None = None,
+        hold_restart: HoldRestart | None = None,
         execution_limit_s: float | None = DEFAULT_EXECUTION_LIMIT_S,
         sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     ) -> None:
@@ -211,6 +226,7 @@ class WorkDrainer:
         self._max_backoff_s = max_backoff_s
         self._on_finished = on_finished
         self._hold_policy = hold_policy
+        self._hold_restart = hold_restart
         self._execution_limit_s = execution_limit_s
         self._sleep = sleep
 
@@ -258,23 +274,16 @@ class WorkDrainer:
             )
             return
 
-        if claimed.slot_generation is not None:
-            slot_id = _extract_slot_id(claimed, payload_dict)
-            if slot_id is not None:
-                current_gen = await asyncio.to_thread(
-                    self._queue_store.get_slot_generation,
-                    claimed.run_id,
-                    slot_id,
-                    workspace_id=claimed.workspace_id,
-                )
-                if current_gen is not None and current_gen != claimed.slot_generation:
-                    await self._finish(
-                        claimed,
-                        lease_expires_at,
-                        WorkStatus.ABANDONED,
-                        error_code="slot.generation_mismatch",
-                    )
-                    return
+        fenced_slot = (
+            _extract_slot_id(claimed, payload_dict)
+            if claimed.slot_generation is not None
+            else None
+        )
+        if fenced_slot is not None and await self._superseded(claimed, fenced_slot):
+            await self._finish(
+                claimed, lease_expires_at, WorkStatus.ABANDONED, error_code=GENERATION_MISMATCH
+            )
+            return
 
         if claimed.attempts > _CLAIMS_PER_ATTEMPT_LIMIT * self._max_attempts:
             _logger.warning(
@@ -296,10 +305,17 @@ class WorkDrainer:
         if registration is None:
             outcome: EffectOutcome = _MISSING_EXECUTOR
         else:
-            executed = await self._execute(claimed, registration, payload_dict, lease_expires_at)
+            executed = await self._execute(
+                claimed, registration, payload_dict, lease_expires_at, fenced_slot=fenced_slot
+            )
             if executed is None:
                 return
             outcome, lease_expires_at = executed
+            if outcome is _SUPERSEDED:
+                await self._finish(
+                    claimed, lease_expires_at, WorkStatus.ABANDONED, error_code=GENERATION_MISMATCH
+                )
+                return
         await self._settle(
             claimed,
             outcome,
@@ -307,18 +323,32 @@ class WorkDrainer:
             paused_at_claim=run_status == int(RunStatus.PAUSED),
         )
 
+    async def _superseded(self, claimed: WorkItem, slot_id: str) -> bool:
+        """Whether the row's slot is now at another generation than the row names."""
+        current = await asyncio.to_thread(
+            self._queue_store.get_slot_generation,
+            claimed.run_id,
+            slot_id,
+            workspace_id=claimed.workspace_id,
+        )
+        return current is not None and current != claimed.slot_generation
+
     async def _execute(
         self,
         claimed: WorkItem,
         registration: ExecutorRegistration,
         payload_dict: dict[str, Any],
         lease_expires_at: int,
+        *,
+        fenced_slot: str | None = None,
     ) -> tuple[EffectOutcome, int] | None:
         """
         Run the executor under a lease heartbeat and the execution limit.
 
-        :returns: The outcome and the lease the finish must name; ``None`` when the
-            lease was lost.
+        :param fenced_slot: The slot whose generation each ``ensure_lease`` re-reads, so
+            a row a retry superseded after its claim acts no further.
+        :returns: The outcome and the lease the finish must name (``_SUPERSEDED`` for a
+            superseded row); ``None`` when the lease was lost.
         """
         current_lease_expires_at = lease_expires_at
         lease_lock = asyncio.Lock()
@@ -356,7 +386,14 @@ class WorkDrainer:
             # thread committed, so the finish names it.
             return await asyncio.shield(_renew_and_record())
 
-        ctx._ensure_lease_fn = _renew_lease
+        async def _ensure_lease() -> bool:
+            if not await _renew_lease():
+                return False
+            if fenced_slot is not None and await self._superseded(claimed, fenced_slot):
+                raise SlotSuperseded(f"work {claimed.id}'s slot moved to another generation")
+            return True
+
+        ctx._ensure_lease_fn = _ensure_lease
 
         async def _heartbeat_loop() -> None:
             while True:
@@ -393,6 +430,12 @@ class WorkDrainer:
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
             outcome = await self._within_limit(claimed, _run())
+        except SlotSuperseded:
+            _logger.info(
+                "Work item %s stopped at a lease check: its slot moved to another generation",
+                claimed.id,
+            )
+            outcome = _SUPERSEDED
         except StartupLeaseLost:
             _logger.info(
                 "Work item %s lost lease during execution on worker %s",
@@ -478,6 +521,9 @@ class WorkDrainer:
             return
         failure = _bounded(outcome)
         finish_now = int(self._clock())
+        restart = self._hold_restart is not None and self._hold_restart(
+            claimed, failure.error_code
+        )
         hold_s = self._hold_delay(claimed, failure, finish_now)
         if hold_s is not None:
             if paused_at_claim and await self._left_pause(claimed):
@@ -492,6 +538,7 @@ class WorkDrainer:
                 next_available_at=finish_now + hold_s,
                 hold=True,
                 now_s=finish_now,
+                restart_held_since=restart,
             )
             return
         if not failure.retryable:
@@ -518,6 +565,7 @@ class WorkDrainer:
                 error_code=failure.error_code,
                 next_available_at=finish_now + backoff_s,
                 now_s=finish_now,
+                restart_held_since=restart,
             )
             return
         await self._finish_terminal(
@@ -562,6 +610,7 @@ class WorkDrainer:
         next_available_at: int | None = None,
         hold: bool = False,
         now_s: int | None = None,
+        restart_held_since: bool = False,
     ) -> bool:
         """Finish the claimed item; ``False`` when its lease was fenced off."""
         finished = await asyncio.to_thread(
@@ -576,6 +625,7 @@ class WorkDrainer:
             workspace_id=claimed.workspace_id,
             now_fn=self._clock if now_s is None else functools.partial(float, now_s),
             hold=hold,
+            restart_held_since=restart_held_since,
         )
         if not finished:
             _logger.warning(
@@ -644,8 +694,10 @@ class WorkDrainer:
 
 __all__ = [
     "DEFAULT_EXECUTION_LIMIT_S",
+    "GENERATION_MISMATCH",
     "FinishedWork",
     "HoldPolicy",
+    "HoldRestart",
     "WorkDrainer",
     "WorkFinishedHook",
 ]

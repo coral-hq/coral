@@ -1,4 +1,10 @@
-import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useIsMutating,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import type { InboxKindUi } from "@/lib/inboxKinds";
@@ -53,6 +59,39 @@ export function runActionErrorText(error: unknown): string {
 /** The run moved on (409) or is gone (404), so its actions are read again. */
 const rereadsRun = (error: unknown) =>
   error instanceof ApiError && (error.status === 409 || error.status === 404);
+
+/**
+ * After an action the server took: the run's detail takes the summary's status and actions
+ * at once, then the run, the runs list and the Inbox are read again.
+ */
+export function refreshAfterRunAction(
+  queryClient: QueryClient,
+  scope: string,
+  runId: string,
+  summary: RunSummary,
+): void {
+  const runKey = runQueryKey(scope, runId);
+  // Only what the summary decides; the refetch brings the detail's other fields.
+  queryClient.setQueryData<RunDetail>(
+    runKey,
+    (detail) =>
+      detail && { ...detail, status: summary.status, allowed_actions: summary.allowed_actions },
+  );
+  void queryClient.invalidateQueries({ queryKey: runKey });
+  void queryClient.invalidateQueries({ queryKey: runsListPrefixKey(scope) });
+  void queryClient.invalidateQueries({ queryKey: WORKFLOW_INBOX_QUERY_KEY });
+}
+
+/** After a refused action: a run that moved on or is gone is read again, and nothing else. */
+export function refreshAfterRunActionError(
+  queryClient: QueryClient,
+  scope: string,
+  runId: string,
+  error: unknown,
+): void {
+  if (!rereadsRun(error)) return;
+  void queryClient.invalidateQueries({ queryKey: runQueryKey(scope, runId) });
+}
 
 interface RunActionsBaseProps {
   runId: string;
@@ -116,20 +155,8 @@ export function RunActions({
     // Sent at once, as a plain request: never held back until React Query sees the network.
     networkMode: "always",
     // These run even if the card closed meanwhile, so the run and the Inbox still refresh.
-    onSuccess: (summary) => {
-      // Only what the summary decides; the refetch brings the detail's other fields.
-      queryClient.setQueryData<RunDetail>(
-        runKey,
-        (detail) =>
-          detail && { ...detail, status: summary.status, allowed_actions: summary.allowed_actions },
-      );
-      void queryClient.invalidateQueries({ queryKey: runKey });
-      void queryClient.invalidateQueries({ queryKey: runsListPrefixKey(scope) });
-      void queryClient.invalidateQueries({ queryKey: WORKFLOW_INBOX_QUERY_KEY });
-    },
-    onError: (error) => {
-      if (rereadsRun(error)) void queryClient.invalidateQueries({ queryKey: runKey });
-    },
+    onSuccess: (summary) => refreshAfterRunAction(queryClient, scope, runId, summary),
+    onError: (error) => refreshAfterRunActionError(queryClient, scope, runId, error),
   });
   // A request sent before the card was last closed is still this run's.
   const inFlight = useIsMutating({ mutationKey: actionKey }) > 0;

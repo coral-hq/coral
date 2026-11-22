@@ -118,10 +118,13 @@ __all__ = [
     "_create_resolved_harness",
     "_ensure_builtin_agent",
     "_ensure_runner_session_initialized",
+    "_get_runner_client",
+    "_query_host_runner_status",
     "_repl_terminal_ui_labels",
     "_session_active_response_cache",
     "_session_blocked_on_cache",
     "_session_status_cache",
+    "_stop_session_host_runner",
     "_tar_gz_dir",
     "attribution_user",
     "canonical_host_id",
@@ -136,6 +139,57 @@ __all__ = [
     "validate_session_agent",
     "validate_session_model_metadata",
 ]
+
+
+async def _query_host_runner_status(
+    host_conn: Any, host_registry: Any, runner_id: str
+) -> str | None:
+    """
+    The host's answer about one runner: ``alive``, ``sign_in_pending``, ``dead``, ``unknown``.
+
+    ``None`` when the host did not answer. Resolved on the sessions facade at call time,
+    as Omnigent's own callers resolve it (omnigent/server/routes/_sessions/helpers.py).
+    """
+    from omnigent.server.routes import sessions as facade
+
+    return await facade._query_host_runner_status(host_conn, host_registry, runner_id)
+
+
+async def _get_runner_client(session_id: str, runner_router: Any, *, conversation: Any) -> Any:
+    """
+    A client for the session's connected runner, or ``None``; it never launches one.
+
+    Resolved on the sessions facade at call time (omnigent/server/routes/_sessions/helpers.py).
+    """
+    from omnigent.server.routes import sessions as facade
+
+    return await facade._get_runner_client(session_id, runner_router, conversation=conversation)
+
+
+async def _stop_session_host_runner(
+    session_id: str,
+    host_id: str,
+    runner_id: str,
+    host_registry: Any,
+    *,
+    expect_already_stopped: bool = False,
+    attempt: Any = None,
+) -> bool:
+    """
+    Stop one runner by id through its host; ``True`` once the host acknowledged it.
+
+    Resolved on the sessions facade at call time (omnigent/server/routes/_sessions/helpers.py).
+    """
+    from omnigent.server.routes import sessions as facade
+
+    return await facade._stop_session_host_runner(
+        session_id,
+        host_id,
+        runner_id,
+        host_registry,
+        expect_already_stopped=expect_already_stopped,
+        attempt=attempt,
+    )
 
 
 def _tar_gz_dir(bundle_dir: Path) -> bytes:

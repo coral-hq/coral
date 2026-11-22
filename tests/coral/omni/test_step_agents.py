@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from coral.omni.protocols import CoralSessionError, StepAgentResolver
 from coral.omni.server import step_agents as step_agents_module
@@ -338,3 +339,43 @@ async def test_a_session_running_another_agent_does_not_choose_the_agent(
     )
 
     assert resolved != foreign
+
+
+def test_only_package_directories_outside_the_environment_are_granted(tmp_path: Path) -> None:
+    prefix = tmp_path / "venv"
+    installed = prefix / "lib" / "site-packages" / "omnigent"
+    checkout = tmp_path / "checkout"
+
+    assert step_agents_module.checkout_read_paths([installed], prefix) == ()
+    granted = step_agents_module.checkout_read_paths(
+        [checkout / "omnigent", checkout / "coral", installed], prefix
+    )
+    # The package directories only, never the repository root that holds them.
+    assert granted == (str(checkout / "coral"), str(checkout / "omnigent"))
+
+
+async def test_an_editable_checkouts_step_bundles_grant_its_packages_to_the_sandbox(
+    agents: OmnigentStepAgents, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sandbox otherwise hides a checkout's packages from its own helper processes."""
+    grants = ("/checkout/coral", "/checkout/omnigent")
+    monkeypatch.setattr(step_agents_module, "_checkout_read_paths", lambda: grants)
+    configs: list[dict[str, Any]] = []
+    real = step_agents_module.materialize
+
+    def recording(*args: Any, **kwargs: Any) -> MaterializedAgent:
+        configs.append(yaml.safe_load(kwargs["config_yaml"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(step_agents_module, "materialize", recording)
+
+    for stance in ("implementer", "reviewer"):
+        await agents.resolve(workspace_id=WORKSPACE, owner=OWNER, stance=stance, **STEP)
+    await agents.resolve(
+        workspace_id=WORKSPACE, owner=OWNER, stance="orchestrator", **ORCHESTRATOR_STEP
+    )
+
+    implementer, reviewer, orchestrator = configs
+    assert implementer["os_env"]["sandbox"] == {"read_paths": list(grants), "write_paths": ["."]}
+    assert reviewer["os_env"]["sandbox"] == {"read_paths": list(grants), "write_paths": []}
+    assert "read_paths" not in str(orchestrator)

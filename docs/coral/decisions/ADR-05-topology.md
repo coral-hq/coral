@@ -95,7 +95,7 @@ anchor (root; no host_id, so no runner; inert agent; never takes a turn)
 | Recovery root | A child with a `host_id` counts as independent when its runner connects (`omnigent/server/app.py:4642-4646`). | Each step is the recovery root of its own runner. |
 | Stop | A stop stops only the runner the session owns, with no cascade to children (`routes_events.py:2073-2206`; `_stop_host_runner_intentionally`, `orchestration.py:832`). | An anchor stop leaves the steps alone. A step stop ends only that step's runner (test A, live probe). |
 | Archive, delete | Neither ends a step runner. Both first call `_best_effort_stop`, which stops only the *turns* of descendants that this replica's in-memory status cache shows as running or waiting (`orchestration.py:730-794`, descendant loop at `:792`); this is what `tests/server/integration/test_sessions_archive.py:209` and `tests/server/routes/test_sessions_crud.py:248` pin. Archive then tears down a host runner only for the archived session itself (`orchestration.py:1024`), and the anchor has none. Delete runs runner cleanup only for the deleted session (`routes_events.py:4133-4158`), never calls `_stop_host_runner_intentionally`, and then hard-deletes the whole subtree (`routes_events.py:4224`). | Rule 4. Idle steps keep their runners until the runner idle reaper fires. A step whose running status this replica missed keeps running with no row and no stop route. SES-09 automates the stop-and-confirm; an upstream fix could tear down descendant-owned runners in archive and delete (open item 5). |
-| Relaunch | Only roots relaunch when a held host returns (`app.py:4321`). | A step stays `runner_interrupted` until its next message relaunches it. Engine-driven relaunch is SES-06 (probe (f)). |
+| Relaunch | Only roots relaunch when a held host returns (`omnigent/server/app.py:4326`). | Coral relaunches a lost step's runner in its own session (SES-06; probe (f) in "Addendum: CRL-137 probe verdicts"). |
 | Managed hosts | `host_id` is rejected on a managed child, which "runs on its parent's host" (`omnigent/server/schemas.py:1807-1811`). | Unsupported. Local hosts only through M4 (WSP-04). |
 | `_owns_host_runner` | A child owns its runner only if no ancestor shares the runner or is unbound on the same host. A missing ancestor row also makes it "not own" its runner, which leaves the runner up: fail-open for containment (`omnigent/server/routes/_sessions/helpers.py:6261-6315`). A stop on a step that does not own its runner still returns 202 while the runner stays (`routes_events.py:2115-2147`). | With no `host_id` on the anchor, each step owns its runner, and a step stop sends exactly one stop (test A). An anchor with the steps' `host_id` but no runner would make every step "not own" its runner, so a stop or archive would leave it running (a leak, found by reading). |
 | Access | Access to a child recurses to its parent; the child's own grants are ignored (`omnigent/server/permissions.py:59-65`). Children get no default-public grant of their own; they follow the parent's (`routes_core.py:1419-1436`). | Every grant on the anchor is a grant on the whole run, and a step cannot be shared on its own. EDIT on the anchor lets a collaborator message, stop and answer approvals on any step. A message to a step whose runner is offline relaunches it on the owner's host (`routes_events.py:3306-3358`, `_sessions/helpers.py:6417-6480`). READ or a public link exposes every step's workspace files (rule 6, open item 4). |
@@ -376,12 +376,12 @@ is archived, deleted or bound to a runner
 
 | Probe | Verdict | Evidence or reason | Owner |
 |---|---|---|---|
-| (a) | **not run** | Needs a real model (Tier B). Its workspace half no longer gates anything: engine git runs on the user's host, outside the agent's sandbox (SPK-04 contingency, [`../contracts/workspace-ops.md`](../contracts/workspace-ops.md)). | CRL-137 (Tier B) |
-| (b), turn-to-completion half | **not run** | Needs a real model. Coral's view of a turn end through the real server, relay and runner is proven in process, with a stub harness and outside the anchor topology: `tests/coral/omni/test_ac2_stop_cancel_end_to_end.py`. | CRL-137 (Tier B) |
+| (a) | **not run** | Needs a real model (Tier B). Its workspace half no longer gates anything: engine git runs on the user's host, outside the agent's sandbox (SPK-04 contingency, [`../contracts/workspace-ops.md`](../contracts/workspace-ops.md)). | CRL-137 (Tier B); verdict in "Addendum: CRL-137 probe verdicts" |
+| (b), turn-to-completion half | **not run** | Needs a real model. Coral's view of a turn end through the real server, relay and runner is proven in process, with a stub harness and outside the anchor topology: `tests/coral/omni/test_ac2_stop_cancel_end_to_end.py`. | CRL-137 (Tier B); verdict in "Addendum: CRL-137 probe verdicts" |
 | (e) | **not run** | Needs Inbox and gates. | CRL-134 (unchanged) |
-| (f) | **not run** | Needs the engine relauncher. Steps are created only through the facade, which never relaunches a step the owner archived or deleted. | CRL-137 (SES-06) |
+| (f) | **not run** | Needs the engine relauncher. Steps are created only through the facade, which never relaunches a step the owner archived or deleted. | CRL-137 (SES-06); verdict in "Addendum: CRL-137 probe verdicts" |
 | 14 | **pass for engine sends** | An engine send to a run whose anchor or step is archived or deleted is refused before anything is saved or forwarded, and the run pauses as `paused(drift, <cause>)`: `tests/coral/omni/test_drift.py::test_archived_anchor_pauses_the_run_and_refuses_the_send` (archived anchor, real `PATCH`), `tests/coral/recovery/test_drift.py::test_the_pre_send_hook_pauses_the_run_and_refuses_the_send` (archived anchor, archived step, deleted step). A user's post to an archived session was not probed. | user posts: full SES-09 drift, no live ticket |
-| 15 | **not run** | Outside CRL-128's deliverables. | decided by the engine bridge, see "Addendum: probe 15" |
+| 15 | **not run** | Outside CRL-128's deliverables. | decided by the engine bridge, see "Addendum: probe 15"; run on single-user servers, see "Addendum: CRL-137 probe verdicts" |
 
 Also found or decided in CRL-128:
 
@@ -495,8 +495,8 @@ not planned.
 
 | Follow-up | Owner |
 |---|---|
-| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | CRL-137 |
-| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced. No gate is labelled Enforced today ([`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md)) | RUL-02 |
+| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | **Run on single-user servers only**, without credentials, in CRL-137 (`tests/e2e/coral/test_sandbox_probe.py`). macOS seatbelt, one local run: a step reaches a sibling's harness socket, other processes' environments and command lines (the model API key in every claude-sdk CLI's among them) and the server; the three probed credential files (Claude's, Omnigent's secrets and the host's tunnel tokens, in the stack's isolated home), the config file's key and the stack's bridge dir are `denied`; no other credential store was probed. Linux bwrap, the `coral-e2e` lane: the server is reachable and every other target is `hidden`, the step's own CLI included. A step runs on an allow-listed-token server, and the token is in its runner's and harness's environment as read from outside the sandbox; the step's shell reads it on macOS only. Tables, limits and owners (CRL-159, CRL-165 to CRL-168): "Addendum: CRL-137 probe verdicts" |
+| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced. No gate is labelled Enforced today ([`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md)) | RUL-02 (CRL-159) |
 | Run probe 15 on native steps before HRN-03 enables them | CRL-138 |
 
 ## Addendum: gates on the anchor (2026-11-19)
@@ -523,3 +523,256 @@ Also decided:
   servers a same-user step that escapes the sandbox can mint an owner token
   (probe 15, residual (b)). The labelling rule in the follow-up table above
   applies.
+
+## Addendum: CRL-137 probe verdicts (2026-11-21)
+
+CRL-137 ran Coral on real processes: a server subprocess with the Coral plugin,
+a real host daemon that launches each step's runner, and the real `claude`
+CLI, with every model call scripted on `mock_llm_server`
+([`../testing/tier-b.md`](../testing/tier-b.md)). It records the probes that
+needed that, the sandbox probe 15, and what the host now does with a step
+runner's processes. Every verdict is from a mock model; no real model ran.
+
+| Probe | Verdict | Evidence | Owner |
+|---|---|---|---|
+| (a), run-worktree half | **pass** | The implementer and the reviewer, each on its own runner under the anchor, run their shell in the run worktree: the implementer's write and its `grep` there pass the step's `done_when`, the reviewer's write is refused as report-only and leaves the worktree unchanged, and the outcome's checkout command puts the implementer's file in the repository (`tests/e2e/coral/test_skeleton.py::test_the_review_loop_runs_end_to_end_on_a_real_stack`). | closed; the separate-worktrees half is CRL-140 |
+| (b), turn-to-completion half | **pass** | The zero-turn anchor hosts four step sessions (two passes of each step) that take turns to completion, hand off and end; one anchor and one session per slot activation, each briefed once, no drift pause, no refused runner event (same test). | closed |
+| (f) | **pass** | A step runner whose process group is SIGKILLed is relaunched in the same session and generation within about a second, with one loss and one wake (`tests/e2e/coral/test_runner_loss.py::test_a_killed_step_runner_is_relaunched_in_the_same_session`). A SIGKILLed host daemon holds the step with Cancel only, and the respawned host's return relaunches it in the same session as one loss (`::test_an_offline_host_holds_the_step_and_its_return_relaunches_it`). A SIGKILLed server's step runner reconnects with the same runner id and is not relaunched, mid-step and under the production lease (`tests/e2e/coral/test_skeleton.py::test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate`, `::test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched`). macOS seatbelt locally, Linux bwrap in the `coral-e2e` lane. | closed |
+
+For (f), on macOS a `killpg` of a step runner empties its whole group (the
+runner, its harness, the sandbox launcher and the CLI) at once, and a host
+SIGKILL empties each runner's group within about 5 s through the runner's own
+parent-loss kill. On Linux the CLI is a descendant of the runner's group, not a
+member: bwrap's `--new-session` puts the in-sandbox launcher and the CLI in a
+session of their own, and they end through bwrap's die-with-parent once the
+group's `bwrap` is killed. The tests therefore capture the runner's process
+tree before the fault, run it only when the tree holds the step's `claude`,
+and wait for the group and the tree to end (`group_tree`, `group_tree_ended`
+in `tests/e2e/coral/_skeleton.py`). Linux timings are not recorded here.
+
+### S108: a Coral step runner's process group ends with it
+
+The host now ends a Coral step runner's own process group whenever that
+runner exits, clean or not, and before it answers a stop of it or a status
+query with `dead`; a step runner that outlives its host ends its own group
+(seam S108, `.coral/seams.yaml`;
+[`../contracts/session-facade.md`](../contracts/session-facade.md), "Runner
+process groups"). The host marks a runner as a Coral step runner at spawn
+from its workspace alone: a checkout on a Coral run branch. Every runner
+outside such a checkout, so every non-Coral session elsewhere, is signalled
+exactly as before; a non-Coral session opened in a run worktree is marked too.
+The group is recorded at spawn only when the runner leads it and it is neither
+the host's nor the zygote's, and members are signalled one by one, only those
+whose start time lies between the runner's start and its observed exit. A step
+loses every process left in its group when its runner exits, background
+processes its agent started included. What escapes: a process that starts its
+own session, except inside a bwrap sandbox, whose pid namespace ends with it.
+What could be signalled wrongly: a process in a new group that reuses the id
+within about 1.5 s of the reap (the exit is observed that late), which needs a
+pid wrap to that exact id.
+
+### Probe 15 on single-user servers
+
+`tests/e2e/coral/test_sandbox_probe.py::test_probe_15_from_a_step_shell`
+runs `tests/e2e/coral/probe15.sh` from a generated implementer's shell, the
+widest stance Coral generates, while a reviewer step on a parallel branch is
+held mid-turn so its runner, harness socket and CLI are live. The test
+resolves every target on the host side and proves it live right before the
+probe call is released and again after the result; a removed target fails as
+a failed control, never as a verdict. The probe prints tokens only:
+`reachable` (connected, or the canary matched), `denied` (`EACCES`/`EPERM`),
+`hidden` (`ENOENT` on a target the host proved exists) and `not_present`;
+`mismatch` and `unclassified` fail the test. Each environment target also has
+`.api_key` and `.argv_api_key` sub-checks: whether the configured model API
+key's canary is in that process's environment, and in its command line.
+Canaries are random and planted with exclusive creates; the test never reads
+the host's tunnel credential file, only its metadata. The pins are change
+detectors, and the test refuses a pinned `reachable` without an owner.
+
+**macOS seatbelt.** `EXPECTED["darwin"]`, pinned from one local run on macOS
+27.2.1 with claude 2.1.325 (`RECORDED["darwin"]`):
+
+| Check | Verdict | Names read | API key in environment / command line | Owner |
+|---|---|---|---|---|
+| `harness_socket` (the reviewer's) | `reachable` | | | CRL-166 |
+| `runner_environ` (the reviewer's runner) | `reachable` | `none` | `not_present` / `not_present` | CRL-165 |
+| `cli_environ` (the reviewer's CLI) | `reachable` | `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` and 13 `HARNESS_CLAUDE_SDK_*` names | `reachable` / `reachable` | CRL-165; the key CRL-167 |
+| `host_environ` | `reachable` | `none` | `not_present` / `not_present` | CRL-165 |
+| `own_cli_environ` (the step's own CLI) | `reachable` | as `cli_environ` | `reachable` / `reachable` | CRL-165; the key CRL-167 |
+| `credential_files.claude` | `denied` | | | |
+| `credential_files.omnigent_secrets` | `denied` | | | |
+| `credential_files.host_tunnel` | `denied` | | | |
+| `config_api_key` | `denied` (the config file only) | | | |
+| `bridge_dir` | `denied` | | | |
+| `server_loopback` (`http://127.0.0.1:<port>`) | `reachable` | | | CRL-159 |
+| `server_localhost` (`http://localhost:<port>`) | `reachable` | | | CRL-159 |
+| `shell_env_names` (the step's own shell) | `not_present` | `none` | | |
+
+**Linux bwrap.** `EXPECTED["linux"]`, pinned from `coral-e2e` lane run
+44980984569 on Ubuntu 24.04.5 LTS (kernel 7.0.0-1017-azure) with claude
+2.1.295 (`RECORDED["linux"]`):
+
+| Check | Verdict | Names read | API key in environment / command line | Owner |
+|---|---|---|---|---|
+| `harness_socket` (the reviewer's) | `hidden` | | | |
+| `runner_environ` (the reviewer's runner) | `hidden` | | `hidden` / `hidden` | |
+| `cli_environ` (the reviewer's CLI) | `hidden` | | `hidden` / `hidden` | |
+| `host_environ` | `hidden` | | `hidden` / `hidden` | |
+| `own_cli_environ` (the step's own CLI) | `hidden` | | `hidden` / `hidden` | |
+| `credential_files.claude` | `hidden` | | | |
+| `credential_files.omnigent_secrets` | `hidden` | | | |
+| `credential_files.host_tunnel` | `hidden` | | | |
+| `config_api_key` | `hidden` | | | |
+| `bridge_dir` | `hidden` | | | |
+| `server_loopback` (`http://127.0.0.1:<port>`) | `reachable` | | | CRL-159 |
+| `server_localhost` (`http://localhost:<port>`) | `reachable` | | | CRL-159 |
+| `shell_env_names` (the step's own shell) | `not_present` | `none` | | |
+
+Reading the tables:
+
+- On macOS, `denied` is seatbelt's `(deny default)` with
+  `(allow file-read-metadata)`: the shell can `stat` the files but not read
+  them. Nothing is `hidden` there: macOS has no pid namespaces, and the step
+  profile allows `sysctl-read` unfiltered (`omnigent/inner/seatbelt_sandbox.py`;
+  the likely path, unconfirmed), so a step reads other processes' environments
+  and command lines, its own CLI's and a sibling CLI's included (CRL-165).
+- **On macOS the model API key is not protected.** `config_api_key: denied`
+  covers only `config.yaml`. The same key is `reachable` in every claude-sdk
+  CLI's environment (`HARNESS_CLAUDE_SDK_API_KEY_HELPER`,
+  `HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND`) and command line (`--settings`
+  `apiKeyHelper`), the step's own CLI and its sibling's (the key helper is
+  built in `omnigent/runtime/workflow.py`). Its own CLI is enough, so no sibling
+  is needed.
+- On Linux, in the lane, `hidden` is a namespace boundary, not a lookup miss
+  (see Limits for where that has not been measured). The step's shell runs in
+  the runner's `os_env` helper, which bwrap wraps on its own
+  (`omnigent/inner/os_env.py`, `wrap_launcher_argv`); the CLI's launcher is
+  wrapped separately (`omnigent/inner/sandbox.py`). Each wrap has its own
+  `--unshare-pid` namespace (`omnigent/inner/bwrap_sandbox.py`) and its own
+  `/tmp` and home mounts, so the step's own CLI, the sibling CLI, the runner
+  and the host are all outside the shell's namespace, and the host-side
+  controls show each one alive before and after the probe.
+- `runner_environ.names` and `host_environ.names` are `none` on macOS only
+  because the stack starts from `minimal_env()`. A host started from a person's
+  shell exports every credential-like name it was started with to what a
+  macOS step reads there. Names outside the probe's patterns
+  (`OMNIGENT_RUNNER_*TOKEN*`, the binding-token name,
+  `OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN`, `*API_KEY*`, `HARNESS_CLAUDE_SDK_*`),
+  such as `ANTHROPIC_AUTH_TOKEN`, are not reported.
+- `harness_socket: reachable` is a connect only. Residual (a) above says a
+  connection is enough to drive the sibling's turn; the probe does not.
+
+**Limits.**
+
+- **Single-user servers only.** Both runs used a header-auth single-user
+  server, and the HTTP checks used `/health` with no credentials. Servers that
+  require identity (owner-token minting after an environment read, the CLI's
+  stored credentials) are CRL-159, RUL-02's ticket. The gate labelling rule in
+  the follow-up table above is unchanged: every gate here is on a single-user
+  server, and none is Enforced.
+- **macOS is one local run, not a regression guard.** No CI lane runs macOS.
+- **CI lifts Ubuntu's AppArmor restriction** on unprivileged user namespaces
+  (`kernel.apparmor_restrict_unprivileged_userns=0` in `.github/workflows/ci.yml`),
+  so bwrap can make its namespaces. A host that keeps the restriction was not
+  measured: there bwrap may be unable to make its namespaces (the backend has
+  no silent fallback), or an AppArmor profile may change what it can do.
+- **The socket root is the stack's own.** Both runs put the harness sockets
+  under the stack's private `/tmp/crl-*` root (`OMNIGENT_HARNESS_TMP_PARENT`),
+  and the bridge-dir canary under the stack's `TMPDIR`. This is not
+  generalized: production sockets sit under `/tmp/omnigent-<uid>` on POSIX,
+  macOS included (`omnigent/runtime/harnesses/paths.py`), and production bridge
+  dirs under the per-user `$TMPDIR/omnigent-<uid>/claude-native`
+  (`omnigent/harnesses/claude_native/bridge.py`). The macOS socket verdict
+  likely carries over, because seatbelt decides AF_UNIX connects by its network
+  rules, not by the path's root; that is unverified.
+- **Only three credential files were probed**, each a canary in the test host's
+  isolated home: `~/.claude/.credentials.json`, `~/.omnigent/secrets.json` and
+  `~/.omnigent/auth_tokens.json`. No other store was probed: not the macOS
+  Keychain (the step profile allows `mach-lookup`), `~/.aws`, `~/.ssh`, or
+  `gh`'s and `databricks`' configs. Residual (d) is narrowed for these files
+  only, and credentials the host was started with stay readable in its runners'
+  environments on macOS.
+- **The checkout read grant was on.** The runs used an editable checkout, so
+  generated step bundles granted the sandbox read access to the installed
+  `omnigent` and `coral` package directories (`checkout_read_paths`,
+  `coral/omni/server/step_agents.py`). That also widens what the file tools can
+  read; a wheel install grants only the worktree.
+- **The host was given `http://127.0.0.1:<port>`**; both spellings were probed.
+- The probe ran from the implementer only. The reviewer's `read_only_os`
+  policy screens its shell, and probing from it needs a second choreography.
+
+**Owners.** Each pinned `reachable` names a filed ticket, each blocked by
+CRL-137, which lands the probe that verifies its fix. None blocks CRL-137
+itself: the probe only measures exposures that already exist.
+
+| Exposure | Owner |
+|---|---|
+| A step connects to another session's harness socket (`harness_socket`, macOS) | CRL-166 |
+| A step reads other processes' environments and command lines (`runner_environ`, `cli_environ`, `host_environ`, `own_cli_environ`, macOS) | CRL-165 |
+| Secrets in exec-time environments and argv, the model API key among them (every `.api_key` and `.argv_api_key` `reachable`, macOS) | CRL-167 |
+| The allow-listed runner token in the step runner's environment (below) | CRL-168 |
+| A single-user server takes any local process as its owner (`server_loopback`, `server_localhost`, both platforms) | CRL-159 (RUL-02) |
+
+CRL-166 reopens the decision in "Addendum: probe 15" that a per-spawn harness
+bearer on POSIX is recorded but not planned.
+
+**Open for the owner.** Whether to run Coral steps on untrusted content on
+macOS before CRL-165 and CRL-166 land is the owner's risk decision. Until
+then a macOS step can read the model API key and other processes'
+environments, and can connect to a sibling's harness socket, which residual (a)
+says is enough to drive its turn. It is not decided here.
+
+### A step on a server that keeps the allow-listed runner token
+
+`test_a_step_on_a_server_with_the_allow_listed_runner_token` runs one step on
+a server that keeps `OMNIGENT_RUNNER_TUNNEL_TOKEN` (the binding token of
+`omnigent run`'s local server, which that server accepts for every session),
+with the host exporting the same test-only value. The names are read from
+outside the sandbox, from each process's environment as another process reads
+it (`EXPECTED_TOKEN`):
+
+| Observation | macOS (`EXPECTED_TOKEN["darwin"]`) | Linux (`EXPECTED_TOKEN["linux"]`) |
+|---|---|---|
+| The step runs and hands off (`step_runs`) | `true` | `true` |
+| Token names in the runner's environment (`runner.names`) | `OMNIGENT_RUNNER_TUNNEL_TOKEN` | `OMNIGENT_RUNNER_TUNNEL_TOKEN` |
+| In the harness's environment (`harness.names`) | `OMNIGENT_RUNNER_TUNNEL_TOKEN` | `OMNIGENT_RUNNER_TUNNEL_TOKEN` |
+| In the sandbox launcher's environment (`launcher.names`) | `none` | `none` |
+| In the CLI's environment (`cli.names`) | `none` | `none` |
+| In the step's own shell (`shell_env_names`) | `not_present`, names `none` | `not_present`, names `none` |
+| The step's shell reading its own runner's environment (`runner_environ`) | `reachable`, names `OMNIGENT_RUNNER_TUNNEL_TOKEN` (CRL-168) | `hidden` |
+
+So the step runs on such a server; the token is in its runner's and harness's
+readable environments on both platforms, and absent from the launcher's, the
+CLI's and the shell's. The step's own shell reads it from its runner on macOS
+only; on Linux that read is `hidden`.
+
+**Exec-time and live environments.** These are exec-time environments. The
+host starts its runner zygote with its whole `os.environ`
+(`omnigent/host/runner_zygote.py`, `_spawn_zygote_process`), and a forked
+runner, and a harness the zygote forks for it, keep the zygote's exec-time
+environment, which is what another process reads. Their live `os.environ`
+differs: a forked runner replaces it with the runner environment the host
+built (`fork_runner`), and a harness's has the runner's authentication secrets
+removed (`strip_runner_auth_secrets`, `omnigent/runner/identity.py`). The
+sandbox launcher and the CLI are started with environments of their own, so
+what another process reads there is what they started with.
+
+**Caveats recorded with it.**
+
+- A host `unknown` counts as dead, so a relaunch can start while the old runner
+  lives on ([`../contracts/session-facade.md`](../contracts/session-facade.md),
+  "The one relaunch path").
+- On a server like this, runner-id rotation does not fence a runner that
+  survived that way, because the server accepts the allow-listed token for every
+  session (`omnigent/server/mcp_identity.py`).
+
+**Residual (b), extended.** On the zygote path, a reader sees the host
+daemon's whole environment, for runners and zygote-forked harnesses alike. On
+the direct-spawn fallback (`OMNIGENT_RUNNER_ZYGOTE=0`, or the zygote
+unavailable or dead), it sees the binding token and the initial bearer, as
+residual (b) already says (from code: `_build_runner_env`,
+`omnigent/host/connect.py`; not measured). Residual (b) is extended, not
+replaced. The allow-listed-token test
+(`test_a_step_on_a_server_with_the_allow_listed_runner_token`) measured the
+zygote path on both platforms. Giving the zygote the filtered runner environment would be an
+Omnigent seam (CRL-167).

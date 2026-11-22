@@ -29,7 +29,7 @@ from coral.bridge.executors import (
     bridge_hold_policy,
 )
 from coral.bridge.keys import effect_work_id
-from coral.bridge.mapping import RUN_RESYNC, TIMER, TURN_FACT
+from coral.bridge.mapping import RECOVERY_RESTART, RECOVERY_WAKE, RUN_RESYNC, TIMER, TURN_FACT
 from coral.bridge.port import StoreDecisionPort
 from coral.bridge.service import EngineBridge
 from coral.db import WorkRow
@@ -54,7 +54,11 @@ from coral.omni.server import plugin as plugin_module
 from coral.omni.server.dispatch import OmnigentSessionDispatch
 from coral.omni.server.gates import GateAnswering, OmnigentGatePublisher
 from coral.omni.server.mutation_guard import MUTATION_GUARD, CoralMutationGuard
-from coral.omni.server.sessions import RUN_ID_LABEL_KEY, OmnigentSessionFacade
+from coral.omni.server.sessions import (
+    RUN_ID_LABEL_KEY,
+    OmnigentSessionFacade,
+    OmnigentStepRelauncher,
+)
 from coral.omni.server.turn_facts import BoundSessionRefresher, TurnFactRecorder
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
 from coral.queue import executors as queue_executors
@@ -67,6 +71,7 @@ from coral.queue.executors import (
     registered_executor_kinds,
 )
 from coral.queue.store import SqlAlchemyCoralQueueStore
+from coral.recovery.relaunch import LivenessPass
 from coral.slots.executors import CANCEL_SESSIONS, CLOSE_SLOT, CREATE_SESSION, SEND_INPUT
 from coral.stores.alerts import SqlAlchemyAlertStore
 from coral.stores.protocols import RunStartSpec, Transition, WorkItemDraft
@@ -144,6 +149,8 @@ ENGINE_EFFECT_TYPES = frozenset(
         WORKSPACE_COMMIT,
         WORKSPACE_SALVAGE,
         WORKSPACE_RESET,
+        RECOVERY_RESTART,
+        RECOVERY_WAKE,
         TURN_FACT,
     }
 )
@@ -313,6 +320,7 @@ async def test_coral_lifespan_registers_and_unregisters_engine_executors(
             assert observers["coral"] == state.coral_status_edges.observe
             assert observers["coral.confirmed_stops"] == state.coral_confirmed_stops.observe
             assert observers["coral.turn_facts"] == state.coral_turn_fact_recorder.observe
+            assert isinstance(state.coral_step_relauncher, OmnigentStepRelauncher)
             # Only cancel_sessions runs for a run that already ended (cancel_run ends it).
             registrations = {kind: get_registration(kind) for kind in ENGINE_EFFECT_TYPES}
             assert {
@@ -450,6 +458,120 @@ def test_the_drain_concurrency_defaults_to_four() -> None:
     assert plugin_module.drain_concurrency({}) == 4
     assert plugin_module.drain_concurrency({"coral_drain_concurrency": None}) == 4
     assert plugin_module.drain_concurrency({"coral_drain_concurrency": 64}) == 64
+
+
+@pytest.mark.parametrize(
+    ("server_config", "lease", "renew", "grace"),
+    [
+        ({}, 120, 30.0, 90),
+        (
+            {"coral_worker_lease_seconds": 10, "coral_runner_reconnect_grace_s": 30},
+            10,
+            2.5,
+            30,
+        ),
+        (
+            {"coral_worker_lease_seconds": 600, "coral_runner_reconnect_grace_s": 600},
+            600,
+            30.0,
+            600,
+        ),
+    ],
+)
+async def test_the_lifespan_leads_with_the_configured_lease_and_watches_runners_for_the_grace(
+    server: CoralServer,
+    monkeypatch: pytest.MonkeyPatch,
+    server_config: dict[str, Any],
+    lease: int,
+    renew: float,
+    grace: int,
+) -> None:
+    built: list[dict[str, Any]] = []
+
+    class RecordingSupervisor(WorkerSupervisor):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            built.append(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(plugin_module, "WorkerSupervisor", RecordingSupervisor)
+    services = dataclasses.replace(server.services, server_config=server_config)
+    async with coral_lifespan(server.app, services):
+        [wiring] = built
+        assert (wiring["lease_seconds"], wiring["renew_interval_s"]) == (lease, renew)
+        manager = server.app.state.coral_worker_supervisor.lease_manager
+        assert (manager.lease_seconds, manager.renew_interval_s) == (lease, renew)
+        liveness = server.app.state.coral_runner_liveness
+        assert isinstance(liveness.current, LivenessPass)
+        assert liveness.current.grace_s == grace
+    assert liveness.current is None
+
+
+async def test_each_leader_term_starts_the_bridge_records_and_the_runner_clocks_afresh(
+    server: CoralServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(EngineBridge, "begin_leader_term", lambda _bridge: calls.append("bridge"))
+    monkeypatch.setattr(LivenessPass, "reset", lambda _pass: calls.append("clocks"))
+
+    async with coral_lifespan(server.app, server.services):
+        supervisor = server.app.state.coral_worker_supervisor
+        await poll_until_async(supervisor.leader_ready_event.is_set, timeout_s=budget(30))
+
+    # The first term began once the session engine had set the pass.
+    assert calls == ["bridge", "clocks"]
+
+
+@pytest.mark.parametrize(("lease", "warned"), [(10, True), (59, True), (60, False), (120, False)])
+def test_a_lease_below_a_minute_warns_once_about_clock_skew(
+    caplog: pytest.LogCaptureFixture, lease: int, warned: bool
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="coral.omni.server.plugin"):
+        assert plugin_module.worker_lease_seconds({"coral_worker_lease_seconds": lease}) == lease
+
+    warnings = [record.getMessage() for record in caplog.records]
+    assert warnings == (
+        [
+            f"coral_worker_lease_seconds is {lease} s: replica clocks must agree within "
+            f"{lease / 4:g} s, a quarter of the lease; keep them NTP-synced"
+        ]
+        if warned
+        else []
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("coral_worker_lease_seconds", 9),
+        ("coral_worker_lease_seconds", 601),
+        ("coral_worker_lease_seconds", True),
+        ("coral_worker_lease_seconds", "10"),
+        ("coral_runner_reconnect_grace_s", 29),
+        ("coral_runner_reconnect_grace_s", 601),
+        ("coral_runner_reconnect_grace_s", True),
+        ("coral_runner_reconnect_grace_s", "90"),
+    ],
+)
+async def test_a_lease_or_grace_outside_its_bounds_fails_the_start_and_wires_nothing(
+    server: CoralServer, key: str, value: object
+) -> None:
+    services = dataclasses.replace(server.services, server_config={key: value})
+
+    with pytest.raises(ValueError, match=key):
+        async with coral_lifespan(server.app, services):
+            pass
+
+    assert _engine_registrations() == NOTHING
+    assert _bridge_registrations() == frozenset()
+
+
+def test_the_lease_and_the_grace_default_to_today_s_values() -> None:
+    assert plugin_module.worker_lease_seconds(None) == 120
+    assert plugin_module.worker_lease_seconds({"coral_worker_lease_seconds": None}) == 120
+    assert plugin_module.worker_renew_interval_s(120) == 30.0
+    assert plugin_module.worker_renew_interval_s(10) == 2.5
+    assert plugin_module.runner_reconnect_grace_s(None) == 90
+    assert plugin_module.runner_reconnect_grace_s({"coral_runner_reconnect_grace_s": 45}) == 45
 
 
 async def test_the_supervisor_starts_a_run_whose_engine_start_was_lost(

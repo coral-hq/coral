@@ -32,6 +32,7 @@ from coral.bridge.orchestrator import is_decision_reminder, orchestrator_rows, r
 from coral.bridge.projection import RunProjection, project_run, project_slots
 from coral.db.enum_codecs import RUN_PAUSE_REASON, RunStatus
 from coral.engine import types as engine
+from coral.engine.lifecycle import HOST_OFFLINE_DETAIL
 from coral.gates.ids import new_gate_elicitation_id
 from coral.model.ir import CompiledGraph
 from coral.recovery.drift import DriftCause
@@ -176,7 +177,13 @@ def build_commit(
             f"run {run.id} commit has {len(logs)} log rows and {len(outbox)} work rows"
         )
     release = tuple(
-        dict.fromkeys((*(RESUME_RELEASE_CODES if resumed else ()), *release_held_codes))
+        dict.fromkeys(
+            (
+                *(RESUME_RELEASE_CODES if resumed else ()),
+                *(("run.paused",) if _left_only_host_holds(first, final) else ()),
+                *release_held_codes,
+            )
+        )
     )
     gate_visits = project_gates(
         run,
@@ -292,6 +299,22 @@ def _new_timer_rows(
         key=lambda timer: (timer.due_at, timer.key),
     )
     return [timer_draft(run_id, timer) for timer in armed]
+
+
+def _left_only_host_holds(first: engine.RunState, final: engine.RunState) -> bool:
+    """
+    Whether the commit cleared every cause but host-offline holds, which keep the run
+    paused: a wake waiting on the pause then checks its host again at once.
+    """
+    if first.status != "paused" or final.status != "paused" or not final.causes:
+        return False
+    if not all(_host_hold(cause) for cause in final.causes):
+        return False
+    return any(not _host_hold(cause) for cause in first.causes)
+
+
+def _host_hold(cause: engine.PauseCause) -> bool:
+    return cause.reason == "infra" and cause.detail == HOST_OFFLINE_DETAIL
 
 
 def _revivable(run: store.CoralRun, state: engine.RunState) -> tuple[str, ...]:

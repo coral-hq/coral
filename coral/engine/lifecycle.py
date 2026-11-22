@@ -1,4 +1,4 @@
-"""Pause, resume, cancel, retry, and timer deadlines."""
+"""Pause, resume, cancel, retry and restarts, runner losses and holds, and timer deadlines."""
 
 from __future__ import annotations
 
@@ -7,20 +7,26 @@ from datetime import datetime
 
 from pydantic import JsonValue
 
-from coral.engine.facts import turn_key_generation
+from coral.engine.facts import runner_loss_key, turn_key_generation
 from coral.engine.machines.activation import (
     activation_id,
+    create_session_effect,
     find_activation,
+    find_node,
     replace_activation,
     route_closed_step,
     traverse_arrow,
 )
-from coral.engine.machines.run import record_pause, refuse, refuse_unknown
+from coral.engine.machines.run import receipt_only, record_pause, refuse, refuse_unknown
 from coral.engine.machines.slot import (
     awaiting_effect,
+    effect_generation,
+    fail_effect,
     find_slot,
     finish_pending_closes,
+    map_slot,
     mark_failed_turn,
+    reports_an_ended_outage,
 )
 from coral.engine.timers import (
     INFRA_BACKOFF,
@@ -34,11 +40,14 @@ from coral.engine.timers import (
     rearm_plan_probe,
 )
 from coral.engine.types import (
+    RULES,
     Activation,
     ApplyResult,
     AttemptCount,
     Decision,
     Effect,
+    EffectCompleted,
+    EffectFailed,
     InfraBackoffExhausted,
     PauseCause,
     PauseReason,
@@ -47,6 +56,8 @@ from coral.engine.types import (
     RejectionObserved,
     ResumeRun,
     RetryStep,
+    RunnerHeld,
+    RunnerHoldEnded,
     RunnerLost,
     RunState,
     SessionFailed,
@@ -75,19 +86,31 @@ _RESUME_REASONS: frozenset[PauseReason] = frozenset(
     }
 )
 _RETRY_REASONS: frozenset[PauseReason] = frozenset({"infra", "failure_path", "liveness"})
-# A step's failed turn no rule names pauses ``failure_path`` with this detail. Until steps
-# can be retried, a resume clears it too and re-prompts the step; other ``failure_path``
-# causes (a permanent effect failure, an unbuildable commit) still need a retry.
-_UNNAMED_TURN_FAILURE = "agent.failed"
+# ``infra`` details that hold a slot: neither Resume nor Retry clears them.
+HOST_OFFLINE_DETAIL = "infra.host_offline"
+RESTARTING_DETAIL = "recovery.restarting"
+_HELD_DETAILS = frozenset({HOST_OFFLINE_DETAIL, RESTARTING_DETAIL})
+# The fourth runner loss of one generation pauses with this detail instead of waking.
+RUNNER_LOST_DETAIL = "infra.runner_lost"
+MAX_WAKES = 3
+# Wake outcomes that leave the slot on a connected runner.
+_RUNNER_UP = frozenset({"runner_back", "relaunched"})
+# A failed or abandoned restart pauses ``failure_path`` with this prefix and its code.
+RESTART_FAILED_PREFIX = "restart:"
+_MAX_RESTART_CODE_CHARS = 128
 _COUNTED_REJECTIONS = frozenset({"handoff.invalid", "tool.illegal"})
 # A failed turn of a slot in these states came after its accepted handoff.
 _HANDED_OFF = frozenset({"closing", "closed"})
 _RETRY_PHASES: tuple[str, ...] = (
     "fence_stop",
-    "create_unbriefed",
     "salvage_reset",
+    "create_unbriefed",
     "brief",
 )
+# A closed step with one of these outcomes is done, so it is never retried.
+_FINISHED_OUTCOMES = frozenset({"completed", "skipped"})
+# The previous rules let Resume clear a step's failed turn no rule names.
+_UNNAMED_TURN_FAILURE = "agent.failed"
 
 
 def pause_run(state: RunState, command: PauseRun) -> ApplyResult:
@@ -104,9 +127,10 @@ def pause_run(state: RunState, command: PauseRun) -> ApplyResult:
 def resume_run(graph: CompiledGraph, state: RunState, command: ResumeRun) -> ApplyResult:
     """Clear the causes ResumeRun is allowed to clear. A miss changes nothing.
 
-    That is every resumable reason, ``budget`` given a higher cap, and a step's failed
-    turn no rule names. A run that is running again finishes pending closes, advances,
-    and re-prompts its failed and stopped slots.
+    That is every resumable reason except a hold or a restart, and ``budget`` given a
+    higher cap. Clearing a slot's fourth-loss pause ends that runner outage. A run that
+    is running again finishes pending closes, advances, and re-prompts its failed and
+    stopped slots.
     """
     store_cap: int | None = None
     if any(cause.reason == "budget" for cause in state.causes):
@@ -114,12 +138,21 @@ def resume_run(graph: CompiledGraph, state: RunState, command: ResumeRun) -> App
             store_cap = command.cap
 
     def cleared(cause: PauseCause) -> bool:
-        return resume_clears(cause) or (cause.reason == "budget" and store_cap is not None)
+        if cause.reason == "budget" and store_cap is not None:
+            return True
+        return resume_clears(cause, rules=state.rules)
 
     reasons = {cause.reason for cause in state.causes if cleared(cause)}
     if not reasons:
         return refuse(state, "resume_not_allowed")
+    lost = [
+        cause.subject
+        for cause in state.causes
+        if cause.reason == "infra" and cause.detail == RUNNER_LOST_DETAIL
+    ]
     updated = _without_causes(state, cleared)
+    for slot_id in lost:
+        updated = _end_outage(updated, slot_id)
     changes: dict[str, object] = {"seq": state.seq + 1}
     if store_cap is not None:
         changes["max_activations"] = store_cap
@@ -138,15 +171,44 @@ def resume_run(graph: CompiledGraph, state: RunState, command: ResumeRun) -> App
     return ApplyResult(state=updated, effects=effects)
 
 
-def resume_clears(cause: PauseCause) -> bool:
-    """A resumable reason, or a step's failed turn no rule names (until steps can retry)."""
-    if cause.reason in _RESUME_REASONS:
-        return True
-    return (
-        cause.reason == "failure_path"
-        and cause.detail == _UNNAMED_TURN_FAILURE
-        and cause.subject != ""
-    )
+def resume_clears(cause: PauseCause, *, rules: int = RULES) -> bool:
+    """A resumable reason, unless the cause holds its slot (a host hold or a restart).
+
+    The previous rules also cleared a step's failed turn no rule names.
+    """
+    if rules < RULES and cause.reason == "failure_path":
+        return cause.detail == _UNNAMED_TURN_FAILURE and cause.subject != ""
+    return cause.reason in _RESUME_REASONS and not holds_slot(cause)
+
+
+def holds_slot(cause: PauseCause) -> bool:
+    """A host-offline hold or a restart in progress: only its own completion clears it."""
+    return cause.reason == "infra" and cause.detail in _HELD_DETAILS
+
+
+def retryable_activations(state: RunState) -> tuple[str, ...]:
+    """The failed step activations a Retry may restart, in cause order.
+
+    None while the run is not paused or a hold or a restart stands. Otherwise each
+    ``infra``, ``failure_path`` or ``liveness`` cause names one through its subject (a
+    slot, an activation, or a node's newest activation); only a step that has slots and
+    did not close ``completed`` or ``skipped`` qualifies, so gates and decisions never do.
+    """
+    if state.status != "paused" or any(holds_slot(cause) for cause in state.causes):
+        return ()
+    found: list[str] = []
+    for cause in state.causes:
+        if cause.reason not in _RETRY_REASONS:
+            continue
+        owner = _cause_activation(state, cause.subject)
+        if owner is None or owner.id in found:
+            continue
+        if not any(slot.activation_id == owner.id for slot in state.slots):
+            continue
+        if owner.status == "closed" and owner.outcome in _FINISHED_OUTCOMES:
+            continue
+        found.append(owner.id)
+    return tuple(found)
 
 
 def cancel_run(state: RunState) -> ApplyResult:
@@ -186,23 +248,29 @@ def cancel_run(state: RunState) -> ApplyResult:
     return ApplyResult(state=updated, effects=tuple(effects), receipt_key=key)
 
 
-def retry_step(graph: CompiledGraph, state: RunState, command: RetryStep) -> ApplyResult:
-    """Reopen one activation. The retry phases are named, not run.
+def retry_step(state: RunState, command: RetryStep) -> ApplyResult:
+    """Restart one failed step in a new session generation. The run stays paused.
 
-    A run that is running again finishes pending closes, advances, and re-prompts the
-    failed and stopped slots of other activations, as resume does.
+    Only the step's own causes clear, plus its slots' pending-input drift. Each slot is
+    bumped and held ``recovery.restarting`` until its ``retry_step`` effect completes or
+    fails, so the old session cannot act between the retry and its fence.
     """
     owner_id = activation_id(command.node_id, command.item_path, command.iteration_path)
     if find_activation(state, owner_id) is None:
         return refuse_unknown(state)
-    if not any(cause.reason in _RETRY_REASONS for cause in state.causes):
-        return refuse(state, "resume_not_allowed")
+    held = {cause.detail for cause in state.causes if holds_slot(cause)}
+    if HOST_OFFLINE_DETAIL in held:
+        return refuse(state, "host_offline_hold")
+    if RESTARTING_DETAIL in held:
+        return refuse(state, "restart_in_progress")
+    if owner_id not in retryable_activations(state):
+        return refuse(state, "retry_not_allowed")
     slot_ids = {slot.id for slot in state.slots if slot.activation_id == owner_id}
     # A retried slot's pending input goes with its session, and so does its drift cause.
     cleared = _without_causes(
         state,
         lambda cause: (
-            cause.reason in _RETRY_REASONS
+            (cause.reason in _RETRY_REASONS and _resolves_to(state, cause.subject, owner_id))
             or (
                 cause.reason == "drift"
                 and cause.detail == "pending_input"
@@ -225,13 +293,170 @@ def retry_step(graph: CompiledGraph, state: RunState, command: RetryStep) -> App
         status="starting",
         outcome=None,
     )
-    if retried.status == "running":
-        retried, spawned = _advance_closed(graph, retried)
-        effects = (*effects, *spawned)
-    if retried.status == "running":
-        retried, nudges = _reprompt(retried, "resume")
-        effects = (*effects, *nudges)
     return ApplyResult(state=retried, effects=effects)
+
+
+def complete_restart(
+    graph: CompiledGraph, state: RunState, effect: Effect, command: EffectCompleted
+) -> ApplyResult:
+    """The restart fenced, salvaged and reset: create the new generation's session.
+
+    The slot's restarting cause goes, and the create carries what was salvaged to the
+    brief. A run running again finishes pending closes and re-prompts as a resume does.
+    A result for a slot that moved on only records its receipt.
+    """
+    slot = find_slot(state, effect.subject)
+    if slot is None:
+        return refuse_unknown(state)
+    owner = find_activation(state, slot.activation_id)
+    node = find_node(graph, owner.node_id) if owner is not None else None
+    if slot.status != "pending" or effect_generation(effect) != slot.session_generation:
+        return receipt_only(state, effect.effect_key, dict(command.payload))
+    if node is None:
+        return refuse_unknown(state)
+    seq = state.seq + 1
+    extra: dict[str, JsonValue] = {}
+    salvage_ref = command.payload.get("salvage_ref")
+    if isinstance(salvage_ref, str):
+        salvage_commit = command.payload.get("salvage_commit")
+        extra = {
+            "salvage_ref": salvage_ref,
+            "salvage_commit": salvage_commit if isinstance(salvage_commit, str) else None,
+        }
+    create = create_session_effect(_run_id(state), seq, slot, node, extra)
+    restarting = _restarting_cause(slot.id)
+    cleared = _without_causes(state, lambda cause: cause == restarting)
+    receipt = Receipt(key=effect.effect_key, payload=dict(command.payload))
+    updated = cleared.model_copy(
+        update={
+            "seq": seq,
+            "effects": (*cleared.effects, create),
+            "receipts": (*cleared.receipts, receipt),
+        }
+    )
+    effects: tuple[Effect, ...] = (create,)
+    if updated.status == "running":
+        updated, spawned = _advance_closed(graph, updated)
+        effects = (*effects, *spawned)
+    if updated.status == "running":
+        updated, nudges = _reprompt(updated, "resume")
+        effects = (*effects, *nudges)
+    return ApplyResult(state=updated, effects=effects, receipt_key=effect.effect_key)
+
+
+def fail_restart(state: RunState, effect: Effect, command: EffectFailed) -> ApplyResult:
+    """A restart that failed or was abandoned leaves the step paused for a Retry only.
+
+    Retryable and permanent failures alike replace the restarting cause with
+    ``failure_path`` / ``restart:<code>`` and receipt the effect. A result for a slot that
+    moved on only records its receipt.
+    """
+    slot = find_slot(state, effect.subject)
+    if slot is None:
+        return refuse_unknown(state)
+    code = command.code[:_MAX_RESTART_CODE_CHARS]
+    payload: dict[str, JsonValue] = {"failed": code}
+    if slot.status != "pending" or effect_generation(effect) != slot.session_generation:
+        return receipt_only(state, effect.effect_key, payload)
+    restarting = _restarting_cause(slot.id)
+    kept = state.model_copy(
+        update={"causes": tuple(cause for cause in state.causes if cause != restarting)}
+    )
+    detail = RESTART_FAILED_PREFIX + code
+    paused = record_pause(kept, "failure_path", detail, slot.id)
+    receipt = Receipt(key=effect.effect_key, payload=payload)
+    failed = paused.model_copy(
+        update={"seq": state.seq + 1, "receipts": (*paused.receipts, receipt)}
+    )
+    return ApplyResult(state=failed, receipt_key=effect.effect_key)
+
+
+def complete_wake(
+    graph: CompiledGraph, state: RunState, effect: Effect, command: EffectCompleted
+) -> ApplyResult:
+    """The wake found the runner back, relaunched it, or skipped the slot.
+
+    Any result of the slot's generation ends the outage it was for, so a later loss of
+    the same runner is a new one. A runner back or relaunched with its turn already
+    running only clears the failed turn and the slot's infra ladder; any other one
+    re-prompts the slot once. A skipped wake ends the slot's host-offline hold, since
+    nothing waits on the host any more. A slot that is no longer working, moved on, or
+    holds only records the receipt.
+    """
+    slot = find_slot(state, effect.subject)
+    if slot is None:
+        return refuse_unknown(state)
+    outcome = command.payload.get("outcome")
+    receipt_payload = dict(command.payload)
+    if effect_generation(effect) != slot.session_generation:
+        return receipt_only(state, effect.effect_key, receipt_payload)
+    ended = _record_wake(_end_outage(state, slot.id), slot.id, effect, command.payload)
+    if outcome == "skipped":
+        released = _release_hold(ended, slot.id)
+        receipted = receipt_only(released, effect.effect_key, receipt_payload)
+        if released.status == "running" and state.status != "running":
+            advanced, effects = _advance_closed(graph, receipted.state)
+            return receipted.model_copy(update={"state": advanced, "effects": effects})
+        return receipted
+    if slot.status != "working" or _slot_holds(state, slot.id):
+        return receipt_only(ended, effect.effect_key, receipt_payload)
+    receipt = Receipt(key=effect.effect_key, payload=receipt_payload)
+    receipted_state = ended.model_copy(
+        update={"seq": state.seq + 1, "receipts": (*ended.receipts, receipt)}
+    )
+    if outcome in _RUNNER_UP and command.payload.get("turn_running") is True:
+        recovered = drop_slot_backoff(
+            map_slot(receipted_state, slot.id, failed_turn=None), (slot.id,), (INFRA_BACKOFF,)
+        )
+        return ApplyResult(state=recovered, receipt_key=effect.effect_key)
+    nudged, effects = _reprompt(receipted_state, "runner_lost", only=slot.id)
+    return ApplyResult(state=nudged, effects=effects, receipt_key=effect.effect_key)
+
+
+def fail_wake(state: RunState, effect: Effect, command: EffectFailed) -> ApplyResult:
+    """A wake that gave up pauses as any effect does, ends the outage it was for, and ends
+    the slot's host-offline hold: nothing waits on the host any more."""
+    failed = fail_effect(state, effect, command)
+    slot = find_slot(state, effect.subject)
+    if slot is None or effect_generation(effect) != slot.session_generation:
+        return failed
+    ended = _release_hold(_end_outage(failed.state, slot.id), slot.id)
+    return failed.model_copy(update={"state": ended.model_copy(update={"seq": state.seq + 1})})
+
+
+def note_runner_held(state: RunState, command: RunnerHeld) -> ApplyResult:
+    """Hold a working slot whose host is offline: Cancel only, and no infra re-prompts."""
+    slot = find_slot(state, command.slot_id)
+    if slot is None:
+        return refuse_unknown(state)
+    if command.generation != slot.session_generation:
+        return refuse(state, "slot.superseded")
+    cause = _host_offline_cause(slot.id)
+    if slot.status != "working" or cause in state.causes:
+        return ApplyResult(state=state)
+    held = drop_slot_backoff(state, (slot.id,), (INFRA_BACKOFF,))
+    paused = record_pause(held, cause.reason, cause.detail, cause.subject)
+    return ApplyResult(state=paused.model_copy(update={"seq": state.seq + 1}))
+
+
+def note_runner_hold_ended(
+    graph: CompiledGraph, state: RunState, command: RunnerHoldEnded
+) -> ApplyResult:
+    """Drop the slot's hold. A run running again finishes closes; the wake re-prompts."""
+    slot = find_slot(state, command.slot_id)
+    if slot is None:
+        return refuse_unknown(state)
+    if command.generation != slot.session_generation:
+        return refuse(state, "slot.superseded")
+    cause = _host_offline_cause(slot.id)
+    if cause not in state.causes:
+        return ApplyResult(state=state)
+    ended = _without_causes(state, lambda item: item == cause)
+    ended = ended.model_copy(update={"seq": state.seq + 1})
+    effects: tuple[Effect, ...] = ()
+    if ended.status == "running":
+        ended, effects = _advance_closed(graph, ended)
+    return ApplyResult(state=ended, effects=effects)
 
 
 def note_rejection(state: RunState, command: RejectionObserved) -> ApplyResult:
@@ -254,20 +479,40 @@ def note_rejection(state: RunState, command: RejectionObserved) -> ApplyResult:
 
 
 def note_runner_lost(state: RunState, command: RunnerLost) -> ApplyResult:
-    """Emit one ``runner_lost`` effect. Does not pause."""
-    key = f"runner:{command.session_id}:{command.generation}"
-    if _has_receipt(state, key):
-        return ApplyResult(state=state, receipt_key=key)
+    """One loss per runner incarnation: mark the turn and wake the slot.
+
+    A loss already receipted is answered with its receipt. The fourth loss of one
+    generation pauses ``infra`` / ``infra.runner_lost`` instead of waking. Only a
+    working slot of the loss's generation can lose its runner.
+    """
     slot = find_slot(state, command.slot_id)
     if slot is None:
         return refuse_unknown(state)
-    if command.generation < slot.session_generation:
+    key = runner_loss_key(
+        command.session_id,
+        command.generation,
+        command.runner_id,
+        command.fact_key,
+        slot.connection_epoch,
+    )
+    if _has_receipt(state, key):
+        return ApplyResult(state=state, receipt_key=key)
+    if command.generation != slot.session_generation:
         return refuse(state, "slot.superseded")
+    if slot.status in _HANDED_OFF:
+        return refuse(state, "slot.closed")
+    if slot.status != "working":
+        return refuse(state, "slot.not_ready")
+    if reports_an_ended_outage(slot, command.runner_id, command.observed_at):
+        # The key stays free: it names this epoch's outage, which has not happened yet.
+        return ApplyResult(state=state)
+    failed_turn = command.fact_key or f"turn:{command.session_id}:{command.generation}:None"
     payload: dict[str, JsonValue] = {
         "session_id": command.session_id,
         "generation": command.generation,
+        "runner_id": command.runner_id,
     }
-    return _emit_runner_lost(state, command.slot_id, payload, (key,))
+    return _lose_runner(state, slot, failed_turn, payload, (key,))
 
 
 def note_usage_limited(
@@ -327,6 +572,10 @@ def note_session_failed(
     if slot is not None and slot.status in _HANDED_OFF:
         return refuse(state, "slot.closed")
     if command.failure_class == "infra.runner_lost":
+        if state.rules < RULES:
+            from coral.engine.previous_rules import session_runner_lost
+
+            return session_runner_lost(state, command, now, policy)
         return _session_runner_lost(state, command, now, policy)
     if slot is None:
         return refuse_unknown(state)
@@ -482,14 +731,14 @@ def _watchdog_due(state: RunState, timer: Timer, now: datetime) -> ApplyResult:
 def _infra_due(state: RunState, timer: Timer) -> ApplyResult:
     """Stages 1 and 2 re-prompt a failed turn. Stage 3 pauses ``infra`` if it keeps failing.
 
-    A slot that is not working only disarms the stage. Stage 3 pauses only while the
-    slot is marked failed or its re-prompt is undelivered: a re-prompted turn that is
-    still running is left alone.
+    A slot that is not working, that holds, or that waits on its fourth-loss pause only
+    disarms the stage. Stage 3 pauses only while the slot is marked failed or its
+    re-prompt is undelivered: a re-prompted turn that is still running is left alone.
     """
     kept = tuple(item for item in state.timers if item.key != timer.key)
     base = state.model_copy(update={"timers": kept, "seq": state.seq + 1})
     slot = find_slot(base, timer.subject)
-    if slot is None or slot.status != "working":
+    if slot is None or slot.status != "working" or not _ladder_allowed(base, slot.id):
         return ApplyResult(state=base)
     if timer.stage < 3:
         nudged, effects = _reprompt(base, "backoff", only=slot.id)
@@ -557,8 +806,11 @@ def _without_causes(state: RunState, dropped: Callable[[PauseCause], bool]) -> R
 
 
 def _retry_slots(state: RunState, owner_id: str, seq: int) -> tuple[RunState, tuple[Effect, ...]]:
+    """Bump each slot of ``owner_id`` and hold it ``recovery.restarting`` for its restart."""
+    expected_head = _expected_head(state)
     slots = []
     effects: list[Effect] = []
+    restarting: list[str] = []
     for slot in state.slots:
         if slot.activation_id != owner_id:
             slots.append(slot)
@@ -575,6 +827,10 @@ def _retry_slots(state: RunState, owner_id: str, seq: int) -> tuple[RunState, tu
                     "pending_input": False,
                     "failed_turn": None,
                     "nudges": 0,
+                    "wakes": 0,
+                    "connection_epoch": 0,
+                    "retired_runners": (),
+                    "outage_ended_at": None,
                 }
             )
         )
@@ -587,10 +843,137 @@ def _retry_slots(state: RunState, owner_id: str, seq: int) -> tuple[RunState, tu
                 {
                     "generation": generation,
                     "phases": [str(phase) for phase in _RETRY_PHASES],
+                    "expected_head": expected_head,
                 },
             )
         )
-    return state.model_copy(update={"slots": tuple(slots)}), tuple(effects)
+        restarting.append(slot.id)
+    updated = state.model_copy(update={"slots": tuple(slots)})
+    for slot_id in restarting:
+        updated = record_pause(updated, "infra", RESTARTING_DETAIL, slot_id)
+    return updated, tuple(effects)
+
+
+def _expected_head(state: RunState) -> str | None:
+    """The newest commit the run recorded: a close's commit, or the head a restart kept.
+
+    A reader's close has none. A restart keeps the head it verified, which may be a commit
+    its step's own close made but never reported.
+    """
+    fields = {
+        effect.effect_key: "commit" if effect.kind == "close_slot" else "head"
+        for effect in state.effects
+        if effect.kind in ("close_slot", "retry_step")
+    }
+    for receipt in reversed(state.receipts):
+        field = fields.get(receipt.key)
+        commit = None if field is None else receipt.payload.get(field)
+        if isinstance(commit, str) and commit:
+            return commit
+    return None
+
+
+def _cause_activation(state: RunState, subject: str) -> Activation | None:
+    """The activation a cause names: its slot's, itself, or its node's newest."""
+    if not subject:
+        return None
+    slot = find_slot(state, subject)
+    if slot is not None:
+        return find_activation(state, slot.activation_id)
+    owner = find_activation(state, subject)
+    if owner is not None:
+        return owner
+    return next((item for item in reversed(state.activations) if item.node_id == subject), None)
+
+
+def _resolves_to(state: RunState, subject: str, owner_id: str) -> bool:
+    owner = _cause_activation(state, subject)
+    return owner is not None and owner.id == owner_id
+
+
+def _restarting_cause(slot_id: str) -> PauseCause:
+    return PauseCause(reason="infra", detail=RESTARTING_DETAIL, subject=slot_id)
+
+
+def _host_offline_cause(slot_id: str) -> PauseCause:
+    return PauseCause(reason="infra", detail=HOST_OFFLINE_DETAIL, subject=slot_id)
+
+
+def _release_hold(state: RunState, slot_id: str) -> RunState:
+    """Drop the slot's host-offline hold, if it has one."""
+    hold = _host_offline_cause(slot_id)
+    return _without_causes(state, lambda cause: cause == hold)
+
+
+def _wake_in_flight(state: RunState, slot_id: str) -> bool:
+    """Whether a wake of the slot's current generation has no result yet."""
+    slot = find_slot(state, slot_id)
+    if slot is None:
+        return False
+    receipted = {receipt.key for receipt in state.receipts}
+    return any(
+        effect.kind == "runner_lost"
+        and effect.subject == slot_id
+        and effect.effect_key not in receipted
+        and effect_generation(effect) == slot.session_generation
+        for effect in state.effects
+    )
+
+
+def _slot_holds(state: RunState, slot_id: str) -> bool:
+    return any(holds_slot(cause) and cause.subject == slot_id for cause in state.causes)
+
+
+def _ladder_allowed(state: RunState, slot_id: str) -> bool:
+    """No infra stage may re-prompt a held slot, one paused for its fourth loss, or one
+    whose wake is in flight: the wake's own result decides what comes next."""
+    lost = PauseCause(reason="infra", detail=RUNNER_LOST_DETAIL, subject=slot_id)
+    if _slot_holds(state, slot_id) or lost in state.causes:
+        return False
+    return state.rules < RULES or not _wake_in_flight(state, slot_id)
+
+
+def _record_wake(
+    state: RunState, slot_id: str, effect: Effect, payload: dict[str, JsonValue]
+) -> RunState:
+    """Remember the runner a relaunch replaced and when the wake saw the runner back."""
+    slot = find_slot(state, slot_id)
+    outcome = payload.get("outcome")
+    if slot is None or outcome not in {"runner_back", "relaunched"}:
+        return state
+    changes: dict[str, object] = {}
+    lost = effect.payload.get("runner_id")
+    if outcome == "relaunched" and isinstance(lost, str) and lost not in slot.retired_runners:
+        changes["retired_runners"] = (*slot.retired_runners, lost)
+    seen = _aware_time(payload.get("seen_at"))
+    if seen is not None and (slot.outage_ended_at is None or seen > slot.outage_ended_at):
+        changes["outage_ended_at"] = seen
+    return map_slot(state, slot_id, **changes) if changes else state
+
+
+def _aware_time(value: JsonValue | None) -> datetime | None:
+    """An ISO-8601 time with a zone, or ``None`` for anything else."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        return None
+    return parsed
+
+
+def _end_outage(state: RunState, slot_id: str) -> RunState:
+    """Start the slot's next connection epoch: its runner's next loss is a new one."""
+    slot = find_slot(state, slot_id)
+    if slot is None:
+        return state
+    return map_slot(state, slot_id, connection_epoch=slot.connection_epoch + 1)
+
+
+def _run_id(state: RunState) -> str:
+    return state.run_id if isinstance(state.run_id, str) else ""
 
 
 def _reset_attempts(state: RunState, owner_id: str) -> tuple[AttemptCount, ...]:
@@ -760,25 +1143,15 @@ def _timer_is_stale(state: RunState, timer: Timer) -> bool:
     return slot is not None and timer.generation < slot.session_generation
 
 
-def _receipt_only(state: RunState, key: str, payload: dict[str, JsonValue]) -> ApplyResult:
-    """Store ``key`` and emit nothing. A second call returns the receipt."""
-    if _has_receipt(state, key):
-        return ApplyResult(state=state, receipt_key=key)
-    receipt = Receipt(key=key, payload=payload)
-    updated = state.model_copy(
-        update={"seq": state.seq + 1, "receipts": (*state.receipts, receipt)}
-    )
-    return ApplyResult(state=updated, receipt_key=key)
-
-
 def _session_runner_lost(
     state: RunState, command: SessionFailed, now: datetime, policy: TimerPolicy
 ) -> ApplyResult:
-    """Receipt the turn and the runner key so one loss emits one effect.
+    """Receipt the turn and the loss key so one lost runner emits one effect.
 
-    Every loss marks the failed turn and arms the infra ladder unless one is live, so
-    stage nudges relaunch the runner and a slot that keeps failing pauses ``infra``. A
-    repeated loss of one session generation records only the turn's receipt.
+    Every loss marks the failed turn. A new loss wakes the slot and arms no infra stage:
+    the wake's result re-prompts it. A loss of a runner already reported lost records
+    only the turn's receipt, and arms the ladder (unless one is live) only when no wake
+    of the slot is out.
     """
     if _has_receipt(state, command.fact_key):
         return ApplyResult(state=state, receipt_key=command.fact_key)
@@ -787,33 +1160,55 @@ def _session_runner_lost(
         return refuse_unknown(state)
     if _fact_is_stale(slot, command.fact_key):
         return refuse(state, "slot.superseded")
+    if reports_an_ended_outage(slot, command.runner_id, command.observed_at):
+        return receipt_only(state, command.fact_key, {"failure_class": "infra.runner_lost"})
     session_id, generation = _session_from_turn_key(command.fact_key, slot.session_generation)
-    runner_key = f"runner:{session_id}:{generation}"
-    payload: dict[str, JsonValue] = {"session_id": session_id, "generation": generation}
-    marked, _armed = _arm_infra_unless_live(
-        mark_failed_turn(state, slot.id, command.fact_key), slot, now, policy
+    key = runner_loss_key(
+        session_id, generation, command.runner_id, command.fact_key, slot.connection_epoch
     )
-    if _has_receipt(state, runner_key):
-        return _receipt_only(marked, command.fact_key, {"failure_class": "infra.runner_lost"})
-    return _emit_runner_lost(marked, slot.id, payload, (runner_key, command.fact_key))
+    if _has_receipt(state, key):
+        marked = mark_failed_turn(state, slot.id, command.fact_key)
+        if _ladder_allowed(state, slot.id):
+            marked, _armed = _arm_infra_unless_live(marked, slot, now, policy)
+        return receipt_only(marked, command.fact_key, {"failure_class": "infra.runner_lost"})
+    payload: dict[str, JsonValue] = {
+        "session_id": session_id,
+        "generation": generation,
+        "runner_id": command.runner_id,
+    }
+    return _lose_runner(state, slot, command.fact_key, payload, (key, command.fact_key))
 
 
-def _emit_runner_lost(
+def _lose_runner(
     state: RunState,
-    slot_id: str,
+    slot: Slot,
+    failed_turn: str,
     payload: dict[str, JsonValue],
     receipt_keys: tuple[str, ...],
 ) -> ApplyResult:
+    """Mark the turn, then wake the slot, or pause once it used its wakes this generation.
+
+    The wake, or the pause, replaces the infra ladder, so no stage re-prompts the slot
+    while it waits: the wake's result re-prompts it.
+    """
     seq = state.seq + 1
-    effect = _effect(state, seq, "runner_lost", slot_id, payload)
     receipts = tuple(
         Receipt(key=key, payload=dict(payload)) for key in dict.fromkeys(receipt_keys)
     )
-    updated = state.model_copy(
+    marked = mark_failed_turn(state, slot.id, failed_turn)
+    if slot.wakes >= MAX_WAKES:
+        unladdered = drop_slot_backoff(marked, (slot.id,), (INFRA_BACKOFF,))
+        paused = record_pause(unladdered, "infra", RUNNER_LOST_DETAIL, slot.id)
+        stopped = paused.model_copy(update={"seq": seq, "receipts": (*paused.receipts, *receipts)})
+        return ApplyResult(state=stopped, receipt_key=receipt_keys[0])
+    unladdered = drop_slot_backoff(marked, (slot.id,), (INFRA_BACKOFF,))
+    woken = map_slot(unladdered, slot.id, wakes=slot.wakes + 1)
+    effect = _effect(state, seq, "runner_lost", slot.id, payload)
+    updated = woken.model_copy(
         update={
             "seq": seq,
-            "effects": (*state.effects, effect),
-            "receipts": (*state.receipts, *receipts),
+            "effects": (*woken.effects, effect),
+            "receipts": (*woken.receipts, *receipts),
         }
     )
     return ApplyResult(state=updated, effects=(effect,), receipt_key=receipt_keys[0])

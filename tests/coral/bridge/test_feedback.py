@@ -11,9 +11,11 @@ from typing import Any
 
 import pytest
 
-from coral.bridge.feedback import fed_payload, feedback_input, gate_of
+from coral.bridge.feedback import abandoned_restart, fed_payload, feedback_input, gate_of
 from coral.bridge.keys import anchor_effect_key, store_slot_id
+from coral.bridge.mapping import RECOVERY_RESTART
 from coral.db.enum_codecs import LogKind, RunPauseReason, RunStatus, SlotStatus, WorkStatus
+from coral.engine.lifecycle import retryable_activations
 from coral.engine.types import EffectCompleted, EffectFailed, PauseRun
 from coral.model.ids import effect_session_id
 from coral.queue import FinishedWork
@@ -24,6 +26,7 @@ from tests.coral.bridge._world import (
     WORKSPACE,
     World,
     finished,
+    retried,
     row_of,
     settle,
     start,
@@ -387,3 +390,128 @@ def test_a_failure_fed_after_a_resume_revived_its_row_is_dropped(world: World, c
     world.bridge.feed(finished(created))
     state = world.assert_fold_matches(run.id)
     assert (state.status, state.slots[0].status) == ("running", "session_created")
+
+
+def _restart(world: World, run_id: str) -> WorkItem:
+    return row_of(world, run_id, RECOVERY_RESTART)
+
+
+def test_a_finished_restart_creates_the_next_generation_and_names_what_it_salvaged(
+    world: World,
+) -> None:
+    run_id = retried(world)
+    salvaged = {
+        "salvage_ref": f"refs/coral/salvage/{'e' * 32}",
+        "salvage_commit": "f" * 40,
+        "head_verified": True,
+        "noise": "x" * 500,
+    }
+    world.bridge.feed(
+        finished(settle(world, _restart(world, run_id), WorkStatus.SUCCEEDED, result=salvaged))
+    )
+
+    assert _causes(world, run_id) == []
+    assert world.run(run_id).status == int(RunStatus.RUNNING)
+    creates = [
+        json.loads(item.payload)
+        for item in world.work(run_id)
+        if json.loads(item.payload).get("engine_kind") == "create_session"
+    ]
+    assert [payload["generation"] for payload in creates] == [1, 2]
+    state = world.assert_fold_matches(run_id)
+    (receipt,) = [
+        item
+        for item in state.receipts
+        if item.key == json.loads(_restart(world, run_id).payload)["effect_key"]
+    ]
+    salvaged.pop("noise")
+    assert receipt.payload == salvaged
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code", "result", "detail"),
+    [
+        pytest.param(
+            WorkStatus.FAILED,
+            "workspace.head_moved",
+            None,
+            "restart:workspace.head_moved",
+            id="permanent",
+        ),
+        pytest.param(
+            WorkStatus.FAILED,
+            "infra.transient",
+            {"last_error_code": "dispatch.stop_unconfirmed"},
+            "restart:dispatch.stop_unconfirmed",
+            id="retries-ran-out",
+        ),
+    ],
+)
+def test_a_failed_restart_leaves_the_step_paused_for_a_retry_only(
+    world: World,
+    status: WorkStatus,
+    error_code: str,
+    result: dict[str, Any] | None,
+    detail: str,
+) -> None:
+    run_id = retried(world)
+
+    world.bridge.feed(
+        finished(
+            settle(world, _restart(world, run_id), status, error_code=error_code, result=result)
+        )
+    )
+
+    assert _causes(world, run_id) == [("failure_path", detail, IMPLEMENT)]
+    state = world.assert_fold_matches(run_id)
+    assert retryable_activations(state) == ("implement||",)
+    assert world.run(run_id).status == int(RunStatus.PAUSED)
+
+
+def test_only_an_abandoned_restart_of_the_slots_generation_is_fed_as_its_failure(
+    world: World,
+) -> None:
+    run_id = retried(world)
+    row = _restart(world, run_id)
+    state = world.bridge.load(workspace_id=WORKSPACE, run_id=run_id).state
+    key = json.loads(row.payload)["effect_key"]
+    abandoned = settle(world, row, WorkStatus.ABANDONED, error_code="slot.generation_mismatch")
+
+    assert abandoned_restart(abandoned, state) == EffectFailed(
+        effect_key=key, code="slot.generation_mismatch", retryable=False
+    )
+    # The drainer's hook never sees an abandoned row; only the resync feeds it.
+    assert feedback_input(finished(abandoned)) is None
+    older = dataclasses.replace(
+        abandoned, payload=json.dumps({**json.loads(row.payload), "generation": 1})
+    )
+    assert abandoned_restart(older, state) is None
+    for status in (WorkStatus.FAILED, WorkStatus.SUCCEEDED, WorkStatus.PENDING):
+        assert abandoned_restart(dataclasses.replace(abandoned, status=int(status)), state) is None
+    close = dataclasses.replace(
+        abandoned,
+        payload=json.dumps({**json.loads(row.payload), "effect_type": "close_slot"}),
+    )
+    assert abandoned_restart(close, state) is None
+
+
+def test_wake_results_feed_only_the_fields_the_engine_reads() -> None:
+    seen_at = "2026-01-01T12:00:00+00:00"
+    assert fed_payload(
+        "runner_lost",
+        {"outcome": "relaunched", "turn_running": False, "seen_at": seen_at, "runner": "r2"},
+    ) == {"outcome": "relaunched", "turn_running": False, "seen_at": seen_at}
+    assert fed_payload("runner_lost", {"outcome": 1, "turn_running": "no"}) == {}
+
+
+def test_restart_results_feed_only_the_fields_the_engine_reads() -> None:
+    assert fed_payload(
+        "retry_step",
+        {
+            "salvage_ref": None,
+            "salvage_commit": None,
+            "head_verified": False,
+            "phase": "reset",
+        },
+    ) == {"salvage_ref": None, "salvage_commit": None, "head_verified": False}
+    assert fed_payload("retry_step", {"salvage_ref": 1, "head_verified": "yes"}) == {}

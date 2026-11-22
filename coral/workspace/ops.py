@@ -105,8 +105,13 @@ WorkspaceErrorCode = Literal[
     "workspace.target_mismatch",
     "workspace.capability_unavailable",
     "workspace.worktree_displaced",
+    # A reset under a salvage: the tree changed since it, or HEAD is not its parent.
+    "workspace.tree_changed",
+    "workspace.head_moved",
 ]
 WORKSPACE_ERROR_CODES: frozenset[str] = frozenset(get_args(WorkspaceErrorCode))
+TREE_CHANGED: WorkspaceErrorCode = "workspace.tree_changed"
+HEAD_MOVED: WorkspaceErrorCode = "workspace.head_moved"
 
 
 class WorkspaceOpError(Exception):
@@ -576,8 +581,23 @@ class WorkspaceOps(Protocol):
     ) -> SalvageResult: ...
 
     async def reset(
-        self, ref: WorkspaceRef, executor: OpExecutor, *, op_key: str, commit: str
-    ) -> ResetResult: ...
+        self,
+        ref: WorkspaceRef,
+        executor: OpExecutor,
+        *,
+        op_key: str,
+        commit: str,
+        salvage_commit: str | None = None,
+    ) -> ResetResult:
+        """
+        Restore ``commit`` and remove untracked files that are not ignored.
+
+        With ``salvage_commit`` (a salvage ref's commit), HEAD must be ``commit`` and that
+        salvage's parent (``workspace.head_moved``), and every path the tree records
+        differently from HEAD must be as the salvage recorded it (``workspace.tree_changed``),
+        checked under the op's own lock.
+        """
+        ...
 
     async def merge(
         self,

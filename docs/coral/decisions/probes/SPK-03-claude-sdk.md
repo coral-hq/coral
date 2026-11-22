@@ -10,12 +10,13 @@ directory that prints one JSON verdict. Nothing imports these scripts.
 | 1, TOOL_CALL DENY on a connector MCP tool | pass with S21 for Coral specs; fail for other sessions | S21 landed for `params.coral` specs | HRN-02 |
 | 7, CLI MCP tool timeout | partial | Bounds for long tool calls | TLS-02, EVD-02 |
 | 2, Agent and Task unreachable | not run | Outside this change | K9 attribution |
-| 16, watchdog against a long turn | not run | Outside this change | S27 retest placement |
+| 16, watchdog against a long turn | pass | A generated step's long model call outlives the runner and harness idle reapers; no S27 change | S27 retest placement |
 | 19, local `CredentialStore` | not run | Outside this change | K12 auth refs |
 | 20, plain routing pin | not run | Outside this change | SES-03 create defaults |
 
-Spikes 2, 16, 19 and 20 have no verdict yet. Their pre-read pointers are in the
-SPK-03 section of `docs/coral/roadmap/CORAL_ENGINEERING_ROADMAP.md`.
+Spikes 2, 19 and 20 have no verdict yet. Their pre-read pointers are in the
+SPK-03 section of `docs/coral/roadmap/CORAL_ENGINEERING_ROADMAP.md`. Spike 16
+ran later, on a real stack, with its own versions (below).
 
 ## Versions probed
 
@@ -252,6 +253,51 @@ Bounds:
 Not measured: the in-process `mcp__omnigent__*` path. It uses the SDK control
 protocol and needs the runner dispatch bridge, so this probe cannot reach it.
 That gap is why the verdict is partial.
+
+## Spike 16: a long model call against the idle reapers
+
+Verdict: pass.
+
+```bash
+uv run --no-sync python docs/coral/decisions/probes/spike_16.py
+```
+
+Local only, about 4.5 minutes. The recorded run used macOS 27.2.1, `claude`
+2.1.325 and `claude-agent-sdk` 0.2.121, with `ANTHROPIC_API_KEY` unset
+(`env -u ANTHROPIC_API_KEY`); `--hold-seconds` sets a shorter hold for a smoke
+run. It starts a real stack: a server with the Coral plugin, a
+host whose config sets `runner: {idle_timeout_s: 60}` with
+`OMNIGENT_HARNESS_IDLE_TIMEOUT_S=60` in its environment, and the review loop.
+The implementer's first model call is held for 180 s, then released.
+
+The CLI abandons a call that gets no response headers for about 120 s and sends
+it again, so the spike holds that repeat too and releases both. A hold above
+about 240 s is not a hold: the CLI's second resend draws from an empty queue.
+
+What it measured:
+
+- The step's own runner, harness, sandbox launcher and CLI were each the same
+  process (pid and start time) through the hold, sampled every 5 s, and the
+  runner id did not change.
+- Neither reaper logged against the step: no `runner idle timeout reached`
+  line, and no `reaping idle harness subprocess` line for its conversation.
+- The handoff was accepted after the release.
+
+Positive controls, so the pass is not vacuous:
+
+- The runner's own log shows the 60 s window it read from
+  `runner.idle_timeout_s`.
+- The harness window reached the step's sandbox launcher's environment as
+  `60`.
+- An idle sibling (the reviewer, paused at its nudge limit with its session
+  open) had its runner exit for idleness about 65 s after the pause, so the
+  60 s runner window was live and only the held turn kept the step's runner up.
+
+Limit: the harness reaper's own 60 s cutoff was not seen firing. The variable
+reaches the runner's children, but on an idle sibling the runner's own 60 s
+shutdown comes first. The spike reports it as
+`harness_window_configured_not_seen_firing`. A step's runner is stopped on its
+accepted close, so its own idle shutdown cannot serve as a control.
 
 ## Prerequisite check
 

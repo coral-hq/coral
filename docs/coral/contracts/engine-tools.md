@@ -220,9 +220,18 @@ engine bridge:
   oversized payload) pauses the run `failure_path` visibly; the call is
   planned again and answered `run.paused`. A run that cannot be loaded is
   paused once and the call fails as a retryable transport error.
-- **Rules.** (a) holds trivially: no step is retried yet, because the
-  `retry_step` effect queues no work; the restart ladder that adds retries
-  must keep it. (b) is the unique index
+- **Rules.** (a) holds: a retry bumps the slot's `session_generation` in its
+  own commit, the restart's completion emits the new generation's
+  `create_session` with that `generation` (a first-generation create names
+  none, which reads as 1, so the recorded logs fold unchanged), and the create
+  binds the new session at it. A create completion of another generation only
+  records its receipt, and a create whose slot moved on before it bound is
+  labelled closed, stopped and abandoned
+  (`test_a_retried_slots_next_generation_gets_its_own_session_bound_at_it`,
+  `tests/coral/omni/test_session_facade.py`;
+  `test_a_retried_writer_is_fenced_salvaged_reset_and_briefed_at_generation_two`,
+  `tests/coral/omni/test_recovery.py`). A handoff from the old generation's
+  session is `slot.superseded`. (b) is the unique index
   `uq_coral_session_bindings_slot_generation`. (c) holds because every
   `apply_transition` bumps the version. (d) holds because the body is stored
   inside the `HandoffReceived` entry's JSON.
@@ -250,7 +259,7 @@ second one entered while one runs raises before it registers anything
 ## Not in this version
 
 Counting orchestrator rejections (ENG-06); replacing an orchestrator (the
-generation stays 1; the restart ladder); `items` (ENG-08); `refresh_note`
+generation stays 1; CRL-155); `items` (ENG-08); `refresh_note`
 (SES-07); evidence scopes other than `per_agent` and native steps' commands
 (HRN-03). Owners are in
 [`session-facade.md`](session-facade.md), "Deferred work and owners".
@@ -283,9 +292,10 @@ Each item below was left to the bridge in v0; each has its line in
   paused step can still hand off" holds only at the policy layer.
 - **Stopped turns.** A resume, or a plan-limit probe that clears its pause,
   re-prompts with one nudge every slot that is `evaluating` with no handoff or
-  whose last turn failed; a resume also clears a step's failed turn no rule
-  names (`agent.failed`), so that slot is re-prompted too (see
-  [`session-facade.md`](session-facade.md), "What a resume clears"). After a store outage the resync re-gathers the turn
+  whose last turn failed. A step's failed turn no rule names (`agent.failed`)
+  is not cleared by a resume: a Retry restarts that step in a new session
+  generation (see [`session-facade.md`](session-facade.md), "What a resume
+  clears" and "Retry"). After a store outage the resync re-gathers the turn
   of each working slot of a running run every five minutes, so a turn end
   lost then is folded and nudged.
 - **Nudge lease.** `nudge` is a leased kind (`_LEASED_KINDS` in

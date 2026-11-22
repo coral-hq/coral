@@ -22,8 +22,10 @@ from coral.bridge.mapping import (
     TURN_FACT,
     MapContext,
     orchestrator_create_draft,
+    regather_key,
     turn_signal_draft,
 )
+from coral.bridge.service import EngineBridge
 from coral.db.enum_codecs import RunPauseReason, RunStatus, WorkKind, WorkStatus
 from coral.engine.types import PauseRun, SessionFailed, TurnEnded
 from coral.omni.server.turn_facts import TurnFactRecorder
@@ -578,6 +580,139 @@ async def test_the_resync_re_gathers_working_slots_of_a_running_run_once_per_buc
         1,
     )
     assert world.run(run_id).pause_reason == int(RunPauseReason.USER)
+
+
+async def test_a_restarted_bridge_re_gathers_a_working_slot_at_once_and_not_again_in_the_bucket(
+    world: World, briefed: tuple[Sessions, str]
+) -> None:
+    sessions, run_id = briefed
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    await sessions.drain()
+    before = _signals(world, run_id)
+    # A new process on the same stores, in the same five-minute bucket.
+    world.clock.advance(60)
+    again = EngineBridge(
+        run_store=world.runs,
+        queue_store=world.queue,
+        versions=world.versions,
+        clock=world.clock,
+        bound_sessions=world.bound,
+    )
+
+    first = again.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    at_boot = _signals(world, run_id)
+    world.clock.advance(60)
+    second = again.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    in_bucket = _signals(world, run_id)
+    world.clock.advance(300)
+    again.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    next_bucket = _signals(world, run_id)
+
+    assert (len(before), len(at_boot), len(in_bucket), len(next_bucket)) == (1, 2, 2, 3)
+    assert (first.regathered, second.regathered) == (1, 1)
+    [booted] = [item for item in at_boot if item.id not in {row.id for row in before}]
+    assert booted.available_at == world.clock.epoch - 360
+    assert json.loads(booted.payload)["session_id"] == sessions.session_of(run_id, IMPLEMENT)
+
+
+async def test_a_bridge_that_leads_again_re_gathers_at_once_within_the_bucket(
+    world: World, briefed: tuple[Sessions, str]
+) -> None:
+    """Another leader may have queued this bucket's key in between."""
+    sessions, run_id = briefed
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    world.clock.advance(300)
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    await sessions.drain()
+    before = _signals(world, run_id)
+
+    world.bridge.begin_leader_term()
+    world.clock.advance(60)
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    again = _signals(world, run_id)
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+
+    assert (len(before), len(again), len(_signals(world, run_id))) == (2, 3, 3)
+
+
+async def test_a_run_is_marked_re_gathered_only_after_its_signals_are_queued(
+    world: World, briefed: tuple[Sessions, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sessions, run_id = briefed
+    session_id = sessions.session_of(run_id, IMPLEMENT)
+    enqueue = world.queue.enqueue_work
+    failed: list[bool] = []
+
+    def fails_once(*args: Any, **kwargs: Any) -> Any:
+        if not failed:
+            failed.append(True)
+            raise RuntimeError("store down")
+        return enqueue(*args, **kwargs)
+
+    monkeypatch.setattr(world.queue, "enqueue_work", fails_once)
+    with pytest.raises(RuntimeError, match="store down"):
+        world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    # The next bucket's re-gather is still this term's first, under its boot key.
+    world.clock.advance(300)
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+
+    [signal] = _signals(world, run_id)
+    bucket_key = turn_signal_draft(
+        run_id=run_id,
+        session_id=session_id,
+        engine_slot_id=IMPLEMENT,
+        generation=1,
+        idempotency_key=regather_key(session_id, world.clock.epoch),
+        edge=None,
+        available_at=world.clock.epoch,
+    )
+    assert signal.id != bucket_key.id
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    assert len(_signals(world, run_id)) == 1
+
+
+async def test_a_step_edge_names_the_runner_its_session_binds(
+    world: World, briefed: tuple[Sessions, str]
+) -> None:
+    sessions, run_id = briefed
+    session_id = sessions.session_of(run_id, IMPLEMENT)
+    sessions.facade.sessions.states[(WORKSPACE, session_id)] = present(
+        session_id, runner_id="runner-7"
+    )
+
+    sessions.publish_to(
+        session_id,
+        "failed",
+        turn_outcome="failed",
+        error_code="runner_disconnected",
+        error_message="Runner disconnected unexpectedly.",
+        failure_origin="runner_offline_sweep",
+    )
+    await sessions.drain()
+
+    [failed] = _of(world, run_id, SessionFailed)
+    assert (failed.failure_class, failed.runner_id) == ("infra.runner_lost", "runner-7")
+    state = world.assert_fold_matches(run_id)
+    [wake] = [effect for effect in state.effects if effect.kind == "runner_lost"]
+    assert wake.payload["runner_id"] == "runner-7"
+
+
+async def test_a_re_gather_without_an_edge_names_no_runner(
+    world: World, briefed: tuple[Sessions, str]
+) -> None:
+    sessions, run_id = briefed
+    session_id = sessions.session_of(run_id, IMPLEMENT)
+    sessions.facade.sessions.states[(WORKSPACE, session_id)] = present(
+        session_id, runner_id="runner-7"
+    )
+    sessions.dispatch.reply(session_id, assistant=False)
+    sessions.dispatch.sessions[session_id].status = "failed"
+
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id)
+    await sessions.drain()
+
+    [failed] = _of(world, run_id, SessionFailed)
+    assert (failed.cause, failed.runner_id) == ("edge_lost", None)
 
 
 async def test_a_working_slot_awaiting_its_re_prompt_is_not_re_gathered(

@@ -14,10 +14,9 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -37,8 +36,6 @@ from coral.db.enum_codecs import (
     WorkStatus,
 )
 from coral.model.ids import effect_session_id
-from coral.omni.server.turn_facts import BoundSessionRefresher
-from coral.reconcile.startup import startup_recovery_sweep
 from coral.stores.protocols import Transition, WorkItem
 from coral.stores.stable_ids import SqlAlchemyStableIdStore
 from tests.coral.bridge._world import (
@@ -49,6 +46,7 @@ from tests.coral.bridge._world import (
     Orchestrator,
     Sessions,
     World,
+    restarted,
     run_id_for,
     serving,
     start,
@@ -362,22 +360,9 @@ async def _run(
     await sessions.run(*actors)
 
 
-@asynccontextmanager
-async def _restarted(crashed: Sessions) -> AsyncIterator[Sessions]:
+def _restarted(crashed: Sessions) -> AbstractAsyncContextManager[Sessions]:
     """A new process on the dead one's database, started as the Coral lifespan starts it."""
-    assert crashed.world.db_uri is not None
-    fresh_process(crashed.world.db_uri)
-    world = World.sql(crashed.world.db_uri)
-    world.clock.now = crashed.world.clock.now + timedelta(seconds=LEASE_S + 1)
-    async with serving(world, after=crashed) as sessions:
-        BoundSessionRefresher(sessions.bindings, world.bound).refresh()
-        await startup_recovery_sweep(
-            world.runs,
-            world.queue,
-            run_reconciler=sessions.threads.schedule_resync,
-            clock=lambda: world.clock.now.timestamp(),
-        )
-        yield sessions
+    return restarted(crashed, lease_s=LEASE_S)
 
 
 @dataclass(frozen=True)

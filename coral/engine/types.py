@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
@@ -30,6 +30,12 @@ DecisionStatus = Literal["requested", "reminded", "escalated", "decided"]
 GateStatus = Literal["open", "resolved", "superseded"]
 HandoffOutcome = Literal["accepted", "evidence_missing", "blocked"]
 TERMINAL_STATUSES: frozenset[RunStatus] = frozenset({"completed", "failed", "cancelled"})
+# The reducer rules a run folds with, named by its start entry. A start entry without a
+# marker was written before markers existed and keeps folding with the previous rules; an
+# unknown marker fails to decode rather than fold with the wrong rules.
+Rules = Literal[1, 2]
+PREVIOUS_RULES: Final = 1
+RULES: Final = 2
 
 
 class _Frozen(BaseModel):
@@ -99,6 +105,15 @@ class Slot(_Frozen):
     failed_turn: str | None = None
     # Turn-end nudges sent while running since the last handoff, resume or retry.
     nudges: int = 0
+    # Runner losses this generation that emitted a wake; a retry resets it.
+    wakes: int = 0
+    # Which outage of the slot's runner a loss report is about. Each wake result, or a
+    # Resume of the fourth-loss pause, ends one, so the same runner's next loss is new.
+    connection_epoch: int = 0
+    # Runners this generation's wakes relaunched away from, and when a wake last saw the
+    # runner back: a loss report about either belongs to an outage that already ended.
+    retired_runners: tuple[str, ...] = ()
+    outage_ended_at: datetime | None = None
 
 
 class Decision(_Frozen):
@@ -167,6 +182,7 @@ class Effect(_Frozen):
 
 class RunState(_Frozen):
     status: RunStatus | None = None
+    rules: Rules = PREVIOUS_RULES
     run_id: str | None = None
     start_key: str | None = None
     version_hash: str | None = None
@@ -216,6 +232,8 @@ class StartRun(_Frozen):
     run_id: str
     start_key: str
     version_hash: str
+    # New runs pass ``RULES``; absent, as in logs written before it, the previous rules.
+    rules: Rules = PREVIOUS_RULES
 
 
 class PauseRun(_Frozen):
@@ -302,9 +320,36 @@ class TurnEnded(_Frozen):
 
 
 class RunnerLost(_Frozen):
+    """A working slot's runner stayed missing past its grace.
+
+    ``fact_key`` is the turn key of the fact that showed it; without a ``runner_id`` its
+    tail keys the loss.
+    """
+
     kind: Literal["runner_lost"] = "runner_lost"
     slot_id: str
     session_id: str
+    generation: int
+    runner_id: str | None = None
+    fact_key: str | None = None
+    # When the runner was first seen missing.
+    observed_at: datetime | None = None
+
+
+class RunnerHeld(_Frozen):
+    """The slot's host is offline: hold the slot until it returns."""
+
+    kind: Literal["runner_held"] = "runner_held"
+    slot_id: str
+    session_id: str
+    generation: int
+
+
+class RunnerHoldEnded(_Frozen):
+    """The held slot's host is back."""
+
+    kind: Literal["runner_hold_ended"] = "runner_hold_ended"
+    slot_id: str
     generation: int
 
 
@@ -326,6 +371,9 @@ class SessionFailed(_Frozen):
     failure_class: str
     cause: str
     fact_key: str
+    # The session's runner when the turn failed, and when the failure was observed.
+    runner_id: str | None = None
+    observed_at: datetime | None = None
 
 
 class PostCloseActivity(_Frozen):
@@ -359,6 +407,8 @@ Input = Annotated[
     | TimerDue
     | TurnEnded
     | RunnerLost
+    | RunnerHeld
+    | RunnerHoldEnded
     | UsageLimited
     | WaitingWithoutElicitation
     | SessionFailed

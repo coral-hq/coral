@@ -382,8 +382,12 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
   single-user header server, every request without credentials is the local
   user, so any process of that user that can reach the server (a step shell
   the sandbox lets reach loopback or the server URL, or the `omnigent` CLI)
-  can read the prompt and answer the gate as the owner; with a single-user
-  server bound to a non-loopback address, so can any network peer. Nothing on
+  can read the prompt and answer the gate as the owner; ADR-05's probe 15
+  measured a step shell reaching the server this way, with no credentials, on
+  single-user servers
+  ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
+  "Addendum: CRL-137 probe verdicts"; CRL-159). With a single-user server
+  bound to a non-loopback address, so can any network peer. Nothing on
   the server can tell such a process from the person. The random prompt id
   stops blind requests (cross-site, guessing), not a process that can read
   the anchor.
@@ -457,15 +461,19 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
 No gate is labelled Enforced. A gate may be labelled Enforced only when
 the sandbox probe in ADR-05's follow-ups passes and the server runs a mode
 that requires identity, in which steps hold no owner credential. Gates on
-single-user or auth-off servers are never Enforced.
+single-user or auth-off servers are never Enforced. The probe has run only on
+single-user servers, where every gate is unenforced by this rule; running it on
+a server that requires identity is CRL-159
+([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
+"Addendum: CRL-137 probe verdicts").
 
 ## Deferred work and owners
 
 | Work | Owner |
 |---|---|
 | A request-body size cap in `CoralRoute` for every Coral POST | CRL-150 |
-| The sandbox probe also tests, from the step shell, HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials | CRL-137 |
-| Label gates Enforced under the rule above | RUL-02 |
+| The sandbox probe on a server that requires identity: from the step shell, HTTP to the Omnigent server with the CLI's stored credentials, and owner-token minting after an environment read. It ran without credentials on single-user servers (ADR-05, "Addendum: CRL-137 probe verdicts") | CRL-159 |
+| Label gates Enforced under the rule above | CRL-159 (RUL-02) |
 | Retention of marked-read and resolved alerts | DUR-06 |
 | External delivery (webhook, email, push), batch gates, team approvers, questions and budget prompts | GTE-03, GTE-04; no live ticket |
 | Multi-label gates on `/approve` (their `approve_link` is unset) | no live ticket |

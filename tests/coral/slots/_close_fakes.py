@@ -6,6 +6,7 @@ import dataclasses
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from coral.db.enum_codecs import StableIdKind, encode_stable_id_kind
 from coral.engine.facts import TurnFact
@@ -13,6 +14,7 @@ from coral.omni.protocols import (
     CoralSessionError,
     LiveStatus,
     ObservedEdge,
+    RunnerLiveness,
     SendReceipt,
     StatusEdgeView,
     TranscriptItem,
@@ -86,11 +88,18 @@ class FakeSession:
 
     status: str | None = "idle"
     response_id: str | None = None
+    # False when the replica guessed ``response_id`` from the store (a cold cache).
+    response_observed: bool = True
     blocked_on: str | None = None
     pending_elicitations: int = 0
     background_work: bool = False
     closed: bool = False
+    # Whether its runner's tunnel is open; a stop or a dropped tunnel clears it.
     runner_alive: bool = True
+    runner_id: str | None = "runner-1"
+    # The server's liveness stamp of the runner, and whether it still calls it fresh.
+    runner_last_seen: datetime | None = None
+    runner_fresh: bool = False
     # Oldest first.
     transcript: list[FakeItem] = field(default_factory=list)
     # Messages taken but not yet persisted, oldest first; newer than the transcript.
@@ -243,9 +252,19 @@ class FakeDispatch:
             blocked_on=session.blocked_on,
             pending_elicitations=session.pending_elicitations,
             background_work=session.background_work,
+            response_observed=session.response_observed,
         )
         self._after("live_status")
         return live
+
+    async def runner_liveness(self, *, workspace_id: int, session_id: str) -> RunnerLiveness:
+        session = self._act("runner_liveness", session_id)
+        return RunnerLiveness(
+            runner_id=session.runner_id,
+            connected=session.runner_alive,
+            last_seen=session.runner_last_seen,
+            fresh=session.runner_alive or session.runner_fresh,
+        )
 
     async def queued_user_input(
         self, *, session_id: str, user_id: str | None, engine_messages: Mapping[str, bytes]

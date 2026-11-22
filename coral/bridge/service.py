@@ -12,6 +12,7 @@ import dataclasses
 import json
 import logging
 import threading
+import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ from coral.bridge.config import (
     LOCK_TIMEOUT_S,
     MAX_RUN_ACTIVATIONS,
     PAUSED_RESYNC_DELAY_S,
+    REGATHER_BUCKET_S,
     FrozenConfigMissing,
     ceil_epoch_seconds,
     engine_config_for,
@@ -45,7 +47,13 @@ from coral.bridge.config import (
     epoch_us,
     utc_now,
 )
-from coral.bridge.feedback import decision_of, feedback_input, finished_from_row, gate_of
+from coral.bridge.feedback import (
+    abandoned_restart,
+    decision_of,
+    feedback_input,
+    finished_from_row,
+    gate_of,
+)
 from coral.bridge.fold import EngineStateCache
 from coral.bridge.gate_rows import live_publish_effects
 from coral.bridge.graphs import PinnedGraphError, PinnedGraphs
@@ -55,13 +63,17 @@ from coral.bridge.keys import (
     anchor_effect_key,
     effect_work_id,
     slot_session_id,
+    store_activation_id,
 )
 from coral.bridge.mapping import (
     FED_KINDS,
+    NEXT_RESYNC_AT,
+    RUN_RESYNC,
     MapContext,
     MappedPayloadTooLarge,
     UnsupportedStance,
     anchor_create_draft,
+    boot_regather_key,
     map_effect,
     regather_key,
     resync_draft,
@@ -227,6 +239,24 @@ class PauseResult:
 
 
 @dataclass(frozen=True)
+class RetryResult:
+    """
+    What a step retry did.
+
+    :param outcome: ``retried`` when the engine took the retry, ``refused`` otherwise.
+    :param commit: ``None`` when nothing was committed (``unknown_activation``).
+    :param code: For a refusal: ``unknown_activation`` (no started activation of the run
+        has the id), the engine's code (``retry_not_allowed``, ``host_offline_hold``,
+        ``restart_in_progress``, ``run_terminal``), or ``unbuildable`` (the run was paused
+        ``failure_path`` instead).
+    """
+
+    outcome: Literal["retried", "refused"]
+    commit: BridgeCommit | None
+    code: str | None = None
+
+
+@dataclass(frozen=True)
 class RunRead:
     """
     A run as a read sees it, without the pause a failed load makes.
@@ -293,6 +323,12 @@ class EngineBridge:
         self._start_hashes: OrderedDict[tuple[int, str], str] = OrderedDict()
         self._max_start_hashes = fold_cache_size
         self._lock = threading.Lock()
+        # Names this leader term in the keys of its first re-gathers.
+        self._boot_id = uuid.uuid4().hex
+        # Runs this term re-gathered, and the bucket of that first re-gather.
+        self._regathered: dict[tuple[int, str], int] = {}
+        # Runs whose resync this term has scheduled.
+        self._scheduled: set[tuple[int, str]] = set()
 
     @property
     def run_store(self) -> RunStore:
@@ -313,12 +349,27 @@ class EngineBridge:
     def now(self) -> datetime:
         return self._clock()
 
+    def begin_leader_term(self) -> None:
+        """
+        Start this replica's records afresh when it starts leading.
+
+        Another leader may have re-gathered or scheduled the runs in between, so each
+        run's first re-gather and first resync in the new term act as after a restart.
+        """
+        with self._lock:
+            self._boot_id = uuid.uuid4().hex
+            self._regathered.clear()
+            self._scheduled.clear()
+
     def start_input(self, snapshot: EngineSnapshot) -> engine.StartRun:
         """The run's one ``StartRun``, derived from what its rows store."""
         run_id = snapshot.store.run_id
         # The run id derives from the caller's start key, so it is as idempotent a key.
         return engine.StartRun(
-            run_id=run_id, start_key=run_id, version_hash=snapshot.graph.content_hash
+            run_id=run_id,
+            start_key=run_id,
+            version_hash=snapshot.graph.content_hash,
+            rules=engine.RULES,
         )
 
     # ── loading ──────────────────────────────────────────────────────────────
@@ -556,6 +607,12 @@ class EngineBridge:
             )
         except _FOLD_TEXT_ERRORS as exc:
             raise EngineLoadFailed(workspace_id, run_id, exc) from exc
+        if (
+            outcome.applied
+            and latest[0]
+            and latest[0][-1].after.status in engine.TERMINAL_STATUSES
+        ):
+            self._forget_run((workspace_id, run_id))
         return BridgeCommit(outcome=outcome, entries=tuple(item.entry for item in latest[0]))
 
     def _apply(
@@ -685,6 +742,61 @@ class EngineBridge:
         if pause.entry.rejection is not None:
             return PauseResult(outcome="refused", commit=commit, code=pause.entry.rejection.code)
         return PauseResult(outcome="paused" if pause.accepted else "unchanged", commit=commit)
+
+    def retry_activation(
+        self, *, workspace_id: int, run_id: str, actor: str | None, activation_id: str
+    ) -> RetryResult:
+        """
+        Retry the step activation whose store id is ``activation_id``, as ``actor``.
+
+        The id is matched only against the run's own activations; none, or a run whose
+        engine has not started, is refused ``unknown_activation`` with nothing committed.
+        The engine decides the rest: the retried step's old session is restarted while
+        the run stays paused.
+
+        :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
+        :raises RunContended: when other commits kept winning.
+        """
+        snapshot = self.load(workspace_id=workspace_id, run_id=run_id)
+        found = next(
+            (
+                activation
+                for activation in snapshot.state.activations
+                if store_activation_id(run_id, activation.id) == activation_id
+            ),
+            None,
+        )
+        if snapshot.state.status is None or found is None:
+            return RetryResult(outcome="refused", commit=None, code="unknown_activation")
+        command = engine.RetryStep(
+            node_id=found.node_id,
+            item_path=found.item_path,
+            iteration_path=found.iteration_path,
+        )
+        retries: list[Applied] = []
+
+        def observe(_snapshot: EngineSnapshot, applied: Sequence[Applied]) -> CommitExtras:
+            retries[:] = [
+                item for item in applied if isinstance(item.entry.input, engine.RetryStep)
+            ]
+            return CommitExtras()
+
+        commit = self.commit_inputs(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            inputs=lambda _snapshot: (command,),
+            actor=actor,
+            extra=observe,
+        )
+        if commit.unbuildable is not None:
+            return RetryResult(outcome="refused", commit=commit, code="unbuildable")
+        if not retries:
+            # A row cancelled without its engine takes the cancel first.
+            return RetryResult(outcome="refused", commit=commit, code="run_terminal")
+        (retry,) = retries
+        if retry.entry.rejection is not None:
+            return RetryResult(outcome="refused", commit=commit, code=retry.entry.rejection.code)
+        return RetryResult(outcome="retried", commit=commit)
 
     def cancel_run(self, *, workspace_id: int, run_id: str, actor: str | None) -> BridgeCommit:
         """
@@ -826,9 +938,11 @@ class EngineBridge:
 
         A contended commit is left to the resync, which feeds it from the stored row. A
         failure whose row a resume has revived since is not fed. A completed create's
-        session goes into the bound-session index.
+        session goes into the bound-session index, and a resync that names when it
+        should run again is rescheduled for then.
         """
         self._index_created(finished)
+        self._resync_again(finished)
         command = feedback_input(finished)
         if command is None:
             return
@@ -849,6 +963,22 @@ class EngineBridge:
             )
         except EngineLoadFailed:
             return
+
+    def _resync_again(self, finished: FinishedWork) -> None:
+        """Make a finished resync row due again by the time its result names."""
+        result = finished.result
+        if finished.status != int(WorkStatus.SUCCEEDED) or not isinstance(result, dict):
+            return
+        due = result.get(NEXT_RESYNC_AT)
+        if not isinstance(due, int) or isinstance(due, bool):
+            return
+        item = finished.item
+        try:
+            effect_type = json.loads(item.payload).get("effect_type")
+        except (json.JSONDecodeError, AttributeError):
+            return
+        if effect_type == RUN_RESYNC:
+            self.reschedule_resync(workspace_id=item.workspace_id, run_id=item.run_id, due_s=due)
 
     def _index_created(self, finished: FinishedWork) -> None:
         if self._bound is None:
@@ -885,19 +1015,51 @@ class EngineBridge:
     # ── repair ───────────────────────────────────────────────────────────────
 
     def schedule_resync(self, run: CoralRun) -> None:
-        """Make the run's one resync row due: now while it runs, 15 minutes out while paused."""
+        """
+        Make the run's one resync row due: now while it runs, 15 minutes out while paused.
+
+        A paused run's first schedule in a leader term is due now too, so a restart
+        finishes at once what a crash cut short (a restart's lost feed, say).
+        """
+        key = (run.workspace_id, run.id)
         if run.status not in UNFINISHED_RUN_STATUSES:
+            self._forget_run(key)
             return
+        with self._lock:
+            seen = key in self._scheduled
         now_s = epoch_seconds(self._clock())
-        due = now_s + PAUSED_RESYNC_DELAY_S if run.status == int(RunStatus.PAUSED) else now_s
+        paused = run.status == int(RunStatus.PAUSED)
+        due = now_s + PAUSED_RESYNC_DELAY_S if paused and seen else now_s
         draft = resync_draft(run.id)
         # Most ticks find the row already due in time; a read takes no write lock.
-        for row in self._queue.get_work([draft.id], workspace_id=run.workspace_id):
-            if row.status in (int(WorkStatus.PENDING), int(WorkStatus.CLAIMED)) and (
-                row.status == int(WorkStatus.CLAIMED) or row.available_at <= due
-            ):
-                return
-        self._queue.reschedule_work(draft, workspace_id=run.workspace_id, available_at=due)
+        rows = self._queue.get_work([draft.id], workspace_id=run.workspace_id)
+        if not any(
+            row.status == int(WorkStatus.CLAIMED)
+            or (row.status == int(WorkStatus.PENDING) and row.available_at <= due)
+            for row in rows
+        ):
+            self._queue.reschedule_work(draft, workspace_id=run.workspace_id, available_at=due)
+        with self._lock:
+            self._scheduled.add(key)
+
+    def reschedule_resync(self, *, workspace_id: int, run_id: str, due_s: int) -> None:
+        """
+        Make the run's resync row due by ``due_s`` (epoch seconds).
+
+        A row already due sooner keeps its time; a claimed row is left to its worker.
+        """
+        self._queue.reschedule_work(
+            resync_draft(run_id), workspace_id=workspace_id, available_at=due_s
+        )
+
+    def _forget_run(self, key: tuple[int, str]) -> None:
+        """Drop a finished run from this term's resync and re-gather records.
+
+        Called when this process finishes the run, and when a resync finds it finished.
+        """
+        with self._lock:
+            self._scheduled.discard(key)
+            self._regathered.pop(key, None)
 
     def resync_run(self, *, workspace_id: int, run_id: str) -> ResyncReport:
         """
@@ -926,6 +1088,8 @@ class EngineBridge:
             snapshot = self.load(workspace_id=workspace_id, run_id=run_id)
         fed = enqueued = timers = 0
         rows: list[WorkItem] = []
+        if snapshot.state.status in engine.TERMINAL_STATUSES:
+            self._forget_run((workspace_id, run_id))
         if snapshot.state.status not in (None, *engine.TERMINAL_STATUSES):
             fed, enqueued, rows = self._repair_effects(snapshot)
             if fed:
@@ -973,12 +1137,26 @@ class EngineBridge:
         A slot waiting on its leased effect is skipped: its receipt comes first. The
         orchestrator a decision waits on is re-gathered too, so an archived or deleted
         one is found without another message to it. A paused run is not re-gathered;
-        its resume re-prompts what failed.
+        its resume re-prompts what failed. A run's first re-gather in a leader term is
+        keyed by the term, so a restart checks every turn at once even when the last
+        leader already re-gathered in this bucket; the rest of that bucket repeats the
+        same key.
         """
         state, run = snapshot.state, snapshot.store.run
         if state.status != "running" or snapshot.store.status != int(RunStatus.RUNNING):
             return 0
         now_s = epoch_seconds(self._clock())
+        bucket = now_s // REGATHER_BUCKET_S
+        run_key = (run.workspace_id, run.id)
+        with self._lock:
+            booted_in = self._regathered.get(run_key)
+            boot_id = self._boot_id
+
+        def key_of(session_id: str) -> str:
+            if booted_in is None or booted_in == bucket:
+                return boot_regather_key(session_id, boot_id)
+            return regather_key(session_id, now_s)
+
         drafts: list[WorkItemDraft] = []
         for slot in state.slots:
             if slot.status != "working" or awaiting_effect(state, slot.id):
@@ -992,7 +1170,7 @@ class EngineBridge:
                     session_id=session_id,
                     engine_slot_id=slot.id,
                     generation=slot.session_generation,
-                    idempotency_key=regather_key(session_id, now_s),
+                    idempotency_key=key_of(session_id),
                     edge=None,
                     available_at=now_s,
                 )
@@ -1005,19 +1183,23 @@ class EngineBridge:
                     session_id=orchestrator,
                     engine_slot_id=ORCHESTRATOR_SLOT_ID,
                     generation=ORCHESTRATOR_GENERATION,
-                    idempotency_key=regather_key(orchestrator, now_s),
+                    idempotency_key=key_of(orchestrator),
                     edge=None,
                     available_at=now_s,
                 )
             )
         if drafts:
             self._queue.enqueue_work(drafts, workspace_id=run.workspace_id, now=now_s)
+            if booted_in is None:
+                with self._lock:
+                    self._regathered.setdefault(run_key, bucket)
         return len(drafts)
 
     def _repair_effects(self, snapshot: EngineSnapshot) -> tuple[int, int, list[WorkItem]]:
         """
         Queue missing rows of unreceipted effects, the anchor, the orchestrator's create
-        and requests, and live gate visits' publishes; feed finished ones.
+        and requests, and live gate visits' publishes; feed finished ones, and an
+        abandoned restart of its slot's generation as the restart's failure.
         """
         run = snapshot.store.run
         now = self._clock()
@@ -1068,7 +1250,12 @@ class EngineBridge:
         fed: list[_Fed] = []
         for row in rows.values():
             if row.status == int(WorkStatus.ABANDONED):
-                _logger.debug("Coral run %s has abandoned work %s", run.id, row.id)
+                ended = abandoned_restart(row, snapshot.state)
+                if ended is not None:
+                    # Never revived, so it stands without the FAILED re-check.
+                    fed.append(_Fed(row.id, False, ended))
+                else:
+                    _logger.debug("Coral run %s has abandoned work %s", run.id, row.id)
                 continue
             outcome = finished_from_row(row)
             self._index_created(outcome)
@@ -1184,6 +1371,7 @@ __all__ = [
     "GateAnswerResult",
     "PauseResult",
     "ResyncReport",
+    "RetryResult",
     "RunNotRunnable",
     "RunRead",
     "TurnFactResult",

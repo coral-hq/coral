@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pydantic import JsonValue
+
 from coral.engine.machines.activation import open_node
 from coral.engine.types import (
     TERMINAL_STATUSES,
@@ -51,6 +53,7 @@ def start_run(
         update={
             "seq": state.seq + 1,
             "status": "running",
+            "rules": command.rules,
             "run_id": command.run_id,
             "start_key": command.start_key,
             "version_hash": command.version_hash,
@@ -109,6 +112,17 @@ def record_pause(state: RunState, reason: PauseReason, detail: str, subject: str
 
 def _cause_order(cause: PauseCause) -> tuple[int, str, str]:
     return (_PAUSE_ORDER.index(cause.reason), cause.subject, cause.detail)
+
+
+def receipt_only(state: RunState, key: str, payload: dict[str, JsonValue]) -> ApplyResult:
+    """Store ``key`` and emit nothing. A second call returns the receipt."""
+    if any(item.key == key for item in state.receipts):
+        return ApplyResult(state=state, receipt_key=key)
+    receipt = Receipt(key=key, payload=payload)
+    updated = state.model_copy(
+        update={"seq": state.seq + 1, "receipts": (*state.receipts, receipt)}
+    )
+    return ApplyResult(state=updated, receipt_key=key)
 
 
 def refuse(state: RunState, code: str, allowed: tuple[str, ...] = ()) -> ApplyResult:

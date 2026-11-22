@@ -1001,11 +1001,13 @@ class QueueStore(Protocol):
         workspace_id: int | None = None,
         now_fn: Callable[[], float] | None = None,
         hold: bool = False,
+        restart_held_since: bool = False,
     ) -> bool:
         """Finish a claimed item; ``hold`` re-pends it without spending an attempt.
 
         A hold needs ``status`` PENDING and keeps the first hold's start in
-        ``held_since``; any other finish clears it.
+        ``held_since``; a finish to SUCCEEDED, FAILED or ABANDONED clears it.
+        ``restart_held_since`` starts it afresh on a hold and clears it on a retry.
         """
         ...
 

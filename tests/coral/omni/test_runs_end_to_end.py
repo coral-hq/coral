@@ -8,7 +8,8 @@ and checkout command. Opening the finished run marks its run-end alert read and 
 every gate's alert. Another user's request on every runs route gets the same 404 bytes
 and marks none of the owner's alerts read. A restart on the same database resumes a
 stream with no gap or repeat, and in accounts mode a deleted account's open stream ends
-at its next re-check and cannot reconnect.
+at its next re-check and cannot reconnect. A blocked step is retried through the routes
+the detail names, and its run stays paused on the restart it queued.
 
 Live streams are served by the app on the test's event loop with their events taken
 as they are sent (an httpx client holds a body until the response ends), so they pass
@@ -31,8 +32,14 @@ from fastapi.testclient import TestClient
 from starlette.types import Message
 
 from coral.api.stream import RECHECK_S, RunStreamHub
+from coral.bridge.keys import store_activation_id
+from coral.bridge.mapping import RECOVERY_RESTART
+from coral.db.enum_codecs import WorkStatus
+from coral.db.migrate import ensure_coral_schema
 from coral.omni.protocols import Viewer
 from coral.omni.server import coral_lifespan
+from coral.stores.protocols import CoralRun
+from coral.workers.worker_lease import DEFAULT_WORKER_LEASE_NAME
 from coral.workspace.run_worktree import run_branch_name
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID
 from omnigent.runtime import pending_elicitations
@@ -49,8 +56,8 @@ from tests.coral.api._stream_client import (
     pump,
     read_until,
 )
-from tests.coral.bridge._gates import APPROVE_TOKEN
-from tests.coral.bridge._world import World
+from tests.coral.bridge._gates import APPROVE_TOKEN, brief, effects, payload, work_for
+from tests.coral.bridge._world import IMPLEMENT, World, blocked, run_spec, start
 from tests.coral.omni._gate_server import (
     CORAL_SERVER_PLUGIN,
     AccountsServer,
@@ -322,12 +329,10 @@ async def _follow_a_run(
             f"{RUNS}/{run.id}/graph", headers={**owner, "If-None-Match": graph.headers["etag"]}
         )
         outcome = await client.get(f"{RUNS}/{run.id}/outcome", headers=owner)
-        stubs = [
-            await client.post(
-                f"{RUNS}/{run.id}/activations/{'a' * 32}:retry", json={}, headers=owner
-            ),
-            await client.post(f"{RUNS}:preflight", json={}, headers=owner),
-        ]
+        retry_finished = await client.post(
+            f"{RUNS}/{run.id}/activations/{'a' * 32}:retry", json={}, headers=owner
+        )
+        preflight = await client.post(f"{RUNS}:preflight", json={}, headers=owner)
 
         cancelled = await client.post(f"{RUNS}/{other.id}:cancel", json={}, headers=owner)
         cancelled_again = await client.post(f"{RUNS}/{other.id}:cancel", json={}, headers=owner)
@@ -436,9 +441,16 @@ async def _follow_a_run(
             "unavailable": None,
         },
     }
-    assert [(response.status_code, response.json()["error"]["code"]) for response in stubs] == [
-        (501, "not_implemented")
-    ] * 2
+    # A finished run retries nothing; preflight is not served yet.
+    assert (retry_finished.status_code, retry_finished.json()["error"]) == (
+        409,
+        {
+            "code": "illegal_transition",
+            "message": "The run is completed.",
+            "details": {"status": "completed", "pause_reason": None},
+        },
+    )
+    assert (preflight.status_code, preflight.json()["error"]["code"]) == (501, "not_implemented")
 
     assert _actions(cancelled.json()) == ("cancelled", None, []), cancelled.text
     assert _actions(cancelled_again.json()) == ("cancelled", None, [])
@@ -563,6 +575,117 @@ async def test_a_restart_resumes_a_stream_from_last_event_id_with_no_gap_or_repe
     assert client.done and client.view == final["view"]
 
 
+# ── A failed step's retry ───────────────────────────────────────────────────
+
+
+def _blocked_run(db_uri: str, user: str) -> tuple[World, CoralRun, str]:
+    """
+    A two-step run of ``user``'s whose implementer was created, briefed and handed off
+    blocked, with the outcomes fed as a drainer would; and that implementer's session.
+    """
+    ensure_coral_schema(db_uri)
+    world = World.sql(db_uri)
+    spec = run_spec(user=user, start_key="blocked", workspace_id=DEFAULT_WORKSPACE_ID)
+    run = start(world, spec=spec, start_key="blocked", actor=user)
+    session_id = brief(world, run.id, IMPLEMENT, workspace_id=DEFAULT_WORKSPACE_ID)
+    world.bridge.commit_inputs(
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        run_id=run.id,
+        inputs=lambda _snapshot: blocked(IMPLEMENT),
+    )
+    return world, run, session_id
+
+
+async def test_the_owner_retries_a_blocked_step_and_the_run_waits_on_the_restart_it_queued(
+    header_server: CoralServer,
+) -> None:
+    server = header_server
+    owner, intruder = {HEADER: "alice@example.com"}, {HEADER: "bob@example.com"}
+    world, run, old_session = _blocked_run(server.db_uri, "alice@example.com")
+    # Another replica leads: this one serves the routes and drains nothing, so the
+    # restart it queues is still queued when it is read.
+    assert world.queue.acquire_worker_lease(
+        DEFAULT_WORKER_LEASE_NAME, "another-replica", lease_seconds=600
+    )
+
+    async with coral_lifespan(server.app, server.services):
+        async with _client(server.app) as client:
+            before = (await client.get(f"{RUNS}/{run.id}", headers=owner)).json()
+            [activation] = before["retry_activation_ids"]
+            retry = f"{RUNS}/{run.id}/activations/{activation}:retry"
+            refused = await client.post(retry, json={}, headers=intruder)
+            retried = await client.post(retry, json={}, headers=owner)
+            again = await client.post(retry, json={}, headers=owner)
+            after = (await client.get(f"{RUNS}/{run.id}", headers=owner)).json()
+            [listed] = (await client.get(RUNS, headers=owner)).json()["data"]
+        led = server.app.state.coral_worker_supervisor.is_leader
+
+    assert not led
+    assert _actions(before) == ("paused", "failure_path", ["cancel"])
+    assert before["causes"] == [
+        {"reason": "failure_path", "detail": "blocked", "subject": IMPLEMENT}
+    ]
+    assert activation == store_activation_id(run.id, "implement||")
+    assert (refused.status_code, refused.content) == (404, NOT_FOUND)
+    # Taken: the run stays paused, Cancel only, until the restart has fenced the old
+    # session and saved its work.
+    assert retried.status_code == 200, retried.text
+    assert retried.headers["cache-control"] == "private, no-store"
+    assert _actions(retried.json()) == _actions(listed) == ("paused", "infra", ["cancel"])
+    assert after["causes"] == [
+        {"reason": "infra", "detail": "recovery.restarting", "subject": IMPLEMENT}
+    ]
+    assert after["retry_activation_ids"] == []
+    assert (again.status_code, again.json()["error"]["details"]["reason"]) == (
+        409,
+        "restart_in_progress",
+    )
+    [restart_effect] = effects(world, run.id, "retry_step", workspace_id=DEFAULT_WORKSPACE_ID)
+    restart = work_for(world, run.id, restart_effect.effect_key, workspace_id=DEFAULT_WORKSPACE_ID)
+    assert restart is not None
+    assert (restart.status, restart.slot_generation) == (int(WorkStatus.PENDING), 2)
+    assert {
+        key: payload(restart)[key] for key in ("effect_type", "engine_kind", "session_id")
+    } == {"effect_type": RECOVERY_RESTART, "engine_kind": "retry_step", "session_id": old_session}
+
+
+async def test_two_retries_of_one_step_at_once_on_the_server_s_database_queue_one_restart(
+    header_server: CoralServer,
+) -> None:
+    server = header_server
+    owner = {HEADER: "alice@example.com"}
+    world, run, old_session = _blocked_run(server.db_uri, "alice@example.com")
+    # Another replica leads, so the restart is still queued when it is read.
+    assert world.queue.acquire_worker_lease(
+        DEFAULT_WORKER_LEASE_NAME, "another-replica", lease_seconds=600
+    )
+    activation = store_activation_id(run.id, "implement||")
+    retry = f"{RUNS}/{run.id}/activations/{activation}:retry"
+
+    async with coral_lifespan(server.app, server.services):
+        async with _client(server.app) as client:
+            answers = await asyncio.gather(
+                client.post(retry, json={}, headers=owner),
+                client.post(retry, json={}, headers=owner),
+            )
+            after = (await client.get(f"{RUNS}/{run.id}", headers=owner)).json()
+
+    # One is taken and the other sees its restart: never a busy answer or a second restart.
+    assert sorted(response.status_code for response in answers) == [200, 409], [
+        response.text for response in answers
+    ]
+    (refused,) = [response for response in answers if response.status_code == 409]
+    assert refused.json()["error"]["details"]["reason"] == "restart_in_progress"
+    [restart_effect] = effects(world, run.id, "retry_step", workspace_id=DEFAULT_WORKSPACE_ID)
+    restart = work_for(world, run.id, restart_effect.effect_key, workspace_id=DEFAULT_WORKSPACE_ID)
+    assert restart is not None
+    assert (restart.slot_generation, payload(restart)["session_id"]) == (2, old_session)
+    assert after["causes"] == [
+        {"reason": "infra", "detail": "recovery.restarting", "subject": IMPLEMENT}
+    ]
+    assert after["retry_activation_ids"] == []
+
+
 # ── Accounts mode ───────────────────────────────────────────────────────────
 
 
@@ -647,6 +770,8 @@ def test_a_deleted_account_s_stream_ends_at_its_next_recheck_and_cannot_reconnec
                     lambda c: c.kinds()[-1] == "heartbeat",
                     timeout_s=TIMEOUT_S,
                 )
+                # The heartbeat can go out before that wake's account check runs.
+                await poll_until_async(lambda: checks == [True], timeout_s=TIMEOUT_S)
                 deleted = await http.delete("/auth/users/alice", headers=admin)
                 fake_time.advance(RECHECK_S)
                 await _to_end(stream, client)
