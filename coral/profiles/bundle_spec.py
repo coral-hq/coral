@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated
@@ -18,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from coral.model.ids import MAX_SLUG_LENGTH, SLUG_PATTERN
 from coral.profiles.seeds import load_seed
+from coral.profiles.spec import ProfileSpec
+from coral.rules.compile import compile_rules
 
 GENERATOR_VERSION = 2
 ENGINE_PREFIX = "coral__"
@@ -63,6 +66,16 @@ class StepRef(BaseModel):
     workflow_id: Slug
     node_id: Slug
     roster_index: int = Field(ge=0)
+
+
+@dataclass(frozen=True)
+class ProfileOverlay:
+    """The pinned profile revision a step bundle is built from, on top of its stance's seed."""
+
+    profile_ref: str
+    revision_id: str
+    revision_no: int
+    spec: ProfileSpec
 
 
 # Forced on every step bundle after the seed, so no seed edit can loosen it.
@@ -118,6 +131,22 @@ def _merge_hygiene(config: dict[str, object], stance: Stance) -> None:
     policies[STANCE_GUARDS[stance]] = _tool_call_policy(stance_guard_handler(stance))
 
 
+def _apply_profile(config: dict[str, object], spec: ProfileSpec) -> None:
+    fragment = compile_rules(spec.rules)
+    if spec.description:
+        config["description"] = spec.description
+    instructions = str(config.get("instructions", ""))
+    if spec.instructions:
+        instructions += f"\n\nProfile instructions:\n{spec.instructions}"
+    if fragment.statements:
+        instructions += "\n\nRules you must follow:\n- " + "\n- ".join(fragment.statements)
+    config["instructions"] = instructions
+    if spec.model is not None:
+        _section(config, "executor")["model"] = spec.model
+    # Before hygiene, so its forced policies win any key clash.
+    _section(_section(config, "guardrails"), "policies").update(fragment.policies)
+
+
 def _bundle_yaml(
     stance: Stance,
     *,
@@ -125,6 +154,7 @@ def _bundle_yaml(
     generated: Mapping[str, object],
     model: str | None,
     provider: str | None,
+    profile: ProfileSpec | None = None,
 ) -> bytes:
     seed = load_seed(stance.value)
     config = copy.deepcopy(dict(seed.config))
@@ -142,6 +172,8 @@ def _bundle_yaml(
         executor["model"] = model
     if provider is not None:
         executor["auth"] = {"type": "provider", "name": provider}
+    if profile is not None:
+        _apply_profile(config, profile)
     _merge_hygiene(config, stance)
     return yaml.safe_dump(config, sort_keys=True, allow_unicode=True).encode("utf-8")
 
@@ -152,6 +184,7 @@ def build_step_bundle_yaml(
     *,
     model: str | None,
     provider: str | None,
+    profile: ProfileOverlay | None = None,
 ) -> bytes:
     """
     Build the ``config.yaml`` bytes for one workflow step's agent.
@@ -162,18 +195,28 @@ def build_step_bundle_yaml(
     :param provider: Name of a configured provider to authenticate with, or
         ``None`` when the run binds credentials another way. A literal API key
         never goes into a bundle.
+    :param profile: The pinned profile revision to overlay on the seed, or
+        ``None`` for the bare stance. Its model, when set, replaces *model*.
     :returns: Canonical YAML (sorted keys), identical for identical inputs.
     """
+    generated: dict[str, object] = {
+        "workflow_id": ref.workflow_id,
+        "node_id": ref.node_id,
+        "roster_index": ref.roster_index,
+    }
+    if profile is not None:
+        generated["profile"] = {
+            "ref": profile.profile_ref,
+            "revision_id": profile.revision_id,
+            "revision_no": profile.revision_no,
+        }
     return _bundle_yaml(
         stance,
         name=step_agent_name(ref),
-        generated={
-            "workflow_id": ref.workflow_id,
-            "node_id": ref.node_id,
-            "roster_index": ref.roster_index,
-        },
+        generated=generated,
         model=model,
         provider=provider,
+        profile=profile.spec if profile is not None else None,
     )
 
 

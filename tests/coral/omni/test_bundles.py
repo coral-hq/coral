@@ -13,11 +13,14 @@ import yaml
 from coral.omni.server.bundles import StepBundleRejected, check_hygiene, materialize, pack_bundle
 from coral.profiles.bundle_spec import (
     STANCE_GUARDS,
+    ProfileOverlay,
     Stance,
     StepRef,
     build_seed_bundle_yaml,
     build_step_bundle_yaml,
 )
+from coral.profiles.spec import ProfileSpec, RuleInstance, RuleStrength
+from coral.rules.catalog import CATALOG
 from omnigent.inner.datamodel import TerminalEnvSpec
 from omnigent.server.bundles import validate_agent_bundle
 from omnigent.spec.types import (
@@ -487,3 +490,44 @@ def test_step_agents_get_no_spawn_timer_browser_or_schedule_tools(stance: Stance
     assert not names & _SPAWN_TOOLS
     assert not [name for name in names if name.startswith(_FORBIDDEN_TOOL_PREFIXES)]
     assert ("sys_os_read" in names) is (spec.os_env is not None)
+
+
+_SAMPLE_PARAMS = {"protect_paths": {"paths": ["infra"]}}
+
+
+@pytest.mark.parametrize("stance", [Stance.IMPLEMENTER, Stance.REVIEWER])
+@pytest.mark.parametrize("template", sorted(CATALOG))
+@pytest.mark.parametrize("strength", list(RuleStrength))
+def test_every_catalog_rule_on_a_profile_passes_hygiene_and_the_handler_allowlist(
+    stance: Stance,
+    template: str,
+    strength: RuleStrength,
+    agent_store: SqlAlchemyAgentStore,
+    artifact_store: LocalArtifactStore,
+) -> None:
+    rule = RuleInstance(
+        template=template, params=_SAMPLE_PARAMS.get(template, {}), strength=strength
+    )
+    overlay = ProfileOverlay(
+        profile_ref=f"{stance.value}/strict",
+        revision_id="rev1",
+        revision_no=1,
+        spec=ProfileSpec(name="Strict", rules=[rule]),
+    )
+    config_yaml = build_step_bundle_yaml(REVIEW, stance, model=None, provider="p", profile=overlay)
+
+    materialize(agent_store, artifact_store, owner=OWNER, config_yaml=config_yaml, stance=stance)
+    spec = validate_agent_bundle(pack_bundle(config_yaml), enforce_handler_allowlist=True)
+    rule_policies = [
+        policy.name
+        for policy in (spec.guardrails.policies if spec.guardrails else None) or []
+        if policy.name.startswith("coral_rule_")
+    ]
+    statement = CATALOG[template].statement(
+        CATALOG[template].params_model.model_validate(rule.params)
+    )
+    assert statement in (spec.instructions or "")
+    if strength is RuleStrength.REQUIRED:
+        assert rule_policies == [f"coral_rule_{template}"]
+    else:
+        assert rule_policies == []
