@@ -26,17 +26,26 @@ Backend-specific emit assertions live in the per-backend modules
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import os
+import plistlib
+import re
 import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
+import psutil
 import pytest
 
+from omnigent.host.service import _wait_for_launchd_unload
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import create_os_environment
 from omnigent.inner.sandbox import create_exec_launcher, resolve_sandbox
@@ -648,6 +657,225 @@ def _shell_quote(value: str) -> str:
     :returns: Shell-safe single-quoted form of *value*.
     """
     return "'" + value.replace("'", "'\\''") + "'"
+
+
+# ---------------------------------------------------------------------------
+# Process isolation
+# ---------------------------------------------------------------------------
+
+# Reads another process's arguments and environment seven ways, then its own; prints
+# yes/no only. The markers come from a file, so no reader's command line holds one.
+_PROCESS_READ_PROBE = """
+import ctypes, pathlib, subprocess, psutil
+pid, fd, env_marker, argv_marker, file_marker, service, job_marker = (
+    pathlib.Path('markers').read_text().split()
+)
+pid, fd = int(pid), int(fd)
+libc = ctypes.CDLL(None, use_errno=True)
+argmax = ctypes.c_int(0)
+libc.sysctlbyname(b'kern.argmax', ctypes.byref(argmax), ctypes.byref(ctypes.c_size_t(4)), None, 0)
+
+def holds(data, *markers):
+    return any(marker.encode() in data for marker in markers)
+
+def procargs(oid):
+    mib = (ctypes.c_int * 3)(1, oid, pid)  # CTL_KERN
+    size = ctypes.c_size_t(argmax.value)
+    data = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, data, ctypes.byref(size), None, 0) != 0:
+        return False
+    return holds(data.raw[: size.value], env_marker, argv_marker)
+
+def psutil_read(read):
+    try:
+        return holds(repr(read()).encode(), env_marker, argv_marker)
+    except psutil.Error:
+        return False
+
+def say(name, value):
+    print(name, 'yes' if value else 'no')
+
+target = psutil.Process(pid)
+pgrep = subprocess.run(['pgrep', '-lf', argv_marker], capture_output=True, text=True)
+job = subprocess.run(['launchctl', 'print', service], capture_output=True)
+path = ctypes.create_string_buffer(1200)  # struct vnode_fdinfowithpath; vip_path at 176
+count = libc.proc_listallpids(None, 0)
+pids = (ctypes.c_int * (count + 64))()
+count = libc.proc_listallpids(pids, ctypes.sizeof(pids))
+me = psutil.Process()
+say('procargs2', procargs(49))  # KERN_PROCARGS2
+say('procargs', procargs(38))  # KERN_PROCARGS
+say('environ', psutil_read(target.environ))
+say('cmdline', psutil_read(target.cmdline))
+say('pgrep', any(line.split(' ', 1)[0] == str(pid) for line in pgrep.stdout.splitlines()))
+say('launchctl', holds(job.stdout, job_marker))
+opened = libc.proc_pidfdinfo(pid, fd, 2, path, 1200) > 0  # PROC_PIDFDVNODEPATHINFO
+say('fd_path', opened and holds(path.raw[176:], file_marker))
+say('listpids', pid in pids[:count])
+say('self', 'PATH' in me.environ() and bool(me.cmdline()))
+"""
+_OTHER_PROCESS_READS = (
+    "procargs2",
+    "procargs",
+    "environ",
+    "cmdline",
+    "pgrep",
+    "launchctl",
+    "fd_path",
+)
+
+
+_LAUNCHD_LABEL = re.compile(r"test\.omnigent\.sandbox\.(\d{1,7})\.[0-9a-f]{32}")
+_LAUNCHD_DIR = re.compile(r"sandbox-launchd-(\d{1,7})-[a-z0-9_]{8}")
+
+
+def _sweep_stale_launchd_jobs() -> None:
+    """
+    Remove the launchd jobs and plist dirs of this test whose owning process is gone.
+
+    Each name holds its owner's pid, so a killed run's leftovers go and a concurrent
+    run's stay.
+    """
+    uid = os.getuid()
+    listed = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=30)
+    for line in listed.stdout.splitlines():
+        label = line.rsplit("\t", 1)[-1]
+        owner = _LAUNCHD_LABEL.fullmatch(label)
+        if owner and not psutil.pid_exists(int(owner[1])):
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True, timeout=30
+            )
+    for plist_dir in Path("/private/tmp").glob("sandbox-launchd-*"):
+        owner = _LAUNCHD_DIR.fullmatch(plist_dir.name)
+        if not owner or psutil.pid_exists(int(owner[1])):
+            continue
+        with contextlib.suppress(FileNotFoundError):
+            info = plist_dir.lstat()
+            if stat.S_ISDIR(info.st_mode) and info.st_uid == uid:
+                shutil.rmtree(plist_dir, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def _launchd_job(marker: str) -> Iterator[str]:
+    """
+    Load a launchd job that never runs, with *marker* in its arguments and environment,
+    and yield its service target.
+
+    launchd refuses a plist on a volume that ignores ownership, where ``tmp_path`` can
+    live, so the plist goes in a private directory under ``/private/tmp``.
+    """
+    owner = os.getpid()
+    label = f"test.omnigent.sandbox.{owner}.{uuid.uuid4().hex}"
+    domain = f"gui/{os.getuid()}"
+    service_target = f"{domain}/{label}"
+    plist_dir = Path(tempfile.mkdtemp(prefix=f"sandbox-launchd-{owner}-", dir="/private/tmp"))
+    try:
+        plist = plist_dir / f"{label}.plist"
+        plist.write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": label,
+                    "ProgramArguments": ["/usr/bin/true", marker],
+                    "EnvironmentVariables": {"SANDBOX_TEST_MARKER": marker},
+                    "RunAtLoad": False,
+                }
+            )
+        )
+        plist.chmod(0o644)
+        bootstrap = subprocess.run(
+            ["launchctl", "bootstrap", domain, str(plist)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if bootstrap.returncode != 0:
+            pytest.fail(
+                f"launchctl bootstrap {domain} rc={bootstrap.returncode}: "
+                f"{bootstrap.stderr.strip()}; this test needs a GUI login session"
+            )
+        yield service_target
+    finally:
+        subprocess.run(["launchctl", "bootout", service_target], capture_output=True, timeout=30)
+        shutil.rmtree(plist_dir, ignore_errors=True)
+    # Checked only on a clean exit, so a failed unload cannot hide the test's own error.
+    if not _wait_for_launchd_unload(service_target):
+        pytest.fail(f"launchd still holds {label}")
+
+
+# CORAL(S111): a sandboxed shell cannot read another process's command line or environment
+@pytest.mark.parametrize("launch_path", ["helper", "launcher"])
+def test_sandbox_cannot_read_another_process_command_line_or_environment(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    launch_path: str,
+) -> None:
+    """
+    A seatbelt-sandboxed shell or CLI wrap cannot read a same-user process's arguments
+    or environment through ``KERN_PROCARGS2``/``KERN_PROCARGS``, psutil, ``pgrep -lf``
+    (sysmond), ``launchctl print`` or its fds, which all work outside the sandbox. It
+    still reads its own and lists pids, and the target and the job outlive the reads.
+    """
+    if active_sandbox_type != "darwin_seatbelt":
+        pytest.skip("procargs, sysmond, launchd and fd paths are macOS read paths")
+    _sweep_stale_launchd_jobs()
+    env_marker, argv_marker, file_marker, job_marker = (
+        f"sandbox-{kind}-{uuid.uuid4().hex}" for kind in ("env", "argv", "file", "job")
+    )
+    held_file = tmp_path / f"held-{file_marker}"
+    held_file.touch()
+    (tmp_path / "probe.py").write_text(_PROCESS_READ_PROBE)
+    probe = [sys.executable, "probe.py"]
+    # The outside reader and the wrap get a minimal environment, so no real secret reaches them.
+    reader_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONPATH": os.environ["PYTHONPATH"],
+        "TMPDIR": tempfile.gettempdir(),
+    }
+    spec = OSEnvSpec(
+        type="caller_process", cwd=str(tmp_path), sandbox=active_sandbox_spec_factory()
+    )
+    run_reader = functools.partial(
+        subprocess.run, cwd=tmp_path, env=reader_env, capture_output=True, text=True, timeout=60
+    )
+    with contextlib.ExitStack() as cleanup:
+        fd = os.open(held_file, os.O_RDONLY)
+        cleanup.callback(os.close, fd)
+        target = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)", argv_marker],
+            env={"PATH": reader_env["PATH"], "SANDBOX_TEST_MARKER": env_marker},
+            pass_fds=(fd,),
+        )
+        cleanup.callback(target.wait)
+        cleanup.callback(target.kill)
+        held = psutil.Process(target.pid)
+        service = cleanup.enter_context(_launchd_job(job_marker))
+        markers = (target.pid, fd, env_marker, argv_marker, file_marker, service, job_marker)
+        (tmp_path / "markers").write_text(" ".join(map(str, markers)))
+        outside = run_reader(probe)
+        if launch_path == "helper":
+            os_env = create_os_environment(spec)
+            cleanup.callback(os_env.close)
+            result = run_async(os_env.shell(shlex.join(probe)))
+            inside, inside_detail = str(result.get("stdout", "")), result
+        else:
+            launcher = create_exec_launcher(sys.executable, resolve_sandbox(spec, tmp_path))
+            cleanup.callback(Path(launcher).unlink, missing_ok=True)
+            completed = run_reader([launcher, "probe.py"])
+            inside, inside_detail = completed.stdout, completed.stderr
+        job = subprocess.run(["launchctl", "print", service], capture_output=True, timeout=30)
+        alive = held.is_running()
+    kept = ["listpids yes", "self yes"]
+    reached = [f"{read} yes" for read in _OTHER_PROCESS_READS] + kept
+    refused = [f"{read} no" for read in _OTHER_PROCESS_READS] + kept
+    observed_outside, observed_inside = outside.stdout.splitlines(), inside.splitlines()
+    missing = [line for line in reached if line not in observed_outside]
+    assert observed_outside == reached, f"failed outside: {missing}; {outside.stderr}"
+    reopened = [line for line in observed_inside if line not in refused]
+    assert observed_inside == refused, f"reopened inside: {reopened}; {inside_detail}"
+    assert job.returncode == 0, "the launchd job was gone before the inside read ended"
+    assert alive, "the target died during the reads, so a denied read proves nothing"
 
 
 # ---------------------------------------------------------------------------

@@ -1421,8 +1421,10 @@ test until someone classifies it.
   ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
   "Addendum: CRL-137 probe verdicts"). On both platforms a step reaches the
   server, so on a single-user server it still acts as the owner, a Linux step
-  included (next item). Whether to run Coral steps on untrusted content on
-  macOS before CRL-165 and CRL-166 land is an open owner decision.
+  included (next item; CRL-159). The macOS sandbox keeps other processes'
+  environments and command lines unreadable, measured on macOS 27.2.1 only
+  (CRL-170). Whether to run Coral steps on untrusted content on macOS while
+  CRL-166 and CRL-171 are open is an open owner decision.
 - **Servers that require no identity.** With authentication off, or on a
   single-user header server, every request without credentials is the local
   user. Any process of that user that can reach the server (a step shell the
@@ -1502,7 +1504,7 @@ drift (CRL-161).
 | A runner's first start in a repo probes git's untracked cache for about 6 s; a turn that ends inside it looks like a drift (`pending_input`). The E2E presets `core.untrackedCache=true` | CRL-161 |
 | Omnigent's own launch paths reach a step's runner without Coral's checks ("One relaunch path", Residuals) | CRL-162 |
 | A relaunch or a fence that meets another stop of the same runner in progress ("A stop in progress reads as stopped", Residuals) | CRL-163 |
-| Probe 15's exposures: a step reads other processes' environments and command lines on macOS (CRL-165); a step connects to a same-user harness's socket on macOS, which residual (a) says is enough to drive its turn (CRL-166); secrets in exec-time environments and argv, the model API key among them (CRL-167); the allow-listed runner token on Coral-bound sessions (CRL-168) | CRL-165, CRL-166, CRL-167, CRL-168 |
+| Probe 15's exposures: a step connects to a same-user harness's socket on macOS, which residual (a) says is enough to drive its turn (CRL-166); secrets in exec-time environments and argv, the model API key among them (CRL-167); the allow-listed runner token on Coral-bound sessions (CRL-168) | CRL-166, CRL-167, CRL-168 |
 | Probe 15 on servers that require identity (owner-JWT minting after an environment read, the CLI's stored credentials), and labelling a gate Enforced only when that passes and steps hold no owner credential; never on single-user or auth-off servers. No gate is labelled Enforced today | CRL-159 (RUL-02) |
 | A force-deleted `coral__` agent leaves the live steps that run it unable to hand off, with only `/mcp` failing closed, until the nudge cap pauses the run: consult the required-policy provider on the no-agent branch keyed on the binding, or stop the run's sessions on a forced delete | CRL-154 |
 | Showing the salvage ref in the web, and the retention and cleanup of `refs/coral/salvage/*` ([`workspace-ops.md`](workspace-ops.md), "Restart ladder") | CRL-158 |

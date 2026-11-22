@@ -495,7 +495,7 @@ not planned.
 
 | Follow-up | Owner |
 |---|---|
-| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | **Run on single-user servers only**, without credentials, in CRL-137 (`tests/e2e/coral/test_sandbox_probe.py`). macOS seatbelt, one local run: a step reaches a sibling's harness socket, other processes' environments and command lines (the model API key in every claude-sdk CLI's among them) and the server; the three probed credential files (Claude's, Omnigent's secrets and the host's tunnel tokens, in the stack's isolated home), the config file's key and the stack's bridge dir are `denied`; no other credential store was probed. Linux bwrap, the `coral-e2e` lane: the server is reachable and every other target is `hidden`, the step's own CLI included. A step runs on an allow-listed-token server, and the token is in its runner's and harness's environment as read from outside the sandbox; the step's shell reads it on macOS only. Tables, limits and owners (CRL-159, CRL-165 to CRL-168): "Addendum: CRL-137 probe verdicts" |
+| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | **Run on single-user servers only**, without credentials, in CRL-137 (`tests/e2e/coral/test_sandbox_probe.py`). macOS seatbelt, one local run: a step reaches a sibling's harness socket, other processes' environments and command lines (the model API key in every claude-sdk CLI's among them; before S111, now `denied`, see "Addendum: CRL-165 process reads on macOS") and the server; the three probed credential files (Claude's, Omnigent's secrets and the host's tunnel tokens, in the stack's isolated home), the config file's key and the stack's bridge dir are `denied`; no other credential store was probed. Linux bwrap, the `coral-e2e` lane: the server is reachable and every other target is `hidden`, the step's own CLI included. A step runs on an allow-listed-token server, and the token is in its runner's and harness's environment as read from outside the sandbox; the step's shell read it on macOS only (before S111; now `denied`). Tables, limits and owners (CRL-159, CRL-165 to CRL-168): "Addendum: CRL-137 probe verdicts" |
 | Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced. No gate is labelled Enforced today ([`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md)) | RUL-02 (CRL-159) |
 | Run probe 15 on native steps before HRN-03 enables them | CRL-138 |
 
@@ -595,10 +595,10 @@ detectors, and the test refuses a pinned `reachable` without an owner.
 | Check | Verdict | Names read | API key in environment / command line | Owner |
 |---|---|---|---|---|
 | `harness_socket` (the reviewer's) | `reachable` | | | CRL-166 |
-| `runner_environ` (the reviewer's runner) | `reachable` | `none` | `not_present` / `not_present` | CRL-165 |
-| `cli_environ` (the reviewer's CLI) | `reachable` | `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` and 13 `HARNESS_CLAUDE_SDK_*` names | `reachable` / `reachable` | CRL-165; the key CRL-167 |
-| `host_environ` | `reachable` | `none` | `not_present` / `not_present` | CRL-165 |
-| `own_cli_environ` (the step's own CLI) | `reachable` | as `cli_environ` | `reachable` / `reachable` | CRL-165; the key CRL-167 |
+| `runner_environ` (the reviewer's runner) | `reachable` | `none` | `not_present` / `not_present` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS") |
+| `cli_environ` (the reviewer's CLI) | `reachable` | `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` and 13 `HARNESS_CLAUDE_SDK_*` names | `reachable` / `reachable` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS"); the key CRL-167 |
+| `host_environ` | `reachable` | `none` | `not_present` / `not_present` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS") |
+| `own_cli_environ` (the step's own CLI) | `reachable` | as `cli_environ` | `reachable` / `reachable` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS"); the key CRL-167 |
 | `credential_files.claude` | `denied` | | | |
 | `credential_files.omnigent_secrets` | `denied` | | | |
 | `credential_files.host_tunnel` | `denied` | | | |
@@ -632,17 +632,18 @@ Reading the tables:
 
 - On macOS, `denied` is seatbelt's `(deny default)` with
   `(allow file-read-metadata)`: the shell can `stat` the files but not read
-  them. Nothing is `hidden` there: macOS has no pid namespaces, and the step
-  profile allows `sysctl-read` unfiltered (`omnigent/inner/seatbelt_sandbox.py`;
-  the likely path, unconfirmed), so a step reads other processes' environments
-  and command lines, its own CLI's and a sibling CLI's included (CRL-165).
-- **On macOS the model API key is not protected.** `config_api_key: denied`
-  covers only `config.yaml`. The same key is `reachable` in every claude-sdk
-  CLI's environment (`HARNESS_CLAUDE_SDK_API_KEY_HELPER`,
-  `HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND`) and command line (`--settings`
-  `apiKeyHelper`), the step's own CLI and its sibling's (the key helper is
-  built in `omnigent/runtime/workflow.py`). Its own CLI is enough, so no sibling
-  is needed.
+  them. Nothing is `hidden` there: macOS has no pid namespaces. In this run a
+  step read other processes' environments and command lines, its own CLI's and
+  a sibling CLI's included (CRL-165). The mechanism is in "Addendum: CRL-165
+  process reads on macOS", and since S111 those reads are `denied` (measured on
+  macOS 27.2.1).
+- **Before S111, on macOS the model API key was not protected.**
+  `config_api_key: denied` covers only `config.yaml`. The same key was
+  `reachable` in every claude-sdk CLI's environment
+  (`HARNESS_CLAUDE_SDK_API_KEY_HELPER`, `HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND`)
+  and command line (`--settings` `apiKeyHelper`), the step's own CLI and its
+  sibling's (the key helper is built in `omnigent/runtime/workflow.py`). Its own
+  CLI was enough, so no sibling was needed.
 - On Linux, in the lane, `hidden` is a namespace boundary, not a lookup miss
   (see Limits for where that has not been measured). The step's shell runs in
   the runner's `os_env` helper, which bwrap wraps on its own
@@ -653,9 +654,9 @@ Reading the tables:
   and the host are all outside the shell's namespace, and the host-side
   controls show each one alive before and after the probe.
 - `runner_environ.names` and `host_environ.names` are `none` on macOS only
-  because the stack starts from `minimal_env()`. A host started from a person's
-  shell exports every credential-like name it was started with to what a
-  macOS step reads there. Names outside the probe's patterns
+  because the stack starts from `minimal_env()`. Before S111, a host started
+  from a person's shell exported every credential-like name it was started
+  with to what a macOS step read there. Names outside the probe's patterns
   (`OMNIGENT_RUNNER_*TOKEN*`, the binding-token name,
   `OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN`, `*API_KEY*`, `HARNESS_CLAUDE_SDK_*`),
   such as `ANTHROPIC_AUTH_TOKEN`, are not reported.
@@ -691,7 +692,8 @@ Reading the tables:
   Keychain (the step profile allows `mach-lookup`), `~/.aws`, `~/.ssh`, or
   `gh`'s and `databricks`' configs. Residual (d) is narrowed for these files
   only, and credentials the host was started with stay readable in its runners'
-  environments on macOS.
+  environments to processes outside the sandbox. Since S111 a macOS step's
+  shell does not read them directly (measured on 27.2.1).
 - **The checkout read grant was on.** The runs used an editable checkout, so
   generated step bundles granted the sandbox read access to the installed
   `omnigent` and `coral` package directories (`checkout_read_paths`,
@@ -708,8 +710,8 @@ itself: the probe only measures exposures that already exist.
 | Exposure | Owner |
 |---|---|
 | A step connects to another session's harness socket (`harness_socket`, macOS) | CRL-166 |
-| A step reads other processes' environments and command lines (`runner_environ`, `cli_environ`, `host_environ`, `own_cli_environ`, macOS) | CRL-165 |
-| Secrets in exec-time environments and argv, the model API key among them (every `.api_key` and `.argv_api_key` `reachable`, macOS) | CRL-167 |
+| A step reads other processes' environments and command lines (`runner_environ`, `cli_environ`, `host_environ`, `own_cli_environ`, macOS) | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS") |
+| Secrets in exec-time environments and argv, the model API key among them (every `.api_key` and `.argv_api_key` `reachable`, macOS, before S111; processes outside the sandbox still read them) | CRL-167 |
 | The allow-listed runner token in the step runner's environment (below) | CRL-168 |
 | A single-user server takes any local process as its owner (`server_loopback`, `server_localhost`, both platforms) | CRL-159 (RUL-02) |
 
@@ -717,10 +719,11 @@ CRL-166 reopens the decision in "Addendum: probe 15" that a per-spawn harness
 bearer on POSIX is recorded but not planned.
 
 **Open for the owner.** Whether to run Coral steps on untrusted content on
-macOS before CRL-165 and CRL-166 land is the owner's risk decision. Until
-then a macOS step can read the model API key and other processes'
-environments, and can connect to a sibling's harness socket, which residual (a)
-says is enough to drive its turn. It is not decided here.
+macOS while CRL-166 and CRL-171 are open is the owner's risk decision (on a
+single-user server, CRL-159 holds on both platforms). S111 closed the process
+reads, measured on macOS 27.2.1 only (CRL-170). Until CRL-166 lands a macOS
+step can connect to a sibling's harness socket, which residual (a) says is
+enough to drive its turn. It is not decided here.
 
 ### A step on a server that keeps the allow-listed runner token
 
@@ -739,12 +742,12 @@ it (`EXPECTED_TOKEN`):
 | In the sandbox launcher's environment (`launcher.names`) | `none` | `none` |
 | In the CLI's environment (`cli.names`) | `none` | `none` |
 | In the step's own shell (`shell_env_names`) | `not_present`, names `none` | `not_present`, names `none` |
-| The step's shell reading its own runner's environment (`runner_environ`) | `reachable`, names `OMNIGENT_RUNNER_TUNNEL_TOKEN` (CRL-168) | `hidden` |
+| The step's shell reading its own runner's environment (`runner_environ`) | `reachable`, names `OMNIGENT_RUNNER_TUNNEL_TOKEN` (CRL-168; before S111, now `denied`) | `hidden` |
 
 So the step runs on such a server; the token is in its runner's and harness's
 readable environments on both platforms, and absent from the launcher's, the
-CLI's and the shell's. The step's own shell reads it from its runner on macOS
-only; on Linux that read is `hidden`.
+CLI's and the shell's. The step's own shell read it from its runner on macOS
+only (before S111; now `denied`); on Linux that read is `hidden`.
 
 **Exec-time and live environments.** These are exec-time environments. The
 host starts its runner zygote with its whole `os.environ`
@@ -776,3 +779,122 @@ replaced. The allow-listed-token test
 (`test_a_step_on_a_server_with_the_allow_listed_runner_token`) measured the
 zygote path on both platforms. Giving the zygote the filtered runner environment would be an
 Omnigent seam (CRL-167).
+
+## Addendum: CRL-165 process reads on macOS (2026-11-22)
+
+CRL-165 closes the process reads that probe 15 found on macOS seatbelt. A
+step's shell read the command line and exec-time environment of every
+same-user process that is not an Apple platform binary: a sibling runner's
+(the host's whole environment on the zygote path), each claude-sdk CLI's (the
+model API key in `HARNESS_CLAUDE_SDK_API_KEY_HELPER` and `--settings`) and the
+host daemon's. Seam S111 (`.coral/seams.yaml`) adds four rules to
+`omnigent/inner/seatbelt_sandbox.py`. Everything here was measured on macOS
+27.2.1 (26B131) only, with claude 2.1.325 and a mock model. No CI lane runs
+macOS (CRL-170).
+
+**The four read paths.** Sandbox.kext is closed source, so this is measured
+behaviour, not documented semantics.
+
+| Path | What it read | Why it was open | Closed by |
+|---|---|---|---|
+| `sysctl` `KERN_PROCARGS2` and `KERN_PROCARGS` on another pid (psutil `environ()` and `cmdline()`, probe 15's reader) | argv and exec-time environment | Seatbelt checks the names `kern.procargs2.<pid>` and `kern.procargs.<pid>`, and admits the read when either `sysctl-read` allows the name or `process-info` allows the target. The profile allowed `sysctl-read` unfiltered, and `(deny default)` does not cover `process-info*`, so `(allow process-info* (target self))` narrowed nothing. A `sysctl-read` deny alone, the ticket's first proposal, changes nothing | the `process-info*` deny and the `kern.procargs` deny together |
+| libproc on another pid (`proc_pidinfo`, `proc_pidpath`, `proc_pidfdinfo`) | path, cwd, the fd list, open-file and socket paths, POSIX shared-memory names | `process-info*` was open for every pid | the `process-info*` deny |
+| `sysmond` (`pgrep -lf`, `pkill` and its other clients) | any command line | `(allow mach-lookup)` reaches the root daemon `com.apple.sysmond`, which answers entitled clients such as `pgrep` | the `com.apple.sysmond` deny |
+| launchd job introspection (`launchctl print`, `dumpstate`) | any launchd job's environment and arguments (measured on a throwaway job; from code, the `ai.omnigent.host` LaunchAgent holds provider credentials and the host token there) | launchd answered the sandboxed client | the `process-info*` deny: launchd then refuses (rc 1); why is not confirmed |
+
+**The rules.** They sit in `_build_profile`'s baseline block, so every profile
+it emits gets them, whatever its network or egress mode:
+
+```
+(deny process-info*)
+(allow process-info* (target self))   ; existing
+(allow process-info-listpids)
+...
+(allow mach-lookup)                   ; existing
+(deny mach-lookup (global-name-prefix "com.apple.sysmond"))
+...
+(allow sysctl-read)                   ; existing
+(deny sysctl-read (sysctl-name-prefix "kern.procargs"))
+```
+
+In the orders the design reviews measured, the more specific rule of each
+pair decided. Each narrowing deny comes after the broad allow it narrows, and
+the `process-info*` deny comes before its two re-allows; that placement does
+not prove that order never matters. The profiles are the os_env step shell's
+and every spawn-time CLI wrap's (the claude CLI, codex, pi, qwen, goose, kimi,
+ACP agents and terminal-launched CLIs), so non-Coral sandboxed sessions on
+macOS change too.
+Only the claude CLI ran under the rules. Coral's host-ops git jail builds its
+own profile and does not get them.
+
+**What was measured.** Env and argv reads only; nothing here measures the
+residuals below.
+
+- Probe 15, two local runs (`EXPECTED["darwin"]`): `runner_environ`,
+  `cli_environ`, `host_environ` and `own_cli_environ`, and each one's `.api_key`
+  and `.argv_api_key`, are `denied`. Their `.names` lines are gone, because the
+  probe prints names only for a `reachable` read. `control_environ` and its
+  sub-checks stay `reachable`, every other pin is unchanged, and the run
+  completes with no cause. Test 9 (`EXPECTED_TOKEN["darwin"]`): `runner_environ`
+  is `denied`. The probe reads only through `KERN_PROCARGS2`.
+- `tests/inner/sandbox/test_sandbox_behavior.py::test_sandbox_cannot_read_another_process_command_line_or_environment`
+  starts a child that holds random markers in its environment, its argv and an
+  open file's name, and loads a launchd job that never runs, holding a marker.
+  One reader runs outside the sandbox, and inside it through the os_env helper
+  and through a CLI wrap (`create_exec_launcher`). Outside it gets all seven
+  reads (both procargs sysctls, psutil `environ()` and `cmdline()`,
+  `pgrep -lf`, `launchctl print` and `proc_pidfdinfo`), and inside it gets
+  none. Inside it still reads its own environment and lists pids with
+  `proc_listallpids`, and the child and the job are still there afterwards.
+  Without the rules all seven reads succeed inside. Dropping one rule at a
+  time: without the `process-info*` deny, procargs, psutil, `launchctl print`
+  and the fd path reopen; without the `kern.procargs` deny, procargs and psutil
+  reopen; without the sysmond deny, `pgrep` reopens; without the listpids
+  allow, listing pids fails.
+  `tests/inner/test_seatbelt_sandbox.py::test_profile_keeps_other_processes_arguments_and_environments_unreadable`
+  pins the rules' text and order.
+- The existing seatbelt and sandbox suites give the same result with and
+  without the rules. Three git tests fail both ways: `/usr/bin/git`'s xcrun
+  shim cannot load `libxcrun` inside the sandbox on this Mac.
+
+**Collateral.** Inside every such sandbox, on any other pid, the sandboxed
+process's own children included:
+
+- `pgrep` and `pkill` exit 3, and `lsof -p` fails;
+- psutil `cmdline()`, `environ()`, `exe()`, `cwd()`, `open_files()`,
+  `memory_info()`, `cpu_times()` and `num_threads()` raise `AccessDenied`;
+- libproc `proc_name`, `proc_pidpath`, `proc_pidinfo`, `proc_pidfdinfo` and
+  `proc_pid_rusage` fail (Rust `sysinfo` and gopsutil use them);
+- `launchctl print` and `blame` fail, and so does `dumpstate` (the design
+  reviews measured `dumpstate` with the `process-info-pidinfo` deny alone);
+- a tmux server started inside such a sandbox loses `pane_current_path`.
+
+Still working: every read of the process itself; pid listing
+(`proc_listallpids`, `proc_listchildpids`, psutil `pids()` and `children()`);
+`kinfo_proc` (name, ppid, status, start time, uid); and every other sysctl.
+The profile already refused signals to other pids, own children included.
+
+**Residuals.** S111 stops the sandboxed reader only, for environments and
+command lines, on macOS 27.2.1.
+
+- A step still connects to other sessions' harness sockets, which residual (a)
+  says is enough to drive their turns (CRL-166).
+- On a single-user server a step can act as the owner, on both platforms.
+  From code, that includes starting a session with no OS sandbox, which S111
+  does not cover (CRL-159).
+- The secrets stay in exec-time environments and argv, the host LaunchAgent's
+  `EnvironmentVariables` included. Processes outside the sandbox still read
+  them, and other local accounts read command lines through setuid `ps`
+  (CRL-167).
+- The allow-listed runner token stays in runner and harness environments, and
+  the server accepts it for every session (CRL-168).
+- A sandboxed process still reaches the clipboard and Spotlight. Apple Events
+  and screen capture were not measured (CRL-171).
+- Other macOS releases, and CI (CRL-170). An unknown operation or filter makes
+  `sandbox-exec` refuse the profile, which fails closed. A renamed service or
+  sysctl name would make a rule a silent no-op instead, and the behaviour test
+  and probe 15 detect that only on a Mac that runs them.
+- A sandboxed process still lists pids and reads `kinfo_proc` (the 16-character
+  name, ppid, uid and start time) of every process.
+- The login keychain stays unreadable because of the profile's `~/Library`
+  deny (S5 in `omnigent/inner/seatbelt_sandbox.py`), not because of S111.
