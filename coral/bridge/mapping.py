@@ -54,7 +54,15 @@ from coral.tools.catalog import ORCHESTRATOR_STANCE, STEP_STANCES
 
 # Effects whose outcome is fed back to the engine as a completion or a failure.
 FED_KINDS = frozenset(
-    {"create_session", "send_input", "close_slot", "nudge", "retry_step", "runner_lost"}
+    {
+        "create_session",
+        "send_input",
+        "close_slot",
+        "nudge",
+        "steer",
+        "retry_step",
+        "runner_lost",
+    }
 )
 # Effects that queue no work yet, and why; each is logged when it is committed.
 UNMAPPED_KINDS: Mapping[str, str] = MappingProxyType(
@@ -123,6 +131,11 @@ def map_effect(ctx: MapContext, effect: engine.Effect) -> WorkItemDraft | None:
         reason = "resume" if ctx.state.status == "paused" else effect.payload.get("reason")
         text = nudge_text(ctx.state, effect.subject, reason if isinstance(reason, str) else None)
         return _slot_draft(ctx, effect, SEND_INPUT, _message(ctx, effect, "nudge", text))
+    if effect.kind == "steer":
+        text = effect.payload.get("text")
+        if not isinstance(text, str) or not text:
+            return None
+        return _slot_draft(ctx, effect, SEND_INPUT, _message(ctx, effect, "steer", text))
     if effect.kind == "close_slot":
         fields = {
             "session_id": slot_session_id(ctx.workspace_id, ctx.state, effect.subject),

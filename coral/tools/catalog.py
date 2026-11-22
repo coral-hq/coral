@@ -12,7 +12,13 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from coral.tools.schemas import CHOOSE_ARROW_PARAMETERS, SUBMIT_HANDOFF_PARAMETERS
+from coral.tools.schemas import (
+    ASSIGN_AGENTS_PARAMETERS,
+    ASSIGN_TASK_PARAMETERS,
+    CHOOSE_ARROW_PARAMETERS,
+    MESSAGE_AGENT_PARAMETERS,
+    SUBMIT_HANDOFF_PARAMETERS,
+)
 
 TOOL_NAME_PREFIX = "coral_"
 ORCHESTRATOR_STANCE = "orchestrator"
@@ -84,7 +90,54 @@ CHOOSE_ARROW = EngineToolDecl(
     ),
 )
 
-ENGINE_TOOLS: tuple[EngineToolDecl, ...] = (SUBMIT_HANDOFF, CHOOSE_ARROW)
+MESSAGE_AGENT = EngineToolDecl(
+    name="coral_message_agent",
+    description=(
+        "Send a message to the orchestrator or another agent in this Coral run. "
+        "It appears in their transcript with a [Coral message from …] header."
+    ),
+    parameters=MESSAGE_AGENT_PARAMETERS,
+    stances=TOOL_STANCES,
+    instructions=(
+        "Coral: to talk to the orchestrator or a peer in this run, call coral_message_agent "
+        "with to (orchestrator or a member id from your brief) and text (it may be listed as "
+        "mcp__omnigent__coral_message_agent; load it with ToolSearch if it is not listed). "
+        "Do not use sys_session_message."
+    ),
+)
+
+ASSIGN_AGENTS = EngineToolDecl(
+    name="coral_assign_agents",
+    description=("Staff an up-to roster for a Coral activation that is waiting for assignment."),
+    parameters=ASSIGN_AGENTS_PARAMETERS,
+    stances=frozenset({ORCHESTRATOR_STANCE}),
+    instructions=(
+        "Coral orchestrator: when an activation waits for assignment, call coral_assign_agents "
+        "with the activation id, assignments within the authored bounds, and a short reason "
+        "(it may be listed as mcp__omnigent__coral_assign_agents; load it with ToolSearch if "
+        "it is not listed)."
+    ),
+)
+
+ASSIGN_TASK = EngineToolDecl(
+    name="coral_assign_task",
+    description=("Re-task a member to resolve a merge conflict in that member's own worktree."),
+    parameters=ASSIGN_TASK_PARAMETERS,
+    stances=frozenset({ORCHESTRATOR_STANCE}),
+    instructions=(
+        "Coral orchestrator: when a step is in merge_conflict, call coral_assign_task with "
+        "the activation id, the member to re-task, the task, and a reason (it may be listed "
+        "as mcp__omnigent__coral_assign_task; load it with ToolSearch if it is not listed)."
+    ),
+)
+
+ENGINE_TOOLS: tuple[EngineToolDecl, ...] = (
+    SUBMIT_HANDOFF,
+    CHOOSE_ARROW,
+    MESSAGE_AGENT,
+    ASSIGN_AGENTS,
+    ASSIGN_TASK,
+)
 # Every engine tool's exact name, for policy exemptions that must not match look-alikes.
 ENGINE_TOOL_NAMES: frozenset[str] = frozenset(decl.name for decl in ENGINE_TOOLS)
 # What runners advertise and the server answers.

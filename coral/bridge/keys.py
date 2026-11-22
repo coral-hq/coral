@@ -69,7 +69,7 @@ def slot_create_key(state: engine.RunState, engine_slot_id: str) -> str | None:
 
 def slot_message_id(workspace_id: int, state: engine.RunState, engine_slot_id: str) -> str | None:
     """The stable id of the slot's latest engine message (its brief or a nudge), if any."""
-    key = _latest_key(state, engine_slot_id, frozenset({"send_input", "nudge"}))
+    key = _latest_key(state, engine_slot_id, frozenset({"send_input", "nudge", "steer"}))
     return None if key is None else effect_message_id(workspace_id, key)
 
 

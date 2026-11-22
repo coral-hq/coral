@@ -89,6 +89,10 @@ class Activation(_Frozen):
     status: ActivationStatus
     outcome: ActivationOutcome | None = None
     handoffs: tuple[SlotHandoff, ...] = ()
+    # WSP-03 opens merge_conflict; TLS-04 assign_task is allowed only then.
+    sub_state: str | None = None
+    conflict_files: tuple[str, ...] = ()
+    resolver_slot_id: str | None = None
 
 
 class Slot(_Frozen):
@@ -299,6 +303,50 @@ class ChooseArrow(_Frozen):
     iteration_path: tuple[str, ...] = ()
 
 
+class MessageAgent(_Frozen):
+    """Deliver a Coral-routed message to another run member (TLS-04)."""
+
+    kind: Literal["message_agent"] = "message_agent"
+    from_slot_id: str
+    to_slot_id: str
+    text: str
+    reply_to: str | None = None
+
+
+class AssignAgents(_Frozen):
+    """Staff an up-to roster activation (TLS-04)."""
+
+    kind: Literal["assign_agents"] = "assign_agents"
+    activation_id: str
+    assignments: tuple[tuple[str, int], ...]
+    reason: str
+
+
+class AssignTask(_Frozen):
+    """Re-task a member in a merge_conflict sub-state (TLS-04)."""
+
+    kind: Literal["assign_task"] = "assign_task"
+    activation_id: str
+    member_slot_id: str
+    task: str
+    reason: str
+
+
+class RecordMergeConflict(_Frozen):
+    """Open K2 merge_conflict on an activation (WSP-03; TLS-04 tests fake it)."""
+
+    kind: Literal["record_merge_conflict"] = "record_merge_conflict"
+    activation_id: str
+    files: tuple[str, ...] = ()
+
+
+class AwaitAssignment(_Frozen):
+    """Mark an activation as waiting for coral_assign_agents (TLS-04)."""
+
+    kind: Literal["await_assignment"] = "await_assignment"
+    activation_id: str
+
+
 class AnswerGate(_Frozen):
     kind: Literal["answer_gate"] = "answer_gate"
     token: str
@@ -403,6 +451,11 @@ Input = Annotated[
     | HandoffReceived
     | HandoffEvaluated
     | ChooseArrow
+    | MessageAgent
+    | AssignAgents
+    | AssignTask
+    | RecordMergeConflict
+    | AwaitAssignment
     | AnswerGate
     | TimerDue
     | TurnEnded

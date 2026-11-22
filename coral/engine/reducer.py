@@ -48,6 +48,9 @@ from coral.engine.types import (
     TERMINAL_STATUSES,
     AnswerGate,
     ApplyResult,
+    AssignAgents,
+    AssignTask,
+    AwaitAssignment,
     CancelRun,
     ChooseArrow,
     Effect,
@@ -59,9 +62,11 @@ from coral.engine.types import (
     InfraBackoffExhausted,
     Input,
     LogEntry,
+    MessageAgent,
     PauseRun,
     PostCloseActivity,
     Receipt,
+    RecordMergeConflict,
     RejectionObserved,
     ResumeRun,
     RetryStep,
@@ -140,13 +145,44 @@ def _dispatch(
     if isinstance(command, StartRun):
         return start_run(graph, state, command, config)
     if state.status == "cancelled" and isinstance(
-        command, (AnswerGate, ChooseArrow, HandoffReceived, HandoffEvaluated)
+        command,
+        (
+            AnswerGate,
+            AssignAgents,
+            AssignTask,
+            AwaitAssignment,
+            ChooseArrow,
+            HandoffReceived,
+            HandoffEvaluated,
+            MessageAgent,
+            RecordMergeConflict,
+        ),
     ):
         return refuse(state, "run_cancelled")
     if isinstance(command, AnswerGate):
         return answer_gate(graph, state, command)
     if isinstance(command, ChooseArrow):
         return choose_arrow(graph, state, command)
+    if isinstance(command, MessageAgent):
+        from coral.engine.machines.message import message_agent
+
+        return message_agent(graph, state, command, now)
+    if isinstance(command, AssignAgents):
+        from coral.engine.machines.message import assign_agents
+
+        return assign_agents(state, command)
+    if isinstance(command, AssignTask):
+        from coral.engine.machines.message import assign_task
+
+        return assign_task(state, command)
+    if isinstance(command, RecordMergeConflict):
+        from coral.engine.machines.message import record_merge_conflict
+
+        return record_merge_conflict(state, command)
+    if isinstance(command, AwaitAssignment):
+        from coral.engine.machines.message import await_assignment
+
+        return await_assignment(state, command)
     if state.status is None:
         return refuse_unknown(state)
     if isinstance(command, CancelRun):
