@@ -658,9 +658,8 @@ exactly the mounted Coral routes, is typed, and that the TS types are current.
 - **The checkout command can run code the run wrote.** Tracked hook scripts or hook-manager
   config in the run's commits run in the owner's shell when they paste the command. Step
   shells already run as the owner on that host today (the first residual), so this adds
-  little now; once the sandbox confines steps it is a way out of the sandbox. Carry it into
-  that work (CRL-166); a variant with `-c core.hooksPath=/dev/null` would be a
-  design change.
+  little now; once the sandbox confines steps it is a way out of the sandbox (CRL-175); a
+  variant with `-c core.hooksPath=/dev/null` would be a design change.
 - **The run view's drawer shows every pending prompt a step session has**, as its Chat
   page does: question forms with typed answers, plan-review feedback, schema forms, and
   session-wide permission choices ("Accept & allow all edits", "Approve & switch to auto

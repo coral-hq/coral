@@ -3446,7 +3446,7 @@ seams:
     upstream_candidate: false
 
   - id: S112
-    title: The sandbox keeps AF_UNIX harness sockets under the configured and default roots, other terminals' tmux servers and the user's tmux server unreachable
+    title: The sandbox keeps AF_UNIX harness sockets under the configured and default roots, other terminals' tmux servers and the user's default tmux socket unreachable
     owner: WS-INTEGRATION
     status: landed
     category: coral-specific
@@ -3467,25 +3467,27 @@ seams:
       subpath of its real path, and the per-user default root even for a
       policy that carries no roots (an old launcher payload), after every
       socket allow; plus Omnigent's terminal and tmux-replies sockets and the
-      user's tmux server (tmux-<uid>/<label>) by path-regex, and the net.local
-      sysctls. Where (allow network*) applied, the scratch the child gets as
+      user's default tmux socket (tmux-<uid>/<label>) by path-regex, and the
+      net.local sysctls. Where (allow network*) applied, the scratch the child gets as
       $TMPDIR (recorded on the policy by the os_env helper and the launcher
       host pass) and each write root inside a denied root (S109's CLI launch
-      dir) are allowed again after those denies, unless that dir is the temp
-      dir itself or holds a denied root or a deny-listed socket. The literal
+      dir) are allowed again after those denies, unless that dir is or holds
+      the temp dir, or holds a denied root or a deny-listed socket. The literal
       deny_unix_socket_paths denies stay last and now also deny writing the
       socket path and its dir, so a pane can rename neither its own tmux
       socket nor its private dir away from the deny, while files in that dir
       stay editable (measured). Seatbelt matches the resolved path; a
       directory path-literal and a {n} regex quantifier are silent no-ops. The
-      process's own sockets, clip.sock, DNS and a full claude-sdk turn are
-      unaffected. bwrap ignores the field: --tmpfs /tmp already hides the
-      default root. Not covered: AF_UNIX harness sockets under another
-      instance's own root, a harness root inside a sandbox write root, a root
-      created as a symlink after the profile is built, socket paths found
-      through fsgetpath, other programs' sockets (CRL-174), the codex-native
-      app-server socket and loopback TCP listeners (CRL-177), and other
-      terminals' clip.sock (CRL-171). No CI lane runs macOS (CRL-170).
+      process's own sockets in its scratch, clip.sock, DNS and a full
+      claude-sdk turn are unaffected. bwrap ignores the field: --tmpfs /tmp
+      already hides the default root. Not covered: AF_UNIX harness sockets
+      under another instance's own root, a harness root inside a sandbox write
+      root, a root created as a symlink after the profile is built, a Linux
+      root under a path bwrap binds and processes outside the sandbox
+      (CRL-173), socket paths found through fsgetpath and other programs'
+      sockets, a tmux server on a custom -S path among them (CRL-174), the
+      codex-native app-server socket and loopback TCP listeners (CRL-177), and
+      other terminals' clip.sock (CRL-171). No CI lane runs macOS (CRL-170).
     files:
       - omnigent/inner/os_env.py
       - omnigent/inner/sandbox.py
