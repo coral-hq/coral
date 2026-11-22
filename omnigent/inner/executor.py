@@ -363,7 +363,12 @@ class ExecutorError(ExecutorEvent):
         prompt that never rendered), so the message never reached the
         transcript and its sender's queued copy is the only record of it.
         ``False`` (default) once the harness may have accepted it.
+    :param resets_at: Unix epoch seconds when a plan/usage limit lifts, or
+        ``None`` when unknown. Coral maps ``code == usage_limited`` into
+        ``paused(plan_limit)`` and arms a timer at ``resets_at + 60`` when set.
     """
+
+    USAGE_LIMITED_CODE = "usage_limited"
 
     message: str
     retryable: bool = False
@@ -373,6 +378,7 @@ class ExecutorError(ExecutorEvent):
     title: str | None = None
     remediation: str | None = None
     undelivered: bool = False
+    resets_at: float | None = None
 
 
 def _close_stream_quietly(stream: Iterator[ProviderStreamItem]) -> None:

@@ -3926,6 +3926,10 @@ def _stop_failure_context(
         "failure_source": "claude_hook",
         "native_harness": "claude-native",
         "native_error_category": record.failure_category,
+        "usage_limited": record.failure_category == "rate_limit",
+        "resets_at": (record.failure_context or {}).get("resets_at")
+        if record.failure_category == "rate_limit"
+        else None,
         "transcript_error_context_state": transcript_context_state,
         "native_session_id": record.claude_session_id,
         "native_agent_id": record.agent_id,

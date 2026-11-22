@@ -5762,6 +5762,26 @@ def _publish_interrupted(session_id: str, response_id: str | None = None) -> Non
     session_stream.publish(session_id, payload)
 
 
+_SUPERSESSION_OBSERVERS: list[Callable[[str, str, str], None]] = []
+
+
+def register_supersession_observer(
+    observer: Callable[[str, str, str], None],
+) -> Callable[[], None]:
+    """Register ``observer(old_id, new_id, reason)`` after each supersession publish.
+
+    Exceptions from one observer are isolated so others still run. Returns an
+    unregister callback.
+    """
+    _SUPERSESSION_OBSERVERS.append(observer)
+
+    def unregister() -> None:
+        with contextlib.suppress(ValueError):
+            _SUPERSESSION_OBSERVERS.remove(observer)
+
+    return unregister
+
+
 def _publish_session_superseded(
     session_id: str,
     target_conversation_id: str,
@@ -5791,6 +5811,16 @@ def _publish_session_superseded(
         reason=reason,
     )
     session_stream.publish(session_id, event.model_dump())
+    for observer in list(_SUPERSESSION_OBSERVERS):
+        try:
+            observer(session_id, target_conversation_id, reason)
+        except Exception:  # noqa: BLE001 — isolate Coral / other followers
+            _logger.exception(
+                "supersession observer failed old=%s new=%s reason=%s",
+                session_id,
+                target_conversation_id,
+                reason,
+            )
     # Discard any unconsumed pending inputs on the superseded session — notably
     # the ``/clear`` the user typed in the web UI. ``/clear`` is never mirrored
     # back as a committed item (the session rotated away), so its pending entry
@@ -12826,4 +12856,5 @@ __all__ = [
     "announce_hosts_changed",
     "cancel_managed_launch_tasks",
     "prefetch_session_routing_catalogs",
+    "register_supersession_observer",
 ]

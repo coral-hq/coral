@@ -357,6 +357,8 @@ class UsageLimited(_Frozen):
     kind: Literal["usage_limited"] = "usage_limited"
     slot_id: str
     fact_key: str
+    # Unix epoch seconds when the plan limit lifts; None → backoff probe only.
+    resets_at: float | None = None
 
 
 class WaitingWithoutElicitation(_Frozen):
@@ -374,6 +376,8 @@ class SessionFailed(_Frozen):
     # The session's runner when the turn failed, and when the failure was observed.
     runner_id: str | None = None
     observed_at: datetime | None = None
+    # Unix epoch seconds when a plan limit lifts; None → backoff probe only.
+    resets_at: float | None = None
 
 
 class PostCloseActivity(_Frozen):

@@ -271,6 +271,16 @@ def test_usage_limited_pauses_plan_limit_and_arms_a_probe() -> None:
     assert duplicate.entry.receipt_key == FACT_KEY
 
 
+def test_usage_limited_with_resets_at_pins_plan_probe_due() -> None:
+    graph = _graph()
+    running = drive(graph, [RUN], config=CFG)
+    resets_at = NOW.timestamp() + 3600
+    command = UsageLimited(slot_id=SLOT, fact_key=FACT_KEY, resets_at=resets_at)
+    paused = transition(graph, running.state, command, NOW, CFG)
+    probe = next(timer for timer in paused.state.timers if timer.kind == "plan_probe")
+    assert probe.due_at == datetime.fromtimestamp(resets_at, tz=UTC) + timedelta(seconds=60)
+
+
 def test_waiting_without_elicitation_is_an_audit_noop() -> None:
     graph = _graph()
     running = drive(graph, [RUN], config=CFG)
