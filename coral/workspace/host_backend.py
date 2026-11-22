@@ -4,8 +4,8 @@
 worktree's host through a ``HostChannelBackend`` and parses the payload
 strictly. Every op checks the op-host rule first, then its params
 (``ValueError``), then that a host-channel executor names the ref's own host,
-before anything is sent; the host re-validates everything. ``fingerprint`` at
-L2, ``merge`` and ``check`` are not served at M2: they raise a permanent
+before anything is sent; the host re-validates everything. ``merge`` and
+``check`` are not served at M2: they raise a permanent
 ``workspace.capability_unavailable`` after the op-host rule.
 
 ``map_host_reply`` turns a host's reply into a payload or a K13 error. The
@@ -55,7 +55,16 @@ from coral.workspace.ops import (
 
 # Op ids the host channel serves at M2; fingerprint counts once per level.
 HOST_CHANNEL_OPS: frozenset[str] = frozenset(
-    {"head", "diff_stat", "read", "fingerprint-L1", "commit", "salvage", "reset"}
+    {
+        "head",
+        "diff_stat",
+        "read",
+        "fingerprint-L1",
+        "fingerprint-L2",
+        "commit",
+        "salvage",
+        "reset",
+    }
 )
 # Host-side deadlines; the channel refuses anything over 900 s before sending.
 READ_TIMEOUT_S = 120.0
@@ -166,14 +175,27 @@ class HostWorkspaceOps(WorkspaceOps):
         self, ref: WorkspaceRef, executor: OpExecutor, *, level: FingerprintLevel
     ) -> Fingerprint:
         check_op_host("fingerprint", executor, level=level)
-        if level != "L1":
+        # L2 stages a private index; use the write deadline like commit/salvage.
+        if level == "L1":
+            payload = await self._read(ref, executor, "fingerprint", level=level)
+            digest = payload.matching("digest", _SHA256)
+        elif level == "L2":
+            payload = await self._request(
+                ref,
+                executor,
+                "fingerprint",
+                None,
+                self._write_timeout_s,
+                {"level": level},
+            )
+            digest = payload.commit_id("digest")
+        else:
             raise _not_served(f"fingerprint({level})")
-        payload = await self._read(ref, executor, "fingerprint", level=level)
-        if payload.text("level") != "L1":
+        if payload.text("level") != level:
             raise payload.malformed("level")
         return Fingerprint(
-            level="L1",
-            digest=payload.matching("digest", _SHA256),
+            level=level,
+            digest=digest,
             head=payload.commit_id("head"),
             dirty_count=payload.count("dirty_count"),
         )

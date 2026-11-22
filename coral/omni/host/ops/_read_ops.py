@@ -1,4 +1,8 @@
-"""K13 READ ops on the host channel: ``head``, ``diff_stat``, ``read`` and L1 ``fingerprint``.
+"""K13 READ ops on the host channel: ``head``, ``diff_stat``, ``read`` and ``fingerprint``.
+
+``fingerprint`` serves L1 (status digest) and L2 (recordable tree id). L2 stages on a
+private index copy via :func:`coral.omni.host.ops._write_ops._recordable_tree` and
+does not change the real index.
 
 Each handler holds its worktree for the op (``_locks``: a busy worktree
 refuses at once), re-validates its params, pins its target (``_target``) and
@@ -16,6 +20,7 @@ import hashlib
 import json
 import os
 import stat
+import time
 import unicodedata
 from collections.abc import Iterator, Mapping
 
@@ -36,11 +41,13 @@ from coral.omni.host.ops._git import (
     printable,
     resolve_commit,
     status_paths,
+    status_records,
     tree_diff_argv,
     unfinished_operations,
 )
 from coral.omni.host.ops._locks import one_op_per_worktree
 from coral.omni.host.ops._target import commit_param, invalid_params, op_params, pinned
+from coral.omni.host.ops._write_ops import _recordable_tree
 from coral.workspace.ops import MAX_READ_BYTES, paths_within, validate_workspace_path
 from omnigent.host.workspace_ops import WorkspaceOpHandlerError, WorkspaceOpRequest
 
@@ -149,23 +156,31 @@ def read(request: WorkspaceOpRequest) -> Mapping[str, object]:
 @one_op_per_worktree
 def fingerprint(request: WorkspaceOpRequest) -> Mapping[str, object]:
     """
-    L1: ``{level, digest, head, dirty_count}``; any other level is not served here.
+    L1: status digest. L2: the tree id ``commit`` would record (private index).
 
-    The digest covers HEAD, the raw ``WORKSPACE_STATUS_ARGV`` output (no stash
-    header, submodules by commit only) and, per dirty path, its ``lstat`` type,
-    size and ``mtime_ns`` plus a blob id computed in Python (regular files up
-    to ``MAX_READ_BYTES``, and symlink text). It never follows a symlink.
+    L1 covers HEAD, the raw ``WORKSPACE_STATUS_ARGV`` output and per-dirty-path
+    ``lstat`` plus blob id (never following a symlink). L2 reuses the write
+    path's private-index ``write-tree`` so staged and unstaged edits match, and
+    the real index is unchanged.
     """
     params = op_params(request, required=("level",))
     level = params["level"]
     if not isinstance(level, str):
         raise invalid_params("level must be a string")
-    if level != "L1":
-        raise WorkspaceOpHandlerError(
-            CAPABILITY_UNAVAILABLE,
-            f"this host serves fingerprint level L1 only, not {level[:16]!r}",
-            permanent=True,
-        )
+    if level == "L1":
+        return _fingerprint_l1(request, params)
+    if level == "L2":
+        return _fingerprint_l2(request, params)
+    raise WorkspaceOpHandlerError(
+        CAPABILITY_UNAVAILABLE,
+        f"this host serves fingerprint levels L1 and L2, not {level[:16]!r}",
+        permanent=True,
+    )
+
+
+def _fingerprint_l1(
+    request: WorkspaceOpRequest, params: Mapping[str, object]
+) -> Mapping[str, object]:
     with pinned(request, params, write=False) as target:
         git = target.git
         object_format = git.run("rev-parse", "--show-object-format").stdout.decode().strip()
@@ -185,6 +200,28 @@ def fingerprint(request: WorkspaceOpRequest) -> Mapping[str, object]:
             "digest": l1_digest(commit, status, entries()),
             "head": commit,
             "dirty_count": dirty_count,
+        }
+
+
+def _fingerprint_l2(
+    request: WorkspaceOpRequest, params: Mapping[str, object]
+) -> Mapping[str, object]:
+    # WRITE pin: private index lives under the op temp dir; real index stays put.
+    t0 = time.monotonic()
+    with pinned(request, params, write=True) as target:
+        git = target.git
+        commit = head_commit(git)
+        status = git.run(*WORKSPACE_STATUS_ARGV).stdout
+        dirty_count, _paths = status_paths(status)
+        untracked_count = sum(1 for record in status_records(status) if record.kind == b"?")
+        digest = _recordable_tree(target, git)
+        return {
+            "level": "L2",
+            "digest": digest,
+            "head": commit,
+            "dirty_count": dirty_count,
+            "untracked_count": untracked_count,
+            "duration_ms": int((time.monotonic() - t0) * 1000),
         }
 
 

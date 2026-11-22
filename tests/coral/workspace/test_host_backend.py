@@ -174,6 +174,19 @@ _ROUND_TRIPS: dict[str, tuple[OpCall, dict, dict, object]] = {
         {"level": "L1", "digest": "c" * 64, "head": HEAD, "dirty_count": 4},
         Fingerprint(level="L1", digest="c" * 64, head=HEAD, dirty_count=4),
     ),
+    "fingerprint-L2": (
+        lambda ops: ops.fingerprint(REF, WRITER, level="L2"),
+        _wire("fingerprint", WRITE_TIMEOUT_S, level="L2"),
+        {
+            "level": "L2",
+            "digest": "a" * 40,
+            "head": HEAD,
+            "dirty_count": 1,
+            "untracked_count": 0,
+            "duration_ms": 12,
+        },
+        Fingerprint(level="L2", digest="a" * 40, head=HEAD, dirty_count=1),
+    ),
     "commit": (
         lambda ops: ops.commit(
             REF,
@@ -257,7 +270,18 @@ async def test_each_served_op_sends_its_wire_request_and_parses_the_payload(
 
 def test_the_host_channel_serves_seven_ops() -> None:
     assert (
-        frozenset({"head", "diff_stat", "read", "fingerprint-L1", "commit", "salvage", "reset"})
+        frozenset(
+            {
+                "head",
+                "diff_stat",
+                "read",
+                "fingerprint-L1",
+                "fingerprint-L2",
+                "commit",
+                "salvage",
+                "reset",
+            }
+        )
         == HOST_CHANNEL_OPS
     )
     assert READ_TIMEOUT_S <= WRITE_TIMEOUT_S <= 900
@@ -354,7 +378,6 @@ async def test_a_host_channel_to_another_host_is_a_target_mismatch_before_sendin
 
 
 _UNSERVED: dict[str, OpCall] = {
-    "fingerprint-L2": lambda ops: ops.fingerprint(REF, WRITER, level="L2"),
     "merge": lambda ops: ops.merge(
         REF, WRITER, op_key="k", source_ref="refs/heads/coral/r-1/agent", message="m"
     ),

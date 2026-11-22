@@ -277,7 +277,7 @@ def test_backends_declare_ops_the_contract_names() -> None:
         assert entry.supported_ops <= ALL_OP_IDS
     assert BACKENDS["fake"].supported_ops == ALL_OP_IDS
     unserved = ALL_OP_IDS - HOST_CHANNEL_OPS
-    assert unserved == {"fingerprint-L2", "merge", "check"}
+    assert unserved == {"merge", "check"}
 
 
 def test_the_per_op_gate_skips_an_unserved_op_with_its_reason() -> None:

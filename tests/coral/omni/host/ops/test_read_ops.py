@@ -1,4 +1,4 @@
-"""Coral's host READ ops on a real linked worktree: head, diff_stat, read and fingerprint(L1)."""
+"""Coral's host READ ops on a real linked worktree: head, diff_stat, read and fingerprint."""
 
 from __future__ import annotations
 
@@ -58,6 +58,10 @@ def _read(
 
 def _l1(handlers: Handlers, worktree: LinkedWorktree) -> Mapping[str, object]:
     return handlers["fingerprint"](op_request("fingerprint", worktree, level="L1"))
+
+
+def _l2(handlers: Handlers, worktree: LinkedWorktree) -> Mapping[str, object]:
+    return handlers["fingerprint"](op_request("fingerprint", worktree, level="L2"))
 
 
 def _content(payload: Mapping[str, object]) -> bytes:
@@ -777,12 +781,49 @@ def test_l1_hashes_files_up_to_the_read_cap_only(
     assert _l1(handlers, worktree)["digest"] != before["digest"]
 
 
-@pytest.mark.parametrize("level", ["L2", "L9"])
-def test_fingerprint_serves_only_l1(
-    worktree: LinkedWorktree, handlers: Handlers, level: str
-) -> None:
+def test_fingerprint_refuses_unknown_levels(worktree: LinkedWorktree, handlers: Handlers) -> None:
     expect_op_error(
-        lambda: handlers["fingerprint"](op_request("fingerprint", worktree, level=level)),
+        lambda: handlers["fingerprint"](op_request("fingerprint", worktree, level="L9")),
         "workspace.capability_unavailable",
         permanent=True,
     )
+
+
+def test_l2_matches_the_tree_commit_would_record_and_leaves_the_index(
+    worktree: LinkedWorktree, handlers: Handlers
+) -> None:
+    from coral.omni.host.ops import _write_ops
+
+    index_path = Path(run_git(worktree.root, "rev-parse", "--git-path", "index").strip())
+    if not index_path.is_absolute():
+        index_path = worktree.root / index_path
+    before_index = index_path.read_bytes()
+
+    clean = _l2(handlers, worktree)
+    assert clean["level"] == "L2"
+    assert clean["dirty_count"] == 0
+    assert clean["untracked_count"] == 0
+    assert isinstance(clean["duration_ms"], int) and clean["duration_ms"] >= 0
+
+    (worktree.root / "README.md").write_bytes(b"edited by l2\n")
+    edited = _l2(handlers, worktree)
+    assert edited["digest"] != clean["digest"]
+    assert edited["dirty_count"] >= 1
+    assert index_path.read_bytes() == before_index
+
+    committed = _write_ops.write_handlers()["commit"](
+        op_request(
+            "commit",
+            worktree,
+            op_key="l2-proof",
+            expected_head=str(clean["head"]),
+            message="edit for l2",
+            trailers=[],
+            run_id=None,
+            attempt_id=None,
+        )
+    )
+    after_commit = _l2(handlers, worktree)
+    assert after_commit["digest"] == edited["digest"]
+    assert after_commit["dirty_count"] == 0
+    assert committed["empty"] is False
