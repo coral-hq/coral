@@ -903,8 +903,10 @@ command lines, on macOS 27.2.1.
   and probe 15 detect that only on a Mac that runs them.
 - A sandboxed process still lists pids and reads `kinfo_proc` (the 16-character
   name, ppid, uid and start time) of every process.
-- The login keychain stays unreadable because of the profile's `~/Library`
-  deny (S5 in `omnigent/inner/seatbelt_sandbox.py`), not because of S111.
+- The login keychain file stays unreadable because no rule grants `~/Library`
+  and the profile's `~/Library` deny (S5 in
+  `omnigent/inner/seatbelt_sandbox.py`) refuses it, not because of S111 (see
+  "Addendum: CRL-176 Claude config isolation").
 
 ## Addendum: CRL-166 harness sockets on macOS (2026-11-22)
 
@@ -1120,7 +1122,7 @@ names, on macOS 27.2.1.
   (CRL-174).
 - Loopback TCP listeners. A step with the network on can still connect to
   them, so each one must refuse a caller without its secret. The codex-native
-  app-server WebSocket was the only Omnigent one that did not. Since S113 it
+  app-server WebSocket was the only Omnigent one that did not. Since S114 it
   takes a per-spawn token: Omnigent writes it to a 0600 file under
   `<data dir>/codex-native/ws-tokens/`, codex refuses a WebSocket without it
   (HTTP 401), and Omnigent's clients and the codex terminal send it.
@@ -1135,8 +1137,7 @@ names, on macOS 27.2.1.
   tool sandbox can read the whole disk in workspace-write mode and has none in
   full-access mode, so a codex-native session's commands can read every
   session's token file and drive its siblings; the codex terminal's
-  environment holds the
-  token, as opencode's holds its password, which S111 guards on macOS and the
+  environment holds the token, as opencode's holds its password, which S111 guards on macOS and the
   pid namespace on Linux (moving it off the environment is CRL-173); a
   same-user process outside the sandbox can read the file (CRL-173, CRL-159);
   the old codex-native socket under `~/.omnigent/codex-native/`, which no
@@ -1144,11 +1145,10 @@ names, on macOS 27.2.1.
   loopback services (CRL-174) and UDP are not covered. Linux was not
   measured.
 - Other Omnigent terminals' clipboard sockets stay reachable (CRL-171).
-- On either platform, every claude-sdk CLI wrap can write `~/.claude/plugins`,
-  `sessions`, `session-env` and `backups` in the user's real home. A step
-  could change a plugin hook, which the user's own Claude Code then runs
-  outside the sandbox, and read the inbox keys in `sessions`. That is from
-  code, not measured (CRL-176).
+- Since S113 a Coral step's sandboxed Claude CLI no longer gets the user's
+  `~/.claude` or `~/.claude.json`; other Omnigent agents that run claude-sdk
+  in a sandbox still do (CRL-178). See "Addendum: CRL-176 Claude config
+  isolation".
 - On a single-user server a step acts as the owner on both platforms, so it
   can still send a message into another session, the reviewer's included,
   through the server (CRL-159). S112 does not restore review-gate integrity
@@ -1172,9 +1172,290 @@ where ptrace between same-user processes is restricted. It does not stop that
 process from acting as the owner on a single-user server (CRL-159).
 
 **Open for the owner.** Whether to run Coral steps on untrusted content on
-macOS while CRL-171 is open, and on either platform while CRL-174 and CRL-176
+macOS while CRL-171 is open, and on either platform while CRL-174 and CRL-181
 are open, is the owner's risk decision (on a single-user server,
 CRL-159 holds on both platforms). S111 and S112 closed the process reads and
 the connect to harness sockets under the configured and per-user default
-roots, measured on macOS 27.2.1 only (CRL-170). S113 gates the codex-native
+roots. S113 closed a sandboxed step CLI's access to the user's Claude config
+files (its settings `env` block still reaches the CLI, CRL-167). All three
+were measured on macOS 27.2.1, and no CI lane runs macOS (CRL-170); S113 is
+also checked on Linux by a bwrap test in CI. What S113 leaves open is in
+"Addendum: CRL-176 Claude config isolation". S114 gates the codex-native
 app-server WebSocket, measured on macOS 26.3.1 only. It is not decided here.
+
+## Addendum: CRL-176 Claude config isolation (2026-11-22)
+
+For Coral steps, CRL-176 closes a way out of the sandbox through the user's
+own Claude Code config. Before S113 every claude-sdk CLI wrap granted read and
+write on `~/.claude/{plugins,sessions,session-env,backups}` in the user's real
+home, and on `~/.claude.json` and `~/.claude/.credentials.json` (each only if
+it exists). The wraps of other Omnigent agents still do (CRL-178). Seam S113
+(`.coral/seams.yaml`) changes `omnigent/inner/sandbox.py`,
+`omnigent/inner/claude_sdk_executor.py`,
+`omnigent/inner/claude_sdk_harness.py` and `omnigent/runtime/workflow.py`.
+Every local measurement here was taken on macOS 27.2.1, with claude 2.1.325,
+throwaway homes and a mock model. Linux is covered only by the bwrap
+generator's output, read on a Mac, and by tests that run in CI on Linux. No CI
+lane runs macOS (CRL-170). The socket and process-read rules are in the
+CRL-165 and CRL-166 addenda.
+
+**Root cause.**
+
+- `prepare_claude_cli_path` (a step's `os_env` wrap) and
+  `prepare_tight_cli_process_path` (the Linux wrap of a CLI without `os_env`),
+  in `omnigent/inner/claude_sdk_executor.py`, add
+  `_claude_internal_write_roots()` and `_claude_internal_write_files()` to the
+  CLI wrap policy; before S113 they did so for every wrap. Seatbelt renders
+  them as read-write `subpath` and `literal` allows, and bwrap as read-write
+  `--bind-try` mounts.
+- The wrap met the CLI's need for a writable config home by sharing the
+  user's own, the one their unsandboxed Claude Code trusts and runs code from.
+  `CLAUDE_CONFIG_DIR` was never set for a claude-sdk launch; S109 gave the CLI
+  its own temp dir only.
+- The grant list predates Coral and gives no reason per directory. It ignores
+  a user-set `CLAUDE_CONFIG_DIR`. The CLI tolerates a config home it cannot
+  read or write, so leaving other directories out broke nothing visible.
+
+Measured before S113, through the generated profile and through a real CLI
+turn: code inside the CLI's wrap overwrote an installed plugin's hook, added a
+plugin and planted a `session-env/<session>/` script. It listed, read and
+wrote `sessions/` keys, wrote `backups/`, read and rewrote `.claude.json`, and
+read `.credentials.json`. The host saw the changes. Read from the CLI binary,
+not measured: the user's Claude Code runs plugin hooks and the user-scope MCP
+servers in `.claude.json`, prepends `session-env` scripts to its Bash tool's
+commands, and keeps each live session's inbox key in `sessions/` (CRL-174).
+
+For a Coral step no direct way in was found. The model has no native shell,
+and with `skills: none` the CLI starts no user MCP server (measured) and loads
+no user settings or their hooks. The code in the wrap is the CLI itself and
+its API key helper, so the hole was one step away: a CLI bug, a future native
+tool, or a bundle that adds an MCP server or hooks. The CLI, as trusted code,
+also wrote the step's own state into the user's directories (its plugin
+store, measured). Other Omnigent agents that run claude-sdk in a sandbox with
+`skills: all` do have a way in (CRL-178, below).
+
+**S113 as built.**
+
+- **Coral only.** `omnigent/runtime/workflow.py` sets
+  `HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG=1` in its `params.coral` block, and
+  `omnigent/inner/claude_sdk_harness.py` passes it to the executor as
+  `isolate_claude_config`. A spec cannot set harness env, and the flag only
+  narrows the grants. Without it the policy and the CLI's environment are as
+  before.
+- **No grant into the user's config.** With the flag, both wrap paths grant
+  nothing under `~/.claude` and nothing on `~/.claude.json` or
+  `.credentials.json`. Of the old list only `~/.npm/_logs` stays, read-write.
+  `_claude_internal_write_roots(include_config=False)` creates nothing under
+  `~/.claude`.
+- **A private config dir for each launch.** The policy names
+  `CLAUDE_CONFIG_DIR` in `scratch_dir_env`. In the launcher's in-wrap pass,
+  after `activate_sandbox` and before the CLI starts, `export_scratch_dir`
+  (`omnigent/inner/sandbox.py`) creates `claude_config_dir`, mode 0700, in the
+  launch's private scratch. That scratch is a fresh 0700 `mkdtemp`, already
+  granted, and is the CLI's `$TMPDIR`. The dir holds nothing of the user's:
+  nothing is copied in or mounted. It is removed with the scratch when the CLI
+  exits.
+- **Both config variables.** The launcher sets `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` to the dir's absolute path, over any
+  inherited value. The executor also removes both names from the CLI's
+  inherited environment and from the user settings `env` block it merges. So
+  a value the host forwards cannot redirect the CLI, and the CLI's credential
+  store and keychain service name follow the private dir. Both names are set,
+  not only removed, so a second connect at the same moment cannot hand the CLI
+  the host's values.
+- **`projects` cannot be created.** The policy lists `projects` in
+  `scratch_dir_files`, so it is an empty 0600 file in the private dir. An
+  oversized tool result is then reported unsaved, with the CLI's advice to use
+  pagination, as before, rather than as a saved file the model has no tool to
+  open.
+- **The launcher wire.** The fields travel the launcher's policy JSON and
+  survive every clone. A payload without them asks for no dir. A malformed
+  one, or one that names a variable other than the two config dir names, fails
+  the launch. With the field set and no scratch the launcher raises, and a
+  failed `mkdir` (a planted name, a full disk) fails the launch too. Nothing
+  falls back to the user's config.
+- **Fail closed.** Take a `caller_process` `os_env` that configures a sandbox
+  (type not `none`, network on, no operator opt-out). When its CLI is not
+  wrapped, the executor refuses the step's turns with
+  `coral_sandbox_unavailable` before any CLI starts. That covers no system
+  `claude` (the SDK's bundled CLI cannot be wrapped), `resolve_sandbox`
+  failing, the sandbox resolving inactive, and the trial wrap failing. So
+  Coral steps need a system `claude`, found on `PATH`, in a common install
+  dir, or named by `OMNIGENT_CLAUDE_PATH`. The implementer and reviewer
+  stances use `os_env` with network on, and no Coral stance turns the network
+  off. So a step is newly refused only when its host has no system `claude`
+  or its wrap was already failing. From code, Coral's run preflight does not
+  check for the CLI: the run starts, and its first step fails.
+- **Unwrapped CLIs.** A Coral CLI that runs unwrapped gets a private 0700 dir
+  that the executor makes with `mkdtemp` (`omnigent-claude-config-*`, with
+  `projects` as a file), passes in both variables, and removes on `close()`.
+  By design that happens under the operator's
+  `OMNIGENT_CLAUDE_SDK_NO_SANDBOX`, with a network-denying sandbox, and for a
+  CLI without `os_env`: the orchestrator and anchor on macOS. It also happens
+  on a fault the executor tolerates: a Linux tight wrap that could not be
+  applied, after which the CLI runs without it. Otherwise the orchestrator's
+  and anchor's tight wrap on Linux gets the per-launch dir, as a step's does.
+  An unwrapped CLI's config is kept off the user's, but the CLI is not
+  contained (CRL-180).
+- **Unchanged.** Resume does not use the config dir: claude-sdk replays the
+  history into a fresh client and runs with `--no-session-persistence`. A
+  fresh dir adds no measurable start-up time.
+
+**What was measured.** On macOS 27.2.1, against throwaway homes; Linux only
+where stated.
+
+- **The grants.** For the same Coral-shaped inputs, the isolated seatbelt
+  profile and bwrap argv differ from the code before S113 by removals only.
+  Seatbelt loses the four `~/.claude` subpaths, the two file literals, the
+  metadata read of `~/.claude` and a duplicate read allow on `~/.npm/_logs`;
+  bwrap loses the six `--bind-try` mounts. The only lines left that name the
+  home are `~/.npm/_logs`, metadata reads of `<HOME>` and `<HOME>/.npm`, and
+  the `~/Library` deny. Without the flag the profile and argv are byte for
+  byte as before. The bwrap argv is generator output, read on a Mac.
+- **The behaviour test.**
+  `tests/inner/sandbox/test_sandbox_behavior.py::test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home`
+  seeds a throwaway home with a plugin hook, a session key, `session-env/`,
+  `backups/`, `.claude.json`, `.credentials.json` and a stand-in file at
+  `~/Library/Keychains/login.keychain-db`. It runs one probe outside the
+  sandbox and one through the CLI wrap that
+  `prepare_claude_cli_path(..., isolate_config=True)` builds. Both config
+  variables are set to paths in the home, as values the host forwards would
+  be. Outside, every home check succeeds, and inside, each one fails. The
+  checks overwrite the hook, add a plugin, list `sessions/`, read or write a
+  key, and write `session-env/` and `backups/`. They also read and write
+  `.claude.json`, read `.credentials.json` and the keychain stand-in,
+  hard-link the key and the stand-in, write the hook through a symlink, and
+  rename `plugins`. Inside, `$CLAUDE_CONFIG_DIR` is a writable 0700 dir in
+  the probe's `$TMPDIR` scratch, `projects` cannot be created there, and
+  `$CLAUDE_SECURESTORAGE_CONFIG_DIR` names the same dir. Afterwards the home
+  is unchanged and the dir is gone. With S113's isolated branch reverted,
+  every home check except the two keychain ones succeeded inside.
+- **More bypasses, in the security reviews.** Each of these was denied: a
+  `clonefile` of the key, a `renamex_np(RENAME_SWAP)` onto the hook, and
+  renaming `.claude.json` out. So were an open of the key through
+  `/.vol/<dev>/<ino>`, and a read or write through a symlink to `~/.claude`
+  swapped in for the private dir. In the design review's emulation of S113's
+  grants, a writable working directory at `$HOME` did not reopen `~/.claude`
+  or `~/.claude.json`, because the dotfile mask denies them.
+- **A real CLI turn.**
+  `tests/e2e/coral/test_tier_b_executor.py::test_a_coral_cli_keeps_its_claude_config_out_of_the_home`
+  runs the real CLI in its seatbelt wrap with the Coral flags, API-key auth and
+  the mock model. It is a local test, not in a CI lane. The probe runs as the
+  API key helper, which the CLI starts inside its wrap: every home check
+  fails, and the private dir checks pass. The turn completes and the home is
+  unchanged. A `security` stub first on `PATH` was asked only for per-dir
+  service names (`Claude Code-<8 hex>` and `Claude Code-credentials-<8 hex>`),
+  and nothing went out through the proxy. A 162,012-character tool result
+  came back as not saved, with the pagination advice and without a saved
+  path.
+- **Unit tests.** `tests/inner/test_claude_sdk_executor.py` pins the isolated
+  grants on both backends and on the Linux tight wrap
+  (`test_an_isolated_cli_wrap_grants_nothing_of_the_claude_config_home` and
+  `test_an_isolated_tight_cli_wrap_grants_nothing_of_the_claude_config_home`).
+  It also pins the refusal rule against every wrap outcome
+  (`test_only_a_wrap_fault_leaves_a_requested_wrap_unapplied`), the refusals
+  (`test_an_isolated_cli_its_sandbox_cannot_wrap_never_starts`), the CLI's
+  environment wrapped and unwrapped
+  (`test_an_isolated_cli_gets_only_its_own_claude_config_dir`) and the
+  two-connect race
+  (`test_a_concurrent_connect_cannot_hand_a_cli_the_hosts_config_names`).
+  `tests/inner/test_sandbox.py` pins the wire fields, 15 malformed payloads
+  and the in-wrap dir
+  (`test_run_launcher_gives_the_target_a_private_dir_in_its_scratch`).
+- **Checked in CI, not run locally.** These run on Linux only:
+  - The behaviour test's bwrap case asserts the same verdicts under bwrap,
+    where only `~/.npm/_logs` of the home is mounted.
+  - `tests/e2e/coral/test_skeleton.py::test_the_review_loop_runs_end_to_end_on_a_real_stack`
+    plants a plugin hook and a session key in the stack host's home. It
+    asserts that the live implement step's CLI has a `CLAUDE_CONFIG_DIR`
+    named `claude_config_dir`, inside its `$TMPDIR` and outside the home,
+    holding `.claude.json`. It also asserts that both canaries are unchanged
+    after the run. It runs in CI's Coral E2E lane with claude 2.1.295.
+
+**Keychain.** On macOS 27.2.1 the login keychain file cannot be opened from
+the CLI's sandbox. No rule grants `~/Library`, and S5 in
+`omnigent/inner/seatbelt_sandbox.py` denies it as a second layer; the CLI
+wrap's own profile has that deny. A stand-in file at the keychain's path did
+not open directly, through a hard link or through `/.vol`, and a Data-volume
+file did not open through the `/System/Volumes/Data` firmlink. The
+`mach-lookup` to securityd stays open. From how the Security framework works,
+not measured, that lookup alone reads no file-keychain item, because the
+caller must open the keychain file itself; CRL-165 measured
+errSecNoSuchKeychain from the same profile generator. No keychain item was
+read and no keychain was created. The per-dir service name is not the
+control: a process in the sandbox can ask `security` for any name, and the
+file denial is what stops it.
+
+**Collateral.**
+
+- A Coral step's CLI no longer reads the user's `~/.claude.json`. Coral steps
+  started no user MCP server before (measured) and loaded no user settings, so
+  they lose nothing they used.
+- Each launch's CLI writes its own `userID` and `machineID` into a fresh
+  `.claude.json` (measured), so the CLI's feature-flag bucketing and telemetry
+  identity differ per launch.
+- A host without a system `claude` now refuses Coral steps, where the SDK's
+  bundled CLI used to run unwrapped.
+
+**Residuals.** S113 keeps a Coral step's sandboxed CLI, and what it starts,
+away from the user's Claude config files.
+
+- Other Omnigent agents that run claude-sdk in a sandbox keep the shared
+  grants. With `skills: all`, a user-scope MCP server from `~/.claude.json`
+  started inside such a wrap and rewrote a plugin hook, which was measured
+  (CRL-178, High).
+- Coral CLIs outside the sandbox: the orchestrator and anchor on macOS, any
+  CLI under the operator's opt-out, and a step whose sandbox denies the
+  network (no Coral stance does). On Linux so is an orchestrator or anchor
+  whose tight wrap could not be applied, a fault the executor tolerates.
+  Their config is a private dir, but they run as the user with no sandbox, so
+  they and what they start can reach `~/.claude` (CRL-180).
+- When the executor kills a CLI, its scratch and private config dir stay in
+  the temp dir (measured before S113 for the scratch). Such a scratch holds
+  about 16 KB of the CLI's config with no credential keys (measured). Read
+  from the binary, it also holds the dead CLI's inbox key when the
+  server-side inbox gate is on. The SDK's version check stops the launcher
+  the same way, so each connect also leaves one scratch. That one holds only
+  a private dir with the empty `projects` file (seen with the real CLI in
+  S113's tests). A killed harness leaves the executor's own dir (CRL-179).
+- The CLI still receives the `env` block of the user's
+  `~/.claude/settings.json`. The executor reads it outside the sandbox and
+  merges it into the CLI's environment, minus the two config dir names and
+  S13's token names, so code in the wrap can read those values. It stays
+  because it may hold the only provider endpoint (CRL-167).
+- A relative `CLAUDE_CONFIG_DIR` forwarded by the host makes that merge read
+  a `settings.json` under the step's worktree, which a step can create. S13's
+  token strips can also be undone by a concurrent connect on one executor.
+  Both are from code and predate S113 (CRL-182).
+- A step can create Claude Code project settings in its worktree:
+  `.claude/settings.json` hooks and `CLAUDE.md` (measured), or a `.mcp.json`
+  that did not exist when its profile was built. The user's own Claude Code
+  loads them when that worktree is opened and trusted, which was not
+  measured. A step can also create a direnv `.envrc` (measured), which direnv
+  runs in the user's shell once allowed (CRL-181). A working directory above
+  `$HOME` would also expose `~/.claude`, because the dotfile mask scans only
+  the top level. No Coral configuration does this.
+- `~/.npm/_logs` stays readable and writable, and a step can plant a symlink
+  there (measured); what npm does with it was not measured. It stays, as an
+  accepted residual with no ticket, for npm-installed CLIs' error logs.
+- On macOS a step can still send the user's own Claude Code sessions a message
+  through their inbox sockets, which take messages without a token on macOS
+  (read from the binary, not measured). It can also confirm guessed names
+  under `~/.claude/sessions` with `stat`, but cannot list or read them
+  (CRL-174). A step's own CLI no longer publishes its inbox key in the shared
+  `~/.claude/sessions`.
+- Other channels to unsandboxed code are unchanged: other programs' sockets
+  (CRL-174), Omnigent's loopback listeners and the codex-native socket
+  (CRL-177), and the owner on a single-user server (CRL-159). Secrets in
+  environments are unchanged too (CRL-167, CRL-168).
+- Other macOS releases, and CI (CRL-170). The keychain result rests on the
+  file denial. The behaviour test checks only that a stand-in file at the
+  keychain's path cannot be opened, and only on a Mac that runs it. A release
+  that let securityd open the login keychain on the caller's behalf would
+  make keychain items readable from the sandbox without that test noticing.
+- Linux was not run locally. `projects` as a file was measured with claude
+  2.1.325, and CI runs 2.1.295.
+
+**Open for the owner.** Whether to run Coral steps on untrusted content is
+the owner's risk decision, stated with its open tickets in "Addendum: CRL-166
+harness sockets on macOS". It is not decided here.

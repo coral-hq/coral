@@ -278,7 +278,7 @@ class _CodexModelDiscoveryProcess:
     stderr_tail: asyncio.Task[str]
     registry_tag: str | None = None
     owner_lock: CodexNativeProcessOwnerLock | None = None
-    ws_token_file: Path | None = None  # CORAL(S113): removed when the process stops
+    ws_token_file: Path | None = None  # CORAL(S114): removed when the process stops
 
 
 def _string_object_dict(value: object) -> _JsonObject | None:
@@ -1250,7 +1250,7 @@ def is_unreadable_thread_error(exc: BaseException) -> bool:
     return False
 
 
-# CORAL(S113): a per-spawn capability token gates the loopback app-server WebSocket.
+# CORAL(S114): a per-spawn capability token gates the loopback app-server WebSocket.
 CODEX_WS_TOKEN_ENV = "OMNIGENT_CODEX_WS_TOKEN"
 # websockets logs every request header at DEBUG; this logger never does.
 _ws_logger = logging.getLogger(f"{__name__}.websocket")
@@ -1398,7 +1398,7 @@ class CodexAppServerClient:
         :returns: None.
         """
         if self._ws_url is not None:
-            # CORAL(S113): the Bearer goes only to a loopback port with a token file.
+            # CORAL(S114): the Bearer goes only to a loopback port with a token file.
             port = _loopback_ws_port(self._ws_url)
             token = read_codex_ws_token(port) if port is not None else None
             self._ws = await websockets.connect(
@@ -1793,7 +1793,7 @@ async def _start_codex_model_discovery_process(
 ) -> _CodexModelDiscoveryProcess:
     """Start the isolated Codex process used only for model discovery."""
     registry_tag = f"codex-model-probe-{uuid.uuid4().hex}"
-    ws_token_file = await _codex_ws_token_file(codex_path, listen_url)  # CORAL(S113)
+    ws_token_file = await _codex_ws_token_file(codex_path, listen_url)  # CORAL(S114)
     argv = _build_native_codex_app_server_argv(
         tagged_argv0=_tagged_codex_argv0(codex_path, registry_tag),
         listen_url=listen_url,
@@ -2535,7 +2535,7 @@ def _build_native_codex_app_server_argv(
     overrides = [arg for override in config_overrides for arg in ("-c", override)]
     argv = [tagged_argv0, *launch_args, *overrides, "app-server", "--listen", listen_url]
     if ws_token_file is not None:
-        # CORAL(S113): codex reads the token from the file; it never goes on argv.
+        # CORAL(S114): codex reads the token from the file; it never goes on argv.
         argv += ["--ws-auth", "capability-token", "--ws-token-file", str(ws_token_file)]
     return argv
 
@@ -2661,7 +2661,7 @@ class CodexNativeAppServer:
         """
         self.process_registry_tag = f"codex-native-{uuid.uuid4().hex}"
         executable, *launch_args = self.app_server_command or (self.codex_path,)
-        # CORAL(S113): probes codex_path, not a configured wrapper.
+        # CORAL(S114): probes codex_path, not a configured wrapper.
         # ponytail: a wrapper that runs a different codex than codex_path gets
         # this codex's answer; a mismatch fails at startup, never silently opens.
         argv = _build_native_codex_app_server_argv(
@@ -3228,7 +3228,7 @@ class CodexNativeAppServer:
                 await self.proc.wait()
         if self.process_registry_tag is not None:
             unregister_codex_native_process(self.process_registry_tag)
-            # CORAL(S113): only the wrapper that spawned the app-server drops its token.
+            # CORAL(S114): only the wrapper that spawned the app-server drops its token.
             _remove_codex_ws_token(self.listen_url)
         if self.process_owner_lock is not None:
             self.process_owner_lock.close()
@@ -3517,7 +3517,7 @@ def _codex_route_turn_hook(bridge_dir: Path, python_executable: str | None) -> _
     from omnigent.harnesses.codex_native.bridge import bridge_root
     from omnigent.runner.turn_routing import HARNESS_HOOK_TIMEOUT_S
 
-    # CORAL(S113): codex's env drops OMNIGENT_*, and the hook's app-server client
+    # CORAL(S114): codex's env drops OMNIGENT_*, and the hook's app-server client
     # finds the WebSocket token under this data dir.
     data_dir = shlex.quote(str(bridge_root().parent))
     return {
@@ -5621,7 +5621,7 @@ def codex_terminal_env(app_server: CodexNativeAppServer) -> dict[str, str]:
         in {"CODEX_HOME", "DATABRICKS_HOST", "DATABRICKS_CODEX_TOKEN", "OTEL_RESOURCE_ATTRIBUTES"}
         or key.startswith(("OPENAI_", "HTTP_", "HTTPS_", "NO_PROXY", "ALL_PROXY"))
     }
-    # CORAL(S113): the TUI reads the token through --remote-auth-token-env.
+    # CORAL(S114): the TUI reads the token through --remote-auth-token-env.
     port = _loopback_ws_port(app_server.listen_url)
     token = read_codex_ws_token(port) if port is not None else None
     if token:
@@ -5856,7 +5856,7 @@ def build_codex_remote_args(
     passthrough = without_codex_config_profile(passthrough)
     if bypass_hook_trust:
         passthrough = [_CODEX_BYPASS_HOOK_TRUST_FLAG, *passthrough]
-    # CORAL(S113): only when a token exists, so an old codex never sees the flag.
+    # CORAL(S114): only when a token exists, so an old codex never sees the flag.
     port = _loopback_ws_port(remote_url)
     remote = ["--remote", remote_url]
     if port is not None and read_codex_ws_token(port):

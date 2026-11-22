@@ -1431,16 +1431,29 @@ test until someone classifies it.
   among them (CRL-174). From code, not measured: on either platform a step with
   network on reaches Omnigent's loopback TCP listeners (CRL-177), on macOS also
   the codex-native socket (CRL-177), and on Linux other programs' abstract
-  sockets (CRL-174); and a claude-sdk step can write the plugins and sessions
-  in the user's real `~/.claude`, whose plugin hooks the user's own Claude Code
-  runs (CRL-176). Processes outside the sandbox can still connect to a harness
-  socket, which has no bearer on POSIX (CRL-173). The full residual list and
-  its owners are in
+  sockets (CRL-174). Processes outside the sandbox can still connect to a
+  harness socket, which has no bearer on POSIX (CRL-173). A Coral step's
+  sandboxed Claude CLI keeps its Claude Code state in a private directory for
+  each launch. Its sandbox grants nothing of the user's `~/.claude` or
+  `~/.claude.json`, so neither it nor anything it starts can read or write
+  them. That was measured on macOS 27.2.1 and is checked on Linux by a bwrap
+  test in CI. The CLI still receives the `env` block of the user's
+  `~/.claude/settings.json` (CRL-167). A step whose sandbox cannot wrap its
+  CLI does not start, so Coral steps need a system `claude` CLI: the SDK's
+  bundled one cannot be wrapped in the sandbox. Coral CLIs that run outside
+  the sandbox get a private config directory but are not confined (CRL-180):
+  the macOS orchestrator and anchor, the Linux ones when their sandbox cannot
+  be applied, and any CLI under the operator's
+  `OMNIGENT_CLAUDE_SDK_NO_SANDBOX`. Other Omnigent agents that run claude-sdk
+  in a sandbox share the user's `~/.claude` (CRL-178). A step can create
+  Claude Code project settings in its worktree, which the user's own Claude
+  Code loads if the user opens and trusts that worktree (CRL-181). The full
+  residual lists and their owners are in
   [`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
-  "Addendum: CRL-166 harness sockets on macOS". Whether to run Coral steps on
-  untrusted content on macOS while CRL-171 is open, and on either platform
-  while CRL-174, CRL-176 and CRL-177 are open, is an open owner decision,
-  recorded there.
+  "Addendum: CRL-166 harness sockets on macOS" and "Addendum: CRL-176 Claude
+  config isolation". Whether to run Coral steps on untrusted content on macOS
+  while CRL-171 is open, and on either platform while CRL-174, CRL-177 and
+  CRL-181 are open, is an open owner decision, recorded in the first.
 - **Servers that require no identity.** With authentication off, or on a
   single-user header server, every request without credentials is the local
   user. Any process of that user that can reach the server (a step shell the

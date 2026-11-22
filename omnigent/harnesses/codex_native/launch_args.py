@@ -127,7 +127,7 @@ _CODEX_VALUE_FLAGS = frozenset(
 # incoherent argv — e.g. ``codex app-server … --remote`` (app-server rejects
 # ``--remote`` on every codex version, clap exits 2) — so the thread never
 # starts. ``--remote-control`` is app-server-only and equally invalid on the TUI.
-# CORAL(S113): Omnigent sets ``--remote-auth-token-env`` for the app-server's token.
+# CORAL(S114): Omnigent sets ``--remote-auth-token-env`` for the app-server's token.
 _RESERVED_CODEX_TRANSPORT_TOKENS = frozenset(
     {"app-server", "--listen", "--remote", "--remote-control", "--remote-auth-token-env"}
 )

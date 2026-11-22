@@ -1136,7 +1136,7 @@ def test_sandbox_cannot_connect_to_omnigent_control_sockets(
     assert alive, "a listener died during the run, so a refused connect proves nothing"
 
 
-# CORAL(S113): reaches each loopback harness listener, calls it without its secret, reads the
+# CORAL(S114): reaches each loopback harness listener, calls it without its secret, reads the
 # secrets it can and calls with them; prints names and HTTP statuses only. Ports from a file.
 _LOOPBACK_LISTENER_PROBE = """
 import base64, http.client, json, os, socket
@@ -1197,7 +1197,7 @@ if codex_token:
 """
 
 
-# CORAL(S113): no sandboxed process drives a loopback harness listener without its secret
+# CORAL(S114): no sandboxed process drives a loopback harness listener without its secret
 @pytest.mark.parametrize("launch_path", ["helper", "launcher"])
 def test_sandbox_cannot_drive_loopback_harness_listeners(
     tmp_path: Path,
@@ -1210,7 +1210,7 @@ def test_sandbox_cannot_drive_loopback_harness_listeners(
     """
     A networked sandboxed shell or CLI wrap reaches a throwaway claude-native tool relay,
     runner direct-attach listener, ``opencode serve`` and real ``codex app-server`` (started
-    through the S113 argv) over TCP, and each refuses it without its secret. Outside, the
+    through the S114 argv) over TCP, and each refuses it without its secret. Outside, the
     same probe reads the relay's ``bridge.json`` and the codex token file and is let in;
     inside, it can read neither. Each listener answers its rightful client before and after.
     """
@@ -1428,6 +1428,89 @@ def test_sandbox_cannot_drive_loopback_harness_listeners(
     assert outside.stdout.splitlines() == reached, f"outside: {outside.stdout}; {outside.stderr}"
     assert inside.splitlines() == refused, f"inside: {inside.splitlines()}; {inside_detail}"
     assert after == expected_rightful, f"a rightful client failed after the run: {after}"
+
+
+# ---------------------------------------------------------------------------
+# Claude config
+# ---------------------------------------------------------------------------
+
+
+def _report(path: Path) -> tuple[list[str], str]:
+    """The probe's verdict lines, and the config dir it named."""
+    *verdicts, named = path.read_text().splitlines()
+    return verdicts, named.removeprefix("config_dir ")
+
+
+# CORAL(S113): code inside a Coral CLI wrap cannot reach the user's Claude config home
+def test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home(
+    tmp_path: Path,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Outside, the probe writes a throwaway home's installed plugin hook, a new plugin,
+    ``sessions``, ``session-env``, ``backups`` and ``.claude.json``, and reads the session key,
+    ``.credentials.json`` and a keychain stand-in, directly and through hard links, a symlink
+    and a rename. Inside an isolated CLI wrap every one fails, though a forwarded
+    ``CLAUDE_CONFIG_DIR`` names that home, and the home is unchanged. The wrap's own config
+    dir is a 0700 dir in its scratch, writable, without ``projects/``, named by both config
+    variables over the forwarded values, and gone after the exit.
+    """
+    import tests.e2e.coral._claude_config_probe as probe
+    from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+
+    home, outside_home, workspace = (tmp_path / name for name in ("home", "outside", "work"))
+    workspace.mkdir()
+    shutil.copy(probe.__file__, workspace / "probe.py")
+    for seeded in (home, outside_home):
+        probe.seed_claude_home(seeded)
+    with contextlib.ExitStack() as cleanup:
+        harness_root = Path(tempfile.mkdtemp(prefix="sbx-h-", dir="/tmp"))
+        cleanup.callback(shutil.rmtree, harness_root, ignore_errors=True)
+        monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", str(harness_root))
+        monkeypatch.setenv("HOME", str(home))
+        spec = OSEnvSpec(
+            type="caller_process",
+            cwd=str(workspace),
+            sandbox=active_sandbox_spec_factory(write_paths=["."]),
+        )
+        prepared = prepare_claude_cli_path(sys.executable, spec, isolate_config=True)
+        assert prepared.config_isolated and prepared.cli_path is not None
+        cleanup.callback(Path(prepared.cli_path).unlink, missing_ok=True)
+        before = probe.tree(home)
+
+        def run_probe(command: list[str], probe_home: Path, report: str) -> Path:
+            reader_env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "PYTHONPATH": os.environ["PYTHONPATH"],
+                "TMPDIR": tempfile.gettempdir(),
+                "HOME": str(probe_home),
+                # Stand in for user values the host forwards.
+                "CLAUDE_CONFIG_DIR": str(probe_home / ".claude"),
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(probe_home),
+            }
+            argv = [*command, "probe.py", report, str(probe_home)]
+            done = subprocess.run(
+                argv, cwd=workspace, env=reader_env, capture_output=True, text=True, timeout=60
+            )
+            assert done.returncode == 0, done.stderr
+            return workspace / report
+
+        outside, outside_dir = _report(run_probe([sys.executable], outside_home, "outside.txt"))
+        inside, inside_dir = _report(run_probe([prepared.cli_path], home, "inside.txt"))
+    own = ["config_private", "config_writable", "projects", "securestorage_own"]
+    reached = [f"{name} yes" for name in probe.HOME_CHECKS] + [
+        f"{name} {verdict}" for name, verdict in zip(own, ("no", "yes", "yes", "no"), strict=True)
+    ]
+    refused = [f"{name} no" for name in probe.HOME_CHECKS] + [
+        f"{name} {verdict}" for name, verdict in zip(own, ("yes", "yes", "no", "yes"), strict=True)
+    ]
+    assert outside == reached, f"failed outside: {outside}"
+    assert outside_dir == str(outside_home / ".claude")
+    assert inside == refused, f"reached inside: {[v for v in inside if v not in refused]}"
+    assert probe.tree(home) == before, "the wrap changed the home"
+    assert Path(inside_dir).name == "claude_config_dir" and not Path(inside_dir).exists()
 
 
 # ---------------------------------------------------------------------------

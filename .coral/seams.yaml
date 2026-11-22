@@ -3534,6 +3534,96 @@ seams:
     upstream_candidate: false
 
   - id: S113
+    title: A Coral claude CLI keeps its Claude config in a private dir, never the user's ~/.claude
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Before this seam every claude-sdk CLI wrap granted read and write on
+      ~/.claude/{plugins,sessions,session-env,backups}, ~/.claude.json and
+      ~/.claude/.credentials.json (each only if it exists), and code in the
+      wrap rewrote a plugin hook and planted a session-env script that the
+      user's Claude Code runs (measured on macOS 27.2.1 with a throwaway
+      home). sandbox.py: for a policy with scratch_dir_env, the launcher's
+      in-wrap pass makes a fresh 0700 dir named after the variable in the
+      target's private scratch, creates each scratch_dir_files name in it as
+      an empty file, sets the variable and each scratch_dir_extra_envs name to
+      its absolute path over any inherited value, and removes it with the
+      scratch; with no scratch it raises. The fields travel the launcher wire
+      and survive clones; an old payload asks for no dir, and a malformed one,
+      or one naming a variable other than the two config dir names, fails the
+      launch. Executor: workflow.py sets
+      HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG for params.coral specs (a spec
+      cannot set harness env, and the flag only narrows). Both wrap paths
+      (os_env and the Linux tight wrap) then grant only ~/.npm/_logs of the
+      home, point CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR at
+      that dir with projects as a file, and remove both names from the CLI's
+      inherited and settings environment. A Coral CLI that runs unwrapped gets
+      an executor-owned mkdtemp dir instead, removed on close. When a step's
+      os_env asks for a wrap (caller_process, a sandbox type other than none,
+      network on, no operator opt-out) and its CLI was not wrapped, the
+      executor refuses its turns with coral_sandbox_unavailable before any CLI
+      starts. No rule grants ~/Library and S5 denies it, so the keychain file
+      cannot be opened from the wrap (measured on 27.2.1 with a stand-in
+      file). Main residuals and owners: other agents' sandboxed claude-sdk
+      wraps (CRL-178), unwrapped Coral CLIs (CRL-180), leftover scratch and
+      private dirs (CRL-179), the settings env merge (CRL-167), env
+      construction races and a relative config dir (CRL-182), project config a
+      step writes in its worktree (CRL-181), and the inbox sockets (CRL-174).
+      No CI lane runs macOS (CRL-170). Mechanism, evidence and the full
+      residual list: ADR-05, "Addendum: CRL-176 Claude config isolation".
+    files:
+      - omnigent/inner/sandbox.py
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/inner/claude_sdk_harness.py
+      - omnigent/runtime/workflow.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+    tests:
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/e2e/coral/test_skeleton.py
+      - tests/e2e/coral/test_tier_b_executor.py
+    budget_lines: 120
+    budget_exception:
+      lines: 343
+      reason: >-
+        tests/inner/test_claude_sdk_executor.py (343 changed lines): the wrap
+        grant tests for both backends and the Linux tight wrap, isolated and
+        not, with a seeded config home; the table that pins the refusal rule
+        to every wrap outcome (wraps, no os_env, operator opt-out, sandbox
+        none, network off, and the resolve, inactive and trial-wrap faults);
+        the spawn-env test for a wrapped, an unwrapped, a tight-wrapped and a
+        tight-unwrapped CLI, a non-isolated one through the user settings and
+        one through the host's environment only, each checking that the wrap
+        was asked to isolate; the fail-closed test (no system claude, resolve,
+        inactive and trial-wrap faults refused; opt-out and network off run);
+        and the two-connect race test. omnigent/inner/claude_sdk_executor.py
+        (148 changed lines): the flag and its docstring, the isolated branch
+        on both wrap paths with the include_config switch, the
+        config_isolated field, the requested-wrap check and the refusal, the
+        executor's own dir for an unwrapped CLI and its removal, the two
+        strip sites, and both names set to the private dir.
+        tests/inner/test_sandbox.py (123 changed lines): the scratch dir
+        fields on the wire and through clones, 15 malformed payloads refused,
+        the in-wrap dir overriding both inherited names and removed when the
+        target exits or fails, and the refusal without a scratch. The other
+        files are within budget: omnigent/inner/sandbox.py 92,
+        tests/inner/sandbox/test_sandbox_behavior.py 83,
+        omnigent/inner/claude_sdk_harness.py 3, omnigent/runtime/workflow.py
+        2, tests/inner/test_claude_sdk_harness.py 4,
+        tests/runtime/test_claude_sdk_spawn_env.py 2.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+  - id: S114
     title: The codex-native app-server WebSocket requires a per-spawn capability token
     owner: WS-INTEGRATION
     status: landed
@@ -3590,7 +3680,7 @@ seams:
         reads the secrets it can and calls with them; and the test that starts
         a throwaway tool relay with its bridge.json, a direct-attach listener,
         opencode serve with throwaway homes and a real codex app-server through
-        the S113 argv, checks each rightful client before and after, and runs
+        the S114 argv, checks each rightful client before and after, and runs
         the probe outside and inside through the os_env helper and the CLI
         wrap. tests/harnesses/codex_native/app_server/test_ws_auth.py (340
         lines, new): the unit tests the PR plan lists, with a fake codex for

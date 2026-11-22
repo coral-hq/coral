@@ -171,6 +171,15 @@ class SandboxPolicy:
         CLI's launch dir sits under the harness root). bwrap ignores it: its
         ``--tmpfs /tmp`` hides the default root. ``None`` is the same as an
         empty list.
+    :param scratch_dir_env: CORAL(S113): the name of an environment variable that the
+        launcher's in-wrap pass sets to a fresh 0700 directory inside the target's private
+        scratch, named after the variable, lowercased (``claude_config_dir``). It is removed
+        with the scratch when the target exits, and needs no grant, because the scratch is
+        one. ``None``: no such dir.
+    :param scratch_dir_files: CORAL(S113): names created as empty files in that dir, so the
+        target cannot make a directory of that name there.
+    :param scratch_dir_extra_envs: CORAL(S113): further environment variables the in-wrap
+        pass sets to that same dir, over any inherited value.
     :param mask_scan_skip_roots: Write roots the dotfile / escaping-symlink
         mask scan must skip — the framework's own scratch / runtime dirs
         added post-resolve via :func:`with_additional_write_roots`. These
@@ -218,6 +227,10 @@ class SandboxPolicy:
     # parent, grants it, sets the target's env var to it, and removes it when the target exits.
     launch_tmpdir_env: str | None = None
     launch_tmpdir_parent: Path | None = None
+    # CORAL(S113): the launcher points this env var at a fresh 0700 dir inside the target's scratch
+    scratch_dir_env: str | None = None
+    scratch_dir_files: tuple[str, ...] = ()
+    scratch_dir_extra_envs: tuple[str, ...] = ()
     # Parent-side only: the resolved credential-proxy policy. Read in
     # ``_HelperProcessClient._start_locked`` (parent) to mint synthetic
     # placeholders and proxy rewrite rules. Intentionally NOT carried in
@@ -305,6 +318,10 @@ class SandboxPolicy:
             "launch_tmpdir_parent": (
                 str(self.launch_tmpdir_parent) if self.launch_tmpdir_parent is not None else None
             ),
+            # CORAL(S113)
+            "scratch_dir_env": self.scratch_dir_env,
+            "scratch_dir_files": _json_string_list(self.scratch_dir_files),
+            "scratch_dir_extra_envs": _json_string_list(self.scratch_dir_extra_envs),
         }
         return result
 
@@ -381,6 +398,12 @@ class SandboxPolicy:
         # CORAL(S109)
         launch_env_raw = data.get("launch_tmpdir_env")
         launch_parent_raw = data.get("launch_tmpdir_parent")
+        # CORAL(S113): an old payload asks for no private dir; a malformed one is refused
+        scratch_dir_env = data.get("scratch_dir_env")
+        scratch_dir_files = data.get("scratch_dir_files", [])
+        scratch_dir_extra_envs = data.get("scratch_dir_extra_envs", [])
+        if scratch_dir_env is not None or scratch_dir_files != [] or scratch_dir_extra_envs != []:
+            _check_scratch_dir(scratch_dir_env, scratch_dir_files, scratch_dir_extra_envs)
         cow_roots = data.get("copy_on_write_roots", [])
         if not isinstance(cow_roots, list) or any(not isinstance(p, str) for p in cow_roots):
             raise ValueError("Invalid copy_on_write_roots")
@@ -417,6 +440,10 @@ class SandboxPolicy:
             launch_tmpdir_parent=(
                 Path(launch_parent_raw) if isinstance(launch_parent_raw, str) else None
             ),
+            # CORAL(S113): both were checked above
+            scratch_dir_env=cast("str | None", scratch_dir_env),
+            scratch_dir_files=tuple(cast("list[str]", scratch_dir_files)),
+            scratch_dir_extra_envs=tuple(cast("list[str]", scratch_dir_extra_envs)),
         )
 
 
@@ -968,6 +995,10 @@ def _clone_policy_with(
         # CORAL(S109)
         launch_tmpdir_env=policy.launch_tmpdir_env,
         launch_tmpdir_parent=policy.launch_tmpdir_parent,
+        # CORAL(S113)
+        scratch_dir_env=policy.scratch_dir_env,
+        scratch_dir_files=policy.scratch_dir_files,
+        scratch_dir_extra_envs=policy.scratch_dir_extra_envs,
         # Preserve the credential-proxy policy across clones: the
         # ``with_additional_*`` helpers run before the parent reads it in
         # ``_start_locked``, so dropping it here would silently disable
@@ -1282,6 +1313,66 @@ def with_launch_tmpdir(policy: SandboxPolicy, env_name: str, parent: Path) -> Sa
     return replace(policy, launch_tmpdir_env=env_name, launch_tmpdir_parent=parent)
 
 
+# CORAL(S113): an environment variable name, which also names the dir in the scratch
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
+# CORAL(S113): the only variables a payload may point at its private dir
+_SCRATCH_DIR_ENVS = frozenset({"CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"})
+# CORAL(S113): a plain entry name in that dir, never a path
+_SCRATCH_ENTRY_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+
+
+def _all_match(values: object, pattern: re.Pattern[str]) -> bool:
+    return isinstance(values, (list, tuple)) and all(
+        isinstance(value, str) and pattern.fullmatch(value) for value in values
+    )
+
+
+def _check_scratch_dir(env_name: object, files: object, extra_envs: object = ()) -> None:
+    """CORAL(S113): raise ``ValueError`` unless these name a private dir, its files and envs."""
+    if not _all_match([env_name], _ENV_NAME) or not _all_match(extra_envs, _ENV_NAME):
+        raise ValueError("scratch_dir_env names must be upper-case environment variable names")
+    if not {env_name, *extra_envs} <= _SCRATCH_DIR_ENVS:  # type: ignore[misc]
+        raise ValueError("scratch_dir_env names must be Claude config dir variables")
+    if not _all_match(files, _SCRATCH_ENTRY_NAME):
+        raise ValueError("scratch_dir_files must be plain file names")
+
+
+def with_scratch_dir_env(
+    policy: SandboxPolicy,
+    env_name: str,
+    *,
+    files: Sequence[str] = (),
+    extra_envs: Sequence[str] = (),
+) -> SandboxPolicy:
+    """CORAL(S113): give the target a private dir in its scratch, named in ``env_name``."""
+    _check_scratch_dir(env_name, files, extra_envs)
+    return replace(
+        policy,
+        scratch_dir_env=env_name,
+        scratch_dir_files=tuple(files),
+        scratch_dir_extra_envs=tuple(extra_envs),
+    )
+
+
+def export_scratch_dir(policy: SandboxPolicy, scratch: Path | None) -> None:
+    """
+    CORAL(S113): create the policy's private dir in ``scratch`` and name it to the target.
+
+    It overwrites an inherited value of each variable. Without a scratch it raises rather than
+    let the target fall back to a default location.
+    """
+    if policy.scratch_dir_env is None:
+        return
+    if scratch is None:
+        raise RuntimeError("The launcher has no scratch dir for the target's private dir")
+    path = Path(os.path.abspath(scratch)) / policy.scratch_dir_env.lower()
+    path.mkdir(mode=0o700)
+    for name in policy.scratch_dir_files:
+        (path / name).touch(mode=0o600, exist_ok=False)
+    for env_name in (policy.scratch_dir_env, *policy.scratch_dir_extra_envs):
+        os.environ[env_name] = str(path)
+
+
 # CORAL(S109): launch dirs are ``mkdtemp(prefix="c")`` names holding this owner claim.
 _LAUNCH_TMPDIR_NAME = re.compile(r"c[a-z0-9_]{8}")
 _LAUNCH_TMPDIR_OWNER = ".launch-owner"
@@ -1563,6 +1654,7 @@ def run_launcher(
             )
     try:
         activate_sandbox(sandbox)
+        export_scratch_dir(sandbox, tmpdir)  # CORAL(S113)
         logger.info("[omnigent-sandbox] activated; spawning target=%s", target_path)
         completed = subprocess.run(target_argv)
         logger.info("[omnigent-sandbox] target exited rc=%s", completed.returncode)

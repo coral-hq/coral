@@ -1,4 +1,4 @@
-# CORAL(S113): tests for the per-spawn token on the codex-native app-server WebSocket
+# CORAL(S114): tests for the per-spawn token on the codex-native app-server WebSocket
 """The per-spawn capability token on the codex-native app-server WebSocket."""
 
 from __future__ import annotations
