@@ -534,7 +534,8 @@ class TestConstructor(unittest.TestCase):
                 side_effect=_capture_launcher,
             ),
         ):
-            prepared = prepare_claude_cli_path("/usr/bin/claude", spec)
+            # CORAL(S115): the shared grants are now an explicit choice
+            prepared = prepare_claude_cli_path("/usr/bin/claude", spec, isolate_config=False)
 
         self.assertEqual(prepared.cli_path, "/tmp/launcher")
         self.assertTrue(prepared.enable_native_tools)
@@ -4123,7 +4124,10 @@ class _PassingWrapBackend:
 
 
 # CORAL(S113): isolate asks for the private config dir
-def _granted_policy(monkeypatch, tmp_path: Path, backend_type: str, *, isolate: bool = False):
+# CORAL(S115): None takes the default, and seed names the global config copied into it
+def _granted_policy(
+    monkeypatch, tmp_path: Path, backend_type: str, *, isolate: bool | None = False, seed=None
+):
     """The policy the CLI wrap is built from, with HOME, TMPDIR and the socket root in tmp_path."""
     import dataclasses
 
@@ -4148,10 +4152,12 @@ def _granted_policy(monkeypatch, tmp_path: Path, backend_type: str, *, isolate: 
 
     monkeypatch.setattr("omnigent.inner.claude_sdk_executor.create_exec_launcher", _capture)
     prepared = prepare_claude_cli_path(
-        "/usr/bin/claude", _wrap_probe_spec(), isolate_config=isolate
+        "/usr/bin/claude", _wrap_probe_spec(), isolate_config=isolate, config_seed=seed
     )
     assert prepared.enable_native_tools is True
-    assert prepared.config_isolated is isolate  # CORAL(S113)
+    # CORAL(S113, S115): by default every backend but the job object, which confines no files
+    default = backend_type != "windows_jobobject"
+    assert prepared.config_isolated is (default if isolate is None else isolate)
     return captured["sandbox"]
 
 
@@ -4209,18 +4215,23 @@ def _claude_home_grants(policy, home: Path) -> list[Path]:
     ]
 
 
-@pytest.mark.parametrize("backend_type", ["darwin_seatbelt", "linux_bwrap"])
-@pytest.mark.parametrize("isolate", [True, False])
+# CORAL(S115): a backend added later is isolated by default too
+@pytest.mark.parametrize("backend_type", ["darwin_seatbelt", "linux_bwrap", "a_future_backend"])
+@pytest.mark.parametrize("isolate", [True, False, None], ids=["coral", "shared", "default"])
 def test_an_isolated_cli_wrap_grants_nothing_of_the_claude_config_home(
-    monkeypatch, tmp_path, backend_type: str, isolate: bool
+    monkeypatch, tmp_path, backend_type: str, isolate: bool | None
 ) -> None:
-    """Only ~/.npm/_logs stays, each launch gets CLAUDE_CONFIG_DIR, and ~/.claude is untouched."""
+    """
+    Only ~/.npm/_logs stays, each launch gets CLAUDE_CONFIG_DIR, and ~/.claude is untouched.
+    CORAL(S115): the default isolates too, and its seed, not yet written, is the one new read.
+    """
     home = tmp_path / "home"
     seeded = _seed_claude_home(home)
-    policy = _granted_policy(monkeypatch, tmp_path, backend_type, isolate=isolate)
+    seed = tmp_path / "seed" / "claude.json" if isolate is None else None
+    policy = _granted_policy(monkeypatch, tmp_path, backend_type, isolate=isolate, seed=seed)
 
     grants = _claude_home_grants(policy, home)
-    if isolate:
+    if isolate is not False:
         assert grants == [], grants
         assert sorted((home / ".claude").iterdir()) == seeded[1:]
         assert (home / ".npm" / "_logs").resolve() in policy.write_roots
@@ -4228,19 +4239,40 @@ def test_an_isolated_cli_wrap_grants_nothing_of_the_claude_config_home(
             "CLAUDE_CONFIG_DIR",
             ("projects",),
         )
+        assert policy.scratch_dir_extra_envs == ("CLAUDE_SECURESTORAGE_CONFIG_DIR",)
+        expected = [] if seed is None else [seed.resolve()]
+        assert [root for root in policy.read_roots or [] if root.name == "claude.json"] == expected
+        assert policy.scratch_dir_seed == tuple((".claude.json", str(path)) for path in expected)
+        assert not (tmp_path / "seed").exists()
     else:
         assert len(grants) == 2 * 4 + len(seeded), grants
         assert (policy.scratch_dir_env, policy.scratch_dir_files) == (None, ())
 
 
-@pytest.mark.parametrize("isolate", [True, False])
+# CORAL(S115): the job object confines no files, so isolating it would only drop the login
+def test_a_windows_job_object_cli_keeps_the_shared_claude_config_by_default(
+    monkeypatch, tmp_path
+) -> None:
+    home = tmp_path / "home"
+    seeded = _seed_claude_home(home)
+    seed = tmp_path / "seed" / "claude.json"
+    policy = _granted_policy(monkeypatch, tmp_path, "windows_jobobject", isolate=None, seed=seed)
+
+    assert len(_claude_home_grants(policy, home)) == 2 * 4 + len(seeded)
+    assert (policy.scratch_dir_env, policy.scratch_dir_seed) == (None, ())
+
+
+@pytest.mark.parametrize("isolate", [True, False, None], ids=["coral", "shared", "default"])
 def test_an_isolated_tight_cli_wrap_grants_nothing_of_the_claude_config_home(
-    monkeypatch, tmp_path, isolate: bool
+    monkeypatch, tmp_path, isolate: bool | None
 ) -> None:
     from omnigent.inner.claude_sdk_executor import prepare_tight_cli_process_path
 
     home = tmp_path / "home"
     seeded = _seed_claude_home(home)
+    seed = tmp_path / "seed" / "claude.json"
+    # CORAL(S115): this wrap is always bwrap, so it isolates by default
+    options = {"config_seed": seed} if isolate is None else {"isolate_config": isolate}
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(
@@ -4253,14 +4285,16 @@ def test_an_isolated_tight_cli_wrap_grants_nothing_of_the_claude_config_home(
         return "/tmp/launcher"
 
     monkeypatch.setattr("omnigent.inner.claude_sdk_executor.create_exec_launcher", _capture)
-    assert prepare_tight_cli_process_path("/usr/bin/claude", isolate_config=isolate) == (
-        "/tmp/launcher"
-    )
+    assert prepare_tight_cli_process_path("/usr/bin/claude", **options) == "/tmp/launcher"
 
     policy = captured["sandbox"]
-    assert bool(_claude_home_grants(policy, home)) is not isolate
-    assert (policy.scratch_dir_env == "CLAUDE_CONFIG_DIR") is isolate
-    if isolate:
+    isolated = isolate is not False  # CORAL(S115): the default isolates
+    assert bool(_claude_home_grants(policy, home)) is not isolated
+    assert (policy.scratch_dir_env == "CLAUDE_CONFIG_DIR") is isolated
+    assert policy.scratch_dir_seed == (
+        ((".claude.json", str(seed.resolve())),) if isolate is None else ()
+    )
+    if isolated:
         assert sorted((home / ".claude").iterdir()) == seeded[1:]
 
 
@@ -6962,9 +6996,9 @@ def _isolation_executor(monkeypatch, tmp_path: Path, *, cli: str | None, os_env=
     monkeypatch.setattr(
         "omnigent.inner.claude_sdk_executor.shutil.which", lambda name: f"/usr/bin/{name}"
     )
-    return ClaudeSDKExecutor(
-        api_key_helper="printf %s sk-ant-test", skills_filter="none", os_env=os_env, **kwargs
-    )
+    # CORAL(S115): a test may name its own skills or credential
+    options = {"api_key_helper": "printf %s sk-ant-test", "skills_filter": "none", **kwargs}
+    return ClaudeSDKExecutor(os_env=os_env, **options)
 
 
 # tight-*: no os_env; the tight wrap returns a launcher on Linux, the real CLI on macOS or a fault.
@@ -6988,11 +7022,11 @@ async def test_an_isolated_cli_gets_only_its_own_claude_config_dir(monkeypatch, 
     launcher = PreparedClaudeCli(str(tmp_path / "launcher"), True, config_isolated=True)
     asked: list[bool] = []
 
-    def _prepare(cli, spec, *, isolate_config=False):
+    def _prepare(cli, spec, *, isolate_config=False, config_seed=None):  # CORAL(S115): seed
         asked.append(isolate_config)
         return launcher
 
-    def _prepare_tight(cli, *, cwd=None, isolate_config=False):
+    def _prepare_tight(cli, *, cwd=None, isolate_config=False, config_seed=None):
         asked.append(isolate_config)
         return launcher.cli_path if mode == "tight-wrapped" else cli
 
@@ -7136,6 +7170,489 @@ async def test_a_concurrent_connect_cannot_hand_a_cli_the_hosts_config_names(
     for env in (first_env, second_env):
         assert [env.get(name) for name in _CONFIG_NAMES] == [private, private]
     assert [os.environ[name] for name in _CONFIG_NAMES] == [user_dir, user_dir]
+
+
+# CORAL(S115): a wrapped non-Coral CLI's private dir starts from a filtered copy of the user's
+# global config, written only just before each launch.
+_SEED_SERVERS = {
+    "local": {"type": "stdio", "command": "srv", "env": {"TOKEN": "throwaway-secret"}},
+    "remote": {"type": "http", "url": "https://mcp.example.test"},
+}
+_SEED_PROJECT = {
+    "hasTrustDialogAccepted": True,
+    "hasClaudeMdExternalIncludesApproved": True,
+    "disabledMcpServers": ["remote"],
+    "enabledMcpServers": ["computer-use"],
+    "disabledMcpjsonServers": ["planted"],
+    "enabledMcpjsonServers": ["repo-tool"],
+    "enableAllProjectMcpServers": True,
+}
+# The value the CLI treats as unset, for each kept key (2.1.325); none of these is copied.
+_UNSET_PROJECT = {
+    "hasTrustDialogAccepted": False,
+    "hasClaudeMdExternalIncludesApproved": False,
+    "disabledMcpServers": [],
+    "enabledMcpServers": [],
+    "disabledMcpjsonServers": [],
+    "enabledMcpjsonServers": [],
+    "enableAllProjectMcpServers": False,
+}
+
+
+def _user_claude_config(**extra) -> dict:
+    """A global config with every kind of key the seed keeps or drops."""
+    return {
+        "mcpServers": _SEED_SERVERS,
+        "userID": "throwaway-user",
+        "env": {
+            "HTTPS_PROXY": "http://proxy.example.test",
+            "RETRIES": 3,
+            "CLAUDE_CONFIG_DIR": "/elsewhere",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR": "",
+        },
+        "oauthAccount": {"emailAddress": "user@example.test"},
+        "primaryApiKey": "sk-ant-throwaway",
+        "customApiKeyResponses": {"approved": ["throwaway"]},
+        "numStartups": 7,
+        "cachedGrowthBookFeatures": {"flag": True},
+        "projects": {
+            "/work/repo": {
+                **_SEED_PROJECT,
+                "mcpServers": {"local-only": {"command": "x", "env": {"KEY": "throwaway"}}},
+                "allowedTools": ["Bash"],
+                "lastSessionId": "s",
+            },
+            "/work/other": {"hasTrustDialogAccepted": True, "lastCost": 1.5},
+            "/work/mixed": {**_UNSET_PROJECT, "disabledMcpServers": ["remote"]},
+            "/work/visited": {**_UNSET_PROJECT, "projectOnboardingSeenCount": 1},
+            "/work/empty": {"mcpServers": {"x": {}}, "history": []},
+            "/work/odd": ["not", "an", "entry"],
+        },
+        **extra,
+    }
+
+
+_EXPECTED_SEED = {
+    "mcpServers": _SEED_SERVERS,
+    "userID": "throwaway-user",
+    "env": {"HTTPS_PROXY": "http://proxy.example.test"},
+    "projects": {
+        "/work/repo": _SEED_PROJECT,
+        "/work/other": {"hasTrustDialogAccepted": True},
+        "/work/mixed": {"disabledMcpServers": ["remote"]},
+    },
+}
+
+
+def test_the_seed_keeps_only_mcp_identity_env_and_project_trust_keys(
+    tmp_path, monkeypatch, claude_config_seed_source
+) -> None:
+    """
+    No credential, OAuth account, cache, project MCP server, other project key, key at its
+    unset value, project left empty or config dir name in ``env`` is copied, and the CLI's
+    credential file is never opened, by any of the open calls: only the global config is read.
+    """
+    import builtins
+    import io
+
+    from omnigent.inner.claude_sdk_executor import _claude_config_seed
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude.json").write_text(json.dumps(_user_claude_config()))
+    credentials = home / ".claude" / ".credentials.json"
+    credentials.write_text(json.dumps({"claudeAiOauth": {"accessToken": "x"}, "mcpOAuth": {}}))
+    opened: list[str] = []
+
+    def _spy(module, name):
+        real = getattr(module, name)
+
+        def _recording(path, *args, **kwargs):
+            if not isinstance(path, int):  # os.fdopen hands io.open a descriptor
+                opened.append(os.fspath(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(module, name, _recording)
+
+    for module, name in ((os, "open"), (builtins, "open"), (io, "open")):
+        _spy(module, name)
+
+    seed = _claude_config_seed({"HOME": str(home)})
+
+    assert seed == _EXPECTED_SEED
+    assert opened == [str(home / ".claude.json")], "the seed read something else"
+    assert "claudeAiOauth" not in json.dumps(seed) and "mcpOAuth" not in json.dumps(seed)
+
+
+@pytest.mark.parametrize(
+    ("layout", "config_dir", "home_value", "read"),
+    [
+        ("home", None, "home", "home/.claude.json"),
+        ("config-dir", "cfg", "home", "cfg/.claude.json"),
+        ("legacy-home", None, "home", "home/.claude/.config.json"),
+        ("legacy-config-dir", "cfg", "home", "cfg/.config.json"),
+        ("symlinked-home", None, "home", "dotfiles/claude.json"),
+        ("relative-config-dir", "relative", "home", None),
+        ("empty-config-dir", "", "home", None),
+        ("relative-home", None, "relative", None),
+    ],
+)
+def test_the_seed_follows_the_clis_config_path_but_never_a_relative_one(
+    tmp_path, caplog, claude_config_seed_source, layout, config_dir, home_value, read
+) -> None:
+    """A relative or empty config dir, which the CLI resolves in its cwd, gives no seed."""
+    from omnigent.inner.claude_sdk_executor import _claude_config_seed
+
+    for relative in ("home/.claude.json", "cfg/.claude.json", "relative/.claude.json"):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text(json.dumps({"userID": relative}))
+    if layout.startswith("legacy"):
+        legacy = tmp_path / (read or "")
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"userID": read}))
+    elif layout == "symlinked-home":  # a dotfiles repo links ~/.claude.json; the host follows it
+        (tmp_path / "dotfiles").mkdir()
+        (tmp_path / "dotfiles" / "claude.json").write_text(json.dumps({"userID": read}))
+        (tmp_path / "home" / ".claude.json").unlink()
+        (tmp_path / "home" / ".claude.json").symlink_to(tmp_path / "dotfiles" / "claude.json")
+    env = {"HOME": str(tmp_path / "home") if home_value == "home" else home_value}
+    if config_dir is not None:
+        env["CLAUDE_CONFIG_DIR"] = (
+            str(tmp_path / config_dir) if config_dir == "cfg" else config_dir
+        )
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor"):
+        seed = _claude_config_seed(env)
+
+    assert seed == ({"userID": read} if read else {})
+    refused = [r.getMessage() for r in caplog.records if "must be absolute" in r.getMessage()]
+    assert bool(refused) is (read is None), (
+        f"refused a valid source: {refused}" if read else "a relative source was not refused"
+    )
+
+
+# CORAL(S115): a test that builds an executor may inherit the developer's CLAUDE_CONFIG_DIR;
+# the autouse fixture keeps its seed empty unless it opts in.
+def test_a_test_that_does_not_opt_in_never_reads_a_claude_config(tmp_path) -> None:
+    from omnigent.inner.claude_sdk_executor import _claude_config_seed
+
+    (tmp_path / ".claude.json").write_text(json.dumps({"userID": "not-for-tests"}))
+    assert _claude_config_seed({"HOME": str(tmp_path)}) == {}, "the hermetic fixture is off"
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize(
+    ("content", "warns", "cap"),
+    [
+        (None, False, None),
+        ("{not json", True, None),
+        ("[1, 2]", True, None),
+        (b"\xff\xfe", True, None),
+        ("fifo", True, None),
+        ("[" * 100_000 + "]" * 100_000, True, None),  # CORAL(S115): past the recursion limit
+        ('{"userID": "x"}' + " " * 100, True, 64),  # valid, but over a lowered size cap
+    ],
+    ids=["missing", "malformed", "not-an-object", "not-utf8", "fifo", "too-deep", "oversized"],
+)
+def test_a_missing_or_unusable_user_config_gives_an_empty_seed(
+    tmp_path, monkeypatch, caplog, claude_config_seed_source, content, warns, cap
+) -> None:
+    """
+    Never the real file, never a hang: an empty seed, with a warning naming the file. A config
+    too deep to parse or past the size cap counts as malformed, and its warning names only the
+    file.
+    """
+    from omnigent.inner.claude_sdk_executor import _claude_config_seed
+
+    if cap is not None:
+        monkeypatch.setattr(
+            "omnigent.inner.claude_sdk_executor._CLAUDE_SEED_SOURCE_MAX_BYTES", cap
+        )
+    source = tmp_path / ".claude.json"
+    if content == "fifo":
+        os.mkfifo(source)
+    elif isinstance(content, bytes):
+        source.write_bytes(content)
+    elif content is not None:
+        source.write_text(content)
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor"):
+        assert _claude_config_seed({"HOME": str(tmp_path)}) == {}
+    messages = [record.getMessage() for record in caplog.records]
+    assert [str(source) in message for message in messages] == ([True] if warns else []), messages
+    assert not any("recursion" in message for message in messages), messages
+
+
+def _seed_prepare_stubs(monkeypatch, tmp_path: Path, *, wrapped: bool) -> list[dict]:
+    """Stub both wraps; record what the executor asks each for. Seeds go under *tmp_path*."""
+    from omnigent.inner.claude_sdk_executor import PreparedClaudeCli
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    asked: list[dict] = []
+    launcher = str(tmp_path / "launcher")
+
+    def _prepare(cli, spec, *, isolate_config=False, config_seed=None):
+        asked.append({"isolate": isolate_config, "seed": config_seed})
+        return PreparedClaudeCli(launcher if wrapped else cli, True, config_isolated=wrapped)
+
+    def _prepare_tight(cli, *, cwd=None, isolate_config=False, config_seed=None):
+        asked.append({"isolate": isolate_config, "seed": config_seed})
+        return launcher if wrapped else cli
+
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor.prepare_claude_cli_path", _prepare)
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.prepare_tight_cli_process_path", _prepare_tight
+    )
+    return asked
+
+
+@pytest.mark.parametrize(
+    ("coral", "skills", "tight", "wrapped", "isolate", "seeded"),
+    [
+        (True, "all", False, True, True, False),
+        (False, "all", False, True, None, True),
+        (False, ["review"], False, True, None, True),
+        (False, "bogus", False, True, None, True),
+        (False, "none", False, True, None, False),
+        (False, "all", False, False, None, False),
+        (False, "all", True, True, True, True),
+        (False, "all", True, False, True, False),
+    ],
+    ids=["coral", "all", "list", "malformed", "none", "unwrapped", "tight", "tight-unwrapped"],
+)
+async def test_only_a_wrapped_non_coral_cli_that_loads_user_settings_reads_the_users_config(
+    monkeypatch, tmp_path, coral, skills, tight, wrapped, isolate, seeded
+) -> None:
+    """
+    Nothing is read or made at construction; the seed is written once per launch, only for a
+    wrapped non-Coral CLI whose skills load user settings. Others never read the user's config.
+    """
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    asked = _seed_prepare_stubs(monkeypatch, tmp_path, wrapped=wrapped)
+    reads: list[object] = []
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._claude_config_seed",
+        lambda env: reads.append(env) or {"userID": "throwaway"},
+    )
+    executor = _isolation_executor(
+        monkeypatch,
+        tmp_path,
+        cli="/usr/bin/claude",
+        os_env=None if tight else OSEnvSpec(cwd=str(tmp_path), sandbox=OSEnvSandboxSpec()),
+        skills_filter=skills,
+        isolate_claude_config=coral,
+    )
+    [request] = asked
+    seed = executor._claude_config_seed_path
+    assert request["isolate"] is isolate
+    assert (request["seed"] is not None) is (not coral and skills != "none")
+    assert seed == (request["seed"] if seeded else None)
+    assert reads == [] and not any(tmp_path.glob("**/claude.json"))
+    if request["seed"] is not None:
+        assert not request["seed"].parent.exists(), "construction made the seed dir"
+
+    events, _, _ = await _turn_with_recording_sdk(executor)
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert len(reads) == int(seeded)
+    if seed is not None:
+        assert json.loads(seed.read_text()) == {"userID": "throwaway"}
+    await executor.close()
+    assert seed is None or not seed.parent.exists()
+
+
+async def _seeded_turn(executor, session_id: str, seen: list) -> list:
+    """One turn on a new or live client; each launch records the seed it would copy."""
+    fake_sdk = _make_recovery_fake_sdk()
+    seed = executor._claude_config_seed_path
+
+    class _SeedReadingClient(fake_sdk.ClaudeSDKClient):
+        async def connect(self):
+            info, folder = seed.stat(), seed.parent.stat()
+            seen.append(
+                (json.loads(seed.read_text()), info.st_mode & 0o777, folder.st_mode & 0o777)
+            )
+
+    fake_sdk.ClaudeSDKClient = _SeedReadingClient
+    messages = [{"role": "user", "content": "hi", "session_id": session_id}]
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        return [event async for event in executor.run_turn(messages, [], "")]
+
+
+async def test_each_launch_gets_a_fresh_copy_and_a_closed_executor_launches_none(
+    monkeypatch, tmp_path, claude_config_seed_source
+) -> None:
+    """
+    A server the user adds reaches the next launch, not a live client. The dir is 0700 and the
+    file 0600; close and ``__del__`` remove them, and a later launch fails instead of making
+    the dir again.
+    """
+    from omnigent.inner.claude_sdk_executor import _claude_config_seed
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude.json").write_text(json.dumps(_user_claude_config()))
+    _seed_prepare_stubs(monkeypatch, tmp_path, wrapped=True)
+    spec = OSEnvSpec(cwd=str(tmp_path), sandbox=OSEnvSandboxSpec())
+    executor = _isolation_executor(
+        monkeypatch, tmp_path, cli="/usr/bin/claude", os_env=spec, skills_filter="all"
+    )
+    seed = executor._claude_config_seed_path
+    seen: list = []
+
+    await _seeded_turn(executor, "first", seen)
+    added = _user_claude_config(mcpServers={**_SEED_SERVERS, "added": {"command": "new"}})
+    (home / ".claude.json").write_text(json.dumps(added))
+    await _seeded_turn(executor, "first", seen)
+    await _seeded_turn(executor, "second", seen)
+
+    assert [entry[1:] for entry in seen] == [(0o600, 0o700)] * 2
+    assert seen[0][0] == _EXPECTED_SEED
+    assert seen[1][0] == _claude_config_seed({"HOME": str(home)}) != seen[0][0]
+    assert list(seed.parent.iterdir()) == [seed]
+    await executor.close()
+    assert not seed.parent.exists()
+    with pytest.raises(RuntimeError, match="the executor is closed"):
+        await _seeded_turn(executor, "third", seen)
+    assert not seed.parent.exists() and len(seen) == 2
+
+    other = _isolation_executor(
+        monkeypatch, tmp_path, cli="/usr/bin/claude", os_env=spec, skills_filter="all"
+    )
+    await _seeded_turn(other, "first", seen)
+    assert other._claude_config_seed_path.exists()
+    other.__del__()
+    assert not other._claude_config_seed_path.parent.exists()
+
+
+async def test_a_seed_dir_someone_else_made_fails_the_launch(monkeypatch, tmp_path) -> None:
+    """The dir is made exclusively at the first launch, so a planted one is never adopted."""
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    _seed_prepare_stubs(monkeypatch, tmp_path, wrapped=True)
+    executor = _isolation_executor(
+        monkeypatch,
+        tmp_path,
+        cli="/usr/bin/claude",
+        os_env=OSEnvSpec(cwd=str(tmp_path), sandbox=OSEnvSandboxSpec()),
+        skills_filter="all",
+    )
+    executor._claude_config_seed_path.parent.mkdir()
+
+    with pytest.raises(RuntimeError, match="could not get its private Claude config"):
+        await _seeded_turn(executor, "first", [])
+    assert executor._clients == {}
+
+
+@pytest.mark.parametrize("skills", ["all", "none"], ids=["seeded", "not-seeded"])
+async def test_a_seeded_mcp_server_the_host_signs_in_is_named_once(
+    monkeypatch, tmp_path, caplog, claude_config_seed_source, skills
+) -> None:
+    """
+    The host's sign-in manager keeps that server's sign-in in the host's store, which the
+    sandboxed CLI's own config lacks; servers without one are not named.
+    """
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / ".claude.json").write_text(json.dumps(_user_claude_config()))
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._claude_mcp_auth_statuses",
+        lambda: {"remote": "sign_in_required", "unseeded": "connected"},
+    )
+    _seed_prepare_stubs(monkeypatch, tmp_path, wrapped=True)
+    executor = _isolation_executor(
+        monkeypatch,
+        tmp_path,
+        cli="/usr/bin/claude",
+        os_env=OSEnvSpec(cwd=str(tmp_path), sandbox=OSEnvSandboxSpec()),
+        skills_filter=skills,
+    )
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor"):
+        for session_id in ("first", "second"):
+            messages = [{"role": "user", "content": "hi", "session_id": session_id}]
+            sdk = _make_recovery_fake_sdk()
+            with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=sdk):
+                events = [event async for event in executor.run_turn(messages, [], "")]
+            assert any(isinstance(event, TurnComplete) for event in events), events
+    await executor.close()
+
+    warned = [r.getMessage() for r in caplog.records if "through this host" in r.getMessage()]
+    assert len(warned) == (1 if skills == "all" else 0), warned
+    assert all("'remote'" in message and "'local'" not in message for message in warned), warned
+
+
+# CORAL(S115): an opted-in test may read only a config under pytest's or the system temp dir
+def test_an_opted_in_test_cannot_read_a_config_outside_the_temp_dirs(
+    claude_config_seed_source,
+) -> None:
+    from omnigent.inner.claude_sdk_executor import _claude_config_seed
+
+    with pytest.raises(AssertionError, match="not a throwaway config"):
+        _claude_config_seed({"HOME": "/nonexistent-claude-seed-home"})
+
+
+@pytest.mark.parametrize(
+    ("wrapped", "credential", "fix", "warns"),
+    [
+        (True, {}, "does not reach it", True),
+        (
+            True,
+            {"CLAUDE_CODE_OAUTH_TOKEN": "throwaway"},
+            "only with the CLAUDE_CODE_OAUTH_TOKEN",
+            False,
+        ),
+        (True, {"ANTHROPIC_AUTH_TOKEN": "throwaway"}, "only with the ANTHROPIC_AUTH_TOKEN", False),
+        (True, {"CLAUDE_CODE_USE_BEDROCK": "1"}, "does not reach it", False),
+        (True, {"api_key_helper": "printf %s sk-ant-test"}, "claude auth login", False),
+        (False, {}, "claude auth login", False),
+    ],
+    ids=["no-credential", "oauth-token", "auth-token", "bedrock", "api-key-helper", "unwrapped"],
+)
+async def test_a_sandboxed_cli_that_cannot_sign_in_names_the_fix(
+    monkeypatch, tmp_path, caplog, wrapped, credential, fix, warns
+) -> None:
+    """
+    Its own config holds no stored login, so the fix is an API key, a gateway or a token; a
+    token already set is named instead. A CLI with no credential in sight is flagged at start,
+    in words that allow for one it may still find.
+    """
+    from omnigent.inner.claude_sdk_executor import _CLAUDE_CREDENTIAL_ENV, CLAUDE_AUTH_FAILED_CODE
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    for name in _CLAUDE_CREDENTIAL_ENV:
+        monkeypatch.delenv(name, raising=False)
+    helper = credential.pop("api_key_helper", None)
+    for name, value in credential.items():
+        monkeypatch.setenv(name, value)
+    _seed_prepare_stubs(monkeypatch, tmp_path, wrapped=wrapped)
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor"):
+        executor = _isolation_executor(
+            monkeypatch,
+            tmp_path,
+            cli="/usr/bin/claude",
+            os_env=OSEnvSpec(cwd=str(tmp_path), sandbox=OSEnvSandboxSpec()),
+            skills_filter="all",
+            api_key_helper=helper,
+        )
+    flagged = [r.getMessage() for r in caplog.records if "signs in no other way" in r.getMessage()]
+
+    error = await _only_executor_error(
+        executor, _failed_result_sdk("Not logged in · Please run /login")
+    )
+    await executor.close()
+
+    assert error.code == CLAUDE_AUTH_FAILED_CODE
+    assert fix in (error.remediation or "") and error.remediation in error.message
+    assert ("OS sandbox with its own Claude config" in error.remediation) is (
+        fix != "claude auth login"
+    )
+    assert bool(flagged) is warns, (
+        f"start warning {'missing' if warns else 'unexpected'}: {flagged}"
+    )
 
 
 # CORAL(S21): Coral specs check every tool call against TOOL_CALL policy from PreToolUse.

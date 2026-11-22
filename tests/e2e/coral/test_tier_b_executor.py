@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import re
 import shlex
@@ -25,6 +27,7 @@ from omnigent.inner.sandbox import _default_sandbox_for_platform
 from tests.e2e._harness_probes import skip_if_harness_cli_missing
 from tests.e2e.conftest import configure_mock_llm, get_mock_message_requests
 from tests.e2e.coral._claude_sdk_kit import (
+    PROBE_MCP_SERVER,
     EgressRecorder,
     collect_turn,
     make_executor,
@@ -146,6 +149,33 @@ async def _oversized_tool(name: str, arguments: dict) -> dict:
     return {"result": _OVERSIZED_RESULT}
 
 
+def _security_stub(workspace: Path) -> tuple[Path, Path]:
+    """A ``security`` stub dir in the workspace, which the wrap reads, and the log it writes."""
+    stubs, log = workspace / "stubbin", workspace / "security.log"
+    stubs.mkdir(parents=True)
+    (stubs / "security").write_text(_SECURITY_STUB.format(log=log))
+    (stubs / "security").chmod(0o755)
+    return stubs, log
+
+
+def _step_sandbox() -> OSEnvSandboxSpec:
+    """The platform's default sandbox as a step gets it, writable only in the workspace."""
+    packages = (Path(omnigent.__file__).parent, Path(coral.__file__).parent)
+    return OSEnvSandboxSpec(
+        type=_default_sandbox_for_platform().type,
+        read_paths=list(checkout_read_paths(packages, Path(sys.prefix))),
+        write_paths=["."],
+    )
+
+
+def _hashed_lookups(log: Path) -> list[str]:
+    """The keychain items the stub was asked for; none may be the default, unhashed ones."""
+    services = log.read_text().splitlines() if log.exists() else []
+    assert services or sys.platform != "darwin", "the security stub saw no lookup"
+    assert all(re.fullmatch(r"Claude Code.*-[0-9a-f]{8}", name) for name in services), services
+    return services
+
+
 # A real CLI in its sandbox wrap, with code it runs there trying the user's Claude config.
 @pytest.mark.timeout(240)
 async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
@@ -170,12 +200,9 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     )
     home, workspace, scratch = (tmp_path / name for name in ("home", "workspace", "tmp"))
     probe.seed_claude_home(home)
-    stubs = workspace / "stubbin"
-    stubs.mkdir(parents=True)
+    stubs, log = _security_stub(workspace)
     scratch.mkdir()
     shutil.copy(probe.__file__, workspace / "probe.py")
-    (stubs / "security").write_text(_SECURITY_STUB.format(log=workspace / "security.log"))
-    (stubs / "security").chmod(0o755)
     report = workspace / "report.txt"
     helper = shlex.join([sys.executable, str(workspace / "probe.py"), str(report), str(home)])
     harness_root = Path(tempfile.mkdtemp(prefix="crl-", dir="/tmp"))
@@ -199,12 +226,7 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
             )
             _set_env(monkeypatch, env)
             monkeypatch.setattr(tempfile, "tempdir", None)
-            packages = (Path(omnigent.__file__).parent, Path(coral.__file__).parent)
-            sandbox = OSEnvSandboxSpec(
-                type=_default_sandbox_for_platform().type,
-                read_paths=list(checkout_read_paths(packages, Path(sys.prefix))),
-                write_paths=["."],
-            )
+            sandbox = _step_sandbox()
             executor = make_executor(
                 workspace,
                 model=_MODEL,
@@ -240,15 +262,13 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     completed = [event for event in events if isinstance(event, TurnComplete)]
     assert completed and f"done {token}" in (completed[-1].response or "")
     *verdicts, named = report.read_text().splitlines()
-    own = ["config_private yes", "config_writable yes", "projects no", "securestorage_own yes"]
+    own = ["config_private yes", "config_writable yes", "projects no", "config_seeded no"]
+    own += ["seed_source_write no", "securestorage_own yes"]
     assert verdicts == [f"{name} no" for name in probe.HOME_CHECKS] + own, verdicts
     config_dir = Path(named.removeprefix("config_dir "))
     assert config_dir.name == "claude_config_dir" and scratch.resolve() in config_dir.parents
     assert probe.tree(home) == before, "the step changed the home"
-    log = workspace / "security.log"
-    services = log.read_text().splitlines() if log.exists() else []
-    assert services or sys.platform != "darwin", "the security stub saw no lookup"
-    assert all(re.fullmatch(r"Claude Code.*-[0-9a-f]{8}", name) for name in services), services
+    _hashed_lookups(log)
     [*_, result] = tool_results(
         get_mock_message_requests(isolated_mock_llm_server_url), call_id=call_id
     )
@@ -257,4 +277,135 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     assert "Failed to save output to file" in result, result[:600]
     assert "use them to retrieve specific portions of the data" in result, result[:600]
     assert "has been saved to" not in result, result[:600]
+    assert egress == []
+
+
+# A real non-Coral CLI in its sandbox wrap: its user MCP servers come from a read-only seed.
+@pytest.mark.timeout(240)
+async def test_a_sandboxed_agent_loads_its_mcp_servers_without_the_home(
+    isolated_mock_llm_server_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    claude_config_seed_source: None,
+) -> None:
+    """
+    A non-Coral agent's real CLI, wrapped by default with its own config dir, starts the user
+    MCP server from the throwaway config's ``.claude.json`` inside the wrap and calls it, while a
+    server the user disabled for this project stays off. That server's start-up code cannot
+    write the home's plugins, sessions, session-env, backups or ``.claude.json``, or read its
+    session key, credentials or keychain stand-in, or write the seed; its own dir holds the
+    seeded copy. The home is unchanged, every keychain lookup names a per-dir item, and nothing
+    leaves the machine.
+    """
+    skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)
+    token = f"TIERB-{uuid.uuid4().hex[:8]}"
+    call_id = f"toolu_seed_{token[-8:]}"
+    tool = f"mcp__{probe.SEED_SERVER}__touch"
+    scripted = tool_search_then_call(tool, {"note": token}, call_id=call_id)
+    configure_mock_llm(
+        isolated_mock_llm_server_url, [*scripted, *[{"text": f"done {token}"}] * 3], match=token
+    )
+    home, workspace, scratch = (tmp_path / name for name in ("home", "workspace", "tmp"))
+    probe.seed_claude_home(home)
+    stubs, log = _security_stub(workspace)
+    scratch.mkdir()
+    for script in (probe.__file__, PROBE_MCP_SERVER):
+        shutil.copy(script, workspace / Path(script).name)
+    report, disabled_report = workspace / "report.txt", workspace / "disabled-report.txt"
+    harness_root = Path(tempfile.mkdtemp(prefix="crl-", dir="/tmp"))
+    try:
+        with EgressRecorder() as recorder:
+            env = mock_only_env(
+                home=home,
+                base_url=isolated_mock_llm_server_url,
+                proxy_url=recorder.url,
+                inherited=os.environ,
+            )
+            # The kit's throwaway config dir stands in for one the host forwards, so even an
+            # unwrapped CLI would ask only for hashed keychain items.
+            env.update(
+                {
+                    "OMNIGENT_CLAUDE_SDK_NO_SANDBOX": None,
+                    "OMNIGENT_HARNESS_TMP_PARENT": str(harness_root),
+                    "TMPDIR": str(scratch),
+                    "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+                }
+            )
+            _set_env(monkeypatch, env)
+            monkeypatch.setattr(tempfile, "tempdir", None)
+            executor = make_executor(
+                workspace,
+                model=_MODEL,
+                permission_mode="bypassPermissions",
+                os_env=OSEnvSpec(
+                    type="caller_process", cwd=str(workspace), sandbox=_step_sandbox()
+                ),
+            )
+            seed = executor._claude_config_seed_path  # type: ignore[attr-defined]
+            assert seed is not None and not seed.parent.exists()
+
+            def server(marker: Path, *probe_args: Path) -> dict:
+                command = [str(workspace / PROBE_MCP_SERVER.name), str(marker)]
+                probe_env = {"CLAUDE_CONFIG_PROBE": "\n".join(map(str, probe_args))}
+                return {
+                    "type": "stdio",
+                    "command": sys.executable,
+                    "args": command,
+                    "env": probe_env,
+                }
+
+            user_config = {
+                "mcpServers": {
+                    probe.SEED_SERVER: server(workspace / "marker.txt", report, home, seed),
+                    "disabled-probe": server(workspace / "disabled.txt", disabled_report, home),
+                },
+                "projects": {str(workspace.resolve()): {"disabledMcpServers": ["disabled-probe"]}},
+                "oauthAccount": {"emailAddress": "user@example.test"},
+            }
+            (home / ".claude.json").write_text(json.dumps(user_config))
+            before = probe.tree(home)
+            try:
+                with caplog.at_level(logging.INFO, logger="omnigent.inner.claude_sdk_executor"):
+                    async with asyncio.timeout(_TURN_BOUND_SECONDS * 2):
+                        events = await collect_turn(
+                            executor, f"Call the tool. {token}", session_id=token
+                        )
+            except TimeoutError:
+                pytest.fail(f"turn was still running after {_TURN_BOUND_SECONDS * 2}s")
+            finally:
+                await executor.close()
+            egress = recorder.request_lines
+    finally:
+        shutil.rmtree(harness_root, ignore_errors=True)
+
+    assert [event.message for event in events if isinstance(event, ExecutorError)] == []
+    completed = [event for event in events if isinstance(event, TurnComplete)]
+    assert completed and f"done {token}" in (completed[-1].response or "")
+    [*_, result] = tool_results(
+        get_mock_message_requests(isolated_mock_llm_server_url), call_id=call_id
+    )
+    assert f"TOUCHED-{token}" in result, result[:600]
+    *verdicts, named = report.read_text().splitlines()
+    own = ["config_private yes", "config_writable yes", "projects no", "config_seeded yes"]
+    own += ["seed_source_write no", "securestorage_own yes"]
+    assert verdicts == [f"{name} no" for name in probe.HOME_CHECKS] + own, verdicts
+    config_dir = Path(named.removeprefix("config_dir "))
+    assert config_dir.name == "claude_config_dir" and scratch.resolve() in config_dir.parents
+    assert not disabled_report.exists(), "a server the user disabled started in the sandbox"
+    # Logging stores a lone mapping argument as the record's args.
+    [init] = [
+        record.args
+        for record in caplog.records
+        if record.msg == "Claude CLI system message: %s"
+        and isinstance(record.args, dict)
+        and record.args.get("subtype") == "init"
+    ]
+    statuses = {server["name"]: server["status"] for server in init["mcp_servers"]}
+    # Measured on 2.1.325: "pending" at init, as the CLI starts MCP servers in the background.
+    assert statuses[probe.SEED_SERVER] in ("pending", "connected"), statuses
+    assert statuses.get("disabled-probe") in (None, "disabled"), statuses
+    assert probe.tree(home) == before, "the agent changed the home"
+    assert not seed.parent.exists(), "close left the seed behind"
+    _hashed_lookups(log)
     assert egress == []

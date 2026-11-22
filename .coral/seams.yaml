@@ -3566,7 +3566,7 @@ seams:
       starts. No rule grants ~/Library and S5 denies it, so the keychain file
       cannot be opened from the wrap (measured on 27.2.1 with a stand-in
       file). Main residuals and owners: other agents' sandboxed claude-sdk
-      wraps (CRL-178), unwrapped Coral CLIs (CRL-180), leftover scratch and
+      wraps (closed by S115 on bwrap and seatbelt), unwrapped Coral CLIs (CRL-180), leftover scratch and
       private dirs (CRL-179), the settings env merge (CRL-167), env
       construction races and a relative config dir (CRL-182), project config a
       step writes in its worktree (CRL-181), and the inbox sockets (CRL-174).
@@ -3619,6 +3619,108 @@ seams:
         omnigent/inner/claude_sdk_harness.py 3, omnigent/runtime/workflow.py
         2, tests/inner/test_claude_sdk_harness.py 4,
         tests/runtime/test_claude_sdk_spawn_env.py 2.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S115
+    title: Every bwrap or seatbelt claude CLI keeps its Claude config in a private dir, seeded for non-Coral agents
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Before this seam a non-Coral claude-sdk CLI wrap still granted read and
+      write on ~/.claude/{plugins,sessions,session-env,backups}, ~/.claude.json
+      and .credentials.json, and a user MCP server from ~/.claude.json, started
+      inside the wrap, rewrote a plugin hook, planted a session-env script and
+      rewrote .claude.json (measured on macOS 27.2.1 with a throwaway home and
+      claude 2.1.325). sandbox.py: scratch_dir_seed names (entry, absolute
+      source file) pairs that the in-wrap pass copies into S113's private dir
+      as fresh 0600 files before scratch_dir_files; the copy follows no link,
+      does not block on a FIFO, and takes only a regular file this user owns
+      and no one else can write, so a missing or tampered seed fails the
+      launch; with_scratch_dir_env grants each source as a read root; the field
+      travels the launcher wire and survives clones, and a malformed one fails
+      the launch. Executor: both wrap paths isolate by default on every backend
+      but Windows' job object, which confines no files and keeps the shared
+      grants, as does an explicit isolate_config=False, which no production
+      caller passes. A non-Coral spec whose skills load user settings (all, a
+      list or a malformed filter) gets a seed from the global config the CLI
+      would read: the user's mcpServers, userID and legacy env (without the
+      config dir names), and for every project only its trust and MCP
+      enable/disable keys that are not at the CLI's default, so a server the
+      user disabled stays off and projects with nothing set are left out.
+      Project mcpServers (which the CLI does not load with these setting
+      sources), oauthAccount, primaryApiKey and every other key are never
+      copied; a relative or empty CLAUDE_CONFIG_DIR is refused as the source,
+      and a config over 16 MB or too deeply nested to parse gives an empty seed
+      and a warning. Construction reads and makes nothing. Just before each
+      wrapped launch the seed is written through mkstemp into a 0700 dir made
+      exclusively at the first launch; close removes it, and a launch after
+      close fails instead of making it again. skills none and Coral get an
+      empty dir, and Coral keeps S113 unchanged. Under the old wrap only those
+      MCP servers reached the CLI (measured), so nothing it used is lost. A
+      stored subscription login does not reach these CLIs: a warning at
+      construction, when no credential is in sight, and the auth error say to
+      use an API key, a gateway or CLAUDE_CODE_OAUTH_TOKEN, and the error names
+      a token that is set but was not accepted. A seeded MCP server that the
+      host's sign-in manager reports is named in a warning, since its sign-in
+      stays in the host's store. Not covered: Windows (shared grants, as
+      before); CLIs that run unwrapped by design or degrade (CRL-183); MCP
+      OAuth tokens in the credential store, beyond that warning; the copied MCP
+      servers' env, arguments and headers, and the paths of projects with a
+      trust or MCP key set, which code in the sandbox can read (CRL-167);
+      CLAUDE_CODE_OAUTH_TOKEN, which the host forwards to every runner and the
+      wrap may read (CRL-167); an absolute forwarded CLAUDE_CONFIG_DIR under a
+      sandbox write root; spec read_paths that cover $TMPDIR, which then reach
+      other executors' seeds; leftover scratches and seed dirs after a kill
+      (CRL-179); project config in the working dir (CRL-181); and the inbox
+      sockets (CRL-174). No CI lane runs macOS (CRL-170).
+    files:
+      - omnigent/inner/sandbox.py
+      - omnigent/inner/claude_sdk_executor.py
+      - tests/conftest.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+    tests:
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/e2e/coral/test_tier_b_executor.py
+    budget_lines: 120
+    budget_exception:
+      lines: 563
+      reason: >-
+        Counted with git diff --numstat origin/development (S114 does not touch
+        these files, except the behaviour test, whose 52 lines are counted
+        against this seam's base). tests/inner/test_claude_sdk_executor.py (563
+        changed lines): the seed filter against a config with every kind of
+        key, keys at their unset value and config dir names in env, and a
+        credential file no open call may touch; the config path (CLAUDE_CONFIG_DIR,
+        both legacy .config.json places, a symlinked config) and the refused
+        relative or empty dirs; missing, malformed, non-object, non-UTF-8, FIFO,
+        too deep and oversized configs; the grant tests' default rows on both
+        backends, a future backend and the tight wrap, and the Windows job
+        object row; the table of which specs read the user's config (Coral, all,
+        a list, a malformed filter, none, unwrapped, tight, tight unwrapped);
+        the per-launch refresh, modes, close, __del__ and launch after close;
+        the planted seed dir; the host sign-in warning; the auth fix and start
+        warning for six credential cases; and the two guards on the hermetic
+        fixture. omnigent/inner/claude_sdk_executor.py (291 changed lines): the
+        seed keys and their unset values, the size cap, the seed source, filter
+        and file name, the default isolation with the Windows exception on both
+        wrap paths with their docstrings, the seed lifecycle (write, refresh
+        before connect, removal, refusal after close), the remediation branch,
+        the start warning and the host sign-in warning.
+        tests/inner/test_sandbox.py (162 changed lines): the seed on the wire,
+        through clones and the drift test, 14 malformed seeds, the in-wrap copy
+        with an inherited empty secure-storage name, six refused seeds (missing,
+        symlink, FIFO, directory, group-writable, foreign) and a copy that never
+        writes through an existing target. The other files are within budget:
+        omnigent/inner/sandbox.py 120, tests/conftest.py 53,
+        tests/inner/sandbox/test_sandbox_behavior.py 52.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
