@@ -446,6 +446,7 @@ def write_policy_hook_config(
     *,
     ap_server_url: str,
     ap_auth_headers: dict[str, str],
+    policy_failure_mode: str | None = None,
 ) -> None:
     """
     Write the Omnigent coordinates the codex-native policy hook needs.
@@ -463,11 +464,19 @@ def write_policy_hook_config(
     :param ap_auth_headers: Outbound auth headers for Omnigent requests, e.g.
         ``{"Authorization": "Bearer <token>"}``. Empty dict for
         local-server mode with no auth provider.
+    :param policy_failure_mode: ``ask`` (default) or ``fail_closed`` for
+        policy-hook outages.
     :returns: None.
     """
+    from omnigent.native.native_policy_hook import normalize_policy_failure_mode
+
     bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = bridge_dir / _POLICY_HOOK_FILE
-    payload = {"ap_server_url": ap_server_url, "ap_auth_headers": ap_auth_headers}
+    payload = {
+        "ap_server_url": ap_server_url,
+        "ap_auth_headers": ap_auth_headers,
+        "policy_failure_mode": normalize_policy_failure_mode(policy_failure_mode),
+    }
     fd, tmp_name = tempfile.mkstemp(prefix=f"{_POLICY_HOOK_FILE}.", dir=str(bridge_dir))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:

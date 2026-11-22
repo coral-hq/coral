@@ -601,6 +601,7 @@ def _wire_session_engine(
     evidence_channels: ChannelsRef | None = None,
     liveness: LivenessRef | None = None,
     reconnect_grace_s: int = DEFAULT_RECONNECT_GRACE_S,
+    claude_native_steps: bool = False,
 ) -> BoundSessionRefresher:
     """
     Build the session engine and register its executors, then its status-edge observers.
@@ -665,7 +666,12 @@ def _wire_session_engine(
     pauser = DriftPauser(run_store, engine=threads, on_anchor_bound=anchor_runner_stopper)
     # The dispatch's relaunch path holds the facade and the relauncher, so both resolve it late.
     facade = OmnigentSessionFacade(
-        app, services, bindings, slot_generations=queue_store, dispatch=lambda: dispatch
+        app,
+        services,
+        bindings,
+        slot_generations=queue_store,
+        dispatch=lambda: dispatch,
+        claude_native_steps=claude_native_steps,
     )
     relauncher = OmnigentStepRelauncher(
         facade, services, bindings, run_store, dispatch=lambda: dispatch
@@ -687,6 +693,7 @@ def _wire_session_engine(
         services.agent_store,
         services.artifact_store,
         conversation_store=services.conversation_store,
+        claude_native_steps=claude_native_steps,
     )
     executors: dict[str, EffectExecutor] = {
         CREATE_SESSION: create_session_executor(
@@ -913,6 +920,35 @@ async def coral_lifespan(
                 app.state.coral_run_stream_hub = _run_stream_hub(
                     bridge, run_store, services, stack
                 )
+            # HRN-07: observe native /clear supersession for Coral-bound sessions.
+            from coral.omni.server.rotation import (
+                SupersessionFollower,
+                follow_bound_supersession,
+                register_follower,
+            )
+
+            def _enqueue_rotation(old_id: str, new_id: str, reason: str) -> None:
+                logging.getLogger("coral.omni.server.rotation").info(
+                    "coral supersession follow queued old=%s new=%s reason=%s",
+                    old_id,
+                    new_id,
+                    reason,
+                )
+                follow_bound_supersession(
+                    old_id=old_id,
+                    new_id=new_id,
+                    bound=bound,
+                    bindings=bindings,
+                    policy_store=services.policy_store,
+                )
+
+            stack.callback(
+                register_follower(
+                    SupersessionFollower(
+                        bound_session_ids=bound.session_ids, enqueue=_enqueue_rotation
+                    )
+                )
+            )
             missing = _missing_engine_input(app, services)
             if missing is None:
                 assert channels is not None  # the host store and registry are engine inputs
@@ -931,6 +967,9 @@ async def coral_lifespan(
                     evidence_channels=evidence_channels,
                     liveness=liveness,
                     reconnect_grace_s=grace_s,
+                    claude_native_steps=bool(
+                        resolve_sub_features(services.server_config).get("claude_native_steps")
+                    ),
                 )
                 stack.push_async_callback(refresher.stop)
                 await refresher.start()

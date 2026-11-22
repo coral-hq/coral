@@ -27,7 +27,6 @@ from omnigent.harnesses.codex_native.bridge import (
 )
 from omnigent.native.native_policy_hook import (
     evaluation_response_to_hook_output,
-    fail_ask_hook_output,
     hook_payload_to_evaluation_request,
     policy_hook_reauth,
     post_evaluate_with_retry,
@@ -123,20 +122,35 @@ def _main_evaluate_policy(argv: list[str]) -> int:
 
     bridge_dir = Path(args.bridge_dir)
     from omnigent.native import policy_allow_cache
+    from omnigent.native.native_policy_hook import (
+        POLICY_FAILURE_MODE_FAIL_CLOSED,
+        normalize_policy_failure_mode,
+        policy_unavailable_hook_output,
+    )
 
     # Read before the session identity: a session switch picks a new
     # generation, so an answer for the previous session opens no window.
     cache_generation = policy_allow_cache.generation(bridge_dir)
+    config = read_policy_hook_config(bridge_dir) or {}
+    failure_mode = config.get("policy_failure_mode")
+    closed = normalize_policy_failure_mode(failure_mode) == POLICY_FAILURE_MODE_FAIL_CLOSED
+    hook_event = payload.get("hook_event_name", "")
+
+    def _fail_unavailable(detail: str | None = None) -> int:
+        out = policy_unavailable_hook_output(hook_event, failure_mode, detail)
+        if out is not None:
+            sys.stdout.write(json.dumps(out))
+        return 0
+
     state = read_bridge_state(bridge_dir)
     if state is None:
-        return 0
+        return _fail_unavailable("missing session id") if closed else 0
     session_id = state.session_id
 
-    hook_event = payload.get("hook_event_name", "")
     eval_request = hook_payload_to_evaluation_request(hook_event, payload)
     if eval_request is None:
         # Unrecognized hook event or an mcp__omnigent__* tool (relay-enforced).
-        return 0
+        return _fail_unavailable("no policy opinion") if closed else 0
 
     # Stamp the live model from this session's config.toml (what an in-TUI
     # ``/model`` writes) onto the request so the cost-budget gate evaluates
@@ -146,12 +160,6 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     model = read_codex_config_model(bridge_dir)
     if model:
         context["model"] = model
-
-    def _fail_closed(detail: str | None = None) -> int:
-        out = fail_ask_hook_output(hook_event, detail)
-        if out is not None:
-            sys.stdout.write(json.dumps(out))
-        return 0
 
     # Prefer the relay (non-expiring local token); fall back to direct server
     # call when the relay isn't up yet (first-call race) or not configured.
@@ -165,12 +173,11 @@ def _main_evaluate_policy(argv: list[str]) -> int:
         }
         reauth = None
     else:
-        config = read_policy_hook_config(bridge_dir)
-        if config is None:
-            return 0
+        if not config:
+            return _fail_unavailable("missing server URL") if closed else 0
         ap_server_url = config.get("ap_server_url")
         if not isinstance(ap_server_url, str) or not ap_server_url:
-            return 0
+            return _fail_unavailable("missing server URL") if closed else 0
         raw_headers = config.get("ap_auth_headers")
         headers = {}
         if isinstance(raw_headers, dict):
@@ -189,10 +196,10 @@ def _main_evaluate_policy(argv: list[str]) -> int:
         reauth=reauth,
     )
     if resp is None:
-        return _fail_closed(api_error or (reauth.failure_reason if reauth else None))
+        return _fail_unavailable(api_error or (reauth.failure_reason if reauth else None))
     if not resp.content:
         print("omnigent codex evaluate-policy hook: empty Coral response", file=sys.stderr)
-        return _fail_closed()
+        return _fail_unavailable()
 
     try:
         eval_response = resp.json()
@@ -201,7 +208,7 @@ def _main_evaluate_policy(argv: list[str]) -> int:
             "omnigent codex evaluate-policy hook: malformed Coral response",
             file=sys.stderr,
         )
-        return _fail_closed()
+        return _fail_unavailable()
 
     # Through the relay the server evaluated the relay's session, which can
     # trail a session switch.

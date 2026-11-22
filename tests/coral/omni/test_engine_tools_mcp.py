@@ -637,7 +637,8 @@ async def test_null_arguments_are_an_empty_object_and_a_structured_refusal(mcp: 
         ("orchestrator", "claude-sdk", SUBMIT),
         ("anchor", "claude-sdk", SUBMIT),
         (None, "claude-sdk", SUBMIT),
-        ("implementer", "claude-native", SUBMIT),
+        # Native now server-dispatches Coral tools; use a tool this stance is not offered.
+        ("implementer", "claude-native", CHOOSE),
     ],
     ids=[
         "implementer_choose",
@@ -655,7 +656,12 @@ async def test_a_tool_the_agent_was_not_given_is_not_run_by_the_server(
     mcp.lookup.add(step_binding(SLOT, session_id=SESSION))
     mcp.spec = _spec(stance, harness)
 
-    payload = await mcp.call(tool, HANDOFF)
+    arguments: dict[str, object] = (
+        HANDOFF
+        if tool == SUBMIT
+        else {"decision_id": "choose||", "label": "approved", "reason": "Looks right."}
+    )
+    payload = await mcp.call(tool, arguments)
 
     # The proxy forwards it to the runner as any other tool; Coral never sees it.
     assert _text(payload) == "runner output"

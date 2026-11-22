@@ -125,6 +125,7 @@ def _bundle_yaml(
     generated: Mapping[str, object],
     model: str | None,
     provider: str | None,
+    harness: str | None = None,
 ) -> bytes:
     seed = load_seed(stance.value)
     config = copy.deepcopy(dict(seed.config))
@@ -138,6 +139,21 @@ def _bundle_yaml(
         }
     }
     executor = _section(config, "executor")
+    executor_config = _section(executor, "config")
+    if harness is not None:
+        executor_config["harness"] = harness
+    if harness == "claude-native":
+        # Run-owned native steps: fail closed and skip the TUI permission prompt.
+        executor_config["permission_mode"] = "bypassPermissions"
+        executor_config["policy_failure_mode"] = "fail_closed"
+        from coral.tools.catalog import CATALOG, tools_for_stance
+
+        # Written for Omnigent launch (S11); Omnigent must not import coral/.
+        allowed: list[str] = []
+        for decl in tools_for_stance(CATALOG, stance.value):
+            allowed.append(decl.name)
+            allowed.append(f"mcp__omnigent__{decl.name}")
+        executor_config["native_preapproved"] = list(dict.fromkeys(allowed))
     if model is not None:
         executor["model"] = model
     if provider is not None:
@@ -152,6 +168,7 @@ def build_step_bundle_yaml(
     *,
     model: str | None,
     provider: str | None,
+    harness: str | None = None,
 ) -> bytes:
     """
     Build the ``config.yaml`` bytes for one workflow step's agent.
@@ -162,6 +179,8 @@ def build_step_bundle_yaml(
     :param provider: Name of a configured provider to authenticate with, or
         ``None`` when the run binds credentials another way. A literal API key
         never goes into a bundle.
+    :param harness: Optional harness override, e.g. ``"claude-native"`` when
+        ``claude_native_steps`` is on. ``None`` keeps the seed's harness.
     :returns: Canonical YAML (sorted keys), identical for identical inputs.
     """
     return _bundle_yaml(
@@ -174,6 +193,7 @@ def build_step_bundle_yaml(
         },
         model=model,
         provider=provider,
+        harness=harness,
     )
 
 

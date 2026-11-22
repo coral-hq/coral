@@ -1,0 +1,25 @@
+# Single-agent Implement → Review loop for claude-native steps (HRN-03).
+# Hidden until coral_sub_features.claude_native_steps is on.
+spec_version: 1
+id: single_agent_steps
+name: Implement with review
+description: >
+  One implementer step, then a reviewer. Loop at most three times. No orchestrator.
+nodes:
+  implement:
+    kind: step
+    stance: implementer
+    roster: [implementer]
+  review:
+    kind: step
+    stance: reviewer
+    roster: [reviewer]
+edges:
+  - from: implement
+    to: review
+  - from: review
+    to: implement
+    when: changes_requested
+loop:
+  max: 3
+  on: review

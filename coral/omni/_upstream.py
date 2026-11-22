@@ -70,8 +70,14 @@ from omnigent.server.routes._sessions.common import (
     CLIENT_SESSION_EVENT_TYPES,
 )
 
-# omnigent/server/routes/_sessions/helpers.py: a label key as a collation compares it.
-from omnigent.server.routes._sessions.helpers import _label_key_skeleton as label_key_skeleton
+# omnigent/server/routes/_sessions/helpers.py: a label key as a collation compares it;
+# Coral also follows native /clear via register_supersession_observer (HRN-07).
+from omnigent.server.routes._sessions.helpers import (
+    _label_key_skeleton as label_key_skeleton,
+)
+from omnigent.server.routes._sessions.helpers import (
+    register_supersession_observer,
+)
 
 # omnigent/server/routes/_sessions/orchestration.py: the harness a create will run on.
 from omnigent.server.routes._sessions.orchestration import _create_resolved_harness
@@ -132,6 +138,7 @@ __all__ = [
     "label_key_skeleton",
     "list_worktrees_on_host",
     "pending_elicitation_count",
+    "register_supersession_observer",
     "request_workspace_op_on_host",
     "resolve_host_launch",
     "validate_create_harness_readiness",

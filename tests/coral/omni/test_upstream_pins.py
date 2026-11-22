@@ -118,6 +118,10 @@ PINNED: dict[str, tuple[str, str]] = {
         "omnigent.runtime.pending_elicitations",
         "(conversation_id: 'str') -> 'int'",
     ),
+    "register_supersession_observer": (
+        "omnigent.server.routes._sessions.helpers",
+        "(observer: 'Callable[[str, str, str], None]') -> 'Callable[[], None]'",
+    ),
     "request_workspace_op_on_host": (
         "omnigent.server.routes._host_workspace_ops",
         "(*, host_registry: 'HostRegistry', host_conn: 'HostConnection', op: 'str', root: 'str',"

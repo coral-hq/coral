@@ -3710,6 +3710,8 @@ class ClaudeSDKExecutor(Executor):
         system_diagnostics: list[str] = []
         terminal_error: str | None = None
         terminal_auth_failure = False
+        terminal_usage_limited = False
+        terminal_resets_at: float | None = None
         auth_remediation = _claude_auth_remediation(
             databricks_profile=self._gateway_uses_databricks_profile,
             gateway=bool(self._gateway),
@@ -4220,6 +4222,17 @@ class ClaudeSDKExecutor(Executor):
                                 terminal_auth_failure = True
                                 break
 
+                            if error_status == 429 or retry_error in {
+                                "rate_limit_error",
+                                "rate_limit_exceeded",
+                            }:
+                                terminal_usage_limited = True
+                                raw_resets = data.get("resets_at")
+                                if isinstance(raw_resets, (int, float)) and not isinstance(
+                                    raw_resets, bool
+                                ):
+                                    terminal_resets_at = float(raw_resets)
+
                             if error_status == 404:
                                 if self._gateway:
                                     endpoint_hint = (
@@ -4336,6 +4349,13 @@ class ClaudeSDKExecutor(Executor):
                     code=CLAUDE_AUTH_FAILED_CODE,
                     title=CLAUDE_AUTH_FAILED_TITLE,
                     remediation=auth_remediation,
+                )
+            elif terminal_usage_limited:
+                yield ExecutorError(
+                    message=terminal_error,
+                    usage=turn_usage,
+                    code=ExecutorError.USAGE_LIMITED_CODE,
+                    resets_at=terminal_resets_at,
                 )
             else:
                 yield ExecutorError(message=terminal_error, usage=turn_usage)

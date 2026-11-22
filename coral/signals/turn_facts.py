@@ -88,6 +88,7 @@ class EdgeFacts:
     error_message: str | None = None
     failure_origin: str | None = None
     background_task_count: int | None = None
+    resets_at: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("status", "origin"):
@@ -105,12 +106,20 @@ class EdgeFacts:
             raise ValueError("background_task_count must be an integer or null")
         if not isinstance(self.turn_completed, bool):
             raise ValueError("turn_completed must be true or false")
+        if self.resets_at is not None and not isinstance(self.resets_at, (int, float)):
+            raise ValueError("resets_at must be a number or null")
 
     @classmethod
     def from_edge(cls, edge: Mapping[str, object]) -> EdgeFacts:
         """An edge's fields, cut to what a signal keeps; never raises for odd values."""
         observed = edge.get("observed_at_ms")
         count = edge.get("background_task_count")
+        raw_resets = edge.get("resets_at")
+        resets_at = (
+            float(raw_resets)
+            if isinstance(raw_resets, (int, float)) and not isinstance(raw_resets, bool)
+            else None
+        )
         return cls(
             status=clean_text(edge.get("status"), MAX_EDGE_CODE_CHARS) or "",
             observed_at_ms=observed if _integer(observed) else 0,  # type: ignore[arg-type]
@@ -122,6 +131,7 @@ class EdgeFacts:
             error_message=clean_text(edge.get("error_message"), MAX_EDGE_MESSAGE_CHARS),
             failure_origin=clean_text(edge.get("failure_origin"), MAX_EDGE_CODE_CHARS),
             background_task_count=count if _integer(count) else None,  # type: ignore[arg-type]
+            resets_at=resets_at,
         )
 
     @classmethod
@@ -219,12 +229,14 @@ def build_turn_fact(
     engine_started = beyond or transcript.newest_input == "engine"
     replied = transcript.newest_substantive_item_is_assistant
     error_code = error_text = failure_origin = None
+    resets_at: float | None = None
     background = 1 if live.background_work else 0
     if current is not None:
         outcome = current.turn_outcome or ("failed" if current.status == "failed" else None)
         saw_completed = current.turn_completed or current.turn_outcome == "completed" or replied
         error_code, error_text = current.error_code, current.error_message
         failure_origin = current.failure_origin
+        resets_at = current.resets_at
         background = max(background, current.background_task_count or 0)
     elif live.status == "failed":
         if not transcript.runner_item_after_engine_input:
@@ -236,6 +248,7 @@ def build_turn_fact(
         # Its reply cannot be checked: the step is re-prompted instead of nudged.
         outcome, saw_completed = "failed", False
         error_code, error_text, failure_origin = TURN_UNREADABLE, None, None
+        resets_at = None
     if current is not None and is_archive_origin(current.origin):
         origin = "archive"
     else:
@@ -258,6 +271,7 @@ def build_turn_fact(
         error_code=error_code,
         error_text=error_text,
         failure_origin=failure_origin,
+        resets_at=resets_at,
         observed_at=_observed_at(current),
     )
 

@@ -5762,6 +5762,26 @@ def _publish_interrupted(session_id: str, response_id: str | None = None) -> Non
     session_stream.publish(session_id, payload)
 
 
+_SUPERSESSION_OBSERVERS: list[Callable[[str, str, str], None]] = []
+
+
+def register_supersession_observer(
+    observer: Callable[[str, str, str], None],
+) -> Callable[[], None]:
+    """Register ``observer(old_id, new_id, reason)`` after each supersession publish.
+
+    Exceptions from one observer are isolated so others still run. Returns an
+    unregister callback.
+    """
+    _SUPERSESSION_OBSERVERS.append(observer)
+
+    def unregister() -> None:
+        with contextlib.suppress(ValueError):
+            _SUPERSESSION_OBSERVERS.remove(observer)
+
+    return unregister
+
+
 def _publish_session_superseded(
     session_id: str,
     target_conversation_id: str,
@@ -5791,6 +5811,16 @@ def _publish_session_superseded(
         reason=reason,
     )
     session_stream.publish(session_id, event.model_dump())
+    for observer in list(_SUPERSESSION_OBSERVERS):
+        try:
+            observer(session_id, target_conversation_id, reason)
+        except Exception:  # noqa: BLE001 — isolate Coral / other followers
+            _logger.exception(
+                "supersession observer failed old=%s new=%s reason=%s",
+                session_id,
+                target_conversation_id,
+                reason,
+            )
     # Discard any unconsumed pending inputs on the superseded session — notably
     # the ``/clear`` the user typed in the web UI. ``/clear`` is never mirrored
     # back as a committed item (the session rotated away), so its pending entry
@@ -9592,6 +9622,15 @@ def _build_evaluation_context(
     hook_harness = (
         supplied_harness if isinstance(supplied_harness, str) and supplied_harness else None
     )
+    raw_subagent = raw_context.get("subagent")
+    hook_subagent: dict[str, str] | None = None
+    if isinstance(raw_subagent, dict):
+        cleaned = {
+            str(key): value
+            for key, value in raw_subagent.items()
+            if isinstance(key, str) and isinstance(value, str) and value
+        }
+        hook_subagent = cleaned or None
     structured_data = data if isinstance(data, dict) else {}
     if phase == Phase.TOOL_CALL:
         raw_tool_name = structured_data.get("name")
@@ -9605,6 +9644,7 @@ def _build_evaluation_context(
             actor=actor,
             model=hook_model,
             harness=hook_harness,
+            subagent=hook_subagent,
         )
     if phase == Phase.TOOL_RESULT:
         tool_result = structured_data.get("result", "")
@@ -9624,6 +9664,7 @@ def _build_evaluation_context(
             actor=actor,
             model=hook_model,
             harness=hook_harness,
+            subagent=hook_subagent,
         )
     # LLM_REQUEST / LLM_RESPONSE — content is the full request/response dict.
     if phase in (Phase.LLM_REQUEST, Phase.LLM_RESPONSE):
@@ -9633,6 +9674,7 @@ def _build_evaluation_context(
             actor=actor,
             model=hook_model,
             harness=hook_harness,
+            subagent=hook_subagent,
         )
     # REQUEST / RESPONSE — content is the user/assistant text. The wire ``data``
     # is a dict for every current first-party producer (``{"text"|"content":
@@ -9663,6 +9705,7 @@ def _build_evaluation_context(
         actor=actor,
         model=hook_model,
         harness=hook_harness,
+        subagent=hook_subagent,
     )
 
 
@@ -12813,4 +12856,5 @@ __all__ = [
     "announce_hosts_changed",
     "cancel_managed_launch_tasks",
     "prefetch_session_routing_catalogs",
+    "register_supersession_observer",
 ]

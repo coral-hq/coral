@@ -65,6 +65,7 @@ def reconcile(
                         fact_key=fact_key,
                         runner_id=fact.runner_id,
                         observed_at=fact.observed_at,
+                        resets_at=fact.resets_at,
                     )
                 )
         lost = _runner_lost(state, fact, now, config)

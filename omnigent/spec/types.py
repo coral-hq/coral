@@ -541,6 +541,11 @@ class ExecutorSpec:  # type: ignore[explicit-any]  # config: dict[str, Any] fiel
         antigravity-native skip flags) into the session's
         ``terminal_launch_args``.
 
+        ``"policy_failure_mode"`` (``"ask"`` default, or ``"fail_closed"``)
+        chooses how native policy hooks behave when the evaluate round-trip
+        cannot return a verdict. Coral run-owned native steps set
+        ``fail_closed``; interactive Omnigent sessions keep ``ask``.
+
         🚨 **TECH DEBT — REMOVE WHEN OMNIGENT COMPAT ENDS.**
         This field exists *solely* to carry harness / profile /
         os_env data for the Omnigent integration (see
