@@ -251,3 +251,25 @@ export async function startRun(
 ): Promise<Operation<"coral_start_run">["response"]> {
   return readJson(await postJson(RUNS_PATH, body));
 }
+
+const PREFLIGHT_PATH =
+  "/v1/coral/runs:preflight" satisfies Operation<"coral_preflight_run">["path"];
+
+/** Check whether a workflow can start on a host, without starting a run. */
+export async function preflightRun(
+  body: Operation<"coral_preflight_run">["body"],
+  signal?: AbortSignal,
+): Promise<Operation<"coral_preflight_run">["response"]> {
+  return readJson(
+    await authenticatedFetch(PREFLIGHT_PATH, {
+      method: POST,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    }),
+  );
+}
+
+/** Query key for a workflow+host preflight in the viewer's scope. */
+export const preflightQueryKey = (scope: string, workflowId: string, hostId: string) =>
+  ["coral-preflight", scope, workflowId, hostId] as const;

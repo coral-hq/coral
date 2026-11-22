@@ -1527,7 +1527,6 @@ drift (CRL-161).
 | Resuming a budget pause with a raised cap from the web, and the run view's other cuts ([`runs-api.md`](runs-api.md), "Deferred work and owners") | no live ticket |
 | Run requests over 512 characters: a start refuses them today, and briefs carry only `request_preview` | CRL-152 |
 | A pause made on the run row alone has no durable marker: a resync repair between the engine's own pause and its plan probe can take over the row's reason, and the probe then lifts the row | CRL-153 |
-| Run preflight (`POST /v1/coral/runs:preflight` answers 501): the CRL-132 facts need an `AgentSpec` per step, and only `materialize` builds them | CRL-151 |
 | The orchestrator's lifecycle: replacing it, with keys and a fence scoped to its generation; backoff for its transient failures, which pause the run at once; winding down the anchor and orchestrator sessions after a run ends; and a Retry for the causes no step owns (`anchor:*`, `orchestrator:*`, `gate:*`, run-level `failure_path`), which stay Cancel-only | CRL-155 |
 | Tier B against the real API: the 529, 429 and 401 texts the classifier reads, a credentialed scheduled lane, and the opt-in Tier B samples in `coral-e2e` | CRL-156 |
 | A runner's first start in a repo probes git's untracked cache for about 6 s; a turn that ends inside it looks like a drift (`pending_input`). The E2E presets `core.untrackedCache=true` | CRL-161 |

@@ -1493,6 +1493,155 @@
         "title": "PauseCause",
         "type": "object"
       },
+      "PreflightEstimate": {
+        "additionalProperties": false,
+        "description": "How many sessions a one-pass start of this workflow needs; no spend history yet.",
+        "properties": {
+          "sessions": {
+            "minimum": 0.0,
+            "title": "Sessions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "title": "PreflightEstimate",
+        "type": "object"
+      },
+      "PreflightFix": {
+        "additionalProperties": false,
+        "description": "One named fix for a failed preflight check.",
+        "properties": {
+          "href": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Href"
+          },
+          "target": {
+            "enum": [
+              "install_harness",
+              "sign_in",
+              "add_api_key",
+              "connect_host",
+              "update_host",
+              "install_bwrap",
+              "fix_workflow"
+            ],
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "href"
+        ],
+        "title": "PreflightFix",
+        "type": "object"
+      },
+      "PreflightItemOut": {
+        "additionalProperties": false,
+        "description": "One preflight check and its result.",
+        "properties": {
+          "check": {
+            "enum": [
+              "auth",
+              "host_online",
+              "sandbox",
+              "system_claude"
+            ],
+            "title": "Check",
+            "type": "string"
+          },
+          "fix": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PreflightFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "warn",
+              "fail"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "check",
+          "status",
+          "message",
+          "fix"
+        ],
+        "title": "PreflightItemOut",
+        "type": "object"
+      },
+      "PreflightRequest": {
+        "additionalProperties": false,
+        "description": "A preflight of one of the caller's workflows on a host, without starting a run.\n\n``host_id`` names the host whose readiness and OS sandbox are checked; no\nworktree is created.",
+        "properties": {
+          "host_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Host Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "host_id"
+        ],
+        "title": "PreflightRequest",
+        "type": "object"
+      },
+      "PreflightResponse": {
+        "additionalProperties": false,
+        "description": "HRN-02's preflight report plus a session-count estimate.",
+        "properties": {
+          "estimate": {
+            "$ref": "#/components/schemas/PreflightEstimate"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PreflightItemOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "items",
+          "estimate"
+        ],
+        "title": "PreflightResponse",
+        "type": "object"
+      },
       "Problem": {
         "description": "One finding, anchored to nodes, arrows and a ``yaml_path``.",
         "properties": {
@@ -5004,19 +5153,29 @@
     },
     "/v1/coral/runs:preflight": {
       "post": {
-        "description": "Not served yet.",
+        "description": "Check whether one of the caller's workflows can start on their host, without\nstarting a run: auth, host, OS sandbox and system Claude, plus a session estimate.",
         "operationId": "coral_preflight_run",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/EmptyRequest"
+                "$ref": "#/components/schemas/PreflightRequest"
               }
             }
           },
           "required": true
         },
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreflightResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -5037,6 +5196,16 @@
             },
             "description": "Forbidden"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -5047,7 +5216,7 @@
             },
             "description": "Unprocessable Content"
           },
-          "501": {
+          "503": {
             "content": {
               "application/json": {
                 "schema": {
@@ -5055,7 +5224,7 @@
                 }
               }
             },
-            "description": "Not Implemented"
+            "description": "Service Unavailable"
           }
         },
         "summary": "Preflight Run",

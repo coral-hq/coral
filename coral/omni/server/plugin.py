@@ -425,6 +425,20 @@ def _host_connector(services: ServerServices) -> HostConnector | None:
     return partial(connect_run_worktree_host, host_registry=host_registry, host_store=host_store)
 
 
+def _workflow_preflight(services: ServerServices):
+    """Host and credential preflight over the server's host registry."""
+    from coral.omni.server.preflight import OmniWorkflowPreflight
+    from omnigent.server.host_registry import HostRegistry
+
+    registry = getattr(services, "host_registry", None) or HostRegistry()
+    return OmniWorkflowPreflight(
+        registry,
+        claude_native_steps=bool(
+            resolve_sub_features(services.server_config).get("claude_native_steps")
+        ),
+    )
+
+
 def _host_channels(services: ServerServices) -> HostWorkspaceChannels | None:
     """The host workspace-op channels on the server's host registry; ``None`` without one."""
     from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
@@ -475,6 +489,7 @@ def _runs_api(
         requires_generation=auth_mode(services.auth_provider) == "accounts",
         workspace_channels=channels,
         canonical_host_id=canonical_host_id,
+        workflow_preflight=_workflow_preflight(services),
     )
 
 

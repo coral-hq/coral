@@ -1844,6 +1844,49 @@ def _anchor_prompt(world: World, run: CoralRun) -> tuple[str, str]:
     return anchor_session_id(WORKSPACE, run.id), row.elicitation_id
 
 
+# ── Preflight ───────────────────────────────────────────────────────────────
+
+
+async def test_preflight_reports_an_offline_host_without_starting_a_run(
+    writes: Api,
+) -> None:
+    from coral.omni.server.preflight import OmniWorkflowPreflight
+    from omnigent.policies.registry import load_registry
+    from omnigent.server.host_registry import HostRegistry
+
+    # Bare app has no Coral plugin; register the handlers step bundles name.
+    load_registry(extra_modules=["coral.omni.policies.hygiene", "coral.omni.policies.guards"])
+    definition = writes.services.definitions.save()
+    writes.api._workflow_preflight = OmniWorkflowPreflight(HostRegistry())
+    body = {"workflow_id": definition.id, "host_id": "missing-host"}
+
+    async with _client(writes.app()) as client:
+        response = await client.post(f"{RUNS}:preflight", headers=_as(ALICE), json=body)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["estimate"]["sessions"] >= 2
+    failures = {
+        item["check"]: item["fix"]["target"]
+        for item in payload["items"]
+        if item["status"] == "fail" and item["fix"] is not None
+    }
+    assert failures["host_online"] == "connect_host"
+    assert _count_runs(writes.world) == 0
+
+
+async def test_preflight_of_another_users_workflow_is_not_found(writes: Api) -> None:
+    definition = writes.services.definitions.save(owner=ALICE)
+    body = {"workflow_id": definition.id, "host_id": "host-1"}
+
+    async with _client(writes.app()) as client:
+        response = await client.post(f"{RUNS}:preflight", headers=_as(BOB), json=body)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+
+
 # ── Start ───────────────────────────────────────────────────────────────────
 
 

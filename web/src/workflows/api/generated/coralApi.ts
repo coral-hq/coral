@@ -312,6 +312,50 @@ export interface PauseCause {
   subject: string;
 }
 
+/** How many sessions a one-pass start of this workflow needs; no spend history yet. */
+export interface PreflightEstimate {
+  sessions: number;
+}
+
+/** One named fix for a failed preflight check. */
+export interface PreflightFix {
+  href: string | null;
+  target:
+    | "install_harness"
+    | "sign_in"
+    | "add_api_key"
+    | "connect_host"
+    | "update_host"
+    | "install_bwrap"
+    | "fix_workflow";
+}
+
+/** One preflight check and its result. */
+export interface PreflightItemOut {
+  check: "auth" | "host_online" | "sandbox" | "system_claude";
+  fix: PreflightFix | null;
+  message: string;
+  status: "ok" | "warn" | "fail";
+}
+
+/**
+ * A preflight of one of the caller's workflows on a host, without starting a run.
+ *
+ * ``host_id`` names the host whose readiness and OS sandbox are checked; no
+ * worktree is created.
+ */
+export interface PreflightRequest {
+  host_id: string;
+  workflow_id: string;
+}
+
+/** HRN-02's preflight report plus a session-count estimate. */
+export interface PreflightResponse {
+  estimate: PreflightEstimate;
+  items: PreflightItemOut[];
+  ok: boolean;
+}
+
 /** One finding, anchored to nodes, arrows and a ``yaml_path``. */
 export interface Problem {
   arrow_ids: string[];
@@ -1020,15 +1064,16 @@ export interface CoralOperations {
   /**
    * POST /v1/coral/runs:preflight
    *
-   * Not served yet.
+   * Check whether one of the caller's workflows can start on their host, without
+   * starting a run: auth, host, OS sandbox and system Claude, plus a session estimate.
    */
   coral_preflight_run: {
     method: "POST";
     path: "/v1/coral/runs:preflight";
-    body: EmptyRequest;
-    status: never;
-    response: never;
-    errors: 401 | 403 | 422 | 501;
+    body: PreflightRequest;
+    status: 200;
+    response: PreflightResponse;
+    errors: 401 | 403 | 404 | 422 | 503;
   };
   /**
    * GET /v1/coral/workflows

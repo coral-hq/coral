@@ -84,6 +84,28 @@ const SUMMARY: RunSummary = {
   run_branch: "coral/r-0a1b2c3d4e5f/base",
 };
 
+const OK_PREFLIGHT = {
+  ok: true,
+  items: [
+    { check: "auth", status: "ok", message: "Claude has an API credential.", fix: null },
+    { check: "host_online", status: "ok", message: "The host is connected.", fix: null },
+  ],
+  estimate: { sessions: 4 },
+};
+
+const FAIL_PREFLIGHT = {
+  ok: false,
+  items: [
+    {
+      check: "auth",
+      status: "fail",
+      message: "Workflows with an orchestrator need an Anthropic API key.",
+      fix: { target: "add_api_key", href: null },
+    },
+  ],
+  estimate: { sessions: 4 },
+};
+
 const refusal = (
   status: number,
   code: string,
@@ -93,6 +115,8 @@ const refusal = (
 
 /** The start route's answers in turn; the last repeats. */
 let answers: (() => Response | Promise<Response>)[];
+/** The preflight route's answers in turn; the last repeats. */
+let preflightAnswers: (() => Response | Promise<Response>)[];
 /** What each notice the dialog raised said. */
 let notices: ReactNode[];
 const onNotice = (event: Event) => notices.push((event as CustomEvent).detail.content);
@@ -162,14 +186,24 @@ function renderDialog() {
 const run = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
 const startButton = () => screen.getByRole("button", { name: "Start run" });
 
-/** Every body the dialog posted, parsed. */
+/** Every start body the dialog posted, parsed. */
 function posted(): Record<string, unknown>[] {
-  return authenticatedFetch.mock.calls.map(([url, init]) => {
-    expect(url).toBe("/v1/coral/runs");
-    expect((init as RequestInit).method).toBe("POST");
-    expect(new Headers((init as RequestInit).headers).get("Content-Type")).toBe("application/json");
-    return JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
-  });
+  return authenticatedFetch.mock.calls
+    .filter(([url]) => url === "/v1/coral/runs")
+    .map(([, init]) => {
+      expect((init as RequestInit).method).toBe("POST");
+      expect(new Headers((init as RequestInit).headers).get("Content-Type")).toBe(
+        "application/json",
+      );
+      return JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+    });
+}
+
+/** Every preflight body the dialog posted, parsed. */
+function preflighted(): Record<string, unknown>[] {
+  return authenticatedFetch.mock.calls
+    .filter(([url]) => url === "/v1/coral/runs:preflight")
+    .map(([, init]) => JSON.parse((init as RequestInit).body as string) as Record<string, unknown>);
 }
 
 const keysPosted = () => posted().map((body) => body.start_key);
@@ -197,8 +231,10 @@ beforeEach(() => {
   notices = [];
   window.addEventListener("omnigent:toast", onNotice);
   answers = [() => jsonResponse(201, SUMMARY)];
-  authenticatedFetch.mockImplementation(async () => {
-    const answer = answers.length > 1 ? answers.shift()! : answers[0]!;
+  preflightAnswers = [() => jsonResponse(200, OK_PREFLIGHT)];
+  authenticatedFetch.mockImplementation(async (url: string) => {
+    const queue = url === "/v1/coral/runs:preflight" ? preflightAnswers : answers;
+    const answer = queue.length > 1 ? queue.shift()! : queue[0]!;
     return answer();
   });
 });
@@ -225,14 +261,25 @@ describe("StartRunDialog", () => {
     expect(startButton()).toBeEnabled();
   });
 
-  it("asks the server nothing before Start: there is no preflight", async () => {
-    // WHY: preflight answers 501 until it exists, so it must not gate a start.
+  it("asks preflight once a host is chosen and gates Start on failures", async () => {
+    preflightAnswers = [() => jsonResponse(200, FAIL_PREFLIGHT)];
+    renderDialog();
+    await run();
+    await chooseHost("Laptop");
+    expect(preflighted()).toEqual([{ workflow_id: WORKFLOW_ID, host_id: "h1" }]);
+    expect(screen.getByTestId("preflight")).toBeInTheDocument();
+    expect(screen.getByText(/need an Anthropic API key/)).toBeInTheDocument();
+    await chooseFolder("/repo", "h1");
+    expect(startButton()).toBeDisabled();
+  });
+
+  it("enables Start after a passing preflight when host and folder are chosen", async () => {
     renderDialog();
     await run();
     await chooseHost("Laptop");
     await chooseFolder("/repo", "h1");
-    expect(screen.queryByTestId("preflight")).not.toBeInTheDocument();
-    expect(authenticatedFetch).not.toHaveBeenCalled();
+    expect(screen.getByTestId("preflight")).toBeInTheDocument();
+    expect(startButton()).toBeEnabled();
   });
 
   it("posts the start once, opens the new run and refreshes the runs history", async () => {
