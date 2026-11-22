@@ -587,6 +587,32 @@ def fail_ask_hook_output(hook_event: str, detail: str | None = None) -> dict[str
     return fail_closed_hook_output(hook_event, detail)
 
 
+POLICY_FAILURE_MODE_ASK = "ask"
+POLICY_FAILURE_MODE_FAIL_CLOSED = "fail_closed"
+
+
+def normalize_policy_failure_mode(value: object | None) -> str:
+    """Return ``ask`` or ``fail_closed``; unknown or missing values become ``ask``."""
+    if value == POLICY_FAILURE_MODE_FAIL_CLOSED:
+        return POLICY_FAILURE_MODE_FAIL_CLOSED
+    return POLICY_FAILURE_MODE_ASK
+
+
+def policy_unavailable_hook_output(
+    hook_event: str,
+    mode: object | None = None,
+    detail: str | None = None,
+) -> dict[str, object] | None:
+    """Choose fail-ask vs fail-closed output for an unobtainable policy verdict.
+
+    Interactive Omnigent sessions default to ``ask``. Coral run-owned native
+    steps set ``fail_closed`` so a policy outage cannot let a gated tool run.
+    """
+    if normalize_policy_failure_mode(mode) == POLICY_FAILURE_MODE_FAIL_CLOSED:
+        return fail_closed_hook_output(hook_event, detail)
+    return fail_ask_hook_output(hook_event, detail)
+
+
 def is_loopback_url(url: str) -> bool:
     """
     Report whether *url* addresses this machine's loopback interface.

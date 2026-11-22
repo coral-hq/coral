@@ -5801,6 +5801,11 @@ async def _auto_create_codex_terminal(
     )
     # SDK initialization can block on DNS/auth before model discovery times out.
     # Keep it off the runner loop so heartbeats and other sessions can progress.
+    _codex_policy_failure_mode = None
+    if agent_spec is not None:
+        raw_codex_mode = agent_spec.executor.config.get("policy_failure_mode")
+        if isinstance(raw_codex_mode, str):
+            _codex_policy_failure_mode = raw_codex_mode
     app_server = await asyncio.to_thread(
         build_codex_native_server,
         session_id=session_id,
@@ -5813,6 +5818,7 @@ async def _auto_create_codex_terminal(
         bridge_dir=bridge_dir,
         ap_server_url=launch_config.policy_server_url,
         ap_auth_headers=policy_headers,
+        policy_failure_mode=_codex_policy_failure_mode,
         bypass_sandbox=launch_config.bypass_sandbox,
         developer_instructions=_codex_developer_instructions,
         terminal_launch_args=launch_config.terminal_launch_args or (),
@@ -9826,6 +9832,11 @@ async def _auto_create_claude_terminal(
         # Its dead-owner cleanup also reclaims these generated skill links.
         bundle_dir = bridge_dir / "skill-bundle"
         _ensure_orchestrator_skills_in_bundle(bundle_dir, agent_spec)
+    _policy_failure_mode = None
+    if agent_spec is not None:
+        raw_mode = agent_spec.executor.config.get("policy_failure_mode")
+        if isinstance(raw_mode, str):
+            _policy_failure_mode = raw_mode
     claude_args = augment_claude_args(
         base_claude_args,
         bridge_dir=bridge_dir,
@@ -9848,6 +9859,7 @@ async def _auto_create_claude_terminal(
         # The route-turn hook is registered only when this session can
         # actually route; otherwise every submit would pay its round trip.
         turn_routing=_claude_turn_router is not None,
+        policy_failure_mode=_policy_failure_mode,
     )
 
     # Apply the per-harness startup command/args override from config

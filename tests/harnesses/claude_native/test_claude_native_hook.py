@@ -2090,18 +2090,17 @@ def test_ask_user_question_subcommand_is_a_silent_noop(
 
 
 @pytest.mark.parametrize("mode", ["connect_error", "non_2xx", "empty_body", "malformed_json"])
-def test_evaluate_policy_pre_tool_use_fails_closed_when_verdict_unavailable(
+def test_evaluate_policy_pre_tool_use_fails_ask_when_verdict_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     mode: str,
 ) -> None:
     """
-    A governed PreToolUse call denies when no usable verdict is returned.
+    Default ``ask`` mode prompts the user when no usable verdict is returned.
 
-    For native harnesses this hook is the sole TOOL_CALL enforcement point,
-    so a server outage / non-2xx / empty / malformed response must fail
-    CLOSED (deny) instead of "no opinion" — the bypass reported in #536.
+    Interactive Omnigent sessions keep fail-ask so a transient policy outage
+    does not block every tool until the server recovers.
     """
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
@@ -2123,6 +2122,41 @@ def test_evaluate_policy_pre_tool_use_fails_closed_when_verdict_unavailable(
     assert exit_code == 0
     result = json.loads(captured.out)
     assert result["hookSpecificOutput"]["permissionDecision"] == "ask", result
+    assert result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("mode", ["connect_error", "non_2xx", "empty_body", "malformed_json"])
+def test_evaluate_policy_pre_tool_use_fails_closed_when_mode_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+) -> None:
+    """``fail_closed`` mode denies PreToolUse when the verdict is unavailable."""
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", make_failing_client(mode))
+    monkeypatch.setattr(native_policy_hook, "_EVALUATE_POLICY_RETRY_BUDGET_S", 0.0)
+    bridge_dir = prepare_bridge_dir("conv_abc", bridge_id="bridge_shared", workspace=tmp_path)
+    write_active_session_id(bridge_dir, "conv_active")
+    build_hook_settings(
+        bridge_dir,
+        ap_server_url="http://127.0.0.1:8787",
+        policy_failure_mode="fail_closed",
+    )
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "rm -rf /"},
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+
+    exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    result = json.loads(captured.out)
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny", result
     assert result["hookSpecificOutput"]["permissionDecisionReason"]
 
 
