@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno  # CORAL(S115)
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ from abc import ABC, abstractmethod
 from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol, cast
+from typing import BinaryIO, Protocol, cast  # CORAL(S115)
 
 from omnigent.runner.identity import RUNNER_AUTH_SECRET_ENV_VARS
 from omnigent.util.json_types import JsonValue
@@ -180,6 +181,11 @@ class SandboxPolicy:
         target cannot make a directory of that name there.
     :param scratch_dir_extra_envs: CORAL(S113): further environment variables the in-wrap
         pass sets to that same dir, over any inherited value.
+    :param scratch_dir_seed: CORAL(S115): ``(entry name, absolute source file)`` pairs the
+        in-wrap pass copies into that dir, each as a fresh 0600 file, before it creates
+        ``scratch_dir_files``. A missing source, a link, any other non-regular file, or one
+        another user owns or can write, fails the launch. :func:`with_scratch_dir_env` grants
+        each source as a read root. Empty: an empty dir.
     :param mask_scan_skip_roots: Write roots the dotfile / escaping-symlink
         mask scan must skip — the framework's own scratch / runtime dirs
         added post-resolve via :func:`with_additional_write_roots`. These
@@ -231,6 +237,7 @@ class SandboxPolicy:
     scratch_dir_env: str | None = None
     scratch_dir_files: tuple[str, ...] = ()
     scratch_dir_extra_envs: tuple[str, ...] = ()
+    scratch_dir_seed: tuple[tuple[str, str], ...] = ()  # CORAL(S115)
     # Parent-side only: the resolved credential-proxy policy. Read in
     # ``_HelperProcessClient._start_locked`` (parent) to mint synthetic
     # placeholders and proxy rewrite rules. Intentionally NOT carried in
@@ -322,6 +329,10 @@ class SandboxPolicy:
             "scratch_dir_env": self.scratch_dir_env,
             "scratch_dir_files": _json_string_list(self.scratch_dir_files),
             "scratch_dir_extra_envs": _json_string_list(self.scratch_dir_extra_envs),
+            # CORAL(S115)
+            "scratch_dir_seed": cast(
+                list[JsonValue], [_json_string_list(pair) for pair in self.scratch_dir_seed]
+            ),
         }
         return result
 
@@ -402,8 +413,16 @@ class SandboxPolicy:
         scratch_dir_env = data.get("scratch_dir_env")
         scratch_dir_files = data.get("scratch_dir_files", [])
         scratch_dir_extra_envs = data.get("scratch_dir_extra_envs", [])
-        if scratch_dir_env is not None or scratch_dir_files != [] or scratch_dir_extra_envs != []:
-            _check_scratch_dir(scratch_dir_env, scratch_dir_files, scratch_dir_extra_envs)
+        scratch_dir_seed = data.get("scratch_dir_seed", [])  # CORAL(S115)
+        if (
+            scratch_dir_env is not None
+            or scratch_dir_files != []
+            or scratch_dir_extra_envs != []
+            or scratch_dir_seed != []  # CORAL(S115)
+        ):
+            _check_scratch_dir(
+                scratch_dir_env, scratch_dir_files, scratch_dir_extra_envs, scratch_dir_seed
+            )
         cow_roots = data.get("copy_on_write_roots", [])
         if not isinstance(cow_roots, list) or any(not isinstance(p, str) for p in cow_roots):
             raise ValueError("Invalid copy_on_write_roots")
@@ -444,6 +463,9 @@ class SandboxPolicy:
             scratch_dir_env=cast("str | None", scratch_dir_env),
             scratch_dir_files=tuple(cast("list[str]", scratch_dir_files)),
             scratch_dir_extra_envs=tuple(cast("list[str]", scratch_dir_extra_envs)),
+            scratch_dir_seed=tuple(  # CORAL(S115): checked above
+                (name, source) for name, source in cast("list[list[str]]", scratch_dir_seed)
+            ),
         )
 
 
@@ -999,6 +1021,7 @@ def _clone_policy_with(
         scratch_dir_env=policy.scratch_dir_env,
         scratch_dir_files=policy.scratch_dir_files,
         scratch_dir_extra_envs=policy.scratch_dir_extra_envs,
+        scratch_dir_seed=policy.scratch_dir_seed,  # CORAL(S115)
         # Preserve the credential-proxy policy across clones: the
         # ``with_additional_*`` helpers run before the parent reads it in
         # ``_start_locked``, so dropping it here would silently disable
@@ -1327,7 +1350,12 @@ def _all_match(values: object, pattern: re.Pattern[str]) -> bool:
     )
 
 
-def _check_scratch_dir(env_name: object, files: object, extra_envs: object = ()) -> None:
+def _check_scratch_dir(
+    env_name: object,
+    files: object,
+    extra_envs: object = (),
+    seed: object = (),  # CORAL(S115)
+) -> None:
     """CORAL(S113): raise ``ValueError`` unless these name a private dir, its files and envs."""
     if not _all_match([env_name], _ENV_NAME) or not _all_match(extra_envs, _ENV_NAME):
         raise ValueError("scratch_dir_env names must be upper-case environment variable names")
@@ -1335,6 +1363,35 @@ def _check_scratch_dir(env_name: object, files: object, extra_envs: object = ())
         raise ValueError("scratch_dir_env names must be Claude config dir variables")
     if not _all_match(files, _SCRATCH_ENTRY_NAME):
         raise ValueError("scratch_dir_files must be plain file names")
+    if not _is_scratch_seed(seed, cast("list[str]", files)):  # CORAL(S115)
+        raise ValueError(
+            "scratch_dir_seed must pair distinct file names with absolute normalized sources"
+        )
+
+
+# CORAL(S115): a seed copy's name in the private dir; a leading dot is allowed (".claude.json")
+_SCRATCH_SEED_NAME = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9._-]*")
+
+
+def _is_scratch_seed(seed: object, files: Sequence[str]) -> bool:
+    """CORAL(S115): ``(name, source)`` pairs with unique names that no listed file takes."""
+    if not isinstance(seed, (list, tuple)):
+        return False
+    names: list[str] = []
+    for pair in seed:
+        if not (
+            isinstance(pair, (list, tuple))
+            and len(pair) == 2
+            and all(isinstance(part, str) for part in pair)
+        ):
+            return False
+        name, source = pair
+        if not _SCRATCH_SEED_NAME.fullmatch(name) or not os.path.isabs(source):
+            return False
+        if os.path.normpath(source) != source:
+            return False
+        names.append(name)
+    return len(set(names)) == len(names) and not set(names) & set(files)
 
 
 def with_scratch_dir_env(
@@ -1343,23 +1400,83 @@ def with_scratch_dir_env(
     *,
     files: Sequence[str] = (),
     extra_envs: Sequence[str] = (),
+    seed: Sequence[tuple[str, Path | str]] = (),  # CORAL(S115)
 ) -> SandboxPolicy:
-    """CORAL(S113): give the target a private dir in its scratch, named in ``env_name``."""
-    _check_scratch_dir(env_name, files, extra_envs)
+    """
+    CORAL(S113): give the target a private dir in its scratch, named in ``env_name``.
+
+    CORAL(S115): ``seed`` names files copied into it at launch; each source becomes a read root.
+    """
+    # A relative source is left as it is, so the check refuses it.
+    pairs = tuple(
+        (name, str(Path(source).resolve(strict=False) if os.path.isabs(source) else source))
+        for name, source in seed
+    )
+    _check_scratch_dir(env_name, files, extra_envs, pairs)
+    if pairs:
+        policy = with_additional_read_roots(policy, [Path(source) for _, source in pairs])
     return replace(
         policy,
         scratch_dir_env=env_name,
         scratch_dir_files=tuple(files),
         scratch_dir_extra_envs=tuple(extra_envs),
+        scratch_dir_seed=pairs,  # CORAL(S115)
     )
 
 
-def export_scratch_dir(policy: SandboxPolicy, scratch: Path | None) -> None:
+def open_regular_file(path: Path, *, follow_symlinks: bool = False) -> BinaryIO:
+    """
+    CORAL(S115): open *path* for reading only if it is a regular file.
+
+    A FIFO or device is opened without blocking and refused, and so is a symlink unless
+    *follow_symlinks*.
+
+    :raises OSError: If *path* is missing, a refused link or not a regular file.
+    """
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+    descriptor = os.open(path, flags if follow_symlinks else flags | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, "Not a regular file", str(path))
+        os.set_blocking(descriptor, True)
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _copy_seed_file(source: Path, target: Path) -> None:
+    """
+    CORAL(S115): copy a regular seed file, never a link or a FIFO, to a new 0600 file.
+
+    The seed must be this user's and writable by no one else, so no other account can plant it.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    with open_regular_file(source) as reader:
+        info = os.fstat(reader.fileno())
+        if info.st_uid != os.getuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise OSError(errno.EPERM, "The seed is not this user's private file", str(source))
+        with open(os.open(target, flags, 0o600), "wb") as writer:
+            shutil.copyfileobj(reader, writer)
+
+
+# CORAL(S115): a CLI version query's arguments, as in the Agent SDK's check of the CLI
+_VERSION_QUERY_ARGVS = (["-v"], ["--version"])
+
+
+def export_scratch_dir(
+    policy: SandboxPolicy,
+    scratch: Path | None,
+    *,
+    copy_seed: bool = True,  # CORAL(S115)
+) -> None:
     """
     CORAL(S113): create the policy's private dir in ``scratch`` and name it to the target.
 
     It overwrites an inherited value of each variable. Without a scratch it raises rather than
     let the target fall back to a default location.
+
+    :param copy_seed: CORAL(S115): ``False`` leaves the seed copies out of the dir.
     """
     if policy.scratch_dir_env is None:
         return
@@ -1367,6 +1484,8 @@ def export_scratch_dir(policy: SandboxPolicy, scratch: Path | None) -> None:
         raise RuntimeError("The launcher has no scratch dir for the target's private dir")
     path = Path(os.path.abspath(scratch)) / policy.scratch_dir_env.lower()
     path.mkdir(mode=0o700)
+    for name, source in policy.scratch_dir_seed if copy_seed else ():  # CORAL(S115)
+        _copy_seed_file(Path(source), path / name)
     for name in policy.scratch_dir_files:
         (path / name).touch(mode=0o600, exist_ok=False)
     for env_name in (policy.scratch_dir_env, *policy.scratch_dir_extra_envs):
@@ -1654,7 +1773,9 @@ def run_launcher(
             )
     try:
         activate_sandbox(sandbox)
-        export_scratch_dir(sandbox, tmpdir)  # CORAL(S113)
+        # CORAL(S113, S115): a version query needs no config, and its caller may kill it before
+        # the cleanup below, so it gets no seed copy
+        export_scratch_dir(sandbox, tmpdir, copy_seed=argv not in _VERSION_QUERY_ARGVS)
         logger.info("[omnigent-sandbox] activated; spawning target=%s", target_path)
         completed = subprocess.run(target_argv)
         logger.info("[omnigent-sandbox] target exited rc=%s", completed.returncode)

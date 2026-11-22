@@ -3566,7 +3566,7 @@ seams:
       starts. No rule grants ~/Library and S5 denies it, so the keychain file
       cannot be opened from the wrap (measured on 27.2.1 with a stand-in
       file). Main residuals and owners: other agents' sandboxed claude-sdk
-      wraps (CRL-178), unwrapped Coral CLIs (CRL-180), leftover scratch and
+      wraps (closed by S115 on bwrap and seatbelt), unwrapped Coral CLIs (CRL-180), leftover scratch and
       private dirs (CRL-179), the settings env merge (CRL-167), env
       construction races and a relative config dir (CRL-182), project config a
       step writes in its worktree (CRL-181), and the inbox sockets (CRL-174).
@@ -3623,6 +3623,7 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
   - id: S114
     title: The codex-native app-server WebSocket requires a per-spawn capability token
     owner: WS-INTEGRATION
@@ -3693,6 +3694,114 @@ seams:
         omnigent/harnesses/codex_native/launch_args.py 15,
         tests/harnesses/codex_native/session/test_launch_config.py 11.
       approver: pending
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S115
+    title: Every bwrap or seatbelt claude CLI keeps its Claude config in a private dir, seeded for non-Coral agents
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Before this seam a non-Coral claude-sdk CLI wrap granted read and write
+      on ~/.claude/{plugins,sessions,session-env,backups}, ~/.claude.json and
+      .credentials.json, and a user MCP server from ~/.claude.json, started
+      inside the wrap, rewrote a plugin hook, planted a session-env script and
+      rewrote .claude.json (measured on macOS 27.2.1 with a throwaway home and
+      claude 2.1.325). sandbox.py: scratch_dir_seed names (entry, absolute
+      source file) pairs that the in-wrap pass copies into S113's private dir
+      as fresh 0600 files before scratch_dir_files, except for a version query
+      (-v or --version alone), which its caller may kill before the launcher
+      cleans up; the copy follows no link, does not block on a FIFO, and takes
+      only a regular file this user owns and no one else can write;
+      with_scratch_dir_env grants each source as a read root; the field
+      travels the launcher wire and survives clones, and
+      a malformed one fails the launch. Executor: both wrap paths isolate by
+      default on every backend but Windows' job object, which confines no
+      files and keeps the shared grants; no production caller passes
+      isolate_config=False. A non-Coral spec whose skills load user settings
+      gets a seed filtered from the global config the CLI would read: the
+      user's mcpServers, userID and legacy env, and per project only the trust
+      and MCP enable/disable keys not at their default. Project mcpServers,
+      oauthAccount, primaryApiKey, any Claude sign-in credential and every
+      other key are never copied. An unusable config, one over 16 MB
+      included, gives an empty seed, so no user MCP servers, and a warning in
+      the runner log. The seed is written just before each wrapped launch and
+      removed on close; its dir is made exclusively, again after a temp
+      cleaner removed it, and one found there must be this user's own 0700
+      dir. skills none and Coral get an empty dir, and Coral keeps S113
+      unchanged. Under the old wrap only those MCP servers reached the CLI
+      (measured), so it loads the same MCP servers as before.
+      Breaking: a stored subscription login no longer reaches these CLIs, and
+      on Linux neither do the MCP OAuth sign-ins in the CLI's credential
+      store. A start warning and the auth error name an API key, a gateway or
+      CLAUDE_CODE_OAUTH_TOKEN, and a seeded MCP server that the host signs in
+      is named in a warning. The Sentinel and scanner example configs carry
+      the auth note. Main residuals: CLIs that run unwrapped by design (no
+      ticket) or because their sandbox could not be applied (CRL-183); the
+      seed copy's secrets and CLAUDE_CODE_OAUTH_TOKEN, both readable in the
+      sandbox (CRL-167); a seed copy left in a launch scratch after a kill,
+      and a scratch without one at each connect from the SDK's -v check
+      (CRL-179); a working dir or path grant above the home, which the
+      top-level dotfile mask does not cover (CRL-184); project config in the
+      working dir (CRL-181); and the inbox sockets (CRL-174). No CI lane runs
+      macOS (CRL-170). Mechanism, evidence and the full residual list:
+      ADR-05, "Addendum: CRL-178 Claude config isolation for every sandboxed
+      agent".
+    files:
+      - omnigent/inner/sandbox.py
+      - omnigent/inner/claude_sdk_executor.py
+      - tests/conftest.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - examples/sentinel/config.yaml
+      - examples/sentinel/agents/scanner/config.yaml
+    tests:
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/e2e/coral/test_tier_b_executor.py
+    budget_lines: 120
+    budget_exception:
+      lines: 589
+      reason: >-
+        Counted with git diff --numstat origin/development.
+        tests/inner/test_claude_sdk_executor.py (589
+        changed lines): the seed filter against a config with every kind of
+        key, keys at their unset value and config dir names in env, and a
+        credential file no open call may touch; the config path (CLAUDE_CONFIG_DIR,
+        both legacy .config.json places, a symlinked config) and the refused
+        relative or empty dirs; missing, malformed, non-object, non-UTF-8, FIFO,
+        too deep and oversized configs; the grant tests' default rows on both
+        backends, a future backend and the tight wrap, and the Windows job
+        object row; the table of which specs read the user's config (Coral, all,
+        a list, a malformed filter, none, unwrapped, tight, tight unwrapped);
+        the per-launch refresh, modes, close, __del__ and launch after close;
+        a seed dir a temp cleaner removed; seed dirs planted before the first
+        launch and after a cleaner; the host sign-in warning; the auth fix and start
+        warning for six credential cases; and the two guards on the hermetic
+        fixture. omnigent/inner/claude_sdk_executor.py (294 changed lines): the
+        seed keys and their unset values, the size cap, the seed source, filter
+        and file name, the default isolation with the Windows exception on both
+        wrap paths with their docstrings, the seed lifecycle (write, refresh
+        before connect, a dir made again after a temp cleaner, removal,
+        refusal after close), the remediation branch,
+        the start warning and the host sign-in warning.
+        tests/inner/test_sandbox.py (176 changed lines): the seed on the wire,
+        through clones and the drift test, 14 malformed seeds, the in-wrap copy
+        with an inherited empty secure-storage name and none for a version
+        query, six refused seeds (missing, symlink, FIFO, directory,
+        group-writable, foreign) and a copy that never writes through an
+        existing target. omnigent/inner/sandbox.py (137 changed lines):
+        scratch_dir_seed on the wire, through clones and its checks, the
+        regular-file open, the owner-checked copy, and no copy for a version
+        query. The other files are within budget: tests/conftest.py 53,
+        tests/inner/sandbox/test_sandbox_behavior.py 116,
+        examples/sentinel/config.yaml 4,
+        examples/sentinel/agents/scanner/config.yaml 4.
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

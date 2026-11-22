@@ -507,6 +507,59 @@ def _isolate_claude_managed_settings(
 
 
 @pytest.fixture()
+def claude_config_seed_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """CORAL(S115): opt back in to the global Claude config a wrapped CLI's seed copies.
+
+    :func:`_hermetic_claude_config_seed` then leaves the source alone, but a source outside
+    pytest's base temp dir and the temp dir fails the test before it is read, so only a
+    throwaway ``HOME`` or ``CLAUDE_CONFIG_DIR`` can be copied.
+
+    :param monkeypatch: Pytest monkeypatch fixture; restores the source at teardown.
+    :param tmp_path_factory: Pytest's session temp factory, whose base dir is allowed.
+    :returns: None.
+    """
+    from omnigent.inner import claude_sdk_executor
+
+    real_source = claude_sdk_executor._claude_seed_source
+    allowed = (
+        tmp_path_factory.getbasetemp().resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    )
+
+    def _throwaway_source(env: dict[str, str]) -> Path | None:
+        source = real_source(env)
+        if source is not None and not any(source.resolve().is_relative_to(r) for r in allowed):
+            raise AssertionError(f"a test would read {source}, which is not a throwaway config")
+        return source
+
+    monkeypatch.setattr(claude_sdk_executor, "_claude_seed_source", _throwaway_source)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_claude_config_seed(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CORAL(S115): keep wrapped claude-sdk CLIs' config seeds off the developer's config.
+
+    A non-Coral executor copies the user's ``~/.claude.json`` into its sandboxed CLI's private
+    config dir before each launch, so any test that builds one with the real ``HOME`` would
+    read it. Every seed is empty instead, unless the test requests
+    :func:`claude_config_seed_source`. This covers this process only: a server, runner or
+    harness a test starts as a subprocess reads whatever ``HOME`` it is given.
+
+    :param request: Pytest request, inspected for the opt-in fixture.
+    :param monkeypatch: Pytest monkeypatch fixture; restores the source at teardown.
+    :returns: None.
+    """
+    if "claude_config_seed_source" in request.fixturenames:
+        return
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor._claude_seed_source", lambda env: None)
+
+
+@pytest.fixture()
 def untracked_cache_start() -> None:
     """Opt back in to the real :meth:`GitFilesystemRegistry.start`.
 

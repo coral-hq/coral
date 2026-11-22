@@ -1442,11 +1442,15 @@ def _report(path: Path) -> tuple[list[str], str]:
 
 
 # CORAL(S113): code inside a Coral CLI wrap cannot reach the user's Claude config home
+# CORAL(S115): nor can a non-Coral one, whose dir starts from a read-only seed
+@pytest.mark.parametrize("seeded", [False, True], ids=["coral", "seeded"])
 def test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home(
     tmp_path: Path,
     active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
     sandbox_pythonpath_env: None,
     monkeypatch: pytest.MonkeyPatch,
+    claude_config_seed_source: None,
+    seeded: bool,
 ) -> None:
     """
     Outside, the probe writes a throwaway home's installed plugin hook, a new plugin,
@@ -1455,16 +1459,24 @@ def test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home(
     and a rename. Inside an isolated CLI wrap every one fails, though a forwarded
     ``CLAUDE_CONFIG_DIR`` names that home, and the home is unchanged. The wrap's own config
     dir is a 0700 dir in its scratch, writable, without ``projects/``, named by both config
-    variables over the forwarded values, and gone after the exit.
+    variables over the forwarded values, and gone after the exit. A non-Coral wrap, isolated by
+    default, holds a copy of the seed made from the home's ``.claude.json``, and cannot write
+    the seed itself.
     """
     import tests.e2e.coral._claude_config_probe as probe
-    from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+    from omnigent.inner.claude_sdk_executor import _claude_config_seed, prepare_claude_cli_path
 
     home, outside_home, workspace = (tmp_path / name for name in ("home", "outside", "work"))
     workspace.mkdir()
     shutil.copy(probe.__file__, workspace / "probe.py")
-    for seeded in (home, outside_home):
-        probe.seed_claude_home(seeded)
+    for seeded_home in (home, outside_home):
+        probe.seed_claude_home(seeded_home)
+    # CORAL(S115): the seed the executor writes from this home's global config, after prepare
+    seed = tmp_path / "seed" / "claude.json"
+    if seeded:
+        server = {"type": "stdio", "command": "true", "env": {"TOKEN": "throwaway"}}
+        user_config = {"mcpServers": {probe.SEED_SERVER: server}, "oauthAccount": {"a": 1}}
+        (home / ".claude.json").write_text(json.dumps(user_config))
     with contextlib.ExitStack() as cleanup:
         harness_root = Path(tempfile.mkdtemp(prefix="sbx-h-", dir="/tmp"))
         cleanup.callback(shutil.rmtree, harness_root, ignore_errors=True)
@@ -1475,12 +1487,21 @@ def test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home(
             cwd=str(workspace),
             sandbox=active_sandbox_spec_factory(write_paths=["."]),
         )
-        prepared = prepare_claude_cli_path(sys.executable, spec, isolate_config=True)
+        # CORAL(S115): Coral asks for isolation; any other caller gets it by default.
+        options = {"config_seed": seed} if seeded else {"isolate_config": True}
+        prepared = prepare_claude_cli_path(sys.executable, spec, **options)  # type: ignore[arg-type]
         assert prepared.config_isolated and prepared.cli_path is not None
         cleanup.callback(Path(prepared.cli_path).unlink, missing_ok=True)
-        before = probe.tree(home)
+        # CORAL(S115): as in production, the wrap is built before the seed exists
+        assert not seed.parent.exists(), "the seed was made before the wrap"
+        if seeded:
+            seed.parent.mkdir(mode=0o700)
+            seed.write_text(json.dumps(_claude_config_seed({"HOME": str(home)})))
+            seed.chmod(0o600)
+            assert "oauthAccount" not in seed.read_text()
+        before, seed_before = probe.tree(home), probe.tree(seed.parent)
 
-        def run_probe(command: list[str], probe_home: Path, report: str) -> Path:
+        def run_probe(command: list[str], probe_home: Path, report: str, *extra: str) -> Path:
             reader_env = {
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "PYTHONPATH": os.environ["PYTHONPATH"],
@@ -1490,7 +1511,7 @@ def test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home(
                 "CLAUDE_CONFIG_DIR": str(probe_home / ".claude"),
                 "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(probe_home),
             }
-            argv = [*command, "probe.py", report, str(probe_home)]
+            argv = [*command, "probe.py", report, str(probe_home), *extra]  # CORAL(S115)
             done = subprocess.run(
                 argv, cwd=workspace, env=reader_env, capture_output=True, text=True, timeout=60
             )
@@ -1498,19 +1519,89 @@ def test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home(
             return workspace / report
 
         outside, outside_dir = _report(run_probe([sys.executable], outside_home, "outside.txt"))
-        inside, inside_dir = _report(run_probe([prepared.cli_path], home, "inside.txt"))
-    own = ["config_private", "config_writable", "projects", "securestorage_own"]
+        source = (str(seed),) if seeded else ()  # CORAL(S115): the probe tries the seed
+        inside, inside_dir = _report(run_probe([prepared.cli_path], home, "inside.txt", *source))
+    own = ["config_private", "config_writable", "projects", "config_seeded"]
+    own += ["seed_source_write", "securestorage_own"]
+    outside_own = ("no", "yes", "yes", "no", "no", "no")
+    inside_own = ("yes", "yes", "no", "yes" if seeded else "no", "no", "yes")
     reached = [f"{name} yes" for name in probe.HOME_CHECKS] + [
-        f"{name} {verdict}" for name, verdict in zip(own, ("no", "yes", "yes", "no"), strict=True)
+        f"{name} {verdict}" for name, verdict in zip(own, outside_own, strict=True)
     ]
     refused = [f"{name} no" for name in probe.HOME_CHECKS] + [
-        f"{name} {verdict}" for name, verdict in zip(own, ("yes", "yes", "no", "yes"), strict=True)
+        f"{name} {verdict}" for name, verdict in zip(own, inside_own, strict=True)
     ]
     assert outside == reached, f"failed outside: {outside}"
     assert outside_dir == str(outside_home / ".claude")
     assert inside == refused, f"reached inside: {[v for v in inside if v not in refused]}"
     assert probe.tree(home) == before, "the wrap changed the home"
+    assert probe.tree(seed.parent) == seed_before, "the wrap changed the seed"
     assert Path(inside_dir).name == "claude_config_dir" and not Path(inside_dir).exists()
+
+
+# CORAL(S115): the Agent SDK's version check kills the wrapped CLI before the launcher cleans up
+@pytest.mark.timeout(120)
+def test_a_killed_version_check_leaves_no_copy_of_the_seed(
+    tmp_path: Path,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    As the SDK does, run the wrapped CLI with ``-v``, read one line, then terminate it. The
+    stand-in CLI prints a version and its config dir, then waits for its input to close, so
+    the kill always lands before the launcher's cleanup.
+    """
+    from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+
+    workspace, scratch_parent, seed = tmp_path / "work", tmp_path / "tmp", tmp_path / "seed"
+    for path in (workspace, scratch_parent):
+        path.mkdir()
+    cli = workspace / "claude"
+    cli.write_text(
+        '#!/bin/sh\nprintf "2.1.325 (Claude Code) %s\\n" "$CLAUDE_CONFIG_DIR"\nread _\n'
+    )
+    cli.chmod(0o700)
+    with contextlib.ExitStack() as cleanup:
+        harness_root = Path(tempfile.mkdtemp(prefix="sbx-h-", dir="/tmp"))
+        cleanup.callback(shutil.rmtree, harness_root, ignore_errors=True)
+        monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", str(harness_root))
+        sandbox = active_sandbox_spec_factory(write_paths=["."])
+        spec = OSEnvSpec(type="caller_process", cwd=str(workspace), sandbox=sandbox)
+        prepared = prepare_claude_cli_path(str(cli), spec, config_seed=seed / "claude.json")
+        assert prepared.config_isolated and prepared.cli_path is not None
+        cleanup.callback(Path(prepared.cli_path).unlink, missing_ok=True)
+        seed.mkdir(mode=0o700)
+        (seed / "claude.json").write_text('{"mcpServers": {}}')
+        (seed / "claude.json").chmod(0o600)
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONPATH": os.environ["PYTHONPATH"],
+            "TMPDIR": str(scratch_parent),
+            "HOME": str(tmp_path / "home"),
+        }
+        check = subprocess.Popen(
+            [prepared.cli_path, "-v"],
+            cwd=workspace,
+            env=env,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert check.stdout is not None
+        line = check.stdout.readline()
+        check.terminate()
+        check.wait(timeout=30)
+        # Closing its input lets a stand-in that outlived the launcher exit.
+        _, errors = check.communicate(timeout=30)
+    version, _, config_dir = line.rstrip("\n").partition(" (Claude Code) ")
+    assert version == "2.1.325", errors
+    private = Path(config_dir)
+    assert private.name == "claude_config_dir", errors
+    assert private.parent.parent.resolve() == scratch_parent.resolve(), config_dir
+    assert private.is_dir(), "the launcher cleaned up before the kill landed"
+    assert not (private / ".claude.json").exists(), "the version check left a seed copy"
 
 
 # ---------------------------------------------------------------------------

@@ -1,17 +1,19 @@
 """
 Try a throwaway Claude config home and the CLI's own config dir; report ``name yes|no`` lines.
 
-Run as ``python _claude_config_probe.py <report> <home>``. It prints nothing, so it can run as
-an API key helper. It writes only the report, entries in the cwd that it removes again,
-``$CLAUDE_CONFIG_DIR`` and the home. It overwrites a seeded file without creating it, and makes a
-new file only in a seeded dir below ``.claude``, so a path a sandbox hides reads ``no``: bwrap's
-private ``/tmp`` holds the home itself as the parent of its ``~/.npm/_logs`` mount. The last line
-names ``$CLAUDE_CONFIG_DIR``, a test temp path. :func:`seed_claude_home` writes the layout the
-checks try, and :func:`tree` snapshots it.
+Run as ``python _claude_config_probe.py <report> <home> [<seed source>]``. It prints nothing, so
+it can run as an API key helper. It writes only the report, entries in the cwd that it removes
+again, ``$CLAUDE_CONFIG_DIR``, the home and the seed source, which a wrapped CLI's launcher copies
+into ``$CLAUDE_CONFIG_DIR``. It overwrites a seeded file without creating it, and makes a new file
+only in a seeded dir below ``.claude``, so a path a sandbox hides reads ``no``: bwrap's private
+``/tmp`` holds the home itself as the parent of its ``~/.npm/_logs`` mount. The last line names
+``$CLAUDE_CONFIG_DIR``, a test temp path. :func:`seed_claude_home` writes the layout the checks
+try, and :func:`tree` snapshots it.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import sys
@@ -21,6 +23,8 @@ from pathlib import Path
 HOOK = Path(".claude/plugins/cache/m/p/1.0.0/hooks/hooks.json")
 KEY = Path(".claude/sessions") / ("4242." + "a" * 64 + ".key")
 KEYCHAIN = Path("Library/Keychains/login.keychain-db")
+# The MCP server a seeded CLI's private global config names.
+SEED_SERVER = "seeded-probe"
 _SEEDED_FILES = {
     HOOK: '{"hooks": {}}',
     KEY: '{"peerToken": "throwaway"}',
@@ -138,7 +142,24 @@ def _private(own: str, scratch: str) -> Callable[[], object]:
     return action
 
 
-def _checks(home: Path, own: str, scratch: str) -> dict[str, Callable[[], object]]:
+def _seeded(own: str) -> Callable[[], object]:
+    """The private dir's global config is a regular file naming :data:`SEED_SERVER`."""
+
+    def action() -> bool:
+        path = Path(own) / ".claude.json"
+        if not own or not stat.S_ISREG(os.lstat(path).st_mode):
+            return False
+        try:
+            return SEED_SERVER in json.loads(path.read_text()).get("mcpServers", {})
+        except ValueError:
+            return False
+
+    return action
+
+
+def _checks(
+    home: Path, own: str, scratch: str, seed_source: str = ""
+) -> dict[str, Callable[[], object]]:
     claude = home / ".claude"
     checks = {
         "plugins_hook": _overwrite(home / HOOK),
@@ -159,6 +180,9 @@ def _checks(home: Path, own: str, scratch: str) -> dict[str, Callable[[], object
         "config_private": _private(own, scratch),
         "config_writable": _write(Path(own) / "probe.txt"),
         "projects": lambda: os.makedirs(Path(own) / "projects" / "probe"),
+        "config_seeded": _seeded(own),
+        # The seed is read-only in the wrap, so a launch cannot poison the next one's copy.
+        "seed_source_write": _overwrite(Path(seed_source)) if seed_source else lambda: False,
     }
     if not own:
         checks.update(dict.fromkeys(("config_writable", "projects"), lambda: False))
@@ -175,12 +199,12 @@ def _verdict(action: Callable[[], object]) -> str:
         return "no"
 
 
-def main(report: str, home: str) -> None:
+def main(report: str, home: str, seed_source: str = "") -> None:
     own = os.environ.get("CLAUDE_CONFIG_DIR", "")
-    checks = _checks(Path(home), own, os.environ.get("TMPDIR", ""))
+    checks = _checks(Path(home), own, os.environ.get("TMPDIR", ""), seed_source)
     lines = [f"{name} {_verdict(action)}" for name, action in checks.items()]
     Path(report).write_text("\n".join([*lines, f"config_dir {own}"]) + "\n")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(*sys.argv[1:4])
