@@ -126,9 +126,8 @@ _CLI_NAMES = Pin(
     )
 )
 
-# Pinned from one local run on macOS 27.2.1 with claude 2.1.325 (seatbelt).
-# Linux comes from the coral-e2e lane's artifacts/probe15-linux.json (bwrap).
 EXPECTED: dict[str, dict[str, Pin]] = {
+    # Pinned from one local run on macOS 27.2.1 with claude 2.1.325 (seatbelt).
     "darwin": {
         "harness_socket": Pin("reachable", SOCKET_OWNER),
         "runner_environ": Pin("reachable", PROCESS_READ_OWNER),
@@ -159,7 +158,31 @@ EXPECTED: dict[str, dict[str, Pin]] = {
         "shell_env_names": Pin("not_present"),
         "shell_env_names.names": Pin("none"),
     },
-    "linux": {},
+    # Pinned from lane run 44980984569 on Ubuntu 24.04.5 LTS, claude 2.1.295 (bwrap).
+    "linux": {
+        "harness_socket": Pin("hidden"),
+        "runner_environ": Pin("hidden"),
+        "runner_environ.api_key": Pin("hidden"),
+        "runner_environ.argv_api_key": Pin("hidden"),
+        "cli_environ": Pin("hidden"),
+        "cli_environ.api_key": Pin("hidden"),
+        "cli_environ.argv_api_key": Pin("hidden"),
+        "host_environ": Pin("hidden"),
+        "host_environ.api_key": Pin("hidden"),
+        "host_environ.argv_api_key": Pin("hidden"),
+        "own_cli_environ": Pin("hidden"),
+        "own_cli_environ.api_key": Pin("hidden"),
+        "own_cli_environ.argv_api_key": Pin("hidden"),
+        "credential_files.claude": Pin("hidden"),
+        "credential_files.omnigent_secrets": Pin("hidden"),
+        "credential_files.host_tunnel": Pin("hidden"),
+        "config_api_key": Pin("hidden"),
+        "bridge_dir": Pin("hidden"),
+        "server_loopback": Pin("reachable", SERVER_OWNER),
+        "server_localhost": Pin("reachable", SERVER_OWNER),
+        "shell_env_names": Pin("not_present"),
+        "shell_env_names.names": Pin("none"),
+    },
 }
 # What the pins hold for. Harness sockets sit under the stack's /tmp/crl-* (production:
 # /tmp/omnigent-<uid>); bridge canaries under the stack's TMPDIR (production: the
@@ -173,7 +196,14 @@ RECORDED: dict[str, dict[str, Any]] = {
         "checkout_read_grant": True,
         "server_url_given_to_the_host": "http://127.0.0.1:<port>",
     },
-    "linux": {},
+    "linux": {
+        "os": "Ubuntu 24.04.5 LTS, kernel 7.0.0-1017-azure",
+        "claude": "2.1.295 (Claude Code)",
+        "harness_socket_root": "/tmp/crl-*",
+        "bridge_dir_root": "<stack TMPDIR>/omnigent-<uid>/claude-native",
+        "checkout_read_grant": True,
+        "server_url_given_to_the_host": "http://127.0.0.1:<port>",
+    },
 }
 
 
@@ -754,8 +784,17 @@ EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
         "launcher.names": Pin("none"),
         "cli.names": Pin("none"),
     },
-    # From the lane's artifacts/probe15-token-linux.json.
-    "linux": {},
+    # Pinned from lane run 44980984569 on Ubuntu 24.04.5 LTS, claude 2.1.295 (bwrap).
+    "linux": {
+        "step_runs": Pin("true"),
+        "runner_environ": Pin("hidden"),
+        "shell_env_names": Pin("not_present"),
+        "shell_env_names.names": Pin("none"),
+        "runner.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
+        "harness.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
+        "launcher.names": Pin("none"),
+        "cli.names": Pin("none"),
+    },
 }
 
 
