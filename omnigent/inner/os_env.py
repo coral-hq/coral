@@ -55,7 +55,7 @@ from .sandbox import (
     resolve_sandbox,
     set_sandbox_env,
     with_additional_read_roots,
-    with_additional_write_roots,
+    with_private_tmpdir,  # CORAL(S112)
 )
 
 if TYPE_CHECKING:
@@ -563,7 +563,8 @@ class _HelperProcessClient:
         credential_runtime: CredentialProxyRuntime | None = None
         if sandbox.active:
             self._tmpdir = create_private_tmpdir()
-            sandbox = with_additional_write_roots(sandbox, [self._tmpdir])
+            # CORAL(S112): record the scratch, so seatbelt keeps the helper's $TMPDIR reachable
+            sandbox = with_private_tmpdir(sandbox, self._tmpdir)
             set_sandbox_env(env, self._tmpdir)
             if self.start_in_scratch:
                 helper_cwd = self._tmpdir

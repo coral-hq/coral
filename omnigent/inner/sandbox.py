@@ -158,6 +158,19 @@ class SandboxPolicy:
         connect) emits an explicit last-match deny for each path.
         ``None`` is treated identically to an empty list, e.g.
         ``[Path("/tmp/omnigent-terminal-ab12/tmux.sock")]``.
+        CORAL(S112): seatbelt also denies writing each socket and its parent
+        dir, so neither can be renamed away from the deny; files inside that
+        dir stay writable, but the dir itself cannot be renamed or removed.
+    :param deny_unix_socket_roots: CORAL(S112): directories under which the
+        sandboxed process may not ``connect(2)`` to any AF_UNIX socket, even when
+        ``allow_network`` is true. :func:`resolve_sandbox` sets the harness socket
+        roots on every active policy. Stored resolved. Seatbelt denies each as a
+        ``subpath``, plus the per-user default root even when this is empty. Only
+        where ``(allow network*)`` applies, it then allows the policy's
+        :attr:`private_tmpdir` and any write root inside a denied root again (the
+        CLI's launch dir sits under the harness root). bwrap ignores it: its
+        ``--tmpfs /tmp`` hides the default root. ``None`` is the same as an
+        empty list.
     :param mask_scan_skip_roots: Write roots the dotfile / escaping-symlink
         mask scan must skip — the framework's own scratch / runtime dirs
         added post-resolve via :func:`with_additional_write_roots`. These
@@ -198,6 +211,8 @@ class SandboxPolicy:
     egress_socket_path: str | None = None
     git_ssh_socket_path: str | None = None
     deny_unix_socket_paths: list[Path] | None = None
+    # CORAL(S112): directories whose AF_UNIX sockets stay unreachable, the harness socket roots
+    deny_unix_socket_roots: list[Path] | None = None
     credential_source_paths: list[Path] | None = None
     # CORAL(S109): per launch, a spawn-time-wrap launcher makes a private dir under this
     # parent, grants it, sets the target's env var to it, and removes it when the target exits.
@@ -224,6 +239,9 @@ class SandboxPolicy:
     # anything nested under it). Built parent-side during arg emission;
     # like ``credential_proxy`` it is intentionally NOT serialised.
     mask_scan_skip_roots: list[Path] | None = None
+    # CORAL(S112): parent-side only, the scratch the child gets as $TMPDIR (with_private_tmpdir).
+    # Not serialised: each profile is built by the process that minted this dir.
+    private_tmpdir: Path | None = None
 
     def to_jsonable(self) -> dict[str, JsonValue]:
         result: dict[str, JsonValue] = {
@@ -269,6 +287,12 @@ class SandboxPolicy:
             "deny_unix_socket_paths": (
                 _json_string_list(self.deny_unix_socket_paths)
                 if self.deny_unix_socket_paths is not None
+                else None
+            ),
+            # CORAL(S112)
+            "deny_unix_socket_roots": (
+                _json_string_list(self.deny_unix_socket_roots)
+                if self.deny_unix_socket_roots is not None
                 else None
             ),
             "credential_source_paths": (
@@ -341,6 +365,13 @@ class SandboxPolicy:
         deny_unix_socket_paths: list[Path] | None = None
         if isinstance(deny_unix_socket_paths_data, list):
             deny_unix_socket_paths = [Path(str(path)) for path in deny_unix_socket_paths_data]
+        # CORAL(S112): an old payload has no roots
+        deny_unix_socket_roots_data = data.get("deny_unix_socket_roots")
+        deny_unix_socket_roots = (
+            [Path(str(path)) for path in deny_unix_socket_roots_data]
+            if isinstance(deny_unix_socket_roots_data, list)
+            else None
+        )
         credential_source_paths_data = data.get("credential_source_paths")
         credential_source_paths = (
             [Path(str(path)) for path in credential_source_paths_data]
@@ -380,6 +411,7 @@ class SandboxPolicy:
             egress_socket_path=egress_socket_path,
             git_ssh_socket_path=git_ssh_socket_path,
             deny_unix_socket_paths=deny_unix_socket_paths,
+            deny_unix_socket_roots=deny_unix_socket_roots,  # CORAL(S112)
             credential_source_paths=credential_source_paths,
             launch_tmpdir_env=launch_env_raw if isinstance(launch_env_raw, str) else None,
             launch_tmpdir_parent=(
@@ -588,6 +620,8 @@ def resolve_sandbox(spec: OSEnvSpec, cwd: Path) -> SandboxPolicy:
             allow_network=True,
         )
     policy = _get_backend(sandbox_spec.type).resolve(spec, cwd)
+    # CORAL(S112): no sandboxed process may reach a harness socket, its own session's included
+    policy = with_denied_unix_socket_roots(policy, _harness_socket_roots())
     if policy.credential_proxy is not None:
         for entry in policy.credential_proxy.entries:
             if (
@@ -920,6 +954,12 @@ def _clone_policy_with(
             if policy.deny_unix_socket_paths is not None
             else None
         ),
+        # CORAL(S112)
+        deny_unix_socket_roots=(
+            list(policy.deny_unix_socket_roots)
+            if policy.deny_unix_socket_roots is not None
+            else None
+        ),
         credential_source_paths=(
             list(policy.credential_source_paths)
             if policy.credential_source_paths is not None
@@ -946,6 +986,7 @@ def _clone_policy_with(
                 else None
             )
         ),
+        private_tmpdir=policy.private_tmpdir,  # CORAL(S112)
     )
 
 
@@ -1068,12 +1109,100 @@ def with_denied_unix_sockets(
     :param sockets: Absolute (or resolvable) AF_UNIX socket paths to deny.
     :returns: A new :class:`SandboxPolicy` carrying the merged deny list.
     """
-    denied = list(policy.deny_unix_socket_paths) if policy.deny_unix_socket_paths else []
-    for sock in sockets:
-        resolved = Path(sock).resolve(strict=False)
-        if all(existing != resolved for existing in denied):
-            denied.append(resolved)
-    return replace(policy, deny_unix_socket_paths=denied)
+    # CORAL(S112): shares its resolve-and-dedupe step with the root form
+    return replace(
+        policy, deny_unix_socket_paths=_merged_resolved(policy.deny_unix_socket_paths, sockets)
+    )
+
+
+def _resolved_path(path: Path) -> Path:
+    """
+    CORAL(S112): as ``Path.resolve(strict=False)``, but never raises.
+
+    A symlink loop keeps its path. A path swapped while it resolves (``realpath`` does not
+    guard ``readlink``) keeps its plain normalised spelling; the profile builder resolves
+    it again and fails closed if it still cannot.
+    """
+    try:
+        return Path(os.path.realpath(path))
+    except OSError:
+        return Path(os.path.normpath(path))
+
+
+# CORAL(S112): one resolve-and-dedupe step for the socket and root deny lists
+def _merged_resolved(existing: list[Path] | None, paths: Sequence[Path]) -> list[Path]:
+    merged = list(existing) if existing else []
+    for path in paths:
+        resolved = _resolved_path(path)
+        if resolved not in merged:
+            merged.append(resolved)
+    return merged
+
+
+# CORAL(S112): the directory form of with_denied_unix_sockets
+def with_denied_unix_socket_roots(policy: SandboxPolicy, roots: Sequence[Path]) -> SandboxPolicy:
+    """
+    Return *policy* extended with directories under which no AF_UNIX connect is allowed.
+
+    See :attr:`SandboxPolicy.deny_unix_socket_roots`. Roots are resolved (non-strict; a root
+    may not exist yet) and de-duplicated; *policy* is not mutated.
+    """
+    return replace(
+        policy, deny_unix_socket_roots=_merged_resolved(policy.deny_unix_socket_roots, roots)
+    )
+
+
+def _harness_socket_roots() -> list[Path]:
+    """
+    CORAL(S112): this process's harness socket root, then the per-user default.
+
+    Never raises, so a bad setting cannot fail :func:`resolve_sandbox` into an unsandboxed
+    run: a configured root that cannot be resolved (``~nosuchuser``, a symlink loop, a
+    relative root in a deleted cwd) is left out with a warning, and the default is always
+    kept. A relative root, or one holding the temp or home dir, is kept with a warning.
+    """
+    from omnigent.runtime.harnesses.paths import (
+        HARNESS_TMP_PARENT_ENV_VAR,
+        harness_tmp_parent,
+        resolve_harness_tmp_parent,
+    )
+
+    roots: list[Path] = []
+    setting = os.environ.get(HARNESS_TMP_PARENT_ENV_VAR, "")
+    try:
+        configured = _resolved_path(resolve_harness_tmp_parent())
+        if configured.is_symlink():  # realpath stops at a symlink loop
+            raise RuntimeError("symlink loop")
+        if not harness_tmp_parent().is_absolute() or _holds_temp_or_home(configured):
+            _warn_once(setting, "The harness socket root is relative or holds the temp or home")
+        roots.append(configured)
+    except (OSError, RuntimeError) as exc:
+        _warn_once(
+            setting,
+            "Cannot resolve the configured harness socket root (%s); denying the default only",
+            type(exc).__name__,
+        )
+    default = _resolved_path(resolve_harness_tmp_parent({}))
+    return roots if default in roots else [*roots, default]
+
+
+# CORAL(S112): each (setting, message) is logged once per process, not on every resolve_sandbox
+_WARNED_ROOT_SETTINGS: set[tuple[str, str]] = set()
+
+
+def _warn_once(setting: str, message: str, *args: object) -> None:
+    if (setting, message) not in _WARNED_ROOT_SETTINGS:
+        _WARNED_ROOT_SETTINGS.add((setting, message))
+        logger.warning(message, *args)
+
+
+def _holds_temp_or_home(root: Path) -> bool:
+    """CORAL(S112): a deny under such a root would also hit the policy's own broker sockets."""
+    try:
+        anchors = [Path(tempfile.gettempdir()), Path("/tmp"), Path.home()]
+    except (OSError, RuntimeError):
+        anchors = [Path("/tmp")]
+    return any(_resolved_path(anchor).is_relative_to(root) for anchor in anchors)
 
 
 def _prune_environ_to_spawn_allowlist(sandbox: SandboxPolicy) -> None:
@@ -1117,6 +1246,12 @@ def _prune_environ_to_spawn_allowlist(sandbox: SandboxPolicy) -> None:
 
 def create_private_tmpdir() -> Path:
     return Path(tempfile.mkdtemp(prefix="omnigent-osenv-"))
+
+
+def with_private_tmpdir(policy: SandboxPolicy, tmpdir: Path) -> SandboxPolicy:
+    """CORAL(S112): grant *tmpdir* and record it as the scratch the child gets as ``$TMPDIR``."""
+    granted = with_additional_write_roots(policy, [tmpdir])
+    return replace(granted, private_tmpdir=tmpdir.resolve(strict=False))
 
 
 def set_sandbox_env(env: MutableMapping[str, str], tmpdir: Path) -> None:
@@ -1310,7 +1445,9 @@ def run_launcher(
         launch_tmpdir = create_launch_tmpdir(sandbox)
         try:
             launch_roots = [launch_tmpdir] if launch_tmpdir is not None else []
-            sandbox = with_additional_write_roots(sandbox, [host_tmpdir, *launch_roots])
+            # CORAL(S112): record the scratch, so seatbelt keeps the target's $TMPDIR reachable
+            sandbox = with_private_tmpdir(sandbox, host_tmpdir)
+            sandbox = with_additional_write_roots(sandbox, launch_roots)
             set_sandbox_env(os.environ, host_tmpdir)
             if launch_tmpdir is not None and sandbox.launch_tmpdir_env is not None:
                 os.environ[sandbox.launch_tmpdir_env] = str(launch_tmpdir)

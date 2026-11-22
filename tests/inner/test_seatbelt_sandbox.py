@@ -635,19 +635,210 @@ def test_profile_denies_unix_control_socket_after_allow_network(
     )
 
 
+def _unix_socket_rule(rule: str, target: str) -> str:
+    """CORAL(S112): an AF_UNIX connect rule as the profile spells it."""
+    return f"({rule} network-outbound (remote unix-socket ({target})))"
+
+
+def _control_socket_denies(root: Path | None) -> list[str]:
+    """CORAL(S112): the root, per-user default root and tmux pattern denies a profile emits."""
+    import os
+
+    roots = [root] if root is not None else []
+    patterns = [r"/omnigent-terminal-[^/]+/tmux\.sock$", r"/omnigent-tmux-replies-[^/]+/s$"]
+    if hasattr(os, "getuid"):
+        default = Path(f"/tmp/omnigent-{os.getuid()}").resolve(strict=False)
+        roots += [default] if default != root else []
+        patterns.append(rf"/tmux-{os.getuid()}/[^/]+$")
+    return [_unix_socket_rule("deny", f'subpath "{path}"') for path in roots] + [
+        _unix_socket_rule("deny", f'path-regex #"{pattern}"') for pattern in patterns
+    ]
+
+
+# CORAL(S112): harness sockets and tmux servers stay unreachable after every socket allow
+@pytest.mark.parametrize("mode", ["allow_network", "no_network", "egress", "git_ssh"])
+def test_profile_denies_omnigent_control_sockets_after_every_socket_allow(
+    tmp_path: Path, mode: str
+) -> None:
+    """
+    Between filtered rules the later one wins, so the root and tmux denies follow every
+    network allow. Only the policy's scratch and a write root inside a denied root are
+    allowed again, and only where ``(allow network*)`` admitted them before; the literal
+    denies stay last. A deny-listed socket cannot be renamed out of its deny.
+    """
+    import dataclasses
+    import tempfile
+
+    from omnigent.inner.sandbox import with_denied_unix_socket_roots
+
+    root = Path("/tmp/crl-x").resolve(strict=False)
+    scratch = Path(tempfile.gettempdir()).resolve(strict=False) / "omnigent-osenv-s112"
+    launch = root / "cabcdefgh"
+    pane_socket = (tmp_path / "pane" / "tmux.sock").resolve(strict=False)
+    egress = {"egress_relay_port": 18080, "egress_socket_path": str(scratch / ".egress.sock")}
+    policy = _make_policy(
+        tmp_path,
+        allow_network=mode != "no_network",
+        write_roots=[scratch, launch],
+        **(egress if mode == "egress" else {}),  # type: ignore[arg-type]
+    )
+    policy = dataclasses.replace(policy, private_tmpdir=scratch)
+    if mode == "git_ssh":
+        policy = dataclasses.replace(policy, git_ssh_socket_path=str(scratch / ".gitssh.sock"))
+    policy = with_denied_unix_sockets(policy, [pane_socket])
+    policy = with_denied_unix_socket_roots(policy, [Path("/tmp/crl-x")])
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    denies = _control_socket_denies(root)
+    reopened = [_unix_socket_rule("allow", f'subpath "{path}"') for path in (scratch, launch)]
+    literal = _unix_socket_rule("deny", f'path-literal "{pane_socket}"')
+    no_rename = f'(deny file-write* (literal "{pane_socket}"))'
+    no_dir_rename = f'(deny file-write* (literal "{pane_socket.parent}"))'
+    for rule in (*denies, literal, no_rename, no_dir_rename):
+        assert lines.count(rule) == 1, rule
+    allows = [n for n, line in enumerate(lines) if line.startswith("(allow network")]
+    last_allow = max((n for n in allows if lines[n] not in reopened), default=-1)
+    assert min(map(lines.index, denies)) > last_allow, f"an allow follows: {lines[last_allow]}"
+    if mode == "allow_network":
+        for rule in reopened:
+            assert lines.count(rule) == 1, rule
+            assert max(map(lines.index, denies)) < lines.index(rule) < lines.index(literal)
+    else:
+        assert not set(reopened) & set(lines)
+    assert not [line for line in lines if "path-regex" in line and "{" in line]
+    net_local = '(deny sysctl-read (sysctl-name-prefix "net.local"))'
+    assert lines.count(net_local) == 1
+    assert lines.index(net_local) > lines.index("(allow sysctl-read)")
+
+
+# CORAL(S112): an own dir that is or holds the temp dir, or holds a denied root or socket, is shut
+@pytest.mark.parametrize(
+    "holds", ["temp_dir", "temp_parent", "denied_root", "denied_socket", "nested_root"]
+)
+def test_profile_does_not_reopen_a_dir_holding_other_sockets(tmp_path: Path, holds: str) -> None:
+    import dataclasses
+    import tempfile
+
+    from omnigent.inner.sandbox import with_denied_unix_socket_roots
+
+    temp_dir = Path(tempfile.gettempdir()).resolve(strict=False)
+    root = Path("/tmp/crl-x").resolve(strict=False)
+    own = {
+        "temp_dir": temp_dir,
+        "temp_parent": temp_dir.parent,
+        "nested_root": root / "inner",
+    }.get(holds, temp_dir / "omnigent-osenv-z")
+    roots = {"denied_root": [own / "root"], "nested_root": [root, own]}.get(holds, [root])
+    policy = _make_policy(tmp_path, write_roots=[own])
+    if holds != "nested_root":
+        policy = dataclasses.replace(policy, private_tmpdir=own)
+    if holds == "denied_socket":
+        policy = with_denied_unix_sockets(policy, [own / "tmux.sock"])
+    policy = with_denied_unix_socket_roots(policy, roots)
+
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    assert _unix_socket_rule("allow", f'subpath "{own}"') not in lines
+    assert _unix_socket_rule("deny", f'subpath "{roots[0]}"') in lines
+
+
+# CORAL(S112): a denied root granted as a write root stays denied; a dir strictly inside reopens
+def test_profile_does_not_reopen_a_denied_root_granted_as_a_write_root(tmp_path: Path) -> None:
+    from omnigent.inner.sandbox import with_denied_unix_socket_roots
+
+    root = Path("/tmp/crl-x").resolve(strict=False)
+    launch = root / "cabcdefgh"
+    policy = _make_policy(tmp_path, write_roots=[root, launch])
+    policy = with_denied_unix_socket_roots(policy, [root])
+
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    assert _unix_socket_rule("allow", f'subpath "{root}"') not in lines
+    assert _unix_socket_rule("allow", f'subpath "{launch}"') in lines
+
+
+# CORAL(S112): in a pane, its $TMPDIR is reopened even behind its private dir, which is not
+def test_profile_reopens_a_panes_tmpdir_and_not_its_tmux_dir(tmp_path: Path) -> None:
+    """
+    A pane's write roots put its private dir (holding its deny-listed ``tmux.sock``) ahead
+    of the scratch it gets as ``$TMPDIR``. Only the scratch is allowed again, after the tmux
+    pattern deny and with no deny after it naming the scratch, so a nested terminal's
+    socket there connects (measured by the behaviour test's ``nested`` line).
+    """
+    import dataclasses
+    import tempfile
+
+    from omnigent.inner.sandbox import with_denied_unix_socket_roots
+
+    temp_dir = Path(tempfile.gettempdir()).resolve(strict=False)
+    private_dir, scratch = temp_dir / "omnigent-terminal-x", temp_dir / "omnigent-osenv-y"
+    policy = _make_policy(tmp_path, write_roots=[Path("/crl-work"), private_dir, scratch])
+    policy = dataclasses.replace(policy, private_tmpdir=scratch)
+    policy = with_denied_unix_sockets(policy, [private_dir / "tmux.sock"])
+    policy = with_denied_unix_socket_roots(policy, [Path("/tmp/crl-x")])
+
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    reopened = _unix_socket_rule("allow", f'subpath "{scratch}"')
+    assert lines.count(reopened) == 1
+    assert not [
+        line for line in lines if "(allow network-outbound" in line and "omnigent-terminal" in line
+    ]
+    nested_deny = _unix_socket_rule("deny", r'path-regex #"/omnigent-terminal-[^/]+/tmux\.sock$"')
+    assert "omnigent-terminal-" in nested_deny and lines.index(nested_deny) < lines.index(reopened)
+    later = lines[lines.index(reopened) + 1 :]
+    assert not [line for line in later if line.startswith("(deny") and str(scratch) in line]
+
+
+# CORAL(S112): the per-user default root is denied even when a policy carries no roots
+@pytest.mark.parametrize("roots", ["none", "empty", "old_payload"])
+def test_profile_always_denies_the_per_user_default_root(tmp_path: Path, roots: str) -> None:
+    import dataclasses
+
+    policy = _make_policy(tmp_path)
+    if roots == "empty":
+        policy = dataclasses.replace(policy, deny_unix_socket_roots=[])
+    elif roots == "old_payload":
+        payload = policy.to_jsonable()
+        del payload["deny_unix_socket_roots"]
+        policy = SandboxPolicy.from_jsonable(payload)
+
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    subpath_denies = [
+        line
+        for line in lines
+        if line.startswith("(deny network-outbound (remote unix-socket (subpath")
+    ]
+    assert subpath_denies == [line for line in _control_socket_denies(None) if "subpath" in line]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX harness socket roots")
+def test_per_user_harness_root_matches_the_harness_default() -> None:
+    """CORAL(S112): the profile's copy of the default root cannot drift from the harness's."""
+    from omnigent.inner.seatbelt_sandbox import _per_user_harness_root
+    from omnigent.runtime.harnesses.paths import harness_tmp_parent
+
+    assert _per_user_harness_root() == harness_tmp_parent({})
+
+
 def test_profile_no_unix_socket_deny_when_list_empty(tmp_path: Path) -> None:
     """
     With no ``deny_unix_socket_paths`` the profile emits no
     ``unix-socket`` deny rule — the containment is opt-in and must not
     appear for ordinary sandboxes (a stray deny could break a
     legitimate egress unix-socket allow).
+
+    CORAL(S112): scoped to the literal form; the per-user default root deny and the tmux
+    name-pattern denies are unconditional and match no egress socket.
     """
     policy = _make_policy(tmp_path, allow_network=True)
     assert policy.deny_unix_socket_paths is None
 
     profile = _build_profile(policy, tmp_path.resolve(strict=False))
 
-    assert "(deny network-outbound (remote unix-socket" not in profile
+    # CORAL(S112)
+    assert "(deny network-outbound (remote unix-socket (path-literal" not in profile
 
 
 # CORAL(S111): other processes' command lines and environments stay unreadable

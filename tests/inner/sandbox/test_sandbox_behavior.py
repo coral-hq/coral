@@ -879,6 +879,264 @@ def test_sandbox_cannot_read_another_process_command_line_or_environment(
 
 
 # ---------------------------------------------------------------------------
+# Control sockets
+# ---------------------------------------------------------------------------
+
+# CORAL(S112): connects to each named throwaway socket, binds and connects its own, and renames
+# a deny-listed one and its dir; prints yes/no only. The paths come from a file.
+_CONTROL_SOCKET_PROBE = """
+import json, os, socket, subprocess, sys
+paths = json.load(open('sockets.json'))
+
+def reaches(path):
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(10)
+        try:
+            sock.connect(path)
+            return sock.recv(2) == b'ok'
+        except OSError:
+            return False
+
+def owns(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with socket.socket(socket.AF_UNIX) as server, socket.socket(socket.AF_UNIX) as client:
+        try:
+            server.bind(path)
+            server.listen()
+            client.connect(path)
+            return True
+        except OSError:
+            return False
+        finally:
+            if os.path.lexists(path):
+                os.unlink(path)
+
+def renamed(source, target, sock):
+    try:
+        os.rename(source, target)
+    except OSError:
+        return False
+    try:
+        return reaches(sock)
+    finally:
+        os.rename(target, source)
+
+def edits(directory):
+    try:
+        with open(os.path.join(directory, 'f'), 'w') as handle:
+            handle.write('x')
+        os.rename(os.path.join(directory, 'f'), os.path.join(directory, 'g'))
+        os.unlink(os.path.join(directory, 'g'))
+        os.mkdir(os.path.join(directory, 'root'))
+        os.rmdir(os.path.join(directory, 'root'))
+        return True
+    except OSError:
+        return False
+
+def say(name, value):
+    print(name, 'yes' if value else 'no')
+
+for name in ('conv', 'mcp', 'default', 'tmux', 'replies', 'user_tmux', 'clip'):
+    say(name, reaches(paths[name]))
+say('own', owns(os.path.join(os.environ['TMPDIR'], 'own.sock')))
+say('nested', owns(os.path.join(os.environ['TMPDIR'], 'omnigent-terminal-nest', 'tmux.sock')))
+say('under_root', owns(os.path.join(paths['under_root'], 'own.sock')))
+if 'SANDBOX_TEST_LAUNCH_DIR' in os.environ:
+    say('launch_dir', owns(os.path.join(os.environ['SANDBOX_TEST_LAUNCH_DIR'], 'own.sock')))
+pane = os.path.dirname(paths['pane'])
+moved = os.path.join(pane, 'moved.sock')
+say('rename', renamed(paths['pane'], moved, moved))
+# Into a write root on the pane's volume (the helper's scratch can sit on another one).
+moved = os.path.join(paths['under_root'], 'moved-pane')
+say('dir_rename', renamed(pane, moved, os.path.join(moved, 'tmux.sock')))
+say('pane_files', edits(pane))
+if sys.platform == 'darwin':
+    table = subprocess.run(['/usr/sbin/netstat', '-an', '-f', 'unix'], capture_output=True)
+    say('listed', os.path.basename(paths['conv']).encode() in table.stdout)
+"""
+
+
+@contextlib.contextmanager
+def _listening(*paths: Path) -> Iterator[None]:
+    """CORAL(S112): answer ``ok`` on each throwaway AF_UNIX path until the block exits."""
+    import select
+    import socket
+    import threading
+
+    servers: list[socket.socket] = []
+    bound: list[Path] = []
+    stop = threading.Event()
+
+    def answer() -> None:
+        while not stop.is_set():
+            ready, _, _ = select.select(servers, [], [], 0.1)
+            for server in ready:
+                with contextlib.suppress(OSError):
+                    connection, _ = server.accept()
+                    with connection:
+                        connection.sendall(b"ok")
+
+    try:
+        for path in paths:
+            servers.append(socket.socket(socket.AF_UNIX))
+            servers[-1].bind(str(path))
+            bound.append(path)
+            servers[-1].listen()
+        thread = threading.Thread(target=answer, daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=10)
+    finally:
+        for server in servers:
+            server.close()
+        for path in bound:
+            path.unlink(missing_ok=True)
+
+
+def _shared_dir(path: Path) -> Path:
+    """CORAL(S112): *path* as this user's dir, made if missing and never removed: it is shared."""
+    path.mkdir(mode=0o700, exist_ok=True)
+    info = path.lstat()
+    assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(), f"{path} is not ours"
+    return path
+
+
+def _reaches(path: Path) -> bool:
+    import socket
+
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(10)
+        try:
+            sock.connect(str(path))
+            return sock.recv(2) == b"ok"
+        except OSError:
+            return False
+
+
+# CORAL(S112): no sandboxed process reaches a harness socket or another terminal's tmux server
+@pytest.mark.parametrize("launch_path", ["helper", "launcher"])
+def test_sandbox_cannot_connect_to_omnigent_control_sockets(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_path: str,
+) -> None:
+    """
+    Throwaway sockets under a configured harness root, under the per-user default root, at
+    Omnigent's terminal and tmux-replies shapes and at the user's tmux shape answer outside
+    and are refused inside. The process's own sockets in its scratch and in write roots
+    under the harness root (a grant, and on the launcher path the CLI's launch dir) still
+    work, another terminal's ``clip.sock`` stays reachable, neither a deny-listed socket nor
+    its dir can be renamed out of its deny while files in that dir stay editable, and
+    ``netstat`` lists nothing. The pane dir sits in the launcher's ``$TMPDIR``, ahead of its
+    scratch, as a terminal pane's does. bwrap's private ``/tmp`` hides every one of them.
+    """
+    from omnigent.inner.sandbox import (
+        with_additional_write_roots,
+        with_denied_unix_sockets,
+        with_launch_tmpdir,
+    )
+    from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
+
+    with contextlib.ExitStack() as cleanup:
+
+        def throwaway_dir(prefix: str, parent: Path = Path("/tmp")) -> Path:
+            path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+            cleanup.callback(shutil.rmtree, path, ignore_errors=True)
+            return path
+
+        def subdir(parent: Path, name: str) -> Path:
+            (parent / name).mkdir(mode=0o700)
+            return parent / name
+
+        harness_root = throwaway_dir("sbx-h-")
+        monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", str(harness_root))
+        default_dir = throwaway_dir("sbx-", _shared_dir(resolve_harness_tmp_parent({})))
+        under_root = subdir(harness_root, "cw")
+        user_tmux = subdir(throwaway_dir("sbx-u-"), f"tmux-{os.getuid()}")
+        reader_tmp = throwaway_dir("sbx-o-")
+        other_terminal = throwaway_dir("omnigent-terminal-sbx-")
+        pane = throwaway_dir("omnigent-terminal-sbx-", reader_tmp)
+        conv = subdir(harness_root, f"ap-{uuid.uuid4().hex}") / f"conv-{uuid.uuid4().hex[:8]}.sock"
+        sockets = {
+            "conv": conv,
+            "mcp": harness_root / "mcp-1.sock",
+            "default": default_dir / "s",
+            "tmux": other_terminal / "tmux.sock",
+            "replies": throwaway_dir("omnigent-tmux-replies-sbx-") / "s",
+            "user_tmux": user_tmux / "default",
+            "clip": other_terminal / "clip.sock",
+            "pane": pane / "tmux.sock",
+        }
+        paths = {name: str(path) for name, path in sockets.items()} | {
+            "under_root": str(under_root)
+        }
+        (tmp_path / "sockets.json").write_text(json.dumps(paths))
+        (tmp_path / "probe.py").write_text(_CONTROL_SOCKET_PROBE)
+        spec = OSEnvSpec(
+            type="caller_process",
+            cwd=str(tmp_path),
+            sandbox=active_sandbox_spec_factory(write_paths=[str(under_root)]),
+        )
+        policy = with_additional_write_roots(resolve_sandbox(spec, tmp_path), [pane])
+        policy = with_denied_unix_sockets(policy, [sockets["pane"]])
+        reader_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONPATH": os.environ["PYTHONPATH"],
+            "TMPDIR": str(reader_tmp),
+        }
+        run_reader = functools.partial(
+            subprocess.run,
+            cwd=tmp_path,
+            env=reader_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        cleanup.enter_context(_listening(*sockets.values()))
+        outside = run_reader([sys.executable, "probe.py"])
+        if launch_path == "helper":
+            os_env = create_os_environment(spec, sandbox_policy=policy)
+            cleanup.callback(os_env.close)
+            result = run_async(os_env.shell(shlex.join([sys.executable, "probe.py"])))
+            inside, inside_detail = str(result.get("stdout", "")), result
+        else:
+            policy = with_launch_tmpdir(policy, "SANDBOX_TEST_LAUNCH_DIR", harness_root)
+            launcher = create_exec_launcher(sys.executable, policy)
+            cleanup.callback(Path(launcher).unlink, missing_ok=True)
+            completed = run_reader([launcher, "probe.py"])
+            inside, inside_detail = completed.stdout, completed.stderr
+        alive = _reaches(conv)
+    seatbelt = active_sandbox_type == "darwin_seatbelt"
+    kept = {"own", "nested", "under_root", "launch_dir", "pane_files"} | (
+        {"clip"} if seatbelt else set()
+    )
+    order = ["conv", "mcp", "default", "tmux", "replies", "user_tmux", "clip", "own", "nested"]
+    tail = [
+        "rename",
+        "dir_rename",
+        "pane_files",
+        *(["listed"] if sys.platform == "darwin" else []),
+    ]
+    reached = [f"{name} yes" for name in [*order, "under_root", *tail]]
+    # The launcher path must print its launch dir line, so a declined launch dir fails here.
+    launch = ["launch_dir"] if launch_path == "launcher" else []
+    refused = [
+        f"{name} {'yes' if name in kept else 'no'}"
+        for name in [*order, "under_root", *launch, *tail]
+    ]
+    observed_outside, observed_inside = outside.stdout.splitlines(), inside.splitlines()
+    assert observed_outside == reached, f"failed outside: {outside.stdout}; {outside.stderr}"
+    assert observed_inside == refused, f"inside: {observed_inside}; {inside_detail}"
+    assert alive, "a listener died during the run, so a refused connect proves nothing"
+
+
+# ---------------------------------------------------------------------------
 # Env passthrough
 # ---------------------------------------------------------------------------
 

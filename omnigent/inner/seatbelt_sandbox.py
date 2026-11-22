@@ -307,6 +307,13 @@ _DEFAULT_READ_LITERALS = (
     "/tmp",
 )
 
+# CORAL(S112): Omnigent's tmux control sockets in any temp dir; another terminal's server runs
+# commands outside the sandbox. SBPL path-regex matches nothing with a {n} quantifier.
+_OMNIGENT_TMUX_SOCKET_PATTERNS = (
+    r"/omnigent-terminal-[^/]+/tmux\.sock$",
+    r"/omnigent-tmux-replies-[^/]+/s$",
+)
+
 # Profile-size cap. ``sandbox-exec`` parses the profile with a
 # finite-size scratch buffer; exceeding it fails the spawn with an
 # opaque "policy compilation error". Cap at 256 KiB to leave headroom
@@ -769,6 +776,8 @@ def _build_profile(
             # CORAL(S111): kern.procargs[2].<pid> is admitted when either sysctl-read or the
             # target's process-info allows it, so the process-info deny needs this one too.
             '(deny sysctl-read (sysctl-name-prefix "kern.procargs"))',
+            # CORAL(S112): the AF_UNIX socket table (netstat -f unix) lists every socket path
+            '(deny sysctl-read (sysctl-name-prefix "net.local"))',
             "(allow file-ioctl)",
             # M7 (security 2026-07-15): Bun's WriteStream constructor calls fstat(2) on
             # its inherited pipe file descriptors (stdout/stderr) at startup for ANSI
@@ -1063,6 +1072,7 @@ def _build_profile(
     lines.append(";; Network policy")
     socket_path = policy.egress_socket_path
     relay_port = policy.egress_relay_port
+    shares_host_network = False  # CORAL(S112)
     if socket_path is not None and relay_port is not None:
         # Hard enforcement: deny all network (already covered by
         # (deny default)) except loopback to the relay and the
@@ -1119,6 +1129,7 @@ def _build_profile(
     elif policy.allow_network:
         lines.append(";; allow_network=true — host network shared")
         lines.append("(allow network*)")
+        shares_host_network = True  # CORAL(S112)
     else:
         lines.append(";; allow_network=false — covered by (deny default); no allow rules emitted")
 
@@ -1127,6 +1138,24 @@ def _build_profile(
         lines.append(
             f"(allow network-outbound (remote unix-socket (path-literal {_quote(git_socket)})))"
         )
+
+    # CORAL(S112): harness sockets and tmux servers. A filtered deny beats the unfiltered
+    # (allow network*) either way, but a later filtered allow would reopen it.
+    lines.append("")
+    lines.append(";; Omnigent harness and tmux control sockets")
+    deny_roots: list[Path] = []
+    for root in [*(policy.deny_unix_socket_roots or []), _per_user_harness_root()]:
+        if root is not None and Path(os.path.realpath(root)) not in deny_roots:
+            deny_roots.append(Path(os.path.realpath(root)))
+    targets = [f"subpath {_quote(str(root))}" for root in deny_roots]
+    targets += [f'path-regex #"{pattern}"' for pattern in _tmux_socket_patterns()]
+    for target in targets:
+        lines.append(f"(deny network-outbound (remote unix-socket ({target})))")
+    # Then the process's own dirs, which (allow network*) admitted before; the literal
+    # denies below still override them.
+    if shares_host_network:
+        for own in _own_socket_dirs(policy, deny_roots):
+            lines.append(f"(allow network-outbound (remote unix-socket (subpath {_quote(own)})))")
 
     # ----------------------------------------------------------------
     # AF_UNIX control-socket denials.
@@ -1149,6 +1178,9 @@ def _build_profile(
             lines.append(
                 f"(deny network-outbound (remote unix-socket (path-literal {_quote(canonical)})))"
             )
+            # CORAL(S112): nor rename it, or the dir holding it, out from under the deny
+            lines.append(f"(deny file-write* (literal {_quote(canonical)}))")
+            lines.append(f"(deny file-write* (literal {_quote(str(Path(canonical).parent))}))")
 
     for source_path in policy.credential_source_paths or []:
         quoted = _quote(str(source_path.resolve()))
@@ -2083,6 +2115,49 @@ def _scratch_tmpdir(write_roots: list[Path]) -> Path | None:
         except (ValueError, OSError):
             continue
     return None
+
+
+def _tmux_socket_patterns() -> list[str]:
+    """CORAL(S112): Omnigent's tmux socket shapes, plus the user's own tmux server's."""
+    patterns = list(_OMNIGENT_TMUX_SOCKET_PATTERNS)
+    if hasattr(os, "getuid"):
+        # tmux serves <TMUX_TMPDIR or /tmp>/tmux-<uid>/<label>, outside any sandbox.
+        patterns.append(rf"/tmux-{os.getuid()}/[^/]+$")
+    return patterns
+
+
+def _per_user_harness_root() -> Path | None:
+    """
+    CORAL(S112): the per-user default harness socket root, denied even with no roots set.
+
+    ``harness_tmp_parent({})`` on POSIX, spelled out so launchers need not import the harness
+    package; a test keeps the two equal.
+    """
+    return Path(f"/tmp/omnigent-{os.getuid()}") if hasattr(os, "getuid") else None
+
+
+def _own_socket_dirs(policy: SandboxPolicy, deny_roots: list[Path]) -> list[str]:
+    """
+    CORAL(S112): the policy's own dirs whose sockets stay reachable after the S112 denies.
+
+    The scratch the child gets as ``$TMPDIR`` (a nested Omnigent's terminals live there),
+    and each write root strictly inside a denied root, such as the CLI's launch dir under
+    the harness root. None that is or holds the temp dir, or holds a denied root or a
+    deny-listed socket, so other sessions' dirs and a pane's own tmux dir stay denied.
+    """
+    temp_dir = Path(tempfile.gettempdir()).resolve(strict=False)
+    sockets = [Path(sock).resolve(strict=False) for sock in policy.deny_unix_socket_paths or []]
+    candidates = [policy.private_tmpdir] if policy.private_tmpdir is not None else []
+    for write_root in policy.write_roots:
+        path = write_root.resolve(strict=False)
+        if any(path != root and path.is_relative_to(root) for root in deny_roots):
+            candidates.append(path)
+    own: list[Path] = []
+    for path in (candidate.resolve(strict=False) for candidate in candidates):
+        holds_denied = any(denied.is_relative_to(path) for denied in [*deny_roots, *sockets])
+        if not temp_dir.is_relative_to(path) and not holds_denied and path not in own:
+            own.append(path)
+    return [str(path) for path in own]
 
 
 def _quote(s: str) -> str:
