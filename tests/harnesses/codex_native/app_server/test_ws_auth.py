@@ -289,7 +289,7 @@ async def test_discovery_process_mints_and_removes_its_token(tmp_path: Path) -> 
     try:
         assert read_codex_ws_token(port) is not None
         cmdline = await asyncio.to_thread(
-            lambda: os.popen(f"ps -o args= -p {discovery.process.pid}").read()
+            lambda: os.popen(f"ps -ww -o args= -p {discovery.process.pid}").read()
         )
         assert f"--ws-token-file {codex_ws_token_path(port)}" in cmdline
     finally:
