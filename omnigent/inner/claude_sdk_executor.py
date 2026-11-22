@@ -98,6 +98,7 @@ from .executor import (
 from .native_attachments import framework_notices, unresolved_attachment_marker
 from .sandbox import (
     SandboxPolicy,  # CORAL(S113)
+    _is_private_dir,  # CORAL(S115)
     _resolve_sandbox_type,
     create_exec_launcher,
     get_backend,
@@ -144,9 +145,9 @@ _CLAUDE_CONFIG_ENV = (_CLAUDE_CONFIG_DIR_ENV, "CLAUDE_SECURESTORAGE_CONFIG_DIR")
 # CORAL(S113): a file there, so the CLI reports an oversized tool result as unsaved
 # instead of naming a saved copy the model has no tool to open
 _CLAUDE_CONFIG_BLOCKED_NAMES = ("projects",)
-# CORAL(S115): a non-Coral wrapped CLI's private dir starts from a copy of these keys of the
-# user's global config: its MCP servers, identity, legacy env and, per project, the trust and
-# MCP enable/disable keys the CLI reads (2.1.325). Never a credential.
+# CORAL(S115): a wrapped non-Coral CLI's private dir starts from a copy of these keys of the
+# user's global config, never a Claude sign-in credential: its MCP servers, identity, legacy
+# env and, per project, the trust and MCP enable/disable keys the CLI reads (2.1.325).
 _CLAUDE_GLOBAL_CONFIG_NAME = ".claude.json"
 _CLAUDE_SEED_KEYS = {"mcpServers": dict, "userID": str, "env": dict}
 # CORAL(S115): each with the value the CLI treats as unset, which is not copied
@@ -2177,8 +2178,8 @@ class ClaudeSDKExecutor(Executor):
         self._isolate_claude_config = isolate_claude_config
         self._claude_config_isolated = False
         self._unwrapped_claude_config_dir: pathlib.Path | None = None
-        # CORAL(S115): the seed a wrapped non-Coral CLI's launcher copies in. Its dir is made at
-        # the first launch; once removed, a launch fails instead of making it again.
+        # CORAL(S115): the seed a wrapped non-Coral CLI's launcher copies in. Its dir is made
+        # at the first launch, and again if it goes missing; after close, a launch fails.
         self._claude_config_seed_path: pathlib.Path | None = None
         self._claude_config_seed_dir_made = False
         self._claude_config_seed_removed = False
@@ -2395,7 +2396,9 @@ class ClaudeSDKExecutor(Executor):
         if self._claude_config_seed_removed:
             raise RuntimeError(f"{failure}: the executor is closed")
         try:
-            if not self._claude_config_seed_dir_made:
+            # CORAL(S115): made at the first launch, and again if a temp cleaner removed it.
+            # Anything else there, or a dir no longer private, fails the exclusive mkdir.
+            if not (self._claude_config_seed_dir_made and _is_private_dir(seed.parent)):
                 seed.parent.mkdir(mode=0o700)
                 self._claude_config_seed_dir_made = True
             config = _claude_config_seed(os.environ)

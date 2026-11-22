@@ -1576,30 +1576,35 @@ is the plaintext `.credentials.json`, which the wrap granted as well.
   before each new CLI connect, `_write_claude_config_seed` reads the user's
   config again and writes the seed through `mkstemp` and `os.replace`, mode
   0600. The first launch makes the 0700 dir with an exclusive `mkdir`, so a
-  dir someone else made under that name fails the launch. A server the user
-  adds mid-session reaches the next launch, not the live one. `close()` and
-  `__del__` remove the dir. A launch after that fails with "This agent's
-  Claude CLI could not get its private Claude config: the executor is
-  closed", and the dir is not made again. Any write error fails the connect
-  with the same text and its reason. An unwrapped CLI gets no seed and reads
-  the user's own config, as before.
+  dir someone else made under that name fails the launch. If a temp cleaner
+  removes it, the next launch makes it again the same way. A dir found there
+  later must still be this user's own 0700 directory, not a link, or the
+  launch fails. A server the user adds mid-session reaches the next launch,
+  not the live one. `close()` and `__del__` remove the dir. A launch after
+  that fails with "This agent's Claude CLI could not get its private Claude
+  config: the executor is closed", and the dir is not made again. Any write
+  error fails the connect with the same text and its reason. An unwrapped CLI
+  gets no seed and reads the user's own config, as before.
 - **The copy into the sandbox.** The policy's `scratch_dir_seed` names the
   pair `.claude.json` and the seed file. `with_scratch_dir_env` grants the
   seed file as a read root only. In the launcher's in-wrap pass, after
   `activate_sandbox`, `export_scratch_dir` (`omnigent/inner/sandbox.py`)
-  copies it into the private dir before it creates `projects`. The copy opens
-  the seed through `open_regular_file`, without following a link and without
-  blocking. It refuses a missing seed, a link, a FIFO, a directory or any
-  other non-regular file, and a file that another user owns or that group or
-  others can write. It writes a fresh 0600 file with
-  `O_CREAT|O_EXCL|O_NOFOLLOW`. Each refusal fails the launch, and the scratch
-  is removed. The field travels the launcher's policy JSON and survives every
-  clone. A malformed one fails the launch, and an old payload asks for no
-  seed.
+  copies it into the private dir before it creates `projects`. A version
+  query, the target arguments `-v` or `--version` alone, gets the dir without
+  the copy: it needs no config, and its caller may kill it before the launcher
+  cleans up. The copy opens the seed through `open_regular_file`, without
+  following a link and without blocking. It refuses a missing seed, a link, a
+  FIFO, a directory or any other non-regular file, and a file that another
+  user owns or that group or others can write. It writes a fresh 0600 file
+  with `O_CREAT|O_EXCL|O_NOFOLLOW`. Each refusal fails the launch, and the
+  scratch is removed. The field travels the launcher's policy JSON and
+  survives every clone. A malformed one fails the launch, and an old payload
+  asks for no seed.
 - **Auth.** A stored subscription login is not carried into the sandbox: the
   CLI's credential store and keychain name follow the private dir, which
-  holds none. No copy of any credential is made. For such a CLI without an
-  API key helper, `_claude_auth_remediation(..., private_config=True)` gives
+  holds none. No copy of any Claude sign-in credential is made. For such a
+  CLI without an API key helper,
+  `_claude_auth_remediation(..., private_config=True)` gives
   the auth error's next step:
   - With no token variable set, it says the stored login does not reach the
     CLI. It tells the user to run `<cli> setup` for an API key or gateway, or
@@ -1803,16 +1808,26 @@ listed here.
 - Leftover copies of the seed (CRL-179). With S115 a launch scratch can hold
   a copy of the user's MCP servers with their secrets, as a 0600 file in a
   0700 dir.
-  - Each new connect can leave one such scratch. The SDK's version check runs
-    the launcher with `-v` and then stops it, which skips the launcher's
-    cleanup (from code).
-  - A killed CLI leaves its scratch too, and a killed harness leaves the
-    executor's seed dir.
+  - The SDK's version check runs the launcher with `-v`, reads one line and
+    stops it, which skips the launcher's cleanup. So each new connect can
+    still leave a launch scratch, but that launch copies no seed: its private
+    dir holds only the empty `projects` file
+    (`test_a_killed_version_check_leaves_no_copy_of_the_seed`, measured on
+    macOS 27.2.1; its `linux_bwrap` row runs in CI).
+  - A killed CLI still leaves its scratch with the seed copy, and a killed
+    harness leaves the executor's seed dir.
   - In QA, an interrupt in the middle of a real CLI turn left two launch
     scratches, each holding `claude_config_dir/.claude.json`: the seed copy,
     and the CLI's rewrite of it. `close()` had removed the seed dir.
 - A spec whose `read_paths` cover the temp dir can read other executors'
-  seeds (from code). It stays as an accepted residual with no ticket.
+  seeds (from code). A Claude CLI wrap with such a write grant is refused
+  when its launcher is built, but another agent's sandboxed tool helper whose
+  `write_paths` cover the temp dir can rewrite them: bwrap mounts write roots
+  after read roots, and seatbelt allows writes anywhere under a write root
+  (from code). The copy's owner and mode checks pass, because the files are
+  the same user's, so a launch that copies a rewritten seed starts from it,
+  still inside its own sandbox. Both are accepted residuals with no ticket of
+  their own; they belong with CRL-179's temp dir hygiene.
 - A relative or empty forwarded `CLAUDE_CONFIG_DIR` is refused as the seed
   source, but the settings `env` merge still follows it into the working dir
   (CRL-182). An absolute one under a sandbox write root is not checked, so

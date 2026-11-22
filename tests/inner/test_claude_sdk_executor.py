@@ -7506,6 +7506,9 @@ async def test_each_launch_gets_a_fresh_copy_and_a_closed_executor_launches_none
     added = _user_claude_config(mcpServers={**_SEED_SERVERS, "added": {"command": "new"}})
     (home / ".claude.json").write_text(json.dumps(added))
     await _seeded_turn(executor, "first", seen)
+    # CORAL(S115): as a temp cleaner would; the next launch makes the dir again
+    seed.unlink()
+    seed.parent.rmdir()
     await _seeded_turn(executor, "second", seen)
 
     assert [entry[1:] for entry in seen] == [(0o600, 0o700)] * 2
@@ -7527,8 +7530,16 @@ async def test_each_launch_gets_a_fresh_copy_and_a_closed_executor_launches_none
     assert not other._claude_config_seed_path.parent.exists()
 
 
-async def test_a_seed_dir_someone_else_made_fails_the_launch(monkeypatch, tmp_path) -> None:
-    """The dir is made exclusively at the first launch, so a planted one is never adopted."""
+# CORAL(S115): first-launch: planted before the dir was made; the others after a temp cleaner
+# removed it
+@pytest.mark.parametrize("planted", ["first-launch", "symlink", "foreign-owner", "group-readable"])
+async def test_a_seed_dir_someone_else_made_fails_the_launch(
+    monkeypatch, tmp_path, planted
+) -> None:
+    """
+    The dir is made exclusively, so a planted one is never adopted. Once made, a dir found
+    there must still be this user's own 0700 dir; a link or any other dir fails the launch.
+    """
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 
     _seed_prepare_stubs(monkeypatch, tmp_path, wrapped=True)
@@ -7539,11 +7550,26 @@ async def test_a_seed_dir_someone_else_made_fails_the_launch(monkeypatch, tmp_pa
         os_env=OSEnvSpec(cwd=str(tmp_path), sandbox=OSEnvSandboxSpec()),
         skills_filter="all",
     )
-    executor._claude_config_seed_path.parent.mkdir()
+    seed, elsewhere = executor._claude_config_seed_path, tmp_path / "elsewhere"
+    # CORAL(S115): a temp cleaner removes the dir this executor made, then a dir is planted
+    if planted != "first-launch":
+        await _seeded_turn(executor, "first", [])
+        seed.unlink()
+        seed.parent.rmdir()
+    elsewhere.mkdir(mode=0o700)
+    if planted == "symlink":
+        seed.parent.symlink_to(elsewhere)
+    else:
+        seed.parent.mkdir(mode=0o700)
+        seed.parent.chmod(0o750 if planted == "group-readable" else 0o700)
+    if planted == "foreign-owner":
+        uid = os.getuid()
+        monkeypatch.setattr("omnigent.inner.sandbox.os.getuid", lambda: uid + 1)
 
     with pytest.raises(RuntimeError, match="could not get its private Claude config"):
-        await _seeded_turn(executor, "first", [])
-    assert executor._clients == {}
+        await _seeded_turn(executor, "next", [])
+    assert "next" not in executor._clients
+    assert not any(elsewhere.iterdir()) and not seed.exists()
 
 
 @pytest.mark.parametrize("skills", ["all", "none"], ids=["seeded", "not-seeded"])

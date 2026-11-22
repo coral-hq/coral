@@ -1460,12 +1460,23 @@ def _copy_seed_file(source: Path, target: Path) -> None:
             shutil.copyfileobj(reader, writer)
 
 
-def export_scratch_dir(policy: SandboxPolicy, scratch: Path | None) -> None:
+# CORAL(S115): a CLI version query's arguments, as in the Agent SDK's check of the CLI
+_VERSION_QUERY_ARGVS = (["-v"], ["--version"])
+
+
+def export_scratch_dir(
+    policy: SandboxPolicy,
+    scratch: Path | None,
+    *,
+    copy_seed: bool = True,  # CORAL(S115)
+) -> None:
     """
     CORAL(S113): create the policy's private dir in ``scratch`` and name it to the target.
 
     It overwrites an inherited value of each variable. Without a scratch it raises rather than
     let the target fall back to a default location.
+
+    :param copy_seed: CORAL(S115): ``False`` leaves the seed copies out of the dir.
     """
     if policy.scratch_dir_env is None:
         return
@@ -1473,7 +1484,7 @@ def export_scratch_dir(policy: SandboxPolicy, scratch: Path | None) -> None:
         raise RuntimeError("The launcher has no scratch dir for the target's private dir")
     path = Path(os.path.abspath(scratch)) / policy.scratch_dir_env.lower()
     path.mkdir(mode=0o700)
-    for name, source in policy.scratch_dir_seed:  # CORAL(S115)
+    for name, source in policy.scratch_dir_seed if copy_seed else ():  # CORAL(S115)
         _copy_seed_file(Path(source), path / name)
     for name in policy.scratch_dir_files:
         (path / name).touch(mode=0o600, exist_ok=False)
@@ -1762,7 +1773,9 @@ def run_launcher(
             )
     try:
         activate_sandbox(sandbox)
-        export_scratch_dir(sandbox, tmpdir)  # CORAL(S113)
+        # CORAL(S113, S115): a version query needs no config, and its caller may kill it before
+        # the cleanup below, so it gets no seed copy
+        export_scratch_dir(sandbox, tmpdir, copy_seed=argv not in _VERSION_QUERY_ARGVS)
         logger.info("[omnigent-sandbox] activated; spawning target=%s", target_path)
         completed = subprocess.run(target_argv)
         logger.info("[omnigent-sandbox] target exited rc=%s", completed.returncode)

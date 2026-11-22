@@ -1539,6 +1539,71 @@ def test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home(
     assert Path(inside_dir).name == "claude_config_dir" and not Path(inside_dir).exists()
 
 
+# CORAL(S115): the Agent SDK's version check kills the wrapped CLI before the launcher cleans up
+@pytest.mark.timeout(120)
+def test_a_killed_version_check_leaves_no_copy_of_the_seed(
+    tmp_path: Path,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    As the SDK does, run the wrapped CLI with ``-v``, read one line, then terminate it. The
+    stand-in CLI prints a version and its config dir, then waits for its input to close, so
+    the kill always lands before the launcher's cleanup.
+    """
+    from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+
+    workspace, scratch_parent, seed = tmp_path / "work", tmp_path / "tmp", tmp_path / "seed"
+    for path in (workspace, scratch_parent):
+        path.mkdir()
+    cli = workspace / "claude"
+    cli.write_text(
+        '#!/bin/sh\nprintf "2.1.325 (Claude Code) %s\\n" "$CLAUDE_CONFIG_DIR"\nread _\n'
+    )
+    cli.chmod(0o700)
+    with contextlib.ExitStack() as cleanup:
+        harness_root = Path(tempfile.mkdtemp(prefix="sbx-h-", dir="/tmp"))
+        cleanup.callback(shutil.rmtree, harness_root, ignore_errors=True)
+        monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", str(harness_root))
+        sandbox = active_sandbox_spec_factory(write_paths=["."])
+        spec = OSEnvSpec(type="caller_process", cwd=str(workspace), sandbox=sandbox)
+        prepared = prepare_claude_cli_path(str(cli), spec, config_seed=seed / "claude.json")
+        assert prepared.config_isolated and prepared.cli_path is not None
+        cleanup.callback(Path(prepared.cli_path).unlink, missing_ok=True)
+        seed.mkdir(mode=0o700)
+        (seed / "claude.json").write_text('{"mcpServers": {}}')
+        (seed / "claude.json").chmod(0o600)
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONPATH": os.environ["PYTHONPATH"],
+            "TMPDIR": str(scratch_parent),
+            "HOME": str(tmp_path / "home"),
+        }
+        check = subprocess.Popen(
+            [prepared.cli_path, "-v"],
+            cwd=workspace,
+            env=env,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert check.stdout is not None
+        line = check.stdout.readline()
+        check.terminate()
+        check.wait(timeout=30)
+        # Closing its input lets a stand-in that outlived the launcher exit.
+        _, errors = check.communicate(timeout=30)
+    version, _, config_dir = line.rstrip("\n").partition(" (Claude Code) ")
+    assert version == "2.1.325", errors
+    private = Path(config_dir)
+    assert private.name == "claude_config_dir", errors
+    assert private.parent.parent.resolve() == scratch_parent.resolve(), config_dir
+    assert private.is_dir(), "the launcher cleaned up before the kill landed"
+    assert not (private / ".claude.json").exists(), "the version check left a seed copy"
+
+
 # ---------------------------------------------------------------------------
 # Env passthrough
 # ---------------------------------------------------------------------------

@@ -1253,13 +1253,24 @@ def test_a_malformed_scratch_dir_seed_is_refused(
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
 @pytest.mark.parametrize("seeded", [False, True])  # CORAL(S115)
 @pytest.mark.parametrize("target_fails", [False, True])
+# CORAL(S115): a version query, which its caller may kill before the cleanup, copies no seed
+@pytest.mark.parametrize(
+    ("argv", "copies"),
+    [([], True), (["-v"], False), (["--version"], False), (["-v", "-p"], True)],
+    ids=["no-args", "v", "version", "v-and-more"],
+)
 def test_run_launcher_gives_the_target_a_private_dir_in_its_scratch(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, target_fails: bool, seeded: bool
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_fails: bool,
+    seeded: bool,
+    argv: list[str],
+    copies: bool,
 ) -> None:
     """
     The in-wrap pass overrides inherited values, and the dir goes with the scratch. A seeded
-    dir holds a fresh 0600 copy of the seed, and an inherited empty secure-storage name, which
-    would select the default keychain item, is overridden too.
+    dir holds a fresh 0600 copy of the seed, except for a version query, and an inherited empty
+    secure-storage name, which would select the default keychain item, is overridden too.
     """
     scratch = tmp_path / "scratch"
     scratch.mkdir()
@@ -1298,14 +1309,15 @@ def test_run_launcher_gives_the_target_a_private_dir_in_its_scratch(
     with mock.patch.dict(os.environ, wrapped_env):
         encoded = _encoded(_scratch_dir_policy(((".claude.json", source),) if seeded else ()))
         with pytest.raises(OSError) if target_fails else contextlib.nullcontext():
-            assert run_launcher(encoded, "/bin/true", []) == 0
+            assert run_launcher(encoded, "/bin/true", argv) == 0  # CORAL(S115)
 
     assert seen["dir"] == seen["store"] == str(scratch.absolute() / "claude_config_dir")
     assert os.path.isabs(str(seen["dir"]))
     assert seen["mode"] == 0o700 and seen["projects_is_file"] is True
     assert "projects_creatable" not in seen
     # CORAL(S115): the copy is fresh, and the source is untouched
-    assert seen.get("copy") == ((True, 0o600, source.read_bytes()) if seeded else None)
+    expected = (True, 0o600, source.read_bytes()) if seeded and copies else None
+    assert seen.get("copy") == expected, f"argv {argv}"
     assert not scratch.exists()
     assert not (tmp_path / "home").exists()
     assert source.read_text() == '{"mcpServers": {}}'
