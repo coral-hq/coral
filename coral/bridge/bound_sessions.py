@@ -87,6 +87,10 @@ class BoundSessions:
         """One dict read; safe on any thread, never blocks."""
         return self._entries.get((workspace_id, session_id))
 
+    def session_ids(self) -> set[str]:
+        """Every currently indexed session id (any workspace). Safe for observers."""
+        return {session_id for (_workspace_id, session_id) in self._entries}
+
     def push(self, workspace_id: int, session_id: str, bound: BoundSession) -> None:
         """Index a session whose create just completed."""
         key = (workspace_id, session_id)

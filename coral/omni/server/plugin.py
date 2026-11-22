@@ -920,6 +920,24 @@ async def coral_lifespan(
                 app.state.coral_run_stream_hub = _run_stream_hub(
                     bridge, run_store, services, stack
                 )
+            # HRN-07: observe native /clear supersession for Coral-bound sessions.
+            from coral.omni.server.rotation import SupersessionFollower, register_follower
+
+            def _enqueue_rotation(old_id: str, new_id: str, reason: str) -> None:
+                logging.getLogger("coral.omni.server.rotation").info(
+                    "coral supersession follow queued old=%s new=%s reason=%s",
+                    old_id,
+                    new_id,
+                    reason,
+                )
+
+            stack.callback(
+                register_follower(
+                    SupersessionFollower(
+                        bound_session_ids=bound.session_ids, enqueue=_enqueue_rotation
+                    )
+                )
+            )
             missing = _missing_engine_input(app, services)
             if missing is None:
                 assert channels is not None  # the host store and registry are engine inputs
