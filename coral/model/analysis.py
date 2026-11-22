@@ -392,6 +392,9 @@ def analyze(nodes: tuple[CompiledNode, ...], arrows: tuple[CompiledArrow, ...]) 
                     node_ids=(split_id,),
                 )
             )
+    # Repeat fan-out needs SES-10's structure.start_item executors. Parallel
+    # AND-joins already run in the pure engine; cancel_region effects land later.
+    needs_structure = any(node.list_from is not None for node in nodes)
     return Analysis(
         join_types=joins,
         loops=loops,
@@ -399,4 +402,5 @@ def analyze(nodes: tuple[CompiledNode, ...], arrows: tuple[CompiledArrow, ...]) 
         unresolved=tuple(facts),
         label_sets=_label_sets(graph),
         checked_parts=_checked_parts(graph),
+        requires_structure_runtime=needs_structure,
     )

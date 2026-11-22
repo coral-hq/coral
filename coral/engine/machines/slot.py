@@ -38,7 +38,7 @@ from coral.model.ir import CompiledGraph
 from coral.signals.nudge import decide, turn_ended_snapshot
 
 # A slot's facts wait while its latest effect of these kinds has no receipt.
-_LEASED_KINDS = frozenset({"send_input", "create_session", "nudge"})
+_LEASED_KINDS = frozenset({"send_input", "create_session", "nudge", "steer"})
 # What a restart salvaged rides from its create to the new session's brief.
 _SALVAGE_FIELDS = ("salvage_ref", "salvage_commit")
 
@@ -62,7 +62,7 @@ def complete_effect(
         return _working(state, effect, slot, command.payload)
     if effect.kind == "close_slot" and slot.status == "closing":
         return _closed(graph, state, effect, slot, command.payload)
-    if effect.kind == "nudge":
+    if effect.kind in {"nudge", "steer"}:
         return _nudged(state, effect, slot, command.payload)
     return refuse_unknown(state)
 

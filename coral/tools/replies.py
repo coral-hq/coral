@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 
 from coral.engine.types import Rejection
-from coral.tools.catalog import CHOOSE_ARROW
+from coral.tools.catalog import ASSIGN_AGENTS, ASSIGN_TASK, CHOOSE_ARROW, MESSAGE_AGENT
 from coral.tools.port import EngineRefused
 from coral.tools.schemas import (
     DECISION_CLOSED,
@@ -19,6 +19,7 @@ from coral.tools.schemas import (
     HANDOFF_INVALID,
     NOT_ORCHESTRATOR,
     NOT_RUN_MEMBER,
+    RECIPIENT_CLOSING,
     RUN_CANCELLED,
     RUN_PAUSED,
     SLOT_CLOSED,
@@ -56,6 +57,13 @@ NOT_THE_ORCHESTRATOR = (
 NO_OPEN_DECISION = "No decision is open now. Stop now and end your turn."
 # After a choice: other decisions of the run may be waiting on the orchestrator.
 CHOICE_DONE = "Answer any other open decision request, then end your turn."
+MESSAGE_QUEUED = "Message queued. Continue your work, or end your turn."
+MESSAGE_CLOSING = (
+    "That recipient is evaluating or closing and cannot take a message. "
+    "Pick another recipient or end your turn."
+)
+ASSIGN_DONE = "Assignment recorded. Continue conducting the run."
+TASK_ASSIGNED = "Task delivered. Continue conducting the run."
 
 
 def stop_paused(reason: str | None) -> str:
@@ -213,6 +221,38 @@ def choice_made(
     )
 
 
+def message_queued(message_id: str) -> ToolReply:
+    """An accepted ``coral_message_agent`` delivery."""
+    return ToolReply(accepted=True, next=MESSAGE_QUEUED, message_id=message_id, delivery="queued")
+
+
+def recipient_closing() -> ToolReply:
+    """A message or task aimed at a slot that is evaluating, closing or closed."""
+    return ToolReply(accepted=False, reason=RECIPIENT_CLOSING, next=MESSAGE_CLOSING)
+
+
+def illegal_message(field: str, message: str, allowed: tuple[str, ...] = ()) -> ToolReply:
+    """An uncounted refusal of a messaging or assign call."""
+    return ToolReply(
+        accepted=False,
+        reason=TOOL_ILLEGAL,
+        allowed_values=allowed,
+        next=f"Fix {field} and try again.",
+        field=field,
+        message=message,
+    )
+
+
+def agents_assigned(members: tuple[str, ...], *, duplicate: bool = False) -> ToolReply:
+    """An accepted ``coral_assign_agents`` call."""
+    return ToolReply(accepted=True, next=ASSIGN_DONE, members=members, duplicate=duplicate)
+
+
+def task_assigned() -> ToolReply:
+    """An accepted ``coral_assign_task`` delivery."""
+    return ToolReply(accepted=True, next=TASK_ASSIGNED)
+
+
 def reply_for_engine_rejection(tool: str, rejection: Rejection) -> ToolReply:
     """
     The reply for the engine refusing a planned input of ``tool``.
@@ -240,11 +280,19 @@ def reply_for_engine_rejection(tool: str, rejection: Rejection) -> ToolReply:
         return retry_shortly()
     if code == "decision_closed":
         return decision_closed()
+    if code == "recipient_closing":
+        return recipient_closing()
     if code == HANDOFF_INVALID:
         return invalid_handoff(
             "label", "Use one of the step's labels.", tuple(rejection.allowed_values)
         )
     if code == TOOL_ILLEGAL:
+        if tool in {MESSAGE_AGENT.name, ASSIGN_AGENTS.name, ASSIGN_TASK.name}:
+            return illegal_message(
+                "arguments",
+                "That call is not allowed for this run state or recipient.",
+                tuple(rejection.allowed_values),
+            )
         return illegal_choice(
             "label", "Use one of the decision's labels.", tuple(rejection.allowed_values)
         )

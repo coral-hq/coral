@@ -1,0 +1,73 @@
+# SES-10 showcase: plan PRs, repeat per PR (two reviewers), fix loop, gate, summarize.
+id: coral.pr_review_loop
+name: PR review loop
+description: >
+  For each open PR, run two read-only reviewers, an orchestrator decision, a fix
+  loop (limit 3), and a human gate, then summarize.
+nodes:
+  - id: start
+    kind: start
+  - id: plan
+    kind: step
+    goal: List open pull requests that need review.
+    roster: [implementer]
+    parts:
+      - name: items
+        kind: list
+  - id: each
+    kind: step
+    goal: Review one pull request with two read-only reviewers.
+    roster: [reviewer, reviewer]
+    list_from: plan.items
+  - id: fix
+    kind: step
+    goal: Apply the agreed fixes on this PR.
+    roster: [implementer]
+  - id: decide
+    kind: decision
+  - id: approve
+    kind: gate
+  - id: summarize
+    kind: step
+    goal: Summarize the review outcomes for every PR.
+    roster: [implementer]
+  - id: end
+    kind: end
+arrows:
+  - id: a1
+    from: start
+    to: plan
+  - id: a2
+    from: plan
+    to: each
+  - id: a3
+    from: each
+    to: fix
+  - id: a4
+    from: fix
+    to: decide
+  - id: a5
+    from: decide
+    to: fix
+    label: revise
+    back: true
+    limit: 3
+    at_limit: a7
+  - id: a6
+    from: decide
+    to: approve
+    label: approved
+  - id: a7
+    from: decide
+    to: summarize
+  - id: a8
+    from: approve
+    to: summarize
+    label: approve
+  - id: a9
+    from: approve
+    to: summarize
+    label: reject
+  - id: a10
+    from: summarize
+    to: end

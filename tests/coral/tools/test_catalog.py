@@ -17,10 +17,13 @@ from coral.profiles.bundle_spec import (
     build_step_bundle_yaml,
 )
 from coral.tools.catalog import (
+    ASSIGN_AGENTS,
+    ASSIGN_TASK,
     CATALOG,
     CHOOSE_ARROW,
     ENGINE_TOOL_NAMES,
     ENGINE_TOOLS,
+    MESSAGE_AGENT,
     SUBMIT_HANDOFF,
     orchestrator_tool_names,
     tools_for_stance,
@@ -52,19 +55,37 @@ _BUNDLES = [
 
 
 def test_production_catalog_lists_every_engine_tool() -> None:
-    assert CATALOG == ENGINE_TOOLS == (SUBMIT_HANDOFF, CHOOSE_ARROW)
+    assert (
+        CATALOG
+        == ENGINE_TOOLS
+        == (
+            SUBMIT_HANDOFF,
+            CHOOSE_ARROW,
+            MESSAGE_AGENT,
+            ASSIGN_AGENTS,
+            ASSIGN_TASK,
+        )
+    )
     validate_catalog(CATALOG)
-    # The anchor gets nothing; each other stance gets its own tool.
+    # The anchor gets nothing; each other stance gets its messaging tools.
     assert [tools_for_stance(CATALOG, stance.value) for stance in Stance] == [
         (),
-        (CHOOSE_ARROW,),
-        (SUBMIT_HANDOFF,),
-        (SUBMIT_HANDOFF,),
+        (CHOOSE_ARROW, MESSAGE_AGENT, ASSIGN_AGENTS, ASSIGN_TASK),
+        (SUBMIT_HANDOFF, MESSAGE_AGENT),
+        (SUBMIT_HANDOFF, MESSAGE_AGENT),
     ]
     # The orchestrator allowlist and the exact-name exemptions do not depend on
     # what production advertises.
-    assert orchestrator_tool_names() == frozenset({"coral_choose_arrow"})
-    assert sorted(ENGINE_TOOL_NAMES) == ["coral_choose_arrow", "coral_submit_handoff"]
+    assert orchestrator_tool_names() == frozenset(
+        {"coral_choose_arrow", "coral_message_agent", "coral_assign_agents", "coral_assign_task"}
+    )
+    assert sorted(ENGINE_TOOL_NAMES) == [
+        "coral_assign_agents",
+        "coral_assign_task",
+        "coral_choose_arrow",
+        "coral_message_agent",
+        "coral_submit_handoff",
+    ]
 
 
 def test_a_schema_is_a_fresh_openai_tool_schema() -> None:
