@@ -2744,8 +2744,23 @@ async def test_two_relaunches_of_one_lost_step_at_once_end_on_one_new_runner(
         return_exceptions=True,
     )
 
-    # The create's launch and one relaunch: the later launch finds the first one's runner.
-    assert results == ["relaunched", "relaunched"]
+    # The later caller either finds the first one's runner, or finds the session already
+    # moved to it before it connected and refuses retryably; it never stops that runner.
+    refused = [result for result in results if isinstance(result, CoralSessionError)]
+    assert [result for result in results if result not in refused] in (
+        ["relaunched", "relaunched"],
+        ["relaunched"],
+    )
+    assert [(error.code, error.retryable) for error in refused] in (
+        [],
+        [("session.runner_changed", True)],
+    )
+    if refused:
+        again = await relauncher.ensure_runner(
+            workspace_id=WORKSPACE, session_id=step_id, generation=1
+        )
+        assert again == "connected"
+    # The create's launch and one relaunch.
     assert host.launches_for(step_id) == 2
     step = coral.conversation(step_id)
     assert step is not None and step.runner_id not in (None, old_runner)
