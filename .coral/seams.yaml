@@ -3539,57 +3539,39 @@ seams:
     status: landed
     category: coral-specific
     note: >-
-      Measured on macOS 27.2.1 with claude 2.1.325 and a throwaway home: every
-      claude-sdk CLI wrap granted read and write on
+      Before this seam every claude-sdk CLI wrap granted read and write on
       ~/.claude/{plugins,sessions,session-env,backups}, ~/.claude.json and
-      ~/.claude/.credentials.json in the user's real home (bwrap renders the
-      same as read-write binds, from the generator), so code in a step CLI's
-      sandbox rewrote an installed plugin's hooks, planted a session-env
-      script the user's Claude Code runs in its Bash tool, read every
-      session's inbox key and rewrote the global config. For a policy with
-      scratch_dir_env, the launcher's in-wrap pass makes a fresh 0700 dir
-      named after the variable in the target's private scratch, creates each
-      scratch_dir_files name in it as an empty file, sets the variable and
-      each scratch_dir_extra_envs name to its absolute path over any inherited
-      value, and removes it with the scratch; with no scratch it raises. The
-      fields travel the launcher wire and survive clones; an old payload asks
-      for no dir, and a malformed one fails the launch. Coral specs set
-      HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG in the one claude-sdk env
-      builder (a spec cannot set harness env, and the flag only narrows).
-      Their wrapped CLIs (os_env and the Linux tight wrap) then get no grant
-      under ~/.claude or on ~/.claude.json or .credentials.json, only
-      ~/.npm/_logs, and CLAUDE_CONFIG_DIR is that private dir. In it projects
-      is a file, so an oversized tool result is still reported unsaved with
-      the pagination advice (measured) instead of as a saved path the model
-      has no tool to open. A Coral CLI that runs unwrapped by design (the
-      operator's OMNIGENT_CLAUDE_SDK_NO_SANDBOX, a network-denying sandbox, or
-      no os_env: the macOS orchestrator and anchor, a degraded Linux tight
-      wrap) gets the same kind of dir, which the executor makes with mkdtemp
-      and removes on close. When os_env configures a sandbox that did not wrap
-      the CLI (it cannot be resolved, it resolves inactive, the trial wrap
-      fails, or no system claude is installed), the executor refuses the
-      step's turns with coral_sandbox_unavailable before any CLI starts.
-      CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR are removed from
-      the CLI's inherited and settings environment and then both set to the
-      private dir, by the launcher in the wrap and by the executor's options
-      for an unwrapped CLI, so a concurrent connect's restore of the host's
-      values cannot reach the CLI; the credential store and keychain service
-      name follow the private dir (measured: only per-dir names were looked
-      up).
-      The CLI completes a turn with an empty dir on API-key auth (Coral
-      refuses subscription auth, S13). Resume is unaffected: claude-sdk
-      replays history into a fresh client and runs with
-      --no-session-persistence. The wrap profile keeps the ~/Library deny,
-      so the keychain file cannot be opened from the wrap (measured on 27.2.1
-      with a stand-in file); mach-lookup to securityd stays open. Not covered:
-      non-Coral claude-sdk wraps keep today's grants (CRL-178); an unwrapped
-      Coral CLI is kept off the user's config but not contained (CRL-180);
-      the scratch and its config dir stay behind when the executor kills the
-      CLI tree, and the executor's own dir when the harness is killed
-      (CRL-179); the user settings env block, which the executor
-      still merges into the CLI's environment (CRL-167); Claude Code project
-      config a step writes in its worktree (CRL-181); and the inbox socket
-      itself (CRL-174). No CI lane runs macOS (CRL-170).
+      ~/.claude/.credentials.json (each only if it exists), and code in the
+      wrap rewrote a plugin hook and planted a session-env script that the
+      user's Claude Code runs (measured on macOS 27.2.1 with a throwaway
+      home). sandbox.py: for a policy with scratch_dir_env, the launcher's
+      in-wrap pass makes a fresh 0700 dir named after the variable in the
+      target's private scratch, creates each scratch_dir_files name in it as
+      an empty file, sets the variable and each scratch_dir_extra_envs name to
+      its absolute path over any inherited value, and removes it with the
+      scratch; with no scratch it raises. The fields travel the launcher wire
+      and survive clones; an old payload asks for no dir, and a malformed one,
+      or one naming a variable other than the two config dir names, fails the
+      launch. Executor: workflow.py sets
+      HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG for params.coral specs (a spec
+      cannot set harness env, and the flag only narrows). Both wrap paths
+      (os_env and the Linux tight wrap) then grant only ~/.npm/_logs of the
+      home, point CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR at
+      that dir with projects as a file, and remove both names from the CLI's
+      inherited and settings environment. A Coral CLI that runs unwrapped gets
+      an executor-owned mkdtemp dir instead, removed on close. When a step's
+      os_env asks for a wrap (caller_process, a sandbox type other than none,
+      network on, no operator opt-out) and its CLI was not wrapped, the
+      executor refuses its turns with coral_sandbox_unavailable before any CLI
+      starts. No rule grants ~/Library and S5 denies it, so the keychain file
+      cannot be opened from the wrap (measured on 27.2.1 with a stand-in
+      file). Main residuals and owners: other agents' sandboxed claude-sdk
+      wraps (CRL-178), unwrapped Coral CLIs (CRL-180), leftover scratch and
+      private dirs (CRL-179), the settings env merge (CRL-167), env
+      construction races and a relative config dir (CRL-182), project config a
+      step writes in its worktree (CRL-181), and the inbox sockets (CRL-174).
+      No CI lane runs macOS (CRL-170). Mechanism, evidence and the full
+      residual list: ADR-05, "Addendum: CRL-176 Claude config isolation".
     files:
       - omnigent/inner/sandbox.py
       - omnigent/inner/claude_sdk_executor.py
@@ -3632,7 +3614,7 @@ seams:
         fields on the wire and through clones, 15 malformed payloads refused,
         the in-wrap dir overriding both inherited names and removed when the
         target exits or fails, and the refusal without a scratch. The other
-        files are within budget: omnigent/inner/sandbox.py 88,
+        files are within budget: omnigent/inner/sandbox.py 92,
         tests/inner/sandbox/test_sandbox_behavior.py 83,
         omnigent/inner/claude_sdk_harness.py 3, omnigent/runtime/workflow.py
         2, tests/inner/test_claude_sdk_harness.py 4,
