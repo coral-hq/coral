@@ -921,7 +921,11 @@ async def coral_lifespan(
                     bridge, run_store, services, stack
                 )
             # HRN-07: observe native /clear supersession for Coral-bound sessions.
-            from coral.omni.server.rotation import SupersessionFollower, register_follower
+            from coral.omni.server.rotation import (
+                SupersessionFollower,
+                follow_bound_supersession,
+                register_follower,
+            )
 
             def _enqueue_rotation(old_id: str, new_id: str, reason: str) -> None:
                 logging.getLogger("coral.omni.server.rotation").info(
@@ -929,6 +933,9 @@ async def coral_lifespan(
                     old_id,
                     new_id,
                     reason,
+                )
+                follow_bound_supersession(
+                    old_id=old_id, new_id=new_id, bound=bound, bindings=bindings
                 )
 
             stack.callback(
