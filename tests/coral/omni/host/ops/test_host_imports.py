@@ -55,7 +55,15 @@ def test_handlers_load_through_the_entry_point_and_run_without_database_modules(
         subprocess.Popen.__init__ = real_popen
 
         assert sorted(handlers) == [
-            "commit", "diff_stat", "fingerprint", "head", "read", "reset", "salvage"
+            "commit",
+            "diff_stat",
+            "fetch_ref",
+            "fingerprint",
+            "head",
+            "push",
+            "read",
+            "reset",
+            "salvage",
         ], dict(handlers)
         request = WorkspaceOpRequest(
             op="head",

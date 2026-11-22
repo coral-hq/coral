@@ -108,10 +108,15 @@ WorkspaceErrorCode = Literal[
     # A reset under a salvage: the tree changed since it, or HEAD is not its parent.
     "workspace.tree_changed",
     "workspace.head_moved",
+    # WSP-07: push without per-run consent, or a ref outside the coral prefixes.
+    "workspace.push_not_permitted",
+    "workspace.invalid_ref",
 ]
 WORKSPACE_ERROR_CODES: frozenset[str] = frozenset(get_args(WorkspaceErrorCode))
 TREE_CHANGED: WorkspaceErrorCode = "workspace.tree_changed"
 HEAD_MOVED: WorkspaceErrorCode = "workspace.head_moved"
+PUSH_NOT_PERMITTED: WorkspaceErrorCode = "workspace.push_not_permitted"
+INVALID_REF: WorkspaceErrorCode = "workspace.invalid_ref"
 
 
 class WorkspaceOpError(Exception):

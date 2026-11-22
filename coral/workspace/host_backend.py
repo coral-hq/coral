@@ -75,7 +75,12 @@ _INVALID_PARAMS = "workspace.invalid_params"
 _UNKNOWN_OP = "unknown_op"
 # Codes a retry never fixes, whatever the host's ``permanent`` flag says.
 ALWAYS_PERMANENT_CODES: frozenset[str] = frozenset(
-    {"workspace.capability_unavailable", "workspace.worktree_displaced"}
+    {
+        "workspace.capability_unavailable",
+        "workspace.worktree_displaced",
+        "workspace.push_not_permitted",
+        "workspace.invalid_ref",
+    }
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
