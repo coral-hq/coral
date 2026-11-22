@@ -13,8 +13,8 @@ const EditorPage = lazy(() =>
   import("./editor/WorkflowEditorPage").then((m) => ({ default: m.WorkflowEditorPage })),
 );
 const SettingsPage = lazy(() =>
-  import("./desk/WorkflowRunPlaceholderPage").then((m) => ({
-    default: m.WorkflowSettingsPlaceholderPage,
+  import("./settings/WorkflowSettingsPage").then((m) => ({
+    default: m.WorkflowSettingsPage,
   })),
 );
 const ProfilesPage = lazy(() =>
