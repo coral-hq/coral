@@ -142,6 +142,55 @@
         "title": "BulkAckRequest",
         "type": "object"
       },
+      "CapabilitiesOut": {
+        "additionalProperties": false,
+        "properties": {
+          "fs_read_only": {
+            "enum": [
+              "supported",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Fs Read Only",
+            "type": "string"
+          },
+          "steering": {
+            "enum": [
+              "supported",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Steering",
+            "type": "string"
+          },
+          "tool_gating": {
+            "enum": [
+              "supported",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Tool Gating",
+            "type": "string"
+          },
+          "usage_reporting": {
+            "enum": [
+              "supported",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Usage Reporting",
+            "type": "string"
+          }
+        },
+        "required": [
+          "steering",
+          "tool_gating",
+          "fs_read_only",
+          "usage_reporting"
+        ],
+        "title": "CapabilitiesOut",
+        "type": "object"
+      },
       "CheckedPart": {
         "additionalProperties": false,
         "description": "Resolution of a ``list_from`` reference.",
@@ -522,6 +571,9 @@
               "not_a_git_repo",
               "start_key_conflict",
               "workflow_key_taken",
+              "profile_exists",
+              "profile_key_taken",
+              "stale_revision",
               "illegal_transition",
               "stale_visit",
               "worktree_failed",
@@ -1708,6 +1760,262 @@
         "title": "Problem",
         "type": "object"
       },
+      "ProfileCreateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "ref": {
+            "description": "``<stance>/<slug>``, e.g. ``reviewer/strict-review``.",
+            "title": "Ref",
+            "type": "string"
+          },
+          "spec": {
+            "additionalProperties": true,
+            "description": "A ProfileSpec.",
+            "title": "Spec",
+            "type": "object"
+          }
+        },
+        "required": [
+          "ref",
+          "spec"
+        ],
+        "title": "ProfileCreateIn",
+        "type": "object"
+      },
+      "ProfileDetailOut": {
+        "additionalProperties": false,
+        "description": "A user profile with its latest spec and every revision, newest first.",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/CapabilitiesOut"
+          },
+          "created": {
+            "default": false,
+            "title": "Created",
+            "type": "boolean"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "harness": {
+            "title": "Harness",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "profile_ref": {
+            "title": "Profile Ref",
+            "type": "string"
+          },
+          "revision_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision No"
+          },
+          "revisions": {
+            "items": {
+              "$ref": "#/components/schemas/RevisionOut"
+            },
+            "title": "Revisions",
+            "type": "array"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/RuleOut"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "seeded",
+              "user"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "spec": {
+            "$ref": "#/components/schemas/ProfileSpec"
+          },
+          "stance": {
+            "title": "Stance",
+            "type": "string"
+          },
+          "used_by": {
+            "$ref": "#/components/schemas/UsedByOut"
+          }
+        },
+        "required": [
+          "profile_ref",
+          "stance",
+          "name",
+          "description",
+          "harness",
+          "model",
+          "revision_no",
+          "source",
+          "rules",
+          "capabilities",
+          "used_by",
+          "spec",
+          "revisions"
+        ],
+        "title": "ProfileDetailOut",
+        "type": "object"
+      },
+      "ProfileRowOut": {
+        "additionalProperties": false,
+        "description": "One profile as the desk lists it; a seeded row is a built-in stance, read-only.",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/CapabilitiesOut"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "harness": {
+            "title": "Harness",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "profile_ref": {
+            "title": "Profile Ref",
+            "type": "string"
+          },
+          "revision_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision No"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/RuleOut"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "seeded",
+              "user"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "stance": {
+            "title": "Stance",
+            "type": "string"
+          },
+          "used_by": {
+            "$ref": "#/components/schemas/UsedByOut"
+          }
+        },
+        "required": [
+          "profile_ref",
+          "stance",
+          "name",
+          "description",
+          "harness",
+          "model",
+          "revision_no",
+          "source",
+          "rules",
+          "capabilities",
+          "used_by"
+        ],
+        "title": "ProfileRowOut",
+        "type": "object"
+      },
+      "ProfileSpec": {
+        "additionalProperties": false,
+        "description": "The content of one profile revision; immutable once saved.",
+        "properties": {
+          "description": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Description",
+            "type": "string"
+          },
+          "instructions": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Instructions",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/RuleInstance"
+            },
+            "maxItems": 16,
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ProfileSpec",
+        "type": "object"
+      },
       "Region": {
         "additionalProperties": false,
         "description": "Parallel region between an unlabelled split and its AND-join.",
@@ -1813,6 +2121,157 @@
           "reason"
         ],
         "title": "ResyncFrame",
+        "type": "object"
+      },
+      "RevisionIn": {
+        "additionalProperties": false,
+        "properties": {
+          "base_revision_no": {
+            "description": "The revision the edit started from.",
+            "minimum": 1.0,
+            "title": "Base Revision No",
+            "type": "integer"
+          },
+          "spec": {
+            "additionalProperties": true,
+            "description": "A ProfileSpec.",
+            "title": "Spec",
+            "type": "object"
+          }
+        },
+        "required": [
+          "base_revision_no",
+          "spec"
+        ],
+        "title": "RevisionIn",
+        "type": "object"
+      },
+      "RevisionOut": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "revision_no": {
+            "title": "Revision No",
+            "type": "integer"
+          },
+          "running_runs": {
+            "title": "Running Runs",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "revision_no",
+          "created_at",
+          "running_runs"
+        ],
+        "title": "RevisionOut",
+        "type": "object"
+      },
+      "RuleInstance": {
+        "additionalProperties": false,
+        "description": "One catalog template attached to a profile, with params checked against the template.",
+        "properties": {
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          },
+          "strength": {
+            "$ref": "#/components/schemas/RuleStrength"
+          },
+          "template": {
+            "title": "Template",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template",
+          "strength"
+        ],
+        "title": "RuleInstance",
+        "type": "object"
+      },
+      "RuleOut": {
+        "additionalProperties": false,
+        "properties": {
+          "statement": {
+            "title": "Statement",
+            "type": "string"
+          },
+          "strength": {
+            "$ref": "#/components/schemas/RuleStrength"
+          },
+          "template": {
+            "title": "Template",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template",
+          "strength",
+          "statement"
+        ],
+        "title": "RuleOut",
+        "type": "object"
+      },
+      "RuleStrength": {
+        "description": "Required rules are enforced by a guardrail policy; Guidance rules are instructions.",
+        "enum": [
+          "required",
+          "guidance"
+        ],
+        "title": "RuleStrength",
+        "type": "string"
+      },
+      "RuleTemplateOut": {
+        "additionalProperties": false,
+        "properties": {
+          "bypasses": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Bypasses",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "params_schema": {
+            "additionalProperties": true,
+            "title": "Params Schema",
+            "type": "object"
+          },
+          "statement_example": {
+            "title": "Statement Example",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "title",
+          "params_schema",
+          "statement_example",
+          "bypasses"
+        ],
+        "title": "RuleTemplateOut",
         "type": "object"
       },
       "RunDetail": {
@@ -3243,6 +3702,25 @@
         "title": "UnresolvedFact",
         "type": "object"
       },
+      "UsedByOut": {
+        "additionalProperties": false,
+        "properties": {
+          "running_runs": {
+            "title": "Running Runs",
+            "type": "integer"
+          },
+          "workflows": {
+            "title": "Workflows",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "workflows",
+          "running_runs"
+        ],
+        "title": "UsedByOut",
+        "type": "object"
+      },
       "ValidResult": {
         "description": "A workflow that loaded and compiled, with what validation found.",
         "properties": {
@@ -3860,6 +4338,362 @@
           }
         },
         "summary": "Coral Info",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/profiles": {
+      "get": {
+        "description": "The built-in stances, then the caller's profiles by ref.",
+        "operationId": "coral_list_profiles",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProfileRowOut"
+                  },
+                  "title": "Response Coral List Profiles",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          }
+        },
+        "summary": "List Profiles",
+        "tags": [
+          "coral"
+        ]
+      },
+      "post": {
+        "description": "Create a profile at revision 1.",
+        "operationId": "coral_create_profile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileCreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Create Profile",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/profiles/{stance}/{slug}": {
+      "get": {
+        "description": "One of the caller's profiles with its spec and revisions.",
+        "operationId": "coral_get_profile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "stance",
+            "required": true,
+            "schema": {
+              "title": "Stance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Get Profile",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/profiles/{stance}/{slug}/revisions": {
+      "post": {
+        "description": "Save an edit as the next revision; unchanged content keeps the latest one.",
+        "operationId": "coral_save_profile_revision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "stance",
+            "required": true,
+            "schema": {
+              "title": "Stance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Failed"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Save Profile Revision",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/rule-templates": {
+      "get": {
+        "description": "Every rule template a profile can use, with its params schema and bypasses.",
+        "operationId": "coral_list_rule_templates",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RuleTemplateOut"
+                  },
+                  "title": "Response Coral List Rule Templates",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          }
+        },
+        "summary": "List Rule Templates",
         "tags": [
           "coral"
         ]

@@ -14,6 +14,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
 
 from coral.rules.catalog import CATALOG
 
@@ -41,16 +42,22 @@ class RuleInstance(BaseModel):
             return data
         template = CATALOG.get(data["template"])
         if template is None:
-            raise ValueError(f"template: unknown rule template {data['template']!r}")
+            raise _rule_error([(("template",), f"unknown rule template {data['template']!r}")])
         try:
             params = template.params_model.model_validate(data.get("params", {}))
         except ValidationError as exc:
-            problems = "; ".join(
-                f"params.{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-                for error in exc.errors()
-            )
-            raise ValueError(problems) from None
+            raise _rule_error(
+                [(("params", *error["loc"]), error["msg"]) for error in exc.errors()]
+            ) from None
         return {**data, "params": params.model_dump(mode="json")}
+
+
+def _rule_error(fields: list[tuple[tuple[str | int, ...], str]]) -> PydanticCustomError:
+    """A rule's refusal; ``ctx["fields"]`` keeps each problem's location inside the rule."""
+    problems = "; ".join(f"{'.'.join(map(str, loc))}: {msg}" for loc, msg in fields)
+    return PydanticCustomError(
+        "rule_invalid", "{problems}", {"problems": problems, "fields": fields}
+    )
 
 
 class ProfileSpec(BaseModel):
