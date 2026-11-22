@@ -431,11 +431,10 @@ def _workflow_preflight(services: ServerServices):
     from omnigent.server.host_registry import HostRegistry
 
     registry = getattr(services, "host_registry", None) or HostRegistry()
+    server_config = getattr(services, "server_config", None) or {}
     return OmniWorkflowPreflight(
         registry,
-        claude_native_steps=bool(
-            resolve_sub_features(services.server_config).get("claude_native_steps")
-        ),
+        claude_native_steps=bool(resolve_sub_features(server_config).get("claude_native_steps")),
     )
 
 

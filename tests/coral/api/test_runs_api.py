@@ -3881,13 +3881,16 @@ async def test_a_retry_whose_body_is_not_an_empty_object_is_refused_before_any_w
     assert _restarts(world, run.id) == []
 
 
-async def test_preflight_is_not_implemented_after_the_caller_check() -> None:
+async def test_preflight_needs_a_body_and_the_runs_api_after_the_caller_check() -> None:
+    body = {"workflow_id": "a" * 32, "host_id": "host-1"}
     async with _client(_app(None)) as client:
-        anonymous = await client.post(f"{RUNS}:preflight", json={})
-        signed_in = await client.post(f"{RUNS}:preflight", headers=_as(ALICE), json={})
+        anonymous = await client.post(f"{RUNS}:preflight", json=body)
+        empty = await client.post(f"{RUNS}:preflight", headers=_as(ALICE), json={})
+        signed_in = await client.post(f"{RUNS}:preflight", headers=_as(ALICE), json=body)
 
     assert _refusal(anonymous) == (401, "unauthenticated")
-    assert _refusal(signed_in) == (501, "not_implemented")
+    assert _refusal(empty) == (422, "validation_failed")
+    assert _refusal(signed_in) == (404, "not_found")
 
 
 # ── Gate answers ────────────────────────────────────────────────────────────
