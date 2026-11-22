@@ -1004,8 +1004,8 @@ dir):
   entry (today a pane's own `tmux.sock`) stays last, and now also denies
   writing that socket and its dir. A pane can rename neither its socket nor
   its private dir away from the deny; files inside the dir stay editable.
-- **`net.local`.** The sysctl deny sits after S111's `kern.procargs` deny, so
-  `netstat -f unix` lists nothing.
+- **`net.local`.** The sysctl deny comes after `(allow sysctl-read)`, beside
+  S111's `kern.procargs` deny, so `netstat -f unix` lists nothing.
 - **Root resolution never raises.** A configured root that cannot be resolved
   (`~nosuchuser`, a symlink loop, a relative root in a deleted cwd) is left
   out with a warning, once per setting, and the default is kept. So a bad

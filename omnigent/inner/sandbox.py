@@ -1161,11 +1161,14 @@ def _harness_socket_roots() -> list[Path]:
     relative root in a deleted cwd) is left out with a warning, and the default is always
     kept. A relative root, or one holding the temp or home dir, is kept with a warning.
     """
-    from omnigent.runtime.harnesses.paths import (
-        HARNESS_TMP_PARENT_ENV_VAR,
-        harness_tmp_parent,
-        resolve_harness_tmp_parent,
-    )
+    try:
+        from omnigent.runtime.harnesses.paths import (
+            HARNESS_TMP_PARENT_ENV_VAR,
+            harness_tmp_parent,
+            resolve_harness_tmp_parent,
+        )
+    except ImportError:  # the profile builder still denies the default root
+        return []
 
     roots: list[Path] = []
     setting = os.environ.get(HARNESS_TMP_PARENT_ENV_VAR, "")

@@ -586,7 +586,7 @@ def test_resolve_sandbox_denies_the_harness_socket_roots(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX harness socket roots")
-@pytest.mark.parametrize("setting", ["loop", "~nosuchuser_crl166/x", "deleted_cwd", "rel", "/"])
+@pytest.mark.parametrize("setting", ["loop", "~nosuchuser_omnigent/x", "deleted_cwd", "rel", "/"])
 def test_harness_socket_roots_never_raise_and_keep_the_default(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
@@ -669,6 +669,17 @@ def test_harness_socket_roots_never_raise_on_a_looping_default_root(
     monkeypatch.setattr(paths, "harness_tmp_parent", lambda env=None: loop)
 
     assert _resolved_roots(monkeypatch, tmp_path, None, "darwin_seatbelt") == [loop]
+
+
+# CORAL(S112): a failed import of the harness paths leaves the default to the profile builder
+def test_harness_socket_roots_never_raise_when_the_harness_paths_cannot_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.inner.sandbox import _harness_socket_roots
+
+    monkeypatch.setitem(sys.modules, "omnigent.runtime.harnesses.paths", None)
+
+    assert _harness_socket_roots() == []
 
 
 def test_with_spawn_env_allowlist_sets_sorted_deduped_copy() -> None:

@@ -3512,7 +3512,7 @@ seams:
         throwaway listener with its clean stop; and the test that runs the
         probe outside and inside, through the os_env helper and the CLI wrap
         with a launch dir and a pane dir in its $TMPDIR.
-        tests/inner/test_sandbox.py (219 changed lines): the wire and clone
+        tests/inner/test_sandbox.py (230 changed lines): the wire and clone
         test, the test that a clone keeps every policy field, the helper
         tests, the resolve_sandbox test, the never-raise and warn-once cases
         (a symlink loop at either root, ~nosuchuser, a deleted cwd, a relative
@@ -3521,7 +3521,7 @@ seams:
         changed lines): the placement test in four network modes, the guard
         cases, the pane-shaped test, the always-denied default root and its
         drift test, and the narrowed empty-list test.
-        omnigent/inner/sandbox.py (151 changed lines): the root and scratch
+        omnigent/inner/sandbox.py (154 changed lines): the root and scratch
         fields with their docstrings, the wire and clone, the shared
         resolve-and-dedupe step, the root form of the helper, the
         never-raising root resolution with its once-per-setting warnings, and
