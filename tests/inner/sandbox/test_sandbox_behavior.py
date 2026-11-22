@@ -1136,6 +1136,300 @@ def test_sandbox_cannot_connect_to_omnigent_control_sockets(
     assert alive, "a listener died during the run, so a refused connect proves nothing"
 
 
+# CORAL(S114): reaches each loopback harness listener, calls it without its secret, reads the
+# secrets it can and calls with them; prints names and HTTP statuses only. Ports from a file.
+_LOOPBACK_LISTENER_PROBE = """
+import base64, http.client, json, os, socket
+info = json.load(open('listeners.json'))
+
+def status(port, method, path, headers=None, body=None):
+    conn = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+    try:
+        conn.request(method, path, body=body, headers=headers or {})
+        return conn.getresponse().status
+    except OSError:
+        return 0
+    finally:
+        conn.close()
+
+def upgrade(port, path, token=None):
+    key = base64.b64encode(os.urandom(16)).decode()
+    headers = {'Connection': 'Upgrade', 'Upgrade': 'websocket',
+               'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': key}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    return status(port, 'GET', path, headers)
+
+def relay(token=None):
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    return status(info['relay'], 'POST', '/tool', headers, '{"name": "echo", "arguments": {}}')
+
+def secret(path, field=None):
+    try:
+        with open(path) as handle:
+            return json.load(handle)[field] if field else handle.read().strip()
+    except OSError:
+        return None
+
+def tcp(port):
+    try:
+        socket.create_connection(('127.0.0.1', port), timeout=10).close()
+        return True
+    except OSError:
+        return False
+
+for name in ('relay', 'attach', 'opencode', 'codex'):
+    print(name, 'tcp', 'yes' if tcp(info[name]) else 'no')
+print('relay anon', relay())
+print('attach anon', upgrade(info['attach'], '/probe'))
+print('opencode anon', status(info['opencode'], 'GET', '/api/session'))
+print('codex anon', upgrade(info['codex'], '/'))
+relay_token = secret(info['bridge_json'], 'token')
+print('relay secret', 'yes' if relay_token else 'no')
+if relay_token:
+    print('relay keyed', relay(relay_token))
+codex_token = secret(info['codex_token'])
+print('codex secret', 'yes' if codex_token else 'no')
+if codex_token:
+    print('codex keyed', upgrade(info['codex'], '/', codex_token))
+"""
+
+
+# CORAL(S114): no sandboxed process drives a loopback harness listener without its secret
+@pytest.mark.parametrize("launch_path", ["helper", "launcher"])
+def test_sandbox_cannot_drive_loopback_harness_listeners(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_path: str,
+) -> None:
+    """
+    A networked sandboxed shell or CLI wrap reaches a throwaway claude-native tool relay,
+    runner direct-attach listener, ``opencode serve`` and real ``codex app-server`` (started
+    through the S114 argv) over TCP, and each refuses it without its secret. Outside, the
+    same probe reads the relay's ``bridge.json`` and the codex token file and is let in;
+    inside, it can read neither. Each listener answers its rightful client before and after.
+    """
+    import asyncio
+    import base64
+    import http.client
+    import secrets
+    import threading
+    import time
+    from collections.abc import Coroutine
+    from typing import TypeVar
+
+    from websockets.sync.client import connect as ws_connect
+
+    from omnigent.harnesses.claude_native import bridge as claude_bridge
+    from omnigent.harnesses.codex_native import bridge as codex_bridge
+    from omnigent.harnesses.codex_native.app_server import (
+        CodexAppServerClient,
+        _allocate_loopback_port,
+        _start_codex_model_discovery_process,
+        _stop_codex_model_discovery_process,
+        _wait_for_discovery_listener,
+        codex_ws_token_path,
+    )
+    from omnigent.runner.direct_attach import (
+        create_direct_attach_app,
+        start_direct_attach_listener,
+    )
+
+    T = TypeVar("T")
+    if active_sandbox_type != "darwin_seatbelt":
+        pytest.skip("measured on macOS; bwrap's view of $HOME and /tmp is checked elsewhere")
+    codex, opencode = shutil.which("codex"), shutil.which("opencode")
+    if codex is None or opencode is None:
+        pytest.skip("needs the codex and opencode CLIs on PATH")
+
+    def http_status(port: int, method: str, path: str, headers: dict[str, str]) -> int:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            body = '{"name": "echo", "arguments": {}}' if method == "POST" else None
+            conn.request(method, path, body=body, headers=headers)
+            return conn.getresponse().status
+        except OSError:
+            return 0
+        finally:
+            conn.close()
+
+    with contextlib.ExitStack() as cleanup:
+        # Under $HOME and outside every read grant, as the real data dir is.
+        home_dir = Path(tempfile.mkdtemp(prefix=".omnigent-sbx-", dir=Path.home()))
+        cleanup.callback(shutil.rmtree, home_dir, ignore_errors=True)
+        monkeypatch.setattr(codex_bridge, "_BRIDGE_ROOT", home_dir / "codex-native")
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        cleanup.callback(loop.close)
+        cleanup.callback(thread.join, 10)
+        cleanup.callback(loop.call_soon_threadsafe, loop.stop)
+
+        def on_loop(coro: Coroutine[object, object, T]) -> T:
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=90)
+
+        relay_token = secrets.token_urlsafe(16)
+
+        async def echo(name: str, arguments: object) -> object:
+            return {"content": [{"type": "text", "text": name}]}
+
+        httpd, _ = claude_bridge._start_bridge_http_server(
+            claude_bridge._tool_relay_handler_factory(relay_token, echo, loop)
+        )
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        cleanup.callback(httpd.server_close)
+        cleanup.callback(httpd.shutdown)
+        bridge_dir = claude_bridge._BRIDGE_ROOT / f"sbx-{uuid.uuid4().hex}"
+        cleanup.callback(shutil.rmtree, bridge_dir, ignore_errors=True)
+        claude_bridge._write_json_file(bridge_dir / "bridge.json", {"token": relay_token})
+
+        attach_token = secrets.token_urlsafe(16)
+
+        async def no_attach(*args: object, **kwargs: object) -> None:
+            return None
+
+        app = create_direct_attach_app(no_attach, token=attach_token, allowed_origins=frozenset())
+        attach = on_loop(start_direct_attach_listener(app))
+        assert attach is not None
+        cleanup.callback(lambda: on_loop(attach.stop()))
+
+        oc_home = Path(tempfile.mkdtemp(prefix="sbx-oc-"))
+        cleanup.callback(shutil.rmtree, oc_home, ignore_errors=True)
+        oc_port, oc_password = _allocate_loopback_port(), secrets.token_urlsafe(16)
+        oc = subprocess.Popen(
+            [opencode, "serve", "--hostname", "127.0.0.1", "--port", str(oc_port)],
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(oc_home),
+                "OPENCODE_PASSWORD": oc_password,
+                **{
+                    f"XDG_{k}_HOME": str(oc_home / k) for k in ("CONFIG", "DATA", "CACHE", "STATE")
+                },
+            },
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        cleanup.callback(oc.wait, 10)
+        cleanup.callback(oc.terminate)
+        oc_auth = {
+            "Authorization": "Basic "
+            + base64.b64encode(f"opencode:{oc_password}".encode()).decode()
+        }
+
+        codex_home = home_dir / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        codex_port = _allocate_loopback_port()
+        codex_url = f"ws://127.0.0.1:{codex_port}"
+        discovery = on_loop(
+            _start_codex_model_discovery_process(
+                codex_path=codex,
+                listen_url=codex_url,
+                env={
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "HOME": str(home_dir),
+                    "CODEX_HOME": str(codex_home),
+                },
+                cwd=home_dir,
+            )
+        )
+        cleanup.callback(lambda: on_loop(_stop_codex_model_discovery_process(discovery)))
+        on_loop(_wait_for_discovery_listener(discovery, codex_port))
+
+        async def codex_initializes() -> bool:
+            client = CodexAppServerClient(ws_url=codex_url)
+            await client.connect()
+            await client.close()
+            return True
+
+        def rightful() -> dict[str, object]:
+            with ws_connect(f"ws://127.0.0.1:{attach.port}/probe?token={attach_token}"):
+                pass
+            return {
+                "relay": http_status(
+                    httpd.server_address[1],
+                    "POST",
+                    "/tool",
+                    {"Authorization": f"Bearer {relay_token}"},
+                ),
+                "attach": "accepted",
+                "opencode": http_status(oc_port, "GET", "/api/session", oc_auth),
+                "codex": on_loop(codex_initializes()),
+            }
+
+        deadline = time.monotonic() + 60
+        while http_status(oc_port, "GET", "/api/session", oc_auth) != 200:
+            assert time.monotonic() < deadline, "opencode serve never answered"
+            time.sleep(0.5)
+        expected_rightful = {"relay": 200, "attach": "accepted", "opencode": 200, "codex": True}
+        before = rightful()
+        listeners = {
+            "relay": httpd.server_address[1],
+            "attach": attach.port,
+            "opencode": oc_port,
+            "codex": codex_port,
+            "bridge_json": str(bridge_dir / "bridge.json"),
+            "codex_token": str(codex_ws_token_path(codex_port)),
+        }
+        (tmp_path / "listeners.json").write_text(json.dumps(listeners))
+        (tmp_path / "probe.py").write_text(_LOOPBACK_LISTENER_PROBE)
+        reader_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONPATH": os.environ["PYTHONPATH"],
+            "TMPDIR": tempfile.gettempdir(),
+        }
+        run_reader = functools.partial(
+            subprocess.run,
+            cwd=tmp_path,
+            env=reader_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        spec = OSEnvSpec(
+            type="caller_process", cwd=str(tmp_path), sandbox=active_sandbox_spec_factory()
+        )
+        outside = run_reader([sys.executable, "probe.py"])
+        if launch_path == "helper":
+            os_env = create_os_environment(spec)
+            assert os_env is not None
+            cleanup.callback(os_env.close)
+            result = run_async(os_env.shell(shlex.join([sys.executable, "probe.py"])))
+            inside, inside_detail = str(result.get("stdout", "")), result
+        else:
+            launcher = create_exec_launcher(sys.executable, resolve_sandbox(spec, tmp_path))
+            cleanup.callback(Path(launcher).unlink, missing_ok=True)
+            completed = run_reader([launcher, "probe.py"])
+            inside, inside_detail = completed.stdout, completed.stderr
+        after = rightful()
+    common = [
+        *(f"{name} tcp yes" for name in ("relay", "attach", "opencode", "codex")),
+        "relay anon 401",
+        # The direct-attach listener closes an unauthorized handshake with 1008 before
+        # accepting it, which uvicorn answers as HTTP 403.
+        "attach anon 403",
+        "opencode anon 401",
+        "codex anon 401",
+    ]
+    reached = [
+        *common,
+        "relay secret yes",
+        "relay keyed 200",
+        "codex secret yes",
+        "codex keyed 101",
+    ]
+    refused = [*common, "relay secret no", "codex secret no"]
+    assert before == expected_rightful, f"a rightful client failed before the run: {before}"
+    assert outside.stdout.splitlines() == reached, f"outside: {outside.stdout}; {outside.stderr}"
+    assert inside.splitlines() == refused, f"inside: {inside.splitlines()}; {inside_detail}"
+    assert after == expected_rightful, f"a rightful client failed after the run: {after}"
+
+
 # ---------------------------------------------------------------------------
 # Claude config
 # ---------------------------------------------------------------------------

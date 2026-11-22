@@ -115,8 +115,8 @@ _CODEX_VALUE_FLAGS = frozenset(
         "--local-provider",
         "--enable",
         "--disable",
-        # Names an env var holding the remote auth token; unlike the reserved
-        # ``--remote`` transport flag it takes a value and is caller-settable.
+        # Names an env var holding the remote auth token. It takes a value (so a
+        # positional prompt after it is found) but is reserved below.
         "--remote-auth-token-env",
     }
 )
@@ -127,8 +127,9 @@ _CODEX_VALUE_FLAGS = frozenset(
 # incoherent argv — e.g. ``codex app-server … --remote`` (app-server rejects
 # ``--remote`` on every codex version, clap exits 2) — so the thread never
 # starts. ``--remote-control`` is app-server-only and equally invalid on the TUI.
+# CORAL(S114): Omnigent sets ``--remote-auth-token-env`` for the app-server's token.
 _RESERVED_CODEX_TRANSPORT_TOKENS = frozenset(
-    {"app-server", "--listen", "--remote", "--remote-control"}
+    {"app-server", "--listen", "--remote", "--remote-control", "--remote-auth-token-env"}
 )
 
 
@@ -147,13 +148,13 @@ def reserved_codex_transport_arg(args: Sequence[str]) -> str | None:
         arg = args[index]
         if arg == "--":
             break
-        if arg.split("=", 1)[0] in _CODEX_VALUE_FLAGS:
-            # Skip the option and its value (an attached ``=`` form carries its own).
-            index += 1 if "=" in arg else 2
-            continue
         token = arg.split("=", 1)[0]
         if token in _RESERVED_CODEX_TRANSPORT_TOKENS:
             return token
+        if token in _CODEX_VALUE_FLAGS:
+            # Skip the option and its value (an attached ``=`` form carries its own).
+            index += 1 if "=" in arg else 2
+            continue
         index += 1
     return None
 

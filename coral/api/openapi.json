@@ -94,6 +94,11 @@
             "title": "Regions",
             "type": "array"
           },
+          "requires_structure_runtime": {
+            "default": false,
+            "title": "Requires Structure Runtime",
+            "type": "boolean"
+          },
           "unresolved": {
             "default": [],
             "items": {
@@ -275,6 +280,7 @@
               "label_sets": [],
               "loops": [],
               "regions": [],
+              "requires_structure_runtime": false,
               "unresolved": []
             }
           },

@@ -16,6 +16,7 @@ export interface Analysis {
   label_sets: LabelSet[];
   loops: LoopInfo[];
   regions: Region[];
+  requires_structure_runtime: boolean;
   unresolved: UnresolvedFact[];
 }
 

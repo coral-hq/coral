@@ -1120,11 +1120,30 @@ names, on macOS 27.2.1.
   `fsgetpath(2)` still returns the path of a named inode, and every path's
   metadata is readable. That matters for sockets the rules do not name
   (CRL-174).
-- Omnigent listeners outside both roots are not covered: on macOS the
-  codex-native app-server socket under `~/.omnigent/codex-native/`, and on
-  either platform loopback TCP listeners (the codex-native WebSocket
-  app-server, opencode's server, claude-native's relays, the runner's
-  direct-attach listener). That is from code, not measured (CRL-177).
+- Loopback TCP listeners. A step with the network on can still connect to
+  them, so each one must refuse a caller without its secret. The codex-native
+  app-server WebSocket was the only Omnigent one that did not. Since S114 it
+  takes a per-spawn token: Omnigent writes it to a 0600 file under
+  `<data dir>/codex-native/ws-tokens/`, codex refuses a WebSocket without it
+  (HTTP 401), and Omnigent's clients and the codex terminal send it.
+  claude-native's relays, the runner's direct-attach listener and opencode's
+  server already required their own secrets. The behaviour test, on macOS
+  26.3.1 with codex-cli 0.171.0 and opencode 2.1.4, connects to all four from
+  a sandboxed step and each refuses it; the step cannot read the codex token
+  file or the relay's `bridge.json`. Still open: a codex without `--ws-auth`
+  runs with no token and logs a warning; a sandbox read grant over the data
+  dir, or a data dir inside a workspace, exposes the token file (no Coral
+  configuration does either; under Coral the dir is `~/.coral`); codex's own
+  tool sandbox can read the whole disk in workspace-write mode and has none in
+  full-access mode, so a codex-native session's commands can read every
+  session's token file and drive its siblings; the codex terminal's
+  environment holds the token, as opencode's holds its password, which S111 guards on macOS and the
+  pid namespace on Linux (moving it off the environment is CRL-173); a
+  same-user process outside the sandbox can read the file (CRL-173, CRL-159);
+  the old codex-native socket under `~/.omnigent/codex-native/`, which no
+  current code starts, has no gate; new loopback listeners, other programs'
+  loopback services (CRL-174) and UDP are not covered. Linux was not
+  measured.
 - Other Omnigent terminals' clipboard sockets stay reachable (CRL-171).
 - Since S113 a Coral step's sandboxed Claude CLI no longer gets the user's
   `~/.claude` or `~/.claude.json`; other Omnigent agents that run claude-sdk
@@ -1153,15 +1172,16 @@ where ptrace between same-user processes is restricted. It does not stop that
 process from acting as the owner on a single-user server (CRL-159).
 
 **Open for the owner.** Whether to run Coral steps on untrusted content on
-macOS while CRL-171 is open, and on either platform while CRL-174, CRL-177 and
-CRL-181 are open, is the owner's risk decision (on a single-user server,
+macOS while CRL-171 is open, and on either platform while CRL-174 and CRL-181
+are open, is the owner's risk decision (on a single-user server,
 CRL-159 holds on both platforms). S111 and S112 closed the process reads and
 the connect to harness sockets under the configured and per-user default
 roots. S113 closed a sandboxed step CLI's access to the user's Claude config
 files (its settings `env` block still reaches the CLI, CRL-167). All three
 were measured on macOS 27.2.1, and no CI lane runs macOS (CRL-170); S113 is
 also checked on Linux by a bwrap test in CI. What S113 leaves open is in
-"Addendum: CRL-176 Claude config isolation". It is not decided here.
+"Addendum: CRL-176 Claude config isolation". S114 gates the codex-native
+app-server WebSocket, measured on macOS 26.3.1 only. It is not decided here.
 
 ## Addendum: CRL-176 Claude config isolation (2026-11-22)
 
