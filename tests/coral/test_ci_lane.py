@@ -22,6 +22,13 @@ SIGKILL_PROOFS = {
 }
 # The live proxy's unit test needs no key, so the lane guards the proxy's refusals.
 PROXY_UNIT_TEST = "tests/e2e/coral/test_live_proxy.py"
+RUNNER_LOSS = "tests/e2e/coral/test_runner_loss.py"
+# A killed step runner, an offline host's hold and return, and a retried step.
+RUNNER_LOSS_PROOFS = {
+    "test_a_killed_step_runner_is_relaunched_in_the_same_session",
+    "test_an_offline_host_holds_the_step_and_its_return_relaunches_it",
+    "test_retrying_a_blocked_step_fences_salvages_resets_and_briefs_a_new_session",
+}
 
 
 def _groups() -> dict[str, dict[str, str]]:
@@ -35,14 +42,20 @@ def _pytest_steps() -> list[dict[str, Any]]:
 def test_the_lane_runs_the_coral_e2e_files_on_two_workers() -> None:
     lane = _groups()[LANE]
 
-    # The proxy's quick tests first, so --dist=load spreads the stack tests over both workers.
-    assert lane["paths"].split() == [PROXY_UNIT_TEST, "tests/e2e/coral/test_skeleton.py"]
+    # The proxy's quick tests first, so --dist=load spreads the stack tests over both
+    # workers; this order is meant to keep the two longest, the default-lease proof and
+    # the host outage, off the same worker.
+    assert lane["paths"].split() == [
+        PROXY_UNIT_TEST,
+        "tests/e2e/coral/test_skeleton.py",
+        RUNNER_LOSS,
+    ]
     assert (lane["workers"], lane["dist"]) == ("2", "load")
     # misc never collects tests/e2e, so the lane is the only CI run of these files.
     assert "--ignore=tests/e2e" in _groups()["misc"]["paths"].split()
 
 
-def test_the_lane_runs_both_server_sigkill_proofs_and_the_proxy_unit_test() -> None:
+def test_the_lane_runs_the_sigkill_and_runner_loss_proofs_and_the_proxy_unit_test() -> None:
     paths = _groups()[LANE]["paths"].split()
     collected = {
         node.name
@@ -51,7 +64,7 @@ def test_the_lane_runs_both_server_sigkill_proofs_and_the_proxy_unit_test() -> N
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     }
 
-    assert collected >= SIGKILL_PROOFS
+    assert collected >= SIGKILL_PROOFS | RUNNER_LOSS_PROOFS
     assert PROXY_UNIT_TEST in paths
     assert "test_a_failing_live_run_shows_its_key_nowhere_in_the_report" in collected
 

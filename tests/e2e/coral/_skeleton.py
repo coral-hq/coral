@@ -19,9 +19,9 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -32,12 +32,16 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
+from coral.db.models.sessions import SessionBindingRow
 from coral.db.models.work import WorkerLeaseRow, WorkRow
 from omnigent.testing.process_reaper import _cmdline_references_dir, _is_pytest_process
 from tests._helpers.host import Host, isolated_host
+from tests._helpers.live_server import terminate_process
 from tests._helpers.polling import poll_until
 from tests._helpers.server_runner import ServerRunner, server_runner
 from tests.e2e._harness_probes import cli_unavailable_reason, skip_if_harness_cli_missing
+from tests.e2e.conftest import configure_mock_llm, get_mock_message_requests
+from tests.e2e.coral._claude_sdk_kit import tool_results
 from tests.e2e.coral.conftest import CORAL_TIER_B_HARNESS
 
 HANDOFF_TOOL = "mcp__omnigent__coral_submit_handoff"
@@ -65,8 +69,21 @@ main()
 _LOG_TAIL_CHARS = 3000
 # Set by the coral-e2e lane, where a CLI that installed but does not run must fail, not skip.
 REQUIRE_CLI_ENV = "CORAL_E2E_REQUIRE_CLI"
-_STOPPED = frozenset({"paused", "failed", "cancelled"})
+# A wait bound to a run ends at once when the run reaches one of these.
+STOPPED = frozenset({"paused", "failed", "cancelled"})
+# For a wait that goes on while the run is paused.
+FAILED = frozenset({"failed", "cancelled"})
 _T = TypeVar("_T")
+Wait = Callable[[Callable[[], Any], str], Any]
+
+
+@dataclass(frozen=True)
+class HostLaunch:
+    """How the stack's host daemon was started, so it can be started again the same way."""
+
+    argv: tuple[str, ...]
+    env: dict[str, str] = field(repr=False)
+    cwd: str
 
 
 @dataclass
@@ -75,6 +92,7 @@ class Skeleton:
     One running stack; ``harness_tmp`` is the host's private harness socket root.
 
     Without ``failure_log_tails``, as against a real model, failures carry no log text.
+    ``respawned`` holds the hosts :func:`respawn_host` started; ``host`` is the newest.
     """
 
     root: Path
@@ -83,7 +101,9 @@ class Skeleton:
     client: httpx.Client
     repo: Path
     harness_tmp: Path
+    host_launch: HostLaunch
     failure_log_tails: bool = True
+    respawned: list[Host] = field(default_factory=list)
 
     def log_tails(self) -> str:
         """The end of every log under the stack root, for failure messages."""
@@ -311,14 +331,17 @@ def skeleton_stack(
     root.mkdir(parents=True, exist_ok=True)
     # Under /tmp to stay within the AF_UNIX path limit for harness sockets.
     harness_tmp = Path(tempfile.mkdtemp(dir="/tmp", prefix="crl-"))
+    # The stack's own temp entries go here, short and removed with the stack.
+    stack_tmp = Path(tempfile.mkdtemp(prefix="crl-t-"))
     config = write_server_config(
         root / "server.yaml", mock_url=mock_url, lease_s=lease_s, grace_s=grace_s
     )
-    base_env = minimal_env()
-    processes = _StackProcesses((root, harness_tmp))
+    base_env = {**minimal_env(), "TMPDIR": str(stack_tmp)}
+    processes = _StackProcesses((root, harness_tmp, stack_tmp))
     with ExitStack() as resources:
         resources.enter_context(_sigterm_unwinds())
         resources.callback(shutil.rmtree, harness_tmp, ignore_errors=True)
+        resources.callback(shutil.rmtree, stack_tmp, ignore_errors=True)
         resources.callback(processes.reap)
         started = server_runner(
             root,
@@ -346,10 +369,17 @@ def skeleton_stack(
                 config=host_config,
             )
         )
-        # Runs first at exit, while the daemons still hold their children.
+        respawned: list[Host] = []
+        resources.callback(lambda: [terminate_process(again.proc) for again in respawned])
+        # Runs first at exit, while the daemons still hold their children; a daemon that
+        # already ended is skipped, since its pid may belong to another process by now.
         resources.callback(
             lambda: processes.remember(
-                host.proc.pid, None if server.server is None else server.server.pid
+                *(
+                    daemon.pid
+                    for daemon in (host.proc, *(again.proc for again in respawned), server.server)
+                    if daemon is not None and daemon.poll() is None
+                )
             )
         )
         _reported(
@@ -357,10 +387,22 @@ def skeleton_stack(
             "The host's start",
             lambda: host.wait_online(client, timeout=health_timeout, poll_interval=0.25),
         )
+        launched = psutil.Process(host.proc.pid)
+        launch = HostLaunch(tuple(host.proc.args), launched.environ(), launched.cwd())
         info = client.get("/v1/coral/info")
         assert info.status_code == 200, info.text
         repo = make_repo(root / "repo")
-        yield Skeleton(root, server, host, client, repo, harness_tmp, failure_log_tails)
+        yield Skeleton(
+            root,
+            server,
+            host,
+            client,
+            repo,
+            harness_tmp,
+            launch,
+            failure_log_tails=failure_log_tails,
+            respawned=respawned,
+        )
 
 
 def _reported(log_tails: bool, what: str, step: Callable[[], _T]) -> _T:
@@ -383,6 +425,35 @@ def start_server(skeleton: Skeleton) -> None:
     _reported(skeleton.failure_log_tails, "The server's restart", skeleton.server.start_server)
 
 
+def respawn_host(skeleton: Skeleton, *, timeout: float = 60.0) -> Host:
+    """
+    Start the host daemon again after the caller ended it: the same command line, home,
+    identity and environment, its output added to the same log. Returns it once online.
+
+    Kept here because ``isolated_host`` refuses a home that already holds an identity.
+    """
+    ended = skeleton.host
+    assert ended.proc.poll() is not None, f"host {ended.proc.pid} is still running"
+    launch = skeleton.host_launch
+    with ended.log_path.open("ab") as log:
+        proc = subprocess.Popen(
+            list(launch.argv),
+            env=dict(launch.env),
+            cwd=launch.cwd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    host = Host(proc, ended.host_id, ended.home, ended.log_path)
+    skeleton.respawned.append(host)
+    skeleton.host = host
+    _reported(
+        skeleton.failure_log_tails,
+        "The host's restart",
+        lambda: host.wait_online(skeleton.client, timeout=timeout, poll_interval=0.25),
+    )
+    return host
+
+
 class _ProbeError(Exception):
     """A probe's own failure, kept apart from the wait's timeout."""
 
@@ -394,15 +465,16 @@ def wait_for(
     what: str,
     skeleton: Skeleton,
     run_id: str | None = None,
+    ends_on: Collection[str] = STOPPED,
     poll_interval: float = 0.5,
 ) -> _T:
     """
     Poll until ``probe`` returns a value other than ``None``, up to an absolute monotonic deadline.
 
-    With ``run_id``, a run that pauses, fails or is cancelled while the probe has nothing
-    ends the wait at once. Either failure carries the run's detail, ``claude --version``
-    and, unless the stack turned them off, its log tails; a probe's own assertion is
-    raised as it is.
+    With ``run_id``, a run whose status is in ``ends_on`` (paused, failed or cancelled)
+    while the probe has nothing ends the wait at once. Either failure carries the run's
+    detail, ``claude --version`` and, unless the stack turned them off, its log tails; a
+    probe's own assertion is raised as it is.
     """
     found: list[_T] = []
     stopped: list[str] = []
@@ -416,7 +488,7 @@ def wait_for(
         if value is not None:
             found.append(value)
             return True
-        if run is not None and run["status"] in _STOPPED:
+        if run is not None and run["status"] in ends_on:
             stopped.append(f"{run['status']} ({run['pause_reason']}): {run['causes']}")
             return True
         return False
@@ -500,6 +572,58 @@ def detail(client: httpx.Client, run_id: str) -> dict[str, Any]:
     return response.json()
 
 
+def start_review_loop(
+    skeleton: Skeleton, *, impl_token: str, review_token: str, start_key: str
+) -> str:
+    """Store the review-loop workflow and start it on the stack's repository; return the run id."""
+    workflow_id = save_workflow(
+        skeleton.client, review_loop_yaml(impl_token=impl_token, review_token=review_token)
+    )
+    return start_run(
+        skeleton.client,
+        workflow_id=workflow_id,
+        host_id=skeleton.host.host_id,
+        repo=skeleton.repo,
+        start_key=start_key,
+    )["run_id"]
+
+
+def finished(client: httpx.Client, run_id: str) -> dict[str, Any] | None:
+    """The run's detail once it completed, failed or was cancelled."""
+    found = detail(client, run_id)
+    return found if found["status"] in {"completed", "failed", "cancelled"} else None
+
+
+def log_entries(client: httpx.Client, run_id: str) -> list[dict[str, Any]]:
+    """Every run-log row with its body, in order, read page by page."""
+    entries: list[dict[str, Any]] = []
+    after: int | None = 0
+    while after is not None:
+        params = {"limit": 100, "after_seq": after}
+        page = client.get(f"{RUNS}/{run_id}/log", params=params).json()
+        entries += page["data"]
+        after = page["next_after_seq"]
+    return entries
+
+
+def log_kinds(client: httpx.Client, run_id: str) -> list[str]:
+    """The kind of every run-log row, in order."""
+    return [entry["kind"] for entry in log_entries(client, run_id)]
+
+
+def waiter(
+    skeleton: Skeleton, run_id: str, deadline: float, *, ends_on: Collection[str] = STOPPED
+) -> Wait:
+    """:func:`wait_for` bound to one run and one absolute deadline."""
+
+    def wait(probe: Callable[[], Any], what: str) -> Any:
+        return wait_for(
+            probe, deadline=deadline, what=what, skeleton=skeleton, run_id=run_id, ends_on=ends_on
+        )
+
+    return wait
+
+
 def coral_sessions(client: httpx.Client, run_id: str) -> list[dict[str, Any]]:
     """
     Every session labelled with the run, archived ones included, read in full; the list
@@ -524,6 +648,50 @@ def session(client: httpx.Client, session_id: str) -> dict[str, Any]:
     response = client.get(f"/v1/sessions/{session_id}")
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def runner_back(client: httpx.Client, session_id: str) -> Callable[[], str | None]:
+    """
+    A probe: the session's runner id once the server reports its runner online.
+
+    Within 90 s of a server SIGKILL this reads the killed server's stamp, so use
+    ``reconnected`` to know a tunnel is back.
+    """
+
+    def probe() -> str | None:
+        found = session(client, session_id)
+        return found["runner_id"] if found["runner_online"] else None
+
+    return probe
+
+
+def reconnected(skeleton: Skeleton, log: Path, runner_id: str) -> Callable[[], bool | None]:
+    """A probe: the restarted server's own log shows the host and the runner connected to it."""
+    lines = (f"Host {skeleton.host.host_id} connected", f"Runner {runner_id} connected")
+
+    def probe() -> bool | None:
+        text = log.read_text(errors="replace")
+        return True if all(line in text for line in lines) else None
+
+    return probe
+
+
+def _item_texts(items: list[dict[str, Any]]) -> list[str]:
+    """The text of each user message among a session's items."""
+    return [
+        block["text"]
+        for item in items
+        if item.get("type") == "message" and item.get("role") == "user"
+        for block in item.get("content") or []
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    ]
+
+
+def session_user_texts(client: httpx.Client, session_id: str) -> list[str]:
+    """The text of each user message the session holds, in order."""
+    response = client.get(f"/v1/sessions/{session_id}/items", params={"limit": 1000})
+    assert response.status_code == 200, response.text
+    return _item_texts(response.json()["data"])
 
 
 def server_logs(skeleton: Skeleton) -> list[Path]:
@@ -560,6 +728,43 @@ def group_members(group_id: int) -> list[psutil.Process]:
             if os.getpgid(proc.pid) == group_id and proc.status() != psutil.STATUS_ZOMBIE:
                 members.append(proc)
     return members
+
+
+def group_tree(group_id: int) -> list[psutil.Process]:
+    """
+    The live members of the process group ``group_id`` and every descendant of theirs.
+
+    A descendant may have left the group yet still be the group's work: under Linux
+    bwrap's ``--new-session`` a sandboxed CLI runs in a session of its own below the
+    runner's harness. Taken before a fault, it is what must end with the group.
+    """
+    found: dict[int, psutil.Process] = {}
+    for member in group_members(group_id):
+        found.setdefault(member.pid, member)
+        with contextlib.suppress(psutil.Error):
+            for child in member.children(recursive=True):
+                found.setdefault(child.pid, child)
+    return list(found.values())
+
+
+def still_running(processes: Iterable[psutil.Process]) -> list[psutil.Process]:
+    """Those of ``processes`` still running; a zombie, or a reused pid, does not count."""
+    running = []
+    for proc in processes:
+        with contextlib.suppress(psutil.Error):
+            if proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE:
+                running.append(proc)
+    return running
+
+
+def group_tree_ended(group_id: int, tree: Iterable[psutil.Process]) -> bool:
+    """Whether the group has no live member and no process of ``tree`` still runs."""
+    return not group_members(group_id) and not still_running(tree)
+
+
+def argvs(processes: Iterable[psutil.Process]) -> list[list[str]]:
+    """The command line of each process; empty for one that is gone."""
+    return [_argv(proc) for proc in processes]
 
 
 def group_stopped(group_id: int) -> bool:
@@ -608,6 +813,14 @@ def work_items(skeleton: Skeleton, run_id: str) -> list[WorkItem]:
             )
             for row in rows
         ]
+
+
+def binding_generation(skeleton: Skeleton, session_id: str) -> int | None:
+    """The slot generation the session's Coral binding names, if it has one."""
+    with _read_database(skeleton) as db:
+        found = select(SessionBindingRow).where(SessionBindingRow.session_id == session_id)
+        rows = db.execute(found).scalars().all()
+        return rows[0].session_generation if len(rows) == 1 else None
 
 
 def worker_lease_holder(skeleton: Skeleton) -> str | None:
@@ -669,6 +882,47 @@ def mock_holds_a_call(mock_url: str) -> bool:
     return bool(response.json()["pending"])
 
 
+def mock_auth(mock_url: str) -> dict[str, Any]:
+    """The host's model credential: the mock's dummy key and root URL."""
+    return {"auth": {"type": "api_key", "api_key": "mock-key", "base_url": mock_url}}
+
+
+def queue(mock_url: str, token: str, responses: list[dict[str, Any]]) -> None:
+    """Replace the queue of ``token``; only the step sessions' own calls may draw from it."""
+    configure_mock_llm(mock_url, responses, match=token, required_tools=[HANDOFF_TOOL])
+
+
+def held(response: dict[str, Any]) -> dict[str, Any]:
+    """The mock response, held until the test releases it."""
+    return {**response, "block": True}
+
+
+def held_activation(wait: Wait, mock_url: str, token: str, number: int) -> str:
+    """The activation of the ``number``-th brief with ``token``, once its first call is held."""
+
+    def found() -> str | None:
+        ledger = get_mock_message_requests(mock_url)
+        mine = [brief for brief in briefs(ledger) if token in brief]
+        if len(mine) >= number and mock_holds_a_call(mock_url):
+            return activation_from_brief(mine[number - 1])
+        return None
+
+    return wait(found, f"brief {number} with {token}")
+
+
+def result_texts(mock_url: str, call_id: str) -> list[str]:
+    """The distinct texts of the tool result the CLI sent back for one scripted call."""
+    texts = []
+    for raw in tool_results(get_mock_message_requests(mock_url), call_id=call_id):
+        content = json.loads(raw).get("content")
+        if isinstance(content, list):
+            content = "".join(
+                block.get("text", "") for block in content if isinstance(block, dict)
+            )
+        texts.append(str(content))
+    return list(dict.fromkeys(texts))
+
+
 def activation_from_brief(brief: str) -> str:
     match = _ACTIVATION_LINE.search(brief)
     assert match is not None, brief[:500]
@@ -687,6 +941,7 @@ def handoff_call(
     report: str,
     status: str = "done",
     label: str | None = None,
+    blocked_reason: str | None = None,
 ) -> dict[str, Any]:
     arguments: dict[str, Any] = {
         "activation_id": activation_id,
@@ -695,4 +950,6 @@ def handoff_call(
     }
     if label is not None:
         arguments["label"] = label
+    if blocked_reason is not None:
+        arguments["blocked_reason"] = blocked_reason
     return tool_call(HANDOFF_TOOL, arguments, call_id=call_id)

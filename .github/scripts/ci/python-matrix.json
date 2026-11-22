@@ -77,7 +77,7 @@
   },
   {
     "group": "coral-e2e",
-    "paths": "tests/e2e/coral/test_live_proxy.py tests/e2e/coral/test_skeleton.py",
+    "paths": "tests/e2e/coral/test_live_proxy.py tests/e2e/coral/test_skeleton.py tests/e2e/coral/test_runner_loss.py",
     "workers": "2",
     "dist": "load"
   },

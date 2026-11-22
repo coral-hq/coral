@@ -34,9 +34,8 @@ import yaml
 
 from coral.bridge.mapping import NEXT_RESYNC_AT
 from coral.db.enum_codecs import WorkStatus
-from tests.e2e.conftest import configure_mock_llm, get_mock_message_requests, release_mock_gate
+from tests.e2e.conftest import get_mock_message_requests, release_mock_gate
 from tests.e2e.coral import _skeleton as sk
-from tests.e2e.coral._claude_sdk_kit import tool_results
 from tests.e2e.coral._live_proxy import LiveProxy, Secret, live_proxy
 
 # Absolute deadline for the whole scenario, below the marker's limit.
@@ -71,81 +70,6 @@ LIVE_KEY = "ANTHROPIC_API_KEY"
 LIVE_MODEL = "CORAL_E2E_LIVE_MODEL"
 LEASE_KEYS = {"coral_worker_lease_seconds", "coral_runner_reconnect_grace_s"}
 
-_Wait = Callable[[Callable[[], Any], str], Any]
-
-
-def _queue(mock: str, token: str, responses: list[dict[str, Any]]) -> None:
-    """Replace the step's queue; only the step sessions' own calls may draw from it."""
-    configure_mock_llm(mock, responses, match=token, required_tools=[sk.HANDOFF_TOOL])
-
-
-def _held(response: dict[str, Any]) -> dict[str, Any]:
-    return {**response, "block": True}
-
-
-def _mock_auth(mock: str) -> dict[str, Any]:
-    """The host's model credential: the mock's dummy key and root URL."""
-    return {"auth": {"type": "api_key", "api_key": "mock-key", "base_url": mock}}
-
-
-def _result_texts(mock: str, call_id: str) -> list[str]:
-    """The distinct texts of the tool result the CLI sent back for one scripted call."""
-    texts = []
-    for raw in tool_results(get_mock_message_requests(mock), call_id=call_id):
-        content = json.loads(raw).get("content")
-        if isinstance(content, list):
-            content = "".join(
-                block.get("text", "") for block in content if isinstance(block, dict)
-            )
-        texts.append(str(content))
-    return list(dict.fromkeys(texts))
-
-
-def _item_texts(items: list[dict[str, Any]]) -> list[str]:
-    """The text of each user message among a session's items."""
-    return [
-        block["text"]
-        for item in items
-        if item.get("type") == "message" and item.get("role") == "user"
-        for block in item.get("content") or []
-        if isinstance(block, dict) and isinstance(block.get("text"), str)
-    ]
-
-
-def _start_review_loop(
-    stack: sk.Skeleton, *, impl_token: str, review_token: str, start_key: str
-) -> str:
-    workflow_id = sk.save_workflow(
-        stack.client, sk.review_loop_yaml(impl_token=impl_token, review_token=review_token)
-    )
-    return sk.start_run(
-        stack.client,
-        workflow_id=workflow_id,
-        host_id=stack.host.host_id,
-        repo=stack.repo,
-        start_key=start_key,
-    )["run_id"]
-
-
-def _waiter(stack: sk.Skeleton, run_id: str, deadline: float) -> _Wait:
-    def wait(probe: Callable[[], Any], what: str) -> Any:
-        return sk.wait_for(probe, deadline=deadline, what=what, skeleton=stack, run_id=run_id)
-
-    return wait
-
-
-def _held_activation(wait: _Wait, mock: str, token: str, number: int) -> str:
-    """The activation of the step's ``number``-th brief, once its first call is held."""
-
-    def found() -> str | None:
-        ledger = get_mock_message_requests(mock)
-        mine = [brief for brief in sk.briefs(ledger) if token in brief]
-        if len(mine) >= number and sk.mock_holds_a_call(mock):
-            return sk.activation_from_brief(mine[number - 1])
-        return None
-
-    return wait(found, f"brief {number} with {token}")
-
 
 def _step_session(client: httpx.Client, run_id: str, node_id: str) -> str:
     """The session of the node's only slot so far."""
@@ -178,33 +102,12 @@ def _resolve_route(anchor: str, elicitation_id: str) -> str:
     return f"/v1/sessions/{anchor}/elicitations/{elicitation_id}/resolve"
 
 
-def _finished(client: httpx.Client, run_id: str) -> dict[str, Any] | None:
-    found = sk.detail(client, run_id)
-    return found if found["status"] in {"completed", "failed", "cancelled"} else None
-
-
-def _log_kinds(client: httpx.Client, run_id: str) -> list[str]:
-    """The kind of every run-log row, in order, read page by page."""
-    kinds: list[str] = []
-    after: int | None = 0
-    while after is not None:
-        params = {"limit": 100, "after_seq": after}
-        page = client.get(f"{sk.RUNS}/{run_id}/log", params=params).json()
-        kinds += [entry["kind"] for entry in page["data"]]
-        after = page["next_after_seq"]
-    return kinds
-
-
 def _briefed(client: httpx.Client, steps: list[dict[str, Any]]) -> dict[str, list[str]]:
     """Each step session's brief items."""
     return {
         session["id"]: [
             text
-            for text in _item_texts(
-                client.get(f"/v1/sessions/{session['id']}/items", params={"limit": 1000}).json()[
-                    "data"
-                ]
-            )
+            for text in sk.session_user_texts(client, session["id"])
             if "Coral step brief." in text
         ]
         for session in steps
@@ -233,27 +136,6 @@ def _sigkill_server(stack: sk.Skeleton) -> None:
     sk.start_server(stack)
 
 
-def _reconnected(stack: sk.Skeleton, log: Path, runner_id: str) -> Callable[[], bool | None]:
-    """A probe: the restarted server's own log shows the host and the runner connected to it."""
-    lines = (f"Host {stack.host.host_id} connected", f"Runner {runner_id} connected")
-
-    def probe() -> bool | None:
-        text = log.read_text(errors="replace")
-        return True if all(line in text for line in lines) else None
-
-    return probe
-
-
-def _runner_back(client: httpx.Client, session_id: str) -> Callable[[], str | None]:
-    """The session's runner id once its runner is connected to the running server."""
-
-    def probe() -> str | None:
-        found = sk.session(client, session_id)
-        return found["runner_id"] if found["runner_online"] else None
-
-    return probe
-
-
 @pytest.mark.timeout(300, method="signal")
 def test_the_review_loop_runs_end_to_end_on_a_real_stack(
     tmp_path: Path, isolated_mock_llm_server_url: str
@@ -265,12 +147,12 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
     # Longer, so a reviewer call that also quotes the implementer's token routes here.
     review_token = f"review-{uid}-pass"
     write, early, done, denied = (f"{name}-{uid}" for name in ("write", "early", "done", "deny"))
-    _queue(mock, impl_token, [_held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=write))])
-    _queue(
+    sk.queue(mock, impl_token, [sk.held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=write))])
+    sk.queue(
         mock,
         review_token,
         [
-            _held(
+            sk.held(
                 sk.tool_call(sk.WRITE_TOOL, {"path": "owned.txt", "content": "x"}, call_id=denied)
             )
         ],
@@ -278,22 +160,22 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
     deadline = time.monotonic() + SCENARIO_S
 
     with sk.skeleton_stack(
-        tmp_path / "stack", mock_url=mock, host_config=_mock_auth(mock), lease_s=SHORT_LEASE_S
+        tmp_path / "stack", mock_url=mock, host_config=sk.mock_auth(mock), lease_s=SHORT_LEASE_S
     ) as stack:
         client = stack.client
-        run_id = _start_review_loop(
+        run_id = sk.start_review_loop(
             stack, impl_token=impl_token, review_token=review_token, start_key=f"skeleton-{uid}"
         )
-        wait = _waiter(stack, run_id, deadline)
+        wait = sk.waiter(stack, run_id, deadline)
 
         # Implement, pass 1: a handoff before the check is refused, then accepted after it.
-        implement_1 = _held_activation(wait, mock, impl_token, 1)
+        implement_1 = sk.held_activation(wait, mock, impl_token, 1)
         # Read while the step's CLI is held on its first call.
         cli_switches = {
             (env.get("DISABLE_AUTOUPDATER"), env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             for env in sk.cli_environs(stack.root)
         }
-        _queue(
+        sk.queue(
             mock,
             impl_token,
             [
@@ -302,14 +184,14 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
                 sk.handoff_call(implement_1, call_id=done, report="Checked greeting.txt."),
                 DONE,
                 # The next pass's first call, held until its brief is read.
-                _held(sk.tool_call(sk.SHELL_TOOL, GREP, call_id=f"grep2-{uid}")),
+                sk.held(sk.tool_call(sk.SHELL_TOOL, GREP, call_id=f"grep2-{uid}")),
             ],
         )
         release_mock_gate(mock)
 
         # Review, pass 1: the write was denied; the reviewer asks for one more pass.
-        review_1 = _held_activation(wait, mock, review_token, 1)
-        _queue(
+        review_1 = sk.held_activation(wait, mock, review_token, 1)
+        sk.queue(
             mock,
             review_token,
             [
@@ -321,21 +203,21 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
                     label="changes_requested",
                 ),
                 DONE,
-                _held(sk.tool_call(sk.SHELL_TOOL, CAT, call_id=f"cat2-{uid}")),
+                sk.held(sk.tool_call(sk.SHELL_TOOL, CAT, call_id=f"cat2-{uid}")),
             ],
         )
         release_mock_gate(mock)
 
         # Implement, pass 2, then review, pass 2 approves.
-        implement_2 = _held_activation(wait, mock, impl_token, 2)
-        _queue(
+        implement_2 = sk.held_activation(wait, mock, impl_token, 2)
+        sk.queue(
             mock,
             impl_token,
             [sk.handoff_call(implement_2, call_id=f"done2-{uid}", report="Checked again."), DONE],
         )
         release_mock_gate(mock)
-        review_2 = _held_activation(wait, mock, review_token, 2)
-        _queue(
+        review_2 = sk.held_activation(wait, mock, review_token, 2)
+        sk.queue(
             mock,
             review_token,
             [
@@ -355,11 +237,11 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
         waiting = sk.detail(client, run_id)
         answered = client.post(resolve, json=APPROVE)
 
-        run = wait(lambda: _finished(client, run_id), "the run to finish")
+        run = wait(lambda: sk.finished(client, run_id), "the run to finish")
         sessions = sk.coral_sessions(client, run_id)
         steps = [session for session in sessions if session["labels"]["coral.role"] == "step"]
         briefed = _briefed(client, steps)
-        kinds = _log_kinds(client, run_id)
+        kinds = sk.log_kinds(client, run_id)
         logs = "\n".join(path.read_text(errors="replace") for path in stack.root.rglob("*.log"))
         worktree = Path(run["target"]["worktree_path"])
         reviewer_wrote = (worktree / "owned.txt").exists()
@@ -370,12 +252,12 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
     # The step's CLI ran with its self-update and non-essential traffic off.
     assert cli_switches == {("1", "1")}, cli_switches
     # One evidence rejection, then the same activation's handoff is accepted.
-    [rejected] = _result_texts(mock, early)
-    [accepted] = _result_texts(mock, done)
+    [rejected] = sk.result_texts(mock, early)
+    [accepted] = sk.result_texts(mock, done)
     assert '"accepted": false' in rejected and '"reason": "evidence.missing"' in rejected, rejected
     assert '"accepted": true' in accepted, accepted
     # The reviewer's write is denied and leaves the worktree unchanged.
-    [denial] = _result_texts(mock, denied)
+    [denial] = sk.result_texts(mock, denied)
     assert "report-only" in denial, denial
     assert not reviewer_wrote
     # The loop ran once: two passes of each step, each its own activation.
@@ -416,29 +298,30 @@ def test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate(
     impl_token = f"impl-{uid}"
     review_token = f"review-{uid}-pass"
     across_kill = f"handoff-{uid}"
-    _queue(mock, impl_token, [_held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=f"w-{uid}"))])
-    _queue(mock, review_token, [_held(sk.tool_call(sk.SHELL_TOOL, CAT, call_id=f"cat-{uid}"))])
+    first_write = sk.held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=f"w-{uid}"))
+    sk.queue(mock, impl_token, [first_write])
+    sk.queue(mock, review_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, CAT, call_id=f"cat-{uid}"))])
     deadline = time.monotonic() + SCENARIO_S
 
     with sk.skeleton_stack(
-        tmp_path / "stack", mock_url=mock, host_config=_mock_auth(mock), lease_s=SHORT_LEASE_S
+        tmp_path / "stack", mock_url=mock, host_config=sk.mock_auth(mock), lease_s=SHORT_LEASE_S
     ) as stack:
         client = stack.client
-        run_id = _start_review_loop(
+        run_id = sk.start_review_loop(
             stack, impl_token=impl_token, review_token=review_token, start_key=f"kills-{uid}"
         )
-        wait = _waiter(stack, run_id, deadline)
+        wait = sk.waiter(stack, run_id, deadline)
 
         # Implement, pass 1: its third model call is held mid-turn across the first kill.
-        implement_1 = _held_activation(wait, mock, impl_token, 1)
-        _queue(
+        implement_1 = sk.held_activation(wait, mock, impl_token, 1)
+        sk.queue(
             mock,
             impl_token,
             [
                 sk.tool_call(sk.SHELL_TOOL, GREP, call_id=f"grep-{uid}"),
-                _held(sk.handoff_call(implement_1, call_id=across_kill, report="Checked it.")),
+                sk.held(sk.handoff_call(implement_1, call_id=across_kill, report="Checked it.")),
                 DONE,
-                _held(sk.tool_call(sk.SHELL_TOOL, GREP, call_id=f"grep2-{uid}")),
+                sk.held(sk.tool_call(sk.SHELL_TOOL, GREP, call_id=f"grep2-{uid}")),
             ],
         )
         release_mock_gate(mock)
@@ -448,20 +331,20 @@ def test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate(
             return True if len(calls) == 3 and sk.mock_holds_a_call(mock) else None
 
         wait(third_call_held, "the implementer's third call")
-        kinds_at_kill = _log_kinds(client, run_id)
+        kinds_at_kill = sk.log_kinds(client, run_id)
         implementer = _step_session(client, run_id, "implement")
         runner_before = sk.session(client, implementer)["runner_id"]
         starts = len(sk.server_logs(stack))
         _sigkill_server(stack)
         # The handoff needs the host's workspace channel; release only once both are back.
         [log] = sk.server_logs(stack)[starts:]
-        wait(_reconnected(stack, log, runner_before), "the host and the implementer's runner")
-        runner_after = wait(_runner_back(client, implementer), "the implementer's runner")
+        wait(sk.reconnected(stack, log, runner_before), "the host and the implementer's runner")
+        runner_after = wait(sk.runner_back(client, implementer), "the implementer's runner")
         release_mock_gate(mock)
 
         # Review, pass 1 asks for one more pass; pass 2 of each step, then approve.
-        review_1 = _held_activation(wait, mock, review_token, 1)
-        _queue(
+        review_1 = sk.held_activation(wait, mock, review_token, 1)
+        sk.queue(
             mock,
             review_token,
             [
@@ -472,19 +355,19 @@ def test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate(
                     label="changes_requested",
                 ),
                 DONE,
-                _held(sk.tool_call(sk.SHELL_TOOL, CAT, call_id=f"cat2-{uid}")),
+                sk.held(sk.tool_call(sk.SHELL_TOOL, CAT, call_id=f"cat2-{uid}")),
             ],
         )
         release_mock_gate(mock)
-        implement_2 = _held_activation(wait, mock, impl_token, 2)
-        _queue(
+        implement_2 = sk.held_activation(wait, mock, impl_token, 2)
+        sk.queue(
             mock,
             impl_token,
             [sk.handoff_call(implement_2, call_id=f"done2-{uid}", report="Checked again."), DONE],
         )
         release_mock_gate(mock)
-        review_2 = _held_activation(wait, mock, review_token, 2)
-        _queue(
+        review_2 = sk.held_activation(wait, mock, review_token, 2)
+        sk.queue(
             mock,
             review_token,
             [
@@ -505,11 +388,11 @@ def test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate(
         answered = client.post(resolve, json=APPROVE)
         repeated = client.post(resolve, json=APPROVE)
 
-        run = wait(lambda: _finished(client, run_id), "the run to finish")
+        run = wait(lambda: sk.finished(client, run_id), "the run to finish")
         sessions = sk.coral_sessions(client, run_id)
         steps = [session for session in sessions if session["labels"]["coral.role"] == "step"]
         briefed = _briefed(client, steps)
-        kinds = _log_kinds(client, run_id)
+        kinds = sk.log_kinds(client, run_id)
         logs = "\n".join(path.read_text(errors="replace") for path in stack.root.rglob("*.log"))
         checkout, outcome = _checkout(stack, run_id)
         greeting = (stack.repo / "greeting.txt").read_text() if checkout.returncode == 0 else None
@@ -519,7 +402,7 @@ def test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate(
     assert "engine.handoff_received" not in kinds_at_kill, kinds_at_kill
     # The turn held across the first kill went on in the same session and runner.
     assert runner_after == runner_before
-    [accepted] = _result_texts(mock, across_kill)
+    [accepted] = sk.result_texts(mock, across_kill)
     assert '"accepted": true' in accepted, accepted
     # The gate kept its visit, token and prompt across the second kill, and answered once.
     assert reopened == opened, (opened, reopened)
@@ -582,8 +465,9 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
     impl_token = f"impl-{uid}"
     review_token = f"review-{uid}-pass"
     handed = f"handoff-{uid}"
-    _queue(mock, impl_token, [_held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=f"w-{uid}"))])
-    _queue(mock, review_token, [_held(sk.tool_call(sk.SHELL_TOOL, CAT, call_id=f"cat-{uid}"))])
+    first_write = sk.held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=f"w-{uid}"))
+    sk.queue(mock, impl_token, [first_write])
+    sk.queue(mock, review_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, CAT, call_id=f"cat-{uid}"))])
     began = time.monotonic()
     deadline = began + DEFAULT_LEASE_SCENARIO_S
     # Seconds after the runner's stop and the server's kill at which each phase was seen.
@@ -591,21 +475,21 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
 
     # No lease or grace key: the production defaults.
     with sk.skeleton_stack(
-        tmp_path / "stack", mock_url=mock, host_config=_mock_auth(mock)
+        tmp_path / "stack", mock_url=mock, host_config=sk.mock_auth(mock)
     ) as stack:
         client = stack.client
         server_config = yaml.safe_load((stack.root / "server.yaml").read_text())
-        run_id = _start_review_loop(
+        run_id = sk.start_review_loop(
             stack, impl_token=impl_token, review_token=review_token, start_key=f"lease-{uid}"
         )
-        wait = _waiter(stack, run_id, deadline)
+        wait = sk.waiter(stack, run_id, deadline)
 
         # The implementer's first call is held; its runner is stopped across the restart.
-        implement = _held_activation(wait, mock, impl_token, 1)
+        implement = sk.held_activation(wait, mock, impl_token, 1)
         # This hold outlasts the CLI's wait for a first byte (about two minutes on 2.1.325),
         # after which it sends the call again; the repeat is held too.
-        _queue(
-            mock, impl_token, [_held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=f"w2-{uid}"))]
+        sk.queue(
+            mock, impl_token, [sk.held(sk.tool_call(sk.WRITE_TOOL, GREETING, call_id=f"w2-{uid}"))]
         )
         implementer = _step_session(client, run_id, "implement")
         runner_before = sk.session(client, implementer)["runner_id"]
@@ -633,12 +517,12 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(pid, signal.SIGCONT)
         seen["continued"] = time.monotonic() - killed
-        runner_after = wait(_runner_back(client, implementer), "the stopped runner to reconnect")
+        runner_after = wait(sk.runner_back(client, implementer), "the stopped runner to reconnect")
         seen["back"] = time.monotonic() - killed
         wait(_resynced_after(stack, run_id, time.time()), "one more resync")
         seen["resynced"] = time.monotonic() - killed
         effects = [item.effect_type for item in sk.work_items(stack, run_id)]
-        kinds_before_release = _log_kinds(client, run_id)
+        kinds_before_release = sk.log_kinds(client, run_id)
         launches_before_release = stack.host.log_path.read_text().count("Launched runner ")
         runner_alive = psutil.pid_exists(pid)
         held_calls = sk.calls_carrying(get_mock_message_requests(mock), impl_token)
@@ -646,7 +530,7 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
         liveness_lines = log.read_text(errors="replace")
 
         # Released, the turn goes on and its handoff is accepted; the run then completes.
-        _queue(
+        sk.queue(
             mock,
             impl_token,
             [
@@ -659,10 +543,10 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
         released = time.monotonic()
         for _ in range(sent):
             release_mock_gate(mock)
-        review = _held_activation(wait, mock, review_token, 1)
+        review = sk.held_activation(wait, mock, review_token, 1)
         reviewer_after = time.monotonic() - released
         seen["handed_off"] = time.monotonic() - killed
-        _queue(
+        sk.queue(
             mock,
             review_token,
             [
@@ -675,8 +559,8 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
         release_mock_gate(mock)
         anchor, prompt = wait(lambda: _anchor_prompt(client, run_id), "the anchor's prompt")
         answered = client.post(_resolve_route(anchor, prompt["elicitation_id"]), json=APPROVE)
-        run = wait(lambda: _finished(client, run_id), "the run to finish")
-        kinds = _log_kinds(client, run_id)
+        run = wait(lambda: sk.finished(client, run_id), "the run to finish")
+        kinds = sk.log_kinds(client, run_id)
         host_log = stack.host.log_path.read_text(errors="replace")
     seen["total"] = time.monotonic() - began
     seen["calls_held"] = sent
@@ -697,7 +581,7 @@ def test_a_runner_reconnecting_after_a_default_lease_restart_is_not_relaunched(
     assert "Coral liveness check of run" not in liveness_lines
     assert "could not read a runner's liveness" not in liveness_lines
     assert "Stopped superseded runner" not in host_log
-    [accepted] = _result_texts(mock, handed)
+    [accepted] = sk.result_texts(mock, handed)
     assert '"accepted": true' in accepted, accepted
     # The implementer's close ended on its turn's own end edge, not at its time limit.
     assert reviewer_after < REVIEWER_STARTS_S, reviewer_after
@@ -813,10 +697,10 @@ def test_live_review_loop_survives_server_sigkills(
         failure_log_tails=False,
     ) as stack:
         client = stack.client
-        run_id = _start_review_loop(
+        run_id = sk.start_review_loop(
             stack, impl_token=f"impl-{uid}", review_token=f"review-{uid}-pass", start_key=uid
         )
-        wait = _waiter(stack, run_id, deadline)
+        wait = sk.waiter(stack, run_id, deadline)
 
         def implementing() -> bool | None:
             slots = [
@@ -834,10 +718,10 @@ def test_live_review_loop_survives_server_sigkills(
         reopened = wait(lambda: _gate_identity(client, run_id), "the gate's prompt again")
         anchor, prompt = wait(lambda: _anchor_prompt(client, run_id), "the anchor's prompt")
         answered = client.post(_resolve_route(anchor, prompt["elicitation_id"]), json=APPROVE)
-        run = wait(lambda: _finished(client, run_id), "the run to finish")
+        run = wait(lambda: sk.finished(client, run_id), "the run to finish")
         sessions = sk.coral_sessions(client, run_id)
         steps = [session for session in sessions if session["labels"]["coral.role"] == "step"]
-        kinds = _log_kinds(client, run_id)
+        kinds = sk.log_kinds(client, run_id)
         checkout, outcome = _checkout(stack, run_id)
 
     spend = run["spend"] or {}
