@@ -9833,10 +9833,30 @@ async def _auto_create_claude_terminal(
         bundle_dir = bridge_dir / "skill-bundle"
         _ensure_orchestrator_skills_in_bundle(bundle_dir, agent_spec)
     _policy_failure_mode = None
+    _coral_framework: tuple[str, ...] = ()
+    _coral_allowed: tuple[str, ...] = ()
     if agent_spec is not None:
         raw_mode = agent_spec.executor.config.get("policy_failure_mode")
         if isinstance(raw_mode, str):
             _policy_failure_mode = raw_mode
+        from omnigent.spec.types import AgentSpec as _AgentSpec
+
+        _spec_for_tools = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
+        if (
+            isinstance(_spec_for_tools, _AgentSpec)
+            and isinstance(_spec_for_tools.params, dict)
+            and "coral" in _spec_for_tools.params
+        ):
+            from omnigent.tools.extensions import extension_framework_instructions
+
+            _coral_framework = extension_framework_instructions(_spec_for_tools)
+            # Bundle-authored allowlist (Coral writes these; Omnigent never
+            # imports coral/).
+            raw_allowed = _spec_for_tools.executor.config.get("native_preapproved")
+            if isinstance(raw_allowed, (list, tuple)):
+                _coral_allowed = tuple(
+                    name for name in raw_allowed if isinstance(name, str) and name
+                )
     claude_args = augment_claude_args(
         base_claude_args,
         bridge_dir=bridge_dir,
@@ -9851,11 +9871,15 @@ async def _auto_create_claude_terminal(
         subagent_router_dir=subagent_router_dir,
         append_system_prompt="\n\n".join(
             x
-            for x in [_native_startup_raw_instructions_from_spec(agent_spec), routed_spawn_note]
+            for x in [
+                _native_startup_raw_instructions_from_spec(agent_spec),
+                *_coral_framework,
+                routed_spawn_note,
+            ]
             if x
         )
         or None,
-        allowed_tools=routed_spawn_tools,
+        allowed_tools=tuple(dict.fromkeys([*routed_spawn_tools, *_coral_allowed])),
         # The route-turn hook is registered only when this session can
         # actually route; otherwise every submit would pay its round trip.
         turn_routing=_claude_turn_router is not None,

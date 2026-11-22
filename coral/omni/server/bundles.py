@@ -17,13 +17,22 @@ from coral.profiles.bundle_spec import (
     stance_guard_handler,
 )
 from omnigent.errors import OmnigentError
-from omnigent.harness_aliases import is_claude_sdk_harness_name
+from omnigent.harness_aliases import canonicalize_harness, is_claude_sdk_harness_name
+from omnigent.native.native_policy_hook import (
+    POLICY_FAILURE_MODE_FAIL_CLOSED,
+    normalize_policy_failure_mode,
+)
 from omnigent.server.bundles import uploaded_agent_for, validate_agent_bundle
 from omnigent.spec.types import AgentSpec, FunctionPolicySpec, Phase, SharePolicy
 from omnigent.stores.agent_store import AgentStore
 from omnigent.stores.artifact_store import ArtifactStore
 
 READ_ONLY_OS_HANDLER = "omnigent.policies.builtins.orchestration.read_only_os"
+
+
+def _is_allowed_step_harness(harness: str | None) -> bool:
+    canonical = canonicalize_harness(harness) or harness
+    return is_claude_sdk_harness_name(harness) or canonical == "claude-native"
 
 
 class MaterializedAgent(BaseModel):
@@ -78,10 +87,14 @@ def _hygiene_violations(spec: AgentSpec, stance: Stance) -> list[str]:
     groups = spec.tool_groups
     enforced = _enforced_handlers(spec)
     guard = STANCE_GUARDS[stance]
+    harness = spec.executor.harness_kind
+    canonical = canonicalize_harness(harness) or harness
+    is_native = canonical == "claude-native"
+    config = spec.executor.config
     rules = {
         f"name starts with {ENGINE_PREFIX}": (spec.name or "").startswith(ENGINE_PREFIX),
         "params.coral is set": "coral" in spec.params,
-        "harness is claude-sdk": is_claude_sdk_harness_name(spec.executor.harness_kind),
+        "harness is claude-sdk or claude-native": _is_allowed_step_harness(harness),
         "spawn is false": not spec.spawn,
         "tools.agents is empty": not spec.tools.agents,
         "timers is false": not spec.timers,
@@ -111,6 +124,15 @@ def _hygiene_violations(spec: AgentSpec, stance: Stance) -> list[str]:
         ),
         "no MCP server is named mcp": not any(server.name == "mcp" for server in spec.mcp_servers),
     }
+    if is_native:
+        rules["claude-native is not the orchestrator"] = stance is not Stance.ORCHESTRATOR
+        rules["claude-native sets policy_failure_mode fail_closed"] = (
+            normalize_policy_failure_mode(config.get("policy_failure_mode"))
+            == POLICY_FAILURE_MODE_FAIL_CLOSED
+        )
+        rules["claude-native sets permission_mode bypassPermissions"] = (
+            config.get("permission_mode") == "bypassPermissions"
+        )
     if spec.os_env is not None:
         sandbox = spec.os_env.sandbox
         rules["os_env has an OS sandbox"] = sandbox is not None and sandbox.type != "none"

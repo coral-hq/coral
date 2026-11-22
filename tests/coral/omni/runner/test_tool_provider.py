@@ -99,10 +99,17 @@ def test_specs_without_a_stance_string_get_nothing(spec: Any) -> None:
     assert CoralToolProvider(ENGINE_TOOLS).tool_set(spec) is None
 
 
-@pytest.mark.parametrize("harness", ["claude-native", "opencode", "native-pi"])
-def test_native_harness_specs_get_no_tools_or_text(harness: str) -> None:
-    # Native relays never carry extension tools, so the prompt must not name them either.
+@pytest.mark.parametrize("harness", ["opencode", "native-pi"])
+def test_non_coral_native_harnesses_get_nothing(harness: str) -> None:
+    # Non-Coral native sessions still omit extension tools and framework text.
     assert CoralToolProvider(ENGINE_TOOLS).tool_set(_spec("implementer", harness)) is None
+
+
+def test_claude_native_coral_step_gets_relay_schemas_and_framework_text() -> None:
+    # S9: native relay advertises coral_* schemas; S12: launch-stable instructions.
+    assert CoralToolProvider(ENGINE_TOOLS).tool_set(_spec("implementer", "claude-native")) == (
+        STEP_SET
+    )
 
 
 def test_tool_sets_pass_the_extension_checks() -> None:

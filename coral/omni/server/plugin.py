@@ -601,6 +601,7 @@ def _wire_session_engine(
     evidence_channels: ChannelsRef | None = None,
     liveness: LivenessRef | None = None,
     reconnect_grace_s: int = DEFAULT_RECONNECT_GRACE_S,
+    claude_native_steps: bool = False,
 ) -> BoundSessionRefresher:
     """
     Build the session engine and register its executors, then its status-edge observers.
@@ -665,7 +666,12 @@ def _wire_session_engine(
     pauser = DriftPauser(run_store, engine=threads, on_anchor_bound=anchor_runner_stopper)
     # The dispatch's relaunch path holds the facade and the relauncher, so both resolve it late.
     facade = OmnigentSessionFacade(
-        app, services, bindings, slot_generations=queue_store, dispatch=lambda: dispatch
+        app,
+        services,
+        bindings,
+        slot_generations=queue_store,
+        dispatch=lambda: dispatch,
+        claude_native_steps=claude_native_steps,
     )
     relauncher = OmnigentStepRelauncher(
         facade, services, bindings, run_store, dispatch=lambda: dispatch
@@ -687,6 +693,7 @@ def _wire_session_engine(
         services.agent_store,
         services.artifact_store,
         conversation_store=services.conversation_store,
+        claude_native_steps=claude_native_steps,
     )
     executors: dict[str, EffectExecutor] = {
         CREATE_SESSION: create_session_executor(
@@ -931,6 +938,9 @@ async def coral_lifespan(
                     evidence_channels=evidence_channels,
                     liveness=liveness,
                     reconnect_grace_s=grace_s,
+                    claude_native_steps=bool(
+                        resolve_sub_features(services.server_config).get("claude_native_steps")
+                    ),
                 )
                 stack.push_async_callback(refresher.stop)
                 await refresher.start()
