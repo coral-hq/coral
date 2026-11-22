@@ -233,6 +233,17 @@ def _sigkill_server(stack: sk.Skeleton) -> None:
     sk.start_server(stack)
 
 
+def _reconnected(stack: sk.Skeleton, log: Path, runner_id: str) -> Callable[[], bool | None]:
+    """A probe: the restarted server's own log shows the host and the runner connected to it."""
+    lines = (f"Host {stack.host.host_id} connected", f"Runner {runner_id} connected")
+
+    def probe() -> bool | None:
+        text = log.read_text(errors="replace")
+        return True if all(line in text for line in lines) else None
+
+    return probe
+
+
 def _runner_back(client: httpx.Client, session_id: str) -> Callable[[], str | None]:
     """The session's runner id once its runner is connected to the running server."""
 
@@ -440,7 +451,11 @@ def test_the_review_loop_survives_server_sigkills_mid_step_and_at_the_gate(
         kinds_at_kill = _log_kinds(client, run_id)
         implementer = _step_session(client, run_id, "implement")
         runner_before = sk.session(client, implementer)["runner_id"]
+        starts = len(sk.server_logs(stack))
         _sigkill_server(stack)
+        # The handoff needs the host's workspace channel; release only once both are back.
+        [log] = sk.server_logs(stack)[starts:]
+        wait(_reconnected(stack, log, runner_before), "the host and the implementer's runner")
         runner_after = wait(_runner_back(client, implementer), "the implementer's runner")
         release_mock_gate(mock)
 
