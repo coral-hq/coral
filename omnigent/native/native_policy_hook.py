@@ -287,6 +287,21 @@ def _is_login_redirect_or_unauthorized(response: httpx.Response) -> bool:
     return "/oidc/" in location or "/.auth/" in location
 
 
+def _subagent_context_from_payload(payload: Mapping[str, object]) -> dict[str, str] | None:
+    """Copy Claude Task / Codex child-thread identity into policy context."""
+    subagent: dict[str, str] = {}
+    for key in ("agent_id", "agent_type"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            subagent[key] = value
+    for key in ("thread_id", "agent_thread_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            subagent.setdefault("thread_id", value)
+            break
+    return subagent or None
+
+
 def hook_payload_to_evaluation_request(
     hook_event: str,
     payload: dict[str, object],
@@ -314,6 +329,10 @@ def hook_payload_to_evaluation_request(
         ``/policies/evaluate``, or ``None`` when the event is not
         policy-relevant (unknown event or an ``mcp__omnigent__*`` tool).
     """
+    subagent = _subagent_context_from_payload(payload)
+    context: dict[str, object] = {}
+    if subagent is not None:
+        context["subagent"] = subagent
     if hook_event == _USER_PROMPT_SUBMIT:
         # Request-phase gate for native sessions. The server reads REQUEST
         # content from ``data.text`` (see ``_build_evaluation_context``).
@@ -325,7 +344,7 @@ def hook_payload_to_evaluation_request(
                 "data": {
                     "text": prompt if isinstance(prompt, str) else json.dumps(prompt),
                 },
-                "context": {},
+                "context": context,
             },
         }
     tool_name = payload.get("tool_name", "")
@@ -345,7 +364,7 @@ def hook_payload_to_evaluation_request(
                     "name": tool_name,
                     "arguments": tool_input,
                 },
-                "context": {},
+                "context": context,
             },
         }
     if hook_event == _POST_TOOL_USE:
@@ -357,7 +376,7 @@ def hook_payload_to_evaluation_request(
                 "data": {
                     "result": tool_output,
                 },
-                "context": {},
+                "context": context,
                 "request_data": {
                     "name": tool_name,
                     "arguments": tool_input,

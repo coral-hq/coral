@@ -326,6 +326,26 @@ def test_user_prompt_submit_non_blocking_actions_return_none(action: str) -> Non
     assert output is None
 
 
+def test_hook_payload_copies_subagent_identity() -> None:
+    from omnigent.native.native_policy_hook import hook_payload_to_evaluation_request
+
+    request = hook_payload_to_evaluation_request(
+        "PreToolUse",
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "agent_id": "agent_abc",
+            "agent_type": "Explore",
+        },
+    )
+    assert request is not None
+    assert request["event"]["context"]["subagent"] == {
+        "agent_id": "agent_abc",
+        "agent_type": "Explore",
+    }
+
+
 def test_policy_unavailable_respects_failure_mode() -> None:
     """ask keeps PreToolUse as ask; fail_closed denies."""
     from omnigent.native.native_policy_hook import policy_unavailable_hook_output

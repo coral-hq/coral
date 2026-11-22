@@ -251,6 +251,8 @@ def _build_event(ctx: EvaluationContext) -> PolicyEvent:
             # turn. None on other phases and on callers
             # that don't distinguish segments.
             "turn_final": ctx.turn_final,
+            # Native Task / child-thread identity from a hook, when stamped.
+            "subagent": dict(ctx.subagent) if ctx.subagent else None,
         },
         # Mutable per-conversation state readable by the callable.
         # Empty dict when no policy has written state yet; the engine
