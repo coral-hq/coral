@@ -3,13 +3,33 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 from coral.bridge.bound_sessions import BoundSession, BoundSessions
 from coral.stores.session_bindings import BindingNotFound, SessionBinding, SessionBindings
 
 _logger = logging.getLogger("coral.omni.server.rotation")
+
+# Deterministic policy ids for re-attach after /clear (K10).
+_POLICY_NAMESPACE = uuid.UUID("6f1c0a2e-9b4d-4e7a-8c3f-1d2e5a7b9c0d")
+
+
+class _PolicyStore(Protocol):
+    def list_for_session(self, session_id: str) -> list[Any]: ...
+
+    def create(
+        self,
+        policy_id: str,
+        session_id: str,
+        name: str,
+        type: str,
+        handler: str,
+        factory_params: dict[str, Any] | None = None,
+        enabled: bool = True,
+    ) -> Any: ...
 
 
 @dataclass
@@ -47,18 +67,57 @@ class RotationFollowResult:
     bound: BoundSession
 
 
+def _reattach_session_policies(old_id: str, new_id: str, policy_store: _PolicyStore | None) -> int:
+    """Copy session-scoped policies onto *new_id* with deterministic ids. Returns count."""
+    if policy_store is None:
+        return 0
+    try:
+        policies = policy_store.list_for_session(old_id)
+    except Exception:
+        _logger.exception("list policies failed for supersession old=%s", old_id)
+        return 0
+    attached = 0
+    for policy in policies:
+        name = getattr(policy, "name", None)
+        handler = getattr(policy, "handler", None)
+        policy_type = getattr(policy, "type", None)
+        if (
+            not isinstance(name, str)
+            or not isinstance(handler, str)
+            or not isinstance(policy_type, str)
+        ):
+            continue
+        policy_id = "pol_" + uuid.uuid5(_POLICY_NAMESPACE, f"{new_id}:{name}").hex
+        try:
+            policy_store.create(
+                policy_id,
+                new_id,
+                name,
+                policy_type,
+                handler,
+                factory_params=getattr(policy, "factory_params", None),
+                enabled=bool(getattr(policy, "enabled", True)),
+            )
+            attached += 1
+        except Exception:
+            _logger.exception(
+                "policy re-attach failed old=%s new=%s name=%s", old_id, new_id, name
+            )
+    return attached
+
+
 def follow_bound_supersession(
     *,
     old_id: str,
     new_id: str,
     bound: BoundSessions,
     bindings: SessionBindings,
+    policy_store: _PolicyStore | None = None,
 ) -> list[RotationFollowResult]:
     """Rebind every Coral workspace entry for *old_id* onto *new_id*.
 
-    Transfers ``coral_session_bindings`` at the same generation and rekeys the
-    in-memory bound-session index. Callers that need policies, labels, or a
-    re-brief layer those on after this returns.
+    Transfers ``coral_session_bindings`` at the same generation, rekeys the
+    in-memory bound-session index, and best-effort re-attaches session policies.
     """
     if old_id == new_id:
         return []
@@ -82,14 +141,16 @@ def follow_bound_supersession(
             )
             continue
         bound.rekey(workspace_id, old_id, new_id)
+        attached = _reattach_session_policies(old_id, new_id, policy_store)
         results.append(RotationFollowResult(workspace_id=workspace_id, binding=moved, bound=entry))
         _logger.info(
-            "coral supersession rebound old=%s new=%s run=%s slot=%s gen=%s",
+            "coral supersession rebound old=%s new=%s run=%s slot=%s gen=%s policies=%s",
             old_id,
             new_id,
             moved.run_id,
             moved.slot_id,
             moved.session_generation,
+            attached,
         )
     return results
 

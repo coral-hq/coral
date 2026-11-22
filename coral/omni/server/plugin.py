@@ -935,7 +935,11 @@ async def coral_lifespan(
                     reason,
                 )
                 follow_bound_supersession(
-                    old_id=old_id, new_id=new_id, bound=bound, bindings=bindings
+                    old_id=old_id,
+                    new_id=new_id,
+                    bound=bound,
+                    bindings=bindings,
+                    policy_store=services.policy_store,
                 )
 
             stack.callback(
