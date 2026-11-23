@@ -10,7 +10,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from coral.engine.lifecycle import resume_clears
+from coral.engine.lifecycle import resume_clears, run_level_retryable
 from coral.engine.projection import RunView
 from coral.engine.types import PauseCause, RunStatus
 from coral.runview.types import FINISHED_RUN_STATUSES, PauseReasonName, RunAction, RunStatusName
@@ -59,7 +59,8 @@ def allowed_actions(
     :param view: The loaded engine's facts; ``None`` with ``loadable`` for a run that was
         not loaded (a list item), which is judged by its row alone.
     :param loadable: ``False`` for a run the bridge cannot load, including a stream whose
-        view is ``None``: only Cancel is offered.
+        view is ``None``: only Cancel is offered. Only a loaded paused run with a failure
+        no step owns, and no hold, offers Retry.
     """
     if row_status in FINISHED_RUN_STATUSES:
         return ()
@@ -72,7 +73,8 @@ def allowed_actions(
     # A paused row over an engine that is not paused is a pause on the row alone.
     if view.status != "paused":
         return _RESUMABLE
-    return _RESUMABLE if any(resume_clears(cause) for cause in view.causes) else _CANCEL_ONLY
+    actions = _RESUMABLE if any(resume_clears(cause) for cause in view.causes) else _CANCEL_ONLY
+    return (*actions[:-1], "retry", "cancel") if run_level_retryable(view.causes) else actions
 
 
 __all__ = ["LIST_RESUMABLE_REASONS", "RunViewFacts", "allowed_actions"]

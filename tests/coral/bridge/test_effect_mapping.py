@@ -264,6 +264,7 @@ def test_a_brief_becomes_send_input_to_the_session_its_create_derives() -> None:
         "session_id": session_id,
         "text": text,
         "kind": "brief",
+        "decision": False,
     }
 
 
@@ -751,6 +752,7 @@ def test_a_decision_message_is_send_input_to_the_orchestrator(
         "session_id": session_id,
         "text": text,
         "kind": kind,
+        "generation": 1,
     }
     assert text.startswith(opening)
     assert _send_payload(payload)["kind"] == kind

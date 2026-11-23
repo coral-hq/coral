@@ -192,6 +192,8 @@ class RunState(_Frozen):
     version_hash: str | None = None
     max_activations: int = 10_000
     rejected_call_limit: int = Field(default=3, ge=1)
+    # Bumped by a run-level retry that replaces the orchestrator; old logs fold as 1.
+    orchestrator_generation: int = 1
     seq: int = 0
     causes: tuple[PauseCause, ...] = ()
     activations: tuple[Activation, ...] = ()
@@ -355,6 +357,16 @@ class AnswerGate(_Frozen):
     note: str = ""
 
 
+class RetryRun(_Frozen):
+    kind: Literal["retry_run"] = "retry_run"
+
+
+class OrchestratorTurn(_Frozen):
+    kind: Literal["orchestrator_turn"] = "orchestrator_turn"
+    failed: bool
+    failure: str = ""
+
+
 class TimerDue(_Frozen):
     kind: Literal["timer_due"] = "timer_due"
     timer_key: str
@@ -450,6 +462,8 @@ Input = Annotated[
     | ResumeRun
     | CancelRun
     | RetryStep
+    | RetryRun
+    | OrchestratorTurn
     | EffectCompleted
     | EffectFailed
     | HandoffReceived

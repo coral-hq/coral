@@ -11,6 +11,8 @@ WATCHDOG_REMIND = "watchdog_remind"
 WATCHDOG_ALERT = "watchdog_alert"
 INFRA_BACKOFF = "infra_backoff"
 PLAN_PROBE = "plan_probe"
+ORCHESTRATOR_BACKOFF = "orchestrator_backoff"
+ORCHESTRATOR_SUBJECT = "orchestrator"
 WATCHDOG_KINDS = frozenset({WATCHDOG_REMIND, WATCHDOG_ALERT})
 
 
@@ -86,13 +88,17 @@ def probe_delay(policy: TimerPolicy, stage: int) -> timedelta:
 
 
 def infra_backoff_rows(
-    slot_id: str, generation: int, now: datetime, policy: TimerPolicy
+    slot_id: str,
+    generation: int,
+    now: datetime,
+    policy: TimerPolicy,
+    kind: str = INFRA_BACKOFF,
 ) -> tuple[Timer, ...]:
-    """Stages 1..3 for ``slot_id``. Dues are ``now + policy.infra_backoff``."""
+    """Stages 1..3 of ``kind`` for ``slot_id``. Dues are ``now + policy.infra_backoff``."""
     return tuple(
         Timer(
-            key=timer_key(INFRA_BACKOFF, slot_id, stage),
-            kind=INFRA_BACKOFF,
+            key=timer_key(kind, slot_id, stage),
+            kind=kind,
             scope=slot_id,
             subject=slot_id,
             generation=generation,
@@ -130,9 +136,10 @@ def arm_infra_backoff(
     generation: int,
     now: datetime,
     policy: TimerPolicy,
+    kind: str = INFRA_BACKOFF,
 ) -> RunState:
     """Store stages 1..3 for ``slot_id``. Does not pause and does not emit effects."""
-    return _store(state, infra_backoff_rows(slot_id, generation, now, policy))
+    return _store(state, infra_backoff_rows(slot_id, generation, now, policy, kind))
 
 
 def arm_plan_probe(

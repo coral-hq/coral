@@ -192,7 +192,7 @@ def test_a_run_frame_is_the_header_with_its_type() -> None:
         (lambda: _snapshot(seq=-1), "seq"),
         (lambda: ResyncFrame.model_validate({"reason": "cursor_lost"}), "reason"),
         (lambda: RunHeader(**{**HEADER.model_dump(), "status": "stopped"}), "status"),
-        (lambda: RunHeader(**{**HEADER.model_dump(), "allowed_actions": ("retry",)}), "allowed"),
+        (lambda: RunHeader(**{**HEADER.model_dump(), "allowed_actions": ("restart",)}), "allowed"),
         (lambda: HeartbeatFrame.model_validate({"extra": 1}), "extra"),
     ],
 )

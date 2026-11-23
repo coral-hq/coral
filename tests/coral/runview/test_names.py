@@ -44,5 +44,6 @@ def test_the_load_error_is_the_bridge_s_load_failure_detail() -> None:
 
 
 def test_run_actions_are_inbox_actions() -> None:
-    assert set(get_args(RunAction)) == {"pause", "resume", "cancel"}
-    assert set(get_args(RunAction)) - {"pause"} <= set(get_args(AlertAction))
+    assert set(get_args(RunAction)) == {"pause", "resume", "retry", "cancel"}
+    # Pause and Retry are offered only in the run view.
+    assert set(get_args(RunAction)) - {"pause", "retry"} <= set(get_args(AlertAction))

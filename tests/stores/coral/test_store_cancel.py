@@ -149,7 +149,8 @@ def test_a_store_only_cancel_queues_session_cancels_and_closes_gate_rows(
         _engine_unloadable(coral_db_uri, run_id)
     world = World.sql(coral_db_uri)
 
-    assert _cancel(world, stepping.id).sessions_queued == 1
+    # The step's session and the anchor.
+    assert _cancel(world, stepping.id).sessions_queued == 2
     assert len(_cancel(world, gated.id).gate_rows) == 1
 
     reopened = _reopened(coral_db_uri)

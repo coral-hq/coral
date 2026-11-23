@@ -125,10 +125,24 @@ def _finished_body(world: World, run_id: str) -> dict[str, Any]:
 
 
 def _session_cancels(world: World, run_id: str) -> list[WorkItem]:
+    """The run's ``cancel_sessions`` rows but the anchor's, which :func:`_anchor_cancels` reads."""
+    anchor = anchor_session_id(WORKSPACE, run_id)
     return [
         item
         for item in world.work(run_id)
         if json.loads(item.payload).get("effect_type") == "cancel_sessions"
+        and json.loads(item.payload).get("session_id") != anchor
+    ]
+
+
+def _anchor_cancels(world: World, run_id: str) -> list[str]:
+    """The effect keys of the run's ``cancel_sessions`` rows for its anchor."""
+    anchor = anchor_session_id(WORKSPACE, run_id)
+    payloads = [json.loads(item.payload) for item in world.work(run_id)]
+    return [
+        payload["effect_key"]
+        for payload in payloads
+        if payload.get("effect_type") == "cancel_sessions" and payload["session_id"] == anchor
     ]
 
 
@@ -165,7 +179,7 @@ async def test_queued_session_cancels_stop_exactly_this_runs_sessions(world: Wor
         cancelled = _cancel(world, run.id)
 
         assert cancelled.outcome.applied
-        assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (1, False)
+        assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (2, False)
         assert cancelled.gate_rows == ()
         row = world.run(run.id)
         assert (row.status, row.pause_reason, row.finished_at) == (
@@ -173,7 +187,9 @@ async def test_queued_session_cancels_stop_exactly_this_runs_sessions(world: Wor
             None,
             world.clock.epoch,
         )
-        assert _finished_body(world, run.id) == _body(queued=1, unreachable=False, gates=0)
+        assert _finished_body(world, run.id) == _body(queued=2, unreachable=False, gates=0)
+        anchor = anchor_session_id(WORKSPACE, run.id)
+        assert _anchor_cancels(world, run.id) == [f"{run.id}:0:cancel_sessions:{anchor}"]
         (queued,) = _session_cancels(world, run.id)
         assert json.loads(queued.payload) == {
             "effect_type": "cancel_sessions",
@@ -217,7 +233,7 @@ async def test_queued_session_cancels_stop_exactly_this_runs_sessions(world: Wor
             int(WorkStatus.SUCCEEDED)
         ] * 2
         # The run ended once: one entry, one alert.
-        assert _finished_body(world, run.id) == _body(queued=1, unreachable=False, gates=0)
+        assert _finished_body(world, run.id) == _body(queued=2, unreachable=False, gates=0)
         assert len(_alerts(world, run.id, AlertKind.RUN_CANCELLED)) == 1
 
 
@@ -255,7 +271,7 @@ async def test_open_gate_rows_are_cancelled_and_their_prompts_withdrawn_everywhe
             int(GateVisitStatus.CANCELLED),
             world.clock.epoch,
         )
-        assert _finished_body(world, run.id) == _body(queued=0, unreachable=False, gates=1)
+        assert _finished_body(world, run.id) == _body(queued=1, unreachable=False, gates=1)
         (gate_alert,) = _alerts(world, run.id, AlertKind.GATE)
         assert gate_alert.status == int(AlertStatus.RESOLVED)
         # No withdraw rows: their executor needs the engine.
@@ -330,7 +346,7 @@ async def test_queued_session_cancels_stop_the_runs_orchestrator(world: World) -
         cancelled = _cancel(world, run.id)
         await sessions.drain()
 
-        assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (1, False)
+        assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (2, False)
         assert sessions.dispatch.stops == [*stopped, (orchestrator, USER)]
         assert sessions.dispatch.sessions[orchestrator].closed
         (queued,) = _session_cancels(world, run.id)
@@ -352,7 +368,7 @@ def test_open_gate_rows_that_do_not_decode_are_left_and_the_run_still_cancels(
 
     assert (cancelled.outcome.applied, cancelled.gate_rows) == (True, ())
     assert world.run(run.id).status == int(RunStatus.CANCELLED)
-    assert _finished_body(world, run.id) == _body(queued=0, unreachable=False, gates=0)
+    assert _finished_body(world, run.id) == _body(queued=1, unreachable=False, gates=0)
     (left,) = gate_rows(world, run.id)
     assert left.status == int(GateVisitStatus.OPEN)
 
@@ -381,10 +397,10 @@ def test_more_unclosed_slot_sessions_than_the_cap_queue_the_cap(world: World) ->
 
     cancelled = _cancel(world, run.id)
 
-    assert MAX_STORE_CANCEL_SESSIONS == 33
-    assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (33, True)
+    assert MAX_STORE_CANCEL_SESSIONS == 34
+    assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (34, True)
     queued = {json.loads(item.payload)["session_id"] for item in _session_cancels(world, run.id)}
-    assert len(queued) == 33
+    assert len(queued) == 33 and len(_anchor_cancels(world, run.id)) == 1
     assert "o" * 32 in queued
     assert all(session.startswith("live-") for session in queued - {"o" * 32})
     (ended,) = _alerts(world, run.id, AlertKind.RUN_CANCELLED)
@@ -412,7 +428,7 @@ def test_a_commit_between_the_cancels_reads_and_its_write_makes_it_read_again(
     cancelled = _cancel(world, run.id)
 
     # The first read found the create unfinished; the second, the session it made.
-    assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (1, False)
+    assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (2, False)
     (queued,) = _session_cancels(world, run.id)
     assert json.loads(queued.payload)["session_id"] == "s" * 32
 
@@ -426,8 +442,8 @@ def test_a_step_whose_session_is_still_being_created_is_reported_as_maybe_runnin
 
     cancelled = _cancel(world, run.id)
 
-    assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (0, True)
-    assert _finished_body(world, run.id) == _body(queued=0, unreachable=True, gates=0)
+    assert (cancelled.sessions_queued, cancelled.sessions_unreachable) == (1, True)
+    assert _finished_body(world, run.id) == _body(queued=1, unreachable=True, gates=0)
     (ended,) = _alerts(world, run.id, AlertKind.RUN_CANCELLED)
     assert (
         AlertPayload.model_validate_json(ended.payload).message

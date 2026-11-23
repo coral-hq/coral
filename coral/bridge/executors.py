@@ -25,9 +25,10 @@ from typing import Any, ParamSpec, Protocol, TypeVar
 
 from coral.bridge.commit import DRIFT_EFFECT_CODES, EngineSnapshot
 from coral.bridge.config import DRIFT_HOLD, HOLD_RULES, HOST_WAIT_HOLDS
+from coral.bridge.feedback import decision_of
 from coral.bridge.keys import ORCHESTRATOR_SLOT_ID, slot_message_id
 from coral.bridge.mapping import NEXT_RESYNC_AT
-from coral.bridge.orchestrator import failure_inputs, failure_pause, open_decisions
+from coral.bridge.orchestrator import failure_inputs, open_decisions, turn_input
 from coral.bridge.service import LOAD_FAILED_DETAIL, EngineBridge, EngineLoadFailed
 from coral.db.enum_codecs import RunStatus
 from coral.engine import types as engine
@@ -35,6 +36,7 @@ from coral.engine.facts import TurnFact
 from coral.engine.lifecycle import _HANDED_OFF
 from coral.engine.machines.slot import find_slot
 from coral.engine.reconcile import awaiting_effect
+from coral.engine.timers import ORCHESTRATOR_BACKOFF
 from coral.omni.protocols import (
     CoralSessionError,
     RunScopeRunner,
@@ -184,11 +186,14 @@ def bridge_hold_policy(item: WorkItem, failure: EffectFailed, now_s: int) -> int
     (``held_since``), and the item then takes the normal retries. A wait for an offline
     host is measured on its own: the hold that starts or ends one starts afresh, so that
     time never counts toward another code's horizon. Any other sequence, a retry between
-    two holds or two codes alternating, keeps one start. Reads no store.
+    two holds or two codes alternating, keeps one start. A message to a drifted
+    orchestrator fails at once instead, so a run-level retry can replace it. Reads no
+    store.
     """
     code = failure.error_code
     rule = HOLD_RULES.get(code)
-    if rule is None and code in DRIFT_EFFECT_CODES:
+    lost_orchestrator = code.startswith("drift.session_") and decision_of(item) is not None
+    if rule is None and code in DRIFT_EFFECT_CODES and not lost_orchestrator:
         # Exactly the drift codes the resume commit releases.
         rule = DRIFT_HOLD
     if rule is None:
@@ -458,21 +463,29 @@ async def _orchestrator_turn(
     threads: BridgeThreads, snapshot: EngineSnapshot, signal: _TurnSignal, sources: _Sources
 ) -> str:
     """
-    Pause the run for its orchestrator, while a decision waits on it.
+    Commit what the run's orchestrator turn asks for, while a decision waits on it.
 
-    An archived or deleted orchestrator pauses ``drift``, as a step does; a failed turn
-    is classified as a step's is, and its pause is re-checked in the commit.
+    An archived or deleted orchestrator pauses ``failure_path``, which a run-level retry
+    replaces; a transient failure backs off, another pauses as a step's class would; a
+    completed turn disarms the backoff. The input is re-checked in the commit.
     """
     if not open_decisions(snapshot.state):
         return "no_input"
     async with run_scope(sources.scope_runner, snapshot.store):
         session = await _session_state(snapshot, signal, sources)
-        gone = await _session_gone(snapshot, session, sources)
-        if gone is not None:
-            return gone
-        edge = signal.edge or await _lost_failure(snapshot, signal, sources)
-    pause = failure_pause(edge)
-    if pause is None:
+        finding = classify_step(session)
+        if finding is None and session.closed:
+            return "session_closed"
+        edge = None if finding is not None else signal.edge
+        if finding is None and edge is None:
+            edge = await _lost_failure(snapshot, signal, sources)
+    backing_off = any(timer.kind == ORCHESTRATOR_BACKOFF for timer in snapshot.state.timers)
+    command = (
+        engine.PauseRun(reason="failure_path", detail=f"{_ORCHESTRATOR}:{finding.effect_code}")
+        if finding is not None
+        else turn_input(edge, backing_off)
+    )
+    if command is None:
         return "orchestrator_turn"
     store = snapshot.store
     commit = await threads.run(
@@ -480,10 +493,15 @@ async def _orchestrator_turn(
         workspace_id=store.workspace_id,
         run_id=store.run_id,
         inputs=lambda current: failure_inputs(
-            current.state, current.store.run, signal.session_id, pause
+            current.state, current.store.run, signal.session_id, command
         ),
     )
-    return "orchestrator_paused" if commit.outcome.applied else "no_input"
+    if not commit.outcome.applied:
+        return "no_input"
+    if isinstance(command, engine.PauseRun):
+        return "orchestrator_paused"
+    failed = isinstance(command, engine.OrchestratorTurn) and command.failed
+    return "orchestrator_backoff" if failed else "orchestrator_turn"
 
 
 async def _lost_failure(

@@ -9,7 +9,7 @@ import pytest
 
 from coral.engine import transition
 from coral.engine.projection import RunView
-from coral.engine.types import PauseCause, PauseReason, ResumeRun, RunStatus
+from coral.engine.types import PauseCause, PauseReason, ResumeRun, RetryRun, RunStatus
 from coral.runview.actions import LIST_RESUMABLE_REASONS, RunViewFacts, allowed_actions
 from coral.runview.types import PauseReasonName, RunAction, RunStatusName
 from tests.coral.bridge._scripted_runs import IMPLEMENT, fixture_graph, start_run
@@ -128,7 +128,6 @@ def test_an_engine_pause_with_a_cause_resume_clears_can_be_resumed(
         (_cause("budget"),),
         (_cause("liveness"),),
         (_cause("engine_upgrade"),),
-        (_cause("failure_path", "agent.failed"),),
         # A step's failed turn is retried, never resumed.
         (_cause("failure_path", "agent.failed", IMPLEMENT),),
         (_cause("failure_path", "effect.permanent", IMPLEMENT),),
@@ -241,3 +240,42 @@ def test_view_facts_read_the_same_from_a_view_or_its_json(view: RunView) -> None
 
     assert facts == RunViewFacts.of(view.model_dump(mode="json"))
     assert (facts.status, facts.causes) == (view.status, view.causes)
+
+
+@pytest.mark.parametrize(
+    ("causes", "offered"),
+    [
+        ((_cause("failure_path", "orchestrator:drift.session_archived"),), ("retry", "cancel")),
+        (
+            (_cause("failure_path", "anchor:dispatch.failed"), _cause("user")),
+            ("resume", "retry", "cancel"),
+        ),
+        # A hold or a restart leaves only Cancel, as the engine refuses the Retry.
+        (
+            (
+                _cause("failure_path", "gate:dispatch.failed"),
+                _cause("infra", "infra.host_offline", IMPLEMENT),
+            ),
+            ("cancel",),
+        ),
+    ],
+)
+def test_a_run_level_failure_offers_the_runs_retry(
+    causes: tuple[PauseCause, ...], offered: tuple[RunAction, ...]
+) -> None:
+    assert _detail("paused", causes[0].reason, _paused(*causes)) == offered
+    assert "retry" not in _listed("paused", "failure_path")
+
+
+@pytest.mark.parametrize("causes", CAUSE_SETS)
+def test_retry_is_offered_exactly_when_the_engine_accepts_retry_run(
+    causes: tuple[PauseCause, ...],
+) -> None:
+    graph = fixture_graph("two_steps")
+    started = drive(graph, [start_run(graph)]).state
+    paused = started.model_copy(update={"status": "paused", "causes": causes})
+
+    retried = transition(graph, paused, RetryRun(), NOW)
+
+    offered = "retry" in _detail("paused", causes[0].reason, _paused(*causes))
+    assert offered is (retried.entry.rejection is None)

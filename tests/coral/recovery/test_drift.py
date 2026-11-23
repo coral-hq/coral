@@ -587,6 +587,46 @@ async def test_the_pre_send_hook_lets_an_undrifted_send_through() -> None:
     assert _drift_logs(store, run) == []
 
 
+@pytest.mark.parametrize(
+    ("state", "cause"),
+    [
+        ({"archived": True, "archived_at": ARCHIVED_AT}, "session_archived"),
+        ({"exists": False}, "session_deleted"),
+    ],
+)
+async def test_a_send_to_a_drifted_orchestrator_is_refused_without_a_drift_pause(
+    state: dict[str, object], cause: str
+) -> None:
+    store = FakeRunStore(default_workspace_id=WORKSPACE)
+    run = _run(store)
+    facade = FakeSessionFacade()
+    facade.states[(WORKSPACE, STEP)] = present(STEP, **state)
+    bindings = FakeBindings(
+        [
+            _anchor_binding(run.id, SessionBindingProgress.INITIALIZED),
+            step_binding(
+                workspace_id=WORKSPACE,
+                run_id=run.id,
+                session_id=STEP,
+                slot_role=SlotRole.ORCHESTRATOR,
+                host_id="host-1",
+            ),
+        ]
+    )
+    hook = DriftPreSendHook(facade, bindings, DriftPauser(store, now_us=lambda: NOW_US))
+
+    with pytest.raises(CoralSessionError) as refused:
+        await hook(
+            PreSendRequest(workspace_id=WORKSPACE, run_id=run.id, session_id=STEP, user_id=None)
+        )
+
+    # The failed send pauses the run for a run-level retry instead.
+    assert (refused.value.code, refused.value.retryable) == (f"drift.{cause}", False)
+    loaded, _ = store.load_run_state(run.id, workspace_id=WORKSPACE)
+    assert loaded.run.status == RunStatus.RUNNING
+    assert _drift_logs(store, run) == []
+
+
 # ── through the engine ───────────────────────────────────────────────────────
 
 

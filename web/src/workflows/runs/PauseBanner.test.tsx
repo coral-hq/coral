@@ -36,7 +36,7 @@ function renderBanner(
   reason: string | null,
   view: RunView | null,
   graph: GraphNodeNames | null = GRAPH,
-  retry: Pick<PauseBannerProps, "retryActivationIds" | "slots"> = {
+  retry: Pick<PauseBannerProps, "retryActivationIds" | "slots" | "runRetry"> = {
     retryActivationIds: [],
     slots: CONTRACT_DETAIL_GATE_PASS2.slots,
   },
@@ -194,6 +194,75 @@ describe("PauseBanner", () => {
     expect(authenticatedFetch.mock.calls.map(([url]) => url)).toEqual([
       `/v1/coral/runs/${RUN_ID}/activations/${PASS_2.activation_id}:retry`,
     ]);
+  });
+
+  it("offers the run's own Retry for a lost orchestrator and posts it", async () => {
+    // WHY: a failure no step owns has no step to retry; the run's Retry replaces the orchestrator.
+    authenticatedFetch.mockResolvedValue(
+      new Response(JSON.stringify({ ...CONTRACT_DETAIL_GATE_PASS2, status: "running" }), {
+        status: 200,
+      }),
+    );
+    const causes: PauseCause[] = [
+      { reason: "failure_path", detail: "orchestrator:drift.session_archived", subject: "" },
+    ];
+    renderBanner("failure_path", pausedView({ causes }), GRAPH, {
+      retryActivationIds: [],
+      slots: [PASS_1, PASS_2],
+      runRetry: true,
+    });
+    const banner = screen.getByRole("region", { name: "Paused: step failed" });
+    expect(banner).toHaveTextContent(
+      "The run’s orchestrator failed. Retry starts a new orchestrator.",
+    );
+    const status = within(within(banner).getByTestId("run-retry-steps")).getByRole("status");
+    fireEvent.click(within(banner).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(status).toHaveTextContent("Retrying."));
+    expect(authenticatedFetch.mock.calls.map(([url]) => url)).toEqual([
+      `/v1/coral/runs/${RUN_ID}:retry`,
+    ]);
+  });
+
+  it("says a refused run Retry in the server's words", async () => {
+    // WHY: a run that changed under the owner (a hold, a cancel) refuses the Retry.
+    authenticatedFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "illegal_transition",
+            message: "This run cannot be retried now.",
+            details: {
+              status: "paused",
+              pause_reason: "failure_path",
+              reason: "retry_not_allowed",
+            },
+          },
+        }),
+        { status: 409 },
+      ),
+    );
+    const causes: PauseCause[] = [
+      { reason: "failure_path", detail: "anchor:dispatch.failed", subject: "" },
+    ];
+    renderBanner("failure_path", pausedView({ causes }), GRAPH, {
+      retryActivationIds: [],
+      slots: [],
+      runRetry: true,
+    });
+    const banner = screen.getByRole("region", { name: "Paused: step failed" });
+    expect(banner).toHaveTextContent(`${PAUSE_MESSAGES.failure_path} Retry tries again.`);
+    const status = within(within(banner).getByTestId("run-retry-steps")).getByRole("status");
+    fireEvent.click(within(banner).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(status).toHaveTextContent("This run cannot be retried now."));
+  });
+
+  it("offers no run Retry unless the run allows it", () => {
+    // WHY: `allowed_actions` decides; a held run's banner shows no Retry.
+    const causes: PauseCause[] = [
+      { reason: "failure_path", detail: "gate:dispatch.failed", subject: "" },
+    ];
+    renderBanner("failure_path", pausedView({ causes }));
+    expect(within(screen.getByRole("region")).queryByRole("button")).toBeNull();
   });
 
   it("offers no Retry while the detail names no step", () => {

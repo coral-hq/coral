@@ -107,12 +107,13 @@ async def test_a_two_step_run_advances_unattended_to_completed(sessions: Session
     assert world.assert_fold_matches(run.id).status == "completed"
     # Nothing is left to run: every row of the run finished.
     assert {item.status for item in world.work(run.id)} == {int(WorkStatus.SUCCEEDED)}
-    # One create, brief and close row per step, beside the anchor's create.
+    # One create, brief and close row per step, beside the anchor's create and wind-down.
     payloads = [json.loads(item.payload) for item in world.work(run.id)]
     assert Counter(payload["effect_type"] for payload in payloads) == {
         "create_session": 3,
         "send_input": 2,
         "close_slot": 2,
+        "cancel_sessions": 1,
     }
     closed = [
         payload["session_id"] for payload in payloads if payload["effect_type"] == "close_slot"

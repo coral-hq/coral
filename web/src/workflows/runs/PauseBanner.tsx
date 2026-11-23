@@ -15,7 +15,7 @@ import { RetryStepButtons, type RetryStepButtonsProps } from "./RetryStepButtons
 // A paused run's banner: why it paused (the first cause, or the run's reason), then what
 // else it waits on: its other causes, steps someone typed into or whose session changed,
 // and decisions the orchestrator has yet to make. Below them, a Retry for each failed
-// step the run's detail says a retry may restart.
+// step the run's detail says a retry may restart, and one for the run when it allows it.
 
 export interface PauseBannerProps {
   /** The run's pause reason, from the stream's header. */
@@ -29,6 +29,8 @@ export interface PauseBannerProps {
   retryActivationIds: RetryStepButtonsProps["activationIds"];
   /** The detail's slots, which name the steps to retry. */
   slots: RetryStepButtonsProps["slots"];
+  /** The run's `allowed_actions` has `retry`: a Retry for the run itself. */
+  runRetry?: boolean;
 }
 
 /** A step's name for a sentence, isolated, or "a step" when the graph cannot name it. */
@@ -61,6 +63,7 @@ export function PauseBanner({
   runId,
   retryActivationIds,
   slots,
+  runRetry = false,
 }: PauseBannerProps) {
   const titleId = useId();
   const copy = pauseCopy(reason, view?.causes[0] ?? null, graph);
@@ -93,6 +96,7 @@ export function PauseBanner({
           slots={slots}
           graph={graph}
           restarting={restarting}
+          runRetry={runRetry}
         />
       </div>
     </section>

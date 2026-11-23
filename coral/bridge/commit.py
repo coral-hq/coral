@@ -27,8 +27,14 @@ from coral.bridge.mapping import (
     anchor_create_draft,
     map_effect,
     timer_draft,
+    wind_down_drafts,
 )
-from coral.bridge.orchestrator import is_decision_reminder, orchestrator_rows, revivable_work_ids
+from coral.bridge.orchestrator import (
+    is_backoff_notify,
+    is_decision_reminder,
+    orchestrator_rows,
+    revivable_work_ids,
+)
 from coral.bridge.projection import RunProjection, project_run, project_slots
 from coral.db.enum_codecs import RUN_PAUSE_REASON, RunStatus
 from coral.engine import types as engine
@@ -114,7 +120,8 @@ def build_commit(
     that shows the engine's own pause follows the engine: a resume, a retry or a plan
     probe that clears it also lifts the row's. The commit that opens the run's first
     decision also names its orchestrator session and queues its create (see
-    :mod:`coral.bridge.orchestrator`). Gate-visit rows follow the final state, so
+    :mod:`coral.bridge.orchestrator`). The commit that ends the run stops its
+    orchestrator and closes its anchor. Gate-visit rows follow the final state, so
     any commit, an empty resync one too, writes a missing or diverged row. Alerts
     follow those rows, the run row's status and the entries' effects (see
     :mod:`coral.alerts.rules`).
@@ -158,15 +165,27 @@ def build_commit(
     if row_only and final.status not in engine.TERMINAL_STATUSES:
         projected = replace(projected, status=None, pause_reason=None, clear_pause_reason=False)
     resumed = not row_only and final.status == "running" and (first.status == "paused" or lifted)
+    ctx = _map_context(snapshot, final, now)
     orchestrator = orchestrator_rows(
-        _map_context(snapshot, final, now),
+        ctx,
         run,
         first=first,
         effects=(effect for item in accepted for effect in item.entry.effects),
         resumed=resumed,
         run_version=snapshot.version + 1,
     )
-    outbox = _dedupe([*_effect_rows(snapshot, accepted, now), *orchestrator.outbox, *extra_outbox])
+    ended = (
+        first.status not in engine.TERMINAL_STATUSES and final.status in engine.TERMINAL_STATUSES
+    )
+    wind_down = wind_down_drafts(ctx, run.orchestrator_session_id) if ended else ()
+    outbox = _dedupe(
+        [
+            *_effect_rows(snapshot, accepted, now),
+            *orchestrator.outbox,
+            *wind_down,
+            *extra_outbox,
+        ]
+    )
     # A full commit drops timer rows first (the resync adds them again), then re-asks
     # (each decision already had its request).
     outbox.extend(_fitting(run.id, "orchestrator re-asks", orchestrator.asks, len(outbox)))
@@ -247,8 +266,8 @@ def _effect_rows(
             if draft is not None:
                 rows.append(draft)
                 continue
-            if is_decision_reminder(item.after, effect):
-                # The orchestrator's rules queue it as a reminder.
+            if is_decision_reminder(item.after, effect) or is_backoff_notify(effect):
+                # The orchestrator's rules queue it as a reminder or re-asks.
                 continue
             _logger.info(
                 "Coral run %s committed %s effect %s without work: %s",

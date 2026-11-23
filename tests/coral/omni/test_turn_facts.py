@@ -392,7 +392,7 @@ def test_a_running_edge_that_reports_the_previous_turns_outcome_is_kept(
     assert len(_signals(queue)) == 1
 
 
-def test_only_failed_and_archive_edges_of_an_orchestrator_are_recorded(
+def test_only_completed_failed_and_archive_edges_of_an_orchestrator_are_recorded(
     recorder: TurnFactRecorder, queue: _ThreadRecordingQueue
 ) -> None:
     recorder.observe(_status_edge(session_id=ORCHESTRATOR_SESSION))
@@ -406,12 +406,14 @@ def test_only_failed_and_archive_edges_of_an_orchestrator_are_recorded(
     recorder.wait_idle()
 
     payloads = [json.loads(row.payload) for row in _signals(queue)]
-    assert [
+    assert sorted(
         (payload["engine_slot_id"], payload["edge"]["status"], payload["edge"]["origin"])
         for payload in payloads
-    ] == [
+    ) == [
         ("orchestrator", "failed", "relayed_runner_status"),
         ("orchestrator", "idle", "archive_idle"),
+        # A completed turn ends the orchestrator's backoff.
+        ("orchestrator", "idle", "relayed_runner_status"),
     ]
 
 

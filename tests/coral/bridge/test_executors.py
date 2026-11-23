@@ -508,6 +508,23 @@ def test_a_domain_wait_is_held_from_its_first_refusal(code: str, delay: int) -> 
 
 
 @pytest.mark.parametrize(
+    ("code", "held"),
+    [
+        ("drift.session_archived", False),
+        ("drift.session_deleted", False),
+        # The anchor's drift pauses ``drift``; its resume releases the message.
+        ("drift.anchor_archived", True),
+    ],
+)
+def test_a_message_to_a_drifted_orchestrator_fails_at_once(code: str, held: bool) -> None:
+    # Its failure pauses the run for a run-level retry, which replaces the orchestrator.
+    payload = json.dumps({"bridge_item": "decision", "decision_id": "review||a4:1"})
+    item = dataclasses.replace(_item(), payload=payload)
+    delay = bridge_hold_policy(item, _refusal(code, retryable=False), NOW_S)
+    assert (delay is not None) == held
+
+
+@pytest.mark.parametrize(
     "code", sorted(code for code, (_delay, horizon) in HOLD_RULES.items() if horizon is not None)
 )
 def test_a_hold_with_a_horizon_ends_that_long_after_its_first_refusal(code: str) -> None:

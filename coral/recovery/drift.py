@@ -24,7 +24,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from coral.db.enum_codecs import RunPauseReason, SessionBindingProgress
+from coral.db.enum_codecs import RunPauseReason, SessionBindingProgress, SlotRole
 from coral.model.ids import anchor_session_id
 from coral.omni.protocols import CoralSessionError, PreSendRequest, SessionFacade, SessionState
 from coral.recovery.pause import pause_log_checksum, pause_run_once
@@ -270,6 +270,8 @@ class DriftPreSendHook:
     """
     Refuses an engine message to a drifted run: its anchor, or the target step, archived,
     deleted or (the anchor) bound. The run pauses first, then the send fails as ``drift.<cause>``.
+    A drifted orchestrator does not pause the run ``drift``: the failed send pauses it for a
+    run-level retry, which replaces the orchestrator.
     """
 
     def __init__(
@@ -290,14 +292,23 @@ class DriftPreSendHook:
         )
         if finding is None:
             return
-        await self._pauser.pause(
-            workspace_id=request.workspace_id, run_id=request.run_id, finding=finding
-        )
+        if not await self._is_orchestrator(request, finding):
+            await self._pauser.pause(
+                workspace_id=request.workspace_id, run_id=request.run_id, finding=finding
+            )
         raise CoralSessionError(
             finding.effect_code,
             f"session {finding.session_id} drifted ({finding.cause.replace('_', ' ')}); "
             "the run is paused",
         )
+
+    async def _is_orchestrator(self, request: PreSendRequest, finding: DriftFinding) -> bool:
+        if finding.session_id != request.session_id or finding.cause.startswith("anchor_"):
+            return False
+        binding = await asyncio.to_thread(
+            self._bindings.get, request.workspace_id, finding.session_id, run_id=request.run_id
+        )
+        return binding is not None and binding.slot_role is SlotRole.ORCHESTRATOR
 
 
 __all__ = [
