@@ -12,7 +12,14 @@ from typing import NamedTuple
 from pydantic import JsonValue
 
 from coral.engine.machines.run import record_pause
-from coral.engine.types import Arrival, Effect, LoopCounter, Receipt, RunState
+from coral.engine.types import (
+    Arrival,
+    Effect,
+    LoopCounter,
+    Receipt,
+    RunState,
+    loop_limit_key,
+)
 from coral.model.ir import CompiledArrow, CompiledGraph, CompiledNode, JoinInfo, LoopInfo
 
 _STRUCTURAL = frozenset({"forward", "at_limit"})
@@ -174,7 +181,7 @@ def _redirect(
     payload: dict[str, JsonValue] = {"code": "loop.limit_reached", "redirected": True}
     if source is not None and source.kind in {"decision", "gate"}:
         payload["decision.made"] = True
-    key = f"loop:{arrow.id}|{'/'.join(item_path)}|{'/'.join(enclosing)}"
+    key = loop_limit_key(arrow.id, item_path, enclosing)
     updated = _add_receipt(state, key, payload)
     limit_arrow = _arrow(graph, at_limit_id) if at_limit_id is not None else None
     if limit_arrow is None:
