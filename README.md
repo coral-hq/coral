@@ -64,7 +64,12 @@ listeners, including other programs' services (CRL-174), and UDP are not
 covered. From the code, not measured: on Linux a step can also reach other
 programs' abstract sockets (CRL-174). On a single-user server, on any
 platform, a step can act as you, the owner, so neither a human gate nor the
-sandbox is a security control there (CRL-159).
+sandbox is a security control there. That is accepted: such a server never
+labels a gate Enforced. On a server that signs users in with accounts, a
+sandboxed step could not get your sign-in token (measured on macOS 27.2.1),
+but other programs' sockets (CRL-174) and files a step leaves for your own
+tools (CRL-181) still keep every gate labelled not Enforced; a run's detail
+says why in `gate_integrity`.
 
 Since CRL-176 a Coral step's Claude CLI keeps its Claude Code state in a
 private directory, a fresh one for each launch in the sandbox. While the CLI
@@ -124,14 +129,15 @@ hooks, which, from the code, your own Claude Code loads if you open and trust
 that directory (CRL-181). A step or a sandboxed agent can still reach your
 `~/.claude` indirectly, through the channels above to code outside the sandbox,
 such as your own Claude Code's inbox (CRL-174) or, on a single-user server, the
-server itself (CRL-159). A step whose sandbox cannot wrap its CLI does not
-start. Coral steps need a system `claude` CLI, or they refuse to start: the
+server itself (accepted, above). A step whose sandbox cannot wrap its CLI does
+not start. Coral steps need a system `claude` CLI, or they refuse to start: the
 SDK's bundled one cannot be wrapped in the sandbox. See the ADR-05 addenda on
 [harness sockets](docs/coral/decisions/ADR-05-topology.md#addendum-crl-166-harness-sockets-on-macos-2026-11-22),
 [Claude config isolation](docs/coral/decisions/ADR-05-topology.md#addendum-crl-176-claude-config-isolation-2026-11-22),
-[sandboxed agents' Claude config](docs/coral/decisions/ADR-05-topology.md#addendum-crl-178-claude-config-isolation-for-every-sandboxed-agent-2026-11-22)
+[sandboxed agents' Claude config](docs/coral/decisions/ADR-05-topology.md#addendum-crl-178-claude-config-isolation-for-every-sandboxed-agent-2026-11-22),
+[launch temp dir cleanup](docs/coral/decisions/ADR-05-topology.md#addendum-crl-179-launch-temp-dir-cleanup-2026-11-22)
 and
-[launch temp dir cleanup](docs/coral/decisions/ADR-05-topology.md#addendum-crl-179-launch-temp-dir-cleanup-2026-11-22).
+[identity-requiring servers and gate labels](docs/coral/decisions/ADR-05-topology.md#addendum-crl-159-probe-15-on-identity-requiring-servers-2026-11-23).
 
 ## Run Coral from source
 

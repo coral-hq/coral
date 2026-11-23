@@ -378,23 +378,25 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
 
 ## Residuals
 
-- **Servers that require no identity.** With authentication off, or a
-  single-user header server, every request without credentials is the local
-  user, so any process of that user that can reach the server (a step shell
-  the sandbox lets reach loopback or the server URL, or the `omnigent` CLI)
-  can read the prompt and answer the gate as the owner; ADR-05's probe 15
-  measured a step shell reaching the server this way, with no credentials, on
-  single-user servers
+- **Single-user servers, accepted.** On a server with authentication off, or
+  a single-user header server, every request without credentials is the
+  owner. Any process of the owner's OS user that reaches the server, a
+  sandboxed step included, can read and answer the owner's gates. Probe 15
+  pins this as `owner_bare: reachable` on macOS and Linux
   ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
-  "Addendum: CRL-137 probe verdicts"; CRL-159). With a single-user server
-  bound to a non-loopback address, so can any network peer. Nothing on
-  the server can tell such a process from the person. The random prompt id
-  stops blind requests (cross-site, guessing), not a process that can read
-  the anchor.
+  "Addendum: CRL-159 probe 15 on identity-requiring servers"). It is
+  accepted: such servers are never Enforced. To close it, run an accounts
+  server, where the identity probe shows that a step's bare request is
+  refused. With a single-user server bound to a non-loopback address, any
+  network peer can answer too. The random prompt id stops blind requests
+  (cross-site, guessing), not a process that can read the anchor.
 - **Same-user steps on authenticated servers.** A step whose shell the
   sandbox does not confine can mint an owner token from its runner's
   environment, so an owner-authenticated answer does not prove a person took
-  it ([`session-facade.md`](session-facade.md), "Same-user steps").
+  it ([`session-facade.md`](session-facade.md), "Same-user steps"). On an
+  accounts server a sandboxed step cannot read its runner's tokens, the stored
+  credentials or the cookie secret (measured on macOS 27.2.1, and from code on
+  Linux). What it can still reach keeps every gate not Enforced (below).
 - **A step that shadows or clears the anchor's prompt** cannot answer the
   gate: answers on any session but the run's anchor are refused, the web
   Inbox's workflow kind claims only anchor prompts, and the sweep withdraws
@@ -458,22 +460,76 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
 
 ## Enforced gates
 
-No gate is labelled Enforced. A gate may be labelled Enforced only when
-the sandbox probe in ADR-05's follow-ups passes and the server runs a mode
-that requires identity, in which steps hold no owner credential. Gates on
-single-user or auth-off servers are never Enforced. The probe has run only on
-single-user servers, where every gate is unenforced by this rule; running it on
-a server that requires identity is CRL-159
-([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
-"Addendum: CRL-137 probe verdicts").
+Each run's detail carries `gate_integrity`, `{label, reasons}`, for its
+pending gates at the time of the read ([`runs-api.md`](runs-api.md), "Reads").
+It covers Coral's steps only. The rule is
+`gate_integrity` in `coral/gates/integrity.py`; the server's facts are read in
+`coral/omni/server/gate_integrity.py`.
+
+A gate is **Enforced** only on a server that signs users in with accounts,
+whose settings the label verifies (no allow-listed runner token, machine
+client, device grant or single-user marker, and no server state under a path
+every seatbelt step reads), and that creates no claude-native steps.
+The run's own host must report an OS sandbox (seatbelt on macOS, bwrap on
+Linux) at a policy revision whose row in `coral/gates/integrity.py` is empty.
+Each row lists the owners of the open paths in probe 15's identity pins, kept
+equal to the pins by a test, and the open paths the probe does not measure.
+Any fact the server cannot read reads `not_enforced`. Enforced is a statement
+about what Coral's sandbox lets a step reach, measured on the platform and
+Claude CLI versions in ADR-05. It does not prove that a person answered.
+
+Each of these keeps every gate `not_enforced` until its ticket closes:
+
+- code a step leaves in its worktree that the owner's own tools later run
+  outside the sandbox, such as a nested `.git` whose hook `git status` runs
+  (measured), Claude Code project settings or a direnv `.envrc` (CRL-181);
+- other programs that take local connections without a credential:
+  Docker-style and `tmux -S` sockets, ssh-agent, the inbox sockets of the
+  owner's own Claude Code sessions, and Linux abstract sockets; and loopback
+  TCP services that do not authenticate callers, such as a browser's
+  remote-debugging port or a codex app-server started without `--ws-auth`
+  (CRL-174);
+- macOS services reached through Mach lookups, the clipboard and Spotlight
+  (CRL-171);
+- macOS releases or CLI versions other than those pinned: no CI lane runs
+  macOS (CRL-170);
+- guessing the owner's password at `/auth/login`, which the server does not
+  rate-limit (CRL-195);
+- an owner credential that a step of another live run, or of an earlier run,
+  obtained, which stays usable until the owner changes their password. The
+  label reads only the run's own host (CRL-193).
+
+OIDC servers read `server_mode_not_verified` until their native sign-in asks
+for consent and the probe runs on them (CRL-194). Single-user and auth-off
+servers are never Enforced (Residuals).
+
+Enforced does not cover:
+
+- agents the owner runs outside Coral, and other accounts that share the
+  owner's OS user;
+- sign-ins the owner approves, such as a link a step asks the owner to open;
+- tools from tool providers other than Coral's, managed outer sandboxes
+  (`lakebox`, `phoenix-kubernetes`), and UDP;
+- the rest of ADR-05's not-checked list: read roots beyond seatbelt's
+  defaults, provider claims of a policy revision, future step-harness flags,
+  the host's live hello rather than each runner's, and a replica that does
+  not hold the host's tunnel.
+
+Today every row names open tickets, so every gate reads `not_enforced`. A row
+empties only through a new policy revision, once each of its tickets is
+closed: its probe pins read closed, or the owner accepts the residual in
+ADR-05 ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
+"Addendum: CRL-159 probe 15 on identity-requiring servers").
 
 ## Deferred work and owners
 
 | Work | Owner |
 |---|---|
 | A request-body size cap in `CoralRoute` for every Coral POST | CRL-150 |
-| The sandbox probe on a server that requires identity: from the step shell, HTTP to the Omnigent server with the CLI's stored credentials, and owner-token minting after an environment read. It ran without credentials on single-user servers (ADR-05, "Addendum: CRL-137 probe verdicts") | CRL-159 |
-| Label gates Enforced under the rule above | CRL-159 (RUL-02) |
+| The label's other blockers ("Enforced gates") | CRL-170, CRL-171, CRL-174, CRL-181 |
+| The label's owner-wide history (the owner's other live and earlier runs), and showing it on the gate card and the Inbox | CRL-193 |
+| Consent for OIDC's native sign-in, then probe 15 on an OIDC server | CRL-194 |
+| A rate limit on `/auth/login` | CRL-195 |
 | Retention of marked-read and resolved alerts | DUR-06 |
 | External delivery (webhook, email, push), batch gates, team approvers, questions and budget prompts | GTE-03, GTE-04; no live ticket |
 | Multi-label gates on `/approve` (their `approve_link` is unset) | no live ticket |

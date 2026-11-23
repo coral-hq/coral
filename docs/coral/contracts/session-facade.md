@@ -1447,7 +1447,13 @@ test until someone classifies it.
   ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
   "Addendum: CRL-137 probe verdicts"). On both platforms a step reaches the
   server, so on a single-user server it still acts as the owner, a Linux step
-  included (next item; CRL-159). The macOS sandbox keeps other processes'
+  included (next item). On an accounts server a sandboxed step cannot mint an
+  owner JWT, act as the owner with the host's bearer or the CLI's stored
+  credentials, read the cookie secret, or make a bare owner request: measured
+  on macOS 27.2.1, and from code on Linux, which the `coral-e2e` lane checks
+  (ADR-05, "Addendum: CRL-159 probe 15 on identity-requiring servers"; the
+  run's `gate_integrity` label, [`gates-and-inbox.md`](gates-and-inbox.md),
+  "Enforced gates"). The macOS sandbox keeps other processes'
   environments and command lines unreadable, measured on macOS 27.2.1 only
   (CRL-170). It also denies connecting to other sessions' harness sockets under
   the host's socket root and the per-user default, and to other terminals' tmux
@@ -1502,14 +1508,16 @@ test until someone classifies it.
   sandboxed agent". Whether to run Coral steps on untrusted content on macOS
   while CRL-171 is open, and on either platform while CRL-174 and CRL-181 are
   open, is an open owner decision, recorded in the first.
-- **Servers that require no identity.** With authentication off, or on a
-  single-user header server, every request without credentials is the local
-  user. Any process of that user that can reach the server (a step shell the
-  sandbox lets reach loopback or the server URL, or the `omnigent` CLI) can
-  read a gate's prompt and answer it as the owner, and with a single-user
-  server bound to a non-loopback address so can any network peer. Nothing on
-  the server can tell such a process from the person, so no gate is labelled
-  Enforced there ([`gates-and-inbox.md`](gates-and-inbox.md)).
+- **Servers that require no identity.** On a server with authentication off,
+  or a single-user header server, every request without credentials is the
+  owner. Any process of the owner's OS user that reaches the server, a
+  sandboxed step or the `omnigent` CLI included, can read and answer the
+  owner's gates, and with a single-user server bound to a non-loopback address
+  so can any network peer. Probe 15 pins this as `owner_bare: reachable` on
+  macOS and Linux. It is accepted: such servers are never Enforced
+  ([`gates-and-inbox.md`](gates-and-inbox.md), "Enforced gates"). To close it,
+  run an accounts server, where the identity probe shows that a step's bare
+  request is refused.
 
 ## Deferred work and owners
 
@@ -1580,7 +1588,7 @@ drift (CRL-161).
 | Omnigent's own launch paths reach a step's runner without Coral's checks ("One relaunch path", Residuals) | CRL-162 |
 | A relaunch or a fence that meets another stop of the same runner in progress ("A stop in progress reads as stopped", Residuals) | CRL-163 |
 | Probe 15's exposures: secrets in exec-time environments and argv, the model API key among them (CRL-167); the allow-listed runner token on Coral-bound sessions (CRL-168) | CRL-167, CRL-168 |
-| Probe 15 on servers that require identity (owner-JWT minting after an environment read, the CLI's stored credentials), and labelling a gate Enforced only when that passes and steps hold no owner credential; never on single-user or auth-off servers. No gate is labelled Enforced today | CRL-159 (RUL-02) |
+| What keeps every gate's `gate_integrity` at `not_enforced` ([`gates-and-inbox.md`](gates-and-inbox.md), "Enforced gates"): other programs' sockets and loopback services; files a step leaves that the owner's tools run; macOS CI and Mach services; the owner's other and earlier runs; password guessing at `/auth/login`. OIDC servers wait on a consented native sign-in | CRL-174, CRL-181, CRL-170, CRL-171, CRL-193, CRL-195; OIDC CRL-194 |
 | A force-deleted `coral__` agent leaves the live steps that run it unable to hand off, with only `/mcp` failing closed, until the nudge cap pauses the run: consult the required-policy provider on the no-agent branch keyed on the binding, or stop the run's sessions on a forced delete | CRL-154 |
 | Showing the salvage ref in the web, and the retention and cleanup of `refs/coral/salvage/*` ([`workspace-ops.md`](workspace-ops.md), "Restart ladder") | CRL-158 |
 | Separate worktrees per agent, and parallel writers (ADR-05 probe (a), separate-worktrees half) | CRL-140 |

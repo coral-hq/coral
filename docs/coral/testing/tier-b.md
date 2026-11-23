@@ -30,7 +30,9 @@ the live variant unless `CORAL_E2E_LIVE=1` and `ANTHROPIC_API_KEY` are set.
   SIGKILL proofs;
 - `tests/e2e/coral/test_runner_loss.py`: a lost runner, a lost host and a step
   retry;
-- `tests/e2e/coral/test_sandbox_probe.py`: ADR-05's probe 15.
+- `tests/e2e/coral/test_sandbox_probe.py`: ADR-05's probe 15 on a single-user,
+  an allow-listed-token and an accounts server, and the test that binds the gate
+  label's table to the probe's pins.
 
 Explicit paths override `addopts`'s `--ignore=tests/e2e` (`pyproject.toml`). The proxy's file comes
 first so that `--dist=load` spreads the stack tests over both workers; the
@@ -49,8 +51,11 @@ action. The job's steps for this group:
   15 writes its verdicts there). The job runs pytest with `--showlocals`, so
   the tests' own frames hold canaries and tokens only in redacted `Secret`s;
   the stack helpers' frames hold the raw per-run values, so only a failure in
-  a stack's start or teardown can print them. Its checkout
-  does not set `persist-credentials: false`, as for every `pytest` group
+  a stack's start or teardown can print them. The accounts stack keeps its
+  cookie secret, admin password and owner JWT in `Secret`s and drops the frames
+  of a failed sign-in, which
+  `test_a_stack_that_fails_to_start_shows_none_of_its_secrets` checks. Its
+  checkout does not set `persist-credentials: false`, as for every `pytest` group
   (CRL-160).
 
 Budgets: each test's absolute deadlines stay within 240 s (the default-lease
@@ -59,8 +64,9 @@ within 15 minutes with its setup. Measured locally the CI way on macOS: the
 row in about 265 s; the default-lease proof about 188 s, the host outage about
 130 s, the SIGKILL proof about 36 s, the retry about 21 s, the happy path about
 18 s, the runner kill about 13 s, probe 15 about 11 s and the allow-listed-token
-test about 9 s. A test that cannot meet its budget moves to a lower layer, not
-to a nightly lane.
+test about 9 s. The identity probe, added later, takes about 13 s in a plain
+local run; the row was not timed again. A test that cannot meet its budget
+moves to a lower layer, not to a nightly lane.
 
 ## The walking-skeleton stack
 
@@ -134,7 +140,7 @@ their process trees.
 | `test_runner_loss.py::test_a_killed_step_runner_is_relaunched_in_the_same_session` | `killpg` of the step runner | one loss, one wake `relaunched`, the same session and generation, a new runner id; the run never pauses |
 | `test_runner_loss.py::test_an_offline_host_holds_the_step_and_its_return_relaunches_it` | host daemon SIGKILL; 30 s grace | the hold (`infra` / `infra.host_offline`, Cancel only, `:resume` and `:retry` 409), then `respawn_host`, the hold ends and the same session is relaunched as one loss |
 | `test_runner_loss.py::test_retrying_a_blocked_step_fences_salvages_resets_and_briefs_a_new_session` | a blocked handoff, then `:retry` | paused `recovery.restarting` until the restart finished; the old session closed and its tree gone; one salvage ref holding the old attempt's file; a reset worktree; generation 2 in a new session whose brief names the ref |
-| `test_sandbox_probe.py` (two stack tests) | none | ADR-05's probe 15 verdicts, pinned per platform |
+| `test_sandbox_probe.py` (three stack tests) | none | ADR-05's probe 15 verdicts, pinned per platform: on a single-user server, on one that keeps the allow-listed runner token, and on an accounts server, where the same probe first runs outside the sandbox and must open every owner path |
 
 The review loop is a test fixture, `tests/e2e/coral/fixtures/review_loop.yaml`
 ("Implement with review loop": implement, review with a `changes_requested`
@@ -150,10 +156,48 @@ with the reviewer still held, and only then is the reviewer let go. Every
 target needs a host-side control; a target that went missing fails as a failed
 control, never as a verdict. Without pins for the platform, each stack test
 writes `artifacts/probe15-<platform>.json` (and
-`artifacts/probe15-token-<platform>.json`) when `artifacts/` exists, as in CI,
-and fails "not pinned"; pins are taken from those files, with every
-`reachable` given its owner ticket. They hold verdict tokens and the recorded
-versions only.
+`artifacts/probe15-token-<platform>.json` or
+`artifacts/probe15-identity-<platform>.json`) when `artifacts/` exists, as in CI, and fails "not pinned"; pins are taken from
+those files, with every open verdict given its owner ticket. They hold verdict
+tokens and the recorded versions only.
+
+**The identity probe's choreography.**
+`test_probe_15_on_a_server_that_requires_identity` starts the stack with
+`skeleton_stack(identity=True)`: an accounts server with a throwaway cookie
+secret and first admin, the owner's JWT from `POST /auth/login` stored in the
+host's `~/.omnigent/auth_tokens.json` before the host starts, and the stack's
+client sending that JWT. The host spawns runners directly
+(`OMNIGENT_RUNNER_ZYGOTE=0`), so the test first checks, by name only, that the
+implementer's runner holds its binding token and the host's bearer. It plants
+a cookie-secret canary in the host's home and opens throwaway listeners for
+other programs' services. With both steps' first calls held, it reads the run's
+`gate_integrity` and runs the same probe outside any sandbox in the step's
+worktree; that run must open every owner path, or the test fails as a broken
+probe. Then the step runs the probe, its controls run again, and the run must
+complete. The verdicts, the outside verdicts and the recorded versions are
+written before any assertion, so a failing lane run still leaves them.
+
+**Pinning probe 15.** The macOS pins come from local runs; the Linux pins come
+from the `coral-e2e` lane's artifacts (`pytest-coral-e2e-<run id>`). The lane
+runs for a non-draft pull request, or a push to `main`, `development` or a
+release branch. For each failure in `test_sandbox_probe.py`:
+
+- A failed control, a broken probe, a count of `claude` CLIs or a timeout is
+  rerun, never re-pinned.
+- "Moved from its pins": re-pin only a move between closed verdicts (such as
+  `hidden` and `denied`), the socket, TCP and plant checks with their owners,
+  and the single-user `owner_bare` checks with the accepted residual.
+- Any open verdict on a credential path is escalated to a person and a ticket,
+  never re-pinned: a `.read` other than `denied` or `hidden`; `minted`,
+  `mismatch`, `refused` or `not_present` on `mint`, `bearer` or `stored`;
+  `reachable` on an environment or the cookie secret; a bare owner request on
+  the accounts server other than `refused`; or any `shell_env_names.names`
+  other than `none`.
+- A person checks every pin copied from the lane, and the comment above the
+  pins names the lane run. A move that changes a policy row's open owners also
+  needs a new sandbox policy revision and rows (ADR-05, "Addendum: CRL-159
+  probe 15 on identity-requiring servers"); the binding test fails until they
+  exist.
 
 ## The live variant
 
@@ -206,9 +250,10 @@ shell and tools that started it, which another process of the same user outside
 the sandbox can read (CRL-167). A step's shell cannot read it directly: on macOS
 27.2.1 since CRL-165 (S111, probe 15; no CI lane runs macOS, CRL-170), and on
 Linux because of pid namespaces. On a single-user server, though, a step can
-act as the owner (CRL-159). The
-proxy path is the claude-sdk gateway path (it sets a base URL), so a host with
-only `ANTHROPIC_API_KEY` and no base URL is not exercised.
+act as the owner, an accepted residual (ADR-05, "Addendum: CRL-159 probe 15 on
+identity-requiring servers"). The proxy path is the claude-sdk gateway path (it
+sets a base URL), so a host with only `ANTHROPIC_API_KEY` and no base URL is not
+exercised.
 
 ## The harness is claude-sdk
 
