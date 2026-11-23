@@ -237,6 +237,7 @@ def create_runner_tunnel_router(
     resolve_managed_runner_owner: Callable[[str], str | None] | None = None,
     admit_managed_runner: Callable[[str], bool] | None = None,
     mint_managed_runner_token: Callable[[str, int], str | None] | None = None,
+    requires_bound_token: Callable[[str], bool] | None = None,  # CORAL(S118)
 ) -> APIRouter:
     """Build the router hosting the ``/runners/{id}/tunnel`` WS endpoint.
 
@@ -279,6 +280,8 @@ def create_runner_tunnel_router(
         peer is then rejected, the prior behavior).
     :param mint_managed_runner_token: Accounts-mode issuer that validates the
         saved runner authority and mints under the account lock.
+    :param requires_bound_token: CORAL(S118): whether a runner id may connect only
+        with the binding token it derives from, not token-less or allow-listed.
     :returns: A FastAPI router with the tunnel endpoint.
     """
     router = APIRouter()
@@ -467,6 +470,20 @@ def create_runner_tunnel_router(
                 allowed_tunnel_tokens=None,
             )
         if expected_runner_id is None and allowed_tunnel_tokens is None and not is_loopback:
+            await ws.accept()
+            await ws.close(
+                code=RUNNER_ID_MISMATCH_CLOSE_CODE,
+                reason="runner tunnel token is required",
+            )
+            return
+        # CORAL(S118): a Coral step's runner id needs its own binding token.
+        presented = (ws.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip()
+        if (
+            expected_runner_id is None
+            and not (presented and token_bound_runner_id(presented) == runner_id)
+            and requires_bound_token is not None
+            and await asyncio.to_thread(requires_bound_token, runner_id)
+        ):
             await ws.accept()
             await ws.close(
                 code=RUNNER_ID_MISMATCH_CLOSE_CODE,

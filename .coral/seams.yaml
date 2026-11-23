@@ -2263,7 +2263,12 @@ seams:
       policy actor is unchanged for every token case. S10 passes the result
       to server tools as ServerToolCall.runner_proven. Proof is
       runner-granular: anything holding the runner's token proves every
-      session that runner serves.
+      session that runner serves. `coral_bound(conversation)` says a session
+      is Coral's by a `coral.` label key (S46: clients can neither write nor
+      remove one); on such a session the allow-list never proves the runner,
+      only a token bound to its runner_id does, so a step holding the
+      server's allow-listed `OMNIGENT_RUNNER_TUNNEL_TOKEN` cannot call Coral's
+      engine tools as another step's runner.
     files:
       - omnigent/server/mcp_identity.py
       - tests/server/test_mcp_identity.py
@@ -2271,14 +2276,15 @@ seams:
       - tests/server/test_mcp_identity.py
     budget_lines: 40
     budget_exception:
-      lines: 82
+      lines: 103
       reason: >-
-        tests/server/test_mcp_identity.py (new, 82 lines) checks
+        tests/server/test_mcp_identity.py (new, 103 lines) checks
         runner_proven and the policy actor over eleven token cases (bound,
         padded, another runner's, missing, blank, a session without a runner
         or on a stable id, allow-listed with and without a runner, not
-        allow-listed, a blank allow-list entry). omnigent/server/mcp_identity.py
-        (22) is within budget.
+        allow-listed, a blank allow-list entry), and the allow-list refused on
+        a Coral-labelled session. omnigent/server/mcp_identity.py (39) is
+        within budget.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
@@ -4007,6 +4013,61 @@ seams:
     tests:
       - tests/coral/omni/test_session_facade.py
     budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S118
+    title: No allow-listed or token-less runner proof for a Coral step's runner
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A server started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` (as `omnigent
+      run`'s local one is) accepted that token, and a loopback peer with no
+      token at all, as the tunnel of any path runner id, also on an accounts
+      server, where the token-less peer is owned by `local`. So a step could
+      connect a tunnel under another step's runner id. runner_tunnel.py takes
+      `requires_bound_token(runner_id)`; when the handshake resolved no
+      token-bound runner id and it says yes, the handshake closes 4004
+      ("runner tunnel token is required") before hello or registration; a
+      token that derives the path runner id (allow-listed or not) still
+      passes. app.py passes a check that a session bound to the runner id has
+      a `coral.` label (S49's `coral_bound`); Coral's supersession follower
+      carries those labels to a session that takes over a step's binding. Coral runners always present the binding token their id
+      derives from. identity.py adds `OMNIGENT_RUNNER_TUNNEL_TOKEN` to
+      RUNNER_AUTH_SECRET_ENV_VARS, so runners strip it from every child they
+      spawn. Residual: a runner zygote still forks with the host's own
+      environment, so a host that exports the token still hands it to
+      zygote-forked runners and harnesses; a tunnel opened before its session
+      row exists is not yet seen as Coral's; the runner lookup is scoped to
+      the handshake's workspace, as the tunnel's owner lookup is; a label
+      carry that fails after a binding transfer is only logged, leaving the
+      superseding session unfenced.
+    files:
+      - omnigent/runner/identity.py
+      - omnigent/server/app.py
+      - omnigent/server/routes/runner_tunnel.py
+      - tests/runner/test_identity.py
+      - tests/server/integration/test_runner_tunnel_route.py
+    tests:
+      - tests/runner/test_identity.py
+      - tests/server/integration/test_runner_tunnel_route.py
+    budget_lines: 40
+    budget_exception:
+      lines: 129
+      reason: >-
+        tests/server/integration/test_runner_tunnel_route.py gains 129 lines:
+        the production app refusing a token-less loopback tunnel for a
+        Coral-labelled session's runner id and taking its own binding token,
+        and the route on an accounts server with an allow-list refusing the
+        allow-listed and token-less tunnels for a Coral runner id from
+        loopback and remote peers while another runner id keeps the
+        token-less loopback path, and the proofs that still connect there (a
+        remote allow-listed non-Coral runner, a Coral runner's own token, an
+        allow-listed token that derives the path id). The other files are
+        within budget.
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
