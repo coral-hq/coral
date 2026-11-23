@@ -1450,9 +1450,9 @@ test until someone classifies it.
   included (next item). On an accounts server a sandboxed step cannot mint an
   owner JWT, act as the owner with the host's bearer or the CLI's stored
   credentials, read the cookie secret, or make a bare owner request: measured
-  on macOS 27.2.1, and from code on Linux, which the `coral-e2e` lane checks
-  (ADR-05, "Addendum: CRL-159 probe 15 on identity-requiring servers"; the
-  run's `gate_integrity` label, [`gates-and-inbox.md`](gates-and-inbox.md),
+  on macOS 27.2.1, and on Linux in `coral-e2e` lane run 45187294423 (ADR-05,
+  "Addendum: CRL-159 probe 15 on identity-requiring servers"; the run's
+  `gate_integrity` label, [`gates-and-inbox.md`](gates-and-inbox.md),
   "Enforced gates"). The macOS sandbox keeps other processes'
   environments and command lines unreadable, measured on macOS 27.2.1 only
   (CRL-170). It also denies connecting to other sessions' harness sockets under
@@ -1465,10 +1465,10 @@ test until someone classifies it.
   secret, the codex-native app-server WebSocket since S114 (measured on macOS
   26.3.1 only). The exception is one started by a Codex without `--ws-auth`,
   which runs with no token and logs a warning (noted on CRL-177). Other
-  programs' loopback services (CRL-174) and UDP are not covered. From code,
-  not measured: on Linux a step reaches other programs' abstract sockets
-  (CRL-174). Processes outside the sandbox can still connect to a
-  harness socket, which has no bearer on POSIX (CRL-173). A Coral step's
+  programs' loopback services (CRL-174) and UDP are not covered. On Linux a
+  step reaches other programs' abstract sockets (CRL-174), measured in
+  `coral-e2e` lane run 45187294423. Processes outside the sandbox can still
+  connect to a harness socket, which has no bearer on POSIX (CRL-173). A Coral step's
   sandboxed Claude CLI keeps its Claude Code state in a private directory for
   each launch. Its sandbox grants nothing of the user's `~/.claude` or
   `~/.claude.json`, so neither it nor anything it starts can read or write

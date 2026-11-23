@@ -395,8 +395,9 @@ with a row in `MODIFICATIONS.md`; all seven are Coral-owned.
   environment, so an owner-authenticated answer does not prove a person took
   it ([`session-facade.md`](session-facade.md), "Same-user steps"). On an
   accounts server a sandboxed step cannot read its runner's tokens, the stored
-  credentials or the cookie secret (measured on macOS 27.2.1, and from code on
-  Linux). What it can still reach keeps every gate not Enforced (below).
+  credentials or the cookie secret (measured on macOS 27.2.1, and on Linux in
+  `coral-e2e` lane run 45187294423). What it can still reach keeps every gate
+  not Enforced (below).
 - **A step that shadows or clears the anchor's prompt** cannot answer the
   gate: answers on any session but the run's anchor are refused, the web
   Inbox's workflow kind claims only anchor prompts, and the sweep withdraws
@@ -497,28 +498,49 @@ Each of these keeps every gate `not_enforced` until its ticket closes:
   rate-limit (CRL-195);
 - an owner credential that a step of another live run, or of an earlier run,
   obtained, which stays usable until the owner changes their password. The
-  label reads only the run's own host (CRL-193).
+  label reads only the run's own host (CRL-193);
+- what the label does not check yet (CRL-193, below).
 
 OIDC servers read `server_mode_not_verified` until their native sign-in asks
 for consent and the probe runs on them (CRL-194). Single-user and auth-off
 servers are never Enforced (Residuals).
+
+The label does not check these yet. They are not accepted: CRL-193, a
+declared blocker on every row, owns them, and each needs a check before any
+row empties (ADR-05's not-checked list):
+
+- read roots beyond seatbelt's defaults: bwrap's own read-only roots, and
+  per-step grants such as the checkout's packages, the interpreter prefix and
+  the CLI install;
+- bwrap binding the host's `/proc` under a managed outer sandbox (`lakebox`,
+  `phoenix-kubernetes`), which the policy token does not show;
+- databases reached over loopback, beyond the CRL-174 pins;
+- provider claims of a policy revision;
+- future step-harness flags such as `codex_steps` and `sandbox_runs`;
+- the host's live hello rather than each runner's;
+- a replica that does not hold the host's tunnel;
+- the step model's tools: the step roster denies only the tools that reach
+  other sessions and agents, so a new default Omnigent tool reaches steps
+  unseen, and the probe measures the shell only;
+- the orchestrator's and anchor's CLIs, which run outside the sandbox
+  (CRL-180).
 
 Enforced does not cover:
 
 - agents the owner runs outside Coral, and other accounts that share the
   owner's OS user;
 - sign-ins the owner approves, such as a link a step asks the owner to open;
-- tools from tool providers other than Coral's, managed outer sandboxes
-  (`lakebox`, `phoenix-kubernetes`), and UDP;
-- the rest of ADR-05's not-checked list: read roots beyond seatbelt's
-  defaults, provider claims of a policy revision, future step-harness flags,
-  the host's live hello rather than each runner's, and a replica that does
-  not hold the host's tunnel.
+- tools from tool providers other than Coral's, and UDP.
 
 Today every row names open tickets, so every gate reads `not_enforced`. A row
-empties only through a new policy revision, once each of its tickets is
-closed: its probe pins read closed, or the owner accepts the residual in
-ADR-05 ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
+empties once each of its tickets is closed. Its probe pins close through a new
+policy revision, and a declared blocker leaves when a probe check pins its
+path closed or the owner accepts the residual in ADR-05. A blocker in server
+code (CRL-193, CRL-195) leaves through its own fix and test, which removes it
+from every row. A server change that widens what a step can reach (sandbox
+paths, network, the step harness) deletes every older revision's rows, so
+hosts still on them read `host_sandbox_unknown`
+([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
 "Addendum: CRL-159 probe 15 on identity-requiring servers").
 
 ## Deferred work and owners
@@ -527,7 +549,7 @@ ADR-05 ([`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
 |---|---|
 | A request-body size cap in `CoralRoute` for every Coral POST | CRL-150 |
 | The label's other blockers ("Enforced gates") | CRL-170, CRL-171, CRL-174, CRL-181 |
-| The label's owner-wide history (the owner's other live and earlier runs), and showing it on the gate card and the Inbox | CRL-193 |
+| The label's owner-wide history (the owner's other live and earlier runs), the checks it does not make yet ("Enforced gates"), and showing it on the gate card and the Inbox | CRL-193 |
 | Consent for OIDC's native sign-in, then probe 15 on an OIDC server | CRL-194 |
 | A rate limit on `/auth/login` | CRL-195 |
 | Retention of marked-read and resolved alerts | DUR-06 |

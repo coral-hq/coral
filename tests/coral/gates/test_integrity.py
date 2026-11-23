@@ -229,8 +229,8 @@ def test_the_declared_blockers_are_the_open_paths_no_probe_measures() -> None:
     }
 
 
-# Every row the table has recorded. Rows are append-only: when a pin moves or a measured rule
-# changes, the revision is bumped and its rows added here; hosts on older code keep theirs.
+# Every row the table has recorded, changed only by the rule above the table in
+# coral/gates/integrity.py (a new revision, a widening server change, a server-code blocker's fix).
 RECORDED_ROWS = {
     HostSandboxPolicy("seatbelt", "1"): SandboxBlockers(
         probed=("CRL-174", "CRL-181"),

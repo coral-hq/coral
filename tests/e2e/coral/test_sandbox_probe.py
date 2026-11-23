@@ -226,7 +226,7 @@ EXPECTED: dict[str, dict[str, Pin]] = {
         "shell_env_names.names": Pin("none"),
     },
     # Pinned from lane run 44980984569 on Ubuntu 24.04.5 LTS, claude 2.1.295 (bwrap); the
-    # two owner_bare pins from code (a shared network namespace), for the lane to confirm.
+    # two owner_bare pins measured in lane run 45187294423 (a shared network namespace).
     "linux": {
         "harness_socket": Pin("hidden"),
         "runner_environ": Pin("hidden"),
@@ -1101,7 +1101,7 @@ EXPECTED_IDENTITY: dict[str, dict[str, Pin]] = {
         "other_loopback_tcp": Pin("reachable", OTHER_PROGRAMS),
         "worktree_exec_config": Pin("reachable", PLANTED_CONFIG),
     },
-    # From code, for the coral-e2e lane to confirm: bwrap's pid namespace and mounts hide
+    # Measured in lane run 45187294423: bwrap's pid namespace and mounts hide
     # the processes, the homes and /tmp; the network namespace and the worktree are shared.
     "linux": {
         "owner_bare": Pin("refused"),
@@ -1135,7 +1135,7 @@ RECORDED_IDENTITY: dict[str, dict[str, Any]] = {
         "sandbox_policy": "1",
         "gate_integrity": OPEN_SANDBOX_LABEL,
     },
-    # From code; the lane's artifact records the versions it ran.
+    # Measured in lane run 45187294423; its artifact records the OS and CLI versions it ran.
     "linux": {
         "harness_socket_root": "/tmp/crl-*",
         "checkout_read_grant": True,

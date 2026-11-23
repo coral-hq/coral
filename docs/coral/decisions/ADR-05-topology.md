@@ -2288,8 +2288,9 @@ that signs users in with accounts, and turns the labelling rule in "Addendum:
 probe 15" into code: each run's detail carries a `gate_integrity` label. No
 Omnigent file changed, so there is no seam. The macOS verdicts are from local
 runs on macOS 27.2.1 with claude 2.1.325, a mock model and throwaway
-credentials. The Linux pins are from code, for the `coral-e2e` lane to
-confirm. No CI lane runs macOS (CRL-170).
+credentials. The Linux pins were measured in `coral-e2e` lane run
+45187294423 (Ubuntu 24.04.5, claude 2.1.295), which matched every one. No CI
+lane runs macOS (CRL-170).
 
 **The identity probe.**
 `tests/e2e/coral/test_sandbox_probe.py::test_probe_15_on_a_server_that_requires_identity`
@@ -2364,7 +2365,7 @@ written to `artifacts/probe15-identity-<platform>.json` before any assertion
 
 **What was measured.** `EXPECTED_IDENTITY` (`:1081-1127`):
 
-| Check | macOS seatbelt (measured) | Linux bwrap (from code) | Owner |
+| Check | macOS seatbelt (measured) | Linux bwrap (measured) | Owner |
 |---|---|---|---|
 | `owner_bare`, `owner_bare_localhost` | `refused` | `refused` | |
 | `shell_env_names` | `not_present`, names `none` | `not_present`, names `none` | |
@@ -2392,36 +2393,36 @@ then runs the hook outside the sandbox was measured on macOS 27.2.1 with git
 
 On Linux, bwrap's pid namespace and mounts hide the other processes, the
 homes and `/tmp`, while the network namespace and the worktree are shared.
-The PR's first `coral-e2e` run confirms these pins from its
-`probe15-identity-linux.json` artifact. Only closed-to-closed moves and the
-socket, TCP and plant checks, with their owners, may be re-pinned from it; an
-open verdict on a credential path is escalated, never re-pinned
+Lane run 45187294423 measured every one of these pins, in its
+`probe15-identity-linux.json` artifact. From a later run, only closed-to-closed
+moves and the socket, TCP and plant checks, with their owners, may be
+re-pinned; an open verdict on a credential path is escalated, never re-pinned
 ([`../testing/tier-b.md`](../testing/tier-b.md), "Pinning probe 15").
 
 **The single-user residual, measured.** The single-user test gains
 `owner_bare` and `owner_bare_localhost`, the same bare owner request. Both are
-`reachable`: measured on macOS, and from code on Linux, where the lane already
-measured the server reachable. Their owner, and that of `server_loopback` and
-`server_localhost` in "Addendum: CRL-137 probe verdicts", is the accepted
-residual `ACCEPTED_SINGLE_USER` (`test_sandbox_probe.py:131`), not CRL-159.
+`reachable`: measured on macOS, and on Linux in lane run 45187294423. Their
+owner, and that of `server_loopback` and `server_localhost` in "Addendum:
+CRL-137 probe verdicts", is the accepted residual `ACCEPTED_SINGLE_USER`
+(`test_sandbox_probe.py:131`), not CRL-159.
 On a server with authentication off, or a single-user header server, every
 request without credentials is the owner, so such servers are never Enforced.
 To close it, run an accounts server, where the identity probe shows a step's
 bare request refused.
 
 **The `gate_integrity` label as built.** The rule is a pure function,
-`gate_integrity` (`coral/gates/integrity.py:170-193`). The server's facts are
+`gate_integrity` (`coral/gates/integrity.py:171-194`). The server's facts are
 read once, when the runs API is built (`server_gate_facts`,
-`coral/omni/server/gate_integrity.py:45-59`; `coral/omni/server/plugin.py:505`).
+`coral/omni/server/gate_integrity.py:45-58`; `coral/omni/server/plugin.py:505`).
 The run's own host is read on each detail read (`_gate_integrity`,
 `coral/api/run_service.py:549-561`). Its inputs:
 
 | Input | Read from | Verified when |
 |---|---|---|
 | Server mode | `auth_mode(provider)` | it is `accounts` (`VERIFIED_SERVER_MODES`, `integrity.py:47`) |
-| Server config | an allow-listed runner token, a machine client, the device grant, the single-user marker, and server state under a path every seatbelt step reads: the data dir, the config file, the artifact location and each SQLite file, as given and with links followed, case-folded on macOS (`gate_integrity.py:62-147`) | every fact was read and is off (`ServerConfigFacts.verified`, `integrity.py:140-143`) |
+| Server config | an allow-listed runner token, a machine client, the device grant, the single-user marker, and server state under a path every seatbelt step reads: the data dir, the config file, the artifact location and each SQLite file, as given and with links followed, case-folded on macOS (`gate_integrity.py:61-146`) | every fact was read and is off (`ServerConfigFacts.verified`, `integrity.py:141-144`) |
 | Native steps | the `claude_native_steps` sub-feature | it is off |
-| The run's own host | the host's live hello: the reserved `os_sandbox:` backend token and exactly one `coral_sandbox_policy:<rev>`, read only while the run's owner and account registration hold the host (`host_sandbox_reader`, `gate_integrity.py:165-190`) | its policy has a row in the table and both parts are empty |
+| The run's own host | the host's live hello: the reserved `os_sandbox:` backend token and exactly one `coral_sandbox_policy:<rev>`, read only while the run's owner and account registration hold the host (`host_sandbox_reader`, `gate_integrity.py:164-189`) | its policy has a row in the table and both parts are empty |
 
 The reasons, in this order, each at most once (`GateIntegrityReason`,
 `integrity.py:27-43`):
@@ -2437,7 +2438,7 @@ The reasons, in this order, each at most once (`GateIntegrityReason`,
 `label` is `enforced` only with no reason. Every unknown input fails closed:
 a host whose steps run with `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` reports no
 revision (`coral/omni/process_map.py:33-35`), and a policy with only one part
-recorded has no row (`blocker_table`, `integrity.py:103-114`).
+recorded has no row (`blocker_table`, `integrity.py:104-115`).
 `tests/coral/gates/test_integrity.py` checks the rule over every server mode,
 flag value, config fact and host policy it lists, against four tables, and
 `tests/coral/omni/test_gate_integrity_facts.py` how each fact is read.
@@ -2450,7 +2451,7 @@ field names no host, backend, revision or ticket
 ([`../contracts/runs-api.md`](../contracts/runs-api.md), "Reads").
 
 **The table.** Per sandbox backend and policy revision it has two parts, and
-Enforced needs both empty (`integrity.py:76-117`):
+Enforced needs both empty (`integrity.py:76-118`):
 
 | Policy | Owners of the open probe pins (`IDENTITY_PROBE_OPEN`) | Declared blockers no probe measures (`UNPROBED_BLOCKERS`) |
 |---|---|---|
@@ -2468,7 +2469,8 @@ The declared blockers:
   label.
 - CRL-193: the label reads the run's own host only. An owner credential that a
   step of another live run, or of an earlier run, obtained stays usable until
-  the owner changes their password.
+  the owner changes their password. CRL-193 also owns the label's not-checked
+  list (Residuals).
 - CRL-195: a step that reaches the server can guess the owner's password at
   `/auth/login`, which has no rate limit
   (`omnigent/server/routes/accounts_auth.py:289-320`).
@@ -2487,9 +2489,9 @@ must equal the declared list.
 **Rows are append-only per policy revision.** A host reports the revision of
 the rules it runs (`SANDBOX_POLICY_REVISION`, `coral/omni/process_map.py:13`),
 so a host on older code keeps the row it was measured under. When a pin moves,
-or a rule probe 15 measures changes (an Omnigent sync that touches
+a rule probe 15 measures changes (an Omnigent sync that touches
 `seatbelt_sandbox.py`, `bwrap_sandbox.py` or the step's environment rules
-included):
+included), or a server-side change widens what a step can reach:
 
 1. Bump `SANDBOX_POLICY_REVISION`.
 2. Re-run the identity probe on both platforms, re-pin `EXPECTED_IDENTITY`,
@@ -2498,9 +2500,18 @@ included):
 3. Add the new revision's rows to `IDENTITY_PROBE_OPEN` and
    `UNPROBED_BLOCKERS`, and to `RECORDED_ROWS` and the policy set in
    `tests/coral/gates/test_integrity.py`.
-4. Keep the old rows, so older hosts keep theirs, or delete them with their
-   `RECORDED_ROWS` entries, so older hosts read `host_sandbox_unknown`.
-5. Never edit a recorded row.
+4. For a host-side change, keep the old rows, so older hosts keep theirs, or
+   delete them with their `RECORDED_ROWS` entries, so older hosts read
+   `host_sandbox_unknown`. A server-side change that widens what a step can
+   reach (the sandbox paths or network in the bundle seeds' `os_env`, the
+   checkout read grant, the step harness, the environment rules the server
+   sends) must delete every older revision's rows: older hosts receive the
+   wider bundle from the server, but their rows were measured under the
+   narrower one.
+5. Never edit a recorded row, with one exception: a declared blocker in server
+   code (CRL-193, CRL-195) leaves every row, and its `RECORDED_ROWS` entries,
+   in the change that fixes it and adds its test, since the server fix reaches
+   every host at once.
 
 A host on a revision with no rows reads `host_sandbox_unknown`. The pin of
 seatbelt's default read roots (`coral/omni/_upstream.py:9`) catches a rename
@@ -2509,11 +2520,14 @@ change for a bump.
 
 **When it flips.** Today every row names open tickets, so every gate reads
 `not_enforced`. On an accounts server with every other fact verified the only
-reason is `host_sandbox_open`, as the identity test records on macOS
-(`RECORDED_IDENTITY`, `test_sandbox_probe.py:1129-1147`). A row empties only
-through a new revision, once each of its pins reads closed and each declared
-blocker is gone: a declared blocker leaves only when a probe check pins its
-path closed, or when the owner accepts it in this ADR.
+reason is `host_sandbox_open`, as the identity test records on macOS and in
+lane run 45187294423 on Linux (`RECORDED_IDENTITY`,
+`test_sandbox_probe.py:1129-1147`). A row empties once each of its pins reads
+closed and each declared blocker is gone. Closed pins, and a declared blocker
+that a probe check pins closed, leave through a new revision. A declared
+blocker in server code (CRL-193, CRL-195) leaves through its own fix and test,
+which removes it from every row (step 5). Any other declared blocker leaves
+only when the owner accepts it in this ADR.
 
 **Residuals and owners.**
 
@@ -2529,7 +2543,9 @@ path closed, or when the owner accepts it in this ADR.
   the host's current hello, not each runner's), and showing the label on gate
   cards and the Inbox.
 - **Single-user servers**, accepted, as above.
-- **Not checked by the label.** Each needs a check before any row empties:
+- **Not checked by the label.** CRL-193, a declared blocker on every row, owns
+  this list, so none of it is accepted. Each item needs a check before any row
+  empties:
   - read roots beyond seatbelt's default subpaths: bwrap's own read-only
     roots, and per-step grants such as the checkout's packages, the
     interpreter prefix and the CLI install;
@@ -2546,7 +2562,13 @@ path closed, or when the owner accepts it in this ADR.
   - the host's live hello rather than each runner's (CRL-193);
   - replica flapping: the host registry is per replica, so a replica without
     the host's tunnel reads `host_sandbox_unknown`, and the label can change
-    between reads.
+    between reads;
+  - the step model's tools: `step_roster` is a denylist of the tools that
+    reach other sessions and agents (`coral/omni/policies/guards.py:98-121`),
+    so a new default Omnigent tool reaches steps unseen, and the probe
+    measures the shell only;
+  - the orchestrator's and anchor's CLIs, which have no `os_env` and run
+    outside the sandbox (CRL-180).
 - **Not covered by Enforced:** agents the owner runs outside Coral, and other
   accounts that share the owner's OS user; sign-ins the owner approves, such
   as a link a step asks the owner to open (the device grant, when on, reads

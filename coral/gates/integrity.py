@@ -73,8 +73,9 @@ class SandboxBlockers:
     unprobed: tuple[str, ...]
 
 
-# Rows are append-only per revision: a moved pin or a changed rule gets a new revision and new
-# rows, and a recorded row is never edited, so hosts on older code keep the row they ran.
+# Rows are append-only per revision: a moved pin or a host-side rule change gets a new revision,
+# and older hosts keep their rows. A server change that widens a step's reach deletes every older
+# row, and a blocker in server code leaves every row through its own fix and test.
 SEATBELT_1 = HostSandboxPolicy("seatbelt", "1")
 BWRAP_1 = HostSandboxPolicy("bwrap", "1")
 # The owners of the open pins in probe 15's tests, per policy they were measured at.

@@ -194,10 +194,12 @@ release branch. For each failure in `test_sandbox_probe.py`:
   the accounts server other than `refused`; or any `shell_env_names.names`
   other than `none`.
 - A person checks every pin copied from the lane, and the comment above the
-  pins names the lane run. A move that changes a policy row's open owners also
-  needs a new sandbox policy revision and rows (ADR-05, "Addendum: CRL-159
-  probe 15 on identity-requiring servers"); the binding test fails until they
-  exist.
+  pins names the lane run. A move that changes a released policy row's open
+  owners also needs a new sandbox policy revision and rows, and a server-side
+  change that widens what a step can reach deletes every older revision's rows
+  (ADR-05, "Addendum: CRL-159 probe 15 on identity-requiring servers"); the
+  binding test fails until they exist. A row still unreleased on the pull
+  request that adds it is corrected in place, with the pins, instead.
 
 ## The live variant
 

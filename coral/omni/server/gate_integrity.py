@@ -44,11 +44,10 @@ FOLD_PATH_CASE = sys.platform == "darwin"
 
 def server_gate_facts(app: Any, services: ServerServices) -> GateIntegrityFacts:
     """The server's own facts for the gate label; the run's host is left unknown."""
+    config = getattr(services, "server_config", None)
     return GateIntegrityFacts(
         server_mode=auth_mode(services.auth_provider),
-        native_steps_enabled=bool(
-            resolve_sub_features(services.server_config).get("claude_native_steps")
-        ),
+        native_steps_enabled=bool(resolve_sub_features(config).get("claude_native_steps")),
         server_config=ServerConfigFacts(
             runner_token_allow_listed=_runner_token_allow_listed(app),
             machine_client=_machine_client(),

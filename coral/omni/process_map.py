@@ -7,9 +7,9 @@ from collections.abc import Iterable, Mapping
 
 # Version 2 hosts offer the engine tools; a host on an older Coral is refused for steps.
 CORAL_RUNNER_TOKEN = "coral_runner:2"
-# The revision of the step sandbox rules this host runs. Bump it when a rule probe 15 measures
-# changes or one of its pins moves, and add the new revision's rows to the gate label's table;
-# recorded rows are never edited. Until then a host on the new rules reads as unknown.
+# The step sandbox rules this host runs. Bump it when a probed rule or pin moves and add its rows
+# to the gate label's table; a server change that widens a step's reach also deletes every older
+# revision's rows. A host on a revision with no rows reads as unknown.
 SANDBOX_POLICY_REVISION = "1"
 SANDBOX_POLICY_PREFIX = "coral_sandbox_policy:"
 CORAL_SANDBOX_POLICY_TOKEN = f"{SANDBOX_POLICY_PREFIX}{SANDBOX_POLICY_REVISION}"
