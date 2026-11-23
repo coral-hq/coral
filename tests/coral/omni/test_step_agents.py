@@ -9,12 +9,16 @@ from typing import Any
 
 import pytest
 import yaml
+from sqlalchemy import create_engine
 
+from coral.db import CoralBase
 from coral.omni.protocols import CoralSessionError, StepAgentResolver
 from coral.omni.server import step_agents as step_agents_module
 from coral.omni.server.bundles import MaterializedAgent, StepBundleRejected
 from coral.omni.server.step_agents import OmnigentStepAgents
 from coral.profiles.bundle_spec import Stance
+from coral.profiles.spec import ProfileSpec
+from coral.stores.profiles import SqlProfileStore
 from omnigent.db.db_models import current_workspace_id, workspace_scope
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
@@ -48,7 +52,7 @@ def agents(agent_store: SqlAlchemyAgentStore, tmp_path: Path) -> OmnigentStepAge
 
 @pytest.fixture
 def materialized(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Each materialize call: its owner, stance, workspace and thread."""
+    """Each materialize call: its owner, stance, workspace, thread and bundle."""
     calls: list[dict[str, Any]] = []
     real = step_agents_module.materialize
 
@@ -59,6 +63,7 @@ def materialized(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
                 "stance": kwargs["stance"],
                 "workspace_id": current_workspace_id(),
                 "thread": threading.current_thread(),
+                "config": yaml.safe_load(kwargs["config_yaml"]),
             }
         )
         return real(*args, **kwargs)
@@ -379,3 +384,104 @@ async def test_an_editable_checkouts_step_bundles_grant_its_packages_to_the_sand
     assert implementer["os_env"]["sandbox"] == {"read_paths": list(grants), "write_paths": ["."]}
     assert reviewer["os_env"]["sandbox"] == {"read_paths": list(grants), "write_paths": []}
     assert "read_paths" not in str(orchestrator)
+
+
+PROFILE = "reviewer/strict-review"
+RUN = "r" * 32
+REVIEW = {"workflow_slug": "two-steps", "node_id": "review", "roster_index": 0}
+
+
+@pytest.fixture
+def profiles(tmp_path: Path) -> SqlProfileStore:
+    engine = create_engine(f"sqlite:///{tmp_path / 'profiles.db'}")
+    CoralBase.metadata.create_all(engine)
+    return SqlProfileStore(engine)
+
+
+def _save(profiles: SqlProfileStore, instructions: str, base: int | None) -> None:
+    profiles.save_revision(
+        workspace_id=WORKSPACE,
+        profile_ref=PROFILE,
+        owner=OWNER,
+        spec=ProfileSpec(name="Strict review", instructions=instructions),
+        base_revision_no=base,
+    )
+
+
+async def test_a_profile_step_builds_from_the_revision_its_run_pinned(
+    agent_store: SqlAlchemyAgentStore,
+    tmp_path: Path,
+    profiles: SqlProfileStore,
+    materialized: list[dict[str, Any]],
+) -> None:
+    agents = OmnigentStepAgents(
+        agent_store, LocalArtifactStore(str(tmp_path / "artifacts")), profiles=profiles
+    )
+    _save(profiles, "Check every line.", None)
+    profiles.pin_run(workspace_id=WORKSPACE, run_id=RUN, owner=OWNER, refs=[PROFILE])
+    _save(profiles, "Skim it.", 1)
+
+    pinned = await agents.resolve(
+        workspace_id=WORKSPACE,
+        owner=OWNER,
+        stance="reviewer",
+        run_id=RUN,
+        profile=PROFILE,
+        **REVIEW,
+    )
+    bare = await agents.resolve(
+        workspace_id=WORKSPACE, owner=OWNER, stance="reviewer", run_id=RUN, **REVIEW
+    )
+
+    assert pinned != bare
+    profiled, plain = (call["config"] for call in materialized)
+    assert "Check every line." in profiled["instructions"]
+    assert "Skim it." not in profiled["instructions"]
+    assert profiled["params"]["coral"]["generated"]["profile"]["revision_no"] == 1
+    assert "profile" not in plain["params"]["coral"]["generated"]
+    assert materialized[0]["stance"] == Stance.REVIEWER
+
+
+@pytest.mark.parametrize(
+    ("with_store", "pinned", "run_id", "stance"),
+    [
+        (True, False, RUN, "reviewer"),
+        (True, True, None, "reviewer"),
+        (True, True, "o" * 32, "reviewer"),
+        (False, True, RUN, "reviewer"),
+        (True, True, RUN, "implementer"),
+    ],
+    ids=["unpinned_run", "no_run", "other_run", "no_store", "other_stance"],
+)
+async def test_a_profile_step_without_its_pin_is_a_permanent_refusal(
+    agent_store: SqlAlchemyAgentStore,
+    tmp_path: Path,
+    profiles: SqlProfileStore,
+    materialized: list[dict[str, Any]],
+    with_store: bool,
+    pinned: bool,
+    run_id: str | None,
+    stance: str,
+) -> None:
+    agents = OmnigentStepAgents(
+        agent_store,
+        LocalArtifactStore(str(tmp_path / "artifacts")),
+        profiles=profiles if with_store else None,
+    )
+    _save(profiles, "Check every line.", None)
+    if pinned:
+        profiles.pin_run(workspace_id=WORKSPACE, run_id=RUN, owner=OWNER, refs=[PROFILE])
+
+    with pytest.raises(CoralSessionError) as refused:
+        await agents.resolve(
+            workspace_id=WORKSPACE,
+            owner=OWNER,
+            stance=stance,
+            run_id=run_id,
+            profile=PROFILE,
+            **REVIEW,
+        )
+
+    assert (refused.value.code, refused.value.retryable) == ("session.agent_not_supported", False)
+    assert f"Profile missing: {PROFILE}" in refused.value.message
+    assert materialized == []

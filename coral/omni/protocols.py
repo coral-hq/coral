@@ -460,6 +460,8 @@ class StepAgentResolver(Protocol):
         node_id: str | None,
         roster_index: int | None,
         session_id: str | None = None,
+        run_id: str | None = None,
+        profile: str | None = None,
     ) -> str:
         """
         The agent id of the stance's Coral bundle; the orchestrator's needs no step reference.
@@ -469,6 +471,9 @@ class StepAgentResolver(Protocol):
         :param owner: The run's user, or ``None`` for an ownerless run (single-user servers).
         :param session_id: The session the create makes: when an earlier try wrote it,
             its agent is kept while it is still this stance's bundle of the owner.
+        :param run_id: The step's run, whose pins name the profile revision.
+        :param profile: The step's profile ref (``reviewer/strict``); its bundle is built
+            from the revision ``run_id`` pinned, never the latest.
         :raises CoralSessionError: Permanent ``session.agent_not_supported`` when no
             bundle can be built for the stance and step; permanent ``session.invalid``
             for an ownerless run on a server that is not single-user.

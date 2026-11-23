@@ -98,6 +98,7 @@ from coral.model.ir import CompiledGraph
 from coral.queue.drainer import FinishedWork
 from coral.queue.run_effects import describe_exception
 from coral.recovery.pause import pause_log_checksum, pause_run_once
+from coral.stores.profiles import SqlProfileStore
 from coral.stores.protocols import (
     STORED_TEXT_ERRORS,
     UNFINISHED_RUN_STATUSES,
@@ -304,11 +305,14 @@ class EngineBridge:
         fold_cache_bytes: int = FOLD_CACHE_BYTES,
         bound_sessions: BoundSessions | None = None,
         gate_elicitation_ids: Callable[[], str] = new_gate_elicitation_id,
+        profiles: SqlProfileStore | None = None,
     ) -> None:
         """
         :param bound_sessions: The status-edge recorder's index; each completed create's
             session is pushed into it.
         :param gate_elicitation_ids: Draws the prompt id of a gate visit's new row.
+        :param profiles: Pins the profiles a run uses at its start; without it a
+            workflow that uses one is refused.
         """
         self._runs = run_store
         self._queue = queue_store
@@ -316,6 +320,7 @@ class EngineBridge:
         self._clock = clock
         self._bound = bound_sessions
         self._gate_ids = gate_elicitation_ids
+        self._profiles = profiles
         self._graphs = PinnedGraphs(versions, max_entries=fold_cache_size)
         self._states = EngineStateCache(
             run_store, max_runs=fold_cache_size, max_bytes=fold_cache_bytes
@@ -337,6 +342,10 @@ class EngineBridge:
     @property
     def versions(self) -> SqlAlchemyWorkflowVersionStore:
         return self._versions
+
+    @property
+    def profiles(self) -> SqlProfileStore | None:
+        return self._profiles
 
     @property
     def bound_sessions(self) -> BoundSessions | None:

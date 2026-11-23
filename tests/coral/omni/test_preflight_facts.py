@@ -218,3 +218,20 @@ async def test_missing_system_claude_is_gathered_from_harness_readiness(
     report = run_preflight(facts)
     failures = [(item.check, item.fix.target) for item in report.items if item.fix is not None]
     assert ("system_claude", "install_harness") in failures
+
+
+@pytest.mark.usefixtures("coral_policy_registry")
+def test_a_profile_ref_plans_with_its_base_stance() -> None:
+    from coral.omni.server.preflight import plan_preflight_steps
+    from tests.coral.workflow_builders import arrow, compile_text, end, start, step, workflow_text
+
+    graph, _source_map = compile_text(
+        workflow_text(
+            [start(), step("review", ["reviewer/strict-review"]), end()],
+            [arrow("a1", "start", "review"), arrow("a2", "review", "end")],
+        )
+    )
+
+    plans = plan_preflight_steps(graph, "demo")
+
+    assert [plan.step_ref for plan in plans] == ["orchestrator", "review:0"]

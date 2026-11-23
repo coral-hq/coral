@@ -24,7 +24,9 @@ SUB_FEATURE_KEYS: tuple[str, ...] = (
     "sandbox_runs",
 )
 
-DEFAULT_SUB_FEATURES: Mapping[str, bool] = MappingProxyType(dict.fromkeys(SUB_FEATURE_KEYS, False))
+DEFAULT_SUB_FEATURES: Mapping[str, bool] = MappingProxyType(
+    dict.fromkeys(SUB_FEATURE_KEYS, False) | {"profiles_desk": True}
+)
 
 
 def resolve_sub_features(server_config: Mapping[str, Any] | None) -> dict[str, bool]:

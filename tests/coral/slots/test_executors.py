@@ -84,6 +84,8 @@ class _Agents:
         node_id: str | None,
         roster_index: int | None,
         session_id: str | None = None,
+        run_id: str | None = None,
+        profile: str | None = None,
     ) -> str:
         self.calls.append(
             {
@@ -94,6 +96,8 @@ class _Agents:
                 "node_id": node_id,
                 "roster_index": roster_index,
                 "session_id": session_id,
+                "run_id": run_id,
+                "profile": profile,
                 "scope": self.scope.active,
             }
         )
@@ -481,6 +485,8 @@ async def test_a_stance_resolves_to_the_run_owners_agent_inside_the_run_scope() 
         "roster_index": 0,
         # The session the create makes: a retry keeps the agent it runs.
         "session_id": effect_session_id(WORKSPACE, env.key()),
+        "run_id": env.run.id,
+        "profile": None,
     }
     assert isinstance(scope, dict)
     assert {key: scope[key] for key in _RUN_SCOPE_KEYS} == {
@@ -498,6 +504,20 @@ async def test_a_stance_resolves_to_the_run_owners_agent_inside_the_run_scope() 
         "implement",
     )
     assert result["session_id"] == effect_session_id(WORKSPACE, env.key())
+
+
+async def test_a_profile_step_resolves_with_its_run_and_profile_ref() -> None:
+    env = _Env(resolver=True)
+
+    _completed(await env.deliver(env.stance_payload(profile="implementer/fast")))
+
+    assert env.agents is not None
+    [call] = env.agents.calls
+    assert (call["stance"], call["run_id"], call["profile"]) == (
+        "implementer",
+        env.run.id,
+        "implementer/fast",
+    )
 
 
 async def test_an_orchestrator_stance_needs_no_step_reference() -> None:
@@ -565,6 +585,9 @@ async def test_a_stance_without_a_resolver_is_an_invalid_payload() -> None:
         {"roster_index": True},
         {"roster_index": "0"},
         {"roster_index": 1_000},
+        {"profile": "reviewer/strict"},
+        {"profile": "implementer/Bad"},
+        {"profile": 3},
     ],
 )
 async def test_invalid_stance_payloads_are_refused_before_resolving(

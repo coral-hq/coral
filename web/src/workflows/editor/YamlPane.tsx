@@ -13,17 +13,21 @@ import type { EditorMarker } from "./markers";
 
 const MARKER_OWNER = "coral-validate";
 
+export type YamlEditor = Parameters<OnMount>[0];
+
 export interface YamlPaneProps {
   value: string;
   onChange: (value: string) => void;
   markers: EditorMarker[];
+  /** The mounted editor, for edits made from outside the pane. */
+  onEditorReady?: (editor: YamlEditor) => void;
 }
 
 /** YAML editor with server-validation markers; uses the shared Monaco seam, not the session editor. */
-export function YamlPane({ value, onChange, markers }: YamlPaneProps) {
+export function YamlPane({ value, onChange, markers, onEditorReady }: YamlPaneProps) {
   const theme = resolvedThemeToMonaco(useResolvedThemeMode());
   const [ready, setReady] = useState(false);
-  const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const editorRef = useRef<YamlEditor | null>(null);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -65,6 +69,7 @@ export function YamlPane({ value, onChange, markers }: YamlPaneProps) {
         onMount={(editor) => {
           editorRef.current = editor;
           setMounted(true);
+          onEditorReady?.(editor);
         }}
         options={{ minimap: { enabled: false }, scrollBeyondLastLine: false, tabSize: 2 }}
       />

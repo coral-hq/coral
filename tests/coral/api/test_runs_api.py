@@ -89,9 +89,11 @@ from coral.omni.protocols import (
 from coral.omni.server import coral_lifespan
 from coral.omni.server.access import request_viewer
 from coral.omni.server.workspace_ops import OmnigentHostWorkspaceChannels
+from coral.profiles.spec import ProfileSpec
 from coral.recovery.cancel import cancel_run_row
 from coral.recovery.pause import pause_run_once
 from coral.stores.fakes import FakeRunStore
+from coral.stores.profiles import revision_id
 from coral.stores.protocols import CoralRun, RunLogEntry, RunNotFound, WorkItem
 from coral.stores.workflows import SqlWorkflowDefinitionStore, WorkflowDefinition
 from coral.validate.pipeline import check_text
@@ -2261,6 +2263,40 @@ async def test_a_workflow_that_cannot_run_is_refused_before_any_host_is_reached(
         "graph.concurrent_writers",
     ]
     assert writes.services.host.connected == []
+
+
+async def test_a_profile_the_starter_has_no_revision_of_is_refused_before_any_host_is_reached(
+    writes: Api,
+) -> None:
+    world, host = writes.world, writes.services.host
+    definition = writes.services.definitions.save(
+        yaml_text=workflow_text(
+            [start_node(), step("review", ["reviewer/strict"]), end_node()],
+            [arrow("a1", "start", "review"), arrow("a2", "review", "end")],
+            id="strict",
+        )
+    )
+    assert definition.runnable
+
+    async with _client(writes.app()) as client:
+        missing = await client.post(RUNS, headers=_as(ALICE), json=_start_body(definition.id))
+        world.profiles.save_revision(
+            workspace_id=WORKSPACE,
+            profile_ref="reviewer/strict",
+            owner=ALICE,
+            spec=ProfileSpec(name="Strict", instructions="Be strict."),
+            base_revision_no=None,
+        )
+        # Refused with no worktree made, no host connected, and no run stored.
+        assert (host.creates(), host.connected, _count_runs(world)) == (0, [], 0)
+        started = await client.post(RUNS, headers=_as(ALICE), json=_start_body(definition.id, "2"))
+
+    assert _refusal(missing) == (422, "not_runnable")
+    assert missing.json()["error"]["details"]["rule"] == "profile.missing", missing.text
+    assert started.status_code == 201, started.text
+    assert world.profiles.run_pin(
+        workspace_id=WORKSPACE, run_id=started.json()["run_id"], profile_ref="reviewer/strict"
+    ) == revision_id("reviewer/strict", 1)
 
 
 async def test_an_accounts_server_starts_only_for_a_proven_account_generation(

@@ -74,7 +74,7 @@ from coral.bridge.service import (
     RunNotRunnable,
     RunRead,
 )
-from coral.bridge.start import check_startable, replay_start, start_engine_run
+from coral.bridge.start import check_profiles, check_startable, replay_start, start_engine_run
 from coral.db.enum_codecs import encode_run_status
 from coral.engine import types as engine
 from coral.gates.verdict import GateAnswers, GateVerdict, VisitAnswer
@@ -719,7 +719,17 @@ class RunsApi:
         if not definition.runnable:
             raise _not_runnable(RunNotRunnable("workflow.invalid", "the workflow cannot run"))
         try:
-            await self._in_flight.run(viewer, check_startable, definition.yaml_text, run_id=run_id)
+            graph = await self._in_flight.run(
+                viewer, check_startable, definition.yaml_text, run_id=run_id
+            )
+            await self._in_flight.run(
+                viewer,
+                check_profiles,
+                self._bridge,
+                graph,
+                workspace_id=workspace_id,
+                owner=owner,
+            )
         except RunNotRunnable as exc:
             raise _not_runnable(exc) from None
         generation = viewer.account_generation if viewer.check_generation else None

@@ -19,6 +19,11 @@ export function profilesPath(): string {
   return PROFILES_PATH;
 }
 
+/** A user profile's page; `ref` is `<stance>/<slug>`, whose slash is the path's own. */
+export function profilePath(ref: string): string {
+  return `${PROFILES_PATH}/${ref.split("/").map(encodeURIComponent).join("/")}`;
+}
+
 export function workflowPath(workflowKey: string): string {
   return `${WORKFLOWS_PATH}/${encodeURIComponent(workflowKey)}`;
 }

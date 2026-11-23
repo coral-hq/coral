@@ -791,7 +791,9 @@ async def test_drift_a_mapped_create_finds_pauses_through_the_engine_until_it_is
         (
             ("node_id", "implement"),
             ("owner", USER),
+            ("profile", None),
             ("roster_index", 0),
+            ("run_id", run.id),
             ("session_id", session_id),
             ("stance", "implementer"),
             ("workflow_slug", "two-steps"),

@@ -15,6 +15,7 @@ from sqlalchemy import Engine, create_engine
 
 from coral.api.inbox import create_inbox_router
 from coral.api.info import create_info_router
+from coral.api.profiles import create_profiles_router
 from coral.api.run_service import API_THREAD_NAME, API_THREADS, InFlight, RunsApi
 from coral.api.runs import create_runs_router
 from coral.api.spend import SPEND_THREAD_NAME, SPEND_THREADS, SpendCache
@@ -45,6 +46,7 @@ from coral.omni.server.usage import OmnigentRunSpend
 from coral.queue.executors import EffectExecutor
 from coral.queue.store import SqlAlchemyCoralQueueStore
 from coral.recovery.relaunch import DEFAULT_RECONNECT_GRACE_S, LivenessPass, LivenessRef
+from coral.stores.profiles import SqlProfileStore
 from coral.stores.protocols import QueueStore, RunStore
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from coral.stores.session_bindings import FreshBindingLookup, SqlAlchemySessionBindingStore
@@ -707,6 +709,7 @@ def _wire_session_engine(
         services.agent_store,
         services.artifact_store,
         conversation_store=services.conversation_store,
+        profiles=SqlProfileStore(db_uri),
         claude_native_steps=claude_native_steps,
     )
     executors: dict[str, EffectExecutor] = {
@@ -841,6 +844,7 @@ async def coral_lifespan(
                 queue_store=queue_store,
                 versions=SqlAlchemyWorkflowVersionStore(storage_location),
                 bound_sessions=bound,
+                profiles=SqlProfileStore(storage_location),
             )
             server_config = getattr(services, "server_config", None)
             workers = drain_concurrency(server_config)
@@ -884,6 +888,7 @@ async def coral_lifespan(
                 app.state.coral_worker_supervisor = supervisor
                 app.state.coral_engine_bridge = bridge
                 app.state.coral_bound_sessions = bound
+                app.state.coral_profile_store = bridge.profiles
             evidence_threads = BoundedThreads(
                 max_workers=EVIDENCE_THREADS, thread_name_prefix=EVIDENCE_THREAD_NAME
             )
@@ -1008,7 +1013,8 @@ def coral_routers(
 
     Each route resolves its caller through ``auth_provider`` and reads the request's
     workspace; the Inbox reads the alert store the lifespan publishes, the runs routes
-    its runs API and run-stream hub, and a start the caller's workflow from ``definitions``.
+    its runs API and run-stream hub, the profiles routes its profile store, and a start the
+    caller's workflow from ``definitions``.
     """
     viewer = request_viewer(auth_provider)
     return (
@@ -1032,6 +1038,15 @@ def coral_routers(
         (
             create_runs_router(
                 definitions=definitions,
+                viewer_dependency=viewer,
+                workspace_id_dependency=current_workspace_id,
+            ),
+            CORAL_API_PREFIX,
+            ["coral"],
+        ),
+        (
+            create_profiles_router(
+                definitions,
                 viewer_dependency=viewer,
                 workspace_id_dependency=current_workspace_id,
             ),

@@ -14,6 +14,7 @@ from coral.bridge.keys import roster_index, slot_create_key, store_activation_id
 from coral.db.enum_codecs import RUN_PAUSE_REASON, RUN_STATUS, SLOT_STATUS, SlotRole
 from coral.engine import types as engine
 from coral.engine.machines.activation import find_activation
+from coral.profiles.refs import roster_stance
 from coral.stores.protocols import AgentSlotDraft, AgentSlotState, CoralRun
 
 # Stances whose slots write the run worktree; any other profile reads it.
@@ -35,8 +36,8 @@ class RunProjection:
 
 
 def slot_role(profile: str) -> SlotRole:
-    """The slot role of a roster profile; an unknown one gets the read-only role."""
-    return _SLOT_ROLES.get(profile, SlotRole.VERIFIER)
+    """The slot role of a roster entry's stance; an unknown one gets the read-only role."""
+    return _SLOT_ROLES.get(roster_stance(profile) or profile, SlotRole.VERIFIER)
 
 
 def run_status_code(state: engine.RunState) -> int:

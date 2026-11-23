@@ -30,6 +30,13 @@ export interface BulkAckRequest {
   run_id: string;
 }
 
+export interface CapabilitiesOut {
+  fs_read_only: "supported" | "unsupported" | "unknown";
+  steering: "supported" | "unsupported" | "unknown";
+  tool_gating: "supported" | "unsupported" | "unknown";
+  usage_reporting: "supported" | "unsupported" | "unknown";
+}
+
 /** Resolution of a ``list_from`` reference. */
 export interface CheckedPart {
   node_id: string;
@@ -95,6 +102,9 @@ export interface CoralError {
     | "not_a_git_repo"
     | "start_key_conflict"
     | "workflow_key_taken"
+    | "profile_exists"
+    | "profile_key_taken"
+    | "stale_revision"
     | "illegal_transition"
     | "stale_visit"
     | "worktree_failed"
@@ -367,6 +377,55 @@ export interface Problem {
   yaml_path: string | null;
 }
 
+export interface ProfileCreateIn {
+  /** ``<stance>/<slug>``, e.g. ``reviewer/strict-review``. */
+  ref: string;
+  /** A ProfileSpec. */
+  spec: Record<string, unknown>;
+}
+
+/** A user profile with its latest spec and every revision, newest first. */
+export interface ProfileDetailOut {
+  capabilities: CapabilitiesOut;
+  created: boolean;
+  description: string;
+  harness: string;
+  model: string | null;
+  name: string;
+  profile_ref: string;
+  revision_no: number | null;
+  revisions: RevisionOut[];
+  rules: RuleOut[];
+  source: "seeded" | "user";
+  spec: ProfileSpec;
+  stance: string;
+  used_by: UsedByOut;
+}
+
+/** One profile as the desk lists it; a seeded row is a built-in stance, read-only. */
+export interface ProfileRowOut {
+  capabilities: CapabilitiesOut;
+  description: string;
+  harness: string;
+  model: string | null;
+  name: string;
+  profile_ref: string;
+  revision_no: number | null;
+  rules: RuleOut[];
+  source: "seeded" | "user";
+  stance: string;
+  used_by: UsedByOut;
+}
+
+/** The content of one profile revision; immutable once saved. */
+export interface ProfileSpec {
+  description: string;
+  instructions: string;
+  model: string | null;
+  name: string;
+  rules: RuleInstance[];
+}
+
 /** Parallel region between an unlabelled split and its AND-join. */
 export interface Region {
   join_node_id: string;
@@ -400,6 +459,45 @@ export interface ResumeRequest {
 export interface ResyncFrame {
   reason: "cursor_unknown" | "cursor_invalid" | "replay_too_long" | "row_unreadable";
   type: "resync";
+}
+
+export interface RevisionIn {
+  /** The revision the edit started from. */
+  base_revision_no: number;
+  /** A ProfileSpec. */
+  spec: Record<string, unknown>;
+}
+
+export interface RevisionOut {
+  created_at: number;
+  id: string;
+  revision_no: number;
+  running_runs: number;
+}
+
+/** One catalog template attached to a profile, with params checked against the template. */
+export interface RuleInstance {
+  params: Record<string, unknown>;
+  strength: RuleStrength;
+  template: string;
+}
+
+export interface RuleOut {
+  statement: string;
+  strength: RuleStrength;
+  template: string;
+}
+
+/** Required rules are enforced by a guardrail policy; Guidance rules are instructions. */
+export type RuleStrength = "required" | "guidance";
+
+export interface RuleTemplateOut {
+  bypasses: string[];
+  id: string;
+  params_schema: Record<string, unknown>;
+  statement_example: string;
+  title: string;
+  version: number;
 }
 
 /**
@@ -715,6 +813,11 @@ export interface UnresolvedFact {
   node_ids: string[];
 }
 
+export interface UsedByOut {
+  running_runs: number;
+  workflows: number;
+}
+
 /** A workflow that loaded and compiled, with what validation found. */
 export interface ValidResult {
   compiled: CompiledGraph;
@@ -853,6 +956,76 @@ export interface CoralOperations {
     path: "/v1/coral/info";
     status: 200;
     response: CoralInfoResponse;
+  };
+  /**
+   * GET /v1/coral/profiles
+   *
+   * The built-in stances, then the caller's profiles by ref.
+   */
+  coral_list_profiles: {
+    method: "GET";
+    path: "/v1/coral/profiles";
+    status: 200;
+    response: ProfileRowOut[];
+    errors: 401 | 403;
+  };
+  /**
+   * POST /v1/coral/profiles
+   *
+   * Create a profile at revision 1.
+   */
+  coral_create_profile: {
+    method: "POST";
+    path: "/v1/coral/profiles";
+    body: ProfileCreateIn;
+    status: 201;
+    response: ProfileDetailOut;
+    errors: 401 | 403 | 409 | 422;
+  };
+  /**
+   * GET /v1/coral/profiles/{stance}/{slug}
+   *
+   * One of the caller's profiles with its spec and revisions.
+   */
+  coral_get_profile: {
+    method: "GET";
+    path: "/v1/coral/profiles/{stance}/{slug}";
+    params: {
+      slug: string;
+      stance: string;
+    };
+    status: 200;
+    response: ProfileDetailOut;
+    errors: 401 | 403 | 404 | 422;
+  };
+  /**
+   * POST /v1/coral/profiles/{stance}/{slug}/revisions
+   *
+   * Save an edit as the next revision; unchanged content keeps the latest one.
+   */
+  coral_save_profile_revision: {
+    method: "POST";
+    path: "/v1/coral/profiles/{stance}/{slug}/revisions";
+    params: {
+      slug: string;
+      stance: string;
+    };
+    body: RevisionIn;
+    status: 200;
+    response: ProfileDetailOut;
+    errors: 401 | 403 | 404 | 409 | 412 | 422;
+  };
+  /**
+   * GET /v1/coral/rule-templates
+   *
+   * Every rule template a profile can use, with its params schema and bypasses.
+   */
+  coral_list_rule_templates: {
+    method: "GET";
+    path: "/v1/coral/rule-templates";
+    status: 200;
+    response: RuleTemplateOut[];
+    errors: 401 | 403;
   };
   /**
    * GET /v1/coral/runs

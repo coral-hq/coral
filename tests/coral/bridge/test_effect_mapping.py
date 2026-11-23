@@ -157,7 +157,9 @@ def test_a_step_create_becomes_a_create_session_row_for_its_stance(
     assert parsed["generation"] == 1
 
 
-@pytest.mark.parametrize("profile", ["orchestrator", "planner", "claude", ""])
+@pytest.mark.parametrize(
+    "profile", ["orchestrator", "planner", "claude", "", "reviewer/Bad", "planner/x", "a/b/c"]
+)
 def test_a_create_for_a_profile_without_a_step_stance_is_refused(profile: str) -> None:
     graph = GRAPH.model_copy(
         update={
@@ -170,6 +172,49 @@ def test_a_create_for_a_profile_without_a_step_stance_is_refused(profile: str) -
     started = drive(graph, [start_run(graph)], auto_ack=False)
     with pytest.raises(UnsupportedStance, match="implement"):
         map_effect(_ctx(started.state, graph=graph), _only(started, "create_session"))
+
+
+@pytest.mark.parametrize(
+    ("profile", "stance", "slot_role"),
+    [
+        ("implementer/fast", "implementer", "step_agent"),
+        ("reviewer/strict-review", "reviewer", "verifier"),
+    ],
+)
+def test_a_profile_create_carries_its_base_stance_and_the_profile_ref(
+    profile: str, stance: str, slot_role: str
+) -> None:
+    graph = GRAPH.model_copy(
+        update={
+            "nodes": tuple(
+                node.model_copy(update={"roster": (profile,)}) if node.id == "implement" else node
+                for node in GRAPH.nodes
+            )
+        }
+    )
+    started = drive(graph, [start_run(graph)], auto_ack=False)
+    payload = _payload(_draft_of(started.state, graph, _only(started, "create_session")))
+
+    assert (payload["stance"], payload["profile"], payload["slot_role"]) == (
+        stance,
+        profile,
+        slot_role,
+    )
+    parsed = _create_payload(payload)
+    assert (parsed["stance"], parsed["profile"]) == (stance, profile)
+
+
+def test_a_bare_stance_create_names_no_profile() -> None:
+    started = _started(auto_ack=False)
+    payload = _payload(_draft(started.state, _only(started, "create_session")))
+    assert "profile" not in payload
+    assert _create_payload(payload)["profile"] is None
+
+
+def _draft_of(state: RunState, graph: CompiledGraph, effect: Effect) -> WorkItemDraft:
+    draft = map_effect(_ctx(state, graph=graph), effect)
+    assert draft is not None
+    return draft
 
 
 def test_the_review_create_is_a_verifier_of_the_second_slot() -> None:

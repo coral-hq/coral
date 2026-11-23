@@ -21,6 +21,7 @@ from coral.db.models.core import (
     WorkflowRow,
     WorkflowVersionRow,
 )
+from coral.db.models.profiles import ProfileRevisionRow, RunProfilePinRow
 from coral.db.models.sessions import (
     CommandObservationRow,
     SessionBindingRow,
@@ -43,7 +44,9 @@ __all__ = [
     "HandoffItemRow",
     "HandoffRow",
     "JoinArrivalRow",
+    "ProfileRevisionRow",
     "RunLogRow",
+    "RunProfilePinRow",
     "RunRow",
     "RunSpecRow",
     "SessionBindingRow",

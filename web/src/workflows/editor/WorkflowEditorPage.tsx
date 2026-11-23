@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, useState } from "react";
+import { Suspense, lazy, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CoralPageHeader } from "@/brand/CoralPageHeader";
 import { Badge } from "@/components/ui/badge";
@@ -12,11 +12,15 @@ import {
   saveWorkflow,
   workflowQueryKey,
 } from "../api/client";
+import { CORAL_SUB_FEATURE } from "../api/types";
 import type { WorkflowDetail } from "../api/workflowTypes";
 import { FlowCanvas } from "../canvas/FlowCanvas";
+import { isCoralAvailable, useCoralInfo } from "../gate/useCoralInfo";
+import { ProfilePicker } from "../profiles/ProfilePicker";
 import { StartRunDialog } from "../start/StartRunDialog";
 import { diagnosticsFromValidate, markersFromDiagnostics } from "./markers";
 import { useValidateLoop } from "./useValidateLoop";
+import type { YamlEditor } from "./YamlPane";
 
 // Monaco is heavy; load it only once an editor actually opens.
 const YamlPane = lazy(() => import("./YamlPane").then((m) => ({ default: m.YamlPane })));
@@ -77,6 +81,8 @@ function EditorSurface({
   const queryClient = useQueryClient();
   const [yaml, setYaml] = useState(initialYaml);
   const [startOpen, setStartOpen] = useState(false);
+  const editorRef = useRef<YamlEditor | null>(null);
+  const profilesOn = isCoralAvailable(useCoralInfo().data, CORAL_SUB_FEATURE.profilesDesk);
   const validation = useValidateLoop(yaml, initialCompiled);
   const diagnostics = useMemo(
     () => diagnosticsFromValidate(validation.response),
@@ -93,6 +99,15 @@ function EditorSurface({
     },
   });
 
+  // The ref replaces the selection at the cursor; Monaco's change event updates `yaml`.
+  const insertProfile = (ref: string) => {
+    const editor = editorRef.current;
+    const selection = editor?.getSelection();
+    if (!editor || !selection) return;
+    editor.executeEdits("coral.insert-profile", [{ range: selection, text: ref }]);
+    editor.focus();
+  };
+
   const runnable = validation.response?.runnable === true;
   const hasErrors = diagnostics.some((diagnostic) => diagnostic.severity === "error");
 
@@ -104,6 +119,7 @@ function EditorSurface({
         description={workflowKey}
         actions={
           <div className="flex items-center gap-2">
+            {profilesOn && <ProfilePicker onPick={insertProfile} />}
             {validation.isValidating && (
               <span className="text-muted-foreground text-xs">Validating…</span>
             )}
@@ -128,7 +144,14 @@ function EditorSurface({
       <div className="flex min-h-0 flex-1 flex-col gap-3 px-6 pb-4 md:flex-row">
         <div className="min-h-[320px] min-w-0 flex-1 overflow-hidden rounded-lg border border-border">
           <Suspense fallback={<EditorFallback />}>
-            <YamlPane value={yaml} onChange={setYaml} markers={markers} />
+            <YamlPane
+              value={yaml}
+              onChange={setYaml}
+              markers={markers}
+              onEditorReady={(editor) => {
+                editorRef.current = editor;
+              }}
+            />
           </Suspense>
         </div>
         <div className="min-h-[320px] min-w-0 flex-1 overflow-hidden rounded-lg border border-border">

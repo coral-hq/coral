@@ -8,7 +8,7 @@ from typing import get_args
 import pytest
 
 from coral.bridge.keys import store_activation_id, store_slot_id
-from coral.bridge.projection import RunProjection, project_run, project_slots
+from coral.bridge.projection import RunProjection, project_run, project_slots, slot_role
 from coral.db.enum_codecs import (
     RUN_PAUSE_REASON,
     SLOT_STATUS,
@@ -264,3 +264,18 @@ def test_a_failed_create_names_no_session() -> None:
     assert any(item.key == create.effect_key for item in failed.state.receipts)
     (draft,) = project_slots(RUN_ID, failed.state, (), now=NOW_S)
     assert draft.session_id is None
+
+
+@pytest.mark.parametrize(
+    ("profile", "role"),
+    [
+        ("implementer", SlotRole.STEP_AGENT),
+        ("implementer/fast", SlotRole.STEP_AGENT),
+        ("reviewer", SlotRole.VERIFIER),
+        ("reviewer/strict-review", SlotRole.VERIFIER),
+        ("implementer/Bad", SlotRole.VERIFIER),
+        ("planner", SlotRole.VERIFIER),
+    ],
+)
+def test_a_profile_slot_takes_its_stance_s_role(profile: str, role: SlotRole) -> None:
+    assert slot_role(profile) == role

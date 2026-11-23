@@ -10,6 +10,7 @@ import yaml
 
 from coral.profiles.bundle_spec import (
     HYGIENE,
+    ProfileOverlay,
     Stance,
     StepRef,
     build_seed_bundle_yaml,
@@ -17,6 +18,9 @@ from coral.profiles.bundle_spec import (
     step_agent_name,
 )
 from coral.profiles.seeds import load_seed
+from coral.profiles.spec import ProfileSpec, RuleInstance, RuleStrength
+from coral.rules.catalog import RELATIVE_PATHS
+from coral.rules.compile import GuardrailFragment
 
 GOLDEN = Path(__file__).with_name("golden") / "reviewer_demo-flow_review_m0.yaml"
 REVIEW = StepRef(workflow_id="demo.flow", node_id="review", roster_index=0)
@@ -176,3 +180,89 @@ def test_step_names_map_dots_and_reject_bad_slugs() -> None:
         StepRef(workflow_id="Bad Slug", node_id="n", roster_index=0)
     with pytest.raises(pydantic.ValidationError):
         StepRef(workflow_id="w", node_id="n", roster_index=-1)
+
+
+STRICT = ProfileOverlay(
+    profile_ref="reviewer/strict-review",
+    revision_id="rev1",
+    revision_no=1,
+    spec=ProfileSpec(
+        name="Strict review",
+        description="Reviews strictly.",
+        instructions="Check every test.",
+        model="claude-x",
+        rules=[
+            RuleInstance(
+                template="protect_paths",
+                params={"paths": ["infra"]},
+                strength=RuleStrength.REQUIRED,
+            ),
+            RuleInstance(template="limit_blast_radius", strength=RuleStrength.GUIDANCE),
+        ],
+    ),
+)
+
+
+def test_a_profile_overlays_description_instructions_model_and_rules() -> None:
+    seed = yaml.safe_load(build_step_bundle_yaml(REVIEW, Stance.REVIEWER, model="m", provider="p"))
+    built = build_step_bundle_yaml(
+        REVIEW, Stance.REVIEWER, model="m", provider="p", profile=STRICT
+    )
+    config = yaml.safe_load(built)
+
+    assert config["description"] == "Reviews strictly."
+    assert config["instructions"] == (
+        f"{seed['instructions']}\n\nProfile instructions:\nCheck every test."
+        "\n\nRules you must follow:\n- Never run outward or destructive shell commands"
+        " (push, merge, rm -rf, deploy).\n- Never change files under infra/."
+        f"\n- {RELATIVE_PATHS}"
+    )
+    assert config["executor"]["model"] == "claude-x"
+    policies = config["guardrails"]["policies"]
+    assert set(policies) == {*seed["guardrails"]["policies"], "coral_rule_protect_paths"}
+    for name in seed["guardrails"]["policies"]:
+        assert policies[name] == seed["guardrails"]["policies"][name]
+    assert config["params"]["coral"]["generated"]["profile"] == {
+        "ref": "reviewer/strict-review",
+        "revision_id": "rev1",
+        "revision_no": 1,
+    }
+    assert built == build_step_bundle_yaml(
+        REVIEW, Stance.REVIEWER, model="m", provider="p", profile=STRICT
+    )
+
+
+def test_an_empty_profile_keeps_the_seed_text_and_the_given_model() -> None:
+    bare = ProfileOverlay(
+        profile_ref="reviewer/bare",
+        revision_id="rev1",
+        revision_no=1,
+        spec=ProfileSpec(name="Bare"),
+    )
+    seed = yaml.safe_load(build_step_bundle_yaml(REVIEW, Stance.REVIEWER, model="m", provider="p"))
+    config = yaml.safe_load(
+        build_step_bundle_yaml(REVIEW, Stance.REVIEWER, model="m", provider="p", profile=bare)
+    )
+
+    assert config["params"]["coral"]["generated"].pop("profile")["ref"] == "reviewer/bare"
+    assert config == seed
+
+
+def test_a_rule_cannot_replace_a_forced_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    hostile = GuardrailFragment(
+        policies={
+            "step_roster": _tool_call_policy("x"),
+            "deny_vendor_ask": _tool_call_policy("x"),
+        },
+        statements=(),
+    )
+    monkeypatch.setattr("coral.profiles.bundle_spec.compile_rules", lambda _rules: hostile)
+
+    policies = yaml.safe_load(
+        build_step_bundle_yaml(REVIEW, Stance.REVIEWER, model=None, provider=None, profile=STRICT)
+    )["guardrails"]["policies"]
+
+    assert policies["step_roster"] == _tool_call_policy("coral.omni.policies.guards.step_roster")
+    assert policies["deny_vendor_ask"] == _tool_call_policy(
+        "coral.omni.policies.hygiene.deny_vendor_ask"
+    )

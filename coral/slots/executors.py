@@ -54,6 +54,7 @@ from coral.omni.protocols import (
     StepAgentResolver,
     engine_message_text,
 )
+from coral.profiles.refs import roster_stance
 from coral.queue.executors import EffectExecutor, EffectOutcome, ExecutionContext
 from coral.queue.run_effects import (
     CONTROL_CHARACTERS,
@@ -224,6 +225,8 @@ async def _resolved_agent(
         roster_index=payload["roster_index"],
         # The facade derives the same id, so a retry keeps the agent its session runs.
         session_id=effect_session_id(state.workspace_id, payload["effect_key"]),
+        run_id=state.run_id,
+        profile=payload.get("profile"),
     )
 
 
@@ -277,7 +280,11 @@ def _stance_fields(payload: Mapping[str, Any], *, node_id: str | None) -> dict[s
         or not 0 <= roster_index <= MAX_ROSTER_INDEX
     ):
         raise invalid_payload(f"roster_index must be an integer from 0 to {MAX_ROSTER_INDEX}")
+    profile = optional_text(payload, "profile")
+    if profile is not None and roster_stance(profile) != stance:
+        raise invalid_payload(f"profile must be a profile of the {stance} stance")
     return {
+        "profile": profile,
         "stance": stance,
         "workflow_slug": _bounded_text(
             payload, "workflow_slug", max_chars=MAX_SLUG_LENGTH, required=True

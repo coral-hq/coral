@@ -11,6 +11,7 @@ from coral.model.ir import CompiledGraph
 from coral.omni._upstream import _build_claude_sdk_spawn_env
 from coral.omni.server.bundles import StepBundleRejected, parse_step_spec
 from coral.omni.server.step_agents import step_bundle_yaml
+from coral.profiles.refs import roster_stance
 from coral.tools.catalog import ORCHESTRATOR_STANCE
 from coral.validate.preflight import (
     CredentialKind,
@@ -123,8 +124,9 @@ def plan_preflight_steps(
         if node.kind != "step":
             continue
         for roster_index, stance_name in enumerate(node.roster):
+            # A profile only overlays its stance's seed, so plan with the base stance.
             config_yaml, stance, _agent_name = step_bundle_yaml(
-                stance_name,
+                roster_stance(stance_name) or stance_name,
                 workflow_slug,
                 node.id,
                 roster_index,

@@ -22,6 +22,7 @@ import dataclasses
 import re
 from collections.abc import Iterator, Mapping
 
+from coral.alerts.types import normalize_owner
 from coral.bridge.config import (
     ENGINE_VERSION,
     LOG_VERSION,
@@ -48,7 +49,9 @@ from coral.engine.types import effect_key
 from coral.gates.ids import MAX_GATE_OUTCOME_CHARS, MAX_GATE_OUTCOMES
 from coral.model.ids import derived_id
 from coral.model.ir import CompiledGraph, CompiledNode
+from coral.profiles.refs import parse_roster_entry, roster_stance
 from coral.queue.run_effects import MAX_EFFECT_KEY_CHARS
+from coral.stores.profiles import ProfileMissing
 from coral.stores.protocols import (
     STORED_TEXT_ERRORS,
     CoralRun,
@@ -149,6 +152,20 @@ def start_engine_run(
     run_id = derived_id("coral-run", spec.user_id or "", start_key)
     _refuse(_target_refusals(spec, run_id))
     _refuse(_shape_refusals(graph, run_id))
+    refs = profile_refs(graph)
+    if refs:
+        # Written once: a retried start keeps the first start's pins.
+        if bridge.profiles is None:
+            raise _profile_missing(refs[0])
+        try:
+            bridge.profiles.pin_run(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                owner=normalize_owner(spec.user_id),
+                refs=refs,
+            )
+        except ProfileMissing as exc:
+            raise _profile_missing(exc.ref) from None
     try:
         pinned = bridge.versions.pin(
             workspace_id=workspace_id,
@@ -199,6 +216,40 @@ def check_startable(
     _refuse(_graph_refusals(graph))
     _refuse(_shape_refusals(graph, run_id))
     return graph
+
+
+def profile_refs(graph: CompiledGraph) -> list[str]:
+    """The profile refs (``reviewer/strict``) the graph's steps use, sorted."""
+    return sorted(
+        {
+            entry
+            for node in _steps(graph)
+            for entry in node.roster
+            if (parsed := parse_roster_entry(entry)) is not None and parsed[1] is not None
+        }
+    )
+
+
+def check_profiles(
+    bridge: EngineBridge, graph: CompiledGraph, *, workspace_id: int, owner: str | None
+) -> None:
+    """
+    Refuse a graph using a profile ``owner`` has no revision of, before a start makes its worktree.
+
+    :raises RunNotRunnable: ``profile.missing`` for the first such profile.
+    """
+    for ref in profile_refs(graph):
+        if bridge.profiles is None or (
+            bridge.profiles.latest(
+                workspace_id=workspace_id, profile_ref=ref, owner=normalize_owner(owner)
+            )
+            is None
+        ):
+            raise _profile_missing(ref)
+
+
+def _profile_missing(ref: str) -> RunNotRunnable:
+    return RunNotRunnable("profile.missing", f"Profile missing: install or replace {ref}")
 
 
 def replay_start(bridge: EngineBridge, read: RunRead, *, actor: str | None) -> CoralRun:
@@ -359,12 +410,13 @@ def _graph_refusals(graph: CompiledGraph) -> Iterator[RunNotRunnable]:
     if not any(node.kind == "start" for node in graph.nodes):
         yield RunNotRunnable("graph.no_start", "the workflow has no start node")
     for node in _steps(graph):
-        unsupported = sorted(set(node.roster) - STEP_STANCES)
+        unsupported = sorted({entry for entry in node.roster if roster_stance(entry) is None})
         if unsupported:
+            stances = ", ".join(sorted(STEP_STANCES))
             yield RunNotRunnable(
                 "profile.unsupported",
                 f"step {node.id!r} uses {', '.join(unsupported)}; steps support "
-                f"{', '.join(sorted(STEP_STANCES))}",
+                f"{stances}, or a profile <stance>/<slug> of one",
             )
     for node in _gates(graph):
         # A visit's alert lists every outcome, and its row stores the answer's label.
@@ -439,9 +491,10 @@ def _shape_refusals(graph: CompiledGraph, run_id: str) -> Iterator[RunNotRunnabl
                         f"{region.split_node_id!r} while the other branches still run",
                     )
     steps = _steps(graph)
-    writers = {node.id for node in steps if _WRITER in node.roster}
+    stances = {node.id: [roster_stance(entry) for entry in node.roster] for node in steps}
+    writers = {node.id for node in steps if _WRITER in stances[node.id]}
     for node in steps:
-        if node.roster.count(_WRITER) > 1:
+        if stances[node.id].count(_WRITER) > 1:
             yield RunNotRunnable(
                 "graph.concurrent_writers", f"step {node.id!r} has two {_WRITER}s"
             )
