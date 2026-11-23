@@ -184,9 +184,12 @@ def test_community_harness_readiness_uses_install_metadata(
 
     _install_entry_points(monkeypatch, _EntryPoint("foo", _contribution))
 
+    from omnigent.onboarding import harness_install
     from omnigent.onboarding import harness_readiness as readiness
 
     monkeypatch.setattr(readiness, "resolve_cli_binary", lambda _binary: None)
+    # The map also version-probes every vendor CLI; hide the machine's.
+    monkeypatch.setattr(harness_install, "resolve_cli_binary", lambda _binary: None)
     assert readiness.harness_is_configured("foo") is False
     configured = readiness.configured_harness_map()
     assert configured["foo"] is False

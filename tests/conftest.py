@@ -559,6 +559,101 @@ def _hermetic_claude_config_seed(
     monkeypatch.setattr("omnigent.inner.claude_sdk_executor._claude_seed_source", lambda env: None)
 
 
+_CREDENTIAL_READING_PROGRAMS = frozenset({"claude", "security"})
+
+
+@pytest.fixture()
+def real_claude_cli() -> None:
+    """Opt in to running the real ``claude`` / ``security`` binaries.
+
+    For live e2e tests only; :func:`_no_real_credential_programs` then leaves spawns alone.
+
+    :returns: None.
+    """
+
+
+@pytest.fixture(autouse=True)
+def _no_real_credential_programs(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Fail any test that starts the real ``claude`` or ``security`` binary.
+
+    The real ``claude`` CLI reads ``~/.claude`` and the macOS keychain, and ``security``
+    is the keychain itself, so a test that reaches either (e.g. through ambient provider
+    detection) passes or fails depending on whose machine runs it. A stub binary under a
+    temp dir, or a child whose ``HOME`` is a temp dir, may run. The check sits
+    on ``Popen._execute_child``, so :mod:`subprocess` and :mod:`asyncio` spawns are covered;
+    ``pty``/``os.exec*`` spawns are not. Live e2e tests request :func:`real_claude_cli`.
+
+    :param request: Pytest request, inspected for the opt-in fixture.
+    :param monkeypatch: Pytest monkeypatch fixture; restores the method at teardown.
+    :param tmp_path_factory: Pytest's session temp factory, whose base dir is allowed.
+    :returns: None.
+    """
+    if "real_claude_cli" in request.fixturenames:
+        return
+    import shlex
+    import subprocess
+
+    throwaway = (
+        tmp_path_factory.getbasetemp().resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    )
+    real_execute_child = subprocess.Popen._execute_child  # type: ignore[attr-defined]
+    real_which, real_run = shutil.which, subprocess.run  # before a test stubs either
+
+    def _is_throwaway(path: str | None) -> bool:
+        return bool(path) and any(Path(path).resolve().is_relative_to(r) for r in throwaway)
+
+    def _guarded(self, args, executable, preexec_fn, close_fds, pass_fds, cwd, env, *rest):  # type: ignore[no-untyped-def]
+        if isinstance(args, (str, bytes, os.PathLike)):
+            line = os.fsdecode(args)
+            try:
+                argv = shlex.split(line)
+            except ValueError:
+                argv = line.split()
+        else:
+            argv = [os.fsdecode(a) for a in args]
+        program = os.fsdecode(executable) if executable else (argv[0] if argv else "")
+        if os.path.basename(program) in _CREDENTIAL_READING_PROGRAMS:
+            child_env = os.environ if env is None else env
+            binary = real_which(program, path=child_env.get("PATH")) or program
+            if not (_is_throwaway(binary) or _is_throwaway(child_env.get("HOME"))):
+                raise AssertionError(
+                    f"a test started {argv!r} with HOME={child_env.get('HOME')!r}; isolate "
+                    "it (see tests/_helpers/providers.py) or use a temp HOME or stub binary"
+                )
+        return real_execute_child(
+            self, args, executable, preexec_fn, close_fds, pass_fds, cwd, env, *rest
+        )
+
+    monkeypatch.setattr(subprocess.Popen, "_execute_child", _guarded)
+
+    # Provider detection asks an installed ``claude`` whether it is logged in. Answer as CI
+    # does, where it is not installed; a stub CLI in a temp dir, or a test that stubs the
+    # probe's ``shutil`` or ``subprocess``, still gets the real function.
+    from omnigent.onboarding import harness_install
+
+    real_logged_in = harness_install.harness_cli_logged_in
+
+    def _logged_in(key: str, *args: object, **kwargs: object) -> bool:
+        spec = harness_install.harness_install_spec(key)
+        if (
+            spec is not None
+            and spec.binary in _CREDENTIAL_READING_PROGRAMS
+            and getattr(harness_install.subprocess, "run", None) is real_run
+            and getattr(harness_install.shutil, "which", None) is real_which
+        ):
+            binary = real_which(spec.binary)
+            if binary is not None and not _is_throwaway(binary):
+                return False
+        return real_logged_in(key, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(harness_install, "harness_cli_logged_in", _logged_in)
+
+
 @pytest.fixture()
 def untracked_cache_start() -> None:
     """Opt back in to the real :meth:`GitFilesystemRegistry.start`.

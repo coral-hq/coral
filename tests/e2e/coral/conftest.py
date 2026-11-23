@@ -18,3 +18,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if _HERE in item.path.resolve().parents:
             item.add_marker(pytest.mark.min_runner_version(CORAL_MIN_RUNNER_VERSION))
+
+
+@pytest.fixture(autouse=True)
+def _tier_b_runs_the_real_claude_cli(real_claude_cli: None) -> None:
+    """Tier B drives the real ``claude`` CLI on purpose, so opt out of the spawn guard.
+
+    :param real_claude_cli: The root conftest's opt-in fixture.
+    :returns: None.
+    """

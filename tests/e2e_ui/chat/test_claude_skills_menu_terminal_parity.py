@@ -30,6 +30,9 @@ from tests.e2e_ui.messages.test_native_claude_render_parity import (
     _wait_terminal_connected,
 )
 
+# These tests run the real claude CLI.
+pytestmark = pytest.mark.usefixtures("real_claude_cli")
+
 _CLAUDE_AGENT_YAML = """\
 name: skills_parity
 prompt: You are a friendly assistant.
