@@ -35,6 +35,7 @@ Every route is under `/v1/coral`, tagged `coral`, and has an `operationId`.
 | `POST /runs/{run_id}:pause` | `coral_pause_run` | 200 `RunSummary` |
 | `POST /runs/{run_id}:resume` | `coral_resume_run` | 200 `RunSummary` |
 | `POST /runs/{run_id}:cancel` | `coral_cancel_run` | 200 `RunSummary` |
+| `POST /runs/{run_id}:retry` | `coral_retry_run` | 200 `RunSummary` ("Actions") |
 | `POST /runs/{run_id}/gates/{node_id}:answer` | `coral_answer_gate` | 200 `GateAnswerOut` |
 | `POST /runs/{run_id}/activations/{activation_id}:retry` | `coral_retry_activation` | 200 `RunSummary` ("Actions") |
 | `GET /runs/{run_id}/outcome` | `coral_get_run_outcome` | 200 `RunOutcome` ("Outcome") |
@@ -252,7 +253,8 @@ no-op.
 | `:pause` | A finished run is 409. A paused run is a 200 no-op. Otherwise the bridge pauses it for the user (`PauseRun(reason="user")`, starting it first if needed): 200, or 409 with the engine's refusal code. A run that cannot be loaded is 409 `reason: engine.load_failed`, and that write pauses its row `failure_path`, as every bridge write does. |
 | `:resume` | A finished run is 409. A run not paused is a 200 no-op. Otherwise 200 when the engine took the resume or the row left `paused`; a resume that clears one cause of several leaves the run paused, and the answer shows it. Else 409 `reason: resume_not_allowed`. A run that cannot be loaded is 409 `reason: engine.load_failed`. A `cap` out of bounds is 422. |
 | `:cancel` | A cancelled run is a 200 no-op. A completed or failed run is 409. Otherwise the bridge cancels it. A run the bridge cannot load, or whose rows are gone, is cancelled on its row alone (below): 200. |
-| `:retry` | Retries one failed step, named by its store activation id (one of the detail's `retry_activation_ids`): the bridge commits `RetryStep` (`EngineBridge.retry_activation`). A taken retry answers 200 `RunSummary`, still paused (`infra`): the run stays paused while the step's old session is fenced and its work saved, then the step's next session generation starts ([`session-facade.md`](session-facade.md), "Retry"). Refusals below. |
+| `:retry` (run) | Retries the run's failures no step owns: the bridge commits `RetryRun` (`EngineBridge.retry_run`), which clears every `failure_path` cause with subject `""` (`anchor:*`, `gate:*`, `orchestrator:*`, `decision:*`, `unbuildable`). An `orchestrator:*` or `decision:*` cause also starts a new orchestrator generation ([`session-facade.md`](session-facade.md), "The orchestrator"). 200 `RunSummary`: running again, re-asked as Resume does, or still paused for another cause. Offered when `allowed_actions` has `retry`. Refusals as below, with "This run cannot be retried now." for `retry_not_allowed` (nothing to retry, a run not paused, or the orchestrator's last generation) and `unbuildable`; there is no `unknown_activation`. |
+| `/activations/{id}:retry` | Retries one failed step, named by its store activation id (one of the detail's `retry_activation_ids`): the bridge commits `RetryStep` (`EngineBridge.retry_activation`). A taken retry answers 200 `RunSummary`, still paused (`infra`): the run stays paused while the step's old session is fenced and its work saved, then the step's next session generation starts ([`session-facade.md`](session-facade.md), "Retry"). Refusals below. |
 
 The 409 for a finished run says "The run is completed." (or failed, or cancelled).
 
@@ -280,8 +282,9 @@ Proof: `tests/coral/api/test_runs_api.py` (`test_a_retry_the_run_cannot_take_is_
 `test_a_retry_naming_a_malformed_activation_is_refused_before_any_work`,
 `test_a_retry_that_meets_a_cancel_is_refused_and_queues_no_restart`,
 `test_a_retry_after_the_run_ended_is_refused_before_the_engine_is_asked`,
-`test_a_host_hold_on_one_step_keeps_another_failed_step_from_its_retry`) and
-`tests/coral/omni/test_runs_end_to_end.py`. A retry only restarts a paused run's step, and
+`test_a_host_hold_on_one_step_keeps_another_failed_step_from_its_retry`,
+`test_a_run_retry_clears_its_run_level_failure`, `test_a_run_retry_the_run_cannot_take_is_refused_with_its_reason`) and
+`tests/coral/omni/test_runs_end_to_end.py` (a step retry; an archived orchestrator replaced by a run Retry). A retry only restarts a paused run's step, and
 a finished run is never retried, so an outcome read needs no re-check of its run's
 status.
 
@@ -443,13 +446,14 @@ the action answers and the stream's `run` frames. `pause` is never offered on a 
 | paused | not paused (a pause on the row alone) | `resume`, `cancel` |
 | paused | paused, and some cause a resume clears | `resume`, `cancel` |
 | paused | paused, and no cause a resume clears | `cancel` |
+| paused | paused, with a `failure_path` cause no step owns and no host hold or restart | as above, with `retry` before `cancel` |
 | paused | not loaded (a list item) | `resume`, `cancel` when the row's reason is `user`, `rejected_calls`, `auth`, `plan_limit` or `authority_revoked`; else `cancel` |
 
 A list item offers a subset of what its detail offers, for a run that loads (see
 "Residuals"). A list item never offers Resume for `infra` (`LIST_RESUMABLE_REASONS`):
-its row cannot tell a host hold or a restart, which Resume never clears. Retry is not an
-`allowed_actions` value: the detail's `retry_activation_ids` names what a retry may
-restart. A run paused only at its activation
+its row cannot tell a host hold or a restart, which Resume never clears. `retry` is the
+run's own Retry (`run_level_retryable`) and never on a list item; a step's Retry is the
+detail's `retry_activation_ids`. A run paused only at its activation
 cap (`budget`) is not offered Resume: `:resume` needs a higher `cap`, and the detail's
 `causes` and `max_activations` let a client offer it.
 
@@ -542,6 +546,8 @@ written only by the stream client), `["coral-run-graph", scope, id]`,
   | `failure_path` / `session.host_unsupported` | "<step>’s machine can’t run Coral steps. Update Coral there, then retry." |
   | `failure_path` / `session.closed` | "<step>’s session was closed, so it can’t go on. Retry starts it again from its last handoff." |
   | `failure_path` / `blocked` | "<step> reported that it is blocked. Retry restarts it from its last handoff." |
+  | `failure_path` / `orchestrator:*`, `decision:*` (subject `""`) | "The run’s orchestrator failed. Retry starts a new orchestrator." |
+  | `failure_path` / `anchor:*`, `gate:*` (subject `""`) | "A step or one of Coral's own actions failed. Retry tries again." |
   | `failure_path` / `attempts_exhausted:<ids>` (or the ids as subject, as older runs recorded it) | "Missing evidence: <ids>." |
 
   Every other cause, the wake's other refusals (`session.not_bound`,
@@ -549,8 +555,10 @@ written only by the stream client), `["coral-run-graph", scope, id]`,
   keeps its reason's general text. The host-offline restart text also shows for a
   `dispatch.stop_unconfirmed` whose runner did not answer, or a permanent
   `workspace.backend_unavailable` from a host that is online. Two unnamed steps get two
-  identical "Retry a step" buttons. Retry is offered only in the run view's banner, not
-  on an Inbox card or a list item.
+  identical "Retry a step" buttons. When `allowed_actions` has `retry`, the banner also
+  shows a "Retry" button for the run that posts `{}` to `/runs/{id}:retry` (`postRunAction`,
+  mutation key `["coral-run-retry", scope, run id, ""]`), with the same status line. Retry
+  is offered only in the run view's banner, not on an Inbox card or a list item.
 - **The step drawer** (`?agent=<session>&node=<node>`, `runs/agents/StepDrawer.tsx`). It
   opens only a session the run's own slots list, shows its transcript and prompts (no
   composer) with "Open in Chat", and keeps the URL on the run, so AppShell stays out of chat
@@ -704,7 +712,6 @@ exactly the mounted Coral routes, is typed, and that the TS types are current.
 |---|---|
 | Run requests over 512 characters (refused today, never cut) | CRL-152 |
 | A durable marker for a pause made on the run row alone | CRL-153 |
-| Retry for causes no step owns (anchor, orchestrator, gate and run-level failures stay Cancel-only) | CRL-155 |
 | Showing a retried step's salvage ref in the run view | CRL-158 |
 | A request-body size cap for every Coral POST: FastAPI parses a body before a route's dependencies | CRL-150 |
 | Workflow sharing (K7's view and edit matrix) | CRL-148 |

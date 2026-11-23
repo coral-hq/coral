@@ -237,6 +237,7 @@ function RunPageBody({ runId }: { runId: string }) {
             runId={runId}
             retryActivationIds={run?.retry_activation_ids ?? NO_RETRIES}
             slots={run?.slots ?? NO_SLOTS}
+            runRetry={offered.includes("retry")}
           />
         )}
         {settingUp && <p className="text-ui text-muted-foreground">Setting up the run…</p>}

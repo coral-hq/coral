@@ -136,6 +136,12 @@ function failureBody(cause: PauseCauseLike, graph: GraphNodeNames | null): strin
     return missing === "" ? PAUSE_MESSAGES.failure_path : `Missing evidence: ${isolated(missing)}.`;
   }
   if (detail === "engine.load_failed") return LOAD_FAILED_TEXT;
+  if (cause.subject === "" && /^(orchestrator|decision):/.test(detail)) {
+    return "The run’s orchestrator failed. Retry starts a new orchestrator.";
+  }
+  if (cause.subject === "" && /^(anchor|gate):/.test(detail)) {
+    return `${PAUSE_MESSAGES.failure_path} Retry tries again.`;
+  }
   const step = causeStep(cause, graph);
   if (detail.startsWith(RESTART_FAILED_PREFIX)) {
     return restartFailedBody(detail.slice(RESTART_FAILED_PREFIX.length), step);

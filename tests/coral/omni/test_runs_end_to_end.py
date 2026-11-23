@@ -36,6 +36,7 @@ from coral.bridge.keys import store_activation_id
 from coral.bridge.mapping import RECOVERY_RESTART
 from coral.db.enum_codecs import WorkStatus
 from coral.db.migrate import ensure_coral_schema
+from coral.engine.types import PauseRun
 from coral.omni.protocols import Viewer
 from coral.omni.server import coral_lifespan
 from coral.stores.protocols import CoralRun
@@ -70,6 +71,9 @@ from tests.coral.omni._gate_server import (
     pending_here,
     pending_prompts,
 )
+from tests.coral.workflow_builders import arrow, decision, step, workflow_text
+from tests.coral.workflow_builders import end as end_node
+from tests.coral.workflow_builders import start as start_node
 
 RUNS = "/v1/coral/runs"
 HEADER = "X-Forwarded-Email"
@@ -684,6 +688,66 @@ async def test_two_retries_of_one_step_at_once_on_the_server_s_database_queue_on
         {"reason": "infra", "detail": "recovery.restarting", "subject": IMPLEMENT}
     ]
     assert after["retry_activation_ids"] == []
+
+
+# ── A lost orchestrator's run Retry ─────────────────────────────────────────
+
+# The run opens its decision at once, so its start names and asks the orchestrator.
+DECIDES = workflow_text(
+    [start_node(), decision("choose"), step("work"), end_node()],
+    [
+        arrow("a1", "start", "choose"),
+        arrow("a2", "choose", "work", label="approved"),
+        arrow("a3", "work", "end"),
+    ],
+)
+
+
+async def test_the_owner_retries_a_run_whose_orchestrator_was_archived_and_a_new_one_is_asked(
+    header_server: CoralServer,
+) -> None:
+    server = header_server
+    owner = {HEADER: "alice@example.com"}
+    ensure_coral_schema(server.db_uri)
+    world = World.sql(server.db_uri)
+    spec = run_spec(
+        user="alice@example.com", start_key="decides", workspace_id=DEFAULT_WORKSPACE_ID
+    )
+    run = start(world, DECIDES, spec=spec, start_key="decides", actor="alice@example.com")
+    old = run.orchestrator_session_id
+    assert old is not None
+    # What the bridge commits when it finds the orchestrator archived while a decision waits.
+    lost = PauseRun(reason="failure_path", detail="orchestrator:drift.session_archived")
+    world.bridge.commit_inputs(
+        workspace_id=DEFAULT_WORKSPACE_ID, run_id=run.id, inputs=lambda _snapshot: (lost,)
+    )
+    # Another replica leads, so the rows the Retry queues are still queued when read.
+    assert world.queue.acquire_worker_lease(
+        DEFAULT_WORKER_LEASE_NAME, "another-replica", lease_seconds=600
+    )
+
+    async with coral_lifespan(server.app, server.services):
+        async with _client(server.app) as client:
+            before = (await client.get(f"{RUNS}/{run.id}", headers=owner)).json()
+            retried = await client.post(f"{RUNS}/{run.id}:retry", json={}, headers=owner)
+
+    assert _actions(before) == ("paused", "failure_path", ["retry", "cancel"])
+    assert retried.status_code == 200, retried.text
+    assert _actions(retried.json()) == ("running", None, ["pause", "cancel"])
+    after = world.runs.get_run(run.id, workspace_id=DEFAULT_WORKSPACE_ID)
+    new = None if after is None else after.orchestrator_session_id
+    assert new not in (None, old)
+    queued = {
+        key: work_for(world, run.id, key, workspace_id=DEFAULT_WORKSPACE_ID)
+        for key in (
+            f"{run.id}:orchestrator:1:fence",
+            f"{run.id}:orchestrator:2:create_session",
+            f"{run.id}:orchestrator:2:decision_request:choose||",
+        )
+    }
+    assert all(item is not None for item in queued.values()), queued
+    fence, _create, request = (payload(item) for item in queued.values() if item is not None)
+    assert (fence["session_id"], request["session_id"]) == (old, new)
 
 
 # ── Accounts mode ───────────────────────────────────────────────────────────

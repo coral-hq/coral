@@ -35,6 +35,7 @@ from coral.db.enum_codecs import (
     WorkKind,
     WorkStatus,
 )
+from coral.engine.types import RetryRun
 from coral.model.ids import effect_session_id
 from coral.stores.protocols import Transition, WorkItem
 from coral.stores.stable_ids import SqlAlchemyStableIdStore
@@ -51,6 +52,7 @@ from tests.coral.bridge._world import (
     serving,
     start,
 )
+from tests.coral.omni.fakes import present
 from tests.coral.workflow_builders import fixture_text
 from tests.stores.coral._faults import (
     SimulatedCrash,
@@ -98,6 +100,10 @@ def _names_the_orchestrator(
     run_id: str, expected_version: int, transition: Transition, **_: Any
 ) -> bool:
     return transition.orchestrator_session_id is not None
+
+
+def _ends_the_run(run_id: str, expected_version: int, transition: Transition, **_: Any) -> bool:
+    return transition.status == int(RunStatus.COMPLETED)
 
 
 Install = Callable[[pytest.MonkeyPatch, Sessions], None]
@@ -328,6 +334,17 @@ DECISION = (
             matching=_commit_of("choose_arrow", replied=True),
         ),
     ),
+    # The commit that ends the run and queues its wind-down landed; nothing ran after it.
+    CrashPoint(
+        "ended",
+        lambda patch, sessions: crash_around(
+            patch,
+            sessions.world.runs,
+            "apply_transition",
+            when="after",
+            matching=_ends_the_run,
+        ),
+    ),
 )
 CASES = [
     *(
@@ -501,6 +518,16 @@ def _assert_completed_once(
         if row.payload.get("engine_kind") in ("create_session", "send_input", "close_slot")
     )
     assert len(per_slot) == 3 * len(slots) and _once_each(per_slot)
+    # The anchor and the orchestrator were wound down once, by the commit that ended the run.
+    wind_down = sorted(
+        row.payload["effect_key"]
+        for row in effects
+        if row.payload["effect_key"].endswith(":wind_down")
+    )
+    orchestrator_stop = [f"{RUN_ID}:{ORCHESTRATOR_SLOT_ID}:1:wind_down"] if decisions else []
+    assert wind_down == [f"{RUN_ID}:anchor:wind_down", *orchestrator_stop]
+    if decisions:
+        assert sessions.dispatch.sessions[ORCHESTRATOR].closed
 
 
 @pytest.mark.parametrize(("workflow", "point"), CASES)
@@ -546,3 +573,62 @@ async def test_a_run_killed_at_any_point_completes_after_a_restart_without_dupli
     assert [(after[row.id].status, after[row.id].attempts) for row in claimed] == [
         (int(WorkStatus.SUCCEEDED), row.attempts + 1) for row in claimed
     ]
+
+
+async def test_a_run_killed_right_after_a_run_level_retry_replaces_its_orchestrator_once(
+    coral_db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with serving(World.sql(coral_db_uri)) as sessions:
+        actors = _actors(sessions, "loop")
+        start(sessions.world, fixture_text("loop"))
+        await sessions.run(actors[0])
+        # The orchestrator is archived while its decision waits: the run pauses for a retry.
+        sessions.facade.sessions.states[(WORKSPACE, ORCHESTRATOR)] = present(
+            ORCHESTRATOR, archived=True, archived_at="2026-01-01T12:00:02Z"
+        )
+        sessions.publish_to(ORCHESTRATOR, "idle", origin="archive_idle", turn_outcome=None)
+        await sessions.drain()
+        paused = sessions.world.run(RUN_ID)
+        assert (paused.status, paused.pause_reason) == (
+            int(RunStatus.PAUSED),
+            int(RunPauseReason.FAILURE_PATH),
+        )
+        with monkeypatch.context() as patch:
+            crash_around(
+                patch,
+                sessions.world.runs,
+                "apply_transition",
+                when="after",
+                matching=_commit_of("retry_run"),
+            )
+            with pytest.raises(SimulatedCrash):
+                sessions.world.bridge.commit_inputs(
+                    workspace_id=WORKSPACE,
+                    run_id=RUN_ID,
+                    inputs=lambda _snapshot: (RetryRun(),),
+                    actor=USER,
+                )
+
+    async with _restarted(sessions) as restarted:
+        for actor in actors:
+            actor.reconnect(restarted)
+        await restarted.run(*actors)
+
+        run = restarted.world.run(RUN_ID)
+        replacement = effect_session_id(WORKSPACE, orchestrator_effect_key(RUN_ID, 2))
+        assert (run.status, run.orchestrator_session_id) == (
+            int(RunStatus.COMPLETED),
+            replacement,
+        )
+        creates = [
+            request.effect_key
+            for request in restarted.facade.requests
+            if request.engine_slot_id == ORCHESTRATOR_SLOT_ID
+        ]
+        assert creates == [orchestrator_effect_key(RUN_ID), orchestrator_effect_key(RUN_ID, 2)]
+        # Both decisions were asked of the replacement once; the old one was fenced.
+        assert _messages(restarted, replacement)[StableIdKind.BRIEF] == 2
+        assert _messages(restarted, ORCHESTRATOR)[StableIdKind.BRIEF] == 1
+        assert restarted.dispatch.sessions[ORCHESTRATOR].closed
+    work = _work(coral_db_uri).values()
+    assert int(WorkStatus.FAILED) not in {row.status for row in work}

@@ -18,7 +18,7 @@ from coral.engine.types import JsonPatch
 PROTOCOL: Final = 1
 VIEW_VERSION: Final = 1
 
-RunAction = Literal["pause", "resume", "cancel"]
+RunAction = Literal["pause", "resume", "retry", "cancel"]
 # Names of the stored run-row codes; the engine's own names are a subset.
 RunStatusName = Literal["starting", "running", "paused", "completed", "failed", "cancelled"]
 PauseReasonName = Literal[

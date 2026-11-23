@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pydantic import JsonValue
 
+from coral.engine.timers import ORCHESTRATOR_BACKOFF, ORCHESTRATOR_SUBJECT, drop_slot_backoff
 from coral.engine.types import (
     TERMINAL_STATUSES,
     ApplyResult,
@@ -84,6 +85,8 @@ def choose_arrow(graph: CompiledGraph, state: RunState, command: ChooseArrow) ->
     )
     closed = replace_activation(state, owner_id, status="closed", outcome="completed")
     closed = closed.model_copy(update={"seq": state.seq + 1, "decisions": decided})
+    # The orchestrator answered, so its backoff ladder is over.
+    closed = drop_slot_backoff(closed, (ORCHESTRATOR_SUBJECT,), (ORCHESTRATOR_BACKOFF,))
     opened, effects, redirected = take_labelled_arrow(
         closed,
         graph,

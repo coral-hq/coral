@@ -2287,6 +2287,7 @@
               "enum": [
                 "pause",
                 "resume",
+                "retry",
                 "cancel"
               ],
               "type": "string"
@@ -2527,6 +2528,7 @@
               "enum": [
                 "pause",
                 "resume",
+                "retry",
                 "cancel"
               ],
               "type": "string"
@@ -2628,6 +2630,7 @@
               "enum": [
                 "pause",
                 "resume",
+                "retry",
                 "cancel"
               ],
               "type": "string"
@@ -3033,6 +3036,7 @@
               "enum": [
                 "pause",
                 "resume",
+                "retry",
                 "cancel"
               ],
               "type": "string"
@@ -6510,6 +6514,109 @@
           }
         },
         "summary": "Resume Run",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/runs/{run_id}:retry": {
+      "post": {
+        "description": "Retry one of the caller's paused runs whose failure no step owns, such as a lost\norchestrator or anchor: a lost orchestrator is replaced by a new one.",
+        "operationId": "coral_retry_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Retry Run",
         "tags": [
           "coral"
         ]

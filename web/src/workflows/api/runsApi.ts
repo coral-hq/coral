@@ -136,7 +136,10 @@ export const runsListQueryKey = (scope: string, filters: RunFilters) => {
 export const runActionKey = (scope: string, runId: string) =>
   ["coral-run-action", scope, runId] as const;
 
-/** The key of one step's retry requests, so every view of the run sees one in flight. */
+/**
+ * The key of one step's retry requests (`""` for the run's own), so every view of the run
+ * sees one in flight.
+ */
 export const runRetryKey = (scope: string, runId: string, activationId: string) =>
   ["coral-run-retry", scope, runId, activationId] as const;
 
@@ -213,7 +216,7 @@ export function runStreamUrl(runId: string): string {
   return runUrl(STREAM_PATH, runId);
 }
 
-/** Pause, resume (without a cap) or cancel a run; an action already in effect is a no-op. */
+/** Pause, resume (without a cap), retry or cancel a run; one already in effect is a no-op. */
 export async function postRunAction(
   runId: string,
   action: RunAction,

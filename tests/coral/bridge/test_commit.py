@@ -50,7 +50,7 @@ from coral.engine.types import (
     Timer,
     TimerDue,
 )
-from coral.model.ids import effect_session_id
+from coral.model.ids import anchor_session_id, effect_session_id
 from coral.recovery.cancel import cancel_run_row
 from coral.recovery.drift import DriftFinding, drift_log_checksum
 from coral.stores.fakes import FakeRunStore
@@ -196,10 +196,64 @@ def test_effects_become_rows_and_unmapped_kinds_are_only_logged(
     run = start(world)
     with caplog.at_level(logging.INFO, logger="coral.bridge.commit"):
         built = _build(world, run.id, CancelRun())
-    (cancel,) = built.outbox_work
-    assert json.loads(cancel.payload)["effect_type"] == "cancel_sessions"
+    cancel, _anchor = built.outbox_work
+    assert json.loads(cancel.payload)["engine_kind"] == "cancel_sessions"
     assert "notify" in caplog.text
     assert (built.status, built.finished_at) == (int(RunStatus.CANCELLED), world.clock.epoch)
+
+
+def _wind_down(rows: Any) -> list[tuple[str, str]]:
+    """The ``(effect_key, session_id)`` of each wind-down row among ``rows``."""
+    payloads = [json.loads(row.payload) for row in rows]
+    return [
+        (payload["effect_key"], payload["session_id"])
+        for payload in payloads
+        if payload["effect_key"].endswith(":wind_down")
+    ]
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+@pytest.mark.parametrize("named", [True, False])
+def test_the_commit_that_ends_a_run_stops_its_orchestrator_and_closes_its_anchor(
+    world: World, status: str, named: bool
+) -> None:
+    run = start(world)
+    orchestrator = "o" * 32
+    if named:
+        version = world.run(run.id).version
+        world.runs.apply_transition(
+            run.id,
+            version,
+            Transition(orchestrator_session_id=orchestrator),
+            workspace_id=WORKSPACE,
+        )
+    snapshot = world.bridge.load(workspace_id=WORKSPACE, run_id=run.id)
+    [applied] = _applied(world, snapshot, (CancelRun(),))
+    ended = dataclasses.replace(applied, after=applied.after.model_copy(update={"status": status}))
+
+    built = build_commit(snapshot, [ended], now=world.clock())
+
+    anchor = (f"{run.id}:anchor:wind_down", anchor_session_id(WORKSPACE, run.id))
+    stop = [(f"{run.id}:orchestrator:1:wind_down", orchestrator)] if named else []
+    assert _wind_down(built.outbox_work) == [*stop, anchor]
+    for row in built.outbox_work:
+        payload = json.loads(row.payload)
+        if payload["effect_key"].endswith(":wind_down"):
+            assert (payload["effect_type"], payload["closed_label"]) == ("cancel_sessions", True)
+            assert "bridge_item" not in payload
+
+
+def test_a_cancelled_run_queues_its_wind_down_once(world: World) -> None:
+    run = start(world)
+
+    world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
+    world.bridge.cancel_run(workspace_id=WORKSPACE, run_id=run.id, actor="user:alice")
+    world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run.id)
+
+    assert _wind_down(world.work(run.id)) == [
+        (f"{run.id}:anchor:wind_down", anchor_session_id(WORKSPACE, run.id))
+    ]
+    world.assert_fold_matches(run.id)
 
 
 def test_timer_rows_are_queued_once_per_arming(world: World) -> None:
@@ -539,7 +593,8 @@ def test_cancel_of_the_widest_allowed_graph_commits(world: World) -> None:
         for item in world.work(run.id)
         if json.loads(item.payload).get("effect_type") == "cancel_sessions"
     ]
-    assert len(cancels) == 32
+    # One per slot and the anchor's wind-down.
+    assert len(cancels) == 33
     world.assert_fold_matches(run.id)
 
 
@@ -881,7 +936,8 @@ def test_cancel_of_a_wide_run_whose_engine_never_started_commits(world: World) -
         for item in world.work(run.id)
         if json.loads(item.payload).get("effect_type") == "cancel_sessions"
     ]
-    assert len(cancels) == 32
+    # One per slot and the anchor's wind-down.
+    assert len(cancels) == 33
     world.assert_fold_matches(run.id)
 
 

@@ -227,6 +227,28 @@ def create_runs_router(
         return summary
 
     @router.post(
+        "/runs/{run_id}:retry",
+        operation_id="coral_retry_run",
+        response_model=RunSummary,
+        responses=_ACTION_REFUSALS,
+    )
+    async def retry_run(
+        request: Request,
+        response: Response,
+        run_id: str,
+        _body: EmptyRequest,
+        viewer: Viewer = caller,
+        workspace_id: int = workspace,
+    ) -> RunSummary:
+        """
+        Retry one of the caller's paused runs whose failure no step owns, such as a lost
+        orchestrator or anchor: a lost orchestrator is replaced by a new one.
+        """
+        summary = await _runs_api(request).retry(viewer, workspace_id, run_id, None)
+        response.headers["Cache-Control"] = _NO_STORE
+        return summary
+
+    @router.post(
         "/runs/{run_id}/activations/{activation_id}:retry",
         operation_id="coral_retry_activation",
         response_model=RunSummary,

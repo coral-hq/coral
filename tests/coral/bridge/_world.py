@@ -557,7 +557,9 @@ class BindingFacade:
                 self.bindings.record_progress, request.workspace_id, ref.session_id, progress
             )
         if ref.session_id not in self.dispatch.sessions:
-            self.dispatch.session(ref.session_id)
+            # The anchor runs on no host: no runner holds it.
+            runner = {} if step else {"runner_id": None, "runner_alive": False}
+            self.dispatch.session(ref.session_id, **runner)
         return ref
 
     async def session_state(self, *, workspace_id: int, session_id: str) -> SessionState:

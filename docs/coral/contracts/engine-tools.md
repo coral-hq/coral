@@ -258,8 +258,7 @@ second one entered while one runs raises before it registers anything
 
 ## Not in this version
 
-Counting orchestrator rejections (ENG-06); replacing an orchestrator (the
-generation stays 1; CRL-155); `items` (ENG-08); `refresh_note`
+Counting orchestrator rejections (ENG-06); `items` (ENG-08); `refresh_note`
 (SES-07); evidence scopes other than `per_agent` and native steps' commands
 (HRN-03). Owners are in
 [`session-facade.md`](session-facade.md), "Deferred work and owners".
@@ -274,7 +273,9 @@ Each item below was left to the bridge in v0; each has its line in
   pinned to the run's version.
 - **Orchestrator bindings.** The orchestrator's binding uses
   `slot_id="orchestrator"`, which no engine slot id can take (they all contain
-  `|`), slot role `orchestrator` and generation 1. The commit that opens a
+  `|`), slot role `orchestrator` and the run's orchestrator generation (1 until
+  a run Retry replaces a lost orchestrator; the old session is then refused
+  `not_orchestrator`). The commit that opens a
   run's first decision writes `CoralRun.orchestrator_session_id` and queues
   the orchestrator's create and the decision's request, so `coral_choose_arrow`
   works end to end. Each later decision gets a request; an unanswered one gets

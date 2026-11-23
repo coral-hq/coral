@@ -111,7 +111,7 @@ All ids are `derived_id(kind, *parts)` (32 lowercase hex, `coral/model/ids.py`).
 |---|---|---|
 | Anchor session | `anchor_session_id(ws, run_id)` = `derived_id("coral-anchor", str(ws), run_id)` | Run-scoped: a re-keyed anchor effect adopts the run's one anchor. The binding's primary key holds one anchor per run. |
 | Step session | `effect_session_id(ws, effect_key)` = `derived_id("coral-session", str(ws), effect_key)` | One per `create_session` effect. The bridge derives it from the slot's latest create, so a send, close or cancel can name it before that create completes. |
-| Orchestrator session | `effect_session_id(ws, "<run_id>:orchestrator:1:create_session")` | The run row's `orchestrator_session_id`, written by the commit that opens the run's first decision. Its binding's `slot_id` is `orchestrator`. |
+| Orchestrator session | `effect_session_id(ws, "<run_id>:orchestrator:<generation>:create_session")` | The run row's `orchestrator_session_id`, written by the commit that opens the run's first decision. Its binding's `slot_id` is `orchestrator`. |
 | Store slot | `derived_id("coral-slot", run_id, engine_slot_id)` | The `coral_agent_slots` id; payloads carry it as `slot_id`. |
 | Engine message | `effect_message_id(ws, effect_key)` = `derived_id("coral-message", …)` | The message's stable id, recorded in `coral_stable_ids` before the send. |
 | Fallback message | `fallback_message_id(stable_id)` = `derived_id("coral-message-fallback", stable_id)` | Used when another item already holds the stable id. |
@@ -542,8 +542,9 @@ generation, so the drainer abandons a stale one; every payload stays under
 | `cancel_sessions` | EFFECT `cancel_sessions`, `session_id` of the slot's latest create, else `null` | the effect key | none: the run is finished |
 | `retry_step` | EFFECT `recovery.restart`, fenced by the slot's new generation: `engine_slot_id`, `generation`, `session_id` (the slot's latest create, still the old generation's, or `null`), `writer`, `expected_head` (nullable), `close_key` (the slot's newest close whose commit never reached a receipt, or `null`) | the effect key | `EffectCompleted` `{salvage_ref, salvage_commit, head_verified, head}`, or `EffectFailed`; an abandoned row of the slot's current generation is fed as a permanent failure |
 | `runner_lost` | EFFECT `recovery.wake`, fenced by the generation that lost the runner: `engine_slot_id`, `generation`, `session_id`, `runner_id` (nullable) | the effect key | `EffectCompleted` `{outcome: skipped \| runner_back \| relaunched, turn_running, seen_at}`, or `EffectFailed` |
-| The orchestrator | EFFECT `create_session`: stance `orchestrator`, slot `orchestrator`, generation 1, due at once | `<run_id>:orchestrator:1:create_session` | A failure pauses the run (`orchestrator:<code>`) |
-| A decision's request, reminder or re-request | EFFECT `send_input` to the orchestrator | `<run_id>:decision_request:<decision>`; the watchdog `notify`'s key; `<run_id>:decision_rerequest:<decision>:<run version>` | A failure pauses the run (`decision:<code>`) while the decision is open |
+| The orchestrator | EFFECT `create_session`: stance `orchestrator`, slot `orchestrator`, the run's orchestrator generation, due at once | `<run_id>:orchestrator:<N>:create_session` | A failure pauses the run (`orchestrator:<code>`) |
+| A decision's request, reminder or re-request | EFFECT `send_input` to the orchestrator | `<run_id>:decision_request:<decision>` (generation 2 on: `<run_id>:orchestrator:<N>:decision_request:<decision>`); the watchdog `notify`'s key; `<run_id>:decision_rerequest:<decision>:<run version>`; a backoff re-ask `<run_id>:orchestrator:<N>:backoff:<decision>:<notify key>` | A failure pauses the run (`decision:<code>`) while the decision is open; a send to a session the row no longer names completes `{"skipped": "stale_orchestrator"}` |
+| An old orchestrator's fence; a finished run's wind-down | EFFECT `cancel_sessions`, no bridge item | `<run_id>:orchestrator:<old N>:fence`; `<run_id>:orchestrator:<N>:wind_down` and `<run_id>:anchor:wind_down` | Never fed |
 | An armed timer | TIMER `timer`, due at its deadline | `timer:<key>:<generation>:<due_at_us>` | The executor commits `TimerDue` |
 | A bound session's turn end; a re-gather | SIGNAL `turn_fact` | `sig:<session>:<response or origin>:<status>:<observed_at_ms>`; `sig:<session>:resync:<five-minute bucket>`; a run's first re-gather in a leader term `sig:<session>:boot:<boot id>` | The executor reconciles the turn |
 | The run's repair | SIGNAL `run_resync`, one recurring row per run | `resync` | The executor runs the resync |
@@ -691,10 +692,17 @@ turn no rule names (`agent.failed`) included
 `tests/coral/engine/test_lifecycle.py`). A resume that returns the run to
 running re-prompts each failed or stopped step once. A step's `failure_path`
 or `liveness` cause, and any `infra` cause a step owns, is cleared by a Retry
-of that step (below). Causes no step owns stay Cancel-only: a permanent anchor,
-orchestrator or gate failure (`anchor:*`, `orchestrator:*`, `gate:*`), a
-commit that cannot be built, and other run-level `failure_path` pauses
-(subject `""`) (`test_a_cause_no_step_owns_is_not_retryable`; CRL-155). A
+of that step (below). Causes no step owns, a permanent anchor, orchestrator,
+decision or gate failure (`anchor:*`, `orchestrator:*`, `decision:*`,
+`gate:*`), a commit that cannot be built and other run-level `failure_path`
+pauses (subject `""`), are not a step's Retry
+(`test_a_cause_no_step_owns_is_not_retryable`): the run's own Retry
+(`RetryRun`, `retry_run`) clears them all at once, refused
+`host_offline_hold` or `restart_in_progress` while a hold or restart stands
+and `retry_not_allowed` when there is none. An `orchestrator:*` or
+`decision:*` cause also moves the orchestrator to its next generation (below).
+A run left with no other cause runs again and is re-asked as a resume does
+(`tests/coral/engine/test_orchestrator_lifecycle.py`). A
 run paused `failure_path` with detail `engine.load_failed` can be neither
 resumed nor retried; the runs API's `:cancel` cancels it on its row alone
 ([`runs-api.md`](runs-api.md), "Actions"). `engine_upgrade` is cleared by
@@ -776,7 +784,25 @@ again about each decision still open. While a decision waits, a failed
 orchestrator turn pauses the run `plan_limit`, `auth` or `infra` (detail
 `orchestrator:<class>`; a failure whose edge was lost is found by the
 re-gather once a runner item follows the request, and pauses `infra`), and an archived or deleted orchestrator pauses it
-`drift`; the resume asks again. A resume commit that cannot hold every
+`failure_path` (`orchestrator:drift.<cause>`); the resume asks again. A
+transient orchestrator failure (`infra.transient`) does not pause at once: it
+re-asks each open decision at 30 s and 2 min and pauses `infra` /
+`orchestrator:infra.transient` at 8 min only if no orchestrator turn completed
+meanwhile (`ORCHESTRATOR_BACKOFF`).
+
+**Replacing the orchestrator.** The run's Retry of an `orchestrator:*` or
+`decision:*` cause raises `orchestrator_generation` (at most 32,767). The
+commit that names generation N's session queues its create and a request for
+each open decision, keyed by N, and fences the old session (`cancel_sessions`,
+key `<run_id>:orchestrator:<old N>:fence`). Feedback from an older generation
+is dropped, an older generation's queued sends are skipped, and its
+`coral_choose_arrow` is refused. Generation 1 keeps its original keys, so stored
+runs fold unchanged.
+
+**Winding down.** The commit that moves a run to `completed`, `failed` or
+`cancelled` closes its orchestrator (when the row names one) and its anchor,
+once each: the anchor is labelled closed and stopped only if a runner holds it.
+The store-only cancel closes the anchor too. A resume commit that cannot hold every
 re-request drops the extra ones, which are asked again only at the next
 resume; the start bound of 48 keeps a commit from filling up this way.
 
@@ -1549,7 +1575,6 @@ drift (CRL-161).
 | Resuming a budget pause with a raised cap from the web, and the run view's other cuts ([`runs-api.md`](runs-api.md), "Deferred work and owners") | no live ticket |
 | Run requests over 512 characters: a start refuses them today, and briefs carry only `request_preview` | CRL-152 |
 | A pause made on the run row alone has no durable marker: a resync repair between the engine's own pause and its plan probe can take over the row's reason, and the probe then lifts the row | CRL-153 |
-| The orchestrator's lifecycle: replacing it, with keys and a fence scoped to its generation; backoff for its transient failures, which pause the run at once; winding down the anchor and orchestrator sessions after a run ends; and a Retry for the causes no step owns (`anchor:*`, `orchestrator:*`, `gate:*`, run-level `failure_path`), which stay Cancel-only | CRL-155 |
 | Tier B against the real API: the 529, 429 and 401 texts the classifier reads, a credentialed scheduled lane, and the opt-in Tier B samples in `coral-e2e` | CRL-156 |
 | A runner's first start in a repo probes git's untracked cache for about 6 s; a turn that ends inside it looks like a drift (`pending_input`). The E2E presets `core.untrackedCache=true` | CRL-161 |
 | Omnigent's own launch paths reach a step's runner without Coral's checks ("One relaunch path", Residuals) | CRL-162 |

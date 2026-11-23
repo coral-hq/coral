@@ -3356,6 +3356,90 @@ async def test_a_retry_naming_a_malformed_activation_is_refused_before_any_work(
     assert writes.calls == []
 
 
+def _run_retry_url(run_id: str) -> str:
+    return f"{RUNS}/{run_id}:retry"
+
+
+ANCHOR_LOST = PauseRun(reason="failure_path", detail="anchor:dispatch.failed")
+RUN_NOT_RETRYABLE = "This run cannot be retried now."
+
+
+async def test_a_run_retry_clears_its_run_level_failure(writes: Api) -> None:
+    world = writes.world
+    run = _start(world, "anchor_lost")
+    _commit(world, run.id, ANCHOR_LOST)
+
+    async with _client(writes.app()) as client:
+        before = (await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))).json()
+        [listed] = (await client.get(RUNS, headers=_as(ALICE))).json()["data"]
+        bobs = await client.post(_run_retry_url(run.id), headers=_as(BOB), json={})
+        retried = await client.post(_run_retry_url(run.id), headers=_as(ALICE), json={})
+        again = await client.post(_run_retry_url(run.id), headers=_as(ALICE), json={})
+
+    # Offered on the detail only; Resume never clears a failure_path cause.
+    assert (before["pause_reason"], before["allowed_actions"]) == (
+        "failure_path",
+        ["retry", "cancel"],
+    )
+    assert listed["allowed_actions"] == ["cancel"]
+    assert bobs.status_code == 404
+    assert retried.status_code == 200, retried.text
+    assert retried.headers["cache-control"] == "private, no-store"
+    assert (retried.json()["status"], retried.json()["allowed_actions"]) == (
+        "running",
+        ["pause", "cancel"],
+    )
+    assert _refusal(again) == (409, "illegal_transition")
+    assert again.json()["error"] == {
+        "code": "illegal_transition",
+        "message": RUN_NOT_RETRYABLE,
+        "details": {"status": "running", "pause_reason": None, "reason": "retry_not_allowed"},
+    }
+    assert again.headers["cache-control"] == "private, no-store"
+
+
+RUN_RETRY_REFUSALS: dict[str, RetryRefusal] = {
+    "completed": RetryRefusal(None, "The run is completed.", "completed"),
+    "cancelled": RetryRefusal(None, "The run is cancelled.", "cancelled"),
+    "unloadable": RETRY_REFUSALS["unloadable"],
+    "running": RetryRefusal("retry_not_allowed", RUN_NOT_RETRYABLE, "running"),
+    "user_paused": RetryRefusal("retry_not_allowed", RUN_NOT_RETRYABLE, "paused", "user"),
+    "held": RETRY_REFUSALS["held"],
+}
+
+
+@pytest.mark.parametrize("case", list(RUN_RETRY_REFUSALS))
+async def test_a_run_retry_the_run_cannot_take_is_refused_with_its_reason(
+    writes: Api, case: str
+) -> None:
+    world = writes.world
+    if case == "held":
+        run, _activation = _retry_case(world, case)
+        _commit(world, run.id, ANCHOR_LOST)
+    else:
+        run = _run_in_state(world, case)
+    before = _row_state(world, run.id)
+    logs_before = len(_fake_runs(world).logs[(WORKSPACE, run.id)])
+
+    async with _client(writes.app()) as client:
+        offered = (await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))).json()
+        response = await client.post(_run_retry_url(run.id), headers=_as(ALICE), json={})
+
+    expected = RUN_RETRY_REFUSALS[case]
+    assert "retry" not in offered["allowed_actions"]
+    assert _refusal(response) == (409, "illegal_transition"), response.text
+    assert response.headers["cache-control"] == "private, no-store"
+    error = response.json()["error"]
+    assert error["message"] == expected.message
+    details = {"status": expected.status, "pause_reason": expected.pause_reason}
+    assert error["details"] == (
+        details if expected.reason is None else {**details, "reason": expected.reason}
+    )
+    if case != "unloadable":
+        assert _row_state(world, run.id) == before
+        assert len(_fake_runs(world).logs[(WORKSPACE, run.id)]) == logs_before
+
+
 # ── Retry under races, loops, generations and holds ─────────────────────────
 
 PLAN, BUILD, DOCS = "plan||:0", "build||:0", "docs||:0"

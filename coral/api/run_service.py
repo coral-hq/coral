@@ -142,6 +142,7 @@ _NOT_PAUSABLE_TEXT = "The run cannot be paused now."
 _NOT_RESUMABLE_TEXT = "The run cannot be resumed now."
 _NOT_CANCELLABLE_TEXT = "The run cannot be cancelled now."
 _NOT_RETRYABLE_TEXT = "This step cannot be retried now."
+_RUN_NOT_RETRYABLE_TEXT = "This run cannot be retried now."
 # A refused retry's text by its reason; others say the step cannot be retried now.
 _RETRY_REFUSAL_TEXTS: Mapping[str, str] = {
     "unknown_activation": "The run has no such step.",
@@ -1043,36 +1044,49 @@ class RunsApi:
         return _Acted(read, gate_rows=gate_rows)
 
     async def retry(
-        self, viewer: Viewer, workspace_id: int, run_id: str, activation_id: str
+        self, viewer: Viewer, workspace_id: int, run_id: str, activation_id: str | None
     ) -> RunSummary:
         """
-        Retry a failed step of the caller's run, named by its store activation id.
+        Retry a failed step of the caller's run, named by its store activation id, or
+        with ``None`` the run's own failures no step owns.
 
         The id is matched only against the run's own activations and never echoed or
-        logged. A retry that is taken leaves the run paused while the step's old session
-        is fenced and its work saved; then its new session starts.
+        logged. A step retry that is taken leaves the run paused while the step's old
+        session is fenced and its work saved; then its new session starts.
 
         :raises CoralApiError: 409 for a finished run, one that cannot be loaded, an id
-            that is no activation of the run, or a step the engine does not retry now
-            (``details.reason`` names which); 503 when busy.
+            that is no activation of the run, or a step or run the engine does not retry
+            now (``details.reason`` names which); 503 when busy.
         """
         run = await self.owned_run(viewer, workspace_id, run_id)
-        with _write_errors("retry a step of", run_id):
+        step = activation_id is not None
+        with _write_errors("retry a step of" if step else "retry", run_id):
+            fallback = _NOT_RETRYABLE_TEXT if step else _RUN_NOT_RETRYABLE_TEXT
             if row_status(run) in FINISHED_RUN_STATUSES:
-                raise _illegal(run, _NOT_RETRYABLE_TEXT)
+                raise _illegal(run, fallback)
             acted = await self._act(
                 viewer, self._retried, workspace_id, run_id, _actor(viewer), activation_id
             )
             if acted.refusal is not None:
-                text = _RETRY_REFUSAL_TEXTS.get(acted.refusal, _NOT_RETRYABLE_TEXT)
+                text = _RETRY_REFUSAL_TEXTS.get(acted.refusal, fallback)
                 raise _illegal(acted.read.run, text, reason=acted.refusal)
             return self._with_spend(workspace_id, read_summary(acted.read))
 
-    def _retried(self, workspace_id: int, run_id: str, actor: str, activation_id: str) -> _Acted:
+    def _retried(
+        self, workspace_id: int, run_id: str, actor: str, activation_id: str | None
+    ) -> _Acted:
         try:
-            result = self._bridge.retry_activation(
-                workspace_id=workspace_id, run_id=run_id, actor=actor, activation_id=activation_id
-            )
+            if activation_id is None:
+                result = self._bridge.retry_run(
+                    workspace_id=workspace_id, run_id=run_id, actor=actor
+                )
+            else:
+                result = self._bridge.retry_activation(
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                    actor=actor,
+                    activation_id=activation_id,
+                )
         except EngineLoadFailed:
             refusal: str | None = LOAD_FAILED_DETAIL
         else:
