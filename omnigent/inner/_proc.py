@@ -480,3 +480,42 @@ def process_alive(pid: int) -> bool:
     except psutil.AccessDenied:
         # Exists but belongs to another user / can't introspect -> alive.
         return True
+
+
+def snapshot_child_tree(process: _ProcessLike) -> dict[int, float]:
+    """
+    CORAL(S116): *process* and its descendants by pid and start time, taken before a signal.
+
+    Empty unless *process* is a live child of this process, so a stale or foreign pid is
+    never waited on or killed.
+    """
+    pid = process.pid
+    if pid is None or process.returncode is not None:
+        return {}
+    try:
+        if psutil.Process(pid).ppid() != os.getpid():
+            return {}
+    except psutil.Error:
+        return {}
+    return _snapshot_identities(pid)
+
+
+def live_members(identities: dict[int, float]) -> dict[int, float]:
+    """CORAL(S116): the members of a snapshot still running: same start time, not a zombie."""
+    alive: dict[int, float] = {}
+    for pid, started in identities.items():
+        try:
+            proc = psutil.Process(pid)
+            # The status first: a zombie has exited even when its start time cannot be read.
+            if proc.status() != psutil.STATUS_ZOMBIE and _process_start_stamp(proc) == started:
+                alive[pid] = started
+        except psutil.NoSuchProcess:  # psutil.ZombieProcess included
+            continue
+        except psutil.AccessDenied:
+            alive[pid] = started
+    return alive
+
+
+def kill_members(identities: dict[int, float]) -> None:
+    """CORAL(S116): SIGKILL the members of a snapshot that are still the same processes."""
+    _signal_identities(identities, force=True)

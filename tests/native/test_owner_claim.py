@@ -77,3 +77,79 @@ def test_unreadable_linux_namespace_remains_unknown(
     assert owner_claim.current_pid_namespace() is None
     owner_claim.write_owner_claim(tmp_path)
     assert owner_claim.read_owner_claim(tmp_path) is None
+
+
+# CORAL(S116): a claim is read only from this user's small regular file, without blocking; a
+# read that blocks fails this test alone (the signal method), not the whole run
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file types")
+@pytest.mark.timeout(30, method="signal")
+@pytest.mark.parametrize(
+    "kind",
+    ["fifo", "symlink-to-dev-zero", "symlink-to-claim", "oversized", "foreign-owner", "directory"],
+)
+def test_a_claim_that_is_not_this_users_small_regular_file_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    """A link, FIFO, device, dir, oversized or foreign file is refused as unclaimed."""
+    elsewhere, directory = tmp_path / "elsewhere", tmp_path / "dir"
+    for path in (elsewhere, directory):
+        path.mkdir()
+    owner_claim.write_owner_claim(elsewhere)
+    claim = directory / "owner.pid"
+    if kind == "fifo":
+        os.mkfifo(claim)
+    elif kind == "symlink-to-dev-zero":
+        claim.symlink_to("/dev/zero")
+    elif kind == "symlink-to-claim":
+        claim.symlink_to(elsewhere / "owner.pid")
+    elif kind == "oversized":
+        claim.write_text((elsewhere / "owner.pid").read_text() + "x" * 4096)
+    elif kind == "directory":
+        claim.mkdir()
+    else:
+        owner_claim.write_owner_claim(directory)
+        uid = os.getuid()
+        monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+
+    assert owner_claim.read_owner_claim(directory) is None
+    assert owner_claim.read_owner_claim_bytes(directory) is None
+
+
+# CORAL(S116): a new claim is a fresh 0600 file, never written over or through an entry there
+@pytest.mark.skipif(os.name == "nt", reason="POSIX links")
+@pytest.mark.parametrize("planted", ["symlink", "hard-link", "file"])
+def test_a_new_claim_never_writes_through_an_entry_already_there(
+    tmp_path: Path, planted: str
+) -> None:
+    outside, directory = tmp_path / "outside", tmp_path / "dir"
+    outside.write_text("untouched")
+    directory.mkdir()
+    entry = directory / ".launch-owner"
+    if planted == "symlink":
+        entry.symlink_to(outside)
+    elif planted == "hard-link":
+        os.link(outside, entry)
+    else:
+        entry.write_text("planted")
+
+    with pytest.raises(FileExistsError):
+        owner_claim.create_owner_claim(directory, filename=".launch-owner")
+    assert outside.read_text() == "untouched"
+    if planted == "file":
+        assert entry.read_text() == "planted"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_a_new_claim_names_the_given_owner_or_holds_the_given_bytes(tmp_path: Path) -> None:
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    owner_claim.create_owner_claim(tmp_path, filename=".launch-target", pid=123)
+    claim = owner_claim.read_owner_claim(tmp_path, filename=".launch-target")
+    assert claim == owner_claim.OwnerClaim(
+        123, owner_claim.current_pid_namespace() or "", owner_claim.current_boot_id()
+    )
+    assert (tmp_path / ".launch-target").stat().st_mode & 0o777 == 0o600
+    data = owner_claim.read_owner_claim_bytes(tmp_path, filename=".launch-target")
+    assert data is not None
+    owner_claim.create_owner_claim(copy, filename=".launch-owner", data=data)
+    assert (copy / ".launch-owner").read_bytes() == data

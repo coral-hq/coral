@@ -80,8 +80,17 @@ holds a filtered copy of your `~/.claude.json`: the MCP servers it defines for
 you, with any you turned off for a project still off, your user ID, any legacy
 top-level `env` values, and the paths of projects where you set trust or MCP
 keys. Code in that sandbox can still read what was copied, including any
-secrets in the MCP servers' `env`, arguments or headers (CRL-167). A Claude
-subscription login stored on the host no longer reaches these agents. On Linux
+secrets in the MCP servers' `env`, arguments or headers (CRL-167). Since
+CRL-179, the copies that a stopped or killed CLI, or a killed runner, leaves in
+the temp dir are removed only when one of your claude-sdk agents on this host
+next connects a CLI or closes with the same temp dir, a large one over several
+of those, and stay if none does. Copies from before CRL-179 or from a build
+without it, or in a dir a sandboxed CLI changed so the cleanup keeps it, stay
+until you delete your `omnigent-osenv-*`, `omnigent-claude-seed-*` and
+`omnigent-claude-config-*` dirs there, with every Omnigent server, runner and
+agent stopped; so do scratches under a `TMPDIR` set in your Claude settings
+`env`, in that dir. A Claude subscription login stored on the host no longer
+reaches these agents. On Linux
 this is a breaking change: an agent that used it now needs an API key, a
 gateway or `CLAUDE_CODE_OAUTH_TOKEN`. Its HTTP MCP servers also lose the OAuth
 sign-ins the CLI stored, so they may need a new sign-in or be missing their
@@ -119,9 +128,10 @@ server itself (CRL-159). A step whose sandbox cannot wrap its CLI does not
 start. Coral steps need a system `claude` CLI, or they refuse to start: the
 SDK's bundled one cannot be wrapped in the sandbox. See the ADR-05 addenda on
 [harness sockets](docs/coral/decisions/ADR-05-topology.md#addendum-crl-166-harness-sockets-on-macos-2026-11-22),
-[Claude config isolation](docs/coral/decisions/ADR-05-topology.md#addendum-crl-176-claude-config-isolation-2026-11-22)
+[Claude config isolation](docs/coral/decisions/ADR-05-topology.md#addendum-crl-176-claude-config-isolation-2026-11-22),
+[sandboxed agents' Claude config](docs/coral/decisions/ADR-05-topology.md#addendum-crl-178-claude-config-isolation-for-every-sandboxed-agent-2026-11-22)
 and
-[sandboxed agents' Claude config](docs/coral/decisions/ADR-05-topology.md#addendum-crl-178-claude-config-isolation-for-every-sandboxed-agent-2026-11-22).
+[launch temp dir cleanup](docs/coral/decisions/ADR-05-topology.md#addendum-crl-179-launch-temp-dir-cleanup-2026-11-22).
 
 ## Run Coral from source
 

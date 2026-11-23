@@ -1012,30 +1012,47 @@ def test_create_launch_tmpdir_refuses_a_parent_another_uid_owns(
     assert not list(parent.iterdir())
 
 
+def _finished_pid() -> int:
+    """CORAL(S116): the pid of a process that has exited and been reaped."""
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait()
+    return finished.pid
+
+
+def _claimed_dir(
+    parent: pathlib.Path, name: str, pid: int, *, target: int | None = None, mode: int = 0o700
+) -> pathlib.Path:
+    """
+    A dir whose launch claim names *pid*.
+
+    CORAL(S116): and whose target claim names *target*, with the dir's *mode*.
+    """
+    from omnigent.native.owner_claim import current_boot_id, current_pid_namespace
+
+    path = parent / name
+    path.mkdir(mode=0o700)
+    boot = current_boot_id()
+    for filename, owner in ((".launch-owner", pid), (".launch-target", target)):
+        if owner is not None:
+            claim = f"{owner}\npid_ns={current_pid_namespace()}\n"
+            (path / filename).write_text(claim + (f"boot={boot}\n" if boot else ""))
+    path.chmod(mode)
+    return path
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
 def test_create_launch_tmpdir_removes_only_its_own_orphaned_siblings(
     tmp_path: pathlib.Path,
 ) -> None:
     """A launch dir whose launcher is gone goes; live, unclaimed and foreign entries stay."""
     from omnigent.inner.sandbox import create_launch_tmpdir
-    from omnigent.native.owner_claim import current_boot_id, current_pid_namespace
 
-    finished = subprocess.Popen([sys.executable, "-c", "pass"])
-    finished.wait()
-
-    def claimed_dir(name: str, pid: int) -> pathlib.Path:
-        path = parent / name
-        path.mkdir(mode=0o700)
-        boot = current_boot_id()
-        claim = f"{pid}\npid_ns={current_pid_namespace()}\n" + (f"boot={boot}\n" if boot else "")
-        (path / ".launch-owner").write_text(claim)
-        return path
-
+    finished = _finished_pid()
     parent = tmp_path / "h"
     parent.mkdir(mode=0o700)
-    orphan = claimed_dir("cdeadbeef", finished.pid)
-    live = claimed_dir("clive0000", os.getpid())
-    foreign = claimed_dir("ap-deadbeef", finished.pid)
+    orphan = _claimed_dir(parent, "cdeadbeef", finished)
+    live = _claimed_dir(parent, "clive0000", os.getpid())
+    foreign = _claimed_dir(parent, "ap-deadbeef", finished)
     unclaimed = parent / "cnoclaim1"
     unclaimed.mkdir(mode=0o700)
     elsewhere = tmp_path / "elsewhere"
@@ -1052,11 +1069,578 @@ def test_create_launch_tmpdir_removes_only_its_own_orphaned_siblings(
     assert (parent / "csymlink1").is_symlink() and (elsewhere / "keep").exists()
 
 
+# CORAL(S116): the sweep takes a name pattern, and a recorded target that runs keeps its dir
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_the_orphan_sweep_takes_a_name_pattern(tmp_path: pathlib.Path) -> None:
+    """
+    A dead launch's scratch goes, with what it holds; live, unclaimed, misnamed, shared and
+    symlinked entries stay, and so does one whose target, or unreadable target claim, remains.
+    """
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+
+    dead = _finished_pid()
+    parent = tmp_path / "tmp"
+    parent.mkdir(mode=0o700)
+    orphan = _claimed_dir(parent, "omnigent-osenv-deadbeef", dead)
+    (orphan / "claude_config_dir").mkdir()
+    (orphan / "claude_config_dir" / ".claude.json").write_text("{}")
+    target_gone = _claimed_dir(parent, "omnigent-osenv-target01", dead, target=dead)
+    garbled = _claimed_dir(parent, "omnigent-osenv-target03", dead)
+    (garbled / ".launch-target").write_text("not a claim")
+    unclaimed = parent / "omnigent-osenv-noclaim1"
+    unclaimed.mkdir(mode=0o700)
+    kept = [
+        _claimed_dir(parent, "omnigent-osenv-live0000", os.getpid()),
+        _claimed_dir(parent, "omnigent-osenv-target02", dead, target=os.getpid()),
+        _claimed_dir(parent, "omnigent-osenv-short", dead),
+        _claimed_dir(parent, "omnigent-osenv-deadbeef0", dead),  # a name only prefixed alike
+        _claimed_dir(parent, "omnigent-osenv-mode0755", dead, mode=0o755),
+        _claimed_dir(parent, "cdeadbeef", dead),
+        garbled,
+        unclaimed,
+    ]
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    (elsewhere / "keep").write_text("x")
+    (parent / "omnigent-osenv-symlink1").symlink_to(elsewhere)
+
+    _remove_orphaned_launch_tmpdirs(parent, PRIVATE_TMPDIR_NAME)
+
+    assert not orphan.exists() and not target_gone.exists()
+    assert [path.name for path in kept if not path.is_dir()] == []
+    assert (parent / "omnigent-osenv-symlink1").is_symlink() and (elsewhere / "keep").exists()
+    _remove_orphaned_launch_tmpdirs(parent)
+    assert not (parent / "cdeadbeef").exists()
+
+
+# CORAL(S116): only the kernel's "no such process" or a zombie counts as gone
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+@pytest.mark.parametrize(
+    ("state", "alive"),
+    [
+        ("exited", False),
+        ("zombie", False),
+        ("running", True),
+        ("not-permitted", True),
+        ("hidden", True),  # CORAL(S116): found by the kernel, not by psutil
+    ],
+)
+def test_a_claimed_process_is_gone_only_when_the_kernel_says_so(
+    monkeypatch: pytest.MonkeyPatch, state: str, alive: bool
+) -> None:
+    """``EPERM``, or a process ``/proc`` hides from psutil, counts as alive."""
+    import psutil
+
+    from omnigent.inner.sandbox import _claimed_process_alive
+    from tests._helpers.polling import poll_until
+
+    child = None
+    if state == "zombie":
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        poll_until(
+            lambda: psutil.Process(child.pid).status() == psutil.STATUS_ZOMBIE,
+            timeout_s=10,
+            interval_s=0.05,
+        )
+        pid = child.pid
+    elif state == "running":
+        pid = os.getpid()
+    else:
+        pid = _finished_pid()
+    if state == "not-permitted":
+
+        def _refused(_pid: int, _signal: int) -> None:
+            raise PermissionError
+
+        monkeypatch.setattr(os, "kill", _refused)
+    if state == "hidden":
+
+        def _unseen(pid: int) -> None:
+            raise psutil.NoSuchProcess(pid)
+
+        monkeypatch.setattr(os, "kill", lambda _pid, _signal: None)
+        monkeypatch.setattr(psutil, "Process", _unseen)
+    try:
+        assert _claimed_process_alive(pid) is alive
+    finally:
+        if child is not None:
+            child.wait()
+
+
+# CORAL(S116): a sweep stops at its deadline and removal count; the next one goes on
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_a_sweep_stops_at_its_budget_and_the_next_goes_on(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.inner import sandbox
+
+    dead = _finished_pid()
+    orphans = [_claimed_dir(tmp_path, f"omnigent-osenv-dead000{n}", dead) for n in range(3)]
+    monkeypatch.setattr(sandbox, "_SWEEP_MAX_REMOVALS", 2)
+
+    sandbox._remove_orphaned_launch_tmpdirs(tmp_path, sandbox.PRIVATE_TMPDIR_NAME, deadline=0.0)
+    assert all(path.is_dir() for path in orphans)
+    sandbox._remove_orphaned_launch_tmpdirs(tmp_path, sandbox.PRIVATE_TMPDIR_NAME)
+    assert sum(path.exists() for path in orphans) == 1
+    sandbox._remove_orphaned_launch_tmpdirs(tmp_path, sandbox.PRIVATE_TMPDIR_NAME)
+    assert not any(path.exists() for path in orphans)
+
+
+# CORAL(S116): what the sweep cannot empty keeps its claims, so the next sweep tries again
+@pytest.mark.skipif(
+    os.name == "nt" or os.geteuid() == 0, reason="POSIX permissions bind only non-root"
+)
+def test_a_dir_the_sweep_cannot_empty_keeps_its_claim_for_the_next_sweep(
+    tmp_path: pathlib.Path,
+) -> None:
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+
+    orphan = _claimed_dir(tmp_path, "omnigent-osenv-deadbeef", _finished_pid())
+    locked = orphan / "claude_config_dir"
+    locked.mkdir()
+    (locked / ".claude.json").write_text("{}")
+    locked.chmod(0o500)
+    try:
+        _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+        assert (locked / ".claude.json").exists()
+        assert (orphan / ".launch-owner").is_file(), "the sweep dropped the claim it needs"
+    finally:
+        locked.chmod(0o700)
+    _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+    assert not orphan.exists()
+
+
+# CORAL(S116): a failure inside the sweep is logged by type and never reaches the caller
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_a_failing_liveness_check_never_escapes_the_sweep(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+
+    orphan = _claimed_dir(tmp_path, "omnigent-osenv-deadbeef", _finished_pid())
+
+    def _broken(_pid: int) -> bool:
+        raise RuntimeError(str(orphan))
+
+    monkeypatch.setattr("omnigent.inner.sandbox._claimed_process_alive", _broken)
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.sandbox"):
+        _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+
+    assert orphan.is_dir()
+    assert [record.getMessage() for record in caplog.records] == [
+        "Cannot sweep a temp dir (RuntimeError)"
+    ]
+
+
+# CORAL(S116): without owner uids (Windows) nothing is claimed and the sweep does nothing
+@pytest.mark.skipif(os.name == "nt", reason="deletes os.getuid on POSIX")
+def test_the_sweep_does_nothing_where_there_are_no_owner_uids(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from omnigent.inner.sandbox import (
+        PRIVATE_TMPDIR_NAME,
+        _remove_orphaned_launch_tmpdirs,
+        claim_temp_dir,
+    )
+
+    dead = _finished_pid()
+    orphans = [
+        _claimed_dir(tmp_path, name, dead) for name in ("cdeadbeef", "omnigent-osenv-deadbeef")
+    ]
+    fresh = tmp_path / "omnigent-osenv-fresh000"
+    fresh.mkdir(mode=0o700)
+    monkeypatch.delattr(os, "getuid")
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.sandbox"):
+        _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+        _remove_orphaned_launch_tmpdirs(tmp_path)
+        claim_temp_dir(fresh)
+
+    assert all(path.is_dir() for path in orphans)
+    assert not (fresh / ".launch-owner").exists()
+    # It returns before any uid check, rather than failing each dir's check.
+    assert caplog.records == []
+
+
+# CORAL(S116): the remover checks the dir it opened, so a dir swapped after the orphan check
+# (a link, or a dir no longer private) keeps everything
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_the_sweep_rechecks_the_dir_it_opens(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+
+    dead = _finished_pid()
+    shared = _claimed_dir(tmp_path, "omnigent-osenv-mode0755", dead, mode=0o755)
+    (shared / "keep").write_text("x")
+    elsewhere = _claimed_dir(tmp_path, "elsewhere", dead)
+    (elsewhere / "keep").write_text("x")
+    (tmp_path / "omnigent-osenv-symlink1").symlink_to(elsewhere)
+    monkeypatch.setattr("omnigent.inner.sandbox._is_orphaned", lambda _child: True)
+
+    _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+
+    assert sorted(path.name for path in shared.iterdir()) == [".launch-owner", "keep"]
+    assert sorted(path.name for path in elsewhere.iterdir()) == [".launch-owner", "keep"]
+    assert (tmp_path / "omnigent-osenv-symlink1").is_symlink()
+
+
+# CORAL(S116): a claim is never written through a link planted in the dir, which stays unclaimed
+@pytest.mark.skipif(os.name == "nt", reason="POSIX links")
+def test_a_temp_dir_claim_never_writes_through_a_planted_link(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from omnigent.inner.sandbox import claim_temp_dir
+
+    outside = tmp_path / "outside"
+    outside.write_text("untouched")
+    directory = tmp_path / "omnigent-osenv-planted1"
+    directory.mkdir(mode=0o700)
+    (directory / ".launch-owner").symlink_to(outside)
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.sandbox"):
+        claim_temp_dir(directory)
+
+    assert outside.read_text() == "untouched"
+    assert (directory / ".launch-owner").is_symlink()
+    assert [record.getMessage() for record in caplog.records] == [
+        "Cannot record a temp dir's owner (FileExistsError)"
+    ]
+
+
+# CORAL(S116): the in-wrap cleanup never drops a claim while its dir stays: a bwrap mount
+# point keeps its claim in place, and a cleanup cut short leaves the dir claimed for a sweep
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+@pytest.mark.parametrize(
+    ("backend", "cut_short"),
+    [("darwin_seatbelt", False), ("linux_bwrap", False), ("darwin_seatbelt", True)],
+    ids=["seatbelt", "bwrap", "seatbelt-killed"],
+)
+def test_the_in_wrap_cleanup_never_drops_a_claim_while_its_dir_stays(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, backend: str, cut_short: bool
+) -> None:
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+
+    scratch = _claimed_dir(tmp_path, "omnigent-osenv-mounted1", _finished_pid())
+    claim = scratch / ".launch-owner"
+    before = (claim.stat().st_ino, claim.read_bytes())
+    real_unlink = os.unlink
+    removed: list[str] = []
+
+    def _run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+        for name in ("a", "b", "c"):
+            (scratch / name).write_text("x")
+        (scratch / "claude_config_dir").mkdir()
+        (scratch / "claude_config_dir" / ".claude.json").write_text("{}")
+        return subprocess.CompletedProcess(argv, 0)
+
+    def _killed_after_one(path: object, *, dir_fd: int | None = None) -> None:
+        real_unlink(path, dir_fd=dir_fd)  # type: ignore[arg-type]
+        if dir_fd is not None:
+            removed.append(str(path))
+            raise KeyboardInterrupt  # as a kill would, mid-cleanup
+
+    monkeypatch.setattr("omnigent.inner.sandbox.activate_sandbox", lambda _policy: None)
+    monkeypatch.setattr(
+        "omnigent.inner.sandbox._run_target", lambda argv, _claimed: _run(argv).returncode
+    )
+    if cut_short:
+        monkeypatch.setattr("omnigent.inner.sandbox.os.unlink", _killed_after_one)
+    policy = dataclasses.replace(_noop_policy(), backend_type=backend, active=True)
+    wrapped_env = {
+        "OMNIGENT_LAUNCHER_SPAWN_WRAPPED": "1",
+        "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR": str(scratch),
+    }
+    with mock.patch.dict(os.environ, wrapped_env):
+        with pytest.raises(KeyboardInterrupt) if cut_short else contextlib.nullcontext():
+            assert run_launcher(_encoded(policy), "/bin/true", []) == 0
+    monkeypatch.undo()
+
+    if backend == "darwin_seatbelt" and not cut_short:
+        assert not scratch.exists()
+        return
+    # The claim was never removed and written again, so no moment left the dir unclaimed.
+    assert (claim.stat().st_ino, claim.read_bytes()) == before
+    if cut_short:
+        assert len(removed) == 1 and ".launch-owner" not in removed
+    else:
+        assert [path.name for path in scratch.iterdir()] == [".launch-owner"]
+    _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+    assert not scratch.exists()
+
+
+# CORAL(S116): a dir that cannot go once emptied (a late writer) gets its claims back
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_a_dir_that_cannot_go_once_emptied_gets_its_claims_back(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+
+    dead = _finished_pid()
+    orphan = _claimed_dir(tmp_path, "omnigent-osenv-deadbeef", dead, target=dead)
+    claims = {name: (orphan / name).read_bytes() for name in (".launch-owner", ".launch-target")}
+    real_unlink = os.unlink
+
+    def _late_writer(path: object, *, dir_fd: int | None = None) -> None:
+        real_unlink(path, dir_fd=dir_fd)  # type: ignore[arg-type]
+        if path == ".launch-owner" and dir_fd is not None:
+            os.close(os.open("late", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=dir_fd))
+
+    with monkeypatch.context() as patched:
+        patched.setattr("omnigent.inner.sandbox.os.unlink", _late_writer)
+        _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+
+    assert {name: (orphan / name).read_bytes() for name in claims} == claims
+    assert (orphan / "late").exists()
+    _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+    assert not orphan.exists()
+
+
+# CORAL(S116): the target's claim goes before the owner's, so a kill between the two removals
+# leaves a dir a later sweep can still judge
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_a_kill_between_the_claim_removals_leaves_a_dir_still_swept(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+
+    dead = _finished_pid()
+    orphan = _claimed_dir(tmp_path, "omnigent-osenv-deadbeef", dead, target=dead)
+    real_unlink = os.unlink
+
+    def _killed_after_one_claim(path: object, *, dir_fd: int | None = None) -> None:
+        real_unlink(path, dir_fd=dir_fd)  # type: ignore[arg-type]
+        if path in (".launch-owner", ".launch-target"):
+            raise KeyboardInterrupt  # as a kill would, between the two removals
+
+    with monkeypatch.context() as patched:
+        patched.setattr("omnigent.inner.sandbox.os.unlink", _killed_after_one_claim)
+        with pytest.raises(KeyboardInterrupt):
+            _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+
+    assert [path.name for path in orphan.iterdir()] == [".launch-owner"]
+    _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+    assert not orphan.exists()
+
+
+# CORAL(S116): a dead tree past the depth cap is left whole and counted, never descended
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_a_dead_tree_past_the_depth_cap_is_left_and_counted(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from omnigent.inner.sandbox import (
+        _SWEEP_MAX_DEPTH,
+        PRIVATE_TMPDIR_NAME,
+        _remove_orphaned_launch_tmpdirs,
+    )
+
+    orphan = _claimed_dir(tmp_path, "omnigent-osenv-deadbeef", _finished_pid())
+    leaf = orphan.joinpath(*["d"] * (_SWEEP_MAX_DEPTH + 2))
+    leaf.mkdir(parents=True)
+    (leaf / "f").write_text("x")
+
+    with caplog.at_level(logging.DEBUG, logger="omnigent.inner.sandbox"):
+        _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+
+    assert (leaf / "f").exists() and (orphan / ".launch-owner").is_file()
+    assert "Removed 0 orphaned temp dirs; kept 1 to retry, 1 too deep" in caplog.messages
+
+
+# CORAL(S116): the deadline holds inside one dir's removal; the next sweep goes on
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_a_sweep_stops_at_its_deadline_inside_a_dir(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import itertools
+
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+
+    orphan = _claimed_dir(tmp_path, "omnigent-osenv-deadbeef", _finished_pid())
+    (orphan / "tree").mkdir()
+    for index in range(10):
+        (orphan / "tree" / f"f{index}").write_text("x")
+    # Before the deadline for the root entry and the first few entries inside, then past it.
+    ticks = itertools.count()
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            "omnigent.inner.sandbox.time.monotonic", lambda: 0.0 if next(ticks) < 4 else 1e9
+        )
+        _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME, deadline=100.0)
+
+    assert (orphan / ".launch-owner").is_file()
+    assert 0 < len(list((orphan / "tree").iterdir())) < 10
+    _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+    assert not orphan.exists()
+
+
+# CORAL(S116): a failure outside any one dir is logged by type and never reaches the caller
+def test_a_failing_scan_never_escapes_the_sweep(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from omnigent.inner.sandbox import _remove_orphaned_launch_tmpdirs
+
+    class _BrokenPattern:
+        def fullmatch(self, _name: str) -> None:
+            raise RuntimeError(str(tmp_path))
+
+    (tmp_path / "entry").mkdir()
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.sandbox"):
+        _remove_orphaned_launch_tmpdirs(tmp_path, _BrokenPattern())  # type: ignore[arg-type]
+
+    assert caplog.messages == ["Cannot sweep the temp dirs (RuntimeError)"]
+
+
+# CORAL(S116): an interrupt while the target is being named still kills it, as subprocess.run
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_an_interrupt_while_naming_the_target_still_kills_it(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.inner import _proc, sandbox
+
+    started: list[int] = []
+
+    def _interrupted(_path: pathlib.Path, *, pid: int, **_kwargs: object) -> None:
+        started.append(pid)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sandbox, "claim_temp_dir", _interrupted)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            sandbox._run_target([sys.executable, "-c", "import time; time.sleep(30)"], [tmp_path])
+        [pid] = started
+        assert not _proc.process_alive(pid), "the target outlived its launcher's interrupt"
+    finally:
+        for pid in started:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+
+
+# CORAL(S116): every claim the launcher writes refuses a link planted where it goes
+@pytest.mark.skipif(os.name == "nt", reason="POSIX links")
+@pytest.mark.parametrize("site", ["scratch", "launch-dir", "target"])
+def test_each_launcher_claim_refuses_a_planted_link(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    site: str,
+) -> None:
+    import tempfile
+
+    from omnigent.inner.sandbox import create_launch_tmpdir
+
+    outside = tmp_path / "outside"
+    outside.write_text("untouched")
+    planted = tmp_path / "planted"
+    planted.mkdir(mode=0o700)
+    claim_name = ".launch-target" if site == "target" else ".launch-owner"
+    (planted / claim_name).symlink_to(outside)
+    monkeypatch.setattr("omnigent.inner.sandbox.activate_sandbox", lambda _policy: None)
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.sandbox"):
+        if site == "launch-dir":
+            monkeypatch.setattr(tempfile, "mkdtemp", lambda **_kwargs: str(planted))
+            assert create_launch_tmpdir(_launch_policy(tmp_path / "h")) is None
+        elif site == "scratch":
+
+            class _Backend:
+                def prepare_launcher_policy(self, policy: SandboxPolicy) -> SandboxPolicy:
+                    return policy
+
+                def wrap_launcher_argv(self, argv, policy, cwd, chdir=None, target=None):
+                    return ["sandbox-exec", *argv]
+
+            monkeypatch.setattr("omnigent.inner.sandbox.get_backend", lambda _name: _Backend())
+            monkeypatch.setattr("omnigent.inner.sandbox.create_private_tmpdir", lambda: planted)
+
+            def _no_exec(_file: str, _argv: list[str]) -> None:
+                raise SystemExit
+
+            monkeypatch.setattr(os, "execvp", _no_exec)
+            policy = dataclasses.replace(
+                _noop_policy(), backend_type="darwin_seatbelt", active=True
+            )
+            with mock.patch.dict(os.environ), pytest.raises(SystemExit):
+                run_launcher(_encoded(policy), "/bin/true", [])
+        else:
+            from omnigent.native.owner_claim import create_owner_claim
+
+            create_owner_claim(planted, filename=".launch-owner")
+            wrapped_env = {
+                "OMNIGENT_LAUNCHER_SPAWN_WRAPPED": "1",
+                "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR": str(planted),
+            }
+            policy = dataclasses.replace(
+                _noop_policy(), backend_type="darwin_seatbelt", active=True
+            )
+            with mock.patch.dict(os.environ, wrapped_env):
+                assert run_launcher(_encoded(policy), sys.executable, ["-c", "pass"]) == 0
+
+    assert outside.read_text() == "untouched"
+    expected = "Cannot record a temp dir's owner (FileExistsError)"
+    if site == "launch-dir":
+        expected = "Cannot create a launch temp dir (FileExistsError)"
+    assert [message for message in caplog.messages if message.startswith("Cannot ")] == [expected]
+
+
+# CORAL(S116): on seatbelt the target runs in the host's pid namespace, so each claimed dir
+# names it; bwrap's target pid means nothing outside its namespace
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell")
+@pytest.mark.parametrize(("backend", "named"), [("darwin_seatbelt", True), ("linux_bwrap", False)])
+def test_the_in_wrap_pass_names_its_target_where_a_sweep_can_see_it(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    backend: str,
+    named: bool,
+) -> None:
+    from omnigent.native.owner_claim import read_owner_claim
+
+    scratch = _claimed_dir(tmp_path, "omnigent-osenv-target00", os.getpid())
+    launch_dir = _claimed_dir(tmp_path, "cabcdefgh", os.getpid())
+    out = tmp_path / "out"
+    out.mkdir()
+    # The target copies each target claim out before the launcher removes the dirs. The
+    # launcher names its target only after starting it, so a named target waits for its claims.
+    wait_for_claims = (
+        'w() { i=0; while [ ! -s "$1" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i+1)); done; }; '
+        'w "$TMPDIR/.launch-target"; w "$OMNIGENT_LAUNCHER_LAUNCH_TMPDIR/.launch-target"; '
+    )
+    script = (
+        'echo $$ > "$OUT/pid"; '
+        + (wait_for_claims if named else "")
+        + 'cat "$TMPDIR/.launch-target" > "$OUT/scratch" 2>/dev/null; '
+        'cat "$OMNIGENT_LAUNCHER_LAUNCH_TMPDIR/.launch-target" > "$OUT/launch" 2>/dev/null; '
+        "exit 0"
+    )
+    monkeypatch.setattr("omnigent.inner.sandbox.activate_sandbox", lambda _policy: None)
+    policy = dataclasses.replace(_launch_policy(tmp_path / "h"), backend_type=backend)
+    wrapped_env = {
+        "OMNIGENT_LAUNCHER_SPAWN_WRAPPED": "1",
+        "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR": str(scratch),
+        "OMNIGENT_LAUNCHER_LAUNCH_TMPDIR": str(launch_dir),
+        "OUT": str(out),
+    }
+    with mock.patch.dict(os.environ, wrapped_env), caplog.at_level(logging.WARNING):
+        assert run_launcher(_encoded(policy), "/bin/sh", ["-c", script]) == 0
+
+    pid = int((out / "pid").read_text())
+    claims = [read_owner_claim(out, filename=name) for name in ("scratch", "launch")]
+    assert [claim.pid if claim else None for claim in claims] == [pid if named else None] * 2
+    # A bwrap scratch is a mount point, so its dirs stay holding only their claims.
+    kept = [] if named else [[".launch-owner"], [".launch-owner"]]
+    assert [
+        sorted(p.name for p in d.iterdir()) for d in (scratch, launch_dir) if d.exists()
+    ] == kept
+    assert [record.getMessage() for record in caplog.records] == []
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
 def test_run_launcher_grants_and_exports_the_launch_dir_before_the_wrap(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The host pass grants only the fresh dir and names it to the target, then execs the wrap."""
+    from omnigent.inner import sandbox  # CORAL(S116)
+    from omnigent.native.owner_claim import read_owner_claim  # CORAL(S116)
+
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     seen: dict[str, object] = {}
@@ -1074,10 +1658,20 @@ def test_run_launcher_grants_and_exports_the_launch_dir_before_the_wrap(
         seen["dir"] = launch_dir
         seen["mode"] = launch_dir.stat().st_mode & 0o777
         seen["marker"] = os.environ["OMNIGENT_LAUNCHER_LAUNCH_TMPDIR"]
+        # CORAL(S116): the scratch names this pid, which the exec keeps, before the wrap runs
+        seen["claim"] = read_owner_claim(scratch, filename=".launch-owner")
         raise SystemExit
+
+    real_create_launch_tmpdir = sandbox.create_launch_tmpdir
+
+    def _create_launch_tmpdir(policy: SandboxPolicy) -> pathlib.Path | None:
+        # CORAL(S116): claimed before S109's sweep, which can take its whole budget
+        seen["claimed first"] = (scratch / ".launch-owner").is_file()
+        return real_create_launch_tmpdir(policy)
 
     monkeypatch.setattr("omnigent.inner.sandbox.get_backend", lambda _name: _Backend())
     monkeypatch.setattr("omnigent.inner.sandbox.create_private_tmpdir", lambda: scratch)
+    monkeypatch.setattr(sandbox, "create_launch_tmpdir", _create_launch_tmpdir)  # CORAL(S116)
     monkeypatch.setattr(os, "execvp", _capture_exec)
     with mock.patch.dict(os.environ):
         with pytest.raises(SystemExit):
@@ -1090,6 +1684,8 @@ def test_run_launcher_grants_and_exports_the_launch_dir_before_the_wrap(
     assert isinstance(policy, SandboxPolicy)
     assert launch_dir.resolve() in policy.write_roots
     assert not [root for root in policy.write_roots if root.name.startswith("claude-")]
+    assert getattr(seen["claim"], "pid", None) == os.getpid()  # CORAL(S116)
+    assert seen["claimed first"] is True  # CORAL(S116)
     # An exec that never hands off leaves nothing behind.
     assert not launch_dir.exists()
 

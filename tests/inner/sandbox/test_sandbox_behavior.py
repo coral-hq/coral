@@ -26,6 +26,7 @@ Backend-specific emit assertions live in the per-backend modules
 
 from __future__ import annotations
 
+import asyncio  # CORAL(S116)
 import contextlib
 import functools
 import json
@@ -1540,26 +1541,39 @@ def test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home(
 
 
 # CORAL(S115): the Agent SDK's version check kills the wrapped CLI before the launcher cleans up
+# CORAL(S116): as does the executor's signal to the whole tree, which this stand-in ignores
 @pytest.mark.timeout(120)
+@pytest.mark.parametrize("signalled", ["launcher", "tree"])
 def test_a_killed_version_check_leaves_no_copy_of_the_seed(
     tmp_path: Path,
+    active_sandbox_type: str,
     active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
     sandbox_pythonpath_env: None,
     monkeypatch: pytest.MonkeyPatch,
+    signalled: str,
 ) -> None:
     """
     As the SDK does, run the wrapped CLI with ``-v``, read one line, then terminate it. The
     stand-in CLI prints a version and its config dir, then waits for its input to close, so
     the kill always lands before the launcher's cleanup.
+
+    CORAL(S116): the scratch names the launcher as its owner. While the stand-in, which ignores
+    SIGTERM, still runs in the sweeper's pid namespace (seatbelt), a sweep keeps the scratch;
+    once it has exited, a sweep removes it.
     """
+    from omnigent.inner import _proc
     from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+    from omnigent.native.owner_claim import read_owner_claim
+    from tests._helpers.polling import poll_until
 
     workspace, scratch_parent, seed = tmp_path / "work", tmp_path / "tmp", tmp_path / "seed"
     for path in (workspace, scratch_parent):
         path.mkdir()
     cli = workspace / "claude"
     cli.write_text(
-        '#!/bin/sh\nprintf "2.1.325 (Claude Code) %s\\n" "$CLAUDE_CONFIG_DIR"\nread _\n'
+        "#!/bin/sh\ntrap '' TERM\n"  # CORAL(S116)
+        'printf "2.1.325 (Claude Code) %s\\n" "$CLAUDE_CONFIG_DIR"\nread _\n'
     )
     cli.chmod(0o700)
     with contextlib.ExitStack() as cleanup:
@@ -1591,17 +1605,177 @@ def test_a_killed_version_check_leaves_no_copy_of_the_seed(
         )
         assert check.stdout is not None
         line = check.stdout.readline()
-        check.terminate()
+        if signalled == "tree":  # CORAL(S116): as the executor's teardown does
+            _proc.terminate_tree(check)
+        else:
+            check.terminate()
         check.wait(timeout=30)
+        # CORAL(S116): checked while the stand-in still waits for its input, so no cleanup has
+        # run: bwrap's sandbox can outlive its monitor long enough to clean up on an EOF
+        version, _, config_dir = line.rstrip("\n").partition(" (Claude Code) ")
+        assert version == "2.1.325", line
+        private = Path(config_dir)
+        scratch = private.parent
+        assert private.name == "claude_config_dir", line
+        assert scratch.parent.resolve() == scratch_parent.resolve(), config_dir
+        assert private.is_dir(), "the launcher cleaned up before the kill landed"
+        assert not (private / ".claude.json").exists(), "the version check left a seed copy"
+        # CORAL(S116): the host pass, outside any pid namespace the wrap makes, named the launcher
+        claim = read_owner_claim(scratch, filename=".launch-owner")
+        assert claim is not None and claim.pid == check.pid, (
+            "the scratch does not name its launcher"
+        )
+        if active_sandbox_type == "darwin_seatbelt":
+            _remove_orphaned_launch_tmpdirs(scratch_parent, PRIVATE_TMPDIR_NAME)
+            assert scratch.is_dir(), "a sweep removed the scratch under its running CLI"
         # Closing its input lets a stand-in that outlived the launcher exit.
-        _, errors = check.communicate(timeout=30)
-    version, _, config_dir = line.rstrip("\n").partition(" (Claude Code) ")
-    assert version == "2.1.325", errors
-    private = Path(config_dir)
-    assert private.name == "claude_config_dir", errors
-    assert private.parent.parent.resolve() == scratch_parent.resolve(), config_dir
-    assert private.is_dir(), "the launcher cleaned up before the kill landed"
-    assert not (private / ".claude.json").exists(), "the version check left a seed copy"
+        check.communicate(timeout=30)
+
+    def _swept() -> bool:
+        _remove_orphaned_launch_tmpdirs(scratch_parent, PRIVATE_TMPDIR_NAME)
+        return not scratch.exists()
+
+    poll_until(_swept, timeout_s=10, interval_s=0.1)
+
+
+# CORAL(S116): a stand-in CLI that answers the Agent SDK's control requests, POSIX sh builtins only
+_CONTROL_REQUEST_CLI = """#!/bin/sh
+case "$1" in -v|--version) printf '2.1.325 (Claude Code)\\n'; exit 0;; esac
+while IFS= read -r line; do
+  case "$line" in
+    *'"control_request"'*)
+      rest=${line#*'"request_id": "'}
+      printf '{"type":"control_response","response":'
+      printf '{"subtype":"success","request_id":"%s","response":{}}}\\n' "${rest%%'"'*}";;
+  esac
+done
+"""
+# CORAL(S116): one that outlives its input and SIGTERM, as a CLI busy shutting down would
+_OUTLIVING_CLI = _CONTROL_REQUEST_CLI.replace("#!/bin/sh\n", "#!/bin/sh\ntrap '' TERM\n") + (
+    "exec sleep 600\n"
+)
+
+
+# CORAL(S116): every launch dir and process a closed executor's CLI launches made is gone
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("cli_exit", ["on-eof", "never"])
+def test_a_closed_executor_leaves_no_launch_scratch(
+    tmp_path: Path,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    claude_config_seed_source: None,
+    cli_exit: str,
+) -> None:
+    """
+    Two sessions connect a seeded, sandboxed stand-in CLI through the real Agent SDK and
+    launcher. Each connect's version check leaves its launch behind, and the executor removes
+    it. One session closes from another task (a force close), the other in place by
+    ``close()``; each one's scratch, holding the seed copy, is then gone, and so are the profile
+    and launch dirs of every launch. A dead process's leftover goes; a live executor's seed stays.
+
+    CORAL(S116): so is every process of each CLI's tree, even one that ignores its input
+    closing and SIGTERM, which outlives the SDK's own close.
+    """
+    from omnigent.inner import _proc
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor, _ensure_sdk
+    from omnigent.native.owner_claim import read_owner_claim, write_owner_claim
+
+    workspace, temp_root, home = (tmp_path / name for name in ("work", "tmp", "home"))
+    for path in (workspace, temp_root, home):
+        path.mkdir()
+    server = {"command": "true", "env": {"TOKEN": "throwaway"}}
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"probe": server}}))
+    cli = workspace / "claude"
+    cli.write_text(_CONTROL_REQUEST_CLI if cli_exit == "on-eof" else _OUTLIVING_CLI)  # CORAL(S116)
+    cli.chmod(0o700)
+    trees: dict[int, float] = {}  # CORAL(S116)
+    dead = temp_root / "omnigent-osenv-deadbeef"
+    live_seed = temp_root / "omnigent-claude-seed-0123456789abcdef"
+    for path in (dead, live_seed):
+        path.mkdir(mode=0o700)
+    # A process that claims the dir and exits, as a killed launch does; the seed is this one's.
+    claim = "import sys; from pathlib import Path; from omnigent.native.owner_claim import "
+    claim += "write_owner_claim as w; w(Path(sys.argv[1]), filename='.launch-owner')"
+    subprocess.run([sys.executable, "-c", claim, str(dead)], check=True, timeout=60)
+    write_owner_claim(live_seed, filename=".launch-owner")
+    (dead / "claude_config_dir").mkdir()
+    (dead / "claude_config_dir" / ".claude.json").write_text("{}")
+    scratches: dict[str, Path] = {}
+    seen: dict[str, object] = {}
+    with contextlib.ExitStack() as cleanup:
+        harness_root = Path(tempfile.mkdtemp(prefix="sbx-h-", dir="/tmp"))
+        cleanup.callback(shutil.rmtree, harness_root, ignore_errors=True)
+        env = {"HOME": home, "TMPDIR": temp_root, "OMNIGENT_CLAUDE_PATH": cli}
+        for name, value in {**env, "OMNIGENT_HARNESS_TMP_PARENT": harness_root}.items():
+            monkeypatch.setenv(name, str(value))
+        for name in (
+            "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK",
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            "OMNIGENT_CLAUDE_SDK_NO_SANDBOX",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(tempfile, "tempdir", None)
+        monkeypatch.setattr(
+            "omnigent.inner.claude_sdk_executor._find_system_claude", lambda: str(cli)
+        )
+        spec = OSEnvSpec(
+            type="caller_process",
+            cwd=str(workspace),
+            sandbox=active_sandbox_spec_factory(write_paths=["."]),
+        )
+        executor = ClaudeSDKExecutor(cwd=str(workspace), os_env=spec)
+        assert executor._claude_config_isolated and executor._claude_config_seed_path is not None
+        assert executor._cli_path is not None and executor._cli_path != str(cli)
+        sdk = _ensure_sdk()
+
+        async def _connect_then_close() -> None:
+            try:
+                for session in ("graceful", "forced"):
+                    before = set(temp_root.glob("omnigent-osenv-*"))
+                    options = sdk.ClaudeAgentOptions(
+                        cli_path=executor._cli_path,
+                        cwd=str(workspace),
+                        env=dict(executor._extra_env),
+                        stderr=lambda _line: None,
+                    )
+                    await executor._get_or_create_client(
+                        sdk, session_key=session, options=options, model=None
+                    )
+                    new = set(temp_root.glob("omnigent-osenv-*")) - before
+                    assert len(new) == 1, f"the version check's launch stayed: {len(new)} new"
+                    [scratches[session]] = new
+                    process = executor._clients[session].client._transport._process  # CORAL(S116)
+                    trees.update(_proc.snapshot_child_tree(process))
+                seen["dead"] = dead.exists()
+                seen["seed copies"] = sorted(
+                    (path / "claude_config_dir" / ".claude.json").is_file()
+                    for path in scratches.values()
+                )
+                await asyncio.create_task(executor.close_session("forced"))
+                seen["forced"] = scratches["forced"].exists()
+                seen["graceful"] = scratches["graceful"].exists()
+            finally:
+                await executor.close()
+
+        # CORAL(S116): whatever outlived the close is killed after the check
+        cleanup.callback(_proc.kill_members, trees)
+        run_async(_connect_then_close())
+        left = _proc.live_members(trees)  # CORAL(S116)
+        launch_dirs = [
+            p.name for p in harness_root.iterdir() if re.fullmatch(r"c[a-z0-9_]{8}", p.name)
+        ]
+
+    assert len(trees) >= 4 and not left, f"{len(left)} of the CLIs' processes outlived close()"
+    assert seen == {"dead": False, "seed copies": [True, True], "forced": False, "graceful": True}
+    assert not scratches["graceful"].exists(), "the in-place close left its scratch"
+    assert not list(temp_root.glob("omnigent-osenv-*"))
+    assert list(temp_root.glob("omnigent-claude-seed-*")) == [live_seed]
+    profiles = list(temp_root.glob("omnigent-seatbelt-profiles-*"))
+    owners = [read_owner_claim(path, filename=".launch-owner") for path in profiles]
+    assert [getattr(owner, "pid", None) for owner in owners] == [os.getpid()] * len(profiles)
+    assert launch_dirs == []
 
 
 # ---------------------------------------------------------------------------

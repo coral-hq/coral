@@ -117,6 +117,7 @@ import atexit
 import contextlib
 import logging
 import os
+import re  # CORAL(S116)
 import shutil
 import sys
 import tempfile
@@ -126,8 +127,10 @@ from pathlib import Path
 from ._cwd_scan import MaskedEntry, MaskKind, merge_scan_roots, scan_cwd_mask_entries
 from .datamodel import OSEnvSandboxSpec, OSEnvSpec
 from .sandbox import (
+    _LAUNCH_TMPDIR_OWNER,  # CORAL(S116)
     SandboxBackend,
     SandboxPolicy,
+    claim_temp_dir,  # CORAL(S116)
     register_backend,
 )
 
@@ -2212,6 +2215,8 @@ _PROFILE_CLEANUP_PATHS: list[str] = []
 # use. Mode 0700 so other users on the box can't list our profile
 # filenames — defense-in-depth on top of the per-file 0600.
 _PROFILE_TEMPDIR: str | None = None
+# CORAL(S116): a profile dir's name, as _ensure_profile_tempdir makes it
+PROFILE_TEMPDIR_NAME = re.compile(r"omnigent-seatbelt-profiles-[a-z0-9_]{8}")
 
 
 def _ensure_profile_tempdir() -> str:
@@ -2239,6 +2244,7 @@ def _ensure_profile_tempdir() -> str:
     if _PROFILE_TEMPDIR is None:
         _PROFILE_TEMPDIR = tempfile.mkdtemp(prefix="omnigent-seatbelt-profiles-")
         os.chmod(_PROFILE_TEMPDIR, 0o700)
+        claim_temp_dir(Path(_PROFILE_TEMPDIR))  # CORAL(S116): a launcher's exec skips atexit
     return _PROFILE_TEMPDIR
 
 
@@ -2299,6 +2305,8 @@ def _cleanup_profile_files() -> None:
             os.unlink(path)
     global _PROFILE_TEMPDIR
     if _PROFILE_TEMPDIR is not None:
+        with contextlib.suppress(OSError):
+            os.unlink(Path(_PROFILE_TEMPDIR) / _LAUNCH_TMPDIR_OWNER)  # CORAL(S116)
         with contextlib.suppress(OSError):
             os.rmdir(_PROFILE_TEMPDIR)
         _PROFILE_TEMPDIR = None

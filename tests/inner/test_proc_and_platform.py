@@ -431,6 +431,29 @@ def test_terminate_tree_stops_the_process() -> None:
         assert not handle.is_running() or handle.status() == psutil.STATUS_ZOMBIE
 
 
+# CORAL(S116): a teardown waits on and kills only the tree of a live child of this process
+def test_a_tree_snapshot_takes_only_a_live_child_of_this_process() -> None:
+    from types import SimpleNamespace
+
+    from tests._helpers.polling import poll_until
+
+    proc = subprocess.Popen(_spin_cmd())
+    try:
+        assert _proc.snapshot_child_tree(SimpleNamespace(pid=os.getppid(), returncode=None)) == {}
+        tree = _proc.snapshot_child_tree(proc)
+        assert proc.pid in tree
+        assert _proc.live_members(tree) == tree
+        _proc.kill_members(tree)
+        proc.wait(timeout=10)
+        # Windows ends a killed process after the call returns.
+        poll_until(lambda: _proc.live_members(tree) == {}, timeout_s=10, interval_s=0.05)
+        assert _proc.snapshot_child_tree(proc) == {}
+    finally:
+        with contextlib.suppress(OSError):
+            proc.kill()
+        proc.wait(timeout=10)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="setsid is POSIX-only")
 def test_kill_tree_reaps_descendant_that_left_process_group(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "setsid-child.pid"

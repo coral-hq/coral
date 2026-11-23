@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib  # CORAL(S116)
 import errno  # CORAL(S115)
 import json
 import logging
@@ -14,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time  # CORAL(S116)
 from abc import ABC, abstractmethod
 from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass, replace
@@ -1495,6 +1497,67 @@ def export_scratch_dir(
 # CORAL(S109): launch dirs are ``mkdtemp(prefix="c")`` names holding this owner claim.
 _LAUNCH_TMPDIR_NAME = re.compile(r"c[a-z0-9_]{8}")
 _LAUNCH_TMPDIR_OWNER = ".launch-owner"
+# CORAL(S116): on seatbelt, the target a launcher started, which can outlive it; the target's
+# claim is removed first, so a dir left between the two removals still names its owner
+_LAUNCH_TARGET_CLAIM = ".launch-target"
+_CLAIM_NAMES = (_LAUNCH_TARGET_CLAIM, _LAUNCH_TMPDIR_OWNER)
+# CORAL(S116): a launch scratch's name, as create_private_tmpdir makes it
+PRIVATE_TMPDIR_NAME = re.compile(r"omnigent-osenv-[a-z0-9_]{8}")
+# CORAL(S116): one sweep's share of the work; the next sweep goes on from there
+_SWEEP_SECONDS = 2.0
+_SWEEP_MAX_REMOVALS = 64
+# CORAL(S116): a dead tree nested deeper is left and counted, never descended
+_SWEEP_MAX_DEPTH = 64
+
+
+class _SweepStopped(Exception):
+    """CORAL(S116): a dir's removal reached the sweep's deadline, or its depth cap."""
+
+    def __init__(self, *, too_deep: bool) -> None:
+        super().__init__("too deep" if too_deep else "out of time")
+        self.too_deep = too_deep
+
+
+def claim_temp_dir(
+    path: Path, *, filename: str = _LAUNCH_TMPDIR_OWNER, pid: int | None = None
+) -> None:
+    """
+    CORAL(S116): name *path*'s owner, this process by default, so a sweep removes it once gone.
+
+    *pid* names another process. A failure, or a platform without owner uids, leaves the dir
+    unclaimed and never swept; it never raises.
+    """
+    from omnigent.native.owner_claim import create_owner_claim
+
+    if not hasattr(os, "getuid"):
+        return
+    try:
+        create_owner_claim(path, filename=filename, pid=pid)
+    except OSError as exc:
+        logger.warning("Cannot record a temp dir's owner (%s)", type(exc).__name__)
+
+
+def _claimed_process_alive(pid: int) -> bool:
+    """
+    CORAL(S116): whether *pid* may still run; only ``ESRCH`` or a zombie seen as one is gone.
+
+    ``EPERM``, or a process the kernel finds but psutil cannot see (``/proc`` hides it),
+    counts as alive.
+    """
+    import psutil  # type: ignore[import-untyped]
+
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OverflowError):
+        return False
+    except OSError:
+        return True
+    try:
+        return bool(psutil.Process(pid).status() != psutil.STATUS_ZOMBIE)
+    except psutil.ZombieProcess:
+        return False
+    except psutil.Error:
+        return True
 
 
 def _is_private_dir(path: Path) -> bool:
@@ -1510,22 +1573,162 @@ def _is_private_dir(path: Path) -> bool:
     )
 
 
-def _remove_orphaned_launch_tmpdirs(parent: Path) -> None:
-    """CORAL(S109): remove launch dirs left by launchers that died before their cleanup."""
+def _is_orphaned(child: Path) -> bool:
+    """CORAL(S116): a private dir whose claimed owner, and recorded target if any, are gone."""
     from omnigent.native.owner_claim import owner_is_gone, read_owner_claim
 
-    from ._proc import process_alive
+    if not _is_private_dir(child):
+        return False
+    for filename in _CLAIM_NAMES:
+        if filename != _LAUNCH_TMPDIR_OWNER and not os.path.lexists(child / filename):
+            continue
+        claim = read_owner_claim(child, filename=filename)
+        if claim is None or not owner_is_gone(claim, process_alive=_claimed_process_alive):
+            return False
+    return True
 
+
+def _remove_entry(parent: int, name: str, deadline: float, depth: int) -> None:
+    """
+    CORAL(S116): remove *name* in the dir at *parent* bottom-up, never following a link.
+
+    :raises _SweepStopped: At *deadline*, or below the depth cap; what is left stays.
+    :raises OSError: If an entry cannot be removed, or changed while open.
+    """
+    if time.monotonic() >= deadline:
+        raise _SweepStopped(too_deep=False)
+    info = os.lstat(name, dir_fd=parent)
+    if not stat.S_ISDIR(info.st_mode):
+        os.unlink(name, dir_fd=parent)
+        return
+    if depth >= _SWEEP_MAX_DEPTH:
+        raise _SweepStopped(too_deep=True)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    descriptor = os.open(name, flags, dir_fd=parent)
     try:
-        children = list(parent.iterdir())
+        if not os.path.samestat(info, os.fstat(descriptor)):
+            raise OSError(errno.EAGAIN, "The entry changed")
+        with os.scandir(descriptor) as entries:
+            names = [entry.name for entry in entries]
+        for child in names:
+            _remove_entry(descriptor, child, deadline, depth + 1)
+    finally:
+        os.close(descriptor)
+    os.rmdir(name, dir_fd=parent)
+
+
+def _empty_but_claims(descriptor: int, deadline: float | None) -> bool:
+    """
+    CORAL(S116): remove every entry but the claims from the dir at *descriptor*.
+
+    With a *deadline* the removal is bounded (it raises :class:`_SweepStopped`); without one
+    it goes as deep as needed. Returns whether only claims are left.
+    """
+    failed = False
+
+    def _failed(*_args: object) -> None:
+        nonlocal failed
+        failed = True
+
+    with os.scandir(descriptor) as entries:
+        names = [entry.name for entry in entries if entry.name not in _CLAIM_NAMES]
+    for name in names:
+        try:
+            if deadline is not None:
+                _remove_entry(descriptor, name, deadline, 1)
+            elif stat.S_ISDIR(os.lstat(name, dir_fd=descriptor).st_mode):
+                shutil.rmtree(name, dir_fd=descriptor, onexc=_failed)
+            else:
+                os.unlink(name, dir_fd=descriptor)
+        except OSError:
+            failed = True
+    with os.scandir(descriptor) as entries:
+        return not failed and not any(entry.name not in _CLAIM_NAMES for entry in entries)
+
+
+def _remove_claimed_dir(child: Path, deadline: float | None, *, keep_claims: bool = False) -> bool:
+    """
+    CORAL(S116): empty *child* but for its claims, then remove those and the dir.
+
+    Entries go relative to the dir's descriptor, so a swapped link is never followed. A
+    failure, the deadline or *keep_claims* keeps the claims; if the dir cannot go once they
+    are gone, they are put back. Either way the next sweep tries again.
+    """
+    from omnigent.native.owner_claim import create_owner_claim, read_owner_claim_bytes
+
+    descriptor = os.open(child, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(descriptor)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            return False
+        if not _empty_but_claims(descriptor, deadline) or keep_claims:
+            return False
+        saved = {name: read_owner_claim_bytes(child, filename=name) for name in _CLAIM_NAMES}
+        for name in _CLAIM_NAMES:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=descriptor)
+        try:
+            os.rmdir(child)
+        except OSError:
+            # A late writer: the claims go back, owner first, so the dir is retried.
+            for name, data in reversed(saved.items()):
+                if data is not None:
+                    with contextlib.suppress(OSError):
+                        create_owner_claim(child, filename=name, data=data, dir_fd=descriptor)
+            return False
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _remove_orphaned_launch_tmpdirs(
+    parent: Path, name: re.Pattern[str] = _LAUNCH_TMPDIR_NAME, *, deadline: float | None = None
+) -> None:
+    """
+    CORAL(S109): remove launch dirs left by launchers that died before their cleanup.
+
+    CORAL(S116): *name* picks the children; S109's call keeps the default. A child goes only
+    when it is this user's 0700 dir whose claimed owner, and recorded target, are gone, and
+    its claims go last. The sweep stops at *deadline* (default two seconds from now) or after
+    a fixed number of removals, does nothing without owner uids, and never raises.
+    """
+    if not hasattr(os, "getuid"):
+        return
+    if deadline is None:
+        deadline = time.monotonic() + _SWEEP_SECONDS
+    removed = kept = too_deep = 0
+    try:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                if time.monotonic() >= deadline or removed >= _SWEEP_MAX_REMOVALS:
+                    break
+                if not name.fullmatch(entry.name):
+                    continue
+                child = Path(entry.path)
+                try:
+                    if not _is_orphaned(child):
+                        continue
+                    if _remove_claimed_dir(child, deadline):
+                        removed += 1
+                    else:
+                        kept += 1
+                except _SweepStopped as stop:
+                    kept += 1
+                    too_deep += stop.too_deep
+                    if not stop.too_deep:
+                        break
+                except FileNotFoundError:
+                    continue  # another sweep removed it first
+                except Exception as exc:  # noqa: BLE001 — one bad dir must not stop the rest
+                    logger.warning("Cannot sweep a temp dir (%s)", type(exc).__name__)
     except OSError:
         return
-    for child in children:
-        if not _LAUNCH_TMPDIR_NAME.fullmatch(child.name) or not _is_private_dir(child):
-            continue
-        claim = read_owner_claim(child, filename=_LAUNCH_TMPDIR_OWNER)
-        if claim is not None and owner_is_gone(claim, process_alive=process_alive):
-            shutil.rmtree(child, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001 — callers run it in teardown
+        logger.warning("Cannot sweep the temp dirs (%s)", type(exc).__name__)
+    if removed or kept:
+        logger.debug(
+            "Removed %d orphaned temp dirs; kept %d to retry, %d too deep", removed, kept, too_deep
+        )
 
 
 def create_launch_tmpdir(policy: SandboxPolicy) -> Path | None:
@@ -1537,7 +1740,7 @@ def create_launch_tmpdir(policy: SandboxPolicy) -> Path | None:
     swap the dir before the grant resolves it. The dir records its launcher as owner, and
     siblings whose launcher is gone are removed first.
     """
-    from omnigent.native.owner_claim import write_owner_claim
+    from omnigent.native.owner_claim import create_owner_claim  # CORAL(S116)
 
     parent = policy.launch_tmpdir_parent
     if policy.launch_tmpdir_env is None or parent is None:
@@ -1554,7 +1757,8 @@ def create_launch_tmpdir(policy: SandboxPolicy) -> Path | None:
     launch_tmpdir: Path | None = None
     try:
         launch_tmpdir = Path(tempfile.mkdtemp(prefix="c", dir=parent))
-        write_owner_claim(launch_tmpdir, filename=_LAUNCH_TMPDIR_OWNER)
+        # CORAL(S116): a new file, never written through an entry planted in the fresh dir
+        create_owner_claim(launch_tmpdir, filename=_LAUNCH_TMPDIR_OWNER)
     except OSError as exc:
         logger.warning("Cannot create a launch temp dir (%s)", type(exc).__name__)
         cleanup_private_tmpdir(launch_tmpdir)
@@ -1654,6 +1858,9 @@ def run_launcher(
         # ``FileNotFoundError: No usable temporary directory`` on
         # seatbelt (bwrap masked it via its ``--tmpfs /tmp`` fallback).
         host_tmpdir = create_private_tmpdir()
+        # CORAL(S116): owned by this pid, which the wrap's exec keeps, in the spawner's pid
+        # namespace; claimed at once, before S109's sweep below
+        claim_temp_dir(host_tmpdir)
         # CORAL(S109): this launch's own target dir, granted here and removed in-wrap
         launch_tmpdir = create_launch_tmpdir(sandbox)
         try:
@@ -1720,6 +1927,7 @@ def run_launcher(
             raise
 
     tmpdir: Path | None = None
+    claimed: list[Path] = []  # CORAL(S116)
     if sandbox.active:
         inherited = os.environ.get(_LAUNCHER_PRIVATE_TMPDIR_ENV)
         if inherited:
@@ -1732,6 +1940,8 @@ def run_launcher(
             # (that one wouldn't be in the baked profile).
             tmpdir = Path(inherited)
             set_sandbox_env(os.environ, tmpdir)
+            # CORAL(S116): the dirs the host pass claimed, seen before the target can change them
+            claimed = _claimed_launch_dirs(tmpdir, launch_tmpdir)
         else:
             # Single-pass active backends (no spawn-time re-exec, e.g.
             # ``windows_jobobject``): mint + grant + surface here.
@@ -1777,12 +1987,62 @@ def run_launcher(
         # the cleanup below, so it gets no seed copy
         export_scratch_dir(sandbox, tmpdir, copy_seed=argv not in _VERSION_QUERY_ARGVS)
         logger.info("[omnigent-sandbox] activated; spawning target=%s", target_path)
-        completed = subprocess.run(target_argv)
-        logger.info("[omnigent-sandbox] target exited rc=%s", completed.returncode)
-        return int(completed.returncode)
+        # CORAL(S116): a seatbelt target shares the spawner's pid namespace, where a sweep sees it
+        seatbelt = sandbox.backend_type == "darwin_seatbelt"
+        returncode = _run_target(target_argv, claimed if seatbelt else [])
+        logger.info("[omnigent-sandbox] target exited rc=%s", returncode)
+        return int(returncode)
     finally:
-        cleanup_private_tmpdir(tmpdir)
-        cleanup_private_tmpdir(launch_tmpdir)  # CORAL(S109)
+        # CORAL(S116): a claimed dir keeps its claims while it stays; a bwrap mount point stays
+        removable = sandbox.backend_type == "darwin_seatbelt"
+        for directory in (tmpdir, launch_tmpdir):  # CORAL(S109)
+            _clean_launch_dir(directory, claimed=directory in claimed, removable=removable)
+
+
+def _claimed_launch_dirs(*directories: Path | None) -> list[Path]:
+    """CORAL(S116): the dirs that hold the owner claim the host pass wrote."""
+    from omnigent.native.owner_claim import read_owner_claim_bytes
+
+    return [
+        directory
+        for directory in directories
+        if directory is not None
+        and read_owner_claim_bytes(directory, filename=_LAUNCH_TMPDIR_OWNER) is not None
+    ]
+
+
+def _clean_launch_dir(directory: Path | None, *, claimed: bool, removable: bool) -> None:
+    """
+    CORAL(S116): remove a launch dir as its launcher ends, never its claims while it stays.
+
+    A claimed private dir is emptied first; its claims and the dir go only if *removable* (not
+    a bwrap mount point). A kill at any point leaves it claimed for the spawner's sweep.
+    """
+    if directory is None:
+        return
+    if not (claimed and _is_private_dir(directory)):
+        cleanup_private_tmpdir(directory)
+        return
+    with contextlib.suppress(OSError):
+        _remove_claimed_dir(directory, None, keep_claims=not removable)
+
+
+def _run_target(argv: list[str], claimed: Sequence[Path]) -> int:
+    """
+    CORAL(S116): run the target as ``subprocess.run`` does, naming it first in each *claimed* dir.
+
+    A sweep then keeps those dirs while the target outlives its launcher.
+    """
+    if not claimed:
+        return subprocess.run(argv).returncode
+    with subprocess.Popen(argv) as process:
+        try:
+            for directory in claimed:
+                claim_temp_dir(directory, filename=_LAUNCH_TARGET_CLAIM, pid=process.pid)
+            return process.wait()
+        except BaseException:
+            process.kill()
+            raise
 
 
 def _launcher_inline_source(
