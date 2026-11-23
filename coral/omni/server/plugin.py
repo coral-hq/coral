@@ -459,6 +459,7 @@ def _host_channels(services: ServerServices) -> HostWorkspaceChannels | None:
 
 
 def _runs_api(
+    app: Any,
     bridge: EngineBridge,
     run_store: RunStore,
     services: ServerServices,
@@ -474,11 +475,14 @@ def _runs_api(
     Starts reach the owner's host through the server's registry, and need a proven
     account generation where users sign in to accounts. Host ids are stored and compared
     in the form the registry keys them by. Outcomes read diffs through ``channels``, the
-    ones the session engine uses. Closing ``stack`` cancels pending spend reads, then
-    closes both pools; a request arriving after that is refused as busy.
+    ones the session engine uses. A detail's gate label takes the server's facts read
+    here and the run's host from the registry. Closing ``stack`` cancels pending spend
+    reads, then closes both pools; a request arriving after that is refused as busy.
     """
     from coral.omni._upstream import canonical_host_id
+    from coral.omni.server.gate_integrity import host_sandbox_reader, server_gate_facts
     from omnigent.server.auth import auth_mode
+    from omnigent.server.host_registry import HostRegistry
 
     api_threads = BoundedThreads(max_workers=API_THREADS, thread_name_prefix=API_THREAD_NAME)
     stack.callback(api_threads.close)
@@ -498,6 +502,10 @@ def _runs_api(
         workspace_channels=channels,
         canonical_host_id=canonical_host_id,
         workflow_preflight=_workflow_preflight(services),
+        gate_integrity_facts=server_gate_facts(app, services),
+        host_sandbox=host_sandbox_reader(
+            getattr(services, "host_registry", None) or HostRegistry()
+        ),
     )
 
 
@@ -935,6 +943,7 @@ async def coral_lifespan(
             if hasattr(app, "state"):
                 # Its pools close before the gates are unregistered.
                 app.state.coral_runs_api = _runs_api(
+                    app,
                     bridge,
                     run_store,
                     services,

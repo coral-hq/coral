@@ -39,11 +39,12 @@ from pydantic import JsonValue
 from coral.alerts.rules import PAUSE_MESSAGES, row_pause_alert
 from coral.alerts.types import AlertPayload
 from coral.api.outcome import OutcomeDiffs, outcome_target, run_outcome
-from coral.api.run_models import run_detail, run_header, run_spend
+from coral.api.run_models import GateIntegrityOut, run_detail, run_header, run_spend
 from coral.api.spend import CachedSpend
 from coral.api.stream import STREAM_THREADS, RunStreamHub, StreamCursor, stream_cursor
 from coral.bridge.executors import BoundedThreads
 from coral.engine.projection import project
+from coral.gates.integrity import GateIntegrityFacts, gate_integrity
 from coral.omni.protocols import RunSpendTotals, Viewer
 from coral.runview.actions import RunViewFacts
 from coral.workspace.run_worktree import run_branch_name
@@ -206,8 +207,13 @@ def _script(world: World, run_id: str) -> tuple[tuple[str, Callable[[], object]]
 
 
 def _detail(world: World, run_id: str) -> dict[str, Any]:
-    """The run's detail as its route answers it, with a fixed spend read now."""
-    detail = run_detail(world.bridge.read(workspace_id=WORKSPACE, run_id=run_id))
+    """
+    The run's detail as its route answers it, with a fixed spend read now, on a server that
+    reports none of the gate label's facts.
+    """
+    unknown = GateIntegrityOut.of(gate_integrity(GateIntegrityFacts()))
+    read = world.bridge.read(workspace_id=WORKSPACE, run_id=run_id)
+    detail = run_detail(read, gate_integrity=unknown)
     spend = run_spend(CachedSpend(totals=SPEND, as_of=world.clock.epoch))
     return detail.model_copy(update={"spend": spend}).model_dump(mode="json")
 

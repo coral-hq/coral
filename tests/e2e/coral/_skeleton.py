@@ -12,6 +12,7 @@ import contextlib
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -34,6 +35,7 @@ from sqlalchemy.pool import NullPool
 
 from coral.db.models.sessions import SessionBindingRow
 from coral.db.models.work import WorkerLeaseRow, WorkRow
+from omnigent.cli_auth import _normalize_server_url
 from omnigent.testing.process_reaper import _cmdline_references_dir, _is_pytest_process
 from tests._helpers.host import Host, isolated_host
 from tests._helpers.live_server import terminate_process
@@ -42,6 +44,7 @@ from tests._helpers.server_runner import ServerRunner, server_runner
 from tests.e2e._harness_probes import cli_unavailable_reason, skip_if_harness_cli_missing
 from tests.e2e.conftest import configure_mock_llm, get_mock_message_requests
 from tests.e2e.coral._claude_sdk_kit import tool_results
+from tests.e2e.coral._live_proxy import Secret
 from tests.e2e.coral.conftest import CORAL_TIER_B_HARNESS
 
 HANDOFF_TOOL = "mcp__omnigent__coral_submit_handoff"
@@ -75,6 +78,8 @@ STOPPED = frozenset({"paused", "failed", "cancelled"})
 FAILED = frozenset({"failed", "cancelled"})
 _T = TypeVar("_T")
 Wait = Callable[[Callable[[], Any], str], Any]
+# The first admin of a stack that requires identity; the host signs in with its stored JWT.
+IDENTITY_OWNER = "coral-e2e-owner"
 
 
 @dataclass(frozen=True)
@@ -104,6 +109,8 @@ class Skeleton:
     host_launch: HostLaunch
     failure_log_tails: bool = True
     respawned: list[Host] = field(default_factory=list)
+    # The owner's JWT on a stack that requires identity; the client already sends it.
+    owner_token: Secret | None = None
 
     def log_tails(self) -> str:
         """The end of every log under the stack root, for failure messages."""
@@ -113,6 +120,86 @@ class Skeleton:
                 text = path.read_text(errors="replace")[-_LOG_TAIL_CHARS:]
                 tails.append(f"--- {path.relative_to(self.root)}\n{text}")
         return "\n".join(tails)
+
+
+class _SecretEnv(Mapping[str, str | None]):
+    """Environment overrides whose repr names the keys only; secret values stay :class:`Secret`."""
+
+    def __init__(self, values: Mapping[str, str | Secret | None]) -> None:
+        self._values = dict(values)
+
+    def __getitem__(self, name: str) -> str | None:
+        value = self._values[name]
+        return value.reveal() if isinstance(value, Secret) else value
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __repr__(self) -> str:
+        return f"_SecretEnv({sorted(self._values)})"
+
+
+def _accounts_env(root: Path, password: Secret) -> dict[str, str | Secret | None]:
+    """A server that signs users in with accounts: a throwaway cookie secret and first admin."""
+    return {
+        "OMNIGENT_AUTH_PROVIDER": "accounts",
+        "OMNIGENT_LOCAL_SINGLE_USER": None,
+        "OMNIGENT_ACCOUNTS_COOKIE_SECRET": Secret(secrets.token_hex(32)),
+        "OMNIGENT_ACCOUNTS_INIT_ADMIN_USERNAME": IDENTITY_OWNER,
+        "OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD": password,
+        "OMNIGENT_ACCOUNTS_AUTO_OPEN": "0",
+        "OMNIGENT_ADMIN_CREDENTIALS_PATH": str(root / "admin-credentials"),
+    }
+
+
+def _owner_login(base_url: str, password: Secret) -> Secret:
+    """
+    The owner's JWT from the password sign-in. A failure shows only its status code or error
+    type: the frames below, which hold the password or the answer, are dropped.
+    """
+    try:
+        response = httpx.post(
+            f"{base_url}/auth/login",
+            json={"username": IDENTITY_OWNER, "password": password.reveal()},
+            timeout=30,
+            trust_env=False,
+        )
+        token = Secret(response.json()["token"]) if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError, LookupError, TypeError) as error:
+        raise AssertionError(f"login: {type(error).__name__}") from None
+    assert token is not None, f"login: HTTP {response.status_code}"
+    return token
+
+
+def _store_owner_login(home: Path, base_url: str, token: Secret) -> None:
+    """
+    The host's stored credentials as ``omnigent login`` leaves them, owner-only and new. A
+    failed write shows its error type only: the frames below hold the JWT.
+    """
+    directory = home / ".omnigent"
+    try:
+        for path in (*reversed(directory.parents), directory):
+            if not path.exists():
+                path.mkdir(mode=0o700)
+        descriptor = os.open(
+            directory / "auth_tokens.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        with os.fdopen(descriptor, "w") as stored:
+            json.dump(
+                {
+                    _normalize_server_url(base_url): {
+                        "token": token.reveal(),
+                        "user_id": IDENTITY_OWNER,
+                        "expires_at": time.time() + 3600,
+                    }
+                },
+                stored,
+            )
+    except OSError as error:
+        raise AssertionError(f"storing the owner's sign-in: {type(error).__name__}") from None
 
 
 def require_claude_cli() -> None:
@@ -327,6 +414,7 @@ def skeleton_stack(
     health_timeout: float = 60.0,
     allowlisted_token: str | None = None,
     repo_files: Mapping[str, bytes] | None = None,
+    identity: bool = False,
 ) -> Iterator[Skeleton]:
     """
     Start a Coral server and a host for one test, and tear both down with every process.
@@ -336,6 +424,10 @@ def skeleton_stack(
     it as ``OMNIGENT_RUNNER_TUNNEL_TOKEN``. Its config, ``root / "server.yaml"``, is read
     again by every restart. ``repo_files`` join the repository's first commit. At exit,
     a SIGTERM included, no process the stack started may survive.
+
+    With ``identity`` the server requires one: accounts with a throwaway cookie secret and
+    first admin, :data:`IDENTITY_OWNER`. The host signs in with the owner's JWT, stored in
+    its home before it starts, and the client sends it; every secret stays a :class:`Secret`.
     """
     root.mkdir(parents=True, exist_ok=True)
     # Under /tmp to stay within the AF_UNIX path limit for harness sockets.
@@ -352,13 +444,16 @@ def skeleton_stack(
         resources.callback(shutil.rmtree, harness_tmp, ignore_errors=True)
         resources.callback(shutil.rmtree, stack_tmp, ignore_errors=True)
         resources.callback(processes.reap)
-        server_env: dict[str, str | None] = {"CORAL_E2E_SERVER_CONFIG": str(config)}
+        server_env: dict[str, str | Secret | None] = {"CORAL_E2E_SERVER_CONFIG": str(config)}
         if allowlisted_token is None:
             server_env["OMNIGENT_RUNNER_TUNNEL_TOKEN"] = None
+        password = Secret(secrets.token_urlsafe(24)) if identity else None
+        if password is not None:
+            server_env.update(_accounts_env(root, password))
         started = server_runner(
             root,
             server_bootstrap=_SERVER_BOOTSTRAP,
-            server_env=server_env,
+            server_env=_SecretEnv(server_env),
             binding_token=allowlisted_token,
             base_env=base_env,
             health_timeout=health_timeout,
@@ -367,8 +462,19 @@ def skeleton_stack(
         server = _reported(
             failure_log_tails, "The server's start", lambda: resources.enter_context(started)
         )
+        owner_token = None
+        if password is not None:
+            owner_token = _owner_login(server.base_url, password)
+            _store_owner_login(root / "host" / "home", server.base_url, owner_token)
         client = resources.enter_context(
-            httpx.Client(base_url=server.base_url, trust_env=False, timeout=30.0)
+            httpx.Client(
+                base_url=server.base_url,
+                trust_env=False,
+                timeout=30.0,
+                headers=None
+                if owner_token is None
+                else {"Authorization": f"Bearer {owner_token.reveal()}"},
+            )
         )
         host = resources.enter_context(
             isolated_host(
@@ -412,6 +518,7 @@ def skeleton_stack(
             launch,
             failure_log_tails=failure_log_tails,
             respawned=respawned,
+            owner_token=owner_token,
         )
 
 

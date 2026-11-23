@@ -3666,7 +3666,7 @@ seams:
       own tool sandbox (workspace-write reads the whole disk), the
       token in the TUI's environment (S111 on macOS, the pid namespace on
       Linux; off-env delivery is CRL-173), same-user processes outside the
-      sandbox (CRL-173, CRL-159), a configured app-server wrapper that runs a
+      sandbox (CRL-173), a configured app-server wrapper that runs a
       different codex than codex_path, the old codex-native unix socket that
       no current code starts, unknown loopback listeners, other programs'
       loopback services (CRL-174) and UDP. Linux was not measured, and no CI

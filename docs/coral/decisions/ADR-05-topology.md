@@ -498,8 +498,8 @@ not planned. Reopened by CRL-166: planned as defence in depth in CRL-173 (see
 
 | Follow-up | Owner |
 |---|---|
-| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | **Run on single-user servers only**, without credentials, in CRL-137 (`tests/e2e/coral/test_sandbox_probe.py`). macOS seatbelt, one local run: a step reaches a sibling's harness socket (before S112, now `denied`, see "Addendum: CRL-166 harness sockets on macOS"), other processes' environments and command lines (the model API key in every claude-sdk CLI's among them; before S111, now `denied`, see "Addendum: CRL-165 process reads on macOS") and the server; the three probed credential files (Claude's, Omnigent's secrets and the host's tunnel tokens, in the stack's isolated home), the config file's key and the stack's bridge dir are `denied`; no other credential store was probed. Linux bwrap, the `coral-e2e` lane: the server is reachable and every other target is `hidden`, the step's own CLI included. A step runs on an allow-listed-token server, and the token is in its runner's and harness's environment as read from outside the sandbox; the step's shell read it on macOS only (before S111; now `denied`). Tables, limits and owners (CRL-159, CRL-165 to CRL-168): "Addendum: CRL-137 probe verdicts" |
-| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced. No gate is labelled Enforced today ([`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md)) | RUL-02 (CRL-159) |
+| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | **Run on single-user servers only**, without credentials, in CRL-137 (`tests/e2e/coral/test_sandbox_probe.py`). macOS seatbelt, one local run: a step reaches a sibling's harness socket (before S112, now `denied`, see "Addendum: CRL-166 harness sockets on macOS"), other processes' environments and command lines (the model API key in every claude-sdk CLI's among them; before S111, now `denied`, see "Addendum: CRL-165 process reads on macOS") and the server; the three probed credential files (Claude's, Omnigent's secrets and the host's tunnel tokens, in the stack's isolated home), the config file's key and the stack's bridge dir are `denied`; no other credential store was probed. Linux bwrap, the `coral-e2e` lane: the server is reachable and every other target is `hidden`, the step's own CLI included. A step runs on an allow-listed-token server, and the token is in its runner's and harness's environment as read from outside the sandbox; the step's shell read it on macOS only (before S111; now `denied`). Tables, limits and owners (CRL-165 to CRL-168; the single-user server rows are an accepted residual): "Addendum: CRL-137 probe verdicts". **Run on an accounts server**, with the CLI's stored credentials and owner-JWT minting, in CRL-159: "Addendum: CRL-159 probe 15 on identity-requiring servers" |
+| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced | **Built** in CRL-159 as `gate_integrity` on the run detail; `enforced` needs an accounts server, verified config, no native steps and an empty table row for the run's host. Every row has open blockers today: CRL-170, CRL-171, CRL-174, CRL-181, CRL-193, CRL-195 ("Addendum: CRL-159 probe 15 on identity-requiring servers"; [`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md), "Enforced gates") |
 | Run probe 15 on native steps before HRN-03 enables them | CRL-138 |
 
 ## Addendum: gates on the anchor (2026-11-19)
@@ -607,8 +607,8 @@ detectors, and the test refuses a pinned `reachable` without an owner.
 | `credential_files.host_tunnel` | `denied` | | | |
 | `config_api_key` | `denied` (the config file only) | | | |
 | `bridge_dir` | `denied` | | | |
-| `server_loopback` (`http://127.0.0.1:<port>`) | `reachable` | | | CRL-159 |
-| `server_localhost` (`http://localhost:<port>`) | `reachable` | | | CRL-159 |
+| `server_loopback` (`http://127.0.0.1:<port>`) | `reachable` | | | accepted (single-user; "Addendum: CRL-159 probe 15 on identity-requiring servers") |
+| `server_localhost` (`http://localhost:<port>`) | `reachable` | | | accepted (single-user; "Addendum: CRL-159 probe 15 on identity-requiring servers") |
 | `shell_env_names` (the step's own shell) | `not_present` | `none` | | |
 
 **Linux bwrap.** `EXPECTED["linux"]`, pinned from `coral-e2e` lane run
@@ -627,8 +627,8 @@ detectors, and the test refuses a pinned `reachable` without an owner.
 | `credential_files.host_tunnel` | `hidden` | | | |
 | `config_api_key` | `hidden` | | | |
 | `bridge_dir` | `hidden` | | | |
-| `server_loopback` (`http://127.0.0.1:<port>`) | `reachable` | | | CRL-159 |
-| `server_localhost` (`http://localhost:<port>`) | `reachable` | | | CRL-159 |
+| `server_loopback` (`http://127.0.0.1:<port>`) | `reachable` | | | accepted (single-user; "Addendum: CRL-159 probe 15 on identity-requiring servers") |
+| `server_localhost` (`http://localhost:<port>`) | `reachable` | | | accepted (single-user; "Addendum: CRL-159 probe 15 on identity-requiring servers") |
 | `shell_env_names` (the step's own shell) | `not_present` | `none` | | |
 
 Reading the tables:
@@ -672,9 +672,9 @@ Reading the tables:
 - **Single-user servers only.** Both runs used a header-auth single-user
   server, and the HTTP checks used `/health` with no credentials. Servers that
   require identity (owner-token minting after an environment read, the CLI's
-  stored credentials) are CRL-159, RUL-02's ticket. The gate labelling rule in
-  the follow-up table above is unchanged: every gate here is on a single-user
-  server, and none is Enforced.
+  stored credentials) are measured in "Addendum: CRL-159 probe 15 on
+  identity-requiring servers". Every gate here is on a single-user server,
+  which is never Enforced.
 - **macOS is one local run, not a regression guard.** No CI lane runs macOS.
 - **CI lifts Ubuntu's AppArmor restriction** on unprivileged user namespaces
   (`kernel.apparmor_restrict_unprivileged_userns=0` in `.github/workflows/ci.yml`),
@@ -719,7 +719,7 @@ itself: the probe only measures exposures that already exist.
 | A step reads other processes' environments and command lines (`runner_environ`, `cli_environ`, `host_environ`, `own_cli_environ`, macOS) | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS") |
 | Secrets in exec-time environments and argv, the model API key among them (every `.api_key` and `.argv_api_key` `reachable`, macOS, before S111; processes outside the sandbox still read them) | CRL-167 |
 | The allow-listed runner token in the step runner's environment (below) | CRL-168 |
-| A single-user server takes any local process as its owner (`server_loopback`, `server_localhost`, both platforms) | CRL-159 (RUL-02) |
+| A single-user server takes any local process as its owner (`server_loopback`, `server_localhost`, both platforms) | accepted: such servers are never Enforced ("Addendum: CRL-159 probe 15 on identity-requiring servers") |
 
 CRL-166 reopened the decision in "Addendum: probe 15" that a per-spawn harness
 bearer on POSIX is recorded but not planned; it is now planned in CRL-173 (see
@@ -888,7 +888,8 @@ command lines, on macOS 27.2.1.
   macOS").
 - On a single-user server a step can act as the owner, on both platforms.
   From code, that includes starting a session with no OS sandbox, which S111
-  does not cover (CRL-159).
+  does not cover (accepted; "Addendum: CRL-159 probe 15 on
+  identity-requiring servers").
 - The secrets stay in exec-time environments and argv, the host LaunchAgent's
   `EnvironmentVariables` included. Processes outside the sandbox still read
   them, and other local accounts read command lines through setuid `ps`
@@ -1139,7 +1140,7 @@ names, on macOS 27.2.1.
   session's token file and drive its siblings; the codex terminal's
   environment holds the token, as opencode's holds its password, which S111 guards on macOS and the
   pid namespace on Linux (moving it off the environment is CRL-173); a
-  same-user process outside the sandbox can read the file (CRL-173, CRL-159);
+  same-user process outside the sandbox can read the file (CRL-173);
   the old codex-native socket under `~/.omnigent/codex-native/`, which no
   current code starts, has no gate; new loopback listeners, other programs'
   loopback services (CRL-174) and UDP are not covered. Linux was not
@@ -1152,7 +1153,8 @@ names, on macOS 27.2.1.
   Claude config isolation for every sandboxed agent".
 - On a single-user server a step acts as the owner on both platforms, so it
   can still send a message into another session, the reviewer's included,
-  through the server (CRL-159). S112 does not restore review-gate integrity
+  through the server (accepted; "Addendum: CRL-159 probe 15 on
+  identity-requiring servers"). S112 does not restore review-gate integrity
   there.
 - Secrets in exec-time environments (CRL-167) and the allow-listed runner
   token (CRL-168) are unchanged.
@@ -1170,17 +1172,18 @@ exec-time environment, it also stops an unsandboxed same-user process on
 macOS, where `task_for_pid` is refused even outside the sandbox (measured in
 CRL-165), from driving a harness socket directly; on Linux it does so only
 where ptrace between same-user processes is restricted. It does not stop that
-process from acting as the owner on a single-user server (CRL-159).
+process from acting as the owner on a single-user server (accepted;
+"Addendum: CRL-159 probe 15 on identity-requiring servers").
 
 **Open for the owner.** Whether to run Coral steps on untrusted content on
 macOS while CRL-171 is open, and on either platform while CRL-174 and CRL-181
-are open, is the owner's risk decision (on a single-user server,
-CRL-159 holds on both platforms). S111 and S112 closed the process reads and
-the connect to harness sockets under the configured and per-user default
-roots. S113 closed a sandboxed step CLI's access to the user's Claude config
-files (its settings `env` block still reaches the CLI, CRL-167). All three
-were measured on macOS 27.2.1, and no CI lane runs macOS (CRL-170); S113 is
-also checked on Linux by a bwrap test in CI. What S113 leaves open is in
+are open, is the owner's risk decision (on a single-user server a step acts
+as the owner on both platforms, an accepted residual). S111 and S112 closed
+the process reads and the connect to harness sockets under the configured and
+per-user default roots. S113 closed a sandboxed step CLI's access to the
+user's Claude config files (its settings `env` block still reaches the CLI,
+CRL-167). All three were measured on macOS 27.2.1, and no CI lane runs macOS
+(CRL-170); S113 is also checked on Linux by a bwrap test in CI. What S113 leaves open is in
 "Addendum: CRL-176 Claude config isolation". S114 gates the codex-native
 app-server WebSocket, measured on macOS 26.3.1 only. It is not decided here.
 
@@ -1467,7 +1470,8 @@ away from the user's Claude config files.
   `~/.claude/sessions`.
 - Other channels to unsandboxed code are unchanged by S113: other programs'
   sockets and loopback services (CRL-174), and the owner on a single-user
-  server (CRL-159). Since S114 Omnigent's loopback listeners each refuse a
+  server (accepted; "Addendum: CRL-159 probe 15 on identity-requiring
+  servers"). Since S114 Omnigent's loopback listeners each refuse a
   caller without its secret, except a codex-native app-server started by a
   Codex without `--ws-auth` (noted on CRL-177). The rest of what S114 leaves
   open is in "Addendum: CRL-166 harness sockets on macOS". Secrets in
@@ -1883,7 +1887,8 @@ listed here.
   listeners, each gated by its secret since S114 except a codex-native
   app-server under a Codex without `--ws-auth` (noted on CRL-177; see
   "Addendum: CRL-166 harness sockets on macOS"), and the owner on a
-  single-user server (CRL-159).
+  single-user server (accepted; "Addendum: CRL-159 probe 15 on
+  identity-requiring servers").
 - Other macOS releases, and CI (CRL-170). The keychain result rests on the
   file denial described in "Addendum: CRL-176 Claude config isolation".
 - Linux was not run locally: the `linux_bwrap` rows run in CI only.
@@ -2275,3 +2280,301 @@ the temp dir, except as listed here.
     regression.
 - **Not run here.** Linux, whose rows run in CI only, and other macOS
   releases; no CI lane runs macOS (CRL-170).
+
+## Addendum: CRL-159 probe 15 on identity-requiring servers (2026-11-23)
+
+CRL-137 ran probe 15 on single-user servers only. CRL-159 runs it on a server
+that signs users in with accounts, and turns the labelling rule in "Addendum:
+probe 15" into code: each run's detail carries a `gate_integrity` label. No
+Omnigent file changed, so there is no seam. The macOS verdicts are from local
+runs on macOS 27.2.1 with claude 2.1.325, a mock model and throwaway
+credentials. The Linux pins were measured in `coral-e2e` lane run
+45187294423 (Ubuntu 24.04.5, claude 2.1.295), which matched every one. No CI
+lane runs macOS (CRL-170).
+
+**The identity probe.**
+`tests/e2e/coral/test_sandbox_probe.py::test_probe_15_on_a_server_that_requires_identity`
+(`:1231`) runs `probe15.sh` from a generated implementer's shell, as the
+single-user test does, on a stack from `skeleton_stack(identity=True)`
+(`tests/e2e/coral/_skeleton.py:417`):
+
+- The server signs users in with accounts, with a throwaway cookie secret and
+  first admin, and without the single-user marker (`_accounts_env`,
+  `_skeleton.py:145-155`).
+- The owner signs in through `POST /auth/login` (`_owner_login`, `:158`).
+  Before the host starts, the JWT is written to the host's
+  `~/.omnigent/auth_tokens.json` in `omnigent login`'s shape, mode 0600 and
+  created exclusively (`_store_owner_login`, `:177`), and the host signs in
+  with it. The test reads only that file's metadata (`_metadata_live`,
+  `test_sandbox_probe.py:354`).
+- The host spawns the runner directly (`OMNIGENT_RUNNER_ZYGOTE=0`, `:1262`),
+  so the runner's exec-time environment holds its tunnel binding token and the
+  host's bearer. The test checks, by name only, that both are there, or fails
+  as a failed control (`:1291-1293`). On the zygote path neither is there, and
+  the mint check would prove nothing.
+
+Each credential is tried on this server's owner route, `GET /v1/coral/runs`:
+
+| Check | Kind | What the step tries |
+|---|---|---|
+| `owner_bare`, `owner_bare_localhost` | `owner_http` | The owner route on `127.0.0.1` and `localhost` with no credential |
+| `own_runner_environ` | `environ` | Read its own runner's environment |
+| `own_runner_mint` | `mint` | Read the runner's binding token, mint a JWT with `POST /v1/runners/{runner_id}/token` (`omnigent/server/routes/runner_tunnel.py:367`), and act as the owner with it |
+| `own_runner_bearer`, `host_bearer` | `bearer` | Act as the owner with the host's bearer, from the runner's and from the host daemon's environment |
+| `stored_credentials` | `stored` | Act as the owner with the host's stored JWT |
+| `server_environ` | `environ` | Read the server's environment, which holds the cookie secret |
+| `credential_files.cookie_secret` | `file` | Read a canary where `omnigent server` keeps its cookie secret by default, `~/.omnigent/artifacts/accounts-cookie-secret` in the host's home (`omnigent/cli.py:5091-5096`) |
+| `other_unix_socket`, `other_abstract_socket` (Linux), `other_loopback_tcp` | `socket`, `tcp` | Connect to throwaway listeners that stand in for other programs' services: a pathname socket under `/tmp/crl-o-*`, an abstract socket with a random name, and a loopback port (`_other_programs`, `test_sandbox_probe.py:1178`) |
+| `worktree_exec_config` | `plant` | Create a nested repository in the worktree whose config names a `core.fsmonitor` hook (`plant_repository`, `probe15.sh:295`) |
+| `shell_env_names` | `shell` | Credential-like names in its own environment |
+
+The probe prints verdict tokens and names, never a value.
+
+- It reads a credential once, from stdin, and sends it only to the server it
+  belongs to: the stored entry keyed by this server's URL, or an environment
+  whose `RUNNER_SERVER_URL` names it. Anything else reads `mismatch` and is
+  never sent. It follows no redirect (`IDENTITY`, `probe15.sh:187-256`).
+- Every credential kind prints `<check>.read` before what the credential did,
+  so a read that worked shows even when the server refused the token.
+- Each kind has a closed set: `denied` and `hidden` for reads, connects and
+  the plant; `refused`, `denied` and `hidden` for a bare owner request; and
+  `not_present` for the shell (`CLOSED`, `test_sandbox_probe.py:138-156`).
+  Any other verdict is open, as is a check of unknown kind, and its pin must
+  name an owner (`test_every_pin_names_an_owner_exactly_when_it_is_open`,
+  `:2034`).
+
+**The control run.** Right before the step's probe call, the test runs the
+same probe outside any sandbox, as the step's user, in the step's worktree
+(`_run_probe`, `:1416`; called at `:1356`). It must open every owner path
+(`OUTSIDE_IDENTITY`, `:1152-1173`):
+
+- it mints an owner JWT from the runner's binding token;
+- it acts as the owner with the runner's bearer and with the stored JWT;
+- it reads the server's environment and the cookie canary;
+- it reaches every listener and writes the plant;
+- the bare owner route refuses it.
+
+The host daemon's environment is read and holds no bearer (`not_present`), a
+negative control. Any other outside verdict fails as a broken probe, never as
+a verdict, so a closed verdict in the step is the sandbox's. Host-side checks
+also prove each target live before the outside run, between the runs and after
+the step's, and the mock's ledger must hold neither the owner JWT nor the
+canary. The verdicts, the outside verdicts and the recorded versions are
+written to `artifacts/probe15-identity-<platform>.json` before any assertion
+(`:1394`), so a failing lane run still leaves them.
+
+**What was measured.** `EXPECTED_IDENTITY` (`:1081-1127`):
+
+| Check | macOS seatbelt (measured) | Linux bwrap (measured) | Owner |
+|---|---|---|---|
+| `owner_bare`, `owner_bare_localhost` | `refused` | `refused` | |
+| `shell_env_names` | `not_present`, names `none` | `not_present`, names `none` | |
+| `own_runner_environ` | `denied` | `hidden` | |
+| `own_runner_mint`, and its `.read` | `denied` | `hidden` | |
+| `own_runner_bearer`, and its `.read` | `denied` | `hidden` | |
+| `host_bearer`, and its `.read` | `denied` | `hidden` | |
+| `server_environ` | `denied` | `hidden` | |
+| `stored_credentials`, and its `.read` | `denied` | `hidden` | |
+| `credential_files.cookie_secret` | `denied` | `hidden` | |
+| `other_unix_socket` | `reachable` | `hidden` | CRL-174 (macOS) |
+| `other_abstract_socket` | not probed | `reachable` | CRL-174 |
+| `other_loopback_tcp` | `reachable` | `reachable` | CRL-174 |
+| `worktree_exec_config` | `reachable` | `reachable` | CRL-181 |
+
+So a sandboxed step on an accounts server cannot mint an owner JWT, act as
+the owner with the host's bearer or the stored credentials, read the cookie
+secret or the server's environment, or make a bare owner request. It can still
+reach other programs' sockets and loopback services (CRL-174); a Docker
+Desktop, OrbStack or `tmux -S` socket would run commands outside the sandbox
+that read the owner's stored JWT. It can also plant worktree exec config
+(CRL-181). The probe shows only the write. That the owner's own `git status`
+then runs the hook outside the sandbox was measured on macOS 27.2.1 with git
+2.54.0 during this ticket's design review.
+
+On Linux, bwrap's pid namespace and mounts hide the other processes, the
+homes and `/tmp`, while the network namespace and the worktree are shared.
+Lane run 45187294423 measured every one of these pins, in its
+`probe15-identity-linux.json` artifact. From a later run, only closed-to-closed
+moves and the socket, TCP and plant checks, with their owners, may be
+re-pinned; an open verdict on a credential path is escalated, never re-pinned
+([`../testing/tier-b.md`](../testing/tier-b.md), "Pinning probe 15").
+
+**The single-user residual, measured.** The single-user test gains
+`owner_bare` and `owner_bare_localhost`, the same bare owner request. Both are
+`reachable`: measured on macOS, and on Linux in lane run 45187294423. Their
+owner, and that of `server_loopback` and `server_localhost` in "Addendum:
+CRL-137 probe verdicts", is the accepted residual `ACCEPTED_SINGLE_USER`
+(`test_sandbox_probe.py:131`), not CRL-159.
+On a server with authentication off, or a single-user header server, every
+request without credentials is the owner, so such servers are never Enforced.
+To close it, run an accounts server, where the identity probe shows a step's
+bare request refused.
+
+**The `gate_integrity` label as built.** The rule is a pure function,
+`gate_integrity` (`coral/gates/integrity.py:171-194`). The server's facts are
+read once, when the runs API is built (`server_gate_facts`,
+`coral/omni/server/gate_integrity.py:45-58`; `coral/omni/server/plugin.py:505`).
+The run's own host is read on each detail read (`_gate_integrity`,
+`coral/api/run_service.py:549-561`). Its inputs:
+
+| Input | Read from | Verified when |
+|---|---|---|
+| Server mode | `auth_mode(provider)` | it is `accounts` (`VERIFIED_SERVER_MODES`, `integrity.py:47`) |
+| Server config | an allow-listed runner token, a machine client, the device grant, the single-user marker, and server state under a path every seatbelt step reads: the data dir, the config file, the artifact location and each SQLite file, as given and with links followed, case-folded on macOS (`gate_integrity.py:61-146`) | every fact was read and is off (`ServerConfigFacts.verified`, `integrity.py:141-144`) |
+| Native steps | the `claude_native_steps` sub-feature | it is off |
+| The run's own host | the host's live hello: the reserved `os_sandbox:` backend token and exactly one `coral_sandbox_policy:<rev>`, read only while the run's owner and account registration hold the host (`host_sandbox_reader`, `gate_integrity.py:164-189`) | its policy has a row in the table and both parts are empty |
+
+The reasons, in this order, each at most once (`GateIntegrityReason`,
+`integrity.py:27-43`):
+
+| Reason | When |
+|---|---|
+| `server_mode_not_verified` | not an accounts server: single-user or proxy header, OIDC, a custom provider, or auth off |
+| `server_config_not_verified` | a config fact is on or was not read |
+| `native_steps_enabled` | the server may create claude-native steps, or the flag was not read |
+| `host_sandbox_unknown` | the run has no host or no owner, or its rows cannot be read; the host is offline or held by another owner or registration; it reports no sandbox, two backend tokens, no revision or two that differ, or a policy with no row; or the registry raised (logged by type only) |
+| `host_sandbox_open` | the policy's row names a ticket in either part |
+
+`label` is `enforced` only with no reason. Every unknown input fails closed:
+a host whose steps run with `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` reports no
+revision (`coral/omni/process_map.py:33-35`), and a policy with only one part
+recorded has no row (`blocker_table`, `integrity.py:104-115`).
+`tests/coral/gates/test_integrity.py` checks the rule over every server mode,
+flag value, config fact and host policy it lists, against four tables, and
+`tests/coral/omni/test_gate_integrity_facts.py` how each fact is read.
+
+The label describes the run's pending gates as the server reads them now, and
+can change between reads. It covers Coral's steps only, not other agents the
+owner runs, and never says who answered a gate (`GateIntegrityOut`,
+`coral/api/run_models.py:336-350`). The run detail is owner-only, and the
+field names no host, backend, revision or ticket
+([`../contracts/runs-api.md`](../contracts/runs-api.md), "Reads").
+
+**The table.** Per sandbox backend and policy revision it has two parts, and
+Enforced needs both empty (`integrity.py:76-118`):
+
+| Policy | Owners of the open probe pins (`IDENTITY_PROBE_OPEN`) | Declared blockers no probe measures (`UNPROBED_BLOCKERS`) |
+|---|---|---|
+| seatbelt, revision 1 | CRL-174, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195 |
+| bwrap, revision 1 | CRL-174, CRL-181 | CRL-181, CRL-193, CRL-195 |
+
+The declared blockers:
+
+- CRL-170: no CI lane runs macOS, so an OS or CLI update can void a seatbelt
+  rule unseen.
+- CRL-171: macOS Mach services, the clipboard and Spotlight are not measured.
+- CRL-181: files a step leaves that the owner's tools run, beyond the probe's
+  one shape, such as Claude Code project settings or a direnv `.envrc`. It is
+  in both parts, so a fix that closes only the nested `.git` cannot flip the
+  label.
+- CRL-193: the label reads the run's own host only. An owner credential that a
+  step of another live run, or of an earlier run, obtained stays usable until
+  the owner changes their password. CRL-193 also owns the label's not-checked
+  list (Residuals).
+- CRL-195: a step that reaches the server can guess the owner's password at
+  `/auth/login`, which has no rate limit
+  (`omnigent/server/routes/accounts_auth.py:289-320`).
+
+Tests keep the table bound to the pins.
+`test_the_gate_label_table_holds_every_open_pin_owner_and_the_declared_blockers`
+(`test_sandbox_probe.py:2087-2110`, in the `coral-e2e` lane) requires the
+current revision's rows to be exactly the pinned backends'. Every open pin's
+owner (identity, single-user and allow-listed-token pins, less the accepted
+residual) must be in its row, and what is left after removing each owner once
+must equal the declared list.
+`test_the_declared_blockers_are_the_open_paths_no_probe_measures` and
+`test_every_recorded_row_stays_as_it_was_recorded`
+(`tests/coral/gates/test_integrity.py:224-246`) freeze every row.
+
+**Rows are append-only per policy revision.** A host reports the revision of
+the rules it runs (`SANDBOX_POLICY_REVISION`, `coral/omni/process_map.py:13`),
+so a host on older code keeps the row it was measured under. When a pin moves,
+a rule probe 15 measures changes (an Omnigent sync that touches
+`seatbelt_sandbox.py`, `bwrap_sandbox.py` or the step's environment rules
+included), or a server-side change widens what a step can reach:
+
+1. Bump `SANDBOX_POLICY_REVISION`.
+2. Re-run the identity probe on both platforms, re-pin `EXPECTED_IDENTITY`,
+   and set each platform's `RECORDED_IDENTITY` `sandbox_policy` to the new
+   revision.
+3. Add the new revision's rows to `IDENTITY_PROBE_OPEN` and
+   `UNPROBED_BLOCKERS`, and to `RECORDED_ROWS` and the policy set in
+   `tests/coral/gates/test_integrity.py`.
+4. For a host-side change, keep the old rows, so older hosts keep theirs, or
+   delete them with their `RECORDED_ROWS` entries, so older hosts read
+   `host_sandbox_unknown`. A server-side change that widens what a step can
+   reach (the sandbox paths or network in the bundle seeds' `os_env`, the
+   checkout read grant, the step harness, the environment rules the server
+   sends) must delete every older revision's rows: older hosts receive the
+   wider bundle from the server, but their rows were measured under the
+   narrower one.
+5. Never edit a recorded row, with one exception: a declared blocker in server
+   code (CRL-193, CRL-195) leaves every row, and its `RECORDED_ROWS` entries,
+   in the change that fixes it and adds its test, since the server fix reaches
+   every host at once.
+
+A host on a revision with no rows reads `host_sandbox_unknown`. The pin of
+seatbelt's default read roots (`coral/omni/_upstream.py:9`) catches a rename
+of that constant, not a grant added under another name, so check each sandbox
+change for a bump.
+
+**When it flips.** Today every row names open tickets, so every gate reads
+`not_enforced`. On an accounts server with every other fact verified the only
+reason is `host_sandbox_open`, as the identity test records on macOS and in
+lane run 45187294423 on Linux (`RECORDED_IDENTITY`,
+`test_sandbox_probe.py:1129-1147`). A row empties once each of its pins reads
+closed and each declared blocker is gone. Closed pins, and a declared blocker
+that a probe check pins closed, leave through a new revision. A declared
+blocker in server code (CRL-193, CRL-195) leaves through its own fix and test,
+which removes it from every row (step 5). Any other declared blocker leaves
+only when the owner accepts it in this ADR.
+
+**Residuals and owners.**
+
+- **Login guessing** at `/auth/login` (CRL-195), now a declared blocker on both
+  backends.
+- **OIDC.** The native sign-in hands an owner JWT to any loopback redirect
+  after one owner click, with no consent page
+  (`omnigent/server/routes/auth.py:324-328`, `:1074`, `:1296`). OIDC servers
+  read `server_mode_not_verified` until a consent step lands and the identity
+  probe runs on OIDC (CRL-194).
+- **The owner-wide history** (CRL-193), a declared blocker: the owner's other
+  live and earlier runs, a host upgraded under live runners (the label reads
+  the host's current hello, not each runner's), and showing the label on gate
+  cards and the Inbox.
+- **Single-user servers**, accepted, as above.
+- **Not checked by the label.** CRL-193, a declared blocker on every row, owns
+  this list, so none of it is accepted. Each item needs a check before any row
+  empties:
+  - read roots beyond seatbelt's default subpaths: bwrap's own read-only
+    roots, and per-step grants such as the checkout's packages, the
+    interpreter prefix and the CLI install;
+  - bwrap's `bind_host_proc` under a vetted outer sandbox (`lakebox`,
+    `phoenix-kubernetes`; `omnigent/inner/bwrap_sandbox.py:225`), which the
+    policy token does not show;
+  - databases reached over loopback, beyond the CRL-174 pins: a database on a
+    network host does not count as server state;
+  - `coral_sandbox_policy:` claims from tool providers, which any installed
+    provider can send; claims that differ read unknown;
+  - future step-harness flags such as `codex_steps` and `sandbox_runs`
+    (`coral/api/sub_features.py:15`, `:24`), which must feed the label before
+    they are used;
+  - the host's live hello rather than each runner's (CRL-193);
+  - replica flapping: the host registry is per replica, so a replica without
+    the host's tunnel reads `host_sandbox_unknown`, and the label can change
+    between reads;
+  - the step model's tools: `step_roster` is a denylist of the tools that
+    reach other sessions and agents (`coral/omni/policies/guards.py:98-121`),
+    so a new default Omnigent tool reaches steps unseen, and the probe
+    measures the shell only;
+  - the orchestrator's and anchor's CLIs, which have no `os_env` and run
+    outside the sandbox (CRL-180).
+- **Not covered by Enforced:** agents the owner runs outside Coral, and other
+  accounts that share the owner's OS user; sign-ins the owner approves, such
+  as a link a step asks the owner to open (the device grant, when on, reads
+  `server_config_not_verified`); tools from tool providers other than
+  Coral's; and UDP.
+- **Probe limits.** On Linux the step's in-namespace ancestors are measured
+  only through the shell's environment. The plant tries the nested `.git`
+  shape only. The server's database, the server's own bootstrap copy of an
+  owner JWT, and writes to `~/.omnigent` are not targeted.

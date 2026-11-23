@@ -207,9 +207,9 @@ it can only be cancelled." A client should not pick a new key for it.
   `next_cursor` is `null`. Spend comes from the cache only (below).
 - **Detail.** `RunSummary` plus `version`, `head_seq`, `max_activations`,
   `request_preview`, `target`, `anchor_session_id`, `orchestrator_session_id`, `causes`,
-  `load_error`, `view`, `gates` (open visits, with the gate's outcomes) and `slots`. It
-  reads with `EngineBridge.read()`, which never writes. A run that cannot be loaded shows
-  `load_error: "engine.load_failed"`, `view: null`, the cause
+  `load_error`, `view`, `gates` (open visits, with the gate's outcomes), `slots` and
+  `gate_integrity` (below). It reads with `EngineBridge.read()`, which never writes. A
+  run that cannot be loaded shows `load_error: "engine.load_failed"`, `view: null`, the cause
   `{"reason": "failure_path", "detail": "engine.load_failed", "subject": ""}` and only
   Cancel. `target`, `max_activations` and `request_preview` are `null` when its stored rows
   cannot be read. Spend waits up to 10 s.
@@ -219,6 +219,18 @@ it can only be cancelled." A client should not pick a new key for it.
   paused, while a host hold or a restart stands, when the run cannot be loaded, and for a
   finished row. Map an id to its step through `slots[].activation_id`. The stream and
   `RunView` do not carry it; a client reads the detail again after an action.
+- **`gate_integrity`** on the detail: `{label, reasons}`, whether the run's pending gates
+  are Enforced ([`gates-and-inbox.md`](gates-and-inbox.md), "Enforced gates"). `label` is
+  `enforced` or `not_enforced`. `reasons` lists, in this order and each at most once,
+  `server_mode_not_verified`, `server_config_not_verified`, `native_steps_enabled`,
+  `host_sandbox_unknown` and `host_sandbox_open`; it is empty only when `label` is
+  `enforced`. The label describes the server and the run at the time of the read and can
+  change between reads: the server's facts are read at startup, and the run's own host
+  (`coral/omni/server/gate_integrity.py`) on each read, only while the run's owner and
+  account registration hold it. It covers Coral's steps only, not other agents the owner
+  runs, and never says who answered a gate. It names no host, sandbox, revision or ticket.
+  Today it is `not_enforced` on every server. The stream and `RunView` do not carry it,
+  and the web app does not show it yet (CRL-193).
 - **Fields the web reads.** Every `RunSummary` (list, detail, action and start answers)
   carries `run_branch`, always `run_branch_name(run_id)` (`coral/r-<12 hex>/base`),
   computed and never read from a row. Each `gates` item carries `context`: the text the
@@ -620,14 +632,19 @@ cases, the real-git outcome and the start-head reads; `tests/coral/api/test_run_
 the checkout and path rules, the read's admission, single flight, deadlines, cache, error
 map and logs; and `tests/coral/api/test_openapi_drift.py` checks that the spec lists
 exactly the mounted Coral routes, is typed, and that the TS types are current.
+`test_the_detail_labels_its_gates_for_the_owner_alone_and_names_no_host_detail` in
+`tests/coral/api/test_runs_api.py` reads `gate_integrity` as the owner only, and
+`tests/e2e/coral/test_sandbox_probe.py` records it on a real accounts stack.
 
 ## Residuals
 
-- **Servers that require no identity, and same-user steps.** Any local process of the user,
-  or a step shell that can reach the server, can act as the owner
-  ([`gates-and-inbox.md`](gates-and-inbox.md), "Residuals"; ADR-05's probe 15 measured
-  a step shell reaching the server, CRL-159). `:retry` is one more owner action; a retried step's old session is refused while the run is
-  paused.
+- **Servers that require no identity, and same-user steps.** On a single-user or auth-off
+  server any local process of the user, or a step shell that can reach the server, can act
+  as the owner. That is accepted, and such servers never label a gate Enforced
+  ([`gates-and-inbox.md`](gates-and-inbox.md), "Residuals"). On an accounts server a
+  sandboxed step cannot act as the owner directly, but the open paths that keep
+  `gate_integrity` at `not_enforced` remain ("Enforced gates" there). `:retry` is one more
+  owner action; a retried step's old session is refused while the run is paused.
 - **Workflows.** Legacy unowned workflows are readable by every caller in the workspace and
   claimed by their first saver. On a single-user server every workflow is saved unowned, so
   turning identity on later makes them legacy rows. A re-created account with the same user
@@ -715,6 +732,7 @@ exactly the mounted Coral routes, is typed, and that the TS types are current.
 | Showing a retried step's salvage ref in the run view | CRL-158 |
 | A request-body size cap for every Coral POST: FastAPI parses a body before a route's dependencies | CRL-150 |
 | Workflow sharing (K7's view and edit matrix) | CRL-148 |
+| `gate_integrity` over the owner's other live and earlier runs, and showing it in the web app | CRL-193 |
 | Run view cuts: live steering in the drawer (Phase 2); the guarantees panel; the phone layout; Run again; the inspector's Step, Decision and Log tabs and the event timeline; per-command evidence (command, exit code, time); the orchestrator pane; resuming a budget pause with a raised cap; workflow version numbers; analytics; axe | no live ticket |
 
 Activation rows are not projected: the engine state carries them, and the detail's `view`

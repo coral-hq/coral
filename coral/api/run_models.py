@@ -37,6 +37,7 @@ from coral.engine.machines.activation import find_node
 from coral.engine.projection import RunView, project
 from coral.engine.types import JsonPatch, PauseCause
 from coral.gates.ids import MAX_GATE_NOTE_CHARS, MAX_GATE_OUTCOME_CHARS
+from coral.gates.integrity import GateIntegrity, GateIntegrityLabel, GateIntegrityReason
 from coral.model.ids import anchor_session_id
 from coral.model.ir import CompiledGraph
 from coral.runview.actions import RunViewFacts, allowed_actions
@@ -332,6 +333,23 @@ class GateOut(_Out):
     context: str | None
 
 
+class GateIntegrityOut(_Out):
+    """
+    Whether this run's pending gates are Enforced: no step of the run could answer them as
+    its owner, as far as the server can tell. It describes the server and the run at the
+    time of the read and can change between reads; it covers Coral's steps only, not other
+    agents the owner runs, and never says who answered a gate. ``reasons`` is empty
+    exactly when ``label`` is ``enforced``.
+    """
+
+    label: GateIntegrityLabel
+    reasons: tuple[GateIntegrityReason, ...]
+
+    @classmethod
+    def of(cls, integrity: GateIntegrity) -> GateIntegrityOut:
+        return cls(label=integrity.label, reasons=integrity.reasons)
+
+
 class SlotOut(_Out):
     """
     An agent slot of one of the run's steps. ``slot_id`` and ``activation_id`` are store
@@ -354,7 +372,8 @@ class RunDetail(RunSummary):
     cannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are
     ``None`` when its stored rows cannot be read. ``retry_activation_ids`` are the store
     ids of the failed steps a retry may restart now, in cause order: none while the run
-    is not paused or a host hold or a restart stands.
+    is not paused or a host hold or a restart stands. ``gate_integrity`` labels its
+    pending gates as the server reads them now.
     """
 
     version: int
@@ -370,6 +389,7 @@ class RunDetail(RunSummary):
     gates: tuple[GateOut, ...]
     slots: tuple[SlotOut, ...]
     retry_activation_ids: tuple[str, ...]
+    gate_integrity: GateIntegrityOut
 
 
 # Why a run's outcome has no diff.
@@ -644,7 +664,7 @@ def read_summary(read: RunRead) -> RunSummary:
     return run_summary(read.run, actions=_read_actions(read, view), spend=None)
 
 
-def run_detail(read: RunRead) -> RunDetail:
+def run_detail(read: RunRead, *, gate_integrity: GateIntegrityOut) -> RunDetail:
     """The run as its detail shows it, without spend, from a read that never writes."""
     run, rows, snapshot = read.run, read.rows, read.snapshot
     view = None if snapshot is None else project(snapshot.state)
@@ -703,6 +723,7 @@ def run_detail(read: RunRead) -> RunDetail:
         gates=gates,
         slots=slots,
         retry_activation_ids=_retry_activation_ids(run, state),
+        gate_integrity=gate_integrity,
     )
 
 

@@ -135,6 +135,7 @@ PINNED: dict[str, tuple[str, str]] = {
         " permission_store: 'PermissionStore | None', conversation: 'Conversation | None' = None,"
         " sandbox_profiles: 'SandboxProfileCatalog | None' = None) -> 'HostLaunchTarget'",
     ),
+    "seatbelt_default_read_roots": ("omnigent.inner.seatbelt_sandbox", ""),
     "validate_create_harness_readiness": (
         "omnigent.server.routes._session_harness_readiness",
         "(*, harness: 'str | None', host_id: 'str | None', parent_session_id: 'str | None',"
@@ -177,6 +178,8 @@ CACHES = frozenset(
 TYPE_SETS = frozenset({"CLIENT_SESSION_EVENT_TYPES", "RUNNER_SESSION_EVENT_TYPES"})
 # Constants Coral compares with; pin name -> the value it must keep.
 VALUES = {"APPROVAL_EVENT_TYPE": "approval"}
+# Path lists Coral checks against; their members may change upstream.
+PATH_LISTS = frozenset({"seatbelt_default_read_roots"})
 # Pins whose name differs from their source's: pin name -> source attribute.
 ALIASES = {
     "APPROVAL_EVENT_TYPE": "_APPROVAL_TYPE",
@@ -185,6 +188,7 @@ ALIASES = {
     "canonical_host_id": "_canonical_host_id",
     "label_key_skeleton": "_label_key_skeleton",
     "pending_elicitation_count": "count_for",
+    "seatbelt_default_read_roots": "_DEFAULT_READ_SUBPATHS",
 }
 # Exceptions Coral raises or catches by type alone; they keep their base.
 BASES: dict[str, type[BaseException]] = {
@@ -222,6 +226,8 @@ def test_pin_keeps_its_upstream_source_and_signature(name: str) -> None:
         assert isinstance(source, frozenset) and all(isinstance(kind, str) for kind in source)
     elif name in VALUES:
         assert source == VALUES[name]
+    elif name in PATH_LISTS:
+        assert isinstance(source, tuple) and all(path.startswith("/") for path in source)
     else:
         assert _signature(source) == expected
 

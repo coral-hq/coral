@@ -166,6 +166,35 @@ export interface GateAnswerRequest {
 }
 
 /**
+ * Whether this run's pending gates are Enforced: no step of the run could answer them as
+ * its owner, as far as the server can tell. It describes the server and the run at the
+ * time of the read and can change between reads; it covers Coral's steps only, not other
+ * agents the owner runs, and never says who answered a gate. ``reasons`` is empty
+ * exactly when ``label`` is ``enforced``.
+ */
+export interface GateIntegrityOut {
+  label: "enforced" | "not_enforced";
+  reasons: GateIntegrityReason[];
+}
+
+/**
+ * Why a gate is not Enforced, in the order a label names them.
+ * ``server_mode_not_verified``: the server does not sign users in with accounts.
+ * ``server_config_not_verified``: a server setting could hand a step an owner
+ * credential, or was not read.
+ * ``native_steps_enabled``: the server may create claude-native steps.
+ * ``host_sandbox_unknown``: the run's host is offline, unreported, or on a sandbox no
+ * probe measured.
+ * ``host_sandbox_open``: the run's sandbox still has an open owner path.
+ */
+export type GateIntegrityReason =
+  | "server_mode_not_verified"
+  | "server_config_not_verified"
+  | "native_steps_enabled"
+  | "host_sandbox_unknown"
+  | "host_sandbox_open";
+
+/**
  * A gate visit waiting for its answer. ``context`` is what its approval prompt asks;
  * ``None`` when the run's engine state cannot be loaded or does not hold the visit.
  */
@@ -505,7 +534,8 @@ export interface RuleTemplateOut {
  * cannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are
  * ``None`` when its stored rows cannot be read. ``retry_activation_ids`` are the store
  * ids of the failed steps a retry may restart now, in cause order: none while the run
- * is not paused or a host hold or a restart stands.
+ * is not paused or a host hold or a restart stands. ``gate_integrity`` labels its
+ * pending gates as the server reads them now.
  */
 export interface RunDetail {
   activation_count: number;
@@ -514,6 +544,7 @@ export interface RunDetail {
   causes: PauseCause[];
   created_at: number;
   finished_at: number | null;
+  gate_integrity: GateIntegrityOut;
   gates: GateOut[];
   head_seq: number;
   load_error: "engine.load_failed" | null;

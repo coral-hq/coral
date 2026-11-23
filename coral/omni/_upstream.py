@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+# omnigent/inner/seatbelt_sandbox.py: paths every seatbelt step reads, used by gate_integrity.py.
+from omnigent.inner.seatbelt_sandbox import _DEFAULT_READ_SUBPATHS as seatbelt_default_read_roots
+
 # omnigent/runtime/pending_elicitations.py: a session's open approvals, read by dispatch.py.
 from omnigent.runtime.pending_elicitations import count_for as pending_elicitation_count
 
@@ -141,6 +144,7 @@ __all__ = [
     "register_supersession_observer",
     "request_workspace_op_on_host",
     "resolve_host_launch",
+    "seatbelt_default_read_roots",
     "validate_create_harness_readiness",
     "validate_existing_host_workspace",
     "validate_session_agent",
