@@ -1497,9 +1497,10 @@ def export_scratch_dir(
 # CORAL(S109): launch dirs are ``mkdtemp(prefix="c")`` names holding this owner claim.
 _LAUNCH_TMPDIR_NAME = re.compile(r"c[a-z0-9_]{8}")
 _LAUNCH_TMPDIR_OWNER = ".launch-owner"
-# CORAL(S116): on seatbelt, the target a launcher started, which can outlive it
+# CORAL(S116): on seatbelt, the target a launcher started, which can outlive it; the target's
+# claim is removed first, so a dir left between the two removals still names its owner
 _LAUNCH_TARGET_CLAIM = ".launch-target"
-_CLAIM_NAMES = (_LAUNCH_TMPDIR_OWNER, _LAUNCH_TARGET_CLAIM)
+_CLAIM_NAMES = (_LAUNCH_TARGET_CLAIM, _LAUNCH_TMPDIR_OWNER)
 # CORAL(S116): a launch scratch's name, as create_private_tmpdir makes it
 PRIVATE_TMPDIR_NAME = re.compile(r"omnigent-osenv-[a-z0-9_]{8}")
 # CORAL(S116): one sweep's share of the work; the next sweep goes on from there
@@ -1518,24 +1519,20 @@ class _SweepStopped(Exception):
 
 
 def claim_temp_dir(
-    path: Path,
-    *,
-    filename: str = _LAUNCH_TMPDIR_OWNER,
-    pid: int | None = None,
-    data: bytes | None = None,
+    path: Path, *, filename: str = _LAUNCH_TMPDIR_OWNER, pid: int | None = None
 ) -> None:
     """
     CORAL(S116): name *path*'s owner, this process by default, so a sweep removes it once gone.
 
-    *pid* names another process, *data* restores a claim read earlier. A failure, or a
-    platform without owner uids, leaves the dir unclaimed and never swept; it never raises.
+    *pid* names another process. A failure, or a platform without owner uids, leaves the dir
+    unclaimed and never swept; it never raises.
     """
     from omnigent.native.owner_claim import create_owner_claim
 
     if not hasattr(os, "getuid"):
         return
     try:
-        create_owner_claim(path, filename=filename, pid=pid, data=data)
+        create_owner_claim(path, filename=filename, pid=pid)
     except OSError as exc:
         logger.warning("Cannot record a temp dir's owner (%s)", type(exc).__name__)
 
@@ -1673,8 +1670,8 @@ def _remove_claimed_dir(child: Path, deadline: float | None, *, keep_claims: boo
         try:
             os.rmdir(child)
         except OSError:
-            # A late writer: the claims go back, so the dir is retried.
-            for name, data in saved.items():
+            # A late writer: the claims go back, owner first, so the dir is retried.
+            for name, data in reversed(saved.items()):
                 if data is not None:
                     with contextlib.suppress(OSError):
                         create_owner_claim(child, filename=name, data=data, dir_fd=descriptor)

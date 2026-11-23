@@ -1815,6 +1815,8 @@ _UNWRAPPED_CONFIG_DIR_NAME = re.compile(r"omnigent-claude-config-[a-z0-9_]{8}")
 # or teardown for its own; a sweep still running then goes on in the background
 _CLOSE_WAIT_SECONDS = 10.0
 _SWEEP_WAIT_SECONDS = 2.0
+# CORAL(S116): after the SDK's own close, how long the rest of the CLI's tree gets before SIGKILL
+_GRACEFUL_TREE_SECONDS = 2.0
 # CORAL(S116): one sweep at a time per process
 _SWEEP_LOCK = threading.Lock()
 
@@ -1874,24 +1876,43 @@ async def _sweep_orphaned_temp_dirs(
     except TimeoutError:
         logger.warning("The temp dir sweep is still running")
     except asyncio.CancelledError:
-        with suppress(Exception):
-            await sweep
+        # Bounded too, so a stuck sweep cannot hold back a cancelled teardown.
+        await asyncio.wait({sweep}, timeout=timeout)
         raise
     except Exception as exc:  # noqa: BLE001 — e.g. a loop whose executor has shut down
         logger.warning("Cannot sweep the temp dirs (%s)", type(exc).__name__)
 
 
-async def _wait_for_tree(process: _Process, tree: dict[int, float], *, timeout: float) -> None:
+async def _wait_for_tree(
+    process: _Process | None, tree: dict[int, float], *, timeout: float
+) -> None:
     """
-    CORAL(S116): wait for *process* and every process of its *tree* to exit.
+    CORAL(S116): wait for *process*, if given, and every process of its *tree* to exit.
 
     :raises TimeoutError: If one still runs after *timeout* seconds in all.
     """
     async with asyncio.timeout(timeout):
-        with suppress(Exception):
-            await process.wait()
+        if process is not None:
+            with suppress(Exception):
+                await process.wait()
         while _proc.live_members(tree):
             await asyncio.sleep(0.05)
+
+
+def _client_process_tree(client: _ClaudeClient) -> dict[int, float]:
+    """CORAL(S116): the tree of *client*'s CLI process, while it is a live child of this one."""
+    process = getattr(getattr(client, "_transport", None), "_process", None)
+    return _proc.snapshot_child_tree(process) if process is not None else {}
+
+
+async def _reap_tree(tree: dict[int, float], *, timeout: float) -> None:
+    """CORAL(S116): give every process of *tree* *timeout* s to exit, then SIGKILL the rest."""
+    try:
+        await _wait_for_tree(None, tree, timeout=timeout)
+    except TimeoutError:
+        _proc.kill_members(tree)
+        with suppress(TimeoutError):
+            await _wait_for_tree(None, tree, timeout=1)
 
 
 def _claude_seed_source(env: Mapping[str, str]) -> pathlib.Path | None:
@@ -2741,6 +2762,8 @@ class ClaudeSDKExecutor(Executor):
             )
             await self._force_close_client(state.client)
             return
+        # CORAL(S116): the SDK's close ends only the launcher, which the CLI can outlive
+        tree = _client_process_tree(state.client)
         try:
             await state.client.disconnect()
         except RuntimeError as exc:
@@ -2753,6 +2776,7 @@ class ClaudeSDKExecutor(Executor):
             )
             await self._force_close_client(state.client)
             return
+        await _reap_tree(tree, timeout=_GRACEFUL_TREE_SECONDS)  # CORAL(S116): before the sweep
         # SDK's disconnect() doesn't close the asyncio transport;
         # call _force_close_client to flip transport._closed before
         # the loop tears down.

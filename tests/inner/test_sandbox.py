@@ -1396,6 +1396,33 @@ def test_a_dir_that_cannot_go_once_emptied_gets_its_claims_back(
     assert not orphan.exists()
 
 
+# CORAL(S116): the target's claim goes before the owner's, so a kill between the two removals
+# leaves a dir a later sweep can still judge
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_a_kill_between_the_claim_removals_leaves_a_dir_still_swept(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.inner.sandbox import PRIVATE_TMPDIR_NAME, _remove_orphaned_launch_tmpdirs
+
+    dead = _finished_pid()
+    orphan = _claimed_dir(tmp_path, "omnigent-osenv-deadbeef", dead, target=dead)
+    real_unlink = os.unlink
+
+    def _killed_after_one_claim(path: object, *, dir_fd: int | None = None) -> None:
+        real_unlink(path, dir_fd=dir_fd)  # type: ignore[arg-type]
+        if path in (".launch-owner", ".launch-target"):
+            raise KeyboardInterrupt  # as a kill would, between the two removals
+
+    with monkeypatch.context() as patched:
+        patched.setattr("omnigent.inner.sandbox.os.unlink", _killed_after_one_claim)
+        with pytest.raises(KeyboardInterrupt):
+            _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+
+    assert [path.name for path in orphan.iterdir()] == [".launch-owner"]
+    _remove_orphaned_launch_tmpdirs(tmp_path, PRIVATE_TMPDIR_NAME)
+    assert not orphan.exists()
+
+
 # CORAL(S116): a dead tree past the depth cap is left whole and counted, never descended
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
 def test_a_dead_tree_past_the_depth_cap_is_left_and_counted(

@@ -1610,23 +1610,26 @@ def test_a_killed_version_check_leaves_no_copy_of_the_seed(
         else:
             check.terminate()
         check.wait(timeout=30)
-        # CORAL(S116): the stand-in still waits for its input
-        scratch = Path(line.rstrip("\n").partition(" (Claude Code) ")[2]).parent
+        # CORAL(S116): checked while the stand-in still waits for its input, so no cleanup has
+        # run: bwrap's sandbox can outlive its monitor long enough to clean up on an EOF
+        version, _, config_dir = line.rstrip("\n").partition(" (Claude Code) ")
+        assert version == "2.1.325", line
+        private = Path(config_dir)
+        scratch = private.parent
+        assert private.name == "claude_config_dir", line
+        assert scratch.parent.resolve() == scratch_parent.resolve(), config_dir
+        assert private.is_dir(), "the launcher cleaned up before the kill landed"
+        assert not (private / ".claude.json").exists(), "the version check left a seed copy"
+        # CORAL(S116): the host pass, outside any pid namespace the wrap makes, named the launcher
+        claim = read_owner_claim(scratch, filename=".launch-owner")
+        assert claim is not None and claim.pid == check.pid, (
+            "the scratch does not name its launcher"
+        )
         if active_sandbox_type == "darwin_seatbelt":
             _remove_orphaned_launch_tmpdirs(scratch_parent, PRIVATE_TMPDIR_NAME)
             assert scratch.is_dir(), "a sweep removed the scratch under its running CLI"
         # Closing its input lets a stand-in that outlived the launcher exit.
-        _, errors = check.communicate(timeout=30)
-    version, _, config_dir = line.rstrip("\n").partition(" (Claude Code) ")
-    assert version == "2.1.325", errors
-    private = Path(config_dir)
-    assert private.name == "claude_config_dir", errors
-    assert private.parent.parent.resolve() == scratch_parent.resolve(), config_dir
-    assert private.is_dir(), "the launcher cleaned up before the kill landed"
-    assert not (private / ".claude.json").exists(), "the version check left a seed copy"
-    # CORAL(S116): the host pass, outside any pid namespace the wrap makes, named the launcher
-    claim = read_owner_claim(scratch, filename=".launch-owner")
-    assert claim is not None and claim.pid == check.pid, "the scratch does not name its launcher"
+        check.communicate(timeout=30)
 
     def _swept() -> bool:
         _remove_orphaned_launch_tmpdirs(scratch_parent, PRIVATE_TMPDIR_NAME)
@@ -1647,16 +1650,22 @@ while IFS= read -r line; do
   esac
 done
 """
+# CORAL(S116): one that outlives its input and SIGTERM, as a CLI busy shutting down would
+_OUTLIVING_CLI = _CONTROL_REQUEST_CLI.replace("#!/bin/sh\n", "#!/bin/sh\ntrap '' TERM\n") + (
+    "exec sleep 600\n"
+)
 
 
-# CORAL(S116): every launch dir a closed executor's CLI launches made is gone
+# CORAL(S116): every launch dir and process a closed executor's CLI launches made is gone
 @pytest.mark.timeout(180)
+@pytest.mark.parametrize("cli_exit", ["on-eof", "never"])
 def test_a_closed_executor_leaves_no_launch_scratch(
     tmp_path: Path,
     active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
     sandbox_pythonpath_env: None,
     monkeypatch: pytest.MonkeyPatch,
     claude_config_seed_source: None,
+    cli_exit: str,
 ) -> None:
     """
     Two sessions connect a seeded, sandboxed stand-in CLI through the real Agent SDK and
@@ -1664,7 +1673,11 @@ def test_a_closed_executor_leaves_no_launch_scratch(
     it. One session closes from another task (a force close), the other in place by
     ``close()``; each one's scratch, holding the seed copy, is then gone, and so are the profile
     and launch dirs of every launch. A dead process's leftover goes; a live executor's seed stays.
+
+    CORAL(S116): so is every process of each CLI's tree, even one that ignores its input
+    closing and SIGTERM, which outlives the SDK's own close.
     """
+    from omnigent.inner import _proc
     from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor, _ensure_sdk
     from omnigent.native.owner_claim import read_owner_claim, write_owner_claim
 
@@ -1674,8 +1687,9 @@ def test_a_closed_executor_leaves_no_launch_scratch(
     server = {"command": "true", "env": {"TOKEN": "throwaway"}}
     (home / ".claude.json").write_text(json.dumps({"mcpServers": {"probe": server}}))
     cli = workspace / "claude"
-    cli.write_text(_CONTROL_REQUEST_CLI)
+    cli.write_text(_CONTROL_REQUEST_CLI if cli_exit == "on-eof" else _OUTLIVING_CLI)  # CORAL(S116)
     cli.chmod(0o700)
+    trees: dict[int, float] = {}  # CORAL(S116)
     dead = temp_root / "omnigent-osenv-deadbeef"
     live_seed = temp_root / "omnigent-claude-seed-0123456789abcdef"
     for path in (dead, live_seed):
@@ -1732,6 +1746,8 @@ def test_a_closed_executor_leaves_no_launch_scratch(
                     new = set(temp_root.glob("omnigent-osenv-*")) - before
                     assert len(new) == 1, f"the version check's launch stayed: {len(new)} new"
                     [scratches[session]] = new
+                    process = executor._clients[session].client._transport._process  # CORAL(S116)
+                    trees.update(_proc.snapshot_child_tree(process))
                 seen["dead"] = dead.exists()
                 seen["seed copies"] = sorted(
                     (path / "claude_config_dir" / ".claude.json").is_file()
@@ -1743,11 +1759,15 @@ def test_a_closed_executor_leaves_no_launch_scratch(
             finally:
                 await executor.close()
 
+        # CORAL(S116): whatever outlived the close is killed after the check
+        cleanup.callback(_proc.kill_members, trees)
         run_async(_connect_then_close())
+        left = _proc.live_members(trees)  # CORAL(S116)
         launch_dirs = [
             p.name for p in harness_root.iterdir() if re.fullmatch(r"c[a-z0-9_]{8}", p.name)
         ]
 
+    assert len(trees) >= 4 and not left, f"{len(left)} of the CLIs' processes outlived close()"
     assert seen == {"dead": False, "seed copies": [True, True], "forced": False, "graceful": True}
     assert not scratches["graceful"].exists(), "the in-place close left its scratch"
     assert not list(temp_root.glob("omnigent-osenv-*"))

@@ -1960,8 +1960,9 @@ So a sweep is needed in any design, and with the sweep a handler adds nothing.
   - The launcher's host pass claims its scratch right after making it, before
     S109's sweep and the exec into the wrap. The claim names the pid the SDK
     holds, which every later exec keeps, in the harness's pid namespace. On
-    bwrap that pid becomes bwrap's monitor, which lives as long as the
-    namespace.
+    bwrap that pid becomes bwrap's monitor. The namespace can outlive it
+    briefly: `--die-with-parent` kills the namespace only after the monitor
+    has died.
   - The seatbelt backend claims its profile dir, and its `atexit` cleanup
     removes the claim with the dir.
   - The executor claims its seed dir at each `mkdir`, and the unwrapped
@@ -1975,8 +1976,9 @@ So a sweep is needed in any design, and with the sweep a handler adds nothing.
 - **The in-wrap cleanup keeps the claims.** For a claimed dir it removes
   everything else first. On seatbelt it then removes the claims and the dir.
   On bwrap the scratch is a bind-mount point it cannot remove, so it leaves
-  the claims for the executor's sweep. The cleanup never deletes a claim while
-  its dir stays.
+  the claims for the executor's sweep. It removes the claims only once nothing
+  else is left, the target's claim first, and puts them back if the dir cannot
+  go.
 - **What the sweep looks at.** S109's `_remove_orphaned_launch_tmpdirs` takes
   a name pattern. The executor runs it over the temp dir
   (`tempfile.gettempdir()`) for `omnigent-osenv-`,
@@ -1992,8 +1994,9 @@ So a sweep is needed in any design, and with the sweep a handler adds nothing.
   - A claim counts only as this user's regular file of at most 4 KiB, opened
     without following a link or blocking. Anything else leaves the dir
     unclaimed, and an unclaimed dir is kept. The check is in
-    `read_owner_claim`, so the terminal reaper and the process manager get it
-    too.
+    `read_owner_claim`, so the terminal reaper gets it too. The process
+    manager also calls it, but when it refuses a file the process manager
+    falls back to its older plain read of that file (see "Smaller limits").
   - Entries go bottom-up relative to the dir's descriptor, never through a
     link, and the claims last. A dir that cannot be emptied keeps its claims,
     and one that cannot be removed once emptied gets them back, so the next
@@ -2015,6 +2018,11 @@ So a sweep is needed in any design, and with the sweep a handler adds nothing.
   before it signals. It waits up to 5 s in all for every member (a zombie
   counts as gone), SIGKILLs what is left, waits at most 1 s more, and only
   then sweeps.
+- **Graceful close.** A close in the connecting task snapshots the tree
+  before the SDK's `disconnect()`. The SDK's close gives the CLI 5 s after
+  its input closes, then signals only the launcher, which on seatbelt can
+  leave the CLI running. Afterwards every member still running gets 2 s, is
+  SIGKILLed, gets at most 1 s more, and only then is the dir swept.
 - **Unchanged.** `SandboxPolicy` and its wire format, the wrap argv and
   profile, `create_private_tmpdir`, the launcher script and the executor's
   public API.
@@ -2036,15 +2044,20 @@ where stated.
     when that close returns. `close()` closes the other, and its scratch is
     gone too.
   - Afterwards no scratch and no S109 launch dir remain, the live seed dir is
-    kept, and every profile dir left is the test process's own.
+    kept, and every profile dir left is the test process's own. No process of
+    either CLI's tree is left, also in a second row whose stand-in ignores its
+    input closing and SIGTERM; that row failed without the graceful-close
+    wait.
   - On the code before S116 its seatbelt row failed with "the version check's
     launch stayed: 2 new".
 - **The killed version check.**
   `test_a_killed_version_check_leaves_no_copy_of_the_seed` kills the version
   check by the SDK's terminate and by the executor's signal to the whole tree,
   with a stand-in that ignores SIGTERM. The scratch stays and names the pid
-  the test spawned. On seatbelt a sweep keeps it while the stand-in still
-  runs, and after the stand-in exits a sweep removes it.
+  the test spawned; that is checked while the stand-in still waits for its
+  input, because on bwrap the namespace can run the cleanup in the moment it
+  outlives its monitor. On seatbelt a sweep keeps the scratch while the
+  stand-in still runs, and after the stand-in exits a sweep removes it.
 - Both behaviour tests' `darwin_seatbelt` rows ran locally only; their
   `linux_bwrap` rows run in CI (below).
 - **Unit tests.** In `tests/inner/test_sandbox.py`: the name pattern
@@ -2056,7 +2069,9 @@ where stated.
   `test_a_dir_that_cannot_go_once_emptied_gets_its_claims_back`), the bounds
   (`test_a_sweep_stops_at_its_budget_and_the_next_goes_on`,
   `test_a_sweep_stops_at_its_deadline_inside_a_dir`,
-  `test_a_dead_tree_past_the_depth_cap_is_left_and_counted`), Windows
+  `test_a_dead_tree_past_the_depth_cap_is_left_and_counted`), the claims'
+  removal order (`test_a_kill_between_the_claim_removals_leaves_a_dir_still_swept`),
+  Windows
   (`test_the_sweep_does_nothing_where_there_are_no_owner_uids`) and a planted
   link at each launcher claim (`test_each_launcher_claim_refuses_a_planted_link`).
   In `tests/native/test_owner_claim.py`: a FIFO, a link to `/dev/zero`, an
@@ -2064,7 +2079,9 @@ where stated.
   (`test_a_claim_that_is_not_this_users_small_regular_file_is_unknown`). In
   `tests/inner/test_claude_sdk_executor.py`: the three sweep points
   (`test_each_sweep_point_removes_only_dead_owners_temp_dirs`), the force
-  close (`test_a_force_close_waits_for_the_whole_process_tree`) and the
+  close (`test_a_force_close_waits_for_the_whole_process_tree`), a cancelled
+  caller's bound (`test_a_cancelled_caller_waits_for_a_stuck_sweep_only_its_bound`)
+  and the
   executor's claims (`test_the_executors_claims_refuse_a_planted_link`). In
   `tests/inner/test_seatbelt_sandbox.py`: the profile dir's claim and its
   `atexit` removal
@@ -2082,10 +2099,13 @@ where stated.
   first line of output.
 - **Reasoned from code; a bwrap test checks this in CI.** On bwrap the claim,
   written in the host pass, names bwrap's monitor in the harness's pid
-  namespace, and `--die-with-parent` ends the namespace with that pid. The
-  in-wrap cleanup empties the scratch, a bind-mount point, and keeps its
-  claims, so the teardown sweep removes it. The `linux_bwrap` rows of both
-  behaviour tests run in CI's `inner-rest` lane.
+  namespace. `--die-with-parent` ends the namespace a moment after that pid
+  dies: CI showed the in-wrap pass still running its cleanup after the monitor
+  was reaped. A sweep in that moment can judge the launch gone; it then
+  removes only what the dying launch's own cleanup removes. The in-wrap
+  cleanup empties the scratch, a bind-mount point, and keeps its claims, so
+  the teardown sweep removes it. The `linux_bwrap` rows of both behaviour
+  tests run in CI's `inner-rest` lane.
   On Linux a `/proc` mounted `hidepid` cannot make a live owner look gone,
   because `os.kill` decides (from code).
 
@@ -2096,6 +2116,13 @@ where stated.
   tree, MCP servers that outlive the CLI included, then SIGKILLs the rest and
   waits at most 1 s more. Before, a tree still running after 5 s was left
   running.
+- A graceful close whose CLI's tree outlives the SDK's own close waits up to
+  2 s more for it, then SIGKILLs it and waits at most 1 s. The SDK bounds its
+  close at about 20 s, so one session's graceful close takes at most about
+  25 s with its 2 s sweep wait. A CLI that ignores both its input closing and
+  SIGTERM closes in about 7 s on seatbelt: the SDK's 5 s grace plus the 2 s.
+  The same 2 s reap applies to unwrapped CLIs, whose slow-exiting
+  descendants, such as MCP servers, are now killed after it.
 - A connect and each client teardown wait up to 2 s for their sweep.
   `close()` can take up to 10 s longer to wait for cancel evictions, and up to
   10 s for its last sweep.
@@ -2152,12 +2179,17 @@ the temp dir, except as listed here.
   turn, so it skips only behind a sweep stuck that long (see "Smaller
   limits").
 - **A sweep's budget.** One sweep removes at most 64 dirs per root and stops
-  after 2 s. A dead scratch with tens of thousands of files, such as a package
-  tree a tool unpacked in `$TMPDIR`, needs several sweeps (100,000 files took
-  four), and its seed copy can be among the entries left. So can a backlog of
-  more than 64 dead dirs. What is left waits for the next sweep. After a
-  harness's last `close()`, that is another claude-sdk executor's with the
-  same temp dir; if none runs, it stays until deleted.
+  after 2 s per root. A dead scratch with tens of thousands of files, such as
+  a package tree a tool unpacked in `$TMPDIR`, needs several sweeps (100,000
+  files took four), and its seed copy can be among the entries left. So can a
+  backlog of more than 64 dead dirs. What is left waits for the next sweep.
+  After a harness's last `close()`, that is another claude-sdk executor's with
+  the same temp dir; if none runs, it stays until deleted.
+  - On a host where several users share `/tmp` (Linux's default temp dir),
+    another user's entries count against the temp dir's 2 s. With enough of
+    them, the sweep can be delayed or kept from ever reaching this user's
+    dirs, and each connect and teardown then waits its full 2 s. A per-user
+    `TMPDIR` avoids this.
 - **The sandboxed CLI can change its own scratch.** It can write both its
   scratch and that scratch's claims.
   - It can keep the scratch after it exits: by removing or rewriting a claim,
@@ -2176,17 +2208,24 @@ the temp dir, except as listed here.
     link, so the CLI cannot make the sweep block, read another file, or
     remove another path.
 - **An unclaimed dir on seatbelt.** A seatbelt launcher killed after removing
-  its owner claim and before removing its dir leaves an unclaimed dir, empty
-  or holding only `.launch-target`, that is never swept. The window is two
-  syscalls, and the dir holds no data.
+  its owner claim and before removing its dir leaves an empty, unclaimed dir
+  that is never swept. The target's claim is removed first, so a kill between
+  the two removals leaves a dir that still names its owner and is swept. The
+  window is one syscall, and the dir holds no data.
 - **Orphaned CLI on macOS.** A CLI whose launcher was killed from outside
   keeps running until its stdin closes (measured before S116). Its scratch
   stays while it runs, because `.launch-target` names it, and goes at the
   first sweep after it exits. If the launcher died before naming it, or could
   not write the name (a failed write only logs a warning), the next sweep
   removes the scratch under it, and anything the CLI writes there
-  afterwards makes an unclaimed dir that is never swept. No ticket; a
-  follow-up is filed only if the CLI process itself proves to leak.
+  afterwards makes an unclaimed dir that is never swept.
+  - The integration check measured, with stand-ins, two cases in which a CLI
+    that ignores its input closing leaks:
+    - a graceful close, in which the SDK's close signals only the launcher.
+      S116's graceful-close wait now ends that tree;
+    - a killed harness. Nothing signals that CLI, and the in-wrap launcher
+      may signal only itself, so the launcher and the CLI keep running, and
+      their scratch stays while they do. CRL-185.
 - **Scope.** Only direct children of the harness's temp dir
   (`tempfile.gettempdir()`) and of the harness socket root are swept. These
   stay:
@@ -2225,8 +2264,14 @@ the temp dir, except as listed here.
     The sweep lock is per process, so a fork while a sweep holds it would
     skip that child's sweeps. No known production code forks such a process.
   - A sweep stuck in one blocking call, as on a stalled mount, keeps the
-    process's sweep lock: a cancelled `close()` or teardown waits for it with
-    no bound, and every later sweep of that process is skipped, so that
-    process removes nothing more.
+    process's sweep lock. A cancelled `close()` or teardown waits for it only
+    up to its own bound (2 s, or 10 s in `close()`), but every later sweep of
+    that process is skipped, so that process removes nothing more.
+  - The process manager's orphan sweep reads its `AP_PID` claims with
+    `read_owner_claim`. When that refuses a file (a link, a FIFO, an oversized
+    or foreign file), it falls back to its older plain integer read of the
+    same file, which follows links and can block on a FIFO
+    (`process_manager.py`). That fallback predates S116; it is not a
+    regression.
 - **Not run here.** Linux, whose rows run in CI only, and other macOS
   releases; no CI lane runs macOS (CRL-170).

@@ -7879,6 +7879,32 @@ async def test_a_sweep_waits_briefly_and_one_runs_at_a_time(monkeypatch, caplog)
         await asyncio.wait(background, timeout=10)
 
 
+# CORAL(S116): a cancelled caller waits for a stuck sweep only as long as its bound
+@pytest.mark.timeout(60)
+async def test_a_cancelled_caller_waits_for_a_stuck_sweep_only_its_bound(monkeypatch) -> None:
+    from omnigent.inner import claude_sdk_executor
+
+    started, release = threading.Event(), threading.Event()
+
+    def _stuck_sweep() -> None:
+        started.set()
+        release.wait(30)
+
+    monkeypatch.setattr(claude_sdk_executor, "_remove_orphaned_temp_dirs", _stuck_sweep)
+    caller = asyncio.create_task(claude_sdk_executor._sweep_orphaned_temp_dirs(0.5))
+    try:
+        assert await asyncio.to_thread(started.wait, 10)
+        caller.cancel()
+        done, _ = await asyncio.wait({caller}, timeout=5)
+        assert done, "a cancelled caller waited past its bound for a stuck sweep"
+        assert caller.cancelled()
+    finally:
+        release.set()
+        background = asyncio.all_tasks() - {asyncio.current_task()}
+        if background:
+            await asyncio.wait(background, timeout=10)
+
+
 # CORAL(S116): the sweep scans the harness socket root only as this user's private real dir
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
 @pytest.mark.parametrize("root", ["private", "symlink", "shared"])
