@@ -1425,6 +1425,20 @@ away from the user's Claude config files.
   the same way, so each connect also leaves one scratch. That one holds only
   a private dir with the empty `projects` file (seen with the real CLI in
   S113's tests). A killed harness leaves the executor's own dir (CRL-179).
+  Since S116 (CRL-179) each of these dirs names its owner. At its next
+  connect, client teardown or close, a claude-sdk executor removes those whose
+  owner has exited; after a killed harness, the next claude-sdk executor of
+  the same user with the same temp dir does. Still open, among the residuals
+  in "Addendum: CRL-179 launch temp dir cleanup": dirs made before S116; a
+  scratch its sandboxed CLI changed so the sweep keeps it (a claim removed or
+  rewritten, its mode changed, an entry the sweep cannot remove, or a tree of
+  64 or more nested dirs); a dir too large for one sweep, until later sweeps;
+  a scratch removed under a seatbelt CLI orphaned before its launcher named
+  it, which the CLI can recreate unclaimed; the launcher script; a scratch
+  under a `TMPDIR` set through the user settings `env`; an unclaimed dir left
+  when a seatbelt launcher is killed between removing its owner claim and
+  removing its dir; other agents whose grants cover the temp dir; and
+  Windows.
 - The CLI still receives the `env` block of the user's
   `~/.claude/settings.json`. The executor reads it outside the sandbox and
   merges it into the CLI's environment, minus the two config dir names and
@@ -1819,6 +1833,22 @@ listed here.
   - In QA, an interrupt in the middle of a real CLI turn left two launch
     scratches, each holding `claude_config_dir/.claude.json`: the seed copy,
     and the CLI's rewrite of it. `close()` had removed the seed dir.
+  - Since S116 (CRL-179) the scratch and the seed dir name their owner. At
+    its next connect, client teardown or close, a claude-sdk executor removes
+    those whose owner has exited, seed copies included; after a killed
+    harness, the next claude-sdk executor of the same user with the same temp
+    dir does. Still open, among the residuals in "Addendum: CRL-179 launch
+    temp dir cleanup": copies made before S116; a scratch its sandboxed CLI
+    changed so the sweep keeps it (a claim removed or rewritten, its mode
+    changed, an entry the sweep cannot remove, or a tree of 64 or more nested
+    dirs), with what is left in it, possibly the seed copy; a seed copy in a
+    dir too large for one sweep, until later sweeps; a scratch removed under a
+    seatbelt CLI orphaned before its launcher named it, which the CLI can
+    recreate unclaimed with its config; the launcher script, which holds no
+    seed; a scratch under a `TMPDIR` set through the user settings `env`; an
+    unclaimed dir left when a seatbelt launcher is killed between removing its
+    owner claim and removing its dir; other agents whose grants cover the
+    temp dir (next item); and Windows.
 - A spec whose `read_paths` cover the temp dir can read other executors'
   seeds (from code). A Claude CLI wrap with such a write grant is refused
   when its launcher is built, but another agent's sandboxed tool helper whose
@@ -1827,7 +1857,10 @@ listed here.
   (from code). The copy's owner and mode checks pass, because the files are
   the same user's, so a launch that copies a rewritten seed starts from it,
   still inside its own sandbox. Both are accepted residuals with no ticket of
-  their own; they belong with CRL-179's temp dir hygiene.
+  their own; they belong with CRL-179's temp dir hygiene. CRL-179 left both
+  unchanged: S116 removes the dirs of launches and harnesses that are gone,
+  but a seed and its live launches' copies still sit in the shared temp dir
+  while their executor runs, and such an agent can also change their claims.
 - A relative or empty forwarded `CLAUDE_CONFIG_DIR` is refused as the seed
   source, but the settings `env` merge still follows it into the working dir
   (CRL-182). An absolute one under a sandbox write root is not checked, so
@@ -1858,3 +1891,342 @@ listed here.
 **Open for the owner.** Whether to run Coral steps on untrusted content is
 the owner's risk decision, stated with its open tickets in "Addendum: CRL-166
 harness sockets on macOS". It is not decided here.
+
+## Addendum: CRL-179 launch temp dir cleanup (2026-11-22)
+
+CRL-179 removes the temp dirs that a stopped or killed claude-sdk CLI launch,
+or a killed harness, left in the shared temp dir. Since S113 a launch's
+scratch holds the CLI's private config dir, and since S115 that dir can hold a
+copy of the user's MCP servers with their secrets ("Addendum: CRL-176 Claude
+config isolation", "Addendum: CRL-178 Claude config isolation for every
+sandboxed agent"). Seam S116 (`.coral/seams.yaml`) changes
+`omnigent/inner/sandbox.py`, `omnigent/inner/seatbelt_sandbox.py`,
+`omnigent/inner/claude_sdk_executor.py`, `omnigent/inner/_proc.py` and
+`omnigent/native/owner_claim.py`. Every local measurement here was taken on
+macOS 27.2.1, with `claude-agent-sdk` 0.2.121, a `/bin/sh` stand-in CLI and
+throwaway homes, unless a real CLI is named. On Linux the behaviour is
+reasoned from the code; a bwrap test checks this in CI. No CI lane runs macOS
+(CRL-170).
+
+**Root cause.**
+
+- The launcher (`run_launcher` in `omnigent/inner/sandbox.py`) makes each
+  launch's scratch, `$TMPDIR/omnigent-osenv-*`, in its host pass, but only its
+  in-wrap pass removes it, in a `finally` that a signal skips. Nothing else
+  could tell a live scratch from a dead one.
+- The Agent SDK checks the CLI's version at every connect: it runs the
+  launcher with `-v`, reads one chunk and terminates it. So every connect left
+  a scratch, 20 of 20 measured. That launch copies no seed (S115).
+- The executor's teardown signals the CLI's process tree whenever it cannot
+  `disconnect()`: a force close from another task, a cancel eviction, a failed
+  connect. That scratch holds the seed copy and the CLI's state.
+- Every seatbelt launch left its profile dir, `omnigent-seatbelt-profiles-*`,
+  a clean one too (5 of 5), because the dir relied on `atexit`, which a
+  launcher that `exec`s never runs.
+- The executor's seed dir (`omnigent-claude-seed-*`) and a Coral unwrapped
+  CLI's config dir (`omnigent-claude-config-*`) relied on `close()` and
+  `__del__`, and a killed harness runs neither.
+
+Measured before S116, through the real executor and SDK with a stand-in CLI
+that answers the SDK's control requests:
+
+- One session, then `close()`, left one scratch and two profile dirs; two
+  sessions left two scratches and four profile dirs.
+- A force close from another task, or a cancel eviction, left two scratches,
+  one of them holding the seed copy, and one S109 launch dir.
+- A SIGKILLed harness left its seed dir, and a killed Coral harness whose CLI
+  ran unwrapped left its config dir.
+- The measuring host's shared test temp dir already held 847 scratches and
+  1,592 profile dirs from earlier runs.
+
+**Why not signal handlers in the launcher.**
+
+- On seatbelt the profile lets a process signal only itself, so the launcher
+  cannot forward a signal to its CLI: `kill` failed with `EPERM` (measured). A
+  handler that only exits makes `subprocess.run` try to kill the CLI, which
+  fails the same way, and then wait for it; with SIGINT the launcher did not
+  exit until the CLI's input closed (measured).
+- On bwrap the SDK's signal reaches bwrap's monitor, never the launcher inside
+  the namespace (from code).
+- SIGKILL, an OOM kill and a killed harness run no handler.
+
+So a sweep is needed in any design, and with the sweep a handler adds nothing.
+
+**S116 as built.**
+
+- **Owner claims.** Every dir the sweep covers names its owner in a
+  `.launch-owner` file: a pid, its pid namespace and, on Linux, the boot id
+  (`omnigent/native/owner_claim.py`).
+  - The launcher's host pass claims its scratch right after making it, before
+    S109's sweep and the exec into the wrap. The claim names the pid the SDK
+    holds, which every later exec keeps, in the harness's pid namespace. On
+    bwrap that pid becomes bwrap's monitor, which lives as long as the
+    namespace.
+  - The seatbelt backend claims its profile dir, and its `atexit` cleanup
+    removes the claim with the dir.
+  - The executor claims its seed dir at each `mkdir`, and the unwrapped
+    config dir when it makes it.
+  - On seatbelt the in-wrap pass also writes its CLI's pid as `.launch-target`
+    in its claimed dirs, because there the CLI can outlive its launcher.
+  - Every claim, S109's included, is created exclusively, mode 0600, without
+    following a link (`create_owner_claim`). A failed write logs a warning
+    naming no path and leaves that dir unclaimed and never swept; S109 keeps
+    its own rule and gives that launch no launch dir.
+- **The in-wrap cleanup keeps the claims.** For a claimed dir it removes
+  everything else first. On seatbelt it then removes the claims and the dir.
+  On bwrap the scratch is a bind-mount point it cannot remove, so it leaves
+  the claims for the executor's sweep. The cleanup never deletes a claim while
+  its dir stays.
+- **What the sweep looks at.** S109's `_remove_orphaned_launch_tmpdirs` takes
+  a name pattern. The executor runs it over the temp dir
+  (`tempfile.gettempdir()`) for `omnigent-osenv-`,
+  `omnigent-seatbelt-profiles-`, `omnigent-claude-seed-` and
+  `omnigent-claude-config-` names, each with the exact random part its maker
+  uses. It also runs it over the harness socket root for S109's `c????????`
+  launch dirs, but only if that root is this user's private real dir.
+- **What it removes.** A direct child goes only when its name matches exactly,
+  it is this user's real 0700 dir by `lstat`, and its owner, and its recorded
+  target if any, are gone in this boot and pid namespace.
+  - A pid is gone only when `os.kill(pid, 0)` fails with `ESRCH` or psutil
+    sees a zombie. `EPERM`, or a process psutil cannot see, counts as alive.
+  - A claim counts only as this user's regular file of at most 4 KiB, opened
+    without following a link or blocking. Anything else leaves the dir
+    unclaimed, and an unclaimed dir is kept. The check is in
+    `read_owner_claim`, so the terminal reaper and the process manager get it
+    too.
+  - Entries go bottom-up relative to the dir's descriptor, never through a
+    link, and the claims last. A dir that cannot be emptied keeps its claims,
+    and one that cannot be removed once emptied gets them back, so the next
+    sweep retries.
+- **Bounds.** Each root's sweep stops at a 2 s deadline, checked at every
+  entry (listing one dir is not interrupted), or after 64 removals, and a
+  dir's removal stops at a dir 64 levels down. Sweeps run off the event loop,
+  one at a time per process. The sweep does nothing without
+  `os.getuid` (Windows) and never raises. It logs counts and exception types,
+  never paths.
+- **When it runs.** After each successful connect, at the end of every client
+  teardown (`_force_close_client`, which a failed connect also reaches), and
+  at the end of `close()`.
+  - A connect or teardown waits up to 2 s for its sweep, which then goes on
+    in the background, and skips it while another sweep of the process runs.
+  - `close()` first waits up to 10 s for pending cancel evictions, then up to
+    10 s for its own sweep, including its turn.
+- **Force close.** `_force_close_client` now snapshots the CLI's process tree
+  before it signals. It waits up to 5 s in all for every member (a zombie
+  counts as gone), SIGKILLs what is left, waits at most 1 s more, and only
+  then sweeps.
+- **Unchanged.** `SandboxPolicy` and its wire format, the wrap argv and
+  profile, `create_private_tmpdir`, the launcher script and the executor's
+  public API.
+
+**What was measured, and what is reasoned.** On macOS 27.2.1; Linux only
+where stated.
+
+- **The done-when test.**
+  `tests/inner/sandbox/test_sandbox_behavior.py::test_a_closed_executor_leaves_no_launch_scratch`
+  drives the real executor, Agent SDK and launcher with a POSIX `sh` stand-in
+  CLI that answers the SDK's control requests.
+  - It plants a scratch claimed by an exited process, holding
+    `claude_config_dir/.claude.json`, and a seed dir claimed by the live test
+    process.
+  - Two sessions of a seeded agent connect. Each connect adds exactly one
+    scratch, because its version check's scratch was swept, and both hold
+    the seed copy. The planted dead scratch is gone.
+  - One session is force-closed from another task, and its scratch is gone
+    when that close returns. `close()` closes the other, and its scratch is
+    gone too.
+  - Afterwards no scratch and no S109 launch dir remain, the live seed dir is
+    kept, and every profile dir left is the test process's own.
+  - On the code before S116 its seatbelt row failed with "the version check's
+    launch stayed: 2 new".
+- **The killed version check.**
+  `test_a_killed_version_check_leaves_no_copy_of_the_seed` kills the version
+  check by the SDK's terminate and by the executor's signal to the whole tree,
+  with a stand-in that ignores SIGTERM. The scratch stays and names the pid
+  the test spawned. On seatbelt a sweep keeps it while the stand-in still
+  runs, and after the stand-in exits a sweep removes it.
+- Both behaviour tests' `darwin_seatbelt` rows ran locally only; their
+  `linux_bwrap` rows run in CI (below).
+- **Unit tests.** In `tests/inner/test_sandbox.py`: the name pattern
+  (`test_the_orphan_sweep_takes_a_name_pattern`), kernel liveness
+  (`test_a_claimed_process_is_gone_only_when_the_kernel_says_so`), the
+  in-wrap cleanup's seatbelt and bwrap rules and one cut short
+  (`test_the_in_wrap_cleanup_never_drops_a_claim_while_its_dir_stays`), the
+  retries (`test_a_dir_the_sweep_cannot_empty_keeps_its_claim_for_the_next_sweep`,
+  `test_a_dir_that_cannot_go_once_emptied_gets_its_claims_back`), the bounds
+  (`test_a_sweep_stops_at_its_budget_and_the_next_goes_on`,
+  `test_a_sweep_stops_at_its_deadline_inside_a_dir`,
+  `test_a_dead_tree_past_the_depth_cap_is_left_and_counted`), Windows
+  (`test_the_sweep_does_nothing_where_there_are_no_owner_uids`) and a planted
+  link at each launcher claim (`test_each_launcher_claim_refuses_a_planted_link`).
+  In `tests/native/test_owner_claim.py`: a FIFO, a link to `/dev/zero`, an
+  oversized file and another user's file are no claim
+  (`test_a_claim_that_is_not_this_users_small_regular_file_is_unknown`). In
+  `tests/inner/test_claude_sdk_executor.py`: the three sweep points
+  (`test_each_sweep_point_removes_only_dead_owners_temp_dirs`), the force
+  close (`test_a_force_close_waits_for_the_whole_process_tree`) and the
+  executor's claims (`test_the_executors_claims_refuse_a_planted_link`). In
+  `tests/inner/test_seatbelt_sandbox.py`: the profile dir's claim and its
+  `atexit` removal
+  (`test_a_profile_dir_names_its_owner_and_atexit_still_removes_it`).
+- **A real CLI.** Both executor tests in
+  `tests/e2e/coral/test_tier_b_executor.py` also assert that `close()` leaves
+  no scratch. They ran locally with claude 2.1.325, a throwaway home and the
+  mock model, and are in no CI lane.
+- **Bounds.** A dead scratch with 100,000 files went in four sweeps (2.04,
+  2.03, 2.00 and 0.23 s). One holding a 1,500-deep chain was kept as too deep
+  in 0.006 s. A dry scan of a 3,799-entry temp dir took 21-23 ms.
+- **Races, from probes on seatbelt.** In 200 of 200 `-v` launches, a SIGTERM
+  sent as the SDK sends it landed before the in-wrap cleanup started. In 200
+  of 200 launches under CPU load, `.launch-target` named the CLI before its
+  first line of output.
+- **Reasoned from code; a bwrap test checks this in CI.** On bwrap the claim,
+  written in the host pass, names bwrap's monitor in the harness's pid
+  namespace, and `--die-with-parent` ends the namespace with that pid. The
+  in-wrap cleanup empties the scratch, a bind-mount point, and keeps its
+  claims, so the teardown sweep removes it. The `linux_bwrap` rows of both
+  behaviour tests run in CI's `inner-rest` lane.
+  On Linux a `/proc` mounted `hidepid` cannot make a live owner look gone,
+  because `os.kill` decides (from code).
+
+**Collateral.**
+
+- A client teardown that finds the CLI still running (a force close, a cancel
+  eviction, a failed connect) now waits up to 5 s for every process of its
+  tree, MCP servers that outlive the CLI included, then SIGKILLs the rest and
+  waits at most 1 s more. Before, a tree still running after 5 s was left
+  running.
+- A connect and each client teardown wait up to 2 s for their sweep.
+  `close()` can take up to 10 s longer to wait for cancel evictions, and up to
+  10 s for its last sweep.
+- `.launch-owner` files now sit in each scratch root (the CLI's `$TMPDIR`),
+  the seed dir, the unwrapped config dir and the profile dir, and on seatbelt
+  `.launch-target` too. The CLI ignores them. Inside bwrap, the scratch's
+  claim shows the launcher's host pid, the host pid namespace and the boot id;
+  that is accepted as low value.
+- The other users of the launcher, the ACP, pi, qwen, kimi and goose
+  executors and the tmux terminal, now claim their scratch too, and a
+  claude-sdk executor's sweep removes theirs once their launcher is gone (from
+  code).
+
+**What users see.** Copies of the user's MCP server secrets no longer pile up
+in the temp dir. Once a launch has exited, its dirs go at its executor's next
+connect, client teardown or close; a dir too large for one sweep goes over
+several. After a killed runner they go when the next claude-sdk agent of the
+same user on the host connects or closes with the same temp dir. Dirs left
+before CRL-179 stay until deleted; the other exceptions are listed under
+Residuals.
+
+**Residuals.** S116 removes what a launch or a harness that is gone left in
+the temp dir, except as listed here.
+
+- **Dirs from before S116.** Temp dirs made before S116, or by a build without
+  it, carry no owner claim, and the sweep never removes them. Remove them by
+  hand only with every Omnigent server, runner and agent of yours on the host
+  stopped: a running one's scratch, seed and config dirs have the same names,
+  and a CLI whose dir is removed under it can recreate it, unclaimed. Remove
+  only your own `omnigent-osenv-*`, `omnigent-claude-seed-*`,
+  `omnigent-claude-config-*` and `omnigent-seatbelt-profiles-*` dirs in the
+  temp dir. No ticket.
+- **Killed harness.** After a harness is killed, these stay:
+  - its seed dir (a copy of the user's MCP servers with their secrets);
+  - the unwrapped CLI's config dir;
+  - its seatbelt profile dirs;
+  - on bwrap, its launches' scratches; on seatbelt, those of launches killed
+    with it, seed copies included, as by a kill of its process group, the
+    close of its terminal or launchd ending its job's process group. The SDK
+    starts the launcher in the harness's process group (from code). A
+    seatbelt launch that outlives the harness still removes its own scratch
+    when its input closes (measured before S116).
+
+  They stay until another claude-sdk executor of the same user connects or
+  closes with the same temp dir, pid namespace and boot. If none does, they
+  stay until deleted or until the OS cleans the temp dir.
+- **Launch killed while its executor idles.** A launch killed from outside (an
+  OOM kill, a user's `kill`) keeps its scratch, with the seed copy, until its
+  executor next connects, tears down a client or closes, or another executor
+  does.
+- **A skipped sweep.** A connect or teardown that finds another sweep of its
+  process running skips its own and does not make it up. A dir that sweep had
+  already passed waits for the next sweep. `close()` waits up to 10 s for its
+  turn, so it skips only behind a sweep stuck that long (see "Smaller
+  limits").
+- **A sweep's budget.** One sweep removes at most 64 dirs per root and stops
+  after 2 s. A dead scratch with tens of thousands of files, such as a package
+  tree a tool unpacked in `$TMPDIR`, needs several sweeps (100,000 files took
+  four), and its seed copy can be among the entries left. So can a backlog of
+  more than 64 dead dirs. What is left waits for the next sweep. After a
+  harness's last `close()`, that is another claude-sdk executor's with the
+  same temp dir; if none runs, it stays until deleted.
+- **The sandboxed CLI can change its own scratch.** It can write both its
+  scratch and that scratch's claims.
+  - It can keep the scratch after it exits: by removing or rewriting a claim,
+    by changing the dir's mode, or by leaving an entry the sweep cannot
+    remove, such as a read-only subdir. Tools can leave one by accident: Go's
+    module cache is read-only.
+  - A tree of 64 or more nested dirs stops its dir's removal at that entry.
+    The entries not yet removed, possibly the seed copy, stay, and each later
+    sweep stops at the same entry. Only a process that can write in that
+    scratch can make one, on purpose or by accident: code in that launch's
+    sandbox, an agent whose grants cover the temp dir, or an unsandboxed
+    process of the user.
+  - It can have the scratch removed while it runs, by naming a dead pid.
+  - With default grants, none of this touches another launch's dirs.
+  - The sweep reads a claim only as a small regular file and never follows a
+    link, so the CLI cannot make the sweep block, read another file, or
+    remove another path.
+- **An unclaimed dir on seatbelt.** A seatbelt launcher killed after removing
+  its owner claim and before removing its dir leaves an unclaimed dir, empty
+  or holding only `.launch-target`, that is never swept. The window is two
+  syscalls, and the dir holds no data.
+- **Orphaned CLI on macOS.** A CLI whose launcher was killed from outside
+  keeps running until its stdin closes (measured before S116). Its scratch
+  stays while it runs, because `.launch-target` names it, and goes at the
+  first sweep after it exits. If the launcher died before naming it, or could
+  not write the name (a failed write only logs a warning), the next sweep
+  removes the scratch under it, and anything the CLI writes there
+  afterwards makes an unclaimed dir that is never swept. No ticket; a
+  follow-up is filed only if the CLI process itself proves to leak.
+- **Scope.** Only direct children of the harness's temp dir
+  (`tempfile.gettempdir()`) and of the harness socket root are swept. These
+  stay:
+  - a scratch made under a `TMPDIR` from the user's settings `env`, which
+    lands outside the swept temp dir;
+  - `omnigent-osenv-*` dirs that other code makes without the launcher (the
+    os_env helper, the codex worker, the terminal), which carry no claim and
+    which only their owners remove, so a killed owner leaves them; they hold
+    no seed copy;
+  - a dir in a temp dir shared with another pid namespace or, on Linux,
+    another boot or machine, which is never judged gone;
+  - a dir whose claim was written where Linux could not read the pid
+    namespace or boot id.
+
+  Do not share a temp dir between machines: on macOS a claim carries no boot
+  id, so another Mac's live dir can be judged gone.
+- **Pid reuse.** If a dead owner's pid is in use again, the owner's dirs stay
+  until that process exits. Pid reuse never removes a dir.
+- **Exposure while running.** While an executor runs, its seed and its live
+  launches' scratches stay in the shared temp dir. Other agents whose sandbox
+  grants cover the temp dir can read and write them (ADR-05's accepted
+  residual, in "Addendum: CRL-178 Claude config isolation for every sandboxed
+  agent"; S116 does not change it). They can also change these dirs' claims,
+  so a dir stays after its owner exits or goes while it runs. Code in a
+  launch's own sandbox can read its seed copy (CRL-167).
+- **Windows.** On Windows the claims and the sweep do nothing; leftovers there
+  are unchanged. No ticket.
+- **Launcher script.** `omnigent-sandbox-*.sh` holds the encoded policy and no
+  secrets. Only the executor's `__del__` removes it, so it can outlive
+  `close()`, and a killed harness leaves it (from code). No ticket.
+- **Smaller limits, from code.**
+  - The profile dir's `atexit` cleanup removes its claim before its `rmdir`.
+    If the dir still holds an entry, it stays unclaimed; it holds no secret.
+  - A process forked after it made its profile dir shares that dir with its
+    parent, and a sweep can remove it under the child once the parent exits.
+    The sweep lock is per process, so a fork while a sweep holds it would
+    skip that child's sweeps. No known production code forks such a process.
+  - A sweep stuck in one blocking call, as on a stalled mount, keeps the
+    process's sweep lock: a cancelled `close()` or teardown waits for it with
+    no bound, and every later sweep of that process is skipped, so that
+    process removes nothing more.
+- **Not run here.** Linux, whose rows run in CI only, and other macOS
+  releases; no CI lane runs macOS (CRL-170).
