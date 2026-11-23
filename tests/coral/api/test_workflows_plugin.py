@@ -2,23 +2,34 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+import coral.api.run_service as run_service
+from coral.api.errors import CoralApiError
+from coral.api.run_service import InFlight
+from coral.api.workflows import MAX_SIMULATIONS, MAX_SIMULATIONS_PER_USER
 from coral.db.enum_codecs import AlertKind
 from coral.db.migrate import ensure_coral_schema
-from coral.omni.server.plugin import register
+from coral.omni.protocols import Viewer
+from coral.omni.server.plugin import register, simulations_lifespan
 from coral.stores.alerts import SqlAlchemyAlertStore
 from coral.stores.runs import SqlAlchemyCoralRunStore
 from omnigent.db.db_models import DEFAULT_WORKSPACE_ID, workspace_scope
 from omnigent.process_logging import DATA_DIR_ENV_VAR
 from omnigent.server.auth import UnifiedAuthProvider
+from tests._helpers.polling import poll_until_async
+from tests.budgets import budget
 from tests.coral.workflow_builders import fixture_text
 from tests.stores.coral._alerts import (
     OTHER_WORKSPACE,
@@ -48,8 +59,77 @@ def test_plugin_mounts_workflows_router_backed_by_sqlite(
     validated = client.post("/v1/coral/workflows:validate", json={"yaml": fixture_text("minimal")})
     assert validated.json()["compiled"]["workflow_id"] == "demo"
     saved = client.post("/v1/coral/workflows", json={"yaml": fixture_text("minimal")}).json()
-    assert [item["id"] for item in client.get("/v1/coral/workflows").json()] == [saved["id"]]
+    [template] = client.get("/v1/coral/templates").json()
+    used = client.post(f"/v1/coral/templates/{template['id']}:use", json={})
+    assert used.status_code == 201, used.text
+    assert sorted(item["id"] for item in client.get("/v1/coral/workflows").json()) == sorted(
+        [saved["id"], used.json()["id"]]
+    )
     assert (tmp_path / "coral.db").exists()
+
+
+async def test_the_plugin_simulates_only_while_its_lifespan_holds_the_simulate_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    services = cast(Any, SimpleNamespace(host_sharded=False, server_config={}, auth_provider=None))
+    # The server enters the hooks the plugin registers.
+    assert simulations_lifespan in register(services).lifespan_hooks
+    app = _plugin_app(auth_provider=None)
+    body = {"yaml": fixture_text("minimal")}
+    simulate = "/v1/coral/workflows:simulate"
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        before = await client.post(simulate, json=body)
+        async with simulations_lifespan(app, services):
+            in_flight = app.state.coral_simulations
+            during = await client.post(simulate, json=body)
+        after = await client.post(simulate, json=body)
+
+    for refused in (before, after):
+        assert (refused.status_code, refused.json()["error"]["code"]) == (503, "server_busy")
+    assert during.status_code == 200, during.text
+    assert during.json()["simulation"]["outcome"] == "completed"
+    assert isinstance(in_flight, InFlight) and in_flight.closed
+
+
+async def test_the_plugins_simulate_pool_takes_one_per_user_and_four_in_all(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=run_service.__name__)
+    services = cast(Any, SimpleNamespace(host_sharded=False, server_config={}, auth_provider=None))
+    app = FastAPI()
+    release = threading.Event()
+    held: list[asyncio.Task[bool]] = []
+    assert (MAX_SIMULATIONS_PER_USER, MAX_SIMULATIONS) == (1, 4)
+
+    async with simulations_lifespan(app, services):
+        pool: InFlight = app.state.coral_simulations
+
+        async def hold(*users: str) -> None:
+            for user in users:
+                held.append(asyncio.create_task(pool.run(Viewer(user), release.wait, budget(30))))
+            await poll_until_async(lambda: pool.in_flight == len(held), timeout_s=budget(10))
+
+        try:
+            await hold("alice")
+            # The pool has room, but not for a second of one user's.
+            with pytest.raises(CoralApiError) as alices_second:
+                await pool.run(Viewer("alice"), lambda: None)
+            await hold("bob", "carol", "dave")
+            with pytest.raises(CoralApiError) as a_fifth:
+                await pool.run(Viewer("erin"), lambda: None)
+        finally:
+            release.set()
+            finished = await asyncio.gather(*held)
+
+    assert (alices_second.value.status, a_fifth.value.status) == (503, 503)
+    assert finished == [True] * MAX_SIMULATIONS
+    messages = [record.getMessage() for record in caplog.records]
+    refusals = [message for message in messages if "refused" in message]
+    assert len(refusals) == 2
+    assert all(message.startswith("Coral refused a simulation:") for message in refusals)
 
 
 def _in_workspace(app: ASGIApp, workspace_id: int) -> ASGIApp:

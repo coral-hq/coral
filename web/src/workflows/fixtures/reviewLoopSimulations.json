@@ -1,0 +1,467 @@
+{
+  "compiled": {
+    "ir_version": 1,
+    "workflow_id": "implement-review-loop",
+    "name": "Implement with review loop",
+    "description": "An implementer makes the change, a read-only reviewer approves it or asks for changes, up to three passes, then you approve or reject the result.",
+    "nodes": [
+      {
+        "id": "start",
+        "kind": "start",
+        "name": null,
+        "goal": null,
+        "question": null,
+        "prompt": null,
+        "roster": [],
+        "harness": null,
+        "attempts": null,
+        "concurrency": null,
+        "list_from": null,
+        "parts": [],
+        "outcomes": [],
+        "evidence": null
+      },
+      {
+        "id": "implement",
+        "kind": "step",
+        "name": "Implement",
+        "goal": "Make the change the run's request describes. Run the project's tests, lint and format checks for what you changed and fix what fails. On a later pass, address every finding in the reviewer's handoff first. Hand off with what you changed and how you checked it.",
+        "question": null,
+        "prompt": null,
+        "roster": ["implementer"],
+        "harness": null,
+        "attempts": 3,
+        "concurrency": 1,
+        "list_from": null,
+        "parts": [],
+        "outcomes": [],
+        "evidence": null
+      },
+      {
+        "id": "review",
+        "kind": "step",
+        "name": "Review",
+        "goal": "Review the change against the run's request without changing any file. Hand off with the label approved when it is ready, or changes_requested with each finding and its file and line.",
+        "question": null,
+        "prompt": null,
+        "roster": ["reviewer"],
+        "harness": null,
+        "attempts": 3,
+        "concurrency": 1,
+        "list_from": null,
+        "parts": [],
+        "outcomes": [],
+        "evidence": null
+      },
+      {
+        "id": "approve_change",
+        "kind": "gate",
+        "name": "Approve change",
+        "goal": null,
+        "question": null,
+        "prompt": "Approve the change?",
+        "roster": [],
+        "harness": null,
+        "attempts": null,
+        "concurrency": null,
+        "list_from": null,
+        "parts": [],
+        "outcomes": ["approve", "reject"],
+        "evidence": null
+      },
+      {
+        "id": "end",
+        "kind": "end",
+        "name": null,
+        "goal": null,
+        "question": null,
+        "prompt": null,
+        "roster": [],
+        "harness": null,
+        "attempts": null,
+        "concurrency": null,
+        "list_from": null,
+        "parts": [],
+        "outcomes": [],
+        "evidence": null
+      }
+    ],
+    "arrows": [
+      {
+        "id": "a1",
+        "source": "start",
+        "target": "implement",
+        "label": null,
+        "kind": "forward",
+        "limit": null,
+        "at_limit": null
+      },
+      {
+        "id": "a2",
+        "source": "implement",
+        "target": "review",
+        "label": null,
+        "kind": "forward",
+        "limit": null,
+        "at_limit": null
+      },
+      {
+        "id": "a3",
+        "source": "review",
+        "target": "approve_change",
+        "label": "approved",
+        "kind": "forward",
+        "limit": null,
+        "at_limit": null
+      },
+      {
+        "id": "a4",
+        "source": "review",
+        "target": "implement",
+        "label": "changes_requested",
+        "kind": "back",
+        "limit": 3,
+        "at_limit": "a7"
+      },
+      {
+        "id": "a5",
+        "source": "approve_change",
+        "target": "end",
+        "label": "approve",
+        "kind": "forward",
+        "limit": null,
+        "at_limit": null
+      },
+      {
+        "id": "a6",
+        "source": "approve_change",
+        "target": "end",
+        "label": "reject",
+        "kind": "forward",
+        "limit": null,
+        "at_limit": null
+      },
+      {
+        "id": "a7",
+        "source": "review",
+        "target": "approve_change",
+        "label": null,
+        "kind": "at_limit",
+        "limit": null,
+        "at_limit": null
+      }
+    ],
+    "content_hash": "d7f4e9feb10a96d36410cefdd32956c938daf53a95e27e636417f911745b337e",
+    "analysis": {
+      "join_types": [
+        {
+          "node_id": "approve_change",
+          "join_type": "xor",
+          "arrow_ids": ["a3", "a7"],
+          "split_node_id": null
+        },
+        { "node_id": "end", "join_type": "xor", "arrow_ids": ["a5", "a6"], "split_node_id": null }
+      ],
+      "loops": [
+        {
+          "back_arrow_id": "a4",
+          "head": "implement",
+          "tail": "review",
+          "body": ["implement", "review"],
+          "limit": 3,
+          "at_limit_arrow_id": "a7",
+          "entry_arrow_ids": ["a1"]
+        }
+      ],
+      "regions": [],
+      "unresolved": [],
+      "label_sets": [
+        {
+          "node_id": "start",
+          "labels": [],
+          "labelled_arrow_ids": [],
+          "unlabelled_arrow_ids": ["a1"]
+        },
+        {
+          "node_id": "implement",
+          "labels": [],
+          "labelled_arrow_ids": [],
+          "unlabelled_arrow_ids": ["a2"]
+        },
+        {
+          "node_id": "review",
+          "labels": ["approved", "changes_requested"],
+          "labelled_arrow_ids": ["a3", "a4"],
+          "unlabelled_arrow_ids": []
+        },
+        {
+          "node_id": "approve_change",
+          "labels": ["approve", "reject"],
+          "labelled_arrow_ids": ["a5", "a6"],
+          "unlabelled_arrow_ids": []
+        }
+      ],
+      "checked_parts": [],
+      "requires_structure_runtime": false
+    }
+  },
+  "simulations": {
+    "needs_review": {
+      "outcome": "needs_input",
+      "steps": [
+        {
+          "node_id": "implement",
+          "activation_id": "implement||a4:1",
+          "kind": "step",
+          "result": "done"
+        }
+      ],
+      "loops": [
+        { "back_arrow_id": "a4", "iteration_path": [], "passes": 1, "limit": 3, "limit_hit": false }
+      ],
+      "gates_reached": [],
+      "limits_hit": [],
+      "step_activations": 2,
+      "sessions": { "anchor": 1, "orchestrator": 0, "steps": 2, "total": 3 },
+      "needs_input": {
+        "node_id": "review",
+        "activation_id": "review||a4:1",
+        "kind": "label",
+        "allowed_values": ["approved", "changes_requested"]
+      },
+      "rejection": null,
+      "unsupported_effect": null,
+      "stall_code": null,
+      "stopped_by": null,
+      "unconsumed": [],
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "review||a4:1", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "review||a4:1:0", "status": "working", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      },
+      "trace_digest": "525f3002b46e73c72126cb97558d53b87c09b5b636c32395a3c19cea300bc00f",
+      "entries": 8
+    },
+    "needs_gate": {
+      "outcome": "needs_input",
+      "steps": [
+        {
+          "node_id": "implement",
+          "activation_id": "implement||a4:1",
+          "kind": "step",
+          "result": "done"
+        },
+        {
+          "node_id": "review",
+          "activation_id": "review||a4:1",
+          "kind": "step",
+          "result": "approved"
+        }
+      ],
+      "loops": [
+        { "back_arrow_id": "a4", "iteration_path": [], "passes": 1, "limit": 3, "limit_hit": false }
+      ],
+      "gates_reached": ["approve_change"],
+      "limits_hit": [],
+      "step_activations": 2,
+      "sessions": { "anchor": 1, "orchestrator": 0, "steps": 2, "total": 3 },
+      "needs_input": {
+        "node_id": "approve_change",
+        "activation_id": "approve_change||",
+        "kind": "gate",
+        "allowed_values": ["approve", "reject"]
+      },
+      "rejection": null,
+      "unsupported_effect": null,
+      "stall_code": null,
+      "stopped_by": null,
+      "unconsumed": [],
+      "view": {
+        "status": "running",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "review||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||", "status": "running", "outcome": null }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "review||a4:1:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": ["approve_change||:1"],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": ["watchdog_remind:approve_change||", "watchdog_alert:approve_change||"]
+      },
+      "trace_digest": "ab1a088ce982cad9618e8a583656c40a09b260167ee5f4fb4d7241d3f443227e",
+      "entries": 11
+    },
+    "approved": {
+      "outcome": "completed",
+      "steps": [
+        {
+          "node_id": "implement",
+          "activation_id": "implement||a4:1",
+          "kind": "step",
+          "result": "done"
+        },
+        {
+          "node_id": "review",
+          "activation_id": "review||a4:1",
+          "kind": "step",
+          "result": "approved"
+        },
+        {
+          "node_id": "approve_change",
+          "activation_id": "approve_change||",
+          "kind": "gate",
+          "result": "approve"
+        }
+      ],
+      "loops": [
+        { "back_arrow_id": "a4", "iteration_path": [], "passes": 1, "limit": 3, "limit_hit": false }
+      ],
+      "gates_reached": ["approve_change"],
+      "limits_hit": [],
+      "step_activations": 2,
+      "sessions": { "anchor": 1, "orchestrator": 0, "steps": 2, "total": 3 },
+      "needs_input": null,
+      "rejection": null,
+      "unsupported_effect": null,
+      "stall_code": null,
+      "stopped_by": null,
+      "unconsumed": [],
+      "view": {
+        "status": "completed",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "review||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||", "status": "closed", "outcome": "completed" },
+          { "id": "end||", "status": "closed", "outcome": "completed" }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "review||a4:1:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 1 }
+        ],
+        "armed_timer_keys": []
+      },
+      "trace_digest": "e8d31b5d18bc88be94cf0849ba316a66350a62579508224f457c0ada5d0af300",
+      "entries": 12
+    },
+    "changes_to_limit": {
+      "outcome": "completed",
+      "steps": [
+        {
+          "node_id": "implement",
+          "activation_id": "implement||a4:1",
+          "kind": "step",
+          "result": "done"
+        },
+        {
+          "node_id": "review",
+          "activation_id": "review||a4:1",
+          "kind": "step",
+          "result": "changes_requested"
+        },
+        {
+          "node_id": "implement",
+          "activation_id": "implement||a4:2",
+          "kind": "step",
+          "result": "done"
+        },
+        {
+          "node_id": "review",
+          "activation_id": "review||a4:2",
+          "kind": "step",
+          "result": "changes_requested"
+        },
+        {
+          "node_id": "implement",
+          "activation_id": "implement||a4:3",
+          "kind": "step",
+          "result": "done"
+        },
+        {
+          "node_id": "review",
+          "activation_id": "review||a4:3",
+          "kind": "step",
+          "result": "changes_requested"
+        },
+        {
+          "node_id": "approve_change",
+          "activation_id": "approve_change||",
+          "kind": "gate",
+          "result": "approve"
+        }
+      ],
+      "loops": [
+        { "back_arrow_id": "a4", "iteration_path": [], "passes": 3, "limit": 3, "limit_hit": true }
+      ],
+      "gates_reached": ["approve_change"],
+      "limits_hit": ["a4"],
+      "step_activations": 6,
+      "sessions": { "anchor": 1, "orchestrator": 0, "steps": 6, "total": 7 },
+      "needs_input": null,
+      "rejection": null,
+      "unsupported_effect": null,
+      "stall_code": null,
+      "stopped_by": null,
+      "unconsumed": [],
+      "view": {
+        "status": "completed",
+        "causes": [],
+        "activations": [
+          { "id": "start||", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "review||a4:1", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "review||a4:2", "status": "closed", "outcome": "completed" },
+          { "id": "implement||a4:3", "status": "closed", "outcome": "completed" },
+          { "id": "review||a4:3", "status": "closed", "outcome": "completed" },
+          { "id": "approve_change||", "status": "closed", "outcome": "completed" },
+          { "id": "end||", "status": "closed", "outcome": "completed" }
+        ],
+        "slots": [
+          { "id": "implement||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "review||a4:1:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:2:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "review||a4:2:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "implement||a4:3:0", "status": "closed", "pending_input": false, "drift": false },
+          { "id": "review||a4:3:0", "status": "closed", "pending_input": false, "drift": false }
+        ],
+        "open_decisions": [],
+        "open_gates": [],
+        "loop_pass_indexes": [
+          { "back_arrow_id": "a4", "item_path": [], "iteration_path": [], "pass_index": 3 }
+        ],
+        "armed_timer_keys": []
+      },
+      "trace_digest": "aa4a74d799ed3c99a5a370692714db0a2720c134ebac508702265fe42771165a",
+      "entries": 32
+    }
+  }
+}

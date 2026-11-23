@@ -6,13 +6,16 @@ vi.mock("@/lib/identity", () => ({ authenticatedFetch }));
 
 import {
   WorkflowsApiError,
+  createFromTemplate,
   getWorkflowByKey,
   listTemplates,
   listWorkflows,
+  simulateWorkflow,
   validateWorkflow,
 } from "./client";
 
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers });
 
 beforeEach(() => authenticatedFetch.mockReset());
 
@@ -48,8 +51,72 @@ describe("workflows client", () => {
     await expect(validateWorkflow("x")).rejects.toMatchObject({ status: 500 });
   });
 
-  it("serves templates locally until their API exists", async () => {
-    expect((await listTemplates())[0].id).toBe("pr-review");
-    expect(authenticatedFetch).not.toHaveBeenCalled();
+  it("lists the server's templates and rejects a payload that is not a list", async () => {
+    const template = { id: "implement-review-loop", name: "N", description: "D", yaml: "y" };
+    authenticatedFetch.mockResolvedValueOnce(json([template]));
+    expect(await listTemplates()).toEqual([template]);
+    const [url, init] = authenticatedFetch.mock.calls[0];
+    expect(url).toBe("/v1/coral/templates");
+    expect(init.method).toBeUndefined();
+
+    authenticatedFetch.mockResolvedValueOnce(json({ templates: [] }));
+    await expect(listTemplates()).rejects.toBeInstanceOf(WorkflowsApiError);
+  });
+
+  it("makes a copy of a template by posting an empty JSON object to its use route", async () => {
+    // WHY: the route takes an empty JSON body, and a cross-site form post is refused.
+    authenticatedFetch.mockResolvedValue(json({ workflow_key: "implement-review-loop-2" }, 201));
+    expect((await createFromTemplate("implement-review-loop")).workflow_key).toBe(
+      "implement-review-loop-2",
+    );
+    const [url, init] = authenticatedFetch.mock.calls[0];
+    expect(url).toBe("/v1/coral/templates/implement-review-loop:use");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({ "Content-Type": "application/json" });
+    expect(JSON.parse(init.body)).toEqual({});
+  });
+
+  it("encodes the template id into one path segment", async () => {
+    authenticatedFetch.mockResolvedValue(json({ workflow_key: "k" }, 201));
+    await createFromTemplate("a/b?c#d");
+    expect(authenticatedFetch.mock.calls[0][0]).toBe("/v1/coral/templates/a%2Fb%3Fc%23d:use");
+  });
+
+  it("posts the YAML and the script to the simulate endpoint", async () => {
+    const response = { valid: false, runnable: false, load_error: { message: "x" } };
+    authenticatedFetch.mockResolvedValue(json(response));
+    const controller = new AbortController();
+    const script = {
+      inputs: [{ node_id: "review", kind: "label" as const, values: ["approved"] }],
+    };
+    expect(await simulateWorkflow("id: demo", script, controller.signal)).toEqual(response);
+    const [url, init] = authenticatedFetch.mock.calls[0];
+    expect(url).toBe("/v1/coral/workflows:simulate");
+    expect(init.method).toBe("POST");
+    expect(init.signal).toBe(controller.signal);
+    expect(JSON.parse(init.body)).toEqual({ yaml: "id: demo", script });
+  });
+
+  it("keeps a refusal's status, Retry-After and code", async () => {
+    // WHY: only a 503 whose code is server_busy is waited out and posted again.
+    const envelope = { error: { code: "server_busy", message: "Busy.", details: null } };
+    authenticatedFetch.mockResolvedValueOnce(json(envelope, 503, { "Retry-After": "2" }));
+    await expect(simulateWorkflow("x", { inputs: [] })).rejects.toMatchObject({
+      name: "WorkflowsApiError",
+      status: 503,
+      retryAfterMs: 2000,
+      code: "server_busy",
+    });
+    authenticatedFetch.mockResolvedValueOnce(json({}, 404));
+    await expect(createFromTemplate("nope")).rejects.toMatchObject({
+      status: 404,
+      retryAfterMs: null,
+      code: null,
+    });
+    authenticatedFetch.mockResolvedValueOnce(new Response("Service Unavailable", { status: 503 }));
+    await expect(simulateWorkflow("x", { inputs: [] })).rejects.toMatchObject({
+      status: 503,
+      code: null,
+    });
   });
 });

@@ -8,7 +8,12 @@ from pydantic import ValidationError
 
 from coral.model import LoadError, load
 from coral.model.authoring import StepNode
-from coral.model.loader import MAX_DEPTH, MAX_DOCUMENT_BYTES, _CoralYamlLoader
+from coral.model.loader import (
+    MAX_DEPTH,
+    MAX_DOCUMENT_BYTES,
+    _CoralYamlLoader,
+    load_yaml_data,
+)
 from tests.coral.workflow_builders import fixture_text, load_ok
 
 _HEADER = "id: demo\nname: Demo\n"
@@ -175,3 +180,115 @@ def test_authoring_validation_error_type_is_pydantic() -> None:
 
     with pytest.raises(ValidationError):
         Workflow.model_validate({"id": "runs", "name": "x", "nodes": [], "arrows": []})
+
+
+@pytest.mark.parametrize(
+    ("value", "code"),
+    [
+        ("2026-13-45", "invalid_yaml"),
+        ("9" * 5000, "invalid_yaml"),
+        ("0x" + "f" * 4000, "invalid_yaml"),
+        ("0" + "7" * 70, "invalid_yaml"),
+        ("1" + ":30" * 40, "invalid_yaml"),
+        ("x\ud800", "invalid_text"),
+    ],
+    ids=[
+        "impossible_date",
+        "too_many_digits",
+        "long_hex",
+        "long_octal",
+        "long_base_60",
+        "lone_surrogate",
+    ],
+)
+def test_an_unreadable_value_is_a_load_error_that_does_not_quote_it(value: str, code: str) -> None:
+    error = _expect_error(f"{_HEADER}description: {value}\nnodes: []\narrows: []\n")
+    assert error.code == code
+    assert value not in error.message
+
+
+@pytest.mark.parametrize(
+    ("text", "data"),
+    [
+        ("", None),
+        ("a: 1\nb: [x, 2.5, true, null]\n", {"a": 1, "b": ["x", 2.5, True, None]}),
+        ("- on\n- '2026-01-01'\n", ["on", "2026-01-01"]),
+        ("plain\n", "plain"),
+        ("[0, -3, 2.5, -0.5, 1.5e+3, '0x10']\n", [0, -3, 2.5, -0.5, 1500.0, "0x10"]),
+    ],
+    ids=["empty", "mapping", "sequence", "scalar", "numbers"],
+)
+def test_load_yaml_data_returns_plain_data(text: str, data: object) -> None:
+    assert load_yaml_data(text) == data
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("a: &x 1\nb: *x\n", "alias"),
+        ("a: {<<: {b: 1}}\n", "merge_key"),
+        ("1: one\n", "non_string_key"),
+        ("a: 1\na: 2\n", "duplicate_key"),
+        ("a: " + "[" * (MAX_DEPTH + 1) + "]" * (MAX_DEPTH + 1) + "\n", "too_deep"),
+        ("a: " + "x" * MAX_DOCUMENT_BYTES + "\n", "oversized"),
+        ("a: [unclosed\n", "invalid_yaml"),
+        ("a: " + "9" * 5000 + "\n", "invalid_yaml"),
+        ("a: x\ud800\n", "invalid_text"),
+        ("a: 2026-01-01\n", "unsupported_type"),
+        ("a: !!set {x: null}\n", "unsupported_type"),
+        ("a: !!binary aGk=\n", "unsupported_type"),
+        ("a: !!omap [{x: 1}]\n", "unsupported_type"),
+        ("a: !!python/object:os.system x\n", "unsupported_type"),
+        ("a: 0x" + "f" * 4000 + "\n", "invalid_yaml"),
+        ("a: 0x10\n", "unsupported_type"),
+        ("a: 010\n", "unsupported_type"),
+        ("a: 0b101\n", "unsupported_type"),
+        ("a: 1:30\n", "unsupported_type"),
+        ("a: 1_000\n", "unsupported_type"),
+        ("a: 1.\n", "unsupported_type"),
+        ("a: .inf\n", "unsupported_type"),
+        ("a: .nan\n", "unsupported_type"),
+    ],
+    ids=[
+        "alias",
+        "merge_key",
+        "non_string_key",
+        "duplicate_key",
+        "too_deep",
+        "oversized",
+        "invalid_yaml",
+        "too_many_digits",
+        "lone_surrogate",
+        "timestamp",
+        "set",
+        "binary",
+        "omap",
+        "python_tag",
+        "long_hex",
+        "hex",
+        "octal",
+        "binary",
+        "base_60",
+        "underscores",
+        "trailing_dot",
+        "inf",
+        "nan",
+    ],
+)
+def test_load_yaml_data_refuses_what_load_refuses_and_non_json_types(text: str, code: str) -> None:
+    error = load_yaml_data(text)
+    assert isinstance(error, LoadError), error
+    assert error.code == code
+
+
+def test_a_long_integer_in_a_workflow_never_reaches_compile() -> None:
+    from coral.validate.pipeline import check_text
+
+    text = (
+        f"{_HEADER}nodes:\n  - {{id: s, kind: start}}\n  - {{id: e, kind: end}}\n"
+        f"arrows:\n  - {{id: a1, from: s, to: e, limit: 0x{'f' * 4000}}}\n"
+    )
+    result = check_text(text)
+    assert result.load_error is not None
+    assert result.load_error.code == "invalid_yaml"
+    assert result.graph is None

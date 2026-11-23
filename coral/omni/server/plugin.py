@@ -10,18 +10,23 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
 from sqlalchemy import Engine, create_engine
 
 from coral.api.inbox import create_inbox_router
 from coral.api.info import create_info_router
 from coral.api.profiles import create_profiles_router
-from coral.api.run_service import API_THREAD_NAME, API_THREADS, InFlight, RunsApi
+from coral.api.run_service import API_THREAD_NAME, API_THREADS, InFlight, RunsApi, server_busy
 from coral.api.runs import create_runs_router
 from coral.api.spend import SPEND_THREAD_NAME, SPEND_THREADS, SpendCache
 from coral.api.stream import STREAM_THREAD_NAME, STREAM_THREADS, RunStreamHub
 from coral.api.sub_features import resolve_sub_features
-from coral.api.workflows import create_workflows_router
+from coral.api.templates import create_templates_router
+from coral.api.workflows import (
+    MAX_SIMULATIONS,
+    MAX_SIMULATIONS_PER_USER,
+    create_workflows_router,
+)
 from coral.bridge.bound_sessions import BoundSessions
 from coral.bridge.config import RESYNC_INTERVAL_S
 from coral.bridge.executors import (
@@ -88,6 +93,8 @@ REQUIRED_POLICY_PROVIDER = "coral"
 # Recording step commands and judging handoffs; apart from the decision pool, so neither starves.
 EVIDENCE_THREADS = 4
 EVIDENCE_THREAD_NAME = "coral-evidence"
+SIMULATE_THREAD_NAME = "coral-simulate"
+SIMULATION_LABEL = "simulation"
 # Server config: drain workers, at most one item per run in flight each, so this many
 # runs advance at once (1 to MAX_DRAIN_CONCURRENCY).
 DRAIN_CONCURRENCY_CONFIG_KEY = "coral_drain_concurrency"
@@ -1001,6 +1008,30 @@ async def coral_lifespan(
         yield
 
 
+@asynccontextmanager
+async def simulations_lifespan(app: FastAPI, _services: ServerServices) -> AsyncIterator[None]:
+    """
+    Publish the pool workflow simulations run on as ``app.state.coral_simulations``,
+    and close it on exit; a simulation arriving after that is refused as busy.
+    """
+    threads = BoundedThreads(max_workers=MAX_SIMULATIONS, thread_name_prefix=SIMULATE_THREAD_NAME)
+    app.state.coral_simulations = InFlight(
+        threads, max_per_caller=MAX_SIMULATIONS_PER_USER, label=SIMULATION_LABEL
+    )
+    try:
+        yield
+    finally:
+        threads.close()
+
+
+def _simulations(request: Request) -> InFlight:
+    """The simulate pool the lifespan publishes; before it, every simulation is busy."""
+    simulations = getattr(request.app.state, "coral_simulations", None)
+    if simulations is None:
+        raise server_busy()
+    return simulations
+
+
 def coral_routers(
     *,
     sub_features: Mapping[str, bool],
@@ -1013,14 +1044,25 @@ def coral_routers(
 
     Each route resolves its caller through ``auth_provider`` and reads the request's
     workspace; the Inbox reads the alert store the lifespan publishes, the runs routes
-    its runs API and run-stream hub, the profiles routes its profile store, and a start the
-    caller's workflow from ``definitions``.
+    its runs API and run-stream hub, the profiles routes its profile store, a simulation
+    its simulate pool, and a start or a template's use the caller's workflows in
+    ``definitions``.
     """
     viewer = request_viewer(auth_provider)
     return (
         (create_info_router(sub_features=sub_features), "", ["coral"]),
         (
             create_workflows_router(
+                definitions,
+                viewer_dependency=viewer,
+                workspace_id_dependency=current_workspace_id,
+                simulations=_simulations,
+            ),
+            CORAL_API_PREFIX,
+            ["coral"],
+        ),
+        (
+            create_templates_router(
                 definitions,
                 viewer_dependency=viewer,
                 workspace_id_dependency=current_workspace_id,
@@ -1080,6 +1122,6 @@ def register(services: ServerServices) -> ServerPluginRegistration:
             definitions=SqlWorkflowDefinitionStore(engine),
             auth_provider=services.auth_provider,
         ),
-        lifespan_hooks=(coral_lifespan, workflow_engine_lifespan),
+        lifespan_hooks=(coral_lifespan, workflow_engine_lifespan, simulations_lifespan),
         policy_modules=("coral.omni.policies.hygiene", "coral.omni.policies.guards"),
     )

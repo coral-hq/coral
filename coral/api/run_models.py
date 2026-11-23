@@ -17,7 +17,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue
 
 from coral.api.errors import CoralApiError
 from coral.api.spend import CachedSpend
-from coral.bridge.config import MAX_RUN_ACTIVATIONS
+from coral.bridge.config import DEFAULT_RUN_ACTIVATIONS, MAX_RUN_ACTIVATIONS
 from coral.bridge.keys import store_activation_id
 from coral.bridge.messages import gate_prompt_text, sanitize
 from coral.bridge.service import LOAD_FAILED_DETAIL, RunRead
@@ -182,7 +182,7 @@ class StartRunRequest(_In):
     base_ref: BaseRef | None = None
     title: RunTitle | None = None
     request: RunRequestText = ""
-    max_activations: ActivationCap = 100
+    max_activations: ActivationCap = DEFAULT_RUN_ACTIVATIONS
 
 
 class ResumeRequest(_In):

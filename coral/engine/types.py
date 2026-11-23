@@ -233,6 +233,16 @@ def effect_key(run_id: str, seq: int, kind: str, subject: str) -> str:
     return f"{run_id}:{seq}:{kind}:{subject}"
 
 
+def loop_limit_key(
+    back_arrow_id: str, item_path: tuple[str, ...], enclosing: tuple[str, ...]
+) -> str:
+    """``loop:{arrow}|{item}|{iteration}``: the receipt a loop writes when its limit redirects.
+
+    ``enclosing`` is the counter's iteration path, the passes of the loops around it.
+    """
+    return f"loop:{back_arrow_id}|{'/'.join(item_path)}|{'/'.join(enclosing)}"
+
+
 class StartRun(_Frozen):
     kind: Literal["start_run"] = "start_run"
     run_id: str

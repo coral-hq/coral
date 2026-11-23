@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
+from coral.engine.simulate import SimResult, SimScript
 from coral.model import CompiledGraph, LoadError
 from coral.validate.problems import Problem
 
@@ -27,6 +28,26 @@ class ValidResult(BaseModel):
     content_hash: str
     problems: list[Problem]
     compiled: CompiledGraph
+
+
+class SimulateRequest(WorkflowYaml):
+    """A workflow document and the values a simulation answers with."""
+
+    # A mistyped field would otherwise simulate with an empty script.
+    model_config = ConfigDict(extra="forbid")
+
+    script: SimScript = Field(default_factory=SimScript)
+
+
+class SimulatedResult(ValidResult):
+    """
+    A workflow that loaded, what validation found, and its simulation.
+
+    ``simulation`` is ``None`` when blocking problems make the workflow not runnable:
+    they are reported, not simulated.
+    """
+
+    simulation: SimResult | None
 
 
 class InvalidResult(BaseModel):
@@ -64,10 +85,22 @@ class SavedWorkflowOut(WorkflowSummaryOut):
     compiled: CompiledGraph
 
 
+class TemplateOut(BaseModel):
+    """A built-in workflow template: its workflow's id, name and description, and its YAML."""
+
+    id: str
+    name: str
+    description: str
+    yaml: str
+
+
 __all__ = [
     "CORAL_API_VERSION",
     "InvalidResult",
     "SavedWorkflowOut",
+    "SimulateRequest",
+    "SimulatedResult",
+    "TemplateOut",
     "ValidResult",
     "WorkflowDetailOut",
     "WorkflowSummaryOut",

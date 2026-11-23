@@ -732,6 +732,127 @@ export interface SavedWorkflowOut {
   workflow_key: string;
 }
 
+/** The values one node supplies for one kind of question, consumed in order. */
+export interface SimInput {
+  kind: "label" | "done_when" | "gate";
+  node_id: string;
+  values: string[];
+}
+
+/** One loop counter. ``iteration_path`` is its enclosing loops' passes; ``()`` outside. */
+export interface SimLoop {
+  back_arrow_id: string;
+  iteration_path: string[];
+  limit: number | null;
+  limit_hit: boolean;
+  passes: number;
+}
+
+/** The value a simulation stopped to ask for, and the values the reducer would take. */
+export interface SimNeedsInput {
+  activation_id: string;
+  allowed_values: string[];
+  kind: "label" | "done_when" | "gate";
+  node_id: string;
+}
+
+/** A script value the reducer refused, with the reducer's own code and choices. */
+export interface SimRejection {
+  allowed_values: string[];
+  code: string;
+  kind: "label" | "done_when" | "gate";
+  node_id: string;
+  value: string;
+}
+
+/** What a simulation did: its outcome, the answered path, and the run it left. */
+export interface SimResult {
+  entries: number;
+  gates_reached: string[];
+  limits_hit: string[];
+  loops: SimLoop[];
+  needs_input: SimNeedsInput | null;
+  outcome:
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "paused"
+    | "needs_input"
+    | "rejected"
+    | "stalled"
+    | "step_limit"
+    | "unsupported";
+  rejection: SimRejection | null;
+  sessions: SimSessions;
+  stall_code: string | null;
+  step_activations: number;
+  steps: SimStep[];
+  stopped_by: "transitions" | "work" | "step_seats" | "graph_seats" | "graph_size" | null;
+  trace_digest: string;
+  unconsumed: SimUnconsumed[];
+  unsupported_effect: string | null;
+  view: RunView;
+}
+
+/** What a simulation answers with: at most one input per node and kind. */
+export interface SimScript {
+  inputs?: SimInput[];
+}
+
+/**
+ * An estimate of the sessions a real run would start.
+ *
+ * The run's turnless anchor, an orchestrator once any decision opens, and one per
+ * step session created; a done-when retry reuses its session.
+ */
+export interface SimSessions {
+  anchor: number;
+  orchestrator: number;
+  steps: number;
+  total: number;
+}
+
+/**
+ * One answered step, decision or gate.
+ *
+ * ``result`` is a step's label, ``done`` or ``evidence_missing``; a decision's label;
+ * a gate's outcome.
+ */
+export interface SimStep {
+  activation_id: string;
+  kind: "step" | "decision" | "gate";
+  node_id: string;
+  result: string;
+}
+
+/** Script values no question used, in their input's order. */
+export interface SimUnconsumed {
+  kind: "label" | "done_when" | "gate";
+  node_id: string;
+  values: string[];
+}
+
+/** A workflow document and the values a simulation answers with. */
+export interface SimulateRequest {
+  script?: SimScript;
+  yaml: string;
+}
+
+/**
+ * A workflow that loaded, what validation found, and its simulation.
+ *
+ * ``simulation`` is ``None`` when blocking problems make the workflow not runnable:
+ * they are reported, not simulated.
+ */
+export interface SimulatedResult {
+  compiled: CompiledGraph;
+  content_hash: string;
+  problems: Problem[];
+  runnable: boolean;
+  simulation: SimResult | null;
+  valid: true;
+}
+
 /**
  * An agent slot of one of the run's steps. ``slot_id`` and ``activation_id`` are store
  * ids; ``engine_slot_id`` is the id the run view's slots carry.
@@ -803,6 +924,14 @@ export interface StartRunRequest {
   start_key: string;
   title?: string | null;
   workflow_id: string;
+}
+
+/** A built-in workflow template: its workflow's id, name and description, and its YAML. */
+export interface TemplateOut {
+  description: string;
+  id: string;
+  name: string;
+  yaml: string;
 }
 
 /** Something Analysis could not resolve; blocks running the workflow. */
@@ -1266,6 +1395,35 @@ export interface CoralOperations {
     errors: 401 | 403 | 404 | 422 | 503;
   };
   /**
+   * GET /v1/coral/templates
+   *
+   * The built-in workflow templates, in gallery order.
+   */
+  coral_list_templates: {
+    method: "GET";
+    path: "/v1/coral/templates";
+    status: 200;
+    response: TemplateOut[];
+    errors: 401 | 403;
+  };
+  /**
+   * POST /v1/coral/templates/{template_id}:use
+   *
+   * Make the caller's own workflow from a built-in template, under the first key no
+   * workflow holds; an existing workflow is never replaced.
+   */
+  coral_use_template: {
+    method: "POST";
+    path: "/v1/coral/templates/{template_id}:use";
+    params: {
+      template_id: string;
+    };
+    body: EmptyRequest;
+    status: 201;
+    response: SavedWorkflowOut;
+    errors: 401 | 403 | 404 | 409 | 413 | 422;
+  };
+  /**
    * GET /v1/coral/workflows
    *
    * The caller's workflows, by key.
@@ -1304,6 +1462,20 @@ export interface CoralOperations {
     status: 200;
     response: WorkflowDetailOut;
     errors: 401 | 403 | 404 | 422;
+  };
+  /**
+   * POST /v1/coral/workflows:simulate
+   *
+   * Validate a workflow and, when it is runnable, dry-run it on the engine with stub
+   * sessions, answering each question from the script; nothing is stored.
+   */
+  coral_simulate_workflow: {
+    method: "POST";
+    path: "/v1/coral/workflows:simulate";
+    body: SimulateRequest;
+    status: 200;
+    response: SimulatedResult | InvalidResult;
+    errors: 401 | 403 | 422 | 503;
   };
   /**
    * POST /v1/coral/workflows:validate
