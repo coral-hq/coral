@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import shlex
+import stat  # CORAL(S115)
 import subprocess
 import sys
 from unittest import mock
@@ -514,6 +515,7 @@ def test_policy_clones_keep_every_field(tmp_path: pathlib.Path) -> None:
         "scratch_dir_env": "CLAUDE_CONFIG_DIR",  # CORAL(S113)
         "scratch_dir_files": ("z",),
         "scratch_dir_extra_envs": ("CLAUDE_SECURESTORAGE_CONFIG_DIR",),
+        "scratch_dir_seed": ((".claude.json", str(path / "seed")),),  # CORAL(S115)
         "credential_proxy": CredentialProxySpec(entries=[]),
         "git_ssh": [binding],
         "mask_scan_skip_roots": [path / "w"],
@@ -1133,7 +1135,8 @@ def test_run_launcher_removes_the_launch_dir_when_the_target_exits(
 
 
 # CORAL(S113): the launcher gives the target a private dir in its scratch, removed with it
-def _scratch_dir_policy() -> SandboxPolicy:
+# CORAL(S115): seeded with copies of the given files
+def _scratch_dir_policy(seed: tuple[tuple[str, pathlib.Path], ...] = ()) -> SandboxPolicy:
     from omnigent.inner.sandbox import with_scratch_dir_env
 
     policy = dataclasses.replace(_noop_policy(), backend_type="darwin_seatbelt", active=True)
@@ -1142,24 +1145,30 @@ def _scratch_dir_policy() -> SandboxPolicy:
         "CLAUDE_CONFIG_DIR",
         files=["projects"],
         extra_envs=["CLAUDE_SECURESTORAGE_CONFIG_DIR"],
+        seed=seed,
     )
 
 
 def test_scratch_dir_fields_survive_the_wire_and_clones(tmp_path: pathlib.Path) -> None:
     """The fields travel the launcher wire and every clone; an old payload asks for no dir."""
-    fields = ("scratch_dir_env", "scratch_dir_files", "scratch_dir_extra_envs")
-    decoded = SandboxPolicy.from_jsonable(_scratch_dir_policy().to_jsonable())
+    # CORAL(S115): the seed too, which is also a read root
+    fields = ("scratch_dir_env", "scratch_dir_files", "scratch_dir_extra_envs", "scratch_dir_seed")
+    seed = str(tmp_path.resolve() / "claude.json")
+    policy = _scratch_dir_policy(seed=((".claude.json", tmp_path / "claude.json"),))
+    assert policy.read_roots == [pathlib.Path(seed)], "the seed is not readable in the sandbox"
+    decoded = SandboxPolicy.from_jsonable(policy.to_jsonable())
     for copy in (decoded, *_with_every_clone(decoded, [tmp_path])):
         assert [getattr(copy, name) for name in fields] == [
             "CLAUDE_CONFIG_DIR",
             ("projects",),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR",),
+            ((".claude.json", seed),),
         ]
     for old in (_noop_policy().to_jsonable(), {}):
         for name in fields:
             old.pop(name, None)
         decoded = SandboxPolicy.from_jsonable(old)
-        assert [getattr(decoded, name) for name in fields] == [None, (), ()]
+        assert [getattr(decoded, name) for name in fields] == [None, (), (), ()]
 
 
 @pytest.mark.parametrize(
@@ -1195,14 +1204,80 @@ def test_a_malformed_scratch_dir_field_is_refused(fields: dict[str, object]) -> 
         with_scratch_dir_env(_noop_policy(), env_name, files=files, extra_envs=extra_envs)  # type: ignore[arg-type]
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
-@pytest.mark.parametrize("target_fails", [False, True])
-def test_run_launcher_gives_the_target_a_private_dir_in_its_scratch(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, target_fails: bool
+# CORAL(S115): a seed names distinct plain files with absolute sources; the helper normalizes
+# a source, so a non-normal one is refused on the wire only
+@pytest.mark.parametrize(
+    ("seed", "files", "helper_refuses"),
+    [
+        ([["claude.json", "relative.json"]], [], True),
+        ([["claude.json", "/seed/../x.json"]], [], False),
+        ([["claude.json", "/seed/"]], [], False),
+        ([["a/b", "/seed"]], [], True),
+        ([[".", "/seed"]], [], True),
+        ([["..", "/seed"]], [], True),
+        ([["", "/seed"]], [], True),
+        ([["a", "/seed"], ["a", "/other"]], [], True),
+        ([["projects", "/seed"]], ["projects"], True),
+        ([["a"]], [], None),
+        ([["a", "/seed", "b"]], [], None),
+        (["a"], [], None),
+        ([[1, "/seed"]], [], None),
+        ("a", [], None),
+    ],
+)
+def test_a_malformed_scratch_dir_seed_is_refused(
+    seed: object, files: list[str], helper_refuses: bool | None
 ) -> None:
-    """The in-wrap pass overrides inherited values, and the dir goes with the scratch."""
+    """A payload whose seed could name a path, clash or point anywhere fails the launch."""
+    from omnigent.inner.sandbox import with_scratch_dir_env
+
+    fields = {"scratch_dir_env": "CLAUDE_CONFIG_DIR", "scratch_dir_files": files}
+    with pytest.raises(ValueError, match="scratch_dir_seed"):
+        SandboxPolicy.from_jsonable(
+            {**_noop_policy().to_jsonable(), **fields, "scratch_dir_seed": seed}
+        )
+    without_env = {"scratch_dir_env": None, "scratch_dir_seed": [["a", "/seed"]]}
+    with pytest.raises(ValueError, match="scratch_dir"):
+        SandboxPolicy.from_jsonable({**_noop_policy().to_jsonable(), **without_env})
+    if helper_refuses is None:  # not a sequence of pairs, which the helper's type rules out
+        return
+    pairs = [tuple(pair) for pair in seed]  # type: ignore[union-attr]
+    with (
+        pytest.raises(ValueError, match="scratch_dir_seed")
+        if helper_refuses
+        else contextlib.nullcontext()
+    ):
+        with_scratch_dir_env(_noop_policy(), "CLAUDE_CONFIG_DIR", files=files, seed=pairs)  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+@pytest.mark.parametrize("seeded", [False, True])  # CORAL(S115)
+@pytest.mark.parametrize("target_fails", [False, True])
+# CORAL(S115): a version query, which its caller may kill before the cleanup, copies no seed
+@pytest.mark.parametrize(
+    ("argv", "copies"),
+    [([], True), (["-v"], False), (["--version"], False), (["-v", "-p"], True)],
+    ids=["no-args", "v", "version", "v-and-more"],
+)
+def test_run_launcher_gives_the_target_a_private_dir_in_its_scratch(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_fails: bool,
+    seeded: bool,
+    argv: list[str],
+    copies: bool,
+) -> None:
+    """
+    The in-wrap pass overrides inherited values, and the dir goes with the scratch. A seeded
+    dir holds a fresh 0600 copy of the seed, except for a version query, and an inherited empty
+    secure-storage name, which would select the default keychain item, is overridden too.
+    """
     scratch = tmp_path / "scratch"
     scratch.mkdir()
+    source = tmp_path / "seed" / "claude.json"
+    source.parent.mkdir()
+    source.write_text('{"mcpServers": {}}')
+    source.chmod(0o644)
     seen: dict[str, object] = {}
 
     def _run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
@@ -1211,6 +1286,10 @@ def test_run_launcher_gives_the_target_a_private_dir_in_its_scratch(
         seen["store"] = os.environ["CLAUDE_SECURESTORAGE_CONFIG_DIR"]
         seen["mode"] = private.stat().st_mode & 0o777
         seen["projects_is_file"] = (private / "projects").is_file()
+        copy = private / ".claude.json"  # CORAL(S115)
+        if copy.exists():
+            info = copy.lstat()
+            seen["copy"] = (stat.S_ISREG(info.st_mode), info.st_mode & 0o777, copy.read_bytes())
         with contextlib.suppress(OSError):
             (private / "projects" / "key").mkdir(parents=True)
             seen["projects_creatable"] = True
@@ -1224,19 +1303,98 @@ def test_run_launcher_gives_the_target_a_private_dir_in_its_scratch(
         "OMNIGENT_LAUNCHER_SPAWN_WRAPPED": "1",
         "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR": str(scratch),
         "CLAUDE_CONFIG_DIR": str(tmp_path / "home" / ".claude"),
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(tmp_path / "home"),
+        # CORAL(S115): an empty name would select the default keychain item
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR": "" if seeded else str(tmp_path / "home"),
     }
     with mock.patch.dict(os.environ, wrapped_env):
-        encoded = _encoded(_scratch_dir_policy())
+        encoded = _encoded(_scratch_dir_policy(((".claude.json", source),) if seeded else ()))
         with pytest.raises(OSError) if target_fails else contextlib.nullcontext():
-            assert run_launcher(encoded, "/bin/true", []) == 0
+            assert run_launcher(encoded, "/bin/true", argv) == 0  # CORAL(S115)
 
     assert seen["dir"] == seen["store"] == str(scratch.absolute() / "claude_config_dir")
     assert os.path.isabs(str(seen["dir"]))
     assert seen["mode"] == 0o700 and seen["projects_is_file"] is True
     assert "projects_creatable" not in seen
+    # CORAL(S115): the copy is fresh, and the source is untouched
+    expected = (True, 0o600, source.read_bytes()) if seeded and copies else None
+    assert seen.get("copy") == expected, f"argv {argv}"
     assert not scratch.exists()
     assert not (tmp_path / "home").exists()
+    assert source.read_text() == '{"mcpServers": {}}'
+
+
+# CORAL(S115): a seed that is not this user's own regular file fails the launch first
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file types")
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize(
+    "kind", ["missing", "symlink", "fifo", "directory", "group-writable", "foreign-owner"]
+)
+def test_run_launcher_refuses_a_seed_that_is_not_a_regular_file(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """
+    A FIFO is refused without waiting for a writer, so the launch fails instead of hanging. A
+    seed another account owns or can write could have been planted by it, so it is refused too.
+    """
+    scratch, source = tmp_path / "scratch", tmp_path / "seed" / "claude.json"
+    scratch.mkdir()
+    source.parent.mkdir()
+    # Built before the seed exists, as the executor builds it, so nothing is resolved through it.
+    policy = _scratch_dir_policy(((".claude.json", source),))
+    if kind == "symlink":
+        (tmp_path / "real.json").write_text("{}")
+        source.symlink_to(tmp_path / "real.json")
+    elif kind == "fifo":
+        os.mkfifo(source)
+    elif kind == "directory":
+        source.mkdir()
+    elif kind in ("group-writable", "foreign-owner"):
+        source.write_text("{}")
+        source.chmod(0o620 if kind == "group-writable" else 0o600)
+    if kind == "foreign-owner":
+        uid = os.getuid()
+        monkeypatch.setattr("omnigent.inner.sandbox.os.getuid", lambda: uid + 1)
+    target_runs: list[list[str]] = []
+
+    def _run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+        target_runs.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr("omnigent.inner.sandbox.activate_sandbox", lambda _policy: None)
+    monkeypatch.setattr("omnigent.inner.sandbox.subprocess.run", _run)
+    wrapped_env = {
+        "OMNIGENT_LAUNCHER_SPAWN_WRAPPED": "1",
+        "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR": str(scratch),
+    }
+
+    with mock.patch.dict(os.environ, wrapped_env), pytest.raises(OSError):
+        run_launcher(_encoded(policy), "/bin/true", [])
+    assert target_runs == [], "the target ran on a refused seed"
+    assert not scratch.exists()
+
+
+# CORAL(S115): the copy makes a new file, so a name already in the private dir is never reused
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file types")
+@pytest.mark.parametrize("planted", ["file", "symlink"])
+def test_a_seed_copy_never_writes_through_an_existing_target(
+    tmp_path: pathlib.Path, planted: str
+) -> None:
+    from omnigent.inner.sandbox import _copy_seed_file
+
+    source, outside = tmp_path / "seed.json", tmp_path / "outside.json"
+    target = tmp_path / "private" / ".claude.json"
+    source.write_text('{"mcpServers": {}}')
+    outside.write_text("untouched")
+    target.parent.mkdir()
+    if planted == "file":
+        target.write_text("planted")
+    else:
+        target.symlink_to(outside)
+
+    with pytest.raises(FileExistsError):
+        _copy_seed_file(source, target)
+    assert outside.read_text() == "untouched"
+    assert target.is_symlink() if planted == "symlink" else target.read_text() == "planted"
 
 
 def test_run_launcher_refuses_a_private_dir_without_a_scratch(

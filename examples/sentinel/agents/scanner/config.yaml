@@ -8,6 +8,10 @@ description: >-
 
 # Read-only explorer on the Claude Agent SDK. No model is pinned, so it runs on
 # whatever Claude provider you configured (`omnigent setup`).
+# CORAL(S115): on Linux and macOS, when its sandbox (`os_env` below) applies,
+# the CLI has its own Claude config, so a subscription login on the host does
+# not reach it: use an API key or a gateway (`omnigent setup`), or set
+# CLAUDE_CODE_OAUTH_TOKEN for the host, which passes it to every runner.
 executor:
   type: omnigent
   config:
