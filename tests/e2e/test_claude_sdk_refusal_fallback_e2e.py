@@ -56,6 +56,9 @@ from tests.e2e.conftest import (
     set_mock_served_models,
 )
 
+# These tests run the real claude CLI.
+pytestmark = pytest.mark.usefixtures("real_claude_cli")
+
 # The Claude ids the mock gateway serves under its own spelling — the launch
 # model and the Opus the refusal-fallback must route to. Deliberately not a
 # real vendor's spelling: the fix must work for any gateway's ids.

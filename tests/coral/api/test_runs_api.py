@@ -112,6 +112,7 @@ from omnigent.runtime import pending_elicitations
 from omnigent.server import elicitation_hooks
 from omnigent.server.auth import AuthProvider, UnifiedAuthProvider
 from tests._helpers.polling import poll_until_async
+from tests._helpers.providers import isolate_provider_resolution
 from tests.budgets import budget
 from tests.coral.bridge._gates import (
     APPROVE_TOKEN,
@@ -1850,11 +1851,14 @@ def _anchor_prompt(world: World, run: CoralRun) -> tuple[str, str]:
 
 
 async def test_preflight_reports_an_offline_host_without_starting_a_run(
-    writes: Api,
+    writes: Api, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from coral.omni.server.preflight import OmniWorkflowPreflight
     from omnigent.policies.registry import load_registry
     from omnigent.server.host_registry import HostRegistry
+
+    # The credential check resolves providers; keep it off the machine's CLI logins.
+    isolate_provider_resolution(monkeypatch, tmp_path / "config")
 
     # Bare app has no Coral plugin; register the handlers step bundles name.
     load_registry(extra_modules=["coral.omni.policies.hygiene", "coral.omni.policies.guards"])
