@@ -3937,10 +3937,10 @@ seams:
       - tests/e2e/coral/test_tier_b_executor.py
     budget_lines: 120
     budget_exception:
-      lines: 620
+      lines: 626
       reason: >-
         Counted with git diff --numstat origin/development (added plus
-        removed lines). tests/inner/test_sandbox.py (620): two shared
+        removed lines). tests/inner/test_sandbox.py (626): two shared
         helpers and the tests for the name pattern sweep with its keep and
         remove cases, kernel liveness (exited, zombie, running, EPERM,
         unseen by psutil), the sweep budget between dirs and inside one, the

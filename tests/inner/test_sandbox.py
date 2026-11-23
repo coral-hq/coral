@@ -1598,10 +1598,16 @@ def test_the_in_wrap_pass_names_its_target_where_a_sweep_can_see_it(
     launch_dir = _claimed_dir(tmp_path, "cabcdefgh", os.getpid())
     out = tmp_path / "out"
     out.mkdir()
-    # The target copies each target claim out before the launcher removes the dirs.
+    # The target copies each target claim out before the launcher removes the dirs. The
+    # launcher names its target only after starting it, so a named target waits for its claims.
+    wait_for_claims = (
+        'w() { i=0; while [ ! -s "$1" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i+1)); done; }; '
+        'w "$TMPDIR/.launch-target"; w "$OMNIGENT_LAUNCHER_LAUNCH_TMPDIR/.launch-target"; '
+    )
     script = (
         'echo $$ > "$OUT/pid"; '
-        'cat "$TMPDIR/.launch-target" > "$OUT/scratch" 2>/dev/null; '
+        + (wait_for_claims if named else "")
+        + 'cat "$TMPDIR/.launch-target" > "$OUT/scratch" 2>/dev/null; '
         'cat "$OMNIGENT_LAUNCHER_LAUNCH_TMPDIR/.launch-target" > "$OUT/launch" 2>/dev/null; '
         "exit 0"
     )
