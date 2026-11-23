@@ -3979,3 +3979,34 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S117
+    title: Omnigent's own runner launch of a Coral step goes through Coral's relauncher
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Every Omnigent runner launch (a person's message after its connect
+      grace, ensure_runner_connected for the resource routes and
+      retry_session, a wake, a scheduled fire, the held-session relaunch)
+      lands in `_launch_runner_on_host_impl`, which checked none of Coral's
+      step rules, so it could replace a runner the host still called alive
+      or launch on a host without the Coral runner token. helpers.py now has
+      a one-owner registry, `register_runner_launch_owner`; before the
+      per-session relaunch lock the latest owner sees the row and returns
+      None (Omnigent launches as before), a runner id (the owner brought the
+      runner up; the launch reports it acknowledged) or raises
+      OmnigentError (refused). With nothing registered nothing changes.
+      Coral registers `OmnigentStepRelauncher.claim_launch` with the session
+      engine: a session with a `coral.run_id` label and a step binding goes
+      through `ensure_runner` at its binding's generation (retryable refusal
+      -> RUNNER_UNAVAILABLE, else CONFLICT); Coral's own create and relaunch
+      launch of that session is let through by a context variable.
+    files:
+      - omnigent/server/routes/_sessions/helpers.py
+    tests:
+      - tests/coral/omni/test_session_facade.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
