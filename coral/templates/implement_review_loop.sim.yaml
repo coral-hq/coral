@@ -1,0 +1,36 @@
+# Saved Simulate cases for implement_review_loop.yaml; CI checks each one.
+cases:
+  - name: approved on the first pass
+    script:
+      inputs:
+        - {node_id: review, kind: label, values: [approved]}
+        - {node_id: approve_change, kind: gate, values: [approve]}
+    expect:
+      outcome: completed
+      steps: ["implement:done", "review:approved", "approve_change:approve"]
+      gates_reached: [approve_change]
+      limits_hit: []
+      sessions: 3
+  - name: changes requested three times reaches the gate
+    script:
+      inputs:
+        - {node_id: review, kind: label, values: [changes_requested, changes_requested, changes_requested]}
+        - {node_id: approve_change, kind: gate, values: [approve]}
+    expect:
+      outcome: completed
+      steps: ["implement:done", "review:changes_requested", "implement:done", "review:changes_requested",
+              "implement:done", "review:changes_requested", "approve_change:approve"]
+      gates_reached: [approve_change]
+      limits_hit: [a4]
+      sessions: 7
+  - name: a rejected change ends the run
+    script:
+      inputs:
+        - {node_id: review, kind: label, values: [approved]}
+        - {node_id: approve_change, kind: gate, values: [reject]}
+    expect:
+      outcome: completed
+      steps: ["implement:done", "review:approved", "approve_change:reject"]
+      gates_reached: [approve_change]
+      limits_hit: []
+      sessions: 3

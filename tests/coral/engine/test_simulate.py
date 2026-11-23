@@ -10,8 +10,9 @@ import random
 import subprocess
 import sys
 import tracemalloc
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
+from functools import partial
 from itertools import pairwise
 from pathlib import Path
 from types import MappingProxyType
@@ -66,6 +67,7 @@ from coral.engine.types import (
 )
 from coral.model.canonical import canonical_json
 from coral.model.ir import CompiledGraph
+from coral.templates import BUILTIN_TEMPLATES, builtin_templates
 from tests.coral.engine.drive import drive
 from tests.coral.workflow_builders import (
     FIXTURES,
@@ -1342,10 +1344,17 @@ def _answer_every_question(graph: CompiledGraph) -> Simulation:
     raise AssertionError("the simulation kept asking")
 
 
-_SWEPT = {
-    **{path.stem: path for path in sorted(FIXTURES.glob("*.yaml"))},
-    "e2e_review_loop": REVIEW_LOOP,
-    "pr_review_loop_template": REPO / "coral" / "templates" / "pr_review_loop.yaml",
+def _builtin_text(stem: str) -> str:
+    return dict(zip(BUILTIN_TEMPLATES, builtin_templates(), strict=True))[stem].yaml_text
+
+
+# Each source is read when its test runs, so a broken template fails only its own case.
+_SWEPT: dict[str, Callable[[], str]] = {
+    **{path.stem: path.read_text for path in sorted(FIXTURES.glob("*.yaml"))},
+    "e2e_review_loop": REVIEW_LOOP.read_text,
+    "pr_review_loop_template": (REPO / "coral" / "templates" / "pr_review_loop.yaml").read_text,
+    # The registry's templates, not a glob: the package also holds case files and drafts.
+    **{f"builtin_{stem}": partial(_builtin_text, stem) for stem in BUILTIN_TEMPLATES},
 }
 
 
@@ -1355,7 +1364,7 @@ _UNRESOLVED = frozenset({"deadlock_join"})
 
 @pytest.mark.parametrize("name", sorted(_SWEPT))
 def test_every_fixture_simulates_without_an_unsupported_effect_or_a_stall(name: str) -> None:
-    text = _SWEPT[name].read_text().replace("{impl_token}", "").replace("{review_token}", "")
+    text = _SWEPT[name]().replace("{impl_token}", "").replace("{review_token}", "")
     graph = compile_text(text)[0]
     assert bool(graph.analysis.unresolved) == (name in _UNRESOLVED)
     if name in _UNRESOLVED:

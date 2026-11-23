@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tomllib
 import zipfile
 from importlib.metadata import EntryPoint, packages_distributions
@@ -14,6 +15,7 @@ import click
 
 from coral.omni.host.ops import workspace_op_handlers
 from coral.omni.runner.tool_provider import tool_provider
+from coral.templates import BUILTIN_TEMPLATES, builtin_templates
 
 
 def test_coral_package_has_no_conflicting_distribution() -> None:
@@ -69,9 +71,8 @@ def test_built_wheel_runs_coral_help_in_no_deps_venv(tmp_path: Path) -> None:
     wheels = list(wheel_dir.glob("omnigent-*.whl"))
     assert len(wheels) == 1
     with zipfile.ZipFile(wheels[0]) as wheel:
-        seed_files = {
-            name for name in wheel.namelist() if name.startswith("coral/profiles/seeds/")
-        }
+        wheel_files = set(wheel.namelist())
+    seed_files = {name for name in wheel_files if name.startswith("coral/profiles/seeds/")}
     assert {
         f"coral/profiles/seeds/{name}"
         for name in (
@@ -82,6 +83,11 @@ def test_built_wheel_runs_coral_help_in_no_deps_venv(tmp_path: Path) -> None:
             "reviewer.yaml",
         )
     } <= seed_files
+    assert {"coral/templates/__init__.py"} | {
+        f"coral/templates/{stem}{suffix}"
+        for stem in BUILTIN_TEMPLATES
+        for suffix in (".yaml", ".sim.yaml")
+    } <= wheel_files
 
     venv_dir = tmp_path / "venv"
     subprocess.run(
@@ -97,6 +103,31 @@ def test_built_wheel_runs_coral_help_in_no_deps_venv(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
+
+    # The registry reads its templates from the installed package, not the source tree.
+    purelib = subprocess.run(
+        [str(venv_python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    registry = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import coral.templates as registry; print(registry.__file__); "
+            "print(' '.join(template.id for template in registry.builtin_templates()))",
+        ],
+        cwd=tmp_path,
+        env={"PYTHONPATH": purelib, "HOME": str(tmp_path / "home")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert registry.returncode == 0, registry.stderr
+    location, template_ids = registry.stdout.splitlines()
+    assert Path(location).resolve().is_relative_to(venv_dir.resolve())
+    assert template_ids == " ".join(template.id for template in builtin_templates())
 
     only_click_dir = tmp_path / "only_click"
     only_click_dir.mkdir()
