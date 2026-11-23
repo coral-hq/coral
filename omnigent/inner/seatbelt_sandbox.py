@@ -115,12 +115,16 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools  # CORAL(S120)
 import logging
 import os
+import platform  # CORAL(S120)
 import re  # CORAL(S116)
 import shutil
+import subprocess  # CORAL(S120)
 import sys
 import tempfile
+import uuid  # CORAL(S120)
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -2313,6 +2317,77 @@ def _cleanup_profile_files() -> None:
 
 
 atexit.register(_cleanup_profile_files)
+
+
+# CORAL(S120): reads the marker from stdin, so no reader's command line holds it, and prints
+# 1/0 for: the target's KERN_PROCARGS2 (arguments and environment) holds it, ``pgrep -lf``
+# (sysmond) finds it, and the reader reads its own arguments (the control).
+_CANARY_READ = """
+import ctypes, os, subprocess, sys
+marker = sys.stdin.read().encode()
+
+def args(pid):
+    size = ctypes.c_size_t(1 << 20)
+    data = ctypes.create_string_buffer(size.value)
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
+    if ctypes.CDLL(None).sysctl(mib, 3, data, ctypes.byref(size), None, 0) != 0:
+        return b''
+    return data.raw[: size.value]
+
+pgrep = subprocess.run(['/usr/bin/pgrep', '-lf', marker], capture_output=True, timeout=10)
+target = args(int(sys.argv[1]))
+print(int(marker in target), int(marker in pgrep.stdout), int(bool(args(os.getpid()))))
+"""
+
+
+# CORAL(S120): the step profile's process-read rules, checked once per host process.
+@functools.cache
+def process_read_canary_open() -> bool:
+    """
+    Whether a step-profile sandbox on this host read a throwaway process's arguments.
+
+    Outside the sandbox the reader must find the marker both ways; inside it must find it
+    neither way while still reading its own arguments. Anything else, an error included,
+    counts as open, so a host that cannot show the rules hold runs no Coral step.
+    ``launchctl print`` is not checked. ``False`` off macOS, where the rules do not apply.
+    """
+    if sys.platform != "darwin":
+        return False
+    marker = f"coral-canary-{uuid.uuid4().hex}"
+    seen: list[str] = []
+    try:
+        target = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", marker],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as scratch:
+                cwd = Path(scratch).resolve()
+                backend = SeatbeltSandboxBackend()
+                policy = backend.resolve(OSEnvSpec(type="caller_process", cwd=str(cwd)), cwd)
+                read = [sys.executable, "-I", "-c", _CANARY_READ, str(target.pid)]
+                for argv in (read, backend.wrap_launcher_argv(read, policy, cwd)):
+                    done = subprocess.run(
+                        argv, cwd=cwd, input=marker, capture_output=True, text=True, timeout=20
+                    )
+                    seen.append(f"{done.returncode}: {done.stdout.strip()}")
+        finally:
+            target.kill()
+            target.wait()
+    except Exception as exc:  # noqa: BLE001 -- any failure fails closed
+        _LOGGER.error("The sandbox process-read check could not run: %r", exc)
+        return True
+    if seen != ["0: 1 1 1", "0: 0 0 1"]:
+        _LOGGER.error(
+            "The sandbox process-read check failed on macOS %s (outside %r, inside %r; "
+            "want '0: 1 1 1' and '0: 0 0 1'); this host runs no Coral step.",
+            platform.mac_ver()[0],
+            *seen,
+        )
+        return True
+    return False
 
 
 register_backend(SeatbeltSandboxBackend())

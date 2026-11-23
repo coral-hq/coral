@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 import json
 from pathlib import Path
 from typing import Any
@@ -93,3 +94,35 @@ def test_the_lane_installs_the_pinned_claude_cli_from_the_in_repo_action() -> No
     # Both run before the tests.
     run_pytest = next(index for index, step in enumerate(steps) if step["name"] == "Run pytest")
     assert steps.index(node) < steps.index(claude) < steps.index(summary) < run_pytest
+
+
+MACOS = ROOT / ".github" / "workflows" / "macos-sandbox.yml"
+# The seatbelt rules' tests: the profile and canary tests, the behaviour suite and probe 15.
+MACOS_TESTS = [
+    "tests/inner/test_seatbelt_sandbox.py",
+    "tests/inner/sandbox/test_sandbox_behavior.py",
+    SANDBOX_PROBE,
+]
+
+
+def test_the_macos_lane_runs_the_seatbelt_tests_on_sandbox_changes() -> None:
+    workflow = yaml.safe_load(MACOS.read_text())
+    # PyYAML reads the bare ``on`` key as True.
+    triggers = workflow[True]
+    [job] = [job for name, job in workflow["jobs"].items() if name != "gate"]
+    steps = job["steps"]
+    [run] = [step for step in steps if step["name"] == "Run the sandbox tests"]
+
+    assert job["runs-on"].startswith("macos-") and job["needs"] == "gate"
+    for event in ("pull_request", "push"):
+        paths = triggers[event]["paths"]
+        watched = [*MACOS_TESTS, "omnigent/inner/seatbelt_sandbox.py", MACOS.relative_to(ROOT)]
+        for path in watched:
+            assert any(fnmatch.fnmatch(str(path), glob) for glob in paths), (event, path)
+    assert "schedule" in triggers
+    # Every test in the files, the identity probe among them, runs with the pinned CLI.
+    assert run["run"].split("uv run pytest", 1)[1].split()[: len(MACOS_TESTS)] == MACOS_TESTS
+    assert "test_probe_15_on_a_server_that_requires_identity" in (ROOT / SANDBOX_PROBE).read_text()
+    [claude] = [step for step in steps if step.get("id") == "claude_cli"]
+    assert claude["uses"] == "./.github/actions/setup-harness-cli"
+    assert any(f"{REQUIRE_CLI_ENV}=1" in str(step.get("run", "")) for step in steps)

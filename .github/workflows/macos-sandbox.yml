@@ -1,0 +1,128 @@
+# CORAL(S119): runs the seatbelt sandbox tests and probe 15's darwin pins on a macOS runner
+name: macOS sandbox
+
+# Only on changes to the sandbox, its tests and the CLI pin the probe pins depend on, and
+# weekly, so a new runner image is checked too. It is not a required check.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'omnigent/inner/seatbelt_sandbox.py'
+      - 'omnigent/inner/sandbox.py'
+      - 'omnigent/inner/os_env.py'
+      - 'omnigent/host/frames.py'
+      - 'coral/gates/**'
+      - 'tests/inner/test_seatbelt_sandbox.py'
+      - 'tests/inner/sandbox/**'
+      - 'tests/e2e/coral/test_sandbox_probe.py'
+      - 'tests/e2e/coral/probe15.sh'
+      - 'tests/e2e/coral/_probe_mcp_server.py'
+      - 'tests/e2e/coral/_skeleton.py'
+      - 'tests/e2e/coral/conftest.py'
+      - '.github/actions/setup-harness-cli/**'
+      - '.github/workflows/macos-sandbox.yml'
+      - 'uv.lock'
+  push:
+    branches:
+      - development
+    paths:
+      - 'omnigent/inner/seatbelt_sandbox.py'
+      - 'omnigent/inner/sandbox.py'
+      - 'omnigent/inner/os_env.py'
+      - 'omnigent/host/frames.py'
+      - 'coral/gates/**'
+      - 'tests/inner/test_seatbelt_sandbox.py'
+      - 'tests/inner/sandbox/**'
+      - 'tests/e2e/coral/test_sandbox_probe.py'
+      - 'tests/e2e/coral/probe15.sh'
+      - 'tests/e2e/coral/_probe_mcp_server.py'
+      - 'tests/e2e/coral/_skeleton.py'
+      - 'tests/e2e/coral/conftest.py'
+      - '.github/actions/setup-harness-cli/**'
+      - '.github/workflows/macos-sandbox.yml'
+      - 'uv.lock'
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OMNIGENT_SKIP_WEB_UI: "true"
+  UV_INDEX_URL: https://pypi.org/simple
+  PIP_INDEX_URL: https://pypi.org/simple
+
+concurrency:
+  group: macos-sandbox-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    uses: ./.github/workflows/security-gate.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
+  macos-sandbox:
+    name: macOS sandbox tests
+    needs: gate
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+
+      - name: Set up uv
+        uses: ./.github/actions/setup-uv
+        with:
+          enable-cache: true
+
+      - name: Set up Node.js for the claude CLI
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install Claude CLI
+        id: claude_cli
+        uses: ./.github/actions/setup-harness-cli
+        with:
+          harness: claude
+
+      # The probe pins were measured on one macOS and CLI version; a CLI that does not run
+      # fails the probe rather than skipping it.
+      - name: Record macOS and Claude CLI versions
+        env:
+          CLAUDE_CLI_VERSION: ${{ steps.claude_cli.outputs.version }}
+        run: |
+          echo "macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion)), claude CLI $CLAUDE_CLI_VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "CORAL_E2E_REQUIRE_CLI=1" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: uv sync --locked --extra all --group test
+
+      # The control-socket helper case is deselected: its nested socket path under the
+      # default /var/folders scratch is longer than macOS's 104-byte sun_path, a test bug
+      # unrelated to the process-read rules.
+      - name: Run the sandbox tests
+        env:
+          PYTHONFAULTHANDLER: "1"
+          OMNIGENT_TEST_TIMEOUT_SCALE: "4"
+        run: >-
+          env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY
+          uv run pytest
+          tests/inner/test_seatbelt_sandbox.py
+          tests/inner/sandbox/test_sandbox_behavior.py
+          tests/e2e/coral/test_sandbox_probe.py
+          --deselect "tests/inner/sandbox/test_sandbox_behavior.py::test_sandbox_cannot_connect_to_omnigent_control_sockets[darwin_seatbelt-helper]"
+          -n 2 --dist=load --timeout=600
+          -p no:cacheprovider -v --tb=long -r a
