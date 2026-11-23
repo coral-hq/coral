@@ -22,15 +22,17 @@ retry, or an old leader's late create) is labelled closed, stopped and abandoned
 
 After its create, Coral's own paths launch a step's runner again only through
 :class:`OmnigentStepRelauncher`, in the same session: the wake after a lost
-runner and any engine send that finds no runner both use it. A person's message
-or a resource route can still reach Omnigent's own launch for the session.
+runner and any engine send that finds no runner both use it. Omnigent's own launch of a
+step's runner (a person's message, a resource route, a retry) goes through it too (S117).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import weakref
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol, override
 
@@ -85,7 +87,7 @@ from coral.stores.session_bindings import (
 )
 from coral.tools.catalog import ORCHESTRATOR_STANCE, STEP_STANCES, generated_stance
 from coral.workspace.run_worktree import RunWorktreeError
-from omnigent.db.db_models import workspace_scope
+from omnigent.db.db_models import current_workspace_id, workspace_scope
 from omnigent.entities import Conversation
 from omnigent.entities.conversation import USER_SESSION_TITLE_MAX_CHARS
 from omnigent.errors import ErrorCode, OmnigentError
@@ -114,6 +116,9 @@ from omnigent.util.session_lifecycle import (
 from omnigent.util.uuid import InvalidUuidError, uuid_to_bytes
 
 _logger = logging.getLogger(__name__)
+# The step session whose runner Coral's own launch is starting in this task, so
+# Omnigent's host launch lets that one through to Omnigent.
+_launching_session: ContextVar[str | None] = ContextVar("coral_launching_session", default=None)
 
 ANCHOR_AGENT_NAME = f"{ENGINE_PREFIX}{Stance.ANCHOR.value}"
 CORAL_RUNS_PROJECT_NAME = "Coral runs"
@@ -916,13 +921,17 @@ class OmnigentSessionFacade(SessionFacade):
         assert current is not None
         owner_host = await self._owner_host(request)
         await ensure_lease()
-        with owner_host.owner_scope():
-            if relaunch:
-                launched = await self._launcher.launch(
-                    current, user_id=request.user_id, suppress_recovery_turn=True
-                )
-            else:
-                launched = await self._launcher.launch(current, user_id=request.user_id)
+        token = _launching_session.set(conv.id)
+        try:
+            with owner_host.owner_scope():
+                if relaunch:
+                    launched = await self._launcher.launch(
+                        current, user_id=request.user_id, suppress_recovery_turn=True
+                    )
+                else:
+                    launched = await self._launcher.launch(current, user_id=request.user_id)
+        finally:
+            _launching_session.reset(token)
         if await self._slot_moved(request):
             await self._retire(request, conv.id)
             raise SlotSuperseded(
@@ -1185,6 +1194,10 @@ class OmnigentStepRelauncher(StepRelauncher):
         self._bindings = bindings
         self._run_store = run_store
         self._dispatch = dispatch
+        # One relaunch of a session at a time: a second one waits, then finds it connected.
+        self._locks: weakref.WeakValueDictionary[tuple[int, str], asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
 
     @override
     async def ensure_runner(
@@ -1195,10 +1208,55 @@ class OmnigentStepRelauncher(StepRelauncher):
         generation: int,
         ensure_lease: Callable[[], Awaitable[None]] | None = None,
     ) -> RunnerRelaunch:
-        with workspace_scope(workspace_id):
-            return await self._ensure(
-                workspace_id, session_id, generation, ensure_lease or _no_lease
+        lock = self._locks.setdefault((workspace_id, session_id), asyncio.Lock())
+        async with lock:
+            with workspace_scope(workspace_id):
+                return await self._ensure(
+                    workspace_id, session_id, generation, ensure_lease or _no_lease
+                )
+
+    async def claim_launch(self, conv: Conversation) -> str | None:
+        """
+        Take over Omnigent's own launch of a step's runner (S117), so it gets these checks.
+
+        Sessions that are not a started run's step, and Coral's own launch of one, are
+        left to Omnigent (``None``). Any other launch of a step goes through
+        :meth:`ensure_runner`, which may keep a live runner or relaunch a lost one.
+
+        :returns: The runner the session is on afterwards.
+        :raises OmnigentError: ``RUNNER_UNAVAILABLE`` when the relaunch was refused for
+            now (the host calls the old runner alive, say), else ``CONFLICT``.
+        """
+        if RUN_ID_LABEL_KEY not in (conv.labels or {}) or _launching_session.get() == conv.id:
+            return None
+        workspace_id = current_workspace_id()
+        binding = await asyncio.to_thread(self._bindings.find_by_session, workspace_id, conv.id)
+        if binding is None or binding.role is not SessionBindingRole.STEP:
+            return None
+        try:
+            await self.ensure_runner(
+                workspace_id=workspace_id,
+                session_id=conv.id,
+                generation=binding.session_generation,
             )
+        except CoralSessionError as exc:
+            raise OmnigentError(
+                f"Coral did not relaunch the runner of step session {conv.id} ({exc.code})",
+                code=ErrorCode.RUNNER_UNAVAILABLE if exc.retryable else ErrorCode.CONFLICT,
+            ) from exc
+        except SlotSuperseded as exc:
+            raise OmnigentError(
+                f"step session {conv.id} is no longer its slot's session",
+                code=ErrorCode.CONFLICT,
+            ) from exc
+        current = await asyncio.to_thread(
+            self._services.conversation_store.get_conversation, conv.id
+        )
+        if current is None or current.runner_id is None:
+            raise OmnigentError(
+                f"step session {conv.id} has no runner", code=ErrorCode.RUNNER_UNAVAILABLE
+            )
+        return current.runner_id
 
     async def _ensure(
         self,

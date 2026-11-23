@@ -118,6 +118,10 @@ PINNED: dict[str, tuple[str, str]] = {
         "omnigent.runtime.pending_elicitations",
         "(conversation_id: 'str') -> 'int'",
     ),
+    "register_runner_launch_owner": (
+        "omnigent.server.routes._sessions.helpers",
+        "(owner: 'Callable[[Conversation], Awaitable[str | None]]') -> 'Callable[[], None]'",
+    ),
     "register_supersession_observer": (
         "omnigent.server.routes._sessions.helpers",
         "(observer: 'Callable[[str, str, str], None]') -> 'Callable[[], None]'",

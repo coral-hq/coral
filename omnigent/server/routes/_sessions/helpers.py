@@ -6315,6 +6315,28 @@ _RELAUNCH_MEMO_MAX = 512
 # custom-lint: disable-next=workspace-scoped-cache -- set of Task objects
 _detached_supersede_stops: set[asyncio.Task[None]] = set()
 
+# CORAL(S117): the one extension that owns some sessions' runner launches; the latest wins.
+_RUNNER_LAUNCH_OWNERS: list[Callable[[Conversation], Awaitable[str | None]]] = []
+
+
+def register_runner_launch_owner(
+    owner: Callable[[Conversation], Awaitable[str | None]],
+) -> Callable[[], None]:
+    """CORAL(S117): let an extension take over a session's runner launch.
+
+    ``owner(conv)`` runs before every host launch. ``None`` leaves the launch to
+    Omnigent; a runner id means the owner brought the session's runner up itself;
+    an :class:`~omnigent.errors.OmnigentError` refuses the launch. Returns an
+    unregister callback.
+    """
+    _RUNNER_LAUNCH_OWNERS.append(owner)
+
+    def unregister() -> None:
+        with contextlib.suppress(ValueError):
+            _RUNNER_LAUNCH_OWNERS.remove(owner)
+
+    return unregister
+
 
 # Ancestor rows read per ownership check; deeper chains leave the runner up.
 _OWNERSHIP_ANCESTOR_LOOKUP_LIMIT = 16
@@ -6509,6 +6531,10 @@ async def _launch_runner_on_host_impl(
     :returns: The :class:`_HostLaunchAttempt` — the new runner id plus any
         structured refusal from the host.
     """
+    if _RUNNER_LAUNCH_OWNERS:  # CORAL(S117): before the lock, which the owner's launch takes
+        owned_runner_id = await _RUNNER_LAUNCH_OWNERS[-1](conv)
+        if owned_runner_id is not None:
+            return _HostLaunchAttempt(runner_id=owned_runner_id, acknowledged=True)
     lock = _relaunch_locks.setdefault(conv.id, asyncio.Lock())
     previous_attempt = _relaunch_last_attempt.get(conv.id)
     async with lock:
@@ -12856,5 +12882,6 @@ __all__ = [
     "announce_hosts_changed",
     "cancel_managed_launch_tasks",
     "prefetch_session_routing_catalogs",
+    "register_runner_launch_owner",  # CORAL(S117)
     "register_supersession_observer",
 ]

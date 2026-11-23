@@ -637,11 +637,12 @@ def _wire_session_engine(
     Workspace ops go through ``channels``; the evidence check reads worktree
     fingerprints through the same ones, set on ``evidence_channels``. The resync's
     runner liveness check is set on ``liveness``, with ``reconnect_grace_s``. Coral's own
-    paths launch a step's runner again only through the one relauncher, which the wake
-    and every engine send share.
+    paths launch a step's runner again only through the one relauncher, which the wake,
+    every engine send and Omnigent's own launch of a step (S117) share.
     """
     from coral.bridge.executors import turn_fact_executor
     from coral.bridge.mapping import RECOVERY_RESTART, RECOVERY_WAKE, TURN_FACT
+    from coral.omni._upstream import register_runner_launch_owner
     from coral.omni.server.anchor_runner import AnchorRunnerStopper
     from coral.omni.server.dispatch import OmnigentSessionDispatch
     from coral.omni.server.sessions import OmnigentSessionFacade, OmnigentStepRelauncher
@@ -699,6 +700,7 @@ def _wire_session_engine(
     relauncher = OmnigentStepRelauncher(
         facade, services, bindings, run_store, dispatch=lambda: dispatch
     )
+    stack.callback(register_runner_launch_owner(relauncher.claim_launch))
     dispatch = OmnigentSessionDispatch(
         app,
         services.conversation_store,

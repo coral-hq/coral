@@ -71,11 +71,13 @@ from omnigent.server.routes._sessions.common import (
 )
 
 # omnigent/server/routes/_sessions/helpers.py: a label key as a collation compares it;
-# Coral also follows native /clear via register_supersession_observer (HRN-07).
+# Coral also follows native /clear via register_supersession_observer (HRN-07), and
+# owns its steps' runner launches via register_runner_launch_owner (S117).
 from omnigent.server.routes._sessions.helpers import (
     _label_key_skeleton as label_key_skeleton,
 )
 from omnigent.server.routes._sessions.helpers import (
+    register_runner_launch_owner,
     register_supersession_observer,
 )
 
@@ -138,6 +140,7 @@ __all__ = [
     "label_key_skeleton",
     "list_worktrees_on_host",
     "pending_elicitation_count",
+    "register_runner_launch_owner",
     "register_supersession_observer",
     "request_workspace_op_on_host",
     "resolve_host_launch",
