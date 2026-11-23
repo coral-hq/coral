@@ -102,6 +102,10 @@ def _names_the_orchestrator(
     return transition.orchestrator_session_id is not None
 
 
+def _ends_the_run(run_id: str, expected_version: int, transition: Transition, **_: Any) -> bool:
+    return transition.status == int(RunStatus.COMPLETED)
+
+
 Install = Callable[[pytest.MonkeyPatch, Sessions], None]
 
 
@@ -330,6 +334,17 @@ DECISION = (
             matching=_commit_of("choose_arrow", replied=True),
         ),
     ),
+    # The commit that ends the run and queues its wind-down landed; nothing ran after it.
+    CrashPoint(
+        "ended",
+        lambda patch, sessions: crash_around(
+            patch,
+            sessions.world.runs,
+            "apply_transition",
+            when="after",
+            matching=_ends_the_run,
+        ),
+    ),
 )
 CASES = [
     *(
@@ -503,6 +518,16 @@ def _assert_completed_once(
         if row.payload.get("engine_kind") in ("create_session", "send_input", "close_slot")
     )
     assert len(per_slot) == 3 * len(slots) and _once_each(per_slot)
+    # The anchor and the orchestrator were wound down once, by the commit that ended the run.
+    wind_down = sorted(
+        row.payload["effect_key"]
+        for row in effects
+        if row.payload["effect_key"].endswith(":wind_down")
+    )
+    orchestrator_stop = [f"{RUN_ID}:{ORCHESTRATOR_SLOT_ID}:1:wind_down"] if decisions else []
+    assert wind_down == [f"{RUN_ID}:anchor:wind_down", *orchestrator_stop]
+    if decisions:
+        assert sessions.dispatch.sessions[ORCHESTRATOR].closed
 
 
 @pytest.mark.parametrize(("workflow", "point"), CASES)

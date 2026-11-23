@@ -1144,6 +1144,8 @@ async def test_one_retry_replaces_a_lost_orchestrator_and_the_new_one_finishes_t
 
     assert world.run(run_id).status == int(RunStatus.COMPLETED)
     assert world.assert_fold_matches(run_id).orchestrator_generation == 2
+    # The run's end winds the replacement down too.
+    assert sessions.dispatch.sessions[new].closed
     assert [_opening(text) for text in _texts_of(sessions, new)] == [REQUEST]
     assert _orchestrator_creates(sessions) == 2
 

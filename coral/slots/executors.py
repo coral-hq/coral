@@ -618,14 +618,15 @@ async def fence_session(
     bounds: CloseBounds = DEFAULT_BOUNDS,
 ) -> FenceOutcome:
     """
-    End one of the run's step sessions (:func:`coral.slots.close.cancel_session`).
+    End one of the run's step sessions (:func:`coral.slots.close.cancel_session`), or
+    close its anchor, stopped only when a runner holds it.
 
     No session yet, a session this run never bound (its create never got that far) and
     a deleted one count as ended without a stop; any other returns only once its stop
     is confirmed.
 
     :raises EffectRefused: Permanent ``session.identity_conflict`` for a session that is
-        not one of the run's steps.
+        neither one of the run's steps nor its anchor.
     :raises CoralSessionError: From dispatch, e.g. retryable ``dispatch.stop_unconfirmed``.
     """
     if session_id is None:
@@ -635,6 +636,8 @@ async def fence_session(
     )
     if found is None:
         return "unbound"
+    if found.role is SessionBindingRole.ANCHOR:
+        return await _close_anchor(ctx, state, session_id, closed_label, dispatch)
     binding = _step_binding(found, state, session_id)
     try:
         await cancel_session(
@@ -648,6 +651,30 @@ async def fence_session(
             ensure_lease=ctx.ensure_lease,
             bounds=bounds,
         )
+    except CoralSessionError as exc:
+        if exc.code != "session.deleted":
+            raise
+        return "deleted"
+    return "stopped"
+
+
+async def _close_anchor(
+    ctx: ExecutionContext,
+    state: RunState,
+    session_id: str,
+    closed_label: bool,
+    dispatch: SessionDispatch,
+) -> FenceOutcome:
+    """Label the anchor closed; stop it only when a runner holds it, or the stop never confirms."""
+    try:
+        if closed_label:
+            await ctx.ensure_lease()
+            await dispatch.set_closed(session_id=session_id)
+        live = await dispatch.runner_liveness(workspace_id=ctx.workspace_id, session_id=session_id)
+        if live.runner_id is None:
+            return "stopped"
+        await ctx.ensure_lease()
+        await dispatch.stop(session_id=session_id, user_id=state.run.user_id)
     except CoralSessionError as exc:
         if exc.code != "session.deleted":
             raise

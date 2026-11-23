@@ -66,6 +66,16 @@ def orchestrator_fence_key(run_id: str, generation: int) -> str:
     return f"{run_id}:{ORCHESTRATOR_SLOT_ID}:{generation}:fence"
 
 
+def orchestrator_wind_down_key(run_id: str, generation: int) -> str:
+    """The key of the stop of a finished run's orchestrator session."""
+    return f"{run_id}:{ORCHESTRATOR_SLOT_ID}:{generation}:wind_down"
+
+
+def anchor_wind_down_key(run_id: str) -> str:
+    """The key of the close of a finished run's anchor session."""
+    return f"{run_id}:anchor:wind_down"
+
+
 def decision_rerequest_key(run_id: str, decision_id: str, run_version: int) -> str:
     """The key of a decision's re-request, one per return to running (its run version)."""
     return f"{run_id}:decision_rerequest:{decision_id}:{run_version}"
@@ -119,12 +129,14 @@ __all__ = [
     "ORCHESTRATOR_GENERATION",
     "ORCHESTRATOR_SLOT_ID",
     "anchor_effect_key",
+    "anchor_wind_down_key",
     "decision_request_key",
     "decision_rerequest_key",
     "effect_work_id",
     "orchestrator_backoff_key",
     "orchestrator_effect_key",
     "orchestrator_fence_key",
+    "orchestrator_wind_down_key",
     "roster_index",
     "slot_create_key",
     "slot_message_id",

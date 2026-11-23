@@ -450,7 +450,12 @@ def test_a_two_step_run_survives_a_crash_at_any_point_of_its_writes(
             item["slot_id"] for item in inputs if item["kind"] == "handoff_received"
         )
         rows = Counter(
-            (payload.get("engine_kind"), payload.get("engine_slot_id"), payload.get("slot_id"))
+            (
+                payload.get("engine_kind"),
+                payload.get("engine_slot_id"),
+                payload.get("slot_id"),
+                payload.get("bridge_item"),
+            )
             for payload in (
                 json.loads(item.payload)
                 for item in world.work(run_id)

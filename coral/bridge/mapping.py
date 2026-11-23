@@ -25,8 +25,10 @@ from coral.bridge.gate_rows import gate_publish_draft, gate_withdraw_draft
 from coral.bridge.keys import (
     ORCHESTRATOR_SLOT_ID,
     anchor_effect_key,
+    anchor_wind_down_key,
     orchestrator_effect_key,
     orchestrator_fence_key,
+    orchestrator_wind_down_key,
     roster_index,
     slot_owner_key,
     slot_session_id,
@@ -46,6 +48,7 @@ from coral.db.enum_codecs import SlotRole
 from coral.engine import types as engine
 from coral.engine.machines.activation import find_activation
 from coral.engine.machines.slot import find_slot
+from coral.model.ids import anchor_session_id
 from coral.model.ir import CompiledGraph
 from coral.profiles.refs import roster_stance
 from coral.signals.turn_facts import EdgeFacts
@@ -242,9 +245,11 @@ def decision_message_draft(
     return _checked(draft)
 
 
-def orchestrator_fence_draft(ctx: MapContext, session_id: str, generation: int) -> WorkItemDraft:
+def orchestrator_fence_draft(
+    ctx: MapContext, session_id: str, generation: int, *, key: str | None = None
+) -> WorkItemDraft:
     """The stop of a replaced orchestrator session, labelled closed; its outcome feeds nothing."""
-    key = orchestrator_fence_key(ctx.run_id, generation)
+    key = key or orchestrator_fence_key(ctx.run_id, generation)
     payload = {
         "effect_type": CANCEL_SESSIONS,
         "effect_key": key,
@@ -261,6 +266,29 @@ def orchestrator_fence_draft(ctx: MapContext, session_id: str, generation: int) 
         available_at=0,
     )
     return _checked(draft)
+
+
+def wind_down_drafts(ctx: MapContext, orchestrator_session_id: str | None) -> list[WorkItemDraft]:
+    """
+    The stops of a finished run's sessions, labelled closed: the orchestrator the row names
+    and the anchor (stopped only if it has a runner). Their outcomes feed nothing.
+    """
+    generation = ctx.state.orchestrator_generation
+    rows = []
+    if orchestrator_session_id is not None:
+        key = orchestrator_wind_down_key(ctx.run_id, generation)
+        rows.append(orchestrator_fence_draft(ctx, orchestrator_session_id, generation, key=key))
+    key = anchor_wind_down_key(ctx.run_id)
+    payload = {
+        "effect_type": CANCEL_SESSIONS,
+        "effect_key": key,
+        "session_id": anchor_session_id(ctx.workspace_id, ctx.run_id),
+        "closed_label": True,
+    }
+    rows.append(
+        _checked(WorkItemDraft.effect(run_id=ctx.run_id, idempotency_key=key, payload=payload))
+    )
+    return rows
 
 
 def timer_draft(run_id: str, timer: engine.Timer) -> WorkItemDraft:
@@ -514,4 +542,5 @@ __all__ = [
     "resync_draft",
     "timer_draft",
     "turn_signal_draft",
+    "wind_down_drafts",
 ]

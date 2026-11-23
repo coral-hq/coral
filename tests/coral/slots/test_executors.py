@@ -13,6 +13,7 @@ from coral.db.enum_codecs import (
     RunPauseReason,
     RunStatus,
     SessionBindingProgress,
+    SessionBindingRole,
     SlotRole,
     StableIdKind,
 )
@@ -1079,6 +1080,37 @@ async def test_cancelling_a_deleted_session_succeeds() -> None:
     result = _completed(await env.deliver(env.cancel, env.cancel_payload()))
 
     assert result == {"session_id": SESSION}
+
+
+@pytest.mark.parametrize("runner", ["runner-1", None])
+async def test_a_cancel_of_the_runs_anchor_labels_it_and_stops_only_a_held_one(
+    runner: str | None,
+) -> None:
+    env = _Sessions()
+    for key, binding in list(env.bindings.rows.items()):
+        env.bindings.rows[key] = dataclasses.replace(
+            binding, role=SessionBindingRole.ANCHOR, slot_id=None, slot_role=None
+        )
+    env.session.runner_id = runner
+
+    result = _completed(await env.deliver(env.cancel, env.cancel_payload()))
+
+    assert result == {"session_id": SESSION}
+    stop = ["stop"] if runner else []
+    assert env.events == ["set_closed", "runner_liveness", *stop]
+    assert env.dispatch.interrupts == []
+
+
+async def test_a_cancel_of_a_deleted_anchor_succeeds() -> None:
+    env = _Sessions()
+    for key, binding in list(env.bindings.rows.items()):
+        env.bindings.rows[key] = dataclasses.replace(binding, role=SessionBindingRole.ANCHOR)
+    env.dispatch.refusals["set_closed"] = CoralSessionError("session.deleted", "gone")
+
+    result = _completed(await env.deliver(env.cancel, env.cancel_payload()))
+
+    assert result == {"session_id": SESSION}
+    assert env.events == ["set_closed"]
 
 
 async def test_a_send_or_close_before_the_sessions_row_exists_waits() -> None:

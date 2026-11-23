@@ -47,8 +47,8 @@ from coral.stores.run_commit import commit_on_run_row
 
 _logger = logging.getLogger(__name__)
 
-# Every slot a run can have live, and its orchestrator.
-MAX_STORE_CANCEL_SESSIONS = MAX_LIVE_SLOTS + 1
+# Every slot a run can have live, its orchestrator and its anchor.
+MAX_STORE_CANCEL_SESSIONS = MAX_LIVE_SLOTS + 2
 
 
 @dataclass(frozen=True)
@@ -174,10 +174,10 @@ def _open_sessions(
     run_store: RunStore, run: CoralRun
 ) -> tuple[tuple[str, ...], UnstoppedSessions | None]:
     """
-    The step sessions to stop, at most :data:`MAX_STORE_CANCEL_SESSIONS`, and which
+    The sessions to stop, at most :data:`MAX_STORE_CANCEL_SESSIONS`, and which
     may be left running.
 
-    Slots that are not closed and name a session, and the orchestrator the run names
+    The anchor, the orchestrator the run names and slots that are not closed and name a session
     (a cancel of a session never bound counts as done). None when the rows do not
     decode or are missing: the cancel executor could not read them either. A slot
     not closed that names no session yet has a create that may still make one.
@@ -192,7 +192,9 @@ def _open_sessions(
         )
         return (), "all"
     open_slots = [slot for slot in rows.agent_slots if slot.status != int(SlotStatus.CLOSED)]
-    named = [] if run.orchestrator_session_id is None else [run.orchestrator_session_id]
+    named = [anchor_session_id(run.workspace_id, run.id)]
+    if run.orchestrator_session_id is not None:
+        named.append(run.orchestrator_session_id)
     named.extend(slot.session_id for slot in open_slots if slot.session_id is not None)
     sessions = tuple(dict.fromkeys(named))
     creating = any(slot.session_id is None for slot in open_slots)
