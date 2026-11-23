@@ -2371,10 +2371,10 @@ class HostProcess:
             if await self._run_host_subprocess_in_thread(process_read_canary_open):
                 return self._launch_failed(
                     frame,
-                    f"host {self._identity.name!r} runs no Coral step: at host start its macOS "
-                    f"{platform.mac_ver()[0]} sandbox let a sandboxed read of another process's "
-                    "arguments through (see the host log). Restart the host to check again "
-                    "after a Coral or macOS update.",
+                    f"host {self._identity.name!r} runs no Coral step: its macOS "
+                    f"{platform.mac_ver()[0]} sandbox check either let a sandboxed read of "
+                    "another process's arguments through or could not run (the host log says "
+                    "which). Restart the host to check again after a Coral or macOS update.",
                 )
         if frame.inference_config is not None:
             try:

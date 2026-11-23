@@ -4081,7 +4081,7 @@ seams:
     note: >-
       `.github/workflows/macos-sandbox.yml` runs on a GitHub-hosted
       `macos-26` runner, behind the security gate, for pull requests and
-      `development` pushes that touch the sandbox code, its tests, the probe's
+      `development` pushes that touch the sandbox code, the host launch path, its tests, the probe's
       stack helpers, the claude CLI pin or `uv.lock` (path filters), weekly
       for new runner images, and by hand. It installs the pinned claude CLI
       from the in-repo action, records the macOS and CLI versions in the job
@@ -4102,10 +4102,10 @@ seams:
       - tests/coral/test_ci_lane.py
     budget_lines: 40
     budget_exception:
-      lines: 128
+      lines: 140
       reason: >-
-        .github/workflows/macos-sandbox.yml is a new 128-line workflow: the
-        two 15-line path filter lists (pull request and push), the gate, and
+        .github/workflows/macos-sandbox.yml is a new 140-line workflow: the
+        two 21-line path filter lists (pull request and push), the gate, and
         the macOS job's checkout, Python, uv, Node and claude CLI setup, the
         version summary, the dependency install and the pytest step.
       approver: nicholasjano (delegated)

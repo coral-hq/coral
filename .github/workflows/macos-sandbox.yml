@@ -12,6 +12,8 @@ on:
       - 'omnigent/inner/sandbox.py'
       - 'omnigent/inner/os_env.py'
       - 'omnigent/host/frames.py'
+      - 'omnigent/host/connect.py'
+      - 'coral/validate/preflight.py'
       - 'coral/gates/**'
       - 'tests/inner/test_seatbelt_sandbox.py'
       - 'tests/inner/sandbox/**'
@@ -20,7 +22,11 @@ on:
       - 'tests/e2e/coral/_probe_mcp_server.py'
       - 'tests/e2e/coral/_skeleton.py'
       - 'tests/e2e/coral/conftest.py'
+      - 'tests/e2e/coral/_live_proxy.py'
+      - 'tests/e2e/conftest.py'
+      - 'tests/_helpers/live_server.py'
       - '.github/actions/setup-harness-cli/**'
+      - '.github/actions/setup-uv/**'
       - '.github/workflows/macos-sandbox.yml'
       - 'uv.lock'
   push:
@@ -31,6 +37,8 @@ on:
       - 'omnigent/inner/sandbox.py'
       - 'omnigent/inner/os_env.py'
       - 'omnigent/host/frames.py'
+      - 'omnigent/host/connect.py'
+      - 'coral/validate/preflight.py'
       - 'coral/gates/**'
       - 'tests/inner/test_seatbelt_sandbox.py'
       - 'tests/inner/sandbox/**'
@@ -39,7 +47,11 @@ on:
       - 'tests/e2e/coral/_probe_mcp_server.py'
       - 'tests/e2e/coral/_skeleton.py'
       - 'tests/e2e/coral/conftest.py'
+      - 'tests/e2e/coral/_live_proxy.py'
+      - 'tests/e2e/conftest.py'
+      - 'tests/_helpers/live_server.py'
       - '.github/actions/setup-harness-cli/**'
+      - '.github/actions/setup-uv/**'
       - '.github/workflows/macos-sandbox.yml'
       - 'uv.lock'
   schedule:
@@ -55,7 +67,7 @@ env:
   PIP_INDEX_URL: https://pypi.org/simple
 
 concurrency:
-  group: macos-sandbox-${{ github.event.pull_request.number || github.sha }}
+  group: macos-sandbox-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
