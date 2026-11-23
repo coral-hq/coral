@@ -3124,7 +3124,7 @@ async def test_coral_info_enabled_and_disabled_and_before_spa(
     assert info_resp.json() == {
         "enabled": True,
         "version": CORAL_VERSION,
-        "sub_features": dict.fromkeys(SUB_FEATURE_KEYS, False),
+        "sub_features": dict.fromkeys(SUB_FEATURE_KEYS, False) | {"profiles_desk": True},
     }
     assert spa_resp.status_code == 200
     assert "<html>" in spa_resp.text

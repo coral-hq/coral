@@ -16,17 +16,37 @@ vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ClientModule>()),
   ...api,
 }));
+// A stand-in for the Monaco editor the pane hands out: the cursor is a selection.
+const yamlEditor = vi.hoisted(() => ({
+  getSelection: vi.fn(() => ({ startLineNumber: 3, startColumn: 5 })),
+  executeEdits: vi.fn(),
+  focus: vi.fn(),
+}));
+const coral = vi.hoisted(() => ({ profilesDesk: true }));
+vi.mock("../gate/useCoralInfo", () => ({
+  isCoralAvailable: () => coral.profilesDesk,
+  useCoralInfo: () => ({ data: undefined }),
+}));
+vi.mock("../profiles/ProfilePicker", () => ({
+  ProfilePicker: ({ onPick }: { onPick: (ref: string) => void }) => (
+    <button type="button" onClick={() => onPick("reviewer/strict-review")}>
+      Insert profile
+    </button>
+  ),
+}));
 vi.mock("./YamlPane", () => ({
   YamlPane: ({
     value,
     onChange,
     markers,
+    onEditorReady,
   }: {
     value: string;
     onChange: (value: string) => void;
     markers: { message: string; startLineNumber: number }[];
+    onEditorReady?: (editor: typeof yamlEditor) => void;
   }) => (
-    <div>
+    <div ref={() => onEditorReady?.(yamlEditor)}>
       <textarea aria-label="yaml" value={value} onChange={(e) => onChange(e.target.value)} />
       <ul data-testid="markers">
         {markers.map((marker) => (
@@ -84,6 +104,8 @@ function renderEditor() {
 }
 
 beforeEach(() => {
+  coral.profilesDesk = true;
+  yamlEditor.executeEdits.mockClear();
   for (const mock of Object.values(api)) mock.mockReset();
   api.getWorkflowByKey.mockResolvedValue(detail);
   api.validateWorkflow.mockResolvedValue({
@@ -164,5 +186,20 @@ describe("WorkflowEditorPage", () => {
     api.getWorkflowByKey.mockRejectedValue(new WorkflowsApiError("Workflow demo not found", 404));
     renderEditor();
     expect(await screen.findByTestId("workflow-editor-error")).toHaveTextContent("not found");
+  });
+
+  it("inserts a picked profile's ref at the YAML cursor", async () => {
+    renderEditor();
+    fireEvent.click(await screen.findByRole("button", { name: "Insert profile" }));
+    expect(yamlEditor.executeEdits).toHaveBeenCalledWith("coral.insert-profile", [
+      { range: { startLineNumber: 3, startColumn: 5 }, text: "reviewer/strict-review" },
+    ]);
+  });
+
+  it("hides Insert profile without profiles_desk", async () => {
+    coral.profilesDesk = false;
+    renderEditor();
+    await screen.findByRole("button", { name: "Save" });
+    expect(screen.queryByRole("button", { name: "Insert profile" })).toBeNull();
   });
 });

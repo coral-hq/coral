@@ -344,6 +344,7 @@ describe("Coral desk routes", () => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("/v1/coral/info")) return respondWith(status, body);
       if (url.includes("/v1/coral/workflows")) return respondWith(200, []);
+      if (url.includes("/v1/coral/profiles")) return respondWith(200, []);
       return respondWith(404, {});
     });
   }
@@ -426,7 +427,7 @@ describe("Coral desk routes", () => {
 
     serveCoral(200, coralInfo({ profiles_desk: true }));
     renderCoralRoute("/profiles");
-    expect(await screen.findByTestId("profiles-placeholder")).toBeInTheDocument();
+    expect(await screen.findByTestId("profile-list")).toBeInTheDocument();
   });
 
   it("offers Retry after a server error and recovers", async () => {

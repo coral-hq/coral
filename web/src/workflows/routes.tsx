@@ -18,7 +18,10 @@ const SettingsPage = lazy(() =>
   })),
 );
 const ProfilesPage = lazy(() =>
-  import("./desk/ProfilesPlaceholderPage").then((m) => ({ default: m.ProfilesPlaceholderPage })),
+  import("./profiles/ProfilesPage").then((m) => ({ default: m.ProfilesPage })),
+);
+const ProfileDetailPage = lazy(() =>
+  import("./profiles/ProfileDetailPage").then((m) => ({ default: m.ProfileDetailPage })),
 );
 
 interface DeskPages {
@@ -27,6 +30,7 @@ interface DeskPages {
   Editor: ComponentType;
   Settings: ComponentType;
   Profiles: ComponentType;
+  Profile: ComponentType;
 }
 
 // Wrapped components must keep a stable identity across renders, or every
@@ -42,6 +46,7 @@ function deskPages(withPageView: WithPageView): DeskPages {
       Editor: withPageView("workflows.editor", EditorPage),
       Settings: withPageView("workflows.settings", SettingsPage),
       Profiles: withPageView("profiles", ProfilesPage),
+      Profile: withPageView("profiles.detail", ProfileDetailPage),
     };
     pagesByWrapper.set(withPageView, pages);
   }
@@ -50,11 +55,11 @@ function deskPages(withPageView: WithPageView): DeskPages {
 
 /**
  * Coral desk routes, as a Fragment to drop inside the AppShell route group
- * before the catch-all. Every route is gated; `/profiles` also needs
+ * before the catch-all. Every route is gated; the `/profiles` routes also need
  * `profiles_desk`.
  */
 export function coralRoutes(prefix: string, withPageView: WithPageView) {
-  const { Workflows, Run, Editor, Settings, Profiles } = deskPages(withPageView);
+  const { Workflows, Run, Editor, Settings, Profiles, Profile } = deskPages(withPageView);
   return (
     <>
       <Route
@@ -94,6 +99,14 @@ export function coralRoutes(prefix: string, withPageView: WithPageView) {
         element={
           <CoralGate subFeature={CORAL_SUB_FEATURE.profilesDesk}>
             <Profiles />
+          </CoralGate>
+        }
+      />
+      <Route
+        path={`${prefix}/profiles/:stance/:slug`}
+        element={
+          <CoralGate subFeature={CORAL_SUB_FEATURE.profilesDesk}>
+            <Profile />
           </CoralGate>
         }
       />
