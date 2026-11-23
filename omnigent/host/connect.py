@@ -991,6 +991,38 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
 # allowlisted by exact name above instead.
 _RUNNER_ENV_ALLOWLIST_PREFIXES: tuple[str, ...] = ("LC_", "MLFLOW_", "OTEL_", "OMNIGENT_OTEL_")
 
+# CORAL(S117): glibc, the loader and the interpreter read these once at the zygote's exec,
+# so the daemon's exports must reach it there; none holds a secret.
+_ZYGOTE_ONLY_ENV_NAMES: frozenset[str] = frozenset(
+    {"MALLOC_ARENA_MAX", "MALLOC_TRIM_THRESHOLD_", "LD_LIBRARY_PATH", "PYTHONHOME"}
+)
+# CORAL(S117): an empty or relative entry searches the working directory, for a fork a
+# step-writable checkout, so the zygote keeps only these paths' absolute entries.
+_ZYGOTE_SEARCH_PATH_ENV_NAMES: frozenset[str] = frozenset({"LD_LIBRARY_PATH", "PYTHONPATH"})
+# CORAL(S117): a ``scheme://user:password@host`` authority; its userinfo may be a credential.
+_URL_USERINFO = re.compile(r"(?<=[A-Za-z0-9+.-])://[^/?#@\s]*@")
+# CORAL(S117): the name parts probe 15 counts as credentials (any case); with the suffixes and
+# the names below, the zygote's exec env drops them even when allow-listed.
+_CREDENTIAL_NAME_PARTS: tuple[str, ...] = (
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "BEARER",
+    "API_KEY",
+    "PRIVATE_KEY",
+    "COOKIE",
+)
+_CREDENTIAL_NAME_SUFFIXES: tuple[str, ...] = ("_HEADERS", "_PAT", "_CRED", "_CREDS")
+_CREDENTIAL_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "OMNIGENT_DEBUG_LOG_CLIENT_SECRET",
+        "OMNIGENT_DEBUG_LOG_CLIENT_SECRET_COMMAND",
+        "OMNIGENT_DATABRICKS_EXTRA_HEADERS",
+    }
+)
+
 # Harness credential / endpoint env vars forwarded host→runner when
 # present. These are the names the harnesses themselves resolve —
 # ANTHROPIC_* for claude-sdk / pi (claude-code also honors
@@ -1084,6 +1116,55 @@ class HostConnectError(Exception):
     """
 
 
+def _runner_allowlisted_env(base_env: Mapping[str, str]) -> dict[str, str]:
+    """CORAL(S117): the names of *base_env* the runner allow-list admits, by name or prefix.
+
+    Forwarded credentials are not among them; :func:`_build_runner_env` adds those.
+    """
+    return {
+        key: value
+        for key, value in base_env.items()
+        if key in _RUNNER_ENV_ALLOWLIST or key.startswith(_RUNNER_ENV_ALLOWLIST_PREFIXES)
+    }
+
+
+def _credential_shaped_env_name(name: str) -> bool:
+    """CORAL(S117): whether *name* looks like it holds a credential, in any case."""
+    upper = name.upper()
+    return (
+        name in _CREDENTIAL_ENV_NAMES
+        or upper.startswith("HARNESS_CLAUDE_SDK_")
+        or upper.endswith(_CREDENTIAL_NAME_SUFFIXES)
+        or any(part in upper for part in _CREDENTIAL_NAME_PARTS)
+    )
+
+
+def _zygote_base_env(base_env: Mapping[str, str]) -> dict[str, str]:
+    """CORAL(S117): the env the zygote is exec'd with, which every fork of it exposes.
+
+    The runner allow-list minus credential-shaped names and values holding URL userinfo,
+    which runners get through the fork payload instead, plus the
+    :data:`_ZYGOTE_ONLY_ENV_NAMES` present in *base_env*. Search paths keep only their
+    absolute entries, and are dropped when none remains.
+    """
+    allowlisted = _runner_allowlisted_env(base_env)
+    env: dict[str, str] = {}
+    for key, value in base_env.items():
+        admitted = key in _ZYGOTE_ONLY_ENV_NAMES or (
+            key in allowlisted and not _credential_shaped_env_name(key)
+        )
+        if not admitted or _URL_USERINFO.search(value):
+            continue
+        if key in _ZYGOTE_SEARCH_PATH_ENV_NAMES:
+            entries = value.split(os.pathsep)
+            absolute = os.pathsep.join(entry for entry in entries if os.path.isabs(entry))
+            if absolute:
+                env[key] = absolute
+        else:
+            env[key] = value
+    return env
+
+
 def _build_runner_env(
     base_env: Mapping[str, str],
     *,
@@ -1160,13 +1241,8 @@ def _build_runner_env(
             inference_config, include_dollar_key_refs=True
         )
     forwarded = HARNESS_CREDENTIAL_ENV_VARS | extra_names | config_env_vars
-    env = {
-        key: value
-        for key, value in base_env.items()
-        if key in _RUNNER_ENV_ALLOWLIST
-        or key.startswith(_RUNNER_ENV_ALLOWLIST_PREFIXES)
-        or key in forwarded
-    }
+    allowlisted = _runner_allowlisted_env(base_env)  # CORAL(S117): shared with the zygote's env
+    env = {key: value for key, value in base_env.items() if key in allowlisted or key in forwarded}
     # Runners start in the session workspace, so resolve a relative override here.
     if auth_status_file := env.get("OMNIGENT_MCP_AUTH_STATUS_FILE"):
         env["OMNIGENT_MCP_AUTH_STATUS_FILE"] = str(Path(auth_status_file).expanduser().absolute())
@@ -1589,7 +1665,12 @@ class HostProcess:
         self._zygote_enabled = IS_POSIX and not (
             _zygote_optout is not None and not env_truthy(_zygote_optout)
         )
-        self._zygote: ZygoteManager | None = ZygoteManager() if self._zygote_enabled else None
+        # CORAL(S117): every runner and harness the zygote forks exposes its exec env.
+        self._zygote: ZygoteManager | None = (
+            ZygoteManager(base_env=lambda: _zygote_base_env(os.environ))
+            if self._zygote_enabled
+            else None
+        )
         self._zygote_disabled = False
         # Warms the zygote at daemon start so the first launch doesn't pay
         # its one-time import; see run().

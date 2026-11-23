@@ -3979,3 +3979,86 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S117
+    title: A runner's exec-time environment holds no credential-shaped name (the zygote starts from the allow-listed runner environment)
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A forked child's readable environment (/proc/<pid>/environ on Linux,
+      KERN_PROCARGS2 on macOS) is its parent's exec-time block, whatever it
+      later does to os.environ. The host exec'd the runner zygote with the
+      daemon's whole environment, so the zygote, every runner it forked and
+      every harness those runners forked exposed every host secret to
+      same-user readers outside the sandbox, past the runner env allow-list.
+      HostProcess now builds its ZygoteManager with base_env, a callable read
+      at each zygote spawn, so a respawn sees the daemon's environment then;
+      ZygoteManager() without it keeps os.environ (tests only), and a
+      base_env that raises leaves no control socket open.
+      _zygote_base_env keeps the names _runner_allowlisted_env admits (the
+      runner allow-list by exact name and by the LC_, MLFLOW_, OTEL_ and
+      OMNIGENT_OTEL_ prefixes; _build_runner_env uses the same filter and its
+      output is unchanged) minus credential-shaped names (any case: TOKEN,
+      SECRET, PASSWORD, PASSWD, CREDENTIAL, BEARER, API_KEY, PRIVATE_KEY or
+      COOKIE in the name, the probe 15 set, a HARNESS_CLAUDE_SDK_ prefix, a
+      _HEADERS, _PAT, _CRED or _CREDS suffix, and
+      OMNIGENT_DEBUG_LOG_CLIENT_SECRET,
+      OMNIGENT_DEBUG_LOG_CLIENT_SECRET_COMMAND and
+      OMNIGENT_DATABRICKS_EXTRA_HEADERS by name) and minus any name whose
+      value holds URL userinfo (scheme://user@host), plus MALLOC_ARENA_MAX,
+      MALLOC_TRIM_THRESHOLD_, LD_LIBRARY_PATH and PYTHONHOME when the daemon
+      has them, since glibc, the loader and the interpreter read them once at
+      exec. LD_LIBRARY_PATH and PYTHONPATH keep only their absolute entries,
+      and are dropped when none remains, because an empty or relative entry
+      searches the working directory, for a fork a step-writable checkout.
+      The malloc defaults are still added by setdefault. Runners get every
+      allow-listed and forwarded name through the fork payload, which lives
+      in heap memory only. Names outside the allow-list that the zygote read
+      at its exec or import now behave as on direct spawn, where they were
+      never passed; for example OMNIGENT_HARNESS_SHUTDOWN_TIMEOUT_S,
+      OMNIGENT_HARNESS_HARD_EXIT_TIMEOUT_S, WEBSOCKETS_*,
+      PYDANTIC_DISABLE_PLUGINS, PSUTIL_DEBUG, PYTHONUSERBASE, PYTHONTZPATH,
+      the interpreter's startup variables (PYTHONDONTWRITEBYTECODE,
+      PYTHONPYCACHEPREFIX, PYTHONWARNINGS, PYTHONUNBUFFERED,
+      PYTHONFAULTHANDLER and the like), OPENSSL_CONF, and in the deferred
+      graph PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION,
+      GOOGLE_API_USE_CLIENT_CERTIFICATE and DATABRICKS_SDK_UPSTREAM*. Names
+      listed in OMNIGENT_RUNNER_ENV_PASSTHROUGH are the exception: direct
+      spawn passes them at exec, but the zygote's own env does not hold them,
+      so a zygote-forked runner gets them only through the payload, after
+      the zygote's exec and imports have read their environment. Measured on
+      macOS with the real zygote and fake host secrets: the zygote, a forked
+      runner and the harness it forked expose only allow-listed names, the
+      control fd and the platform's __CF_USER_TEXT_ENCODING and
+      __PYVENV_LAUNCHER__. Residuals: a direct-spawned runner's env= still
+      carries the credential-shaped allow-listed names and the forwarded
+      credentials (CRL-197); a credential in the value of a name that is not
+      credential-shaped, outside URL userinfo (such as a signed query
+      string), still reaches the zygote.
+    files:
+      - omnigent/host/connect.py
+      - omnigent/host/runner_zygote.py
+      - tests/host/test_connect.py
+      - tests/host/test_runner_zygote.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/host/test_runner_zygote.py
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 120
+    budget_exception:
+      lines: 136
+      reason: >-
+        Counted with git diff --numstat origin/development (added plus
+        removed lines). tests/host/test_connect.py (136): the
+        _zygote_base_env unit test with every credential name part and
+        suffix, URL userinfo in a value and the allow-listed controls, the
+        search path test for LD_LIBRARY_PATH and PYTHONPATH, and the
+        HostProcess wiring test with its respawn re-read. The other files
+        are within budget: omnigent/host/connect.py 97,
+        omnigent/host/runner_zygote.py 15, tests/host/test_runner_zygote.py
+        119.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

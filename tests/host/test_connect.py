@@ -40,9 +40,11 @@ from omnigent.host.connect import (
     _connection_refused,
     _is_coral_run_workspace,  # CORAL(S108)
     _kill_lost_group_members,  # CORAL(S108)
+    _runner_allowlisted_env,  # CORAL(S117)
     _runner_exit_error,
     _RunnerHandle,
     _start_stamp_now,  # CORAL(S108)
+    _zygote_base_env,  # CORAL(S117)
     run_host_process,
 )
 from omnigent.host.frames import (
@@ -5088,6 +5090,140 @@ def test_build_runner_env_allowlists_host_env_and_strips_secrets(tmp_path: Path)
     assert env[RUNNER_PARENT_PID_ENV_VAR] == "42"
     assert env[HARNESS_TMP_PARENT_ENV_VAR] == str((tmp_path / "harness-sockets").resolve())
     assert env[RUNNER_HOST_OWNS_GLOBAL_CLEANUP_ENV_VAR] == "1"
+
+
+# CORAL(S117): every runner and harness the zygote forks exposes the zygote's exec env.
+def test_zygote_base_env_is_the_allow_list_without_credential_shaped_names() -> None:
+    """The zygote starts from the runner allow-list minus credential-shaped names and values.
+
+    A value holding URL userinfo counts as one. Runners get those through the fork
+    payload. The loader, interpreter and allocator names read once at exec are kept,
+    only when the daemon has them.
+    """
+    kept = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/home/alice",
+        "PYTHONPATH": "/opt/lib",
+        "LC_CTYPE": "UTF-8",
+        "MLFLOW_TRACKING_URI": "databricks",
+        "OTEL_SERVICE_NAME": "omnigent",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "https://otel.invalid/v1@traces",
+        "MLFLOW_FAKE_COMPAT": "1",
+        "OMNIGENT_OTEL_CAPTURE_CONTENT": "1",
+        "OMNIGENT_DEBUG_LOG_CLIENT_ID": "client",
+        "OMNIGENT_RUNNER_ENV_PASSTHROUGH": "MY_PROVIDER_KEY",
+        "MALLOC_ARENA_MAX": "16",
+        "MALLOC_TRIM_THRESHOLD_": "1",
+        "LD_LIBRARY_PATH": "/opt/python/lib",
+        "PYTHONHOME": "/opt/python",
+    }
+    allow_listed_credentials = {
+        "OMNIGENT_DEBUG_LOG_CLIENT_SECRET": "fake-secret",
+        "OMNIGENT_DEBUG_LOG_CLIENT_SECRET_COMMAND": "fake-helper",
+        "OMNIGENT_DATABRICKS_EXTRA_HEADERS": "{}",
+        "OMNIGENT_PROXY_BEARER_FILE": "/fake/bearer",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/fake/adc.json",
+        "MLFLOW_TRACKING_TOKEN": "fake-token",
+        "MLFLOW_tracking_password": "fake-password",
+        "OTEL_EXPORTER_OTLP_HEADERS": "authorization=fake",
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS": "authorization=fake",
+        # Prefix-admitted names for the parts and the suffix case no name above exercises.
+        "MLFLOW_FAKE_SECRET": "fake",
+        "MLFLOW_FAKE_PASSWD": "fake",
+        "MLFLOW_FAKE_API_KEY": "fake",
+        "OTEL_FAKE_PRIVATE_KEY": "fake",
+        "OMNIGENT_OTEL_FAKE_COOKIE": "fake",
+        "OTEL_exporter_otlp_logs_headers": "authorization=fake",
+        "MLFLOW_DATABRICKS_PAT": "fake-pat",
+        "MLFLOW_FAKE_CRED": "fake",
+        "OTEL_fake_creds": "fake",
+        # URL userinfo in the value, whatever the name.
+        "MLFLOW_REGISTRY_URI": "https://fake-user:fake-pass@mlflow.invalid/db",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "endpoint=grpc+tls://fake-token@otel.invalid:4317",
+    }
+    never_listed = {
+        "ANTHROPIC_API_KEY": "sk-ant-test-0000",
+        "OMNIGENT_ANTHROPIC_API_KEY": "sk-ant-test-0001",
+        "GIT_TOKEN": "fake-git-token",
+        "MY_PROVIDER_KEY": "fake-provider-key",
+        "OMNIGENT_RUNNER_TUNNEL_TOKEN": "fake-tunnel-token",
+        "AWS_SECRET_ACCESS_KEY": "fake-aws-secret",
+        "OMNIGENT_HARNESS_SHUTDOWN_TIMEOUT_S": "5",
+        "LD_PRELOAD": "/fake/lib.so",
+        "UNLISTED_SETTING": "1",
+    }
+    base = {**kept, **allow_listed_credentials, **never_listed}
+
+    env = _zygote_base_env(base)
+
+    assert sorted(env) == sorted(kept)
+    assert all(env[name] == base[name] for name in env)
+    allowlisted = _runner_allowlisted_env(base)
+    zygote_only = {"MALLOC_ARENA_MAX", "MALLOC_TRIM_THRESHOLD_", "LD_LIBRARY_PATH", "PYTHONHOME"}
+    assert sorted(allowlisted) == sorted((set(kept) - zygote_only) | set(allow_listed_credentials))
+    assert sorted(_zygote_base_env({"PATH": "/bin"})) == ["PATH"]
+
+
+# CORAL(S117): an empty or relative entry would search a fork's cwd, a step-writable checkout.
+@pytest.mark.parametrize("name", ["LD_LIBRARY_PATH", "PYTHONPATH"])
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("/opt/a:/opt/b", "/opt/a:/opt/b"),
+        ("/opt/a:", "/opt/a"),
+        (":/opt/b:.:rel/lib:/opt/a::./x", "/opt/b:/opt/a"),
+        ("rel:.:", None),
+    ],
+)
+def test_zygote_base_env_keeps_only_absolute_search_path_entries(
+    name: str, value: str, expected: str | None
+) -> None:
+    """The zygote keeps a search path's absolute entries in order, or drops the name."""
+    assert _zygote_base_env({"PATH": "/bin", name: value}).get(name) == expected
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the zygote is POSIX-only")
+def test_host_zygote_spawns_from_the_daemon_env_through_the_zygote_base_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host's zygote is exec'd with the filtered daemon env, read at that spawn."""
+    from omnigent.runner._zygote import ZYGOTE_CONTROL_FD_ENV_VAR, ZYGOTE_ENABLED_ENV_VAR
+
+    monkeypatch.setenv(ZYGOTE_ENABLED_ENV_VAR, "1")
+    host = _make_host_process()
+    assert host._zygote is not None
+    # Exported after the host was built: the zygote reads the daemon env when it spawns.
+    monkeypatch.setattr("omnigent.inner._proc.IS_LINUX", True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-0000")
+    monkeypatch.setenv("OMNIGENT_DEBUG_LOG_CLIENT_SECRET", "fake-secret")
+    monkeypatch.setenv("OMNIGENT_RUNNER_TUNNEL_TOKEN", "fake-tunnel-token")
+    monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", "fake-wrapper")
+    monkeypatch.setenv("MALLOC_ARENA_MAX", "16")
+    watched = ("OMNIGENT_WRAPPER_COMMAND", "MALLOC_ARENA_MAX", ZYGOTE_CONTROL_FD_ENV_VAR)
+    spawned: list[tuple[frozenset[str], dict[str, str | None]]] = []
+
+    class _FakePopen:
+        pid = 4321
+
+        def __init__(self, argv: list[str], env: dict[str, str], **kwargs: object) -> None:
+            # Names and the watched fakes only: the rest is this test process's environment.
+            spawned.append((frozenset(env), {name: env.get(name) for name in watched}))
+
+    monkeypatch.setattr("omnigent.host.runner_zygote.subprocess.Popen", _FakePopen)
+    host._zygote._spawn_zygote_process(child_fd=7)
+
+    [(names, values)] = spawned
+    dropped = {
+        "ANTHROPIC_API_KEY",
+        "OMNIGENT_DEBUG_LOG_CLIENT_SECRET",
+        "OMNIGENT_RUNNER_TUNNEL_TOKEN",
+    }
+    assert not dropped & names, sorted(dropped & names)
+    assert values == dict(zip(watched, ("fake-wrapper", "16", "7"), strict=True))
+    # A respawned zygote (the first one died) reads the daemon env again.
+    monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", "fake-wrapper-2")
+    host._zygote._spawn_zygote_process(child_fd=8)
+    assert spawned[1][1] == dict(zip(watched, ("fake-wrapper-2", "16", "8"), strict=True))
 
 
 def test_build_runner_env_omits_cleanup_owner_without_active_janitor() -> None:

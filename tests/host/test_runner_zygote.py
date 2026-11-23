@@ -14,6 +14,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import secrets  # CORAL(S117)
 import signal
 import socket
 import subprocess
@@ -29,7 +30,12 @@ import psutil
 import pytest
 
 import omnigent
-from omnigent.host.connect import HostProcess
+from omnigent.host.connect import (  # CORAL(S117): the allow-list and the zygote's env
+    _RUNNER_ENV_ALLOWLIST,
+    _RUNNER_ENV_ALLOWLIST_PREFIXES,
+    HostProcess,
+    _zygote_base_env,
+)
 from omnigent.host.identity import HostIdentity
 from omnigent.host.runner_zygote import (
     _ZYGOTE_LOST_EXIT_CODE,
@@ -38,10 +44,13 @@ from omnigent.host.runner_zygote import (
     ZygoteUnavailable,
 )
 from omnigent.inner import _proc
+from omnigent.process_logging import LOG_TTY_FD_ENV_VAR  # CORAL(S117)
 from omnigent.runner import _zygote
 from omnigent.runner._zygote import (
     _ZYGOTE_TEST_CHILD_EXIT_ENV_VAR,
+    _ZYGOTE_TEST_CHILD_HARNESS_ENV_VAR,  # CORAL(S117)
     _ZYGOTE_TEST_CHILD_SLEEP_ENV_VAR,
+    ZYGOTE_CONTROL_FD_ENV_VAR,  # CORAL(S117)
     _disk_build_stamp,
     _GraphStamp,
     _package_source_stamps,
@@ -49,6 +58,7 @@ from omnigent.runner._zygote import (
     _source_files_match,
     _ZygoteServer,
 )
+from tests._helpers.polling import poll_until  # CORAL(S117)
 
 # The zygote is POSIX-only: these tests exercise os.fork() and pass_fds, which
 # do not exist on Windows.
@@ -1043,6 +1053,113 @@ def test_operator_malloc_override_wins_at_the_zygote_exec(monkeypatch, tmp_path)
     mgr._spawn_zygote_process(child_fd=7)
 
     assert captured["MALLOC_ARENA_MAX"] == "16"
+
+
+# CORAL(S117): fake host secrets the host env may hold; the last three are allow-listed.
+_FAKE_HOST_SECRET_NAMES = (
+    "ANTHROPIC_API_KEY",
+    "OMNIGENT_RUNNER_TUNNEL_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "UNLISTED_SETTING",
+    "OMNIGENT_DEBUG_LOG_CLIENT_SECRET",
+    "MLFLOW_TRACKING_TOKEN",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+)
+
+
+def _exposed_names(pid: int) -> frozenset[str]:
+    """The names in *pid*'s environment as an outside reader sees it, never a value."""
+    return frozenset(psutil.Process(pid).environ())
+
+
+def test_forked_runner_and_harness_expose_only_allow_listed_names(tmp_path: Path) -> None:
+    """A zygote started from ``_zygote_base_env`` hands its forks no host secret.
+
+    A forked runner's, and its harness's, readable environment is the zygote's exec
+    block, never the fork payload, so only names the zygote was started with show.
+    """
+    host_env = {
+        name: os.environ[name]
+        for name in ("PATH", "PYTHONPATH", "LD_LIBRARY_PATH", "PYTHONHOME")
+        if name in os.environ
+    }
+    host_env.update(HOME=str(tmp_path), TMPDIR=str(tmp_path), OTEL_SERVICE_NAME="fake")
+    host_env.update(
+        {name: f"sk-ant-test-{secrets.token_hex(16)}" for name in _FAKE_HOST_SECRET_NAMES}
+    )
+    host_env["UNLISTED_SETTING"] = "1"
+    allowed = {
+        name
+        for name in host_env
+        if name in _RUNNER_ENV_ALLOWLIST or name.startswith(_RUNNER_ENV_ALLOWLIST_PREFIXES)
+    } | {
+        ZYGOTE_CONTROL_FD_ENV_VAR,
+        LOG_TTY_FD_ENV_VAR,
+        "MALLOC_ARENA_MAX",
+        "MALLOC_TRIM_THRESHOLD_",
+        "LD_LIBRARY_PATH",
+        "PYTHONHOME",
+    }
+    if sys.platform == "darwin":
+        # The platform adds these at exec.
+        allowed |= {"__CF_USER_TEXT_ENCODING", "__PYVENV_LAUNCHER__"}
+    manager = ZygoteManager(
+        log_path=tmp_path / "zygote.log", base_env=lambda: _zygote_base_env(host_env)
+    )
+    manager.start()
+    log = tmp_path / "runner.log"
+    runner: ZygoteRunnerProc | None = None
+    harness: int | None = None
+    try:
+        # As in production, the fork payload carries a credential; it stays in the heap.
+        payload = {
+            "PATH": host_env["PATH"],
+            "ANTHROPIC_API_KEY": host_env["ANTHROPIC_API_KEY"],
+            _ZYGOTE_TEST_CHILD_HARNESS_ENV_VAR: "30",
+        }
+        runner = manager.fork_runner(payload, str(log), str(tmp_path))
+        poll_until(
+            lambda: log.exists() and "harness=" in log.read_text(), timeout_s=10, interval_s=0.05
+        )
+        harness = json.loads(log.read_text().split("harness=", 1)[1].splitlines()[0])["pid"]
+        assert manager.pid is not None and isinstance(harness, int)
+        for role, pid in (("zygote", manager.pid), ("runner", runner.pid), ("harness", harness)):
+            exposed = _exposed_names(pid)
+            assert {"PATH", "HOME"} <= exposed, f"{role}'s environment was not read"
+            assert not exposed - allowed, f"{role} exposes {sorted(exposed - allowed)}"
+            leaked = exposed & set(_FAKE_HOST_SECRET_NAMES)
+            assert not leaked, f"{role} exposes {sorted(leaked)}"
+    finally:
+        if harness is not None:
+            with contextlib.suppress(psutil.Error):
+                psutil.Process(harness).kill()
+        if runner is not None:
+            runner.kill()
+            _wait_exit(runner)
+        manager.stop()
+
+
+# CORAL(S117): the zygote's exec env is computed after its control socketpair exists.
+def test_raising_base_env_leaves_no_control_socket_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``base_env`` callable that raises closes both control socket ends and propagates."""
+    created: list[socket.socket] = []
+    real_socketpair = socket.socketpair
+
+    def _recording_socketpair(*args: object) -> tuple[socket.socket, socket.socket]:
+        pair = real_socketpair(*args)
+        created.extend(pair)
+        return pair
+
+    def _raising_base_env() -> dict[str, str]:
+        raise RuntimeError("base env unavailable")
+
+    monkeypatch.setattr(socket, "socketpair", _recording_socketpair)
+    manager = ZygoteManager(base_env=_raising_base_env)
+    with pytest.raises(RuntimeError, match="base env unavailable"):
+        manager.start()
+
+    assert [sock.fileno() for sock in created] == [-1, -1]
+    assert not manager.is_running()
 
 
 def test_zygote_boots_from_inside_an_omnigent_checkout(monkeypatch, tmp_path) -> None:

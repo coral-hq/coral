@@ -941,8 +941,9 @@ EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
         "runner_environ": Pin("denied"),
         "shell_env_names": Pin("not_present"),
         "shell_env_names.names": Pin("none"),
-        "runner.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
-        "harness.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
+        # The zygote starts from the allow-listed runner env, so its forks lack the token.
+        "runner.names": Pin("none"),
+        "harness.names": Pin("none"),
         "launcher.names": Pin("none"),
         "cli.names": Pin("none"),
     },
@@ -952,8 +953,9 @@ EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
         "runner_environ": Pin("hidden"),
         "shell_env_names": Pin("not_present"),
         "shell_env_names.names": Pin("none"),
-        "runner.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
-        "harness.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
+        # As on macOS; the same zygote env on both platforms.
+        "runner.names": Pin("none"),
+        "harness.names": Pin("none"),
         "launcher.names": Pin("none"),
         "cli.names": Pin("none"),
     },
@@ -967,7 +969,8 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
     """
     Whether a step runs on a server that keeps the allow-listed runner token, and which
     token names reach its shell, and its runner, harness, launcher and CLI as read from
-    outside, where a zygote-forked runner's or harness's environment is the host's own.
+    outside. A zygote-forked runner's or harness's readable environment is the zygote's,
+    which starts from the allow-listed runner environment, so the host's token is not in it.
 
     Recorded with it: a host ``unknown`` counts as dead, so a relaunch can start while the
     old runner lives on; on such a server runner-id rotation does not fence that runner,
