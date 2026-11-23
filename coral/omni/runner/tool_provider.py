@@ -1,4 +1,4 @@
-"""Coral's ``omnigent.tool_providers`` entry point: engine tools by stance, and the host token.
+"""Coral's ``omnigent.tool_providers`` entry point: engine tools by stance, and the host tokens.
 
 A host loads it to build its hello and a runner on its first tool or prompt
 build, so it imports only the standard library, the tool catalog, the process
@@ -70,7 +70,7 @@ class CoralToolProvider:
         return self._names
 
     def host_capabilities(self) -> tuple[str, ...]:
-        """``coral_runner:2``, unless Coral's host entry points are disabled."""
+        """``coral_runner:2`` and the sandbox policy, unless host entry points are disabled."""
         return host_tokens()
 
 

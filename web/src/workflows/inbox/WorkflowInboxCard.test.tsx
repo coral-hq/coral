@@ -717,6 +717,7 @@ describe("WorkflowAlertCard run actions", () => {
       gates: [],
       slots: [],
       retry_activation_ids: [],
+      gate_integrity: { label: "not_enforced", reasons: ["host_sandbox_unknown"] },
       ...overrides,
     };
   }

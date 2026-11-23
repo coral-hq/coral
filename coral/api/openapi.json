@@ -845,6 +845,45 @@
         "title": "GateAnswerRequest",
         "type": "object"
       },
+      "GateIntegrityOut": {
+        "additionalProperties": false,
+        "description": "Whether this run's pending gates are Enforced: no step of the run could answer them as\nits owner, as far as the server can tell. It describes the server and the run at the\ntime of the read and can change between reads; it covers Coral's steps only, not other\nagents the owner runs, and never says who answered a gate. ``reasons`` is empty\nexactly when ``label`` is ``enforced``.",
+        "properties": {
+          "label": {
+            "enum": [
+              "enforced",
+              "not_enforced"
+            ],
+            "title": "Label",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "$ref": "#/components/schemas/GateIntegrityReason"
+            },
+            "title": "Reasons",
+            "type": "array"
+          }
+        },
+        "required": [
+          "label",
+          "reasons"
+        ],
+        "title": "GateIntegrityOut",
+        "type": "object"
+      },
+      "GateIntegrityReason": {
+        "description": "Why a gate is not Enforced, in the order a label names them.\n``server_mode_not_verified``: the server does not sign users in with accounts.\n``server_config_not_verified``: a server setting could hand a step an owner\ncredential, or was not read.\n``native_steps_enabled``: the server may create claude-native steps.\n``host_sandbox_unknown``: the run's host is offline, unreported, or on a sandbox no\nprobe measured.\n``host_sandbox_open``: the run's sandbox still has an open owner path.",
+        "enum": [
+          "server_mode_not_verified",
+          "server_config_not_verified",
+          "native_steps_enabled",
+          "host_sandbox_unknown",
+          "host_sandbox_open"
+        ],
+        "title": "GateIntegrityReason",
+        "type": "string"
+      },
       "GateOut": {
         "additionalProperties": false,
         "description": "A gate visit waiting for its answer. ``context`` is what its approval prompt asks;\n``None`` when the run's engine state cannot be loaded or does not hold the visit.",
@@ -2276,7 +2315,7 @@
       },
       "RunDetail": {
         "additionalProperties": false,
-        "description": "One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that\ncannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are\n``None`` when its stored rows cannot be read. ``retry_activation_ids`` are the store\nids of the failed steps a retry may restart now, in cause order: none while the run\nis not paused or a host hold or a restart stands.",
+        "description": "One run in full. ``view`` is ``None`` and ``load_error`` is set for a run that\ncannot be loaded; ``target``, ``max_activations`` and ``request_preview`` are\n``None`` when its stored rows cannot be read. ``retry_activation_ids`` are the store\nids of the failed steps a retry may restart now, in cause order: none while the run\nis not paused or a host hold or a restart stands. ``gate_integrity`` labels its\npending gates as the server reads them now.",
         "properties": {
           "activation_count": {
             "title": "Activation Count",
@@ -2320,6 +2359,9 @@
               }
             ],
             "title": "Finished At"
+          },
+          "gate_integrity": {
+            "$ref": "#/components/schemas/GateIntegrityOut"
           },
           "gates": {
             "items": {
@@ -2514,7 +2556,8 @@
           "view",
           "gates",
           "slots",
-          "retry_activation_ids"
+          "retry_activation_ids",
+          "gate_integrity"
         ],
         "title": "RunDetail",
         "type": "object"

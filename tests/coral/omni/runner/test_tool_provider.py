@@ -145,7 +145,8 @@ def test_tool_sets_pass_the_extension_checks() -> None:
 def test_host_capabilities_follow_the_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = tool_provider()
     monkeypatch.delenv("CORAL_DISABLE_HOST_ENTRY_POINTS", raising=False)
-    assert provider.host_capabilities() == ("coral_runner:2",)
+    monkeypatch.delenv("OMNIGENT_CLAUDE_SDK_NO_SANDBOX", raising=False)
+    assert provider.host_capabilities() == ("coral_runner:2", "coral_sandbox_policy:1")
 
     monkeypatch.setenv("CORAL_DISABLE_HOST_ENTRY_POINTS", "1")
     assert provider.host_capabilities() == ()

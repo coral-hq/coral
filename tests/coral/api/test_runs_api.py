@@ -46,6 +46,7 @@ from coral.api.run_service import (
     MAX_STARTS_PER_USER,
     START_HEAD_DEADLINE_S,
     START_HEAD_TIMEOUT_S,
+    HostSandboxReader,
     InFlight,
     RunsApi,
     StartSlots,
@@ -75,6 +76,7 @@ from coral.engine.types import (
     RunnerHoldEnded,
     RunnerLost,
 )
+from coral.gates.integrity import GateIntegrityFacts, HostSandboxPolicy, ServerConfigFacts
 from coral.gates.prompt import gate_params
 from coral.gates.verdict import GateAnswers
 from coral.model.ids import anchor_session_id, derived_id
@@ -436,6 +438,8 @@ def _build(
     channels: HostWorkspaceChannels | None = None,
     outcome_diffs: OutcomeDiffs | None = None,
     canonical_host_id: Callable[[str], str] | None = None,
+    gate_integrity_facts: GateIntegrityFacts | None = None,
+    host_sandbox: HostSandboxReader | None = None,
     **in_flight_options: Any,
 ) -> tuple[Api, list[BoundedThreads]]:
     api_threads = BoundedThreads(max_workers=API_THREADS, thread_name_prefix="test-coral-api")
@@ -457,6 +461,8 @@ def _build(
         workspace_channels=channels,
         outcome_diffs=outcome_diffs,
         canonical_host_id=canonical_host_id,
+        gate_integrity_facts=gate_integrity_facts,
+        host_sandbox=host_sandbox,
     )
     built = Api(world, api, spend, reader, calls, in_flight, writes)
     return built, [api_threads, spend_threads]
@@ -779,6 +785,16 @@ async def test_a_running_run_s_detail_holds_its_view_target_slots_and_spend(
     assert detail["run_branch"] == run_branch_name(run.id)
     assert (detail["causes"], detail["load_error"], detail["gates"]) == ([], None, [])
     assert detail["retry_activation_ids"] == []
+    # A runs API built without the server's facts labels no gate enforced.
+    assert detail["gate_integrity"] == {
+        "label": "not_enforced",
+        "reasons": [
+            "server_mode_not_verified",
+            "server_config_not_verified",
+            "native_steps_enabled",
+            "host_sandbox_unknown",
+        ],
+    }
     assert detail["view"]["status"] == "running"
     assert detail["slots"] == [
         {
@@ -941,6 +957,115 @@ async def test_a_run_whose_rows_do_not_decode_shows_its_row_alone(
         None,
     )
     assert (detail["slots"], detail["gates"]) == ([], [])
+
+
+# ── The gate-integrity label ────────────────────────────────────────────────
+
+# An accounts server whose config and steps the label verifies: only the host decides it.
+ACCOUNTS_FACTS = GateIntegrityFacts(
+    server_mode="accounts",
+    native_steps_enabled=False,
+    server_config=ServerConfigFacts(
+        runner_token_allow_listed=False,
+        machine_client=False,
+        device_grant=False,
+        state_under_step_read_root=False,
+        local_single_user=False,
+    ),
+)
+
+
+class HostSandboxes:
+    """A host-sandbox reader with one answer for every host; records each owner and host asked."""
+
+    def __init__(self, policy: HostSandboxPolicy | None) -> None:
+        self.policy = policy
+        self.asked: list[dict[str, Any]] = []
+
+    def __call__(self, **owner_host: Any) -> HostSandboxPolicy | None:
+        self.asked.append(owner_host)
+        return self.policy
+
+
+async def test_the_detail_labels_its_gates_for_the_owner_alone_and_names_no_host_detail(
+    world: World,
+) -> None:
+    hosts = HostSandboxes(HostSandboxPolicy("seatbelt", "1"))
+    built, pools = _build(world, gate_integrity_facts=ACCOUNTS_FACTS, host_sandbox=hosts)
+    run = _start(world, "labelled")
+    proven = _start(world, "proven", account_generation="gen-1")
+    ownerless = _start(world, "ownerless", user=None)
+    try:
+        async with _client(_app(built.api)) as client:
+            refused = await client.get(f"{RUNS}/{run.id}", headers=_as(BOB))
+            asked_for_bob = list(hosts.asked)
+            response = await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))
+        viewer = Viewer(user_id=ALICE, account_generation="gen-1", check_generation=True)
+        generation_detail = await built.api.detail(viewer, WORKSPACE, proven.id)
+        await built.api.detail(Viewer(user_id=None), WORKSPACE, ownerless.id)
+    finally:
+        _close(built, pools)
+
+    assert (refused.status_code, refused.content) == (404, NOT_FOUND)
+    assert asked_for_bob == []
+    assert response.status_code == 200, response.text
+    # Today no sandbox is verified, so a host on a measured policy still reads open.
+    assert response.json()["gate_integrity"] == {
+        "label": "not_enforced",
+        "reasons": ["host_sandbox_open"],
+    }
+    # The run's own host, asked for the owner and registration the run was stored with.
+    owner = {"user_id": ALICE, "host_id": "host-1", "workspace_id": WORKSPACE}
+    assert hosts.asked == [
+        {**owner, "account_generation": None},
+        {**owner, "account_generation": "gen-1"},
+        # An ownerless run's host is asked for with no owner.
+        {**owner, "user_id": None, "account_generation": None},
+    ]
+    assert generation_detail.gate_integrity.reasons == ("host_sandbox_open",)
+    # The label names no backend, policy revision or blocking ticket.
+    for detail in ("seatbelt", "coral_sandbox_policy", "CRL-"):
+        assert detail not in response.text
+
+
+@pytest.mark.parametrize(
+    ("policy", "undecodable", "reasons"),
+    [
+        pytest.param(HostSandboxPolicy("bwrap", "1"), False, ["host_sandbox_open"], id="bwrap"),
+        pytest.param(
+            HostSandboxPolicy("seatbelt", "0"), False, ["host_sandbox_unknown"], id="old-revision"
+        ),
+        pytest.param(
+            HostSandboxPolicy("none", "1"), False, ["host_sandbox_unknown"], id="no-sandbox"
+        ),
+        pytest.param(None, False, ["host_sandbox_unknown"], id="offline-or-another-owner"),
+        pytest.param(
+            HostSandboxPolicy("seatbelt", "1"), True, ["host_sandbox_unknown"], id="rows-unread"
+        ),
+    ],
+)
+async def test_a_host_the_label_cannot_place_in_its_table_is_unknown(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: HostSandboxPolicy | None,
+    undecodable: bool,
+    reasons: list[str],
+) -> None:
+    hosts = HostSandboxes(policy)
+    built, pools = _build(world, gate_integrity_facts=ACCOUNTS_FACTS, host_sandbox=hosts)
+    run = _start(world, "placed")
+    if undecodable:
+        _rows_undecodable(world, run, monkeypatch)
+    try:
+        async with _client(_app(built.api)) as client:
+            response = await client.get(f"{RUNS}/{run.id}", headers=_as(ALICE))
+    finally:
+        _close(built, pools)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["gate_integrity"] == {"label": "not_enforced", "reasons": reasons}
+    # Without its stored rows the run names no host, so none is asked about.
+    assert len(hosts.asked) == (0 if undecodable else 1)
 
 
 # ── The pinned graph ────────────────────────────────────────────────────────
@@ -4372,6 +4497,16 @@ def test_slot_names_are_the_stored_codes_names() -> None:
 async def test_the_lifespan_publishes_the_runs_api_and_closes_its_pools(
     db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A single-user server with no machine client, device grant or config file.
+    for name in (
+        "OMNIGENT_MACHINE_CLIENT_ID",
+        "OMNIGENT_MACHINE_CLIENT_SECRET_HASH",
+        "OMNIGENT_MACHINE_SUB",
+        "OMNIGENT_DEVICE_GRANT_ENABLED",
+        "OMNIGENT_CONFIG",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
     built: list[OmnigentHostWorkspaceChannels] = []
     asked: list[OmnigentHostWorkspaceChannels] = []
     host, _channels = _outcome_host()
@@ -4419,6 +4554,16 @@ async def test_the_lifespan_publishes_the_runs_api_and_closes_its_pools(
     assert isinstance(api, RunsApi)
     assert detail.status_code == 200, detail.text
     assert [gate["node_id"] for gate in detail.json()["gates"]] == ["approve"]
+    # The plugin reads the server's facts: no sign-in, the single-user marker, native steps
+    # off, and the run's host is not connected.
+    assert detail.json()["gate_integrity"] == {
+        "label": "not_enforced",
+        "reasons": [
+            "server_mode_not_verified",
+            "server_config_not_verified",
+            "host_sandbox_unknown",
+        ],
+    }
     assert [item["run_id"] for item in listed] == [run.id]
     assert (answered.status_code, answered.json()) == (200, {"result": "accepted"})
     assert run_status(world, run) == int(RunStatus.COMPLETED)

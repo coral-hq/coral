@@ -44,6 +44,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +57,13 @@ import pytest
 
 import coral
 import omnigent
+from coral.gates.integrity import (
+    GATE_BLOCKERS,
+    UNPROBED_BLOCKERS,
+    HostSandboxPolicy,
+    SandboxBlockers,
+)
+from coral.omni.process_map import SANDBOX_POLICY_REVISION
 from coral.omni.server.step_agents import checkout_read_paths
 from omnigent._platform import stable_user_id
 from omnigent.inner.os_env import _DEFAULT_ENV_PASSTHROUGH
@@ -644,9 +652,13 @@ def _recorded(stack: sk.Skeleton, harness_socket: Path) -> dict[str, Any]:
 
 
 def _assert_recorded(recorded: Mapping[str, Any], pinned: Mapping[str, Any] | None = None) -> None:
-    """The pins hold only for the socket root, read grant, server and spawn path pinned with."""
+    """
+    The pins hold only for the socket root, read grant, server, spawn path and sandbox policy
+    pinned with; the identity stack also pins the gate label its server reads.
+    """
     pinned = RECORDED.get(sys.platform, {}) if pinned is None else pinned
-    for key in ("harness_socket_root", "checkout_read_grant", "server_mode", "runner_spawn"):
+    keys = ("harness_socket_root", "checkout_read_grant", "server_mode", "runner_spawn")
+    for key in (*keys, "sandbox_policy", "gate_integrity"):
         if key in pinned:
             assert recorded[key] == pinned[key], (key, recorded[key])
 
@@ -1113,16 +1125,28 @@ EXPECTED_IDENTITY: dict[str, dict[str, Pin]] = {
         "worktree_exec_config": Pin("reachable", PLANTED_CONFIG),
     },
 }
+# What the run's detail says of its gates on that server: the sandbox still has open paths.
+OPEN_SANDBOX_LABEL = {"label": "not_enforced", "reasons": ["host_sandbox_open"]}
 RECORDED_IDENTITY: dict[str, dict[str, Any]] = {
-    "darwin": {**RECORDED["darwin"], "server_mode": "accounts", "runner_spawn": "direct"},
+    "darwin": {
+        **RECORDED["darwin"],
+        "server_mode": "accounts",
+        "runner_spawn": "direct",
+        "sandbox_policy": "1",
+        "gate_integrity": OPEN_SANDBOX_LABEL,
+    },
     # From code; the lane's artifact records the versions it ran.
     "linux": {
         "harness_socket_root": "/tmp/crl-*",
         "checkout_read_grant": True,
         "server_mode": "accounts",
         "runner_spawn": "direct",
+        "sandbox_policy": "1",
+        "gate_integrity": OPEN_SANDBOX_LABEL,
     },
 }
+# The sandbox backend each platform's pins were measured on.
+PINNED_BACKENDS: Mapping[str, str] = MappingProxyType({"darwin": "seatbelt", "linux": "bwrap"})
 # What the same probe must find outside any sandbox, in the same stack, right before the
 # step runs it: every owner path open, so a closed verdict in the step is the sandbox's.
 OUTSIDE_IDENTITY: Mapping[str, str] = MappingProxyType(
@@ -1267,12 +1291,17 @@ def test_probe_15_on_a_server_that_requires_identity(
         runner_tokens = _token_names(psutil.Process(runner))
         spawn = "direct" if set(RUNNER_CREDENTIALS) <= set(runner_tokens.split(",")) else "zygote"
         assert spawn == "direct", f"failed control: the runner's environment holds {runner_tokens}"
+        # Read while the step holds its host: the label the owner's run shows on this server.
+        detail = sk.detail(client, run_id)
         recorded = {
             **_recorded(stack, _harness_socket(stack, implementer)),
             "server_mode": "accounts",
             "runner_spawn": spawn,
+            # The host runs this checkout, so it reports this revision.
+            "sandbox_policy": SANDBOX_POLICY_REVISION,
+            "gate_integrity": detail["gate_integrity"],
         }
-        worktree = Path(sk.detail(client, run_id)["target"]["worktree_path"])
+        worktree = Path(detail["target"]["worktree_path"])
         probe_digest = _sha256(PROBE.read_bytes())
         # Every credential is tried on this server's owner route, and only there.
         on_server = f"{stack.server.base_url} {stack.server.base_url}{sk.RUNS}"
@@ -2029,6 +2058,84 @@ def test_every_pin_names_an_owner_exactly_when_it_is_open() -> None:
         assert bare == {"refused"}, system
         assert ACCEPTED_SINGLE_USER not in {pin.owner for pin in pins.values()}, system
         assert RECORDED_IDENTITY[system]["server_mode"] == "accounts", system
+
+
+def _open_owners(pins: Mapping[str, Pin]) -> set[str | None]:
+    """The owner of every pin that is open; an open pin with none counts as ``None``."""
+    return {pin.owner for check, pin in pins.items() if _open(check, pin.verdict)}
+
+
+def _unbound(
+    owners: Collection[str | None], blockers: SandboxBlockers, declared: Collection[str]
+) -> list[str]:
+    """
+    How the label's table for one sandbox fails its pins: an open pin's owner it lacks, or,
+    once each owner is taken out once, anything but the declared blockers left over.
+    """
+    table = Counter((*blockers.probed, *blockers.unprobed))
+    problems = [
+        f"no table entry for open pins of {owner}"
+        for owner in sorted(owners, key=str)
+        if owner not in table
+    ]
+    left = table - Counter(owner for owner in owners if owner in table)
+    if left != Counter(declared):
+        problems.append(f"after the pins' owners the table holds {sorted(left.elements())}")
+    return problems
+
+
+def test_the_gate_label_table_holds_every_open_pin_owner_and_the_declared_blockers() -> None:
+    """
+    The current revision's rows, against the pins; older revisions' rows stay as recorded
+    (``tests/coral/gates/test_integrity.py``), so a moved pin needs a new revision.
+    """
+    assert set(EXPECTED_IDENTITY) == set(PINNED_BACKENDS)
+    # Every row at the current revision is a pinned platform's: none is bound by nothing.
+    current = {policy for policy in GATE_BLOCKERS if policy.revision == SANDBOX_POLICY_REVISION}
+    pinned = {
+        HostSandboxPolicy(backend, SANDBOX_POLICY_REVISION) for backend in PINNED_BACKENDS.values()
+    }
+    assert current == pinned
+    for system, backend in PINNED_BACKENDS.items():
+        identity = EXPECTED_IDENTITY[system]
+        # A single-user residual is a server-mode fact: it never excuses an identity pin.
+        assert ACCEPTED_SINGLE_USER not in {pin.owner for pin in identity.values()}, system
+        revision = RECORDED_IDENTITY[system]["sandbox_policy"]
+        assert revision == SANDBOX_POLICY_REVISION, f"{system} is pinned at policy {revision}"
+        others = (_open_owners(table[system]) for table in (EXPECTED, EXPECTED_TOKEN))
+        owners = _open_owners(identity).union(*others) - {ACCEPTED_SINGLE_USER}
+        policy = HostSandboxPolicy(backend, revision)
+        assert policy in GATE_BLOCKERS, f"no gate label table for {system}'s pins"
+        problems = _unbound(owners, GATE_BLOCKERS[policy], UNPROBED_BLOCKERS[policy])
+        assert not problems, f"{system}: {problems}"
+
+
+def test_the_table_binding_fails_when_the_table_and_the_pins_part() -> None:
+    owners = {OTHER_PROGRAMS, PLANTED_CONFIG}
+    declared = ("CRL-170", PLANTED_CONFIG)
+    bound = SandboxBlockers(probed=(OTHER_PROGRAMS, PLANTED_CONFIG), unprobed=declared)
+    assert _unbound(owners, bound, declared) == []
+    # The table emptied while a pin is still open.
+    emptied = SandboxBlockers(probed=(PLANTED_CONFIG,), unprobed=declared)
+    assert _unbound(owners, emptied, declared) == [
+        f"no table entry for open pins of {OTHER_PROGRAMS}"
+    ]
+    assert _unbound(owners, SandboxBlockers((), ()), declared) == [
+        f"no table entry for open pins of {OTHER_PROGRAMS}",
+        f"no table entry for open pins of {PLANTED_CONFIG}",
+        "after the pins' owners the table holds []",
+    ]
+    # A pin re-pinned closed while the table still names its owner.
+    assert _unbound({PLANTED_CONFIG}, bound, declared) == [
+        "after the pins' owners the table holds ['CRL-170', 'CRL-174', 'CRL-181']"
+    ]
+    # A declared blocker dropped from the table, though its pin is open too.
+    dropped = SandboxBlockers(probed=(OTHER_PROGRAMS, PLANTED_CONFIG), unprobed=("CRL-170",))
+    assert _unbound(owners, dropped, declared) == [
+        "after the pins' owners the table holds ['CRL-170']"
+    ]
+    # An open pin with no owner is never in the table.
+    assert _unbound({None}, bound, declared)[0] == "no table entry for open pins of None"
 
 
 def test_only_a_reach_that_failed_reads_as_closed() -> None:

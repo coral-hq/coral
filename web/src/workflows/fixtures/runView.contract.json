@@ -410,7 +410,16 @@
         "engine_slot_id": "implement||a4:1:0"
       }
     ],
-    "retry_activation_ids": []
+    "retry_activation_ids": [],
+    "gate_integrity": {
+      "label": "not_enforced",
+      "reasons": [
+        "server_mode_not_verified",
+        "server_config_not_verified",
+        "native_steps_enabled",
+        "host_sandbox_unknown"
+      ]
+    }
   },
   "detail_gate_pass2": {
     "run_id": "84170e76f35c7a90d1280a24a7230fc9",
@@ -514,7 +523,16 @@
         "engine_slot_id": "implement||a4:2:0"
       }
     ],
-    "retry_activation_ids": []
+    "retry_activation_ids": [],
+    "gate_integrity": {
+      "label": "not_enforced",
+      "reasons": [
+        "server_mode_not_verified",
+        "server_config_not_verified",
+        "native_steps_enabled",
+        "host_sandbox_unknown"
+      ]
+    }
   },
   "final_detail": {
     "run_id": "84170e76f35c7a90d1280a24a7230fc9",
@@ -605,7 +623,16 @@
         "engine_slot_id": "implement||a4:2:0"
       }
     ],
-    "retry_activation_ids": []
+    "retry_activation_ids": [],
+    "gate_integrity": {
+      "label": "not_enforced",
+      "reasons": [
+        "server_mode_not_verified",
+        "server_config_not_verified",
+        "native_steps_enabled",
+        "host_sandbox_unknown"
+      ]
+    }
   },
   "outcome": {
     "run_id": "84170e76f35c7a90d1280a24a7230fc9",

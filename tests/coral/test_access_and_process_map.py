@@ -5,9 +5,16 @@ from __future__ import annotations
 import pytest
 from starlette.requests import HTTPConnection
 
-from coral.omni.process_map import CORAL_RUNNER_TOKEN, host_entry_points_disabled, host_tokens
+from coral.omni.process_map import (
+    CLAUDE_SDK_NO_SANDBOX_ENV,
+    CORAL_RUNNER_TOKEN,
+    CORAL_SANDBOX_POLICY_TOKEN,
+    host_entry_points_disabled,
+    host_tokens,
+)
 from coral.omni.server.access import CORAL_LEVEL_READ, has_session_access, resolve_user_id
 from omnigent.entities import Conversation
+from omnigent.inner import claude_sdk_executor
 from omnigent.server.auth import AuthProvider
 
 
@@ -59,16 +66,30 @@ def test_access_adapter_delegates_auth_and_permissions() -> None:
 def test_process_map_constants_and_disable_flag() -> None:
     # Version 2: the host's Coral offers the engine tools.
     assert CORAL_RUNNER_TOKEN == "coral_runner:2"
+    # The step sandbox rules the gate label's table was measured at.
+    assert CORAL_SANDBOX_POLICY_TOKEN == "coral_sandbox_policy:1"
     assert host_entry_points_disabled({}) is False
     assert host_entry_points_disabled({"CORAL_DISABLE_HOST_ENTRY_POINTS": "1"}) is True
     assert host_entry_points_disabled({"CORAL_DISABLE_HOST_ENTRY_POINTS": "false"}) is False
 
 
 def test_host_tokens_follow_the_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert host_tokens({}) == ("coral_runner:2",)
+    monkeypatch.delenv(CLAUDE_SDK_NO_SANDBOX_ENV, raising=False)
+    assert host_tokens({}) == ("coral_runner:2", "coral_sandbox_policy:1")
     assert host_tokens({"CORAL_DISABLE_HOST_ENTRY_POINTS": "1"}) == ()
     # Without an explicit environment the process's own is read.
     monkeypatch.setenv("CORAL_DISABLE_HOST_ENTRY_POINTS", "true")
     assert host_tokens() == ()
     monkeypatch.delenv("CORAL_DISABLE_HOST_ENTRY_POINTS")
-    assert host_tokens() == (CORAL_RUNNER_TOKEN,)
+    assert host_tokens() == (CORAL_RUNNER_TOKEN, CORAL_SANDBOX_POLICY_TOKEN)
+
+
+@pytest.mark.parametrize("value", ["1", "0", "true"])
+def test_a_host_that_runs_steps_unsandboxed_claims_no_sandbox_policy(value: str) -> None:
+    # Any value the executor reads as its bypass: the gate label then reads the host unknown.
+    assert host_tokens({CLAUDE_SDK_NO_SANDBOX_ENV: value}) == (CORAL_RUNNER_TOKEN,)
+    assert host_tokens({CLAUDE_SDK_NO_SANDBOX_ENV: ""}) == (
+        CORAL_RUNNER_TOKEN,
+        CORAL_SANDBOX_POLICY_TOKEN,
+    )
+    assert CLAUDE_SDK_NO_SANDBOX_ENV == claude_sdk_executor._NO_SANDBOX_ENV

@@ -20,7 +20,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
 from coral.alerts.types import LOCAL_USER_ID, CallerKey, caller_key, is_owner, normalize_owner
@@ -38,6 +38,7 @@ from coral.api.run_models import (
     RUN_ID,
     GateAnswerOut,
     GateAnswerRequest,
+    GateIntegrityOut,
     LogPage,
     PreflightEstimate,
     PreflightFix,
@@ -77,6 +78,7 @@ from coral.bridge.service import (
 from coral.bridge.start import check_profiles, check_startable, replay_start, start_engine_run
 from coral.db.enum_codecs import encode_run_status
 from coral.engine import types as engine
+from coral.gates.integrity import GateIntegrityFacts, HostSandboxPolicy, gate_integrity
 from coral.gates.verdict import GateAnswers, GateVerdict, VisitAnswer
 from coral.limits import Slots, WarnOnce
 from coral.model.ids import derived_id
@@ -297,6 +299,19 @@ class HostConnector(Protocol):
     ) -> RunWorktreeHost: ...
 
 
+class HostSandboxReader(Protocol):
+    """The sandbox policy of a run's host while the run's owner holds it; else ``None``."""
+
+    def __call__(
+        self,
+        *,
+        user_id: str | None,
+        account_generation: str | None,
+        host_id: str,
+        workspace_id: int,
+    ) -> HostSandboxPolicy | None: ...
+
+
 @dataclass
 class _KeyLock:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -406,6 +421,8 @@ class RunsApi:
         outcome_diffs: OutcomeDiffs | None = None,
         canonical_host_id: Callable[[str], str] | None = None,
         workflow_preflight: WorkflowPreflight | None = None,
+        gate_integrity_facts: GateIntegrityFacts | None = None,
+        host_sandbox: HostSandboxReader | None = None,
     ) -> None:
         """
         :param bridge: Loads runs (reads never write) and commits the owner's actions.
@@ -426,6 +443,10 @@ class RunsApi:
             as given without it.
         :param workflow_preflight: Host and credential checks for ``:preflight``; without
             it every preflight reports the host offline.
+        :param gate_integrity_facts: The server's facts for the gate label; without them
+            every fact is unknown, and no gate reads enforced.
+        :param host_sandbox: Reads the sandbox policy of a run's host for its owner;
+            without it every host is unknown.
         """
         self._bridge = bridge
         self._runs = run_store
@@ -440,6 +461,8 @@ class RunsApi:
         self._outcome_diffs = outcome_diffs or OutcomeDiffs()
         self._canonical_host_id = canonical_host_id or _as_given
         self._workflow_preflight = workflow_preflight
+        self._gate_integrity_facts = gate_integrity_facts or GateIntegrityFacts()
+        self._host_sandbox = host_sandbox
         self._graph_unreadable = WarnOnce()
 
     @property
@@ -520,7 +543,22 @@ class RunsApi:
         return detail.model_copy(update={"spend": run_spend(spend)})
 
     def _read_detail(self, workspace_id: int, run_id: str) -> RunDetail:
-        return run_detail(self._bridge.read(workspace_id=workspace_id, run_id=run_id))
+        read = self._bridge.read(workspace_id=workspace_id, run_id=run_id)
+        return run_detail(read, gate_integrity=self._gate_integrity(read))
+
+    def _gate_integrity(self, read: RunRead) -> GateIntegrityOut:
+        """The label of the run's pending gates: the server's facts and the run's own host."""
+        host_id = None if read.rows is None else read.rows.spec.host_id
+        host = None
+        if host_id is not None and self._host_sandbox is not None:
+            host = self._host_sandbox(
+                user_id=read.run.user_id,
+                account_generation=read.run.account_generation,
+                host_id=host_id,
+                workspace_id=read.run.workspace_id,
+            )
+        facts = replace(self._gate_integrity_facts, host_sandbox=host)
+        return GateIntegrityOut.of(gate_integrity(facts))
 
     async def graph(
         self, viewer: Viewer, workspace_id: int, run_id: str, *, if_none_match: str | None
