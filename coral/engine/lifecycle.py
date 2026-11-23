@@ -218,15 +218,15 @@ def retryable_activations(state: RunState) -> tuple[str, ...]:
     return tuple(found)
 
 
-def run_level_retryable(state: RunState) -> tuple[PauseCause, ...]:
+def run_level_retryable(causes: tuple[PauseCause, ...]) -> tuple[PauseCause, ...]:
     """The ``failure_path`` causes no step owns (subject ``""``) a run-level Retry clears.
 
     None while a hold or a restart stands.
     """
-    if any(holds_slot(cause) for cause in state.causes):
+    if any(holds_slot(cause) for cause in causes):
         return ()
     return tuple(
-        cause for cause in state.causes if cause.reason == "failure_path" and cause.subject == ""
+        cause for cause in causes if cause.reason == "failure_path" and cause.subject == ""
     )
 
 
@@ -241,7 +241,7 @@ def retry_run(graph: CompiledGraph, state: RunState) -> ApplyResult:
         return refuse(state, "host_offline_hold")
     if RESTARTING_DETAIL in held:
         return refuse(state, "restart_in_progress")
-    causes = run_level_retryable(state)
+    causes = run_level_retryable(state.causes)
     if not causes:
         return refuse(state, "retry_not_allowed")
     replace = any(cause.detail.startswith(_ORCHESTRATOR_PREFIXES) for cause in causes)

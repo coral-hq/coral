@@ -509,7 +509,7 @@ export interface RuleTemplateOut {
  */
 export interface RunDetail {
   activation_count: number;
-  allowed_actions: ("pause" | "resume" | "cancel")[];
+  allowed_actions: ("pause" | "resume" | "retry" | "cancel")[];
   anchor_session_id: string;
   causes: PauseCause[];
   created_at: number;
@@ -552,7 +552,7 @@ export interface RunDetail {
 
 /** The run header again, sent when the row changes without a view patch. */
 export interface RunFrame {
-  allowed_actions: ("pause" | "resume" | "cancel")[];
+  allowed_actions: ("pause" | "resume" | "retry" | "cancel")[];
   finished_at: number | null;
   load_error: "engine.load_failed" | null;
   pause_reason:
@@ -577,7 +577,7 @@ export interface RunFrame {
 
 /** The run row as clients see it; a finished row wins over what the view says. */
 export interface RunHeader {
-  allowed_actions: ("pause" | "resume" | "cancel")[];
+  allowed_actions: ("pause" | "resume" | "retry" | "cancel")[];
   finished_at: number | null;
   load_error: "engine.load_failed" | null;
   pause_reason:
@@ -669,7 +669,7 @@ export type RunStreamFrame = SnapshotFrame | EntryFrame | RunFrame | ResyncFrame
 /** A run as its owner's run list shows it; ``run_branch`` is derived from its id. */
 export interface RunSummary {
   activation_count: number;
-  allowed_actions: ("pause" | "resume" | "cancel")[];
+  allowed_actions: ("pause" | "resume" | "retry" | "cancel")[];
   created_at: number;
   finished_at: number | null;
   pause_reason:
@@ -1230,6 +1230,23 @@ export interface CoralOperations {
       run_id: string;
     };
     body: ResumeRequest;
+    status: 200;
+    response: RunSummary;
+    errors: 401 | 403 | 404 | 409 | 422 | 503;
+  };
+  /**
+   * POST /v1/coral/runs/{run_id}:retry
+   *
+   * Retry one of the caller's paused runs whose failure no step owns, such as a lost
+   * orchestrator or anchor: a lost orchestrator is replaced by a new one.
+   */
+  coral_retry_run: {
+    method: "POST";
+    path: "/v1/coral/runs/{run_id}:retry";
+    params: {
+      run_id: string;
+    };
+    body: EmptyRequest;
     status: 200;
     response: RunSummary;
     errors: 401 | 403 | 404 | 409 | 422 | 503;

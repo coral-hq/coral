@@ -111,7 +111,7 @@ def test_retry_run_clears_a_run_level_cause_and_bumps_only_for_the_orchestrator(
 ) -> None:
     graph = _decision_graph()
     paused = drive(graph, [RUN, PauseRun(reason="failure_path", detail=detail)])
-    assert run_level_retryable(paused.state) == (_run_level(detail),)
+    assert run_level_retryable(paused.state.causes) == (_run_level(detail),)
     retried = drive(graph, [RetryRun()], after=paused)
     assert retried.log[-1].rejection is None
     assert (retried.state.status, retried.state.causes) == ("running", ())

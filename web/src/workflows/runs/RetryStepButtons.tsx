@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { RunDetail, SlotOut } from "../api/generated/coralApi";
-import { retryStep, runQueryKey, runRetryKey } from "../api/runsApi";
+import { postRunAction, retryStep, runQueryKey, runRetryKey } from "../api/runsApi";
 import { CardStatusLine } from "../inbox/CardStatusLine";
 import {
   refreshAfterRunAction,
@@ -16,7 +16,8 @@ import { useCoralScope } from "../shared/viewerScope";
 import { runViewCardUi } from "./gateCardUi";
 
 // A paused run's Retry buttons: one per failed step the run's detail says a retry may
-// restart now. Each button sends one request at a time. The status line above them stays
+// restart now, then one for the run when it allows `retry` (a failure no step owns, such as
+// a lost orchestrator). Each button sends one request at a time. The status line above them stays
 // mounted with the banner and says how the latest request went, even after its button is
 // gone; a new offer or the end of a restart clears it.
 
@@ -33,6 +34,8 @@ export interface RetryStepButtonsProps {
   graph: GraphNodeNames | null;
   /** A step of the run is restarting (an `infra` / `recovery.restarting` cause). */
   restarting: boolean;
+  /** The run's `allowed_actions` has `retry`. */
+  runRetry?: boolean;
 }
 
 interface Outcome {
@@ -57,10 +60,11 @@ export function RetryStepButtons({
   slots,
   graph,
   restarting,
+  runRetry = false,
 }: RetryStepButtonsProps) {
   const statusRef = useRef<HTMLParagraphElement>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
-  const offered = activationIds.length > 0;
+  const offered = activationIds.length > 0 || runRetry;
   // The last result is over once a step is offered again after none (a restart that
   // failed) or a restart ends.
   const [seen, setSeen] = useState({ offered, restarting });
@@ -105,6 +109,14 @@ export function RetryStepButtons({
               onOutcome={setOutcome}
             />
           ))}
+          {runRetry && (
+            <RetryStepButton
+              runId={runId}
+              activationId={null}
+              label="Retry"
+              onOutcome={setOutcome}
+            />
+          )}
         </runViewCardUi.InboxActions>
       )}
     </div>
@@ -113,7 +125,8 @@ export function RetryStepButtons({
 
 interface RetryStepButtonProps {
   runId: string;
-  activationId: string;
+  /** `null` retries the run itself. */
+  activationId: string | null;
   label: string;
   /**
    * The banner's result setter. Cleared when a request starts, so the same text again is
@@ -126,14 +139,15 @@ function RetryStepButton({ runId, activationId, label, onOutcome }: RetryStepBut
   const queryClient = useQueryClient();
   const { scope, ready: viewerKnown } = useCoralScope();
   const online = useOnline();
-  const retryKey = runRetryKey(scope, runId, activationId);
+  const retryKey = runRetryKey(scope, runId, activationId ?? "");
   // Set at the click, so a second click finds the button disabled.
   const [pending, setPending] = useState(false);
   // The server took the retry; the button goes once the detail stops offering the step.
   const [taken, setTaken] = useState(false);
   const retry = useMutation({
     mutationKey: retryKey,
-    mutationFn: () => retryStep(runId, activationId),
+    mutationFn: () =>
+      activationId === null ? postRunAction(runId, "retry") : retryStep(runId, activationId),
     // Sent at once, as a plain request: never held back until React Query sees the network.
     networkMode: "always",
     // These run even if this button unmounted meanwhile, so the run refreshes and the
@@ -178,7 +192,7 @@ function RetryStepButton({ runId, activationId, label, onOutcome }: RetryStepBut
       loading={pending || inFlight}
       disabled={!ready}
       onClick={send}
-      componentId="workflows.run.retry_step"
+      componentId={activationId === null ? "workflows.run.retry_run" : "workflows.run.retry_step"}
     >
       {label}
     </Button>

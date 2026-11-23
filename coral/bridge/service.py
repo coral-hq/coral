@@ -809,6 +809,38 @@ class EngineBridge:
             return RetryResult(outcome="refused", commit=commit, code=retry.entry.rejection.code)
         return RetryResult(outcome="retried", commit=commit)
 
+    def retry_run(self, *, workspace_id: int, run_id: str, actor: str | None) -> RetryResult:
+        """
+        Retry the run's run-level failures as ``actor``: the engine clears every
+        ``failure_path`` cause no step owns, replacing the orchestrator for one of its own.
+
+        :raises EngineLoadFailed: when the run cannot be loaded; it is paused once.
+        :raises RunContended: when other commits kept winning.
+        """
+        retries: list[Applied] = []
+
+        def observe(_snapshot: EngineSnapshot, applied: Sequence[Applied]) -> CommitExtras:
+            retries[:] = [
+                item for item in applied if isinstance(item.entry.input, engine.RetryRun)
+            ]
+            return CommitExtras()
+
+        commit = self.commit_inputs(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            inputs=lambda _snapshot: (engine.RetryRun(),),
+            actor=actor,
+            extra=observe,
+        )
+        if commit.unbuildable is not None:
+            return RetryResult(outcome="refused", commit=commit, code="unbuildable")
+        if not retries:
+            return RetryResult(outcome="refused", commit=commit, code="run_terminal")
+        (retry,) = retries
+        if retry.entry.rejection is not None:
+            return RetryResult(outcome="refused", commit=commit, code=retry.entry.rejection.code)
+        return RetryResult(outcome="retried", commit=commit)
+
     def cancel_run(self, *, workspace_id: int, run_id: str, actor: str | None) -> BridgeCommit:
         """
         Cancel the run; its live slots' sessions are cancelled by the derived session id.
