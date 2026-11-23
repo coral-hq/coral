@@ -52,6 +52,7 @@ from coral.api.run_service import (
 )
 from coral.api.runs import create_runs_router
 from coral.api.spend import SPEND_THREADS, SpendCache
+from coral.bridge.config import DEFAULT_RUN_ACTIVATIONS
 from coral.bridge.executors import BoundedThreads, BridgeThreads
 from coral.bridge.keys import store_activation_id
 from coral.bridge.mapping import RECOVERY_RESTART, RECOVERY_WAKE
@@ -94,7 +95,7 @@ from coral.recovery.cancel import cancel_run_row
 from coral.recovery.pause import pause_run_once
 from coral.stores.fakes import FakeRunStore
 from coral.stores.profiles import revision_id
-from coral.stores.protocols import CoralRun, RunLogEntry, RunNotFound, WorkItem
+from coral.stores.protocols import CoralRun, RunLogEntry, RunNotFound, RunStartSpec, WorkItem
 from coral.stores.workflows import SqlWorkflowDefinitionStore, WorkflowDefinition
 from coral.validate.pipeline import check_text
 from coral.workspace.host_backend import host_capability_unavailable
@@ -1598,6 +1599,15 @@ def test_the_caps_are_the_designed_ones() -> None:
     assert API_THREADS == 2 * MAX_API_CALLS_PER_USER
     # One call per thread: an admitted call never queues for one.
     assert MAX_API_CALLS == API_THREADS
+
+
+def test_a_start_that_names_no_activation_cap_gets_the_default_one() -> None:
+    spec = RunStartSpec(workflow_id="w", version_id="v", title="t", request_preview="")
+    assert (
+        StartRunRequest.model_fields["max_activations"].default
+        == spec.max_activations
+        == DEFAULT_RUN_ACTIVATIONS
+    )
 
 
 async def test_a_full_pool_refuses_another_user_at_once_instead_of_queueing_the_call(

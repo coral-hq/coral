@@ -224,11 +224,14 @@ class InFlight:
         max_calls: int | None = None,
         max_per_caller: int = MAX_API_CALLS_PER_USER,
         timeout_s: float = API_CALL_TIMEOUT_S,
+        label: str = "runs-API call",
     ) -> None:
         """:param max_calls: Calls in flight in all; one per thread when not given, so a
-        full pool refuses at once instead of queueing a call until its timeout."""
+        full pool refuses at once instead of queueing a call until its timeout.
+        :param label: What the log lines call one of its calls, e.g. ``"simulation"``."""
         self._threads = threads
         self._timeout_s = timeout_s
+        self._label = label
         self._slots = Slots[CallerKey](
             per_key=max_per_caller,
             total=threads.max_workers if max_calls is None else max_calls,
@@ -256,7 +259,8 @@ class InFlight:
         slot = None if self._threads.closed else self._slots.acquire(key)
         if slot is None:
             _logger.debug(
-                "Coral refused a runs-API call: %d in flight, %d of the caller's",
+                "Coral refused a %s: %d in flight, %d of the caller's",
+                self._label,
                 self._slots.held,
                 self._slots.held_by(key),
             )
@@ -266,7 +270,7 @@ class InFlight:
         # asyncio.wait neither raises on a timeout nor cancels the call.
         done, _pending = await asyncio.wait({call}, timeout=self._timeout_s)
         if not done:
-            _logger.warning("Coral refused a runs-API call: it ran past %.0f s", self._timeout_s)
+            _logger.warning("Coral refused a %s: it ran past %g s", self._label, self._timeout_s)
             raise server_busy()
         try:
             return call.result()

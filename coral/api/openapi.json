@@ -3371,6 +3371,507 @@
         "title": "SavedWorkflowOut",
         "type": "object"
       },
+      "SimInput": {
+        "additionalProperties": false,
+        "description": "The values one node supplies for one kind of question, consumed in order.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "label",
+              "done_when",
+              "gate"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Node Id",
+            "type": "string"
+          },
+          "values": {
+            "items": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Values",
+            "type": "array"
+          }
+        },
+        "required": [
+          "node_id",
+          "kind",
+          "values"
+        ],
+        "title": "SimInput",
+        "type": "object"
+      },
+      "SimLoop": {
+        "additionalProperties": false,
+        "description": "One loop counter. ``iteration_path`` is its enclosing loops' passes; ``()`` outside.",
+        "properties": {
+          "back_arrow_id": {
+            "title": "Back Arrow Id",
+            "type": "string"
+          },
+          "iteration_path": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Iteration Path",
+            "type": "array"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "limit_hit": {
+            "title": "Limit Hit",
+            "type": "boolean"
+          },
+          "passes": {
+            "title": "Passes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "back_arrow_id",
+          "iteration_path",
+          "passes",
+          "limit",
+          "limit_hit"
+        ],
+        "title": "SimLoop",
+        "type": "object"
+      },
+      "SimNeedsInput": {
+        "additionalProperties": false,
+        "description": "The value a simulation stopped to ask for, and the values the reducer would take.",
+        "properties": {
+          "activation_id": {
+            "title": "Activation Id",
+            "type": "string"
+          },
+          "allowed_values": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Values",
+            "type": "array"
+          },
+          "kind": {
+            "enum": [
+              "label",
+              "done_when",
+              "gate"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id",
+          "activation_id",
+          "kind",
+          "allowed_values"
+        ],
+        "title": "SimNeedsInput",
+        "type": "object"
+      },
+      "SimRejection": {
+        "additionalProperties": false,
+        "description": "A script value the reducer refused, with the reducer's own code and choices.",
+        "properties": {
+          "allowed_values": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Values",
+            "type": "array"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "label",
+              "done_when",
+              "gate"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id",
+          "kind",
+          "value",
+          "code",
+          "allowed_values"
+        ],
+        "title": "SimRejection",
+        "type": "object"
+      },
+      "SimResult": {
+        "additionalProperties": false,
+        "description": "What a simulation did: its outcome, the answered path, and the run it left.",
+        "properties": {
+          "entries": {
+            "title": "Entries",
+            "type": "integer"
+          },
+          "gates_reached": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Gates Reached",
+            "type": "array"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "enum": [
+                  "transitions",
+                  "work",
+                  "step_seats",
+                  "graph_seats",
+                  "graph_size"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "limits_hit": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limits Hit",
+            "type": "array"
+          },
+          "loops": {
+            "items": {
+              "$ref": "#/components/schemas/SimLoop"
+            },
+            "title": "Loops",
+            "type": "array"
+          },
+          "needs_input": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SimNeedsInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "enum": [
+              "completed",
+              "failed",
+              "cancelled",
+              "paused",
+              "needs_input",
+              "rejected",
+              "stalled",
+              "step_limit",
+              "unsupported"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "rejection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SimRejection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sessions": {
+            "$ref": "#/components/schemas/SimSessions"
+          },
+          "stall_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stall Code"
+          },
+          "step_activations": {
+            "title": "Step Activations",
+            "type": "integer"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/SimStep"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "trace_digest": {
+            "title": "Trace Digest",
+            "type": "string"
+          },
+          "unconsumed": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SimUnconsumed"
+            },
+            "title": "Unconsumed",
+            "type": "array"
+          },
+          "unsupported_effect": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unsupported Effect"
+          },
+          "view": {
+            "$ref": "#/components/schemas/RunView"
+          }
+        },
+        "required": [
+          "outcome",
+          "steps",
+          "loops",
+          "gates_reached",
+          "limits_hit",
+          "step_activations",
+          "sessions",
+          "needs_input",
+          "rejection",
+          "unsupported_effect",
+          "stall_code",
+          "limit",
+          "unconsumed",
+          "view",
+          "trace_digest",
+          "entries"
+        ],
+        "title": "SimResult",
+        "type": "object"
+      },
+      "SimScript": {
+        "additionalProperties": false,
+        "description": "What a simulation answers with: at most one input per node and kind.",
+        "properties": {
+          "inputs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SimInput"
+            },
+            "maxItems": 200,
+            "title": "Inputs",
+            "type": "array"
+          }
+        },
+        "title": "SimScript",
+        "type": "object"
+      },
+      "SimSessions": {
+        "additionalProperties": false,
+        "description": "An estimate of the sessions a real run would start.\n\nThe run's turnless anchor, an orchestrator once any decision opens, and one per\nstep session created; a done-when retry reuses its session.",
+        "properties": {
+          "anchor": {
+            "title": "Anchor",
+            "type": "integer"
+          },
+          "orchestrator": {
+            "title": "Orchestrator",
+            "type": "integer"
+          },
+          "steps": {
+            "title": "Steps",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "anchor",
+          "orchestrator",
+          "steps",
+          "total"
+        ],
+        "title": "SimSessions",
+        "type": "object"
+      },
+      "SimStep": {
+        "additionalProperties": false,
+        "description": "One answered step, decision or gate.\n\n``result`` is a step's label, ``done`` or ``evidence_missing``; a decision's label;\na gate's outcome.",
+        "properties": {
+          "activation_id": {
+            "title": "Activation Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "step",
+              "decision",
+              "gate"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id",
+          "activation_id",
+          "kind",
+          "result"
+        ],
+        "title": "SimStep",
+        "type": "object"
+      },
+      "SimUnconsumed": {
+        "additionalProperties": false,
+        "description": "Script values no question used, in their input's order.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "label",
+              "done_when",
+              "gate"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "values": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Values",
+            "type": "array"
+          }
+        },
+        "required": [
+          "node_id",
+          "kind",
+          "values"
+        ],
+        "title": "SimUnconsumed",
+        "type": "object"
+      },
+      "SimulateRequest": {
+        "additionalProperties": false,
+        "description": "A workflow document and the values a simulation answers with.",
+        "properties": {
+          "script": {
+            "$ref": "#/components/schemas/SimScript"
+          },
+          "yaml": {
+            "title": "Yaml",
+            "type": "string"
+          }
+        },
+        "required": [
+          "yaml"
+        ],
+        "title": "SimulateRequest",
+        "type": "object"
+      },
+      "SimulatedResult": {
+        "description": "A workflow that loaded, what validation found, and its simulation.\n\n``simulation`` is ``None`` when blocking problems make the workflow not runnable:\nthey are reported, not simulated.",
+        "properties": {
+          "compiled": {
+            "$ref": "#/components/schemas/CompiledGraph"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "simulation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SimResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "valid": {
+            "const": true,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "valid",
+          "runnable",
+          "content_hash",
+          "problems",
+          "compiled",
+          "simulation"
+        ],
+        "title": "SimulatedResult",
+        "type": "object"
+      },
       "SlotOut": {
         "additionalProperties": false,
         "description": "An agent slot of one of the run's steps. ``slot_id`` and ``activation_id`` are store\nids; ``engine_slot_id`` is the id the run view's slots carry.",
@@ -3664,6 +4165,35 @@
           "repo_path"
         ],
         "title": "StartRunRequest",
+        "type": "object"
+      },
+      "TemplateOut": {
+        "description": "A built-in workflow template: its workflow's id, name and description, and its YAML.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "yaml": {
+            "title": "Yaml",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "yaml"
+        ],
+        "title": "TemplateOut",
         "type": "object"
       },
       "UnresolvedFact": {
@@ -6067,6 +6597,155 @@
         ]
       }
     },
+    "/v1/coral/templates": {
+      "get": {
+        "description": "The built-in workflow templates, in gallery order.",
+        "operationId": "coral_list_templates",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateOut"
+                  },
+                  "title": "Response Coral List Templates",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          }
+        },
+        "summary": "List Templates",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/templates/{template_id}:use": {
+      "post": {
+        "description": "Make the caller's own workflow from a built-in template, under the first key no\nworkflow holds; an existing workflow is never replaced.",
+        "operationId": "coral_use_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedWorkflowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Use Template",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
     "/v1/coral/workflows": {
       "get": {
         "description": "The caller's workflows, by key.",
@@ -6261,6 +6940,86 @@
           }
         },
         "summary": "Get Workflow",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/workflows:simulate": {
+      "post": {
+        "description": "Validate a workflow and, when it is runnable, dry-run it on the engine with stub\nsessions, answering each question from the script; nothing is stored.",
+        "operationId": "coral_simulate_workflow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SimulatedResult"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidResult"
+                    }
+                  ],
+                  "title": "Response Coral Simulate Workflow"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Simulate Workflow",
         "tags": [
           "coral"
         ]

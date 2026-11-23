@@ -170,6 +170,11 @@ class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class _FrozenOut(_Frozen):
+    # A result sends every field, defaulted ones too, so its schema lists them as required.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
 class SimInput(_Frozen):
     """The values one node supplies for one kind of question, consumed in order."""
 
@@ -199,7 +204,7 @@ class SimScript(_Frozen):
         return self
 
 
-class SimStep(_Frozen):
+class SimStep(_FrozenOut):
     """One answered step, decision or gate.
 
     ``result`` is a step's label, ``done`` or ``evidence_missing``; a decision's label;
@@ -212,7 +217,7 @@ class SimStep(_Frozen):
     result: str
 
 
-class SimLoop(_Frozen):
+class SimLoop(_FrozenOut):
     """One loop counter. ``iteration_path`` is its enclosing loops' passes; ``()`` outside."""
 
     back_arrow_id: str
@@ -222,7 +227,7 @@ class SimLoop(_Frozen):
     limit_hit: bool
 
 
-class SimSessions(_Frozen):
+class SimSessions(_FrozenOut):
     """An estimate of the sessions a real run would start.
 
     The run's turnless anchor, an orchestrator once any decision opens, and one per
@@ -235,7 +240,7 @@ class SimSessions(_Frozen):
     total: int
 
 
-class SimNeedsInput(_Frozen):
+class SimNeedsInput(_FrozenOut):
     """The value a simulation stopped to ask for, and the values the reducer would take."""
 
     node_id: str
@@ -244,7 +249,7 @@ class SimNeedsInput(_Frozen):
     allowed_values: tuple[str, ...]
 
 
-class SimRejection(_Frozen):
+class SimRejection(_FrozenOut):
     """A script value the reducer refused, with the reducer's own code and choices."""
 
     node_id: str
@@ -254,7 +259,7 @@ class SimRejection(_Frozen):
     allowed_values: tuple[str, ...]
 
 
-class SimUnconsumed(_Frozen):
+class SimUnconsumed(_FrozenOut):
     """Script values no question used, in their input's order."""
 
     node_id: str
@@ -262,7 +267,7 @@ class SimUnconsumed(_Frozen):
     values: tuple[str, ...]
 
 
-class SimResult(_Frozen):
+class SimResult(_FrozenOut):
     """What a simulation did: its outcome, the answered path, and the run it left."""
 
     outcome: SimOutcome
