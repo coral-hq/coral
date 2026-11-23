@@ -841,6 +841,23 @@ def test_profile_no_unix_socket_deny_when_list_empty(tmp_path: Path) -> None:
     assert "(deny network-outbound (remote unix-socket (path-literal" not in profile
 
 
+# CORAL(S121): the pasteboard, Spotlight and Apple Events lookups are denied after the broad allow
+def test_profile_denies_pasteboard_spotlight_and_apple_events_lookups(tmp_path: Path) -> None:
+    lines = _build_profile(_make_policy(tmp_path), tmp_path.resolve(strict=False)).splitlines()
+    denied = [line for line in lines if "com.apple.pasteboard." in line]
+    assert len(denied) == 1
+    for service in (
+        "pasteboard.",
+        "coreservices.uasharedpasteboard",
+        "metadata.",
+        "spotlight.",
+        "corespotlight",
+        "coreservices.appleevents",
+    ):
+        assert f'(global-name-prefix "com.apple.{service}")' in denied[0]
+    assert lines.index(denied[0]) > lines.index("(allow mach-lookup)")
+
+
 # CORAL(S111): other processes' command lines and environments stay unreadable
 @pytest.mark.parametrize("allow_network", [True, False])
 def test_profile_keeps_other_processes_arguments_and_environments_unreadable(
