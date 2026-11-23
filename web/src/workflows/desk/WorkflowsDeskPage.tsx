@@ -7,19 +7,19 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useNavigate, useSearchParams } from "@/lib/routing";
 import {
+  TEMPLATES_QUERY_KEY,
   WORKFLOWS_QUERY_KEY,
+  createFromTemplate,
   listTemplates,
   listWorkflows,
-  saveWorkflow,
   shouldRetryWorkflows,
 } from "../api/client";
-import type { WorkflowSummary, WorkflowTemplate } from "../api/workflowTypes";
+import type { TemplateOut } from "../api/generated/coralApi";
+import type { WorkflowSummary } from "../api/workflowTypes";
 import { CORAL_LABELS } from "../nav/labels";
 import { workflowPath } from "../nav/coralPaths";
 import { RunsTable } from "../runs/list/RunsTable";
 import { ALL_RUNS, searchWithRunFilters } from "../runs/list/runFilters";
-
-const TEMPLATES_QUERY_KEY = ["coral-templates"] as const;
 
 // The open tab rides `?tab=`, so a reload or a shared link keeps it; Your Workflows is the
 // default and leaves the URL plain.
@@ -132,7 +132,11 @@ function YourWorkflows() {
 }
 
 function Templates() {
-  const templates = useQuery({ queryKey: TEMPLATES_QUERY_KEY, queryFn: listTemplates });
+  const templates = useQuery({
+    queryKey: TEMPLATES_QUERY_KEY,
+    retry: shouldRetryWorkflows,
+    queryFn: ({ signal }) => listTemplates(signal),
+  });
   if (templates.isPending) {
     return (
       <div className="flex justify-center py-16">
@@ -140,21 +144,34 @@ function Templates() {
       </div>
     );
   }
+  if (templates.isError) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-16 text-center">
+        <p className="text-muted-foreground text-ui">Couldn't load templates.</p>
+        <Button variant="outline" onClick={() => void templates.refetch()}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (templates.data.length === 0) {
+    return <p className="py-16 text-center text-muted-foreground text-ui">No templates yet.</p>;
+  }
   return (
     <div className="grid gap-3 sm:grid-cols-2" data-testid="template-list">
-      {(templates.data ?? []).map((template) => (
+      {templates.data.map((template) => (
         <TemplateCard key={template.id} template={template} />
       ))}
     </div>
   );
 }
 
-function TemplateCard({ template }: { template: WorkflowTemplate }) {
+function TemplateCard({ template }: { template: TemplateOut }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  // Saving the starter makes it an ordinary workflow, then the editor takes over.
+  // The server makes a new copy under a free key each time, then the editor takes over.
   const useTemplate = useMutation({
-    mutationFn: () => saveWorkflow(template.yaml),
+    mutationFn: () => createFromTemplate(template.id),
     onSuccess: (saved) => {
       void queryClient.invalidateQueries({ queryKey: WORKFLOWS_QUERY_KEY });
       navigate(workflowPath(saved.workflow_key));

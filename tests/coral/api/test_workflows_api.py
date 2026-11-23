@@ -41,7 +41,9 @@ from coral.validate.pipeline import CheckResult
 from omnigent.server.auth import AuthProvider, UnifiedAuthProvider
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
+from tests.coral.api import simulate_contract
 from tests.coral.api._auth import CROSSED_ACCOUNT, HEADER
+from tests.coral.api.run_view_contract import checked_in
 from tests.coral.workflow_builders import (
     arrow,
     compile_text,
@@ -482,6 +484,23 @@ def test_simulate_answers_each_saved_case_of_the_template_as_the_engine_does(
         # The route runs the engine with the server's own bounds, never the client's.
         engine = simulate(template.graph, case.script, max_activations=DEFAULT_RUN_ACTIVATIONS)
         assert simulation == engine.result.model_dump(mode="json"), case.name
+
+
+def test_the_web_fixture_holds_what_simulate_sends_for_the_template(
+    simulator: TestClient,
+) -> None:
+    # WHY: the web panel tests replay this recording; an engine or template change must
+    # update it rather than leave the panel tested against an older response.
+    # On a mismatch: uv run --no-sync python -m tests.coral.api.simulate_contract --write
+    recorded = checked_in(simulate_contract.CONTRACT_PATH)
+    assert recorded == simulate_contract.build_contract()
+    assert set(recorded["simulations"]) == set(simulate_contract.SCRIPTS)
+
+    for case, inputs in simulate_contract.SCRIPTS.items():
+        body = _simulation(simulator, _template_text(), {"inputs": inputs})
+
+        assert body["compiled"] == recorded["compiled"], case
+        assert body["simulation"] == recorded["simulations"][case], case
 
 
 def test_simulate_reports_a_rejected_value_with_the_reducers_code(simulator: TestClient) -> None:

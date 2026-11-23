@@ -1,9 +1,17 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SimResult, SimulatedResult } from "../api/generated/coralApi";
 import type { ValidateResponse } from "../api/workflowTypes";
-import { MINIMAL_COMPILED, MINIMAL_YAML, PR_REVIEW_COMPILED } from "../fixtures";
+import {
+  MINIMAL_COMPILED,
+  MINIMAL_YAML,
+  PR_REVIEW_COMPILED,
+  REVIEW_LOOP_COMPILED,
+  REVIEW_LOOP_SIMULATIONS,
+} from "../fixtures";
+import { isolated } from "../shared/pauseCopy";
 import { WorkflowsApiError } from "../api/client";
 import type * as ClientModule from "../api/client";
 
@@ -11,6 +19,7 @@ const api = vi.hoisted(() => ({
   getWorkflowByKey: vi.fn(),
   saveWorkflow: vi.fn(),
   validateWorkflow: vi.fn(),
+  simulateWorkflow: vi.fn(),
 }));
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ClientModule>()),
@@ -57,8 +66,20 @@ vi.mock("./YamlPane", () => ({
   ),
 }));
 vi.mock("../canvas/FlowCanvas", () => ({
-  FlowCanvas: ({ compiled }: { compiled: { nodes: unknown[] } | null }) => (
-    <div data-testid="canvas-nodes">{compiled?.nodes.length ?? 0}</div>
+  FlowCanvas: ({
+    compiled,
+    overlay,
+  }: {
+    compiled: { nodes: unknown[]; workflow_id: string } | null;
+    overlay?: ReadonlyMap<string, unknown> | null;
+  }) => (
+    <div
+      data-testid="canvas-nodes"
+      data-workflow={compiled?.workflow_id ?? ""}
+      data-overlay={overlay ? "on" : "off"}
+    >
+      {compiled?.nodes.length ?? 0}
+    </div>
   ),
 }));
 vi.mock("../start/StartRunDialog", () => ({
@@ -89,6 +110,32 @@ const detail = {
 
 const SLOW = { timeout: 3000 };
 
+const BLOCKED: ValidateResponse = {
+  valid: true,
+  runnable: false,
+  compiled: MINIMAL_COMPILED,
+  problems: [
+    {
+      rule: "V2",
+      severity: "error",
+      message: "deadlock join",
+      node_ids: [],
+      arrow_ids: [],
+      yaml_path: null,
+      range: null,
+    },
+  ],
+};
+
+const simulatedReviewLoop = (simulation: SimResult): SimulatedResult => ({
+  valid: true,
+  runnable: true,
+  content_hash: REVIEW_LOOP_COMPILED.content_hash,
+  problems: [],
+  compiled: REVIEW_LOOP_COMPILED,
+  simulation,
+});
+
 function renderEditor() {
   return render(
     <QueryClientProvider
@@ -114,6 +161,7 @@ beforeEach(() => {
     problems: [],
     compiled: MINIMAL_COMPILED,
   } satisfies ValidateResponse);
+  api.simulateWorkflow.mockResolvedValue(simulatedReviewLoop(REVIEW_LOOP_SIMULATIONS.approved));
 });
 afterEach(cleanup);
 
@@ -201,5 +249,220 @@ describe("WorkflowEditorPage", () => {
     renderEditor();
     await screen.findByRole("button", { name: "Save" });
     expect(screen.queryByRole("button", { name: "Insert profile" })).toBeNull();
+  });
+
+  it("opens Simulate below the panes and paints the simulated run on the canvas", async () => {
+    // WHY: the overlay belongs to the graph the server simulated, not to the stored one.
+    renderEditor();
+    const simulate = await screen.findByRole("button", { name: "Simulate" });
+    expect(simulate).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(simulate);
+    expect(await screen.findByText("The run completes.")).toBeInTheDocument();
+    expect(api.simulateWorkflow).toHaveBeenCalledWith(
+      MINIMAL_YAML,
+      { inputs: [] },
+      expect.anything(),
+    );
+    expect(simulate).toHaveAttribute("aria-expanded", "true");
+    const canvas = screen.getByTestId("canvas-nodes");
+    expect(canvas).toHaveAttribute("data-workflow", REVIEW_LOOP_COMPILED.workflow_id);
+    expect(canvas).toHaveAttribute("data-overlay", "on");
+
+    fireEvent.click(simulate);
+    expect(screen.queryByRole("region", { name: "Simulation" })).toBeNull();
+    expect(canvas).toHaveAttribute("data-workflow", MINIMAL_COMPILED.workflow_id);
+    expect(canvas).toHaveAttribute("data-overlay", "off");
+  });
+
+  it("shows the live graph with no overlay while the simulation is stale", async () => {
+    // WHY: the canvas always matches the YAML pane; an overlay only paints its own graph.
+    renderEditor();
+    fireEvent.click(await screen.findByRole("button", { name: "Simulate" }));
+    await screen.findByText("The run completes.");
+
+    fireEvent.change(screen.getByLabelText("yaml"), { target: { value: "id: next\n" } });
+    const canvas = screen.getByTestId("canvas-nodes");
+    expect(screen.getByText("The workflow changed since this simulation.")).toBeInTheDocument();
+    expect(canvas).toHaveAttribute("data-workflow", MINIMAL_COMPILED.workflow_id);
+    expect(canvas).toHaveAttribute("data-overlay", "off");
+    expect(api.simulateWorkflow).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Simulate again" }));
+    await waitFor(() => expect(canvas).toHaveAttribute("data-overlay", "on"));
+    expect(canvas).toHaveAttribute("data-workflow", REVIEW_LOOP_COMPILED.workflow_id);
+    expect(api.simulateWorkflow).toHaveBeenLastCalledWith(
+      "id: next\n",
+      { inputs: [] },
+      expect.anything(),
+    );
+  });
+
+  it("keeps the live graph when an answer lands for a text edited meanwhile", async () => {
+    // WHY: the response belongs to the text posted before the edit.
+    let release: (response: SimulatedResult) => void = () => {};
+    api.simulateWorkflow
+      .mockResolvedValueOnce(simulatedReviewLoop(REVIEW_LOOP_SIMULATIONS.needs_review))
+      .mockReturnValueOnce(
+        new Promise<SimulatedResult>((resolve) => {
+          release = resolve;
+        }),
+      );
+    renderEditor();
+    fireEvent.click(await screen.findByRole("button", { name: "Simulate" }));
+    fireEvent.click(await screen.findByRole("button", { name: "approved" }));
+    fireEvent.change(screen.getByLabelText("yaml"), { target: { value: "id: next\n" } });
+
+    await act(async () => release(simulatedReviewLoop(REVIEW_LOOP_SIMULATIONS.needs_gate)));
+    expect(
+      screen.getByText(`Choose a result for ${isolated("Approve change")}:`),
+    ).toBeInTheDocument();
+    expect(screen.getByText("The workflow changed since this simulation.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "approve" })).toBeDisabled();
+    const canvas = screen.getByTestId("canvas-nodes");
+    expect(canvas).toHaveAttribute("data-workflow", MINIMAL_COMPILED.workflow_id);
+    expect(canvas).toHaveAttribute("data-overlay", "off");
+  });
+
+  it("keeps the live graph while the edited text is simulated again", async () => {
+    renderEditor();
+    fireEvent.click(await screen.findByRole("button", { name: "Simulate" }));
+    await screen.findByText("The run completes.");
+    fireEvent.change(screen.getByLabelText("yaml"), { target: { value: "id: next\n" } });
+
+    api.simulateWorkflow.mockReturnValueOnce(new Promise(() => {}));
+    fireEvent.click(screen.getByRole("button", { name: "Simulate again" }));
+    const canvas = screen.getByTestId("canvas-nodes");
+    expect(canvas).toHaveAttribute("data-workflow", MINIMAL_COMPILED.workflow_id);
+    expect(canvas).toHaveAttribute("data-overlay", "off");
+  });
+
+  it("shows the stale notice and no result until the edited text's answer lands", async () => {
+    // WHY: the previous text's result must never show as the edited text's (R29).
+    renderEditor();
+    fireEvent.click(await screen.findByRole("button", { name: "Simulate" }));
+    await screen.findByText("The run completes.");
+    fireEvent.change(screen.getByLabelText("yaml"), { target: { value: "id: next\n" } });
+
+    let release: (response: SimulatedResult) => void = () => {};
+    api.simulateWorkflow.mockReturnValueOnce(
+      new Promise<SimulatedResult>((resolve) => {
+        release = resolve;
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Simulate again" }));
+    const canvas = screen.getByTestId("canvas-nodes");
+    expect(screen.getByText("Simulating…")).toBeInTheDocument();
+    expect(screen.getByText("The workflow changed since this simulation.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Simulate again" })).toBeDisabled();
+    expect(screen.queryByText("The run completes.")).toBeNull();
+    expect(canvas).toHaveAttribute("data-workflow", MINIMAL_COMPILED.workflow_id);
+    expect(canvas).toHaveAttribute("data-overlay", "off");
+
+    await act(async () => release(simulatedReviewLoop(REVIEW_LOOP_SIMULATIONS.needs_review)));
+    expect(screen.queryByText("The workflow changed since this simulation.")).toBeNull();
+    expect(canvas).toHaveAttribute("data-workflow", REVIEW_LOOP_COMPILED.workflow_id);
+    expect(canvas).toHaveAttribute("data-overlay", "on");
+  });
+
+  it("keeps the live graph while the edited text waits out a busy server", async () => {
+    renderEditor();
+    fireEvent.click(await screen.findByRole("button", { name: "Simulate" }));
+    await screen.findByText("The run completes.");
+    fireEvent.change(screen.getByLabelText("yaml"), { target: { value: "id: next\n" } });
+    vi.useFakeTimers();
+    try {
+      api.simulateWorkflow
+        .mockRejectedValueOnce(
+          new WorkflowsApiError("Failed to simulate workflow (503)", 503, 1000, "server_busy"),
+        )
+        .mockResolvedValueOnce(simulatedReviewLoop(REVIEW_LOOP_SIMULATIONS.needs_review));
+      fireEvent.click(screen.getByRole("button", { name: "Simulate again" }));
+      await act(async () => {});
+      const canvas = screen.getByTestId("canvas-nodes");
+      expect(screen.getByText("The server is busy; trying again shortly.")).toBeInTheDocument();
+      expect(screen.getByText("The workflow changed since this simulation.")).toBeInTheDocument();
+      expect(screen.queryByText("The run completes.")).toBeNull();
+      expect(canvas).toHaveAttribute("data-workflow", MINIMAL_COMPILED.workflow_id);
+      expect(canvas).toHaveAttribute("data-overlay", "off");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(api.simulateWorkflow).toHaveBeenLastCalledWith(
+        "id: next\n",
+        { inputs: [] },
+        expect.anything(),
+      );
+      expect(canvas).toHaveAttribute("data-workflow", REVIEW_LOOP_COMPILED.workflow_id);
+      expect(canvas).toHaveAttribute("data-overlay", "on");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns focus to Simulate when the panel's Close is used", async () => {
+    // WHY: Close removes the focused control; keyboard focus must not drop to the page.
+    renderEditor();
+    const simulate = await screen.findByRole("button", { name: "Simulate" });
+    fireEvent.click(simulate);
+    await screen.findByText("The run completes.");
+    const close = within(screen.getByRole("region", { name: "Simulation" })).getByRole("button", {
+      name: "Close",
+    });
+    close.focus();
+    fireEvent.click(close);
+    expect(screen.queryByRole("region", { name: "Simulation" })).toBeNull();
+    expect(simulate).toHaveFocus();
+  });
+
+  it("stops waiting for a busy server when the panel is closed", async () => {
+    renderEditor();
+    const simulate = await screen.findByRole("button", { name: "Simulate" });
+    vi.useFakeTimers();
+    try {
+      api.simulateWorkflow.mockRejectedValueOnce(
+        new WorkflowsApiError("Failed to simulate workflow (503)", 503, 5000, "server_busy"),
+      );
+      fireEvent.click(simulate);
+      await act(async () => {});
+      const panel = screen.getByRole("region", { name: "Simulation" });
+      expect(within(panel).getByText("The server is busy; trying again shortly.")).toBeVisible();
+
+      fireEvent.click(within(panel).getByRole("button", { name: "Close" }));
+      expect(screen.queryByRole("region", { name: "Simulation" })).toBeNull();
+      expect(simulate).toHaveAttribute("aria-expanded", "false");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(api.simulateWorkflow).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("disables Simulate while validation reports an error", async () => {
+    api.validateWorkflow.mockResolvedValue(BLOCKED);
+    renderEditor();
+    const simulate = await screen.findByRole("button", { name: "Simulate" });
+    await waitFor(() => expect(simulate).toBeDisabled(), SLOW);
+    expect(api.simulateWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("keeps Simulate enabled while the panel is open, so an error never traps it open", async () => {
+    renderEditor();
+    const simulate = await screen.findByRole("button", { name: "Simulate" });
+    fireEvent.click(simulate);
+    await screen.findByText("The run completes.");
+
+    api.validateWorkflow.mockResolvedValue(BLOCKED);
+    fireEvent.change(screen.getByLabelText("yaml"), { target: { value: "id: broken\n" } });
+    await waitFor(
+      () => expect(screen.getByTestId("problem-list")).toHaveTextContent("deadlock join"),
+      SLOW,
+    );
+    expect(simulate).toBeEnabled();
+    fireEvent.click(simulate);
+    expect(screen.queryByRole("region", { name: "Simulation" })).toBeNull();
+    expect(simulate).toBeDisabled();
   });
 });
