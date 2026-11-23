@@ -203,6 +203,7 @@ from omnigent.process_logging import (
 from omnigent.runner._zygote import ZYGOTE_ENABLED_ENV_VAR
 from omnigent.runner.identity import (
     RUNNER_AUTH_REJECTED_EXIT_CODE,
+    RUNNER_AUTH_SECRET_ENV_VARS,  # CORAL(S117)
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_FINISH_WORK_SIGNAL,
@@ -218,6 +219,10 @@ from omnigent.runner.identity import (
     RUNNER_WORKSPACE_ENV_VAR,
     runner_sign_in_is_pending,
     token_bound_runner_id,
+)
+from omnigent.runner.launch_secrets import (  # CORAL(S117)
+    LAUNCH_SECRETS_FD_ENV_VAR,
+    launch_secrets_in_pipe,
 )
 from omnigent.runner.transports.ws_tunnel.diagnostics import TunnelDiagnostics
 from omnigent.runner.transports.ws_tunnel.frames import (
@@ -999,6 +1004,9 @@ _ZYGOTE_ONLY_ENV_NAMES: frozenset[str] = frozenset(
 # CORAL(S117): an empty or relative entry searches the working directory, for a fork a
 # step-writable checkout, so the zygote keeps only these paths' absolute entries.
 _ZYGOTE_SEARCH_PATH_ENV_NAMES: frozenset[str] = frozenset({"LD_LIBRARY_PATH", "PYTHONPATH"})
+# CORAL(S117): a fd number in the daemon's own env names nothing a runner may read as its
+# launch socket, so no env the host builds carries one; a direct spawn sets its own.
+_LAUNCH_SECRETS_FD_ENV_VARS: frozenset[str] = frozenset({LAUNCH_SECRETS_FD_ENV_VAR})
 # CORAL(S117): a ``scheme://user:password@host`` authority; its userinfo may be a credential.
 _URL_USERINFO = re.compile(r"(?<=[A-Za-z0-9+.-])://[^/?#@\s]*@")
 # CORAL(S117): the name parts probe 15 counts as credentials (any case); with the suffixes and
@@ -1124,7 +1132,8 @@ def _runner_allowlisted_env(base_env: Mapping[str, str]) -> dict[str, str]:
     return {
         key: value
         for key, value in base_env.items()
-        if key in _RUNNER_ENV_ALLOWLIST or key.startswith(_RUNNER_ENV_ALLOWLIST_PREFIXES)
+        if (key in _RUNNER_ENV_ALLOWLIST or key.startswith(_RUNNER_ENV_ALLOWLIST_PREFIXES))
+        and key not in _LAUNCH_SECRETS_FD_ENV_VARS
     }
 
 
@@ -1241,6 +1250,7 @@ def _build_runner_env(
             inference_config, include_dollar_key_refs=True
         )
     forwarded = HARNESS_CREDENTIAL_ENV_VARS | extra_names | config_env_vars
+    forwarded -= _LAUNCH_SECRETS_FD_ENV_VARS  # CORAL(S117): not even when passthrough names it
     allowlisted = _runner_allowlisted_env(base_env)  # CORAL(S117): shared with the zygote's env
     env = {key: value for key, value in base_env.items() if key in allowlisted or key in forwarded}
     # Runners start in the session workspace, so resolve a relative override here.
@@ -2708,13 +2718,20 @@ class HostProcess:
                         with contextlib.suppress(Exception):
                             zygote.stop()
 
-            with child_logging_popen_kwargs(env) as logging_kwargs:
+            # CORAL(S117): on POSIX the runner's tokens travel in an inherited socket, not its env
+            secret_names = RUNNER_AUTH_SECRET_ENV_VARS if IS_POSIX else frozenset[str]()
+            with (
+                launch_secrets_in_pipe(env, secret_names) as (spawn_env, secret_fds),
+                child_logging_popen_kwargs(spawn_env) as logging_kwargs,
+            ):
+                if secret_fds:  # CORAL(S117): beside the terminal mirror's fd, if any
+                    logging_kwargs["pass_fds"] = logging_kwargs.get("pass_fds", ()) + secret_fds
                 proc = subprocess.Popen(
                     # -P keeps cwd off sys.path: a workspace that is itself an
                     # omnigent checkout would otherwise shadow the installed
                     # package. _entry re-adds it for spec-declared local tools.
                     [sys.executable, "-P", "-m", "omnigent.runner._entry"],
-                    env=env,
+                    env=spawn_env,  # CORAL(S117)
                     # A daemon may outlive the checkout it started from.
                     cwd=str(workspace),
                     # Runners are WS-tunnel clients with no interactive input.

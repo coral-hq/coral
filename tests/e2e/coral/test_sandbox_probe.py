@@ -114,8 +114,8 @@ _SENSITIVE_NAME = re.compile(
     re.ASCII | re.IGNORECASE,
 )
 _TOKEN_NAME = re.compile(r"^OMNIGENT_RUNNER_.*TOKEN.*$")
-# What a direct-spawn runner's exec-time environment holds: a binding token that mints an
-# owner JWT, and the host's bearer.
+# The runner tokens the probe looks for in an exec-time environment: a binding token that
+# mints an owner JWT, and the host's bearer. A host-launched POSIX runner's holds neither.
 RUNNER_CREDENTIALS = ("OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN", "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN")
 
 
@@ -1157,10 +1157,12 @@ OUTSIDE_IDENTITY: Mapping[str, str] = MappingProxyType(
         "owner_bare": "refused",
         "owner_bare_localhost": "refused",
         "own_runner_environ": "reachable",
+        # The direct-spawned runner's environment is read and holds neither token: they came
+        # through its launch socket.
         "own_runner_mint.read": "reachable",
-        "own_runner_mint": "minted",
+        "own_runner_mint": "not_present",
         "own_runner_bearer.read": "reachable",
-        "own_runner_bearer": "reachable",
+        "own_runner_bearer": "not_present",
         # The host daemon's environment is read and holds no bearer: a negative control.
         "host_bearer.read": "reachable",
         "host_bearer": "not_present",
@@ -1238,9 +1240,10 @@ def test_probe_15_on_a_server_that_requires_identity(
     Whether a step on an accounts server can act as its owner: mint an owner JWT with its
     runner's binding token, use the host's bearer or the CLI's stored credentials, call an
     owner route bare, read the server's secrets, reach other programs' services, or plant a
-    repository config the owner's git would run. The runner is spawned directly, so its
-    exec-time environment holds both tokens. The same probe runs first outside any sandbox
-    and must open every one of those paths, or the probe is broken rather than the step held.
+    repository config the owner's git would run. The runner is spawned directly by the host
+    daemon, which hands it both tokens through an inherited socket, so its exec-time
+    environment holds neither. The same probe runs first outside any sandbox and must open
+    every other one of those paths, or the probe is broken rather than the step held.
     """
     sk.require_claude_cli()
     mock = isolated_mock_llm_server_url
@@ -1261,7 +1264,7 @@ def test_probe_15_on_a_server_that_requires_identity(
             tmp_path / "stack",
             mock_url=mock,
             host_config=sk.mock_auth(mock),
-            # Direct spawn: the runner's exec-time environment holds its binding token.
+            # Direct spawn: the runner takes its tokens from a socket, not its exec-time env.
             host_env={"OMNIGENT_RUNNER_ZYGOTE": "0"},
             lease_s=SHORT_LEASE_S,
             repo_files={PROBE.name: PROBE.read_bytes()},
@@ -1291,9 +1294,10 @@ def test_probe_15_on_a_server_that_requires_identity(
         review = sk.held_activation(wait, mock, review_token, 1)
         implementer = sk.step_session(client, run_id, "implement")
         runner = sk.runner_pid(stack, implementer)
-        runner_tokens = _token_names(psutil.Process(runner))
-        spawn = "direct" if set(RUNNER_CREDENTIALS) <= set(runner_tokens.split(",")) else "zygote"
-        assert spawn == "direct", f"failed control: the runner's environment holds {runner_tokens}"
+        # A directly spawned runner is the daemon's child; a zygote-forked one the zygote's.
+        parent = psutil.Process(runner).ppid()
+        spawn = "direct" if parent == stack.host.proc.pid else "zygote"
+        assert spawn == "direct", f"failed control: the runner's parent {parent} is not the host"
         # Read while the step holds its host: the label the owner's run shows on this server.
         detail = sk.detail(client, run_id)
         recorded = {
@@ -1531,9 +1535,9 @@ def _owner_server(
 
 def _runner_env(home: Path, server: str | None, binding: Secret | None) -> dict[str, str]:
     """
-    A runner's exec-time environment as a host builds it on the direct-spawn path, with
-    ``binding`` as both its binding token and its bearer; without one it holds neither,
-    and without ``server`` it names no server.
+    A runner's exec-time environment holding its tokens, as a CLI-local or Windows runner's
+    does, with ``binding`` as both its binding token and its bearer; without one it holds
+    neither, and without ``server`` it names no server.
     """
     tokens = {} if binding is None else dict.fromkeys(RUNNER_CREDENTIALS, binding.reveal())
     named = {} if server is None else {"RUNNER_SERVER_URL": server}

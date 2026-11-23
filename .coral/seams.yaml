@@ -3981,7 +3981,7 @@ seams:
     upstream_candidate: false
 
   - id: S117
-    title: A runner's exec-time environment holds no credential-shaped name (the zygote starts from the allow-listed runner environment)
+    title: A runner's exec-time environment holds no credential-shaped name (the zygote starts from the allow-listed runner environment; a direct-spawned runner takes its tokens from an inherited socket and holds them in memory)
     owner: WS-INTEGRATION
     status: landed
     category: coral-specific
@@ -4031,33 +4031,94 @@ seams:
       macOS with the real zygote and fake host secrets: the zygote, a forked
       runner and the harness it forked expose only allow-listed names, the
       control fd and the platform's __CF_USER_TEXT_ENCODING and
-      __PYVENV_LAUNCHER__. Residuals: a direct-spawned runner's env= still
-      carries the credential-shaped allow-listed names and the forwarded
-      credentials (CRL-197); a credential in the value of a name that is not
-      credential-shaped, outside URL userinfo (such as a signed query
-      string), still reaches the zygote.
+      __PYVENV_LAUNCHER__. A direct-spawned runner (zygote off or failed)
+      no longer gets OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN or
+      OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN in env= on POSIX: _spawn_runner_proc
+      moves them through launch_secrets_in_pipe into an AF_UNIX stream
+      socket pair (launch_secrets_pipe: one JSON object of at most 4096
+      bytes, sent through a non-blocking end that is shut down and closed
+      before the spawn; a child's end that a closed standard stream left at
+      fd 0-2 moves above 2, where the child's own stdio cannot replace it),
+      names the child's end in OMNIGENT_RUNNER_LAUNCH_FD (no credential word,
+      so probe 15 and _credential_shaped_env_name do not flag it), adds it to
+      the terminal mirror's pass_fds and closes it once Popen returns or
+      raises. Unlike a pipe, a socket cannot be reopened through
+      /proc/<pid>/fd, so on Linux a same-user reader cannot take or replace
+      the payload while the runner boots. A send failure, the size cap
+      included, is an OSError that fails the launch through _launch_failed,
+      with no env fallback; Windows keeps env delivery. The runner's main()
+      sets its boot signal disposition, then _hold_runner_auth_secrets:
+      adopt_launch_secrets reads the socket (a socket only, non-blocking
+      under 5 s, a non-empty JSON object of strings naming only the two
+      tokens, each once, otherwise one stderr line that names no value and
+      exit 2; one str as the allowed names is a TypeError), and
+      take_runner_auth_secrets moves both names out of os.environ (a zygote
+      fork's payload or a CLI-local runner's environment) and the sent values
+      into a holder in omnigent/runner/identity.py. _make_auth_token_factory
+      and _runner_tunnel_binding_token_from_env (the pi-native launch reads
+      through it) read the holder, falling back to os.environ, and the
+      initial bearer is still consumed on use, so no child of the runner
+      inherits either token whatever environment it is given, the env=None
+      gh and git spawns included. _runner_allowlisted_env and
+      _build_runner_env never carry OMNIGENT_RUNNER_LAUNCH_FD, not even when
+      passthrough names it, so a stale fd number in the daemon's env reaches
+      neither a runner nor the zygote. adopt_launch_secrets takes the target
+      mapping, the fd variable and the allowed names, so a harness can reuse
+      it. Measured on macOS: outside the sandbox the identity stack reads the
+      direct-spawned runner's environment and finds neither token
+      (own_runner_mint and own_runner_bearer not_present) and no
+      credential-like name (own_runner_environ.names none). Residuals: a
+      direct-spawned runner's env= still carries the
+      credential-shaped allow-listed names and the forwarded credentials
+      (CRL-197); a CLI-local runner still gets its binding token at exec
+      (CRL-197) and a Windows runner both tokens (accepted); a credential in
+      the value of a name that is not credential-shaped, outside URL
+      userinfo (such as a signed query string), still reaches the zygote.
     files:
       - omnigent/host/connect.py
       - omnigent/host/runner_zygote.py
+      - omnigent/runner/_entry.py
+      - omnigent/runner/identity.py
+      - omnigent/runner/launch_secrets.py
       - tests/host/test_connect.py
       - tests/host/test_runner_zygote.py
+      - tests/runner/test_identity.py
+      - tests/runner/test_launch_secrets.py
+      - tests/runner/test_runner_entry.py
     tests:
       - tests/host/test_connect.py
       - tests/host/test_runner_zygote.py
+      - tests/runner/test_identity.py
+      - tests/runner/test_launch_secrets.py
+      - tests/runner/test_runner_entry.py
       - tests/e2e/coral/test_sandbox_probe.py
     budget_lines: 120
     budget_exception:
-      lines: 136
+      lines: 416
       reason: >-
         Counted with git diff --numstat origin/development (added plus
-        removed lines). tests/host/test_connect.py (136): the
-        _zygote_base_env unit test with every credential name part and
-        suffix, URL userinfo in a value and the allow-listed controls, the
-        search path test for LD_LIBRARY_PATH and PYTHONPATH, and the
-        HostProcess wiring test with its respawn re-read. The other files
-        are within budget: omnigent/host/connect.py 97,
-        omnigent/host/runner_zygote.py 15, tests/host/test_runner_zygote.py
-        119.
+        removed lines; a new file counts every line).
+        tests/runner/test_launch_secrets.py (416, new): the round trip at
+        and under the cap, every refused payload (empty and duplicate-name
+        included) and descriptor kind (a pipe and a file among them), one
+        name as the allowed names, the writer's cap and full-socket cases,
+        the socket context, a real runner whose readable environment and
+        env=None child lack the tokens, concurrent launches that never cross
+        sockets, and a daemon without stdin or stdout whose child still reads
+        its socket. tests/host/test_connect.py (302): the zygote base env,
+        search path and HostProcess wiring tests, then the rewritten
+        direct-spawn launch test, the Windows env-delivery test, the
+        fail-closed launch cases, the passthrough fd-variable and name checks
+        and the direct fallback with the terminal mirror.
+        omnigent/runner/launch_secrets.py (210, new): the socket writer,
+        the spawn context and the bounded, validating reader.
+        tests/runner/test_runner_entry.py (126): the boot order test and
+        the after-boot test for both deliveries, with the delegated mint
+        path. The other files are within budget: omnigent/host/connect.py
+        118, omnigent/host/runner_zygote.py 15,
+        omnigent/runner/_entry.py 30, omnigent/runner/identity.py 34,
+        tests/host/test_runner_zygote.py 119,
+        tests/runner/test_identity.py 31.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false

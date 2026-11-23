@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import hashlib  # CORAL(S117)
 import json
 import logging
 import os
@@ -16,9 +17,10 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping  # CORAL(S117)
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast  # CORAL(S117)
 from unittest.mock import AsyncMock, Mock, patch
 
 import click
@@ -38,6 +40,7 @@ from omnigent.host.connect import (
     ModelOptionsResult,
     _build_runner_env,
     _connection_refused,
+    _credential_shaped_env_name,  # CORAL(S117)
     _is_coral_run_workspace,  # CORAL(S108)
     _kill_lost_group_members,  # CORAL(S108)
     _runner_allowlisted_env,  # CORAL(S117)
@@ -117,7 +120,9 @@ from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
 from omnigent.inner import _proc  # CORAL(S108)
 from omnigent.onboarding.harness_login import CodexDeviceLogin
+from omnigent.process_logging import LOG_TO_STDERR_ENV_VAR, LOG_TTY_FD_ENV_VAR  # CORAL(S117)
 from omnigent.runner.identity import (
+    RUNNER_AUTH_SECRET_ENV_VARS,  # CORAL(S117)
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR,  # CORAL(S108)
@@ -131,6 +136,7 @@ from omnigent.runner.identity import (
     RUNNER_WORKSPACE_ENV_VAR,
     token_bound_runner_id,
 )
+from omnigent.runner.launch_secrets import LAUNCH_SECRETS_FD_ENV_VAR  # CORAL(S117)
 from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
 from tests._helpers.polling import poll_until, poll_until_async  # CORAL(S108)
 from tests._helpers.providers import isolate_provider_resolution
@@ -1015,6 +1021,9 @@ async def test_handle_launch_spawns_subprocess(
 
     spawned_env: dict[str, str] = {}
     spawned_kwargs: dict[str, object] = {}
+    # CORAL(S117): what the runner's inherited launch socket held, and which socket it was.
+    sent: dict[str, str] = {}
+    socket_identity: list[tuple[int, int]] = []
 
     original_popen = subprocess.Popen
 
@@ -1028,6 +1037,10 @@ async def test_handle_launch_spawns_subprocess(
         env = kwargs.get("env", {})
         spawned_env.update(env)
         spawned_kwargs.update(kwargs)
+        if fd_text := spawned_env.get(LAUNCH_SECRETS_FD_ENV_VAR):  # CORAL(S117)
+            status = os.fstat(int(fd_text))
+            socket_identity.append((status.st_dev, status.st_ino))
+            sent.update(_secret_digests(json.loads(os.read(int(fd_text), 8192))))
         # Spawn a real process that sleeps briefly so poll() returns None.
         return original_popen(
             ["sleep", "10"],
@@ -1052,9 +1065,18 @@ async def test_handle_launch_spawns_subprocess(
 
     # Verify env vars passed to the subprocess.
     assert spawned_env.get("RUNNER_SERVER_URL") == "http://localhost:8000"
-    assert spawned_env.get("OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN") == "test_token_abc"
-    assert spawned_env.get(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR) == "host-bootstrap-bearer"
     assert spawned_env.get("OMNIGENT_RUNNER_WORKSPACE") == str(workspace)
+    # CORAL(S117): the tokens travel in an inherited socket, never in the runner's exec-time env.
+    assert sorted(RUNNER_AUTH_SECRET_ENV_VARS & set(spawned_env)) == []
+    fd = int(spawned_env[LAUNCH_SECRETS_FD_ENV_VAR])
+    assert fd in cast(tuple[int, ...], spawned_kwargs.get("pass_fds", ()))
+    assert sent == _secret_digests(
+        {
+            RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: "test_token_abc",
+            RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR: "host-bootstrap-bearer",
+        }
+    )
+    assert not _same_socket(fd, socket_identity[0]), "the host kept the runner's socket open"
 
     # Runners must get a clean /dev/null stdin, not the daemon's inherited fd:
     # a long-lived (e.g. nohup'd) daemon can end up with a closed/recycled
@@ -1078,6 +1100,94 @@ async def test_handle_launch_spawns_subprocess(
 
     # Clean up the spawned sleep process (and its exit watcher).
     _cleanup_host(host)
+
+
+# CORAL(S117): secrets are compared by digest, so a failure prints none of them.
+def _secret_digests(values: Mapping[str, str]) -> dict[str, str]:
+    return {name: hashlib.sha256(value.encode()).hexdigest() for name, value in values.items()}
+
+
+def _same_socket(fd: int, identity: tuple[int, int]) -> bool:
+    """Whether *fd* is still open on the socket it was, rather than closed or reused."""
+    try:
+        status = os.fstat(fd)
+    except OSError:
+        return False
+    return (status.st_dev, status.st_ino) == identity
+
+
+# CORAL(S117): Windows has no pass_fds, so its runners keep env delivery.
+async def test_handle_launch_keeps_runner_tokens_in_the_env_off_posix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _make_host_process()
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    monkeypatch.setattr("omnigent.host.connect.IS_POSIX", False)
+    spawned: dict[str, object] = {}
+    original_popen = subprocess.Popen
+
+    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        spawned.update(kwargs)
+        return original_popen(
+            ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+    frame = HostLaunchRunnerFrame(
+        request_id="req_env", binding_token="tok_env", workspace=str(tmp_path)
+    )
+    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+        result = await host._handle_launch(frame)
+
+    assert result.status == "launched", result.error
+    env = cast(dict[str, str], spawned["env"])
+    assert LAUNCH_SECRETS_FD_ENV_VAR not in env
+    assert not spawned.get("pass_fds")
+    assert _secret_digests({name: env[name] for name in RUNNER_AUTH_SECRET_ENV_VARS}) == (
+        _secret_digests(
+            {
+                RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: "tok_env",
+                RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR: "host-bootstrap-bearer",
+            }
+        )
+    )
+    _cleanup_host(host)
+
+
+# CORAL(S117): a socket that cannot carry the tokens fails the launch; nothing falls back to env=.
+@pytest.mark.parametrize("failure", ["over_the_payload_cap", "popen_fails"])
+async def test_handle_launch_fails_closed_when_the_runner_secrets_cannot_be_handed_over(
+    tmp_path: Path, failure: str
+) -> None:
+    bearer = "x" * 5000 if failure == "over_the_payload_cap" else "host-bootstrap-bearer"
+    host = _make_host_process()
+    host._auth_token_factory = lambda: bearer
+    host._auth_token_factory_resolved = True
+    spawned: list[dict[str, str]] = []
+    socket_identity: list[tuple[int, int]] = []
+
+    def _failing_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        env = cast(dict[str, str], kwargs["env"])
+        spawned.append(env)
+        status = os.fstat(int(env[LAUNCH_SECRETS_FD_ENV_VAR]))
+        socket_identity.append((status.st_dev, status.st_ino))
+        raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+    frame = HostLaunchRunnerFrame(
+        request_id="req_pipe", binding_token="tok_pipe_fail", workspace=str(tmp_path)
+    )
+    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_failing_popen):
+        result = await host._handle_launch(frame)
+
+    assert result.status == "failed"
+    assert result.error is not None and "failed to spawn runner" in result.error
+    assert "tok_pipe_fail" not in result.error and bearer not in result.error
+    if failure == "over_the_payload_cap":
+        assert spawned == [], "a launch whose secrets do not fit must not spawn"
+    else:
+        [env] = spawned
+        assert not _same_socket(int(env[LAUNCH_SECRETS_FD_ENV_VAR]), socket_identity[0])
+    assert host._runners == {}
 
 
 async def test_handle_launch_recreates_missing_workspace(
@@ -5374,10 +5484,13 @@ def test_build_runner_env_passthrough_extends_forwarded_set() -> None:
     base = {
         "PATH": "/usr/bin",
         "HOME": "/root",
-        "OMNIGENT_RUNNER_ENV_PASSTHROUGH": "MY_GATEWAY_TOKEN, MY_GATEWAY_URL",
+        # CORAL(S117): the daemon's own fd number never names a runner's launch socket.
+        "OMNIGENT_RUNNER_ENV_PASSTHROUGH": "MY_GATEWAY_TOKEN, MY_GATEWAY_URL,"
+        + LAUNCH_SECRETS_FD_ENV_VAR,
         "MY_GATEWAY_TOKEN": "tok-123",
         "MY_GATEWAY_URL": "https://llm.internal.example.com",
         "UNLISTED_SECRET": "nope",
+        LAUNCH_SECRETS_FD_ENV_VAR: "7",
     }
 
     env = _build_runner_env(
@@ -5394,6 +5507,10 @@ def test_build_runner_env_passthrough_extends_forwarded_set() -> None:
     assert env["MY_GATEWAY_URL"] == "https://llm.internal.example.com"
     # Anything unnamed stays behind the allowlist.
     assert "UNLISTED_SECRET" not in env
+    assert LAUNCH_SECRETS_FD_ENV_VAR not in env  # CORAL(S117)
+    assert LAUNCH_SECRETS_FD_ENV_VAR not in _zygote_base_env(base)  # CORAL(S117)
+    # CORAL(S117): a fd number, so no credential detector may flag its name.
+    assert not _credential_shaped_env_name(LAUNCH_SECRETS_FD_ENV_VAR)
 
 
 def test_dispatch_trace_context_reaches_runner_but_not_daemon(
@@ -9205,6 +9322,7 @@ def _spawn_with_fake_zygote(
     tmp_path: Path,
     zygote: _FakeZygote,
     popen_kwargs: list[dict[str, object]] | None = None,
+    env: dict[str, str] | None = None,  # CORAL(S117)
 ) -> tuple[HostProcess, list[list[str]]]:
     """Drive ``_spawn_runner_proc`` with *zygote* and a stubbed direct Popen.
 
@@ -9213,6 +9331,7 @@ def _spawn_with_fake_zygote(
     :param zygote: The scripted zygote installed on the host.
     :param popen_kwargs: Optional sink for the keyword arguments of every
         direct ``Popen`` call.
+    :param env: The runner environment to spawn with; empty when omitted.
     :returns: The host and the argv of every direct ``Popen`` call.
     """
     host = _make_host_process()
@@ -9238,7 +9357,7 @@ def _spawn_with_fake_zygote(
 
     monkeypatch.setattr("omnigent.host.connect.open_process_log_file", _fake_open_log)
     monkeypatch.setattr("omnigent.host.connect.subprocess.Popen", _fake_popen)
-    host._spawn_runner_proc({}, "slug", tmp_path)
+    host._spawn_runner_proc({} if env is None else env, "slug", tmp_path)  # CORAL(S117)
     return host, popen_argvs
 
 
@@ -9260,6 +9379,43 @@ def test_direct_runner_spawn_starts_its_own_session(
     assert len(popen_kwargs) == 1
     assert popen_kwargs[0]["start_new_session"] is True
     assert popen_kwargs[0]["stdin"] is subprocess.DEVNULL
+
+
+# CORAL(S117): after a failed zygote fork, the direct spawn passes the mirror and the socket.
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pass_fds")
+def test_direct_fallback_runner_gets_the_terminal_mirror_and_its_launch_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zygote = _FakeZygote(fail_at="fork", running=False)
+    payload_names: list[str] = []
+
+    def _fork_fails(env: dict[str, str], log_path: str, workspace: str) -> object:
+        del log_path, workspace
+        payload_names.extend(env)
+        raise ZygoteUnavailable("scripted fork failure")
+
+    monkeypatch.setattr(zygote, "fork_runner", _fork_fails)
+    popen_kwargs: list[dict[str, object]] = []
+    with open(tmp_path / "terminal", "wb") as terminal:  # stands in for the daemon's tty
+        daemon_fd = terminal.fileno()
+        env = {
+            LOG_TO_STDERR_ENV_VAR: "1",
+            LOG_TTY_FD_ENV_VAR: str(daemon_fd),
+            RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: "fake-binding",
+            RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR: "fake-bearer",
+        }
+        _spawn_with_fake_zygote(monkeypatch, tmp_path, zygote, popen_kwargs, env=env)
+
+    [kwargs] = popen_kwargs
+    spawn_env = cast(dict[str, str], kwargs["env"])
+    mirror_fd = int(spawn_env[LOG_TTY_FD_ENV_VAR])
+    secrets_fd = int(spawn_env[LAUNCH_SECRETS_FD_ENV_VAR])
+    assert mirror_fd != daemon_fd, "the runner must name the mirror's duplicate"
+    assert sorted(cast(tuple[int, ...], kwargs["pass_fds"])) == sorted([mirror_fd, secrets_fd])
+    assert sorted(RUNNER_AUTH_SECRET_ENV_VARS & set(spawn_env)) == []
+    # The zygote's own attempt still carried the tokens, in its fork payload only.
+    assert sorted(RUNNER_AUTH_SECRET_ENV_VARS - set(payload_names)) == []
 
 
 def test_dead_zygote_is_reaped_and_respawnable(

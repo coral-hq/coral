@@ -8,12 +8,16 @@ import sys
 
 import pytest
 
+from omnigent.runner import identity  # CORAL(S117)
 from omnigent.runner.identity import (
     RUNNER_AUTH_SECRET_ENV_VARS,
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+    consume_runner_auth_secret,  # CORAL(S117)
+    runner_auth_secret,  # CORAL(S117)
     strip_runner_auth_secrets,
+    take_runner_auth_secrets,  # CORAL(S117)
     token_bound_runner_id,
     touch_connect_marker,
 )
@@ -104,6 +108,33 @@ def test_strip_runner_auth_secrets_does_not_mutate_input() -> None:
     assert source == {RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: "tok", "HOME": "/home/x"}
     assert result == {"HOME": "/home/x"}
     assert result is not source
+
+
+# CORAL(S117): the runner's tokens after boot live in an in-memory holder.
+def test_held_runner_tokens_win_over_os_environ_and_each_take_moves_them_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    held: dict[str, str] = {}
+    monkeypatch.setattr(identity, "_held_runner_auth_secrets", held)
+    binding = RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR
+    monkeypatch.setenv(binding, "fake-environ-binding")
+
+    # Nothing held yet: code run without a boot reads os.environ.
+    assert runner_auth_secret(binding) == "fake-environ-binding"
+    take_runner_auth_secrets()
+    assert (held, binding in os.environ) == ({binding: "fake-environ-binding"}, False)
+
+    # A later take replaces the held value and empties only the mapping it was given.
+    launched = {binding: "fake-launched-binding", "PATH": "/bin"}
+    take_runner_auth_secrets(launched)
+    take_runner_auth_secrets(launched)
+    assert launched == {"PATH": "/bin"}
+    monkeypatch.setenv(binding, "fake-later-environ-binding")
+    assert runner_auth_secret(binding) == "fake-launched-binding"
+
+    # Consuming returns the held value and clears both places.
+    assert consume_runner_auth_secret(binding) == "fake-launched-binding"
+    assert (held, binding in os.environ) == ({}, False)
 
 
 def test_importing_identity_does_not_pull_in_fastapi() -> None:
