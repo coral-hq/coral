@@ -19,8 +19,10 @@ from coral.engine.lifecycle import (
     note_session_failed,
     note_usage_limited,
     note_waiting_without_elicitation,
+    orchestrator_turn,
     pause_run,
     resume_run,
+    retry_run,
     retry_step,
 )
 from coral.engine.machines import (
@@ -63,12 +65,14 @@ from coral.engine.types import (
     Input,
     LogEntry,
     MessageAgent,
+    OrchestratorTurn,
     PauseRun,
     PostCloseActivity,
     Receipt,
     RecordMergeConflict,
     RejectionObserved,
     ResumeRun,
+    RetryRun,
     RetryStep,
     RunnerHeld,
     RunnerHoldEnded,
@@ -203,6 +207,10 @@ def _dispatch(
         return resume_run(graph, state, command)
     if isinstance(command, RetryStep):
         return retry_step(state, command)
+    if isinstance(command, RetryRun):
+        return retry_run(graph, state)
+    if isinstance(command, OrchestratorTurn):
+        return orchestrator_turn(state, command, now, config.timer_policy)
     if isinstance(command, TimerDue):
         return apply_timer_due(graph, state, command, now, config.timer_policy)
     if isinstance(command, RejectionObserved):

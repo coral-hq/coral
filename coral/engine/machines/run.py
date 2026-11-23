@@ -89,10 +89,17 @@ def accepted_kinds(state: RunState) -> tuple[str, ...]:
         if state.slots:
             kinds.append("rejection_observed")
     kinds.extend(
-        ["pause_run", "cancel_run", "timer_due", "session_failed", "infra_backoff_exhausted"]
+        [
+            "pause_run",
+            "cancel_run",
+            "timer_due",
+            "session_failed",
+            "infra_backoff_exhausted",
+            "orchestrator_turn",
+        ]
     )
     if state.status == "paused":
-        kinds.extend(["resume_run", "retry_step"])
+        kinds.extend(["resume_run", "retry_step", "retry_run"])
     return tuple(kinds)
 
 

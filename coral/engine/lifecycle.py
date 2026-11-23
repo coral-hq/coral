@@ -30,6 +30,8 @@ from coral.engine.machines.slot import (
 )
 from coral.engine.timers import (
     INFRA_BACKOFF,
+    ORCHESTRATOR_BACKOFF,
+    ORCHESTRATOR_SUBJECT,
     PLAN_PROBE,
     WATCHDOG_KINDS,
     arm_infra_backoff,
@@ -49,6 +51,7 @@ from coral.engine.types import (
     EffectCompleted,
     EffectFailed,
     InfraBackoffExhausted,
+    OrchestratorTurn,
     PauseCause,
     PauseReason,
     PauseRun,
@@ -109,6 +112,10 @@ _RETRY_PHASES: tuple[str, ...] = (
 )
 # A closed step with one of these outcomes is done, so it is never retried.
 _FINISHED_OUTCOMES = frozenset({"completed", "skipped"})
+# A run-level retry of a cause with one of these prefixes replaces the orchestrator.
+_ORCHESTRATOR_PREFIXES = ("orchestrator:", "decision:")
+# The orchestrator create payload's generation bound (``coral.slots.executors.MAX_GENERATION``).
+_MAX_ORCHESTRATOR_GENERATION = 32_767
 # The previous rules let Resume clear a step's failed turn no rule names.
 _UNNAMED_TURN_FAILURE = "agent.failed"
 
@@ -209,6 +216,79 @@ def retryable_activations(state: RunState) -> tuple[str, ...]:
             continue
         found.append(owner.id)
     return tuple(found)
+
+
+def run_level_retryable(state: RunState) -> tuple[PauseCause, ...]:
+    """The ``failure_path`` causes no step owns (subject ``""``) a run-level Retry clears.
+
+    None while a hold or a restart stands.
+    """
+    if any(holds_slot(cause) for cause in state.causes):
+        return ()
+    return tuple(
+        cause for cause in state.causes if cause.reason == "failure_path" and cause.subject == ""
+    )
+
+
+def retry_run(graph: CompiledGraph, state: RunState) -> ApplyResult:
+    """Clear the run-level ``failure_path`` causes; a run running again resumes.
+
+    An ``orchestrator:`` or ``decision:`` cause also moves the orchestrator to a new
+    generation and drops its backoff ladder.
+    """
+    held = {cause.detail for cause in state.causes if holds_slot(cause)}
+    if HOST_OFFLINE_DETAIL in held:
+        return refuse(state, "host_offline_hold")
+    if RESTARTING_DETAIL in held:
+        return refuse(state, "restart_in_progress")
+    causes = run_level_retryable(state)
+    if not causes:
+        return refuse(state, "retry_not_allowed")
+    replace = any(cause.detail.startswith(_ORCHESTRATOR_PREFIXES) for cause in causes)
+    changes: dict[str, object] = {"seq": state.seq + 1}
+    updated = _without_causes(state, lambda cause: cause in causes)
+    if replace:
+        if state.orchestrator_generation >= _MAX_ORCHESTRATOR_GENERATION:
+            return refuse(state, "retry_not_allowed")
+        changes["orchestrator_generation"] = state.orchestrator_generation + 1
+        updated = _drop_orchestrator_backoff(updated)
+    updated = updated.model_copy(update=changes)
+    effects: tuple[Effect, ...] = ()
+    if updated.status == "running":
+        updated, effects = _advance_closed(graph, updated)
+    if updated.status == "running":
+        updated, nudges = _reprompt(updated, "resume")
+        effects = (*effects, *nudges)
+    return ApplyResult(state=updated, effects=effects)
+
+
+def orchestrator_turn(
+    state: RunState, command: OrchestratorTurn, now: datetime, policy: TimerPolicy
+) -> ApplyResult:
+    """A transient failure of a running run arms the orchestrator's ladder once; no pause.
+
+    A completed turn disarms it. Another failure class is refused ``not_supported``.
+    """
+    if not command.failed:
+        dropped = _drop_orchestrator_backoff(state)
+        if dropped == state:
+            return ApplyResult(state=state)
+        return ApplyResult(state=dropped.model_copy(update={"seq": state.seq + 1}))
+    if command.failure != "infra.transient":
+        return refuse(state, "not_supported")
+    if state.status != "running" or has_live_timer(
+        state, ORCHESTRATOR_BACKOFF, ORCHESTRATOR_SUBJECT, now
+    ):
+        return ApplyResult(state=state)
+    armed = arm_infra_backoff(
+        state,
+        ORCHESTRATOR_SUBJECT,
+        state.orchestrator_generation,
+        now,
+        policy,
+        ORCHESTRATOR_BACKOFF,
+    )
+    return ApplyResult(state=armed.model_copy(update={"seq": state.seq + 1}))
 
 
 def cancel_run(state: RunState) -> ApplyResult:
@@ -647,6 +727,8 @@ def apply_timer_due(
         return _infra_due(state, timer)
     if timer.kind == PLAN_PROBE:
         return _plan_due(graph, state, timer, now, policy)
+    if timer.kind == ORCHESTRATOR_BACKOFF:
+        return _orchestrator_due(state, timer)
     return ApplyResult(state=state)
 
 
@@ -748,6 +830,33 @@ def _infra_due(state: RunState, timer: Timer) -> ApplyResult:
     if slot.failed_turn is None and not awaiting_effect(base, slot.id):
         return ApplyResult(state=base)
     return ApplyResult(state=record_pause(base, "infra", "infra.transient", timer.subject))
+
+
+def _orchestrator_due(state: RunState, timer: Timer) -> ApplyResult:
+    """Stages 1 and 2 ask for re-asks; stage 3 pauses ``infra`` for the run.
+
+    A stage of a replaced generation, or of a run that is not running, only disarms.
+    """
+    kept = tuple(item for item in state.timers if item.key != timer.key)
+    seq = state.seq + 1
+    base = state.model_copy(update={"timers": kept, "seq": seq})
+    if timer.generation < state.orchestrator_generation or state.status != "running":
+        return ApplyResult(state=base)
+    if timer.stage >= 3:
+        return ApplyResult(state=record_pause(base, "infra", "orchestrator:infra.transient", ""))
+    effect = _effect(
+        state,
+        seq,
+        "notify",
+        ORCHESTRATOR_SUBJECT,
+        {"kind": "orchestrator_backoff", "stage": timer.stage},
+    )
+    notified = base.model_copy(update={"effects": (*base.effects, effect)})
+    return ApplyResult(state=notified, effects=(effect,))
+
+
+def _drop_orchestrator_backoff(state: RunState) -> RunState:
+    return drop_slot_backoff(state, (ORCHESTRATOR_SUBJECT,), (ORCHESTRATOR_BACKOFF,))
 
 
 def _plan_due(
