@@ -53,12 +53,12 @@ from coral.bridge.feedback import (
     feedback_input,
     finished_from_row,
     gate_of,
+    orchestrator_generation_of,
 )
 from coral.bridge.fold import EngineStateCache
 from coral.bridge.gate_rows import live_publish_effects
 from coral.bridge.graphs import PinnedGraphError, PinnedGraphs
 from coral.bridge.keys import (
-    ORCHESTRATOR_GENERATION,
     ORCHESTRATOR_SLOT_ID,
     anchor_effect_key,
     effect_work_id,
@@ -194,6 +194,7 @@ class _Fed:
 
     :param decision_id: For a message to the orchestrator, the decision it is about.
     :param visit_id: For a gate's publish or withdraw, the visit row it is about.
+    :param generation: For an orchestrator row, the generation it was queued for.
     """
 
     work_id: str
@@ -201,6 +202,7 @@ class _Fed:
     command: engine.Input
     decision_id: str | None = None
     visit_id: str | None = None
+    generation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -957,7 +959,16 @@ class EngineBridge:
             return
         item = finished.item
         failed = finished.status == int(WorkStatus.FAILED)
-        pending = (_Fed(item.id, failed, command, decision_of(item), gate_of(item)),)
+        pending = (
+            _Fed(
+                item.id,
+                failed,
+                command,
+                decision_of(item),
+                gate_of(item),
+                orchestrator_generation_of(item),
+            ),
+        )
         try:
             self.commit_inputs(
                 workspace_id=item.workspace_id,
@@ -1191,7 +1202,7 @@ class EngineBridge:
                     run_id=run.id,
                     session_id=orchestrator,
                     engine_slot_id=ORCHESTRATOR_SLOT_ID,
-                    generation=ORCHESTRATOR_GENERATION,
+                    generation=state.orchestrator_generation,
                     idempotency_key=key_of(orchestrator),
                     edge=None,
                     available_at=now_s,
@@ -1271,7 +1282,16 @@ class EngineBridge:
             command = feedback_input(outcome)
             if command is not None:
                 failed = row.status == int(WorkStatus.FAILED)
-                fed.append(_Fed(row.id, failed, command, decision_of(row), gate_of(row)))
+                fed.append(
+                    _Fed(
+                        row.id,
+                        failed,
+                        command,
+                        decision_of(row),
+                        gate_of(row),
+                        orchestrator_generation_of(row),
+                    )
+                )
         for start in range(0, len(fed), FEED_BATCH):
             batch = tuple(fed[start : start + FEED_BATCH])
             try:
@@ -1297,8 +1317,9 @@ class EngineBridge:
 
         A resume revives exhausted rows in its own commit; read inside the commit's
         attempt, a stale failure is dropped instead of pausing the resumed run again.
-        A failed message to the orchestrator counts only while its decision is open,
-        and a failed gate row only while its visit is live.
+        A failed message to the orchestrator counts only while its decision is open, an
+        orchestrator row only while its generation is the run's, and a failed gate row
+        only while its visit is live.
         """
         failed = [item.work_id for item in fed if item.failed]
         standing = {
@@ -1307,12 +1328,14 @@ class EngineBridge:
             if row.status == int(WorkStatus.FAILED)
         }
         waiting = {item.activation_id for item in open_decisions(snapshot.state)}
+        generation = snapshot.state.orchestrator_generation
         live = live_visit_ids(snapshot.state, snapshot.store.run_id)
         return tuple(
             item.command
             for item in fed
             if (not item.failed or item.work_id in standing)
             and (item.decision_id is None or item.decision_id in waiting)
+            and (item.generation is None or item.generation >= generation)
             and (item.visit_id is None or item.visit_id in live)
         )
 

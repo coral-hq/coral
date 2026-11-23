@@ -20,17 +20,22 @@ import pytest
 from coral.bridge.codec import decode_entries
 from coral.bridge.commit import Applied, build_commit
 from coral.bridge.config import MAX_COMMIT_ROWS
-from coral.bridge.keys import ORCHESTRATOR_SLOT_ID, effect_work_id, orchestrator_effect_key
-from coral.bridge.orchestrator import failure_pause, open_decisions
+from coral.bridge.keys import (
+    ORCHESTRATOR_SLOT_ID,
+    decision_request_key,
+    effect_work_id,
+    orchestrator_effect_key,
+)
+from coral.bridge.orchestrator import open_decisions, turn_input
 from coral.db.enum_codecs import ActorKind, RunPauseReason, RunStatus, WorkStatus
 from coral.engine import transition
-from coral.engine.types import PauseCause, PauseRun, ResumeRun
+from coral.engine.types import Input, OrchestratorTurn, PauseCause, PauseRun, ResumeRun, RetryRun
 from coral.model.ids import effect_session_id
 from coral.omni.protocols import CoralSessionError
 from coral.queue.drainer import FinishedWork
 from coral.signals.turn_facts import EdgeFacts
 from coral.stores.fakes import FakeQueueStore
-from coral.stores.protocols import CommitOutcome, Transition, WorkItem
+from coral.stores.protocols import CommitOutcome, Transition, WorkItem, WorkItemDraft
 from tests.coral.bridge._scripted_runs import RUN_ID, accept, start_run
 from tests.coral.bridge._world import (
     USER,
@@ -541,9 +546,9 @@ async def test_the_resync_indexes_an_orchestrator_whose_create_feedback_was_lost
 
     # Indexed again, so its failed turn reaches the run.
     assert world.bound.lookup(WORKSPACE, orchestrator) is not None
-    sessions.fail_session(orchestrator, OVERLOADED)
+    sessions.fail_session(orchestrator, NOT_LOGGED_IN, code="claude_sdk_auth_failed")
     await sessions.drain()
-    assert _status(world, run.id) == (int(RunStatus.PAUSED), int(RunPauseReason.INFRA))
+    assert _status(world, run.id) == (int(RunStatus.PAUSED), int(RunPauseReason.AUTH))
 
 
 async def test_a_failed_request_whose_feedback_was_lost_pauses_at_the_resync_and_resume_revives(
@@ -586,11 +591,10 @@ async def test_a_failed_request_whose_feedback_was_lost_pauses_at_the_resync_and
 @pytest.mark.parametrize(
     ("message", "code", "reason", "failure_class"),
     [
-        (OVERLOADED, "RuntimeError", RunPauseReason.INFRA, "infra.transient"),
         (RATE_LIMITED, "RuntimeError", RunPauseReason.PLAN_LIMIT, "plan.usage_limit"),
         (NOT_LOGGED_IN, "claude_sdk_auth_failed", RunPauseReason.AUTH, "auth"),
     ],
-    ids=["529", "429", "401"],
+    ids=["429", "401"],
 )
 async def test_a_failed_orchestrator_turn_pauses_its_run_and_resume_re_requests(
     asked: tuple[Sessions, str],
@@ -657,11 +661,12 @@ async def test_a_failed_orchestrator_turn_whose_edge_was_lost_pauses_at_the_re_g
         assert json.loads(signal.result or "{}") == {"turn_fact": "orchestrator_turn"}
         assert world.run(run_id).status == int(RunStatus.RUNNING)
         return
-    assert json.loads(signal.result or "{}") == {"turn_fact": "orchestrator_paused"}
-    assert _status(world, run_id) == (int(RunStatus.PAUSED), int(RunPauseReason.INFRA))
-    assert world.assert_fold_matches(run_id).causes == (
-        PauseCause(reason="infra", detail="orchestrator:infra.transient", subject=""),
-    )
+    # A lost runner is transient: the orchestrator backs off instead of pausing.
+    assert json.loads(signal.result or "{}") == {"turn_fact": "orchestrator_backoff"}
+    assert world.run(run_id).status == int(RunStatus.RUNNING)
+    assert {timer.kind for timer in world.assert_fold_matches(run_id).timers} >= {
+        "orchestrator_backoff"
+    }
 
 
 def _failed_edge(**fields: Any) -> EdgeFacts:
@@ -670,33 +675,55 @@ def _failed_edge(**fields: Any) -> EdgeFacts:
     return EdgeFacts(**values)
 
 
+_COMPLETED = EdgeFacts(status="idle", observed_at_ms=1, turn_outcome="completed")
+
+
 @pytest.mark.parametrize(
-    ("edge", "expected"),
+    ("edge", "backing_off", "expected"),
     [
         # A failure no rule names is still resumable: an orchestrator has no step to retry.
         (
             _failed_edge(error_code="RuntimeError", error_message="something broke"),
+            False,
             PauseRun(reason="infra", detail="orchestrator:agent.failed"),
         ),
         (
             _failed_edge(error_code="runner_disconnected"),
+            False,
             PauseRun(reason="infra", detail="orchestrator:infra.runner_lost"),
         ),
         (
             _failed_edge(turn_outcome=None, error_code="budget_exhausted"),
+            False,
             PauseRun(reason="plan_limit", detail="orchestrator:plan.spend_cap"),
         ),
-        (_failed_edge(turn_outcome="cancelled"), None),
-        (_failed_edge(origin="archive_failed"), None),
-        (EdgeFacts(status="idle", observed_at_ms=1, turn_outcome="completed"), None),
-        (None, None),
+        (
+            _failed_edge(error_code="RuntimeError", error_message=OVERLOADED),
+            False,
+            OrchestratorTurn(failed=True, failure="infra.transient"),
+        ),
+        (_failed_edge(turn_outcome="cancelled"), True, None),
+        (_failed_edge(origin="archive_failed"), True, None),
+        (_COMPLETED, False, None),
+        (_COMPLETED, True, OrchestratorTurn(failed=False)),
+        (None, True, None),
     ],
-    ids=["unnamed", "runner_lost", "spend_cap", "cancelled", "archive", "completed", "no_edge"],
+    ids=[
+        "unnamed",
+        "runner_lost",
+        "spend_cap",
+        "transient",
+        "cancelled",
+        "archive",
+        "completed",
+        "completed_backing_off",
+        "no_edge",
+    ],
 )
-def test_an_orchestrator_turn_pauses_by_the_step_classifier_and_always_resumably(
-    edge: EdgeFacts | None, expected: PauseRun | None
+def test_an_orchestrator_turn_backs_off_or_pauses_by_the_step_classifier(
+    edge: EdgeFacts | None, backing_off: bool, expected: Input | None
 ) -> None:
-    assert failure_pause(edge) == expected
+    assert turn_input(edge, backing_off) == expected
 
 
 async def test_completed_orchestrator_turns_write_nothing(asked: tuple[Sessions, str]) -> None:
@@ -709,7 +736,9 @@ async def test_completed_orchestrator_turns_write_nothing(asked: tuple[Sessions,
     sessions.publish_to(orchestrator, "idle", turn_outcome="completed")
     await sessions.drain()
 
-    assert _signals_of(world, run_id, orchestrator) == []
+    # Without a backoff to end, the turn is read and nothing is committed.
+    [signal] = _signals_of(world, run_id, orchestrator)
+    assert json.loads(signal.result or "{}") == {"turn_fact": "orchestrator_turn"}
     assert world.run(run_id).version == version
 
 
@@ -830,7 +859,7 @@ async def test_a_failed_create_or_request_row_fed_twice_pauses_once(
 
 @pytest.mark.parametrize("seen", ["archive_edge", "re_gather", "re_gather_after_the_alert"])
 @pytest.mark.parametrize("change", ["archived", "deleted"])
-async def test_an_archived_or_deleted_orchestrator_pauses_its_run_for_drift(
+async def test_an_archived_or_deleted_orchestrator_pauses_its_run_for_a_run_level_retry(
     asked: tuple[Sessions, str], seen: str, change: str
 ) -> None:
     sessions, run_id = asked
@@ -862,12 +891,18 @@ async def test_an_archived_or_deleted_orchestrator_pauses_its_run_for_drift(
         assert report.regathered == 1
     await sessions.drain()
 
-    assert _status(world, run_id) == (int(RunStatus.PAUSED), int(RunPauseReason.DRIFT))
-    causes = world.assert_fold_matches(run_id).causes
-    assert [(cause.reason, cause.detail) for cause in causes] == [("drift", f"session_{change}")]
+    assert _status(world, run_id) == (
+        int(RunStatus.PAUSED),
+        int(RunPauseReason.FAILURE_PATH),
+    )
+    assert world.assert_fold_matches(run_id).causes == (
+        PauseCause(
+            reason="failure_path", detail=f"orchestrator:drift.session_{change}", subject=""
+        ),
+    )
     assert [
         json.loads(row.result or "{}") for row in _signals_of(world, run_id, orchestrator)
-    ] == [{"turn_fact": "drift"}]
+    ] == [{"turn_fact": "orchestrator_paused"}]
     assert len(_orchestrator_texts(sessions, run_id)) == sent
 
 
@@ -940,7 +975,11 @@ def test_a_resume_with_more_open_decisions_than_a_commit_holds_drops_the_extra_r
     loaded = world.bridge.load(workspace_id=WORKSPACE, run_id=run.id)
     assert run.id == RUN_ID
     named = dataclasses.replace(
-        loaded.store, run=dataclasses.replace(loaded.store.run, orchestrator_session_id="o" * 32)
+        loaded.store,
+        run=dataclasses.replace(
+            loaded.store.run,
+            orchestrator_session_id=effect_session_id(WORKSPACE, orchestrator_effect_key(run.id)),
+        ),
     )
     snapshot = dataclasses.replace(loaded, store=named, graph=graph, state=driven.state)
     resumed = transition(graph, driven.state, ResumeRun(), world.clock(), snapshot.config)
@@ -955,3 +994,211 @@ def test_a_resume_with_more_open_decisions_than_a_commit_holds_drops_the_extra_r
     assert len(built.outbox_work) == MAX_COMMIT_ROWS
     assert kinds == ["nudge"] * MAX_COMMIT_ROWS
     assert built.release_held_codes
+
+
+# ── backoff ──────────────────────────────────────────────────────────────────
+
+
+async def test_a_transiently_failing_orchestrator_is_re_asked_at_each_stage_then_paused(
+    sessions: Sessions,
+) -> None:
+    world = sessions.world
+    run = start(world, TWO_DECISIONS)
+    await sessions.run(Agent(sessions))
+    orchestrator = sessions.orchestrator_of(run.id)
+    assert [_opening(text) for text in _orchestrator_texts(sessions, run.id)] == [REQUEST] * 2
+
+    sessions.fail_session(orchestrator, OVERLOADED)
+    await sessions.drain()
+    [signal] = _signals_of(world, run.id, orchestrator)
+    assert json.loads(signal.result or "{}") == {"turn_fact": "orchestrator_backoff"}
+    assert world.run(run.id).status == int(RunStatus.RUNNING)
+
+    # 30 s, then 2 min: one re-ask per open decision at each stage.
+    for seconds, asked in ((30, 4), (90, 6)):
+        world.clock.advance(seconds)
+        await sessions.drain()
+        texts = [_opening(text) for text in _orchestrator_texts(sessions, run.id)]
+        assert texts == [REQUEST] * 2 + [REMINDER] * (asked - 2)
+        assert world.run(run.id).status == int(RunStatus.RUNNING)
+
+    # 8 min: still failing, the run pauses resumably and the ladder is spent.
+    world.clock.advance(360)
+    await sessions.drain()
+    assert _status(world, run.id) == (int(RunStatus.PAUSED), int(RunPauseReason.INFRA))
+    state = world.assert_fold_matches(run.id)
+    assert state.causes == (
+        PauseCause(reason="infra", detail="orchestrator:infra.transient", subject=""),
+    )
+    assert [timer.kind for timer in state.timers if timer.kind == "orchestrator_backoff"] == []
+    assert len(_orchestrator_texts(sessions, run.id)) == 6
+
+    world.bridge.resume_run(workspace_id=WORKSPACE, run_id=run.id, actor=USER)
+    await sessions.run(Orchestrator(sessions, [("ok", "Fine."), ("ok", "Fine.")]))
+    assert world.run(run.id).status == int(RunStatus.COMPLETED)
+
+
+async def test_a_completed_orchestrator_turn_ends_its_backoff(
+    asked: tuple[Sessions, str],
+) -> None:
+    sessions, run_id = asked
+    world = sessions.world
+    orchestrator = sessions.orchestrator_of(run_id)
+    sessions.fail_session(orchestrator, OVERLOADED)
+    await sessions.drain()
+    timers = world.assert_fold_matches(run_id).timers
+    assert len([timer for timer in timers if timer.kind == "orchestrator_backoff"]) == 3
+
+    world.clock.advance(1)
+    sessions.dispatch.reply(orchestrator)
+    sessions.publish_to(orchestrator, "idle", turn_outcome="completed")
+    await sessions.drain()
+    timers = world.assert_fold_matches(run_id).timers
+    assert [timer for timer in timers if timer.kind == "orchestrator_backoff"] == []
+    world.clock.advance(480)
+    await sessions.drain()
+
+    assert world.run(run_id).status == int(RunStatus.RUNNING)
+    assert [_opening(text) for text in _orchestrator_texts(sessions, run_id)] == [REQUEST]
+
+    # A second ladder in the same generation re-asks again at its own stages.
+    sessions.fail_session(orchestrator, OVERLOADED)
+    await sessions.drain()
+    world.clock.advance(30)
+    await sessions.drain()
+    assert [_opening(text) for text in _orchestrator_texts(sessions, run_id)] == [
+        REQUEST,
+        REMINDER,
+    ]
+
+
+# ── replacement ──────────────────────────────────────────────────────────────
+
+
+def _retry_run(world: World, run_id: str) -> None:
+    commit = world.bridge.commit_inputs(
+        workspace_id=WORKSPACE, run_id=run_id, inputs=lambda _snapshot: (RetryRun(),), actor=USER
+    )
+    assert commit.outcome.applied
+
+
+async def _lose_orchestrator(sessions: Sessions, run_id: str, change: str = "archived") -> str:
+    """Archive or delete the run's orchestrator and let its edge pause the run."""
+    orchestrator = sessions.orchestrator_of(run_id)
+    sessions.facade.sessions.states[(WORKSPACE, orchestrator)] = (
+        present(orchestrator, archived=True, archived_at="2026-01-01T12:00:02Z")
+        if change == "archived"
+        else present(orchestrator, exists=False)
+    )
+    sessions.publish_to(orchestrator, "idle", origin="archive_idle", turn_outcome=None)
+    await sessions.drain()
+    assert _status(sessions.world, run_id) == (
+        int(RunStatus.PAUSED),
+        int(RunPauseReason.FAILURE_PATH),
+    )
+    return orchestrator
+
+
+@pytest.mark.parametrize("change", ["archived", "deleted"])
+async def test_one_retry_replaces_a_lost_orchestrator_and_the_new_one_finishes_the_run(
+    asked: tuple[Sessions, str], monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    sessions, run_id = asked
+    world = sessions.world
+    [first_request] = _decision_rows(world, run_id)
+    # Generation 1 keeps the keys stored runs have.
+    assert json.loads(first_request.payload)["effect_key"] == decision_request_key(
+        run_id, DECISION_1
+    )
+    old = await _lose_orchestrator(sessions, run_id, change)
+    commits = _record_commits(monkeypatch, world)
+
+    _retry_run(world, run_id)
+
+    new = effect_session_id(WORKSPACE, orchestrator_effect_key(run_id, 2))
+    [retry] = commits
+    assert retry.orchestrator_session_id == new
+    rows = [json.loads(draft.payload) for draft in retry.outbox_work]
+    assert [
+        (row["effect_type"], row["effect_key"], row.get("session_id"))
+        for row in rows
+        if row["effect_key"].startswith(f"{run_id}:{ORCHESTRATOR_SLOT_ID}:")
+    ] == [
+        ("cancel_sessions", f"{run_id}:orchestrator:1:fence", old),
+        ("create_session", f"{run_id}:orchestrator:2:create_session", None),
+        ("send_input", f"{run_id}:orchestrator:2:decision_request:{DECISION_1}", new),
+    ]
+    [logged] = [row for row in world.engine_log(run_id) if row.actor_kind == int(ActorKind.USER)][
+        -1:
+    ]
+    assert json.loads(logged.body)["input"]["kind"] == "retry_run"
+    # A resync right after finds every row of the new generation.
+    assert world.bridge.resync_run(workspace_id=WORKSPACE, run_id=run_id).enqueued == 0
+    await sessions.drain()
+
+    # The old session is fenced: stopped, labelled closed, its choice refused.
+    assert sessions.dispatch.sessions[old].closed
+    refused = await Orchestrator(sessions).choose(old, DECISION_1, *APPROVED)
+    assert not refused.accepted
+    await sessions.run(Orchestrator(sessions, [APPROVED]))
+
+    assert world.run(run_id).status == int(RunStatus.COMPLETED)
+    assert world.assert_fold_matches(run_id).orchestrator_generation == 2
+    assert [_opening(text) for text in _texts_of(sessions, new)] == [REQUEST]
+    assert _orchestrator_creates(sessions) == 2
+
+
+async def test_a_replaced_generations_rows_change_nothing(asked: tuple[Sessions, str]) -> None:
+    sessions, run_id = asked
+    world = sessions.world
+    [first_request] = _decision_rows(world, run_id)
+    old = await _lose_orchestrator(sessions, run_id)
+    _retry_run(world, run_id)
+    await sessions.drain()
+    version = world.run(run_id).version
+
+    # A late failure of a generation-1 row feeds nothing.
+    failed = settle(world, first_request, WorkStatus.FAILED, error_code="session.deleted")
+    world.bridge.feed(finished(failed))
+    assert world.run(run_id).version == version
+
+    # A message still queued for the old session completes without being sent.
+    payload = {
+        **json.loads(first_request.payload),
+        "effect_key": f"{run_id}:decision_rerequest:{DECISION_1}:99",
+    }
+    stale = WorkItemDraft.effect(
+        run_id=run_id, idempotency_key=payload["effect_key"], payload=payload
+    )
+    world.queue.enqueue_work([stale], workspace_id=WORKSPACE, now=world.clock.epoch)
+    sent = len(sessions.messages(old))
+    await sessions.drain()
+
+    [row] = world.queue.get_work([stale.id], workspace_id=WORKSPACE)
+    assert (row.status, json.loads(row.result or "{}")) == (
+        int(WorkStatus.SUCCEEDED),
+        {"skipped": "stale_orchestrator"},
+    )
+    assert len(sessions.messages(old)) == sent
+    assert world.run(run_id).status == int(RunStatus.RUNNING)
+
+
+async def test_a_retry_of_a_failed_request_replaces_the_orchestrator(
+    asked: tuple[Sessions, str],
+) -> None:
+    sessions, run_id = asked
+    world = sessions.world
+    [request] = _decision_rows(world, run_id)
+    failed = settle(world, request, WorkStatus.FAILED, error_code="drift.session_archived")
+    world.bridge.feed(finished(failed))
+    assert world.assert_fold_matches(run_id).causes == (
+        PauseCause(reason="failure_path", detail="decision:drift.session_archived", subject=""),
+    )
+
+    _retry_run(world, run_id)
+    await sessions.run(Orchestrator(sessions, [APPROVED]))
+
+    assert world.run(run_id).status == int(RunStatus.COMPLETED)
+    assert world.run(run_id).orchestrator_session_id == effect_session_id(
+        WORKSPACE, orchestrator_effect_key(run_id, 2)
+    )

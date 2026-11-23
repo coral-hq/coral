@@ -23,10 +23,10 @@ from coral.bridge.config import (
 )
 from coral.bridge.gate_rows import gate_publish_draft, gate_withdraw_draft
 from coral.bridge.keys import (
-    ORCHESTRATOR_GENERATION,
     ORCHESTRATOR_SLOT_ID,
     anchor_effect_key,
     orchestrator_effect_key,
+    orchestrator_fence_key,
     roster_index,
     slot_owner_key,
     slot_session_id,
@@ -179,11 +179,12 @@ def anchor_create_draft(ctx: MapContext) -> WorkItemDraft:
 
 def orchestrator_create_draft(ctx: MapContext) -> WorkItemDraft:
     """
-    The create of the run's orchestrator session, titled after the run.
+    The create of the state's orchestrator generation's session, titled after the run.
 
     It is due at once, so it runs before the request queued beside it.
     """
-    key = orchestrator_effect_key(ctx.run_id)
+    generation = ctx.state.orchestrator_generation
+    key = orchestrator_effect_key(ctx.run_id, generation)
     payload = {
         "effect_type": CREATE_SESSION,
         "effect_key": key,
@@ -192,7 +193,7 @@ def orchestrator_create_draft(ctx: MapContext) -> WorkItemDraft:
         "stance": ORCHESTRATOR_STANCE,
         "engine_slot_id": ORCHESTRATOR_SLOT_ID,
         "slot_role": SlotRole.ORCHESTRATOR.name.lower(),
-        "generation": ORCHESTRATOR_GENERATION,
+        "generation": generation,
         "title": orchestrator_title(ctx.title),
     }
     draft = WorkItemDraft.effect(
@@ -200,7 +201,7 @@ def orchestrator_create_draft(ctx: MapContext) -> WorkItemDraft:
         idempotency_key=key,
         payload=payload,
         scope_key=ORCHESTRATOR_SLOT_ID,
-        slot_generation=ORCHESTRATOR_GENERATION,
+        slot_generation=generation,
         owner_key=_ORCHESTRATOR_OWNER,
         available_at=0,
     )
@@ -225,6 +226,7 @@ def decision_message_draft(
         "session_id": session_id,
         "text": text,
         "kind": "brief" if message == "request" else "nudge",
+        "generation": ctx.state.orchestrator_generation,
     }
     owner = find_activation(ctx.state, decision_id)
     draft = WorkItemDraft.effect(
@@ -233,9 +235,30 @@ def decision_message_draft(
         payload=payload,
         node_id=owner.node_id if owner is not None else None,
         scope_key=decision_id if len(decision_id) <= _SCOPE_KEY_CHARS else None,
-        slot_generation=ORCHESTRATOR_GENERATION,
+        slot_generation=ctx.state.orchestrator_generation,
         owner_key=_ORCHESTRATOR_OWNER,
         available_at=epoch_seconds(ctx.now),
+    )
+    return _checked(draft)
+
+
+def orchestrator_fence_draft(ctx: MapContext, session_id: str, generation: int) -> WorkItemDraft:
+    """The stop of a replaced orchestrator session, labelled closed; its outcome feeds nothing."""
+    key = orchestrator_fence_key(ctx.run_id, generation)
+    payload = {
+        "effect_type": CANCEL_SESSIONS,
+        "effect_key": key,
+        "session_id": session_id,
+        "closed_label": True,
+    }
+    draft = WorkItemDraft.effect(
+        run_id=ctx.run_id,
+        idempotency_key=key,
+        payload=payload,
+        scope_key=ORCHESTRATOR_SLOT_ID,
+        slot_generation=generation,
+        owner_key=_ORCHESTRATOR_OWNER,
+        available_at=0,
     )
     return _checked(draft)
 
@@ -486,6 +509,7 @@ __all__ = [
     "edge_signal_key",
     "map_effect",
     "orchestrator_create_draft",
+    "orchestrator_fence_draft",
     "regather_key",
     "resync_draft",
     "timer_draft",

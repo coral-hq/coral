@@ -843,7 +843,9 @@ def _orchestrator_due(state: RunState, timer: Timer) -> ApplyResult:
     if timer.generation < state.orchestrator_generation or state.status != "running":
         return ApplyResult(state=base)
     if timer.stage >= 3:
-        return ApplyResult(state=record_pause(base, "infra", "orchestrator:infra.transient", ""))
+        # Earlier stages still armed would re-ask after the resume; the pause ends the ladder.
+        ended = _drop_orchestrator_backoff(base)
+        return ApplyResult(state=record_pause(ended, "infra", "orchestrator:infra.transient", ""))
     effect = _effect(
         state,
         seq,

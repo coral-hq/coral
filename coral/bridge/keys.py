@@ -42,9 +42,28 @@ def orchestrator_effect_key(run_id: str, generation: int = ORCHESTRATOR_GENERATI
     return f"{run_id}:{ORCHESTRATOR_SLOT_ID}:{generation}:create_session"
 
 
-def decision_request_key(run_id: str, decision_id: str) -> str:
-    """The key of an open decision's request, which a resync recomputes from the decision."""
-    return f"{run_id}:decision_request:{decision_id}"
+def decision_request_key(
+    run_id: str, decision_id: str, generation: int = ORCHESTRATOR_GENERATION
+) -> str:
+    """
+    The key of an open decision's request to an orchestrator generation, which a resync
+    recomputes from the decision; generation 1 keeps the key its stored rows have.
+    """
+    if generation == ORCHESTRATOR_GENERATION:
+        return f"{run_id}:decision_request:{decision_id}"
+    return f"{run_id}:{ORCHESTRATOR_SLOT_ID}:{generation}:decision_request:{decision_id}"
+
+
+def orchestrator_backoff_key(
+    run_id: str, generation: int, decision_id: str, notify_key: str
+) -> str:
+    """The key of a decision's re-ask at one backoff stage, the stage's ``notify`` key."""
+    return f"{run_id}:{ORCHESTRATOR_SLOT_ID}:{generation}:backoff:{decision_id}:{notify_key}"
+
+
+def orchestrator_fence_key(run_id: str, generation: int) -> str:
+    """The key of the stop of a replaced orchestrator generation's session."""
+    return f"{run_id}:{ORCHESTRATOR_SLOT_ID}:{generation}:fence"
 
 
 def decision_rerequest_key(run_id: str, decision_id: str, run_version: int) -> str:
@@ -103,7 +122,9 @@ __all__ = [
     "decision_request_key",
     "decision_rerequest_key",
     "effect_work_id",
+    "orchestrator_backoff_key",
     "orchestrator_effect_key",
+    "orchestrator_fence_key",
     "roster_index",
     "slot_create_key",
     "slot_message_id",

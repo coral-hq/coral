@@ -28,7 +28,12 @@ from coral.bridge.mapping import (
     map_effect,
     timer_draft,
 )
-from coral.bridge.orchestrator import is_decision_reminder, orchestrator_rows, revivable_work_ids
+from coral.bridge.orchestrator import (
+    is_backoff_notify,
+    is_decision_reminder,
+    orchestrator_rows,
+    revivable_work_ids,
+)
 from coral.bridge.projection import RunProjection, project_run, project_slots
 from coral.db.enum_codecs import RUN_PAUSE_REASON, RunStatus
 from coral.engine import types as engine
@@ -247,8 +252,8 @@ def _effect_rows(
             if draft is not None:
                 rows.append(draft)
                 continue
-            if is_decision_reminder(item.after, effect):
-                # The orchestrator's rules queue it as a reminder.
+            if is_decision_reminder(item.after, effect) or is_backoff_notify(effect):
+                # The orchestrator's rules queue it as a reminder or re-asks.
                 continue
             _logger.info(
                 "Coral run %s committed %s effect %s without work: %s",

@@ -137,6 +137,18 @@ def decision_of(item: WorkItem) -> str | None:
     return decision_id
 
 
+def orchestrator_generation_of(item: WorkItem) -> int | None:
+    """
+    The orchestrator generation an orchestrator create or decision message was queued
+    for; 1 for a row stored before it carried one, ``None`` for any other row.
+    """
+    payload = _payload(item)
+    if payload.get("bridge_item") not in ("orchestrator", DECISION_ITEM):
+        return None
+    generation = payload.get("generation", 1)
+    return generation if isinstance(generation, int) else 1
+
+
 def gate_of(item: WorkItem) -> str | None:
     """The visit row a gate's publish or withdraw is about; ``None`` for any other row."""
     payload = _payload(item)
@@ -184,4 +196,5 @@ __all__ = [
     "feedback_input",
     "finished_from_row",
     "gate_of",
+    "orchestrator_generation_of",
 ]

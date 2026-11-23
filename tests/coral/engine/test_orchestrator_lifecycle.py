@@ -226,6 +226,15 @@ def test_transient_orchestrator_failure_backs_off_then_pauses() -> None:
     assert _ladder(third) == []
 
 
+def test_a_stage_3_pause_also_drops_earlier_stages_still_armed() -> None:
+    graph = _decision_graph()
+    armed = drive(graph, [RUN, TRANSIENT])
+    # Stages 1 and 2 were late; stage 3 fires first.
+    paused = _due(graph, armed, 3, timedelta(minutes=8))
+    assert paused.state.status == "paused"
+    assert _ladder(paused) == []
+
+
 def test_a_completed_turn_or_a_decision_disarms_the_ladder() -> None:
     graph = _decision_graph()
     armed = drive(graph, [RUN, TRANSIENT])

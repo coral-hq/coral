@@ -55,11 +55,12 @@ def ends_turn(edge: SessionStatusEdge, bound: BoundSession) -> bool:
     """
     Whether the edge can end the bound session's turn.
 
-    An orchestrator's counts only when it failed, or when an archive published it.
+    An orchestrator's counts only when it failed or completed (which ends its backoff),
+    or when an archive published it.
     """
     if bound.orchestrator:
-        failed = edge.status == "failed" or edge.turn_outcome == "failed"
-        return failed or is_archive_origin(edge.origin)
+        ended = edge.status == "failed" or edge.turn_outcome in ("failed", "completed")
+        return ended or is_archive_origin(edge.origin)
     return edge.turn_outcome is not None or edge.status in _TURN_END_STATUSES
 
 

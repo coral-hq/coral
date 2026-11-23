@@ -22,7 +22,9 @@ from coral.engine.machines.slot import find_slot
 from coral.stores.protocols import LogEntryDraft, RunLogEntry
 
 _STEP_AGENT_KINDS = frozenset({"handoff_received", "handoff_evaluated", "rejection_observed"})
-_USER_KINDS = frozenset({"start_run", "resume_run", "cancel_run", "retry_step", "answer_gate"})
+_USER_KINDS = frozenset(
+    {"start_run", "resume_run", "cancel_run", "retry_step", "retry_run", "answer_gate"}
+)
 
 
 class EngineLogDecodeError(ValueError):

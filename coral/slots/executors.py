@@ -327,7 +327,9 @@ def send_input_executor(
     The ``send_input`` executor.
 
     Payload: ``effect_key``, ``session_id``, ``text``, ``kind`` (``brief``,
-    ``steer`` or ``nudge``). Result: ``{session_id, stable_id}``.
+    ``steer`` or ``nudge``). Result: ``{session_id, stable_id}``. A message about a
+    decision (``bridge_item`` ``decision``) to a session the run no longer names as its
+    orchestrator is not sent: ``{"skipped": "stale_orchestrator"}``.
     """
 
     async def execute(ctx: ExecutionContext) -> EffectOutcome:
@@ -420,8 +422,10 @@ async def _send(
     stable_ids: StableIds,
     bindings: SessionBindings,
 ) -> dict[str, Any]:
-    refuse_paused_run(state)
     session_id = payload["session_id"]
+    if payload["decision"] and session_id != state.run.orchestrator_session_id:
+        return {"skipped": "stale_orchestrator"}
+    refuse_paused_run(state)
     binding = await _bound_step(bindings, state, session_id, created=True)
     stable_id = effect_message_id(ctx.workspace_id, payload["effect_key"])
     try:
@@ -706,7 +710,13 @@ def _send_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         raise invalid_payload(
             f"text must be at most {MAX_ENGINE_MESSAGE_BYTES} bytes as sent, without NUL"
         )
-    return {"session_id": session_id_field(payload), "text": text, "kind": kind}
+    return {
+        "session_id": session_id_field(payload),
+        "text": text,
+        "kind": kind,
+        # The bridge's messages to the run's orchestrator.
+        "decision": payload.get("bridge_item") == "decision",
+    }
 
 
 def _close_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
