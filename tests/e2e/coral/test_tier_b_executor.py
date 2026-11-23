@@ -267,6 +267,7 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     assert verdicts == [f"{name} no" for name in probe.HOME_CHECKS] + own, verdicts
     config_dir = Path(named.removeprefix("config_dir "))
     assert config_dir.name == "claude_config_dir" and scratch.resolve() in config_dir.parents
+    assert not list(scratch.glob("omnigent-osenv-*")), "close left a launch scratch"
     assert probe.tree(home) == before, "the step changed the home"
     _hashed_lookups(log)
     [*_, result] = tool_results(
@@ -392,6 +393,7 @@ async def test_a_sandboxed_agent_loads_its_mcp_servers_without_the_home(
     assert verdicts == [f"{name} no" for name in probe.HOME_CHECKS] + own, verdicts
     config_dir = Path(named.removeprefix("config_dir "))
     assert config_dir.name == "claude_config_dir" and scratch.resolve() in config_dir.parents
+    assert not list(scratch.glob("omnigent-osenv-*")), "close left a launch scratch"
     assert not disabled_report.exists(), "a server the user disabled started in the sandbox"
     # Logging stores a lone mapping argument as the record's args.
     [init] = [

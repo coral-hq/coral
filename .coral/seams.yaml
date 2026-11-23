@@ -3329,8 +3329,12 @@ seams:
       messaging socket under XDG_RUNTIME_DIR, which the launcher points at its
       scratch, so no socket lands in this dir. Bwrap gets no launch dir: its
       /tmp is a private tmpfs per launch. A dir a killed launcher leaves
-      behind is removed at the next launch under the same root; a CLI that
-      outlived its killed launcher can lose its dir then.
+      behind is removed at the next launch under the same root and, since
+      S116 (CRL-179), by a claude-sdk executor's sweep after each connect,
+      client teardown and close(). Since S116 the in-wrap pass also names its
+      CLI in the dir, so a CLI that outlived its killed launcher keeps its dir
+      until it exits, unless the launcher died before naming it or could not
+      write the name.
     files:
       - omnigent/inner/claude_sdk_executor.py
       - omnigent/inner/sandbox.py
@@ -3567,9 +3571,14 @@ seams:
       cannot be opened from the wrap (measured on 27.2.1 with a stand-in
       file). Main residuals and owners: other agents' sandboxed claude-sdk
       wraps (closed by S115 on bwrap and seatbelt), unwrapped Coral CLIs (CRL-180), leftover scratch and
-      private dirs (CRL-179), the settings env merge (CRL-167), env
-      construction races and a relative config dir (CRL-182), project config a
-      step writes in its worktree (CRL-181), and the inbox sockets (CRL-174).
+      private dirs (CRL-179; removed by S116 once their owner has exited, at
+      a claude-sdk executor's next connect, client teardown or close, or,
+      after a killed harness, when the next claude-sdk executor with the same
+      temp dir connects or closes; dirs from before S116 and the other
+      residuals in the CRL-179 addendum stay), the settings env merge
+      (CRL-167), env construction races and a relative config dir (CRL-182),
+      project config a step writes in its worktree (CRL-181), and the inbox
+      sockets (CRL-174).
       No CI lane runs macOS (CRL-170). Mechanism, evidence and the full
       residual list: ADR-05, "Addendum: CRL-176 Claude config isolation".
     files:
@@ -3743,12 +3752,16 @@ seams:
       seed copy's secrets and CLAUDE_CODE_OAUTH_TOKEN, both readable in the
       sandbox (CRL-167); a seed copy left in a launch scratch after a kill,
       and a scratch without one at each connect from the SDK's -v check
-      (CRL-179); a working dir or path grant above the home, which the
-      top-level dotfile mask does not cover (CRL-184); project config in the
-      working dir (CRL-181); and the inbox sockets (CRL-174). No CI lane runs
-      macOS (CRL-170). Mechanism, evidence and the full residual list:
-      ADR-05, "Addendum: CRL-178 Claude config isolation for every sandboxed
-      agent".
+      (CRL-179; removed by S116 once the launch has exited, at a claude-sdk
+      executor's next connect, client teardown or close, or, after a killed
+      harness, when the next claude-sdk executor with the same temp dir
+      connects or closes; copies from before S116 and the other residuals in
+      the CRL-179 addendum stay); a working dir or path grant above the home,
+      which the top-level dotfile mask does not cover (CRL-184); project
+      config in the working dir (CRL-181); and the inbox sockets (CRL-174). No
+      CI lane runs macOS (CRL-170). Mechanism, evidence and the full residual
+      list: ADR-05, "Addendum: CRL-178 Claude config isolation for every
+      sandboxed agent".
     files:
       - omnigent/inner/sandbox.py
       - omnigent/inner/claude_sdk_executor.py
@@ -3801,6 +3814,167 @@ seams:
         tests/inner/sandbox/test_sandbox_behavior.py 116,
         examples/sentinel/config.yaml 4,
         examples/sentinel/agents/scanner/config.yaml 4.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S116
+    title: A claude-sdk executor removes the temp dirs a killed CLI launch or harness left
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Only the launcher's in-wrap pass removed its per-launch scratch
+      ($TMPDIR/omnigent-osenv-*: the CLI's TMPDIR and private
+      CLAUDE_CONFIG_DIR, with the S115 seed copy), in a finally that any
+      signal skips. Measured on macOS 27.2.1 with a stand-in CLI: the Agent
+      SDK's -v version check left one scratch per connect (20 of 20); a force
+      close or a cancel eviction left the scratch with the seed copy (a failed
+      connect takes the same teardown, from code); every seatbelt launch left
+      its profile dir, since atexit never runs after the exec; a killed
+      harness left its seed dir and its unwrapped config dir. Under bwrap the
+      scratch is a bind-mount point, so the in-wrap cleanup empties it but
+      cannot remove it (from code). Launcher signal handlers cannot fix this:
+      on seatbelt the profile lets a process signal only itself (EPERM), on
+      bwrap the SDK's signal reaches bwrap's monitor, and SIGKILL or a killed
+      harness send none. Instead each dir names its owner in a .launch-owner
+      claim: the host pass claims its scratch right after making it, before
+      S109's sweep and execvp (the pid the spawner holds, in the spawner's pid
+      namespace), the seatbelt backend its profile dir, the executor its seed
+      dir at each mkdir and its unwrapped config dir. On seatbelt the in-wrap
+      pass also names its target CLI in .launch-target, since the CLI can
+      outlive its launcher. The in-wrap cleanup of a claimed dir removes
+      everything else first and the claims only once nothing else is left, the
+      target's claim first, putting them back if the dir cannot go: on
+      seatbelt the claims and the dir go last; on bwrap, where the scratch is
+      a mount point, the claims stay in place for the spawner's sweep. On
+      bwrap the namespace can briefly outlive its monitor (--die-with-parent
+      kills it after the monitor dies), so a sweep in that moment can judge a
+      dying launch gone; it removes only what that launch's own cleanup
+      removes. S109's sweep takes a name pattern, and the executor runs it off
+      the event loop over the temp dir (the four names) and, if it is this
+      user's private real dir, the harness socket root: after each connect and
+      at the end of every client teardown (waiting up to 2 s) and at the end
+      of close(), which first awaits pending evictions and waits up to 10 s
+      for its turn and its sweep. One sweep runs at a time per process; a
+      connect or teardown asking while one runs skips its own. A child goes
+      only when its name is exactly what its maker makes, it is this user's
+      real 0700 dir, and its owner and any recorded target are gone in this
+      boot and pid namespace (os.kill ESRCH, or a zombie psutil sees; EPERM,
+      or a process psutil cannot see, counts as alive). Its entries are
+      removed bottom-up relative to the dir's descriptor and the claims last;
+      a dir that cannot be emptied keeps them, and one that cannot be removed
+      once emptied (a late writer) gets them back, so the next sweep retries.
+      A sweep stops at a 2 s deadline per root, checked at every entry, or
+      after 64 removals per root; a dir's removal stops at a dir 64 levels
+      down, which is counted, and the dir keeps its claims. It does nothing
+      without os.getuid (Windows) and never raises; it logs counts and
+      exception types, never paths. Measured: a dead scratch with 100,000
+      files went in four sweeps (2.04, 2.03, 2.00 and 0.23 s), one holding a
+      1,500-deep chain was kept as too deep in 0.006 s, and a dry scan of a
+      3,799-entry temp dir took 22 ms. Every claim, S109's too, is created
+      exclusively (0600) without following a link, and read_owner_claim reads
+      only this user's regular file of at most 4 KiB without blocking (the
+      process manager, when it refuses a file, still falls back to its older
+      plain read, as before S116). A force close now waits up to 5 s in all
+      for the whole process tree it signalled (a zombie counts as gone),
+      SIGKILLs what is left, waits at most 1 s more, and only then sweeps. A
+      graceful close snapshots the tree before the SDK's disconnect(), whose
+      close signals only the launcher, then gives every member still running 2
+      s, SIGKILLs it and waits at most 1 s more before the sweep; one
+      session's graceful close is bounded at about 25 s (the SDK's own about
+      20 s), and a CLI that ignores its input closing and SIGTERM closes in
+      about 7 s on seatbelt. A cancelled caller waits for its sweep only up to its bound.
+      Residuals, among others in the ADR addendum: dirs made before S116, or
+      by a build without it, carry no claim and stay (no ticket); a dead
+      scratch its sandboxed CLI changed (a claim removed or rewritten, its
+      mode changed, an entry the sweep cannot remove, or a tree of 64 or more
+      nested dirs, at which each sweep stops) keeps what is left, possibly the
+      seed copy; a dir too large for one sweep's budget, possibly holding the
+      seed copy, waits for later sweeps, after a harness's last close() for
+      another executor's; on a /tmp shared with other users, their entries
+      count against the temp dir's 2 s and can keep the sweep from this user's
+      dirs (a per-user TMPDIR avoids it); a seatbelt launcher killed between
+      removing its owner claim and its dir leaves an empty, unclaimed dir; a
+      killed harness's dirs, and on seatbelt those of launches killed with it
+      (a process-group kill, its terminal's SIGHUP), wait for the next
+      claude-sdk executor of the same user and temp dir to connect or close; a
+      skipped sweep is not made up, and a sweep stuck in one blocking call
+      holds the lock, so that process sweeps no more; a CLI orphaned on
+      seatbelt before its launcher named it, or whose name could not be
+      written, can lose its scratch and make an unclaimed one; a killed
+      harness leaves a seatbelt CLI that ignores its input closing running,
+      with its launcher and scratch (CRL-185); a scratch under a TMPDIR set
+      through the user settings env, and other code's unclaimed
+      omnigent-osenv-* dirs, are outside the sweep; the launcher script stays
+      until the executor's __del__; other agents whose grants cover the temp
+      dir can read and write live seeds and scratches and change their claims
+      (ADR-05's accepted residual); a seed copy stays readable in the sandbox
+      while its executor runs (CRL-167); Windows is unchanged; no CI lane runs
+      macOS (CRL-170), so the seatbelt rows run locally. Mechanism, evidence
+      and the full residual list: ADR-05, "Addendum: CRL-179 launch temp dir
+      cleanup".
+    files:
+      - omnigent/inner/_proc.py
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/inner/sandbox.py
+      - omnigent/inner/seatbelt_sandbox.py
+      - omnigent/native/owner_claim.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_proc_and_platform.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/native/test_owner_claim.py
+    tests:
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_proc_and_platform.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/native/test_owner_claim.py
+      - tests/e2e/coral/test_tier_b_executor.py
+    budget_lines: 120
+    budget_exception:
+      lines: 626
+      reason: >-
+        Counted with git diff --numstat origin/development (added plus
+        removed lines). tests/inner/test_sandbox.py (626): two shared
+        helpers and the tests for the name pattern sweep with its keep and
+        remove cases, kernel liveness (exited, zombie, running, EPERM,
+        unseen by psutil), the sweep budget between dirs and inside one, the
+        depth cap, an undeletable subdir kept for a retry, claims put back
+        after a late writer, the claims' removal order, a raising liveness
+        check and a raising scan, no owner uids, the dir re-check on open, a
+        planted link at each launcher claim, the in-wrap cleanup on
+        seatbelt, on bwrap and cut short, the seatbelt target claim, an
+        interrupt while naming the target, and the host pass's claim before
+        S109's sweep. tests/inner/test_claude_sdk_executor.py (439): the
+        autouse stub that keeps other tests out of the shared temp dir, the
+        seed and unwrapped config claims with planted links, the three sweep
+        points, the force close tree wait (two pipe shapes), a force close
+        bounded against an escaped pipe holder, a zombie in the tree wait,
+        the off-loop sweep, its short wait and one-at-a-time rule, a
+        cancelled caller's bound, close() waiting for evictions, and the
+        harness root check. omnigent/inner/sandbox.py (294): the claim
+        helper, kernel liveness, the orphan test with target claims, the
+        bounded bottom-up removal with the claims last and put back, the
+        budgeted never-raising sweep, the host pass's claim, the in-wrap
+        claim check, claim-keeping cleanup and target run.
+        tests/inner/sandbox/test_sandbox_behavior.py (194): the version
+        check kill on both signal paths with the sweep, and the done-when
+        executor test with its control-request stand-in CLIs, one of which
+        outlives its input and SIGTERM. omnigent/inner/claude_sdk_executor.py
+        (142): the name patterns, the sweep composition, its off-loop runner
+        with its lock and bounded waits, the claims, the three sweep points,
+        and the tree waits of a force close and a graceful close. The other
+        files are within budget: omnigent/native/owner_claim.py 73,
+        omnigent/inner/_proc.py 39, omnigent/inner/seatbelt_sandbox.py 8,
+        tests/native/test_owner_claim.py 76,
+        tests/inner/test_seatbelt_sandbox.py 46,
+        tests/inner/test_proc_and_platform.py 23,
+        tests/e2e/coral/test_tier_b_executor.py 2.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
