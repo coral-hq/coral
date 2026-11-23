@@ -34,10 +34,12 @@ import json
 import logging
 import os
 import pathlib
+import re  # CORAL(S116)
 import secrets  # CORAL(S115)
 import shutil
 import sys
 import tempfile  # CORAL(S113)
+import threading  # CORAL(S116)
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
@@ -97,9 +99,12 @@ from .executor import (
 )
 from .native_attachments import framework_notices, unresolved_attachment_marker
 from .sandbox import (
+    PRIVATE_TMPDIR_NAME,  # CORAL(S116)
     SandboxPolicy,  # CORAL(S113)
     _is_private_dir,  # CORAL(S115)
+    _remove_orphaned_launch_tmpdirs,  # CORAL(S116)
     _resolve_sandbox_type,
+    claim_temp_dir,  # CORAL(S116)
     create_exec_launcher,
     get_backend,
     open_regular_file,  # CORAL(S115)
@@ -1803,6 +1808,92 @@ def _claude_seed_path() -> pathlib.Path:
     return pathlib.Path(tempfile.gettempdir()) / name / "claude.json"
 
 
+# CORAL(S116): the executor's own dirs, as _claude_seed_path and mkdtemp name them
+_CLAUDE_SEED_DIR_NAME = re.compile(r"omnigent-claude-seed-[0-9a-f]{16}")
+_UNWRAPPED_CONFIG_DIR_NAME = re.compile(r"omnigent-claude-config-[a-z0-9_]{8}")
+# CORAL(S116): how long close() waits for pending evictions and its last sweep, and a connect
+# or teardown for its own; a sweep still running then goes on in the background
+_CLOSE_WAIT_SECONDS = 10.0
+_SWEEP_WAIT_SECONDS = 2.0
+# CORAL(S116): one sweep at a time per process
+_SWEEP_LOCK = threading.Lock()
+
+
+def _remove_orphaned_temp_dirs() -> None:
+    """
+    CORAL(S116): remove the temp dirs that processes now gone left behind; never raises.
+
+    In the temp dir: launch scratches, seatbelt profile dirs, seed and unwrapped config dirs;
+    under the harness socket root, if it is this user's private dir: seatbelt launch dirs.
+    """
+    if not hasattr(os, "getuid"):
+        return
+    try:
+        from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
+
+        from .seatbelt_sandbox import PROFILE_TEMPDIR_NAME
+
+        names = (
+            PRIVATE_TMPDIR_NAME,
+            PROFILE_TEMPDIR_NAME,
+            _CLAUDE_SEED_DIR_NAME,
+            _UNWRAPPED_CONFIG_DIR_NAME,
+        )
+        pattern = re.compile("|".join(f"(?:{name.pattern})" for name in names))
+        _remove_orphaned_launch_tmpdirs(pathlib.Path(tempfile.gettempdir()), pattern)
+        harness_root = resolve_harness_tmp_parent()
+        if _is_private_dir(harness_root):  # as S109's own sweep requires
+            _remove_orphaned_launch_tmpdirs(harness_root)
+    except Exception as exc:  # noqa: BLE001 — it runs in teardown, which must not fail
+        logger.warning("Cannot sweep the temp dirs (%s)", type(exc).__name__)
+
+
+def _sweep_once(wait: float) -> None:
+    """CORAL(S116): sweep, unless another sweep of this process still runs after *wait* s."""
+    if not (_SWEEP_LOCK.acquire(timeout=wait) if wait > 0 else _SWEEP_LOCK.acquire(False)):
+        return
+    try:
+        _remove_orphaned_temp_dirs()
+    finally:
+        _SWEEP_LOCK.release()
+
+
+async def _sweep_orphaned_temp_dirs(
+    timeout: float = _SWEEP_WAIT_SECONDS, *, wait_turn: float = 0.0
+) -> None:
+    """
+    CORAL(S116): run the sweep off the event loop; a cancelled caller still lets it finish.
+
+    *timeout* bounds only the wait; the sweep then goes on in the background. A sweep asked
+    for while another runs is skipped, unless *wait_turn* lets it wait that long for its
+    turn. Never raises but for the caller's own cancellation.
+    """
+    sweep = asyncio.create_task(asyncio.to_thread(_sweep_once, wait_turn))
+    try:
+        await asyncio.wait_for(asyncio.shield(sweep), timeout)
+    except TimeoutError:
+        logger.warning("The temp dir sweep is still running")
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await sweep
+        raise
+    except Exception as exc:  # noqa: BLE001 — e.g. a loop whose executor has shut down
+        logger.warning("Cannot sweep the temp dirs (%s)", type(exc).__name__)
+
+
+async def _wait_for_tree(process: _Process, tree: dict[int, float], *, timeout: float) -> None:
+    """
+    CORAL(S116): wait for *process* and every process of its *tree* to exit.
+
+    :raises TimeoutError: If one still runs after *timeout* seconds in all.
+    """
+    async with asyncio.timeout(timeout):
+        with suppress(Exception):
+            await process.wait()
+        while _proc.live_members(tree):
+            await asyncio.sleep(0.05)
+
+
 def _claude_seed_source(env: Mapping[str, str]) -> pathlib.Path | None:
     """
     CORAL(S115): the global config file the CLI would read for *env*.
@@ -2371,6 +2462,7 @@ class ClaudeSDKExecutor(Executor):
         """CORAL(S113): this executor's own 0700 Claude config dir, for a CLI it cannot wrap."""
         if self._unwrapped_claude_config_dir is None:
             path = pathlib.Path(tempfile.mkdtemp(prefix="omnigent-claude-config-"))
+            claim_temp_dir(path)  # CORAL(S116): a killed harness's dir goes at a later sweep
             for name in _CLAUDE_CONFIG_BLOCKED_NAMES:
                 (path / name).touch(mode=0o600, exist_ok=False)
             self._unwrapped_claude_config_dir = path
@@ -2400,6 +2492,7 @@ class ClaudeSDKExecutor(Executor):
             # Anything else there, or a dir no longer private, fails the exclusive mkdir.
             if not (self._claude_config_seed_dir_made and _is_private_dir(seed.parent)):
                 seed.parent.mkdir(mode=0o700)
+                claim_temp_dir(seed.parent)  # CORAL(S116): a killed harness's seed goes later
                 self._claude_config_seed_dir_made = True
             config = _claude_config_seed(os.environ)
             content = json.dumps(config)
@@ -2583,6 +2676,8 @@ class ClaudeSDKExecutor(Executor):
                 mcp_auth=mcp_auth,
             )
             self._clients[session_key] = state
+            # CORAL(S116): the SDK's version check left its launch behind
+            await _sweep_orphaned_temp_dirs()
             return client
 
         if state.model != model:
@@ -2703,6 +2798,12 @@ class ClaudeSDKExecutor(Executor):
             self._gateway_shim = None
         self._remove_unwrapped_claude_config_dir()  # CORAL(S113)
         self._remove_claude_config_seed()  # CORAL(S115)
+        # CORAL(S116): clients evicted on cancel finish closing first; then the last sweep
+        loop = asyncio.get_running_loop()
+        evictions = [task for task in self._cancel_close_tasks if task.get_loop() is loop]
+        if evictions:
+            await asyncio.wait(evictions, timeout=_CLOSE_WAIT_SECONDS)
+        await _sweep_orphaned_temp_dirs(_CLOSE_WAIT_SECONDS, wait_turn=_CLOSE_WAIT_SECONDS)
 
     async def interrupt_session(self, session_key: str) -> bool:
         state = self._clients.get(session_key)
@@ -2788,18 +2889,22 @@ class ClaudeSDKExecutor(Executor):
             process = transport._process
             if process is not None:
                 if process.returncode is None:
+                    # CORAL(S116): the CLI can outlive its launcher, so the whole tree is waited on
+                    tree = _proc.snapshot_child_tree(process)
                     _terminate_process_tree(process)
                     try:
-                        with suppress(Exception):
-                            await asyncio.wait_for(process.wait(), timeout=5)
+                        await _wait_for_tree(process, tree, timeout=5)  # CORAL(S116)
                     except TimeoutError:
                         _kill_process_tree(process)
-                        with suppress(Exception):
-                            await process.wait()
+                        _proc.kill_members(tree)  # CORAL(S116)
+                        # CORAL(S116): bounded, as a pipe held outside the tree outlives the kill
+                        with suppress(TimeoutError):
+                            await _wait_for_tree(process, tree, timeout=1)
                     except asyncio.CancelledError:
                         _kill_process_tree(process)
-                        with suppress(Exception):
-                            await process.wait()
+                        _proc.kill_members(tree)  # CORAL(S116)
+                        with suppress(TimeoutError):  # CORAL(S116): bounded, as above
+                            await _wait_for_tree(process, tree, timeout=1)
 
                 _best_effort_close(process)
                 # The SDK's `transport._process` is an anyio Process;
@@ -2819,6 +2924,7 @@ class ClaudeSDKExecutor(Executor):
 
         client._query = None
         client._transport = None
+        await _sweep_orphaned_temp_dirs()  # CORAL(S116): a launch this teardown killed
 
     def supports_streaming(self) -> bool:
         return True

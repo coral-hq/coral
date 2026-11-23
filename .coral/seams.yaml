@@ -3805,3 +3805,127 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S116
+    title: A claude-sdk executor removes the temp dirs a killed CLI launch or harness left
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Only the launcher's in-wrap pass removed its per-launch scratch
+      ($TMPDIR/omnigent-osenv-*: the CLI's TMPDIR and private
+      CLAUDE_CONFIG_DIR, with the S115 seed copy), in a finally that any
+      signal skips. Measured on macOS 27.2.1 with a stand-in CLI: the Agent
+      SDK's -v version check left one scratch per connect (20 of 20); a force
+      close, a cancel eviction or a failed connect left the scratch with the
+      seed copy; every seatbelt launch left its profile dir, since atexit
+      never runs after the exec; a killed harness left its seed dir and its
+      unwrapped config dir. Under bwrap the scratch is a bind-mount point, so
+      the in-wrap cleanup empties it but cannot remove it (from code).
+      Launcher signal handlers cannot fix this: on seatbelt the profile lets
+      a process signal only itself (EPERM), on bwrap the SDK's signal
+      reaches bwrap's monitor, and SIGKILL or a killed harness send none.
+      Instead each dir names its owner in a .launch-owner claim: the host
+      pass claims its scratch before execvp (the pid the spawner holds, in
+      the spawner's pid namespace), the seatbelt backend its profile dir, the
+      executor its seed dir at each mkdir and its unwrapped config dir; the
+      host pass claims its scratch right after making it. On seatbelt the
+      in-wrap pass also names its target CLI in .launch-target, since the
+      CLI can outlive its launcher. The in-wrap cleanup of a claimed dir
+      removes everything else first and never drops a claim while the dir
+      stays: on seatbelt the claims and the dir go last; on bwrap, where the
+      scratch is a mount point, the claims stay in place for the spawner's
+      sweep. S109's sweep takes a name pattern, and the executor runs it off
+      the event loop over the temp dir (the four names) and, if it is this
+      user's private real dir, the harness socket root: after each connect
+      and at the end of every client teardown (waiting up to 2 s) and at the
+      end of close(), which first awaits pending evictions and waits up to
+      10 s for its turn and its sweep. One sweep runs at a time per process;
+      a connect or teardown asking while one runs skips its own. A child goes
+      only when its name is exactly what its maker makes, it is this user's
+      real 0700 dir, and its owner and any recorded target are gone in this
+      boot and pid namespace (os.kill ESRCH, or a zombie psutil sees; EPERM,
+      or a process psutil cannot see, counts as alive). Its entries are
+      removed bottom-up relative to the dir's descriptor and the claims last;
+      a dir that cannot be emptied keeps them, and one that cannot be removed
+      once emptied (a late writer) gets them back, so the next sweep retries.
+      A sweep stops at a 2 s deadline, checked at every entry, or after 64
+      removals per root; a dead tree deeper than 64 levels is left whole and
+      counted, never descended. It does nothing without os.getuid (Windows)
+      and never raises; it logs counts and exception types, never paths.
+      Measured: a dead scratch with 20,000 files went in 0.97 s with the loop
+      stalled at most 1.3 ms; a dry scan of a 3,799-entry temp dir took
+      22 ms. Every claim, S109's too, is created exclusively (0600) without
+      following a link, and read_owner_claim, for every caller, reads only
+      this user's regular file of at most 4 KiB without blocking. A force
+      close now waits up to 5 s in all for the whole process tree it
+      signalled (a zombie counts as gone), SIGKILLs what is left, waits at
+      most 1 s more, and only then sweeps. Residuals: dirs made before S116
+      carry no claim and stay (no ticket); a seatbelt launcher killed between
+      its last claim's removal and its dir's leaves an empty, unclaimed dir;
+      a dead tree past the depth cap stays; a killed harness's dirs wait for
+      the next claude-sdk executor of the same user and temp dir to connect
+      or close; a CLI orphaned on seatbelt can make an unclaimed dir after
+      its scratch went; a seed copy stays readable in the sandbox while its
+      executor runs (CRL-167); no CI lane runs macOS (CRL-170), so the
+      seatbelt rows run locally.
+    files:
+      - omnigent/inner/_proc.py
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/inner/sandbox.py
+      - omnigent/inner/seatbelt_sandbox.py
+      - omnigent/native/owner_claim.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_proc_and_platform.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/native/test_owner_claim.py
+    tests:
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_proc_and_platform.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/native/test_owner_claim.py
+      - tests/e2e/coral/test_tier_b_executor.py
+    budget_lines: 120
+    budget_exception:
+      lines: 593
+      reason: >-
+        Counted with git diff --numstat origin/development (added plus
+        removed lines). tests/inner/test_sandbox.py (593): two shared
+        helpers and the tests for the name pattern sweep with its keep and
+        remove cases, kernel liveness (exited, zombie, running, EPERM,
+        unseen by psutil), the sweep budget between dirs and inside one, the
+        depth cap, an undeletable subdir kept for a retry, claims put back
+        after a late writer, a raising liveness check and a raising scan, no
+        owner uids, the dir re-check on open, a planted link at each
+        launcher claim, the in-wrap cleanup on seatbelt, on bwrap and cut
+        short, the seatbelt target claim, an interrupt while naming the
+        target, and the host pass's claim before S109's sweep.
+        tests/inner/test_claude_sdk_executor.py (413): the autouse stub that
+        keeps other tests out of the shared temp dir, the seed and unwrapped
+        config claims with planted links, the three sweep points, the force
+        close tree wait (two pipe shapes), a force close bounded against an
+        escaped pipe holder, a zombie in the tree wait, the off-loop sweep,
+        its short wait and one-at-a-time rule, close() waiting for evictions,
+        and the harness root check. omnigent/inner/sandbox.py (297): the
+        claim helper, kernel liveness, the orphan test with target claims,
+        the bounded bottom-up removal with the claims last and put back, the
+        budgeted never-raising sweep, the host pass's claim, the in-wrap
+        claim check, claim-keeping cleanup and target run.
+        tests/inner/sandbox/test_sandbox_behavior.py (158): the version
+        check kill on both signal paths with the sweep, and the done-when
+        executor test with its control-request stand-in CLI.
+        The other files are within budget:
+        omnigent/inner/claude_sdk_executor.py 118,
+        omnigent/native/owner_claim.py 73, omnigent/inner/_proc.py 39,
+        omnigent/inner/seatbelt_sandbox.py 8, tests/native/test_owner_claim.py
+        76, tests/inner/test_seatbelt_sandbox.py 46,
+        tests/inner/test_proc_and_platform.py 23,
+        tests/e2e/coral/test_tier_b_executor.py 2.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

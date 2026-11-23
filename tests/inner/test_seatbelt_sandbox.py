@@ -2903,3 +2903,49 @@ def test_run_launcher_spawn_wrap_private_tmpdir_boots_under_seatbelt(
         "Target ran but didn't reach the scratch-write marker; "
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
+
+
+# CORAL(S116): a profile dir names its owner, since a launcher's exec skips atexit; a clean
+# exit's atexit hook still removes it
+def test_a_profile_dir_names_its_owner_and_atexit_still_removes_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+    import tempfile
+
+    from omnigent.inner import seatbelt_sandbox
+    from omnigent.native.owner_claim import read_owner_claim
+
+    monkeypatch.setattr(seatbelt_sandbox, "_PROFILE_TEMPDIR", None)
+    monkeypatch.setattr(seatbelt_sandbox, "_PROFILE_CLEANUP_PATHS", [])
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+    directory = Path(seatbelt_sandbox._write_profile_to_tempfile("(version 1)")).parent
+
+    assert seatbelt_sandbox.PROFILE_TEMPDIR_NAME.fullmatch(directory.name)
+    assert directory.parent == tmp_path
+    assert getattr(read_owner_claim(directory, filename=".launch-owner"), "pid", None) == (
+        os.getpid()
+    )
+    seatbelt_sandbox._cleanup_profile_files()
+    assert not directory.exists()
+
+
+# CORAL(S116): the profile dir's claim refuses a link planted in the fresh dir
+def test_a_profile_dir_claim_refuses_a_planted_link(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+    import tempfile
+
+    from omnigent.inner import seatbelt_sandbox
+
+    outside, planted = tmp_path / "outside", tmp_path / "planted"
+    outside.write_text("untouched")
+    planted.mkdir(mode=0o700)
+    (planted / ".launch-owner").symlink_to(outside)
+    monkeypatch.setattr(seatbelt_sandbox, "_PROFILE_TEMPDIR", None)
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda **_kwargs: str(planted))
+
+    assert seatbelt_sandbox._ensure_profile_tempdir() == str(planted)
+    assert outside.read_text() == "untouched" and os.path.islink(planted / ".launch-owner")

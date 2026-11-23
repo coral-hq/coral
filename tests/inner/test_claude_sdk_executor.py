@@ -6,6 +6,8 @@ import base64
 import json
 import logging
 import os
+import shutil  # CORAL(S116)
+import subprocess  # CORAL(S116)
 import sys
 import tempfile
 import threading
@@ -18,7 +20,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from omnigent.inner.claude_sdk_executor import _to_anthropic_content_blocks
+from omnigent.inner.claude_sdk_executor import (
+    _remove_orphaned_temp_dirs,  # CORAL(S116)
+    _to_anthropic_content_blocks,
+)
 from omnigent.inner.executor import (
     ExecutorConfig,
     ExecutorError,
@@ -28,6 +33,14 @@ from omnigent.inner.executor import (
     ToolCallStatus,
     TurnComplete,
 )
+
+
+# CORAL(S116): tests leave the shared temp dir alone; a test of the sweep itself restores it
+@pytest.fixture(autouse=True)
+def _no_shared_temp_dir_sweep(monkeypatch):
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._remove_orphaned_temp_dirs", lambda: None
+    )
 
 
 class _SDKClient:
@@ -7489,6 +7502,7 @@ async def test_each_launch_gets_a_fresh_copy_and_a_closed_executor_launches_none
     """
     from omnigent.inner.claude_sdk_executor import _claude_config_seed
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+    from omnigent.native.owner_claim import read_owner_claim  # CORAL(S116)
 
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     home = tmp_path / "home"
@@ -7507,14 +7521,16 @@ async def test_each_launch_gets_a_fresh_copy_and_a_closed_executor_launches_none
     (home / ".claude.json").write_text(json.dumps(added))
     await _seeded_turn(executor, "first", seen)
     # CORAL(S115): as a temp cleaner would; the next launch makes the dir again
-    seed.unlink()
-    seed.parent.rmdir()
+    shutil.rmtree(seed.parent)  # CORAL(S116): with its owner claim
     await _seeded_turn(executor, "second", seen)
 
     assert [entry[1:] for entry in seen] == [(0o600, 0o700)] * 2
     assert seen[0][0] == _EXPECTED_SEED
     assert seen[1][0] == _claude_config_seed({"HOME": str(home)}) != seen[0][0]
-    assert list(seed.parent.iterdir()) == [seed]
+    # CORAL(S116): the remade dir names this process, so a killed harness's seed is swept
+    assert sorted(path.name for path in seed.parent.iterdir()) == [".launch-owner", seed.name]
+    claim = read_owner_claim(seed.parent, filename=".launch-owner")
+    assert claim is not None and claim.pid == os.getpid()
     await executor.close()
     assert not seed.parent.exists()
     with pytest.raises(RuntimeError, match="the executor is closed"):
@@ -7554,8 +7570,7 @@ async def test_a_seed_dir_someone_else_made_fails_the_launch(
     # CORAL(S115): a temp cleaner removes the dir this executor made, then a dir is planted
     if planted != "first-launch":
         await _seeded_turn(executor, "first", [])
-        seed.unlink()
-        seed.parent.rmdir()
+        shutil.rmtree(seed.parent)  # CORAL(S116): with its owner claim
     elsewhere.mkdir(mode=0o700)
     if planted == "symlink":
         seed.parent.symlink_to(elsewhere)
@@ -7570,6 +7585,392 @@ async def test_a_seed_dir_someone_else_made_fails_the_launch(
         await _seeded_turn(executor, "next", [])
     assert "next" not in executor._clients
     assert not any(elsewhere.iterdir()) and not seed.exists()
+
+
+# CORAL(S116): a killed harness's unwrapped config dir names its owner, so a sweep removes it
+def test_the_unwrapped_config_dir_names_its_owner(monkeypatch, tmp_path) -> None:
+    from omnigent.native.owner_claim import read_owner_claim
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    executor = _isolation_executor(monkeypatch, tmp_path, cli=None, isolate_claude_config=True)
+
+    path = executor._claude_config_dir_for_unwrapped_cli()
+
+    assert path.parent == tmp_path
+    assert getattr(read_owner_claim(path, filename=".launch-owner"), "pid", None) == os.getpid()
+    executor._remove_unwrapped_claude_config_dir()
+    assert not path.exists()
+
+
+# CORAL(S116): each sweep point removes the temp dirs dead processes left, and keeps a live
+# owner's
+@pytest.mark.skipif(os.name == "nt", reason="the sweep needs owner uids")
+@pytest.mark.parametrize("trigger", ["connect", "teardown", "close"])
+async def test_each_sweep_point_removes_only_dead_owners_temp_dirs(
+    monkeypatch, tmp_path, trigger
+) -> None:
+    """
+    After a connect, a client's teardown and ``close()``, every dead owner's scratch, profile,
+    seed, unwrapped config and launch dir is gone; a live owner's scratch stays.
+    """
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._remove_orphaned_temp_dirs", _remove_orphaned_temp_dirs
+    )
+    from omnigent.native.owner_claim import create_owner_claim
+
+    temp_root, harness_root = tmp_path / "tmp", tmp_path / "h"
+    for path in (temp_root, harness_root):
+        path.mkdir(mode=0o700)
+    monkeypatch.setenv("TMPDIR", str(temp_root))
+    monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", str(harness_root))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    # The fake transport's pid names no process of this test.
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._terminate_process_tree", lambda _process: None
+    )
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait()
+    names = ("osenv-deadbeef", "seatbelt-profiles-deadbeef", "claude-seed-0123456789abcdef")
+    dead = [temp_root / f"omnigent-{name}" for name in (*names, "claude-config-deadbeef")]
+    dead.append(harness_root / "cdeadbeef")
+    live = temp_root / "omnigent-osenv-live0000"
+
+    def _plant() -> None:
+        for path, pid in [*((path, finished.pid) for path in dead), (live, os.getpid())]:
+            path.mkdir(mode=0o700)
+            create_owner_claim(path, filename=".launch-owner", pid=pid)
+
+    executor = _isolation_executor(monkeypatch, tmp_path, cli=None, isolate_claude_config=True)
+    if trigger == "connect":
+        _plant()
+    if trigger != "close":
+        events, _, _ = await _turn_with_recording_sdk(executor)
+        assert any(isinstance(event, TurnComplete) for event in events), events
+    if trigger == "teardown":
+        _plant()
+        [session_key] = executor._clients
+        await executor.close_session(session_key)
+    if trigger == "close":
+        _plant()
+        await executor.close()
+
+    assert [path.name for path in dead if path.exists()] == []
+    assert live.is_dir()
+    await executor.close()
+
+
+# CORAL(S116): a force close waits for every process of the CLI's tree, as the CLI can outlive
+# its launcher: what outlives the 5 s bound is killed, and the sweep runs only after
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("child_stdout", ["inherited", "own-pipe"])
+async def test_a_force_close_waits_for_the_whole_process_tree(monkeypatch, child_stdout) -> None:
+    import contextlib
+    import signal
+    import time
+
+    from omnigent.inner import _proc, claude_sdk_executor
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    ignores_term = (
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "print(flush=True); time.sleep(120)"
+    )
+    spawn = f"child = subprocess.Popen([sys.executable, '-c', {ignores_term!r}]"
+    leader = {
+        # The child shares the leader's stdout, so waiting on the leader also waits for it.
+        "inherited": f"{spawn}); print(child.pid, flush=True)",
+        # The child holds none of the leader's pipes; only the tree wait sees it.
+        "own-pipe": f"{spawn}, stdout=subprocess.PIPE); child.stdout.readline(); "
+        "print(child.pid, flush=True); print(flush=True)",
+    }[child_stdout]
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        f"import subprocess, sys; {leader}; child.wait()",
+        stdout=asyncio.subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    child = int(await process.stdout.readline())
+    try:
+        await process.stdout.readline()  # the child now ignores SIGTERM
+        swept: list[bool] = []
+        monkeypatch.setattr(
+            claude_sdk_executor,
+            "_remove_orphaned_temp_dirs",
+            lambda: swept.append(_proc.process_alive(child)),
+            raising=False,
+        )
+        transport = SimpleNamespace(
+            _process=process,
+            _stdout_stream=None,
+            _stdin_stream=None,
+            _stderr_stream=None,
+            _stderr_task=None,
+            _ready=True,
+        )
+        started = time.monotonic()
+
+        await ClaudeSDKExecutor._force_close_client(
+            SimpleNamespace(_query=None, _transport=transport)
+        )
+
+        assert 4.5 <= time.monotonic() - started < 30
+        assert not _proc.process_alive(child), "the CLI outlived its force close"
+        assert swept == [False], "the sweep ran before the tree was gone"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child, signal.SIGKILL)
+
+
+# CORAL(S116): the seed and unwrapped config claims go through the helper that refuses a link
+# planted in the fresh dir
+@pytest.mark.skipif(os.name == "nt", reason="POSIX links")
+@pytest.mark.parametrize("site", ["seed", "unwrapped-config"])
+def test_the_executors_claims_refuse_a_planted_link(monkeypatch, tmp_path, site) -> None:
+    from omnigent.inner import claude_sdk_executor
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+    from omnigent.inner.sandbox import claim_temp_dir
+
+    outside = tmp_path / "outside"
+    outside.write_text("untouched")
+    planted: list[Path] = []
+
+    def _plant_then_claim(path: Path, **kwargs) -> None:
+        (path / ".launch-owner").symlink_to(outside)
+        planted.append(path)
+        claim_temp_dir(path, **kwargs)
+
+    monkeypatch.setattr(claude_sdk_executor, "claim_temp_dir", _plant_then_claim)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    if site == "seed":
+        _seed_prepare_stubs(monkeypatch, tmp_path, wrapped=True)
+        spec = OSEnvSpec(cwd=str(tmp_path), sandbox=OSEnvSandboxSpec())
+        executor = _isolation_executor(
+            monkeypatch, tmp_path, cli="/usr/bin/claude", os_env=spec, skills_filter="all"
+        )
+        executor._write_claude_config_seed()
+    else:
+        executor = _isolation_executor(monkeypatch, tmp_path, cli=None, isolate_claude_config=True)
+        executor._claude_config_dir_for_unwrapped_cli()
+
+    [path] = planted
+    assert outside.read_text() == "untouched" and (path / ".launch-owner").is_symlink()
+    executor._remove_unwrapped_claude_config_dir()
+    executor._remove_claude_config_seed()
+
+
+# CORAL(S116): a force close is bounded when a process outside the tree it signalled holds the
+# CLI's pipe after the kill
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+@pytest.mark.timeout(60)
+async def test_a_force_close_is_bounded_when_an_escaped_process_holds_the_pipe(monkeypatch):
+    import contextlib
+    import signal
+    import time
+
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    # The leader ignores SIGTERM; a double-forked holder of its stdout escapes the snapshot.
+    leader = """
+import os, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+read, write = os.pipe()
+if os.fork() == 0:
+    if os.fork() == 0:
+        os.write(write, str(os.getpid()).encode())
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        time.sleep(30)
+    os._exit(0)
+os.wait()
+os.close(write)
+print(os.read(read, 32).decode(), flush=True)
+time.sleep(120)
+"""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", leader, stdout=asyncio.subprocess.PIPE
+    )
+    assert process.stdout is not None
+    holder = int(await process.stdout.readline())
+    try:
+        transport = SimpleNamespace(
+            _process=process,
+            _stdout_stream=None,
+            _stdin_stream=None,
+            _stderr_stream=None,
+            _stderr_task=None,
+            _ready=True,
+        )
+        started = time.monotonic()
+
+        await ClaudeSDKExecutor._force_close_client(
+            SimpleNamespace(_query=None, _transport=transport)
+        )
+
+        assert time.monotonic() - started < 12, "the force close waited on the escaped holder"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(holder, signal.SIGKILL)
+
+
+# CORAL(S116): the tree wait counts a zombie as gone, so it ends at once, not at its bound
+@pytest.mark.skipif(os.name == "nt", reason="POSIX zombies")
+async def test_the_tree_wait_counts_a_zombie_as_gone() -> None:
+    import time
+
+    import psutil
+
+    from omnigent.inner import _proc
+    from omnigent.inner.claude_sdk_executor import _wait_for_tree
+    from tests._helpers.polling import poll_until_async
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE
+    )
+    try:
+        tree = _proc.snapshot_child_tree(child)
+        assert child.pid in tree
+        assert child.stdin is not None
+        child.stdin.close()
+        await poll_until_async(
+            lambda: psutil.Process(child.pid).status() == psutil.STATUS_ZOMBIE, timeout_s=10
+        )
+        started = time.monotonic()
+        await _wait_for_tree(SimpleNamespace(wait=AsyncMock()), tree, timeout=5)
+        assert time.monotonic() - started < 2
+    finally:
+        child.wait()
+
+
+# CORAL(S116): a connect or teardown waits briefly for its sweep, skips one while another
+# runs, and close() waits for its turn
+@pytest.mark.timeout(60)
+async def test_a_sweep_waits_briefly_and_one_runs_at_a_time(monkeypatch, caplog) -> None:
+    import time
+
+    from omnigent.inner import claude_sdk_executor
+
+    entered: list[int] = []
+    release = threading.Event()
+
+    def _stuck_sweep() -> None:
+        entered.append(threading.get_ident())
+        release.wait(20)
+
+    monkeypatch.setattr(claude_sdk_executor, "_remove_orphaned_temp_dirs", _stuck_sweep)
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor"):
+        await claude_sdk_executor._sweep_orphaned_temp_dirs()
+    assert time.monotonic() - started < 5 and len(entered) == 1
+    assert caplog.messages == ["The temp dir sweep is still running"]
+
+    started = time.monotonic()
+    await claude_sdk_executor._sweep_orphaned_temp_dirs()
+    assert time.monotonic() - started < 1 and len(entered) == 1, "a second sweep ran at once"
+
+    closing = asyncio.create_task(claude_sdk_executor._sweep_orphaned_temp_dirs(20, wait_turn=20))
+    done, _ = await asyncio.wait({closing}, timeout=0.2)
+    assert not done and len(entered) == 1
+    release.set()
+    await closing
+    assert len(entered) == 2
+    background = asyncio.all_tasks() - {asyncio.current_task()}
+    if background:
+        await asyncio.wait(background, timeout=10)
+
+
+# CORAL(S116): the sweep scans the harness socket root only as this user's private real dir
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+@pytest.mark.parametrize("root", ["private", "symlink", "shared"])
+def test_the_harness_root_is_swept_only_as_a_private_real_dir(monkeypatch, tmp_path, root):
+    from omnigent.native.owner_claim import create_owner_claim
+
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait()
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    orphan = real / "cdeadbeef"
+    orphan.mkdir(mode=0o700)
+    create_owner_claim(orphan, filename=".launch-owner", pid=finished.pid)
+    harness_root = real
+    if root == "symlink":
+        harness_root = tmp_path / "link"
+        harness_root.symlink_to(real)
+    elif root == "shared":
+        real.chmod(0o755)
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+    monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", str(harness_root))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+
+    _remove_orphaned_temp_dirs()
+
+    assert orphan.exists() is (root != "private")
+
+
+# CORAL(S116): the sweep runs in a worker thread; a cancelled caller still waits for it, and a
+# bounded wait returns while it goes on
+@pytest.mark.timeout(60)
+async def test_a_sweep_runs_off_the_event_loop_and_outlives_its_caller(monkeypatch, caplog):
+    from omnigent.inner import claude_sdk_executor
+
+    started, release = threading.Event(), threading.Event()
+    threads: list[int] = []
+
+    def _blocked_sweep() -> None:
+        threads.append(threading.get_ident())
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr(claude_sdk_executor, "_remove_orphaned_temp_dirs", _blocked_sweep)
+    caller = asyncio.create_task(claude_sdk_executor._sweep_orphaned_temp_dirs())
+    assert await asyncio.to_thread(started.wait, 10)
+    assert threads != [threading.get_ident()], "the sweep ran on the event loop's thread"
+    caller.cancel()
+    done, _ = await asyncio.wait({caller}, timeout=0.2)
+    assert not done, "a cancelled caller left before its sweep finished"
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    release.clear()
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor"):
+        await claude_sdk_executor._sweep_orphaned_temp_dirs(0.05)
+    assert [record.getMessage() for record in caplog.records] == [
+        "The temp dir sweep is still running"
+    ]
+    release.set()
+    # The sweep that outlived its wait finishes before the loop closes.
+    background = asyncio.all_tasks() - {asyncio.current_task()}
+    if background:
+        await asyncio.wait(background, timeout=10)
+
+
+# CORAL(S116): close() lets a client evicted on cancel finish closing before its last sweep
+async def test_close_waits_for_a_cancel_eviction_before_its_last_sweep(monkeypatch, tmp_path):
+    from omnigent.inner import claude_sdk_executor
+
+    executor = _isolation_executor(monkeypatch, tmp_path, cli=None)
+    order: list[str] = []
+    release = asyncio.Event()
+
+    async def _slow_teardown(_client) -> None:
+        await release.wait()
+        order.append("evicted")
+
+    monkeypatch.setattr(executor, "_force_close_client", _slow_teardown)
+    monkeypatch.setattr(
+        claude_sdk_executor, "_remove_orphaned_temp_dirs", lambda: order.append("swept")
+    )
+    executor._clients["evicted"] = SimpleNamespace(client=object())
+    executor._evict_client_on_cancel("evicted")
+    closing = asyncio.create_task(executor.close())
+    done, _ = await asyncio.wait({closing}, timeout=0.2)
+    assert not done, "close() returned while a cancel eviction was still closing"
+    release.set()
+    await closing
+
+    assert order == ["evicted", "swept"]
 
 
 @pytest.mark.parametrize("skills", ["all", "none"], ids=["seeded", "not-seeded"])
