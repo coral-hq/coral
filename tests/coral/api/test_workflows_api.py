@@ -80,7 +80,7 @@ SIMULATION_FIELDS = {
     "rejection",
     "unsupported_effect",
     "stall_code",
-    "limit",
+    "stopped_by",
     "unconsumed",
     "view",
     "trace_digest",
@@ -456,7 +456,7 @@ def test_simulate_with_no_script_stops_at_the_first_question(simulator: TestClie
     assert [f"{item['node_id']}:{item['result']}" for item in simulation["steps"]] == [
         "implement:done"
     ]
-    assert (simulation["rejection"], simulation["limit"], simulation["unconsumed"]) == (
+    assert (simulation["rejection"], simulation["stopped_by"], simulation["unconsumed"]) == (
         None,
         None,
         [],
@@ -530,7 +530,7 @@ def test_simulate_names_the_bound_that_stopped_a_graph_before_its_run_started(
 
     assert body["runnable"] is True
     simulation = body["simulation"]
-    assert (simulation["outcome"], simulation["limit"], simulation["entries"]) == (
+    assert (simulation["outcome"], simulation["stopped_by"], simulation["entries"]) == (
         "step_limit",
         "step_seats",
         0,
@@ -646,13 +646,13 @@ def _ts_members(ts: str, interface: str, field: str) -> list[str]:
 
 
 def test_the_ts_union_reader_ignores_how_a_union_is_wrapped() -> None:
-    one_line = 'export interface X {\n  a: string;\n  limit: "t" | "w" | null;\n}\n'
+    one_line = 'export interface X {\n  a: string;\n  stopped_by: "t" | "w" | null;\n}\n'
     wrapped = (
-        'export interface X {\n  a: string;\n  limit:\n    | "t"\n    | "w"\n    | null;\n}\n'
+        'export interface X {\n  a: string;\n  stopped_by:\n    | "t"\n    | "w"\n    | null;\n}\n'
     )
 
     for ts in (one_line, wrapped):
-        assert _ts_members(ts, "X", "limit") == ['"t"', '"w"', "null"]
+        assert _ts_members(ts, "X", "stopped_by") == ['"t"', '"w"', "null"]
 
 
 def test_the_simulation_schema_sends_every_field_and_names_the_bound() -> None:
@@ -661,10 +661,10 @@ def test_the_simulation_schema_sends_every_field_and_names_the_bound() -> None:
 
     assert set(schema["properties"]) == SIMULATION_FIELDS
     assert set(schema["required"]) == SIMULATION_FIELDS
-    limits = [member for member in schema["properties"]["limit"]["anyOf"] if "enum" in member]
-    assert [tuple(member["enum"]) for member in limits] == [get_args(SimLimit)]
+    bounds = [member for member in schema["properties"]["stopped_by"]["anyOf"] if "enum" in member]
+    assert [tuple(member["enum"]) for member in bounds] == [get_args(SimLimit)]
     bound = [*(f'"{name}"' for name in get_args(SimLimit)), "null"]
-    assert _ts_members(TS_PATH.read_text(encoding="utf-8"), "SimResult", "limit") == bound
+    assert _ts_members(TS_PATH.read_text(encoding="utf-8"), "SimResult", "stopped_by") == bound
     responses = spec["paths"]["/v1/coral/workflows:simulate"]["post"]["responses"]
     assert set(responses) == {"200", "401", "403", "422", "503"}
 

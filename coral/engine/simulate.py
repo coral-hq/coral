@@ -80,8 +80,7 @@ MAX_NODE_ID_CHARS: Final = MAX_SLUG_LENGTH
 DEFAULT_MAX_TRANSITIONS: Final = 5000
 # Work approximates what transitions cost: each one copies and projects the run state and
 # scans the graph, and copies the receipts again for every receipt it adds (a choice
-# receipts each labelled arrow it skips). It is checked between transitions, so it cannot
-# stop one costly transition; the caps below, checked before the run starts, bound those.
+# receipts each labelled arrow it skips).
 DEFAULT_MAX_WORK: Final = 1_000_000
 # Opening a step compares each of its seats with every slot so far, in one transition.
 MAX_STEP_SEATS: Final = 16
@@ -286,7 +285,7 @@ class SimResult(_FrozenOut):
     # The reducer's code when it refused an input the simulation made, not a script value.
     stall_code: str | None = None
     # The bound that ended a ``step_limit`` simulation.
-    limit: SimLimit | None = None
+    stopped_by: SimLimit | None = None
     unconsumed: tuple[SimUnconsumed, ...] = ()
     view: RunView
     # SHA-256 of the canonical log; comparable only within one engine and log version.
@@ -331,7 +330,9 @@ def simulate(
     ``MAX_GRAPH_SEATS`` in all, or more than ``MAX_SIMULATED_NODES`` nodes or
     ``MAX_SIMULATED_ARROWS`` arrows, ends in ``step_limit`` before its run starts, with no
     entries and no sessions. So does a run that spends ``max_transitions`` inputs or
-    ``max_work``. ``SimResult.limit`` names the bound.
+    ``max_work``. ``SimResult.stopped_by`` names the bound. Work is checked between
+    transitions, so it cannot stop one costly transition; the caps checked before the run
+    starts bound those.
 
     :raises ValueError: when ``graph.analysis.unresolved`` is not empty; callers validate first.
     """
@@ -341,7 +342,7 @@ def simulate(
     driver = _Driver(graph, script, config, max_transitions=max_transitions, max_work=max_work)
     refused = _refused_before_start(graph)
     if refused is not None:
-        driver.stop = _Stop("step_limit", limit=refused)
+        driver.stop = _Stop("step_limit", stopped_by=refused)
     else:
         driver.run()
     return Simulation(
@@ -356,7 +357,7 @@ class _Stop:
     rejection: SimRejection | None = None
     unsupported_effect: str | None = None
     stall_code: str | None = None
-    limit: SimLimit | None = None
+    stopped_by: SimLimit | None = None
 
 
 class _Driver:
@@ -469,7 +470,7 @@ class _Driver:
             return True
         # A handoff is two inputs; one that cannot fit under the cap consumes nothing.
         if len(self.log) + 2 > self.max_transitions:
-            self.stop = _Stop("step_limit", limit="transitions")
+            self.stop = _Stop("step_limit", stopped_by="transitions")
             return True
         if node.evidence is not None:
             done_when.popleft()
@@ -616,7 +617,7 @@ class _Driver:
             return _Stop(ended)
         spent = self._spent()
         if status == "running" and spent is not None:
-            return _Stop("step_limit", limit=spent)
+            return _Stop("step_limit", stopped_by=spent)
         return _Stop("stalled")
 
     def result(self) -> SimResult:
@@ -648,7 +649,7 @@ class _Driver:
             rejection=stop.rejection,
             unsupported_effect=stop.unsupported_effect,
             stall_code=stop.stall_code,
-            limit=stop.limit,
+            stopped_by=stop.stopped_by,
             unconsumed=tuple(
                 SimUnconsumed(node_id=node_id, kind=kind, values=tuple(self.queues[node_id, kind]))
                 for node_id, kind in self.order

@@ -3555,24 +3555,6 @@
             "title": "Gates Reached",
             "type": "array"
           },
-          "limit": {
-            "anyOf": [
-              {
-                "enum": [
-                  "transitions",
-                  "work",
-                  "step_seats",
-                  "graph_seats",
-                  "graph_size"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Limit"
-          },
           "limits_hit": {
             "items": {
               "type": "string"
@@ -3647,6 +3629,24 @@
             "title": "Steps",
             "type": "array"
           },
+          "stopped_by": {
+            "anyOf": [
+              {
+                "enum": [
+                  "transitions",
+                  "work",
+                  "step_seats",
+                  "graph_seats",
+                  "graph_size"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stopped By"
+          },
           "trace_digest": {
             "title": "Trace Digest",
             "type": "string"
@@ -3686,7 +3686,7 @@
           "rejection",
           "unsupported_effect",
           "stall_code",
-          "limit",
+          "stopped_by",
           "unconsumed",
           "view",
           "trace_digest",

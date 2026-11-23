@@ -232,7 +232,7 @@
       "rejection": null,
       "unsupported_effect": null,
       "stall_code": null,
-      "limit": null,
+      "stopped_by": null,
       "unconsumed": [],
       "view": {
         "status": "running",
@@ -288,7 +288,7 @@
       "rejection": null,
       "unsupported_effect": null,
       "stall_code": null,
-      "limit": null,
+      "stopped_by": null,
       "unconsumed": [],
       "view": {
         "status": "running",
@@ -346,7 +346,7 @@
       "rejection": null,
       "unsupported_effect": null,
       "stall_code": null,
-      "limit": null,
+      "stopped_by": null,
       "unconsumed": [],
       "view": {
         "status": "completed",
@@ -429,7 +429,7 @@
       "rejection": null,
       "unsupported_effect": null,
       "stall_code": null,
-      "limit": null,
+      "stopped_by": null,
       "unconsumed": [],
       "view": {
         "status": "completed",

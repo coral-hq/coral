@@ -769,7 +769,6 @@ export interface SimRejection {
 export interface SimResult {
   entries: number;
   gates_reached: string[];
-  limit: "transitions" | "work" | "step_seats" | "graph_seats" | "graph_size" | null;
   limits_hit: string[];
   loops: SimLoop[];
   needs_input: SimNeedsInput | null;
@@ -788,6 +787,7 @@ export interface SimResult {
   stall_code: string | null;
   step_activations: number;
   steps: SimStep[];
+  stopped_by: "transitions" | "work" | "step_seats" | "graph_seats" | "graph_size" | null;
   trace_digest: string;
   unconsumed: SimUnconsumed[];
   unsupported_effect: string | null;

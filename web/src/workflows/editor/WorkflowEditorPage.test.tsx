@@ -337,7 +337,7 @@ describe("WorkflowEditorPage", () => {
   });
 
   it("shows the stale notice and no result until the edited text's answer lands", async () => {
-    // WHY: the previous text's result must never show as the edited text's (R29).
+    // WHY: the previous text's result must never show as the edited text's.
     renderEditor();
     fireEvent.click(await screen.findByRole("button", { name: "Simulate" }));
     await screen.findByText("The run completes.");

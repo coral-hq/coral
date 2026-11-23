@@ -308,7 +308,7 @@ describe("SimulatePanel", () => {
     ],
     [
       "a stop with no bound named",
-      ended({ outcome: "step_limit", limit: null }),
+      ended({ outcome: "step_limit", stopped_by: null }),
       ["The simulation stopped after too many steps."],
     ],
     [
@@ -324,27 +324,27 @@ describe("SimulatePanel", () => {
     ],
     [
       "the transition cap",
-      ended({ outcome: "step_limit", limit: "transitions" }),
+      ended({ outcome: "step_limit", stopped_by: "transitions" }),
       ["The simulation stopped after too many steps."],
     ],
     [
       "the work budget",
-      ended({ outcome: "step_limit", limit: "work" }),
+      ended({ outcome: "step_limit", stopped_by: "work" }),
       ["The simulation stopped: the run grew too large to simulate."],
     ],
     [
       "the step seat cap",
-      ended({ outcome: "step_limit", limit: "step_seats", entries: 0, steps: [] }),
+      ended({ outcome: "step_limit", stopped_by: "step_seats", entries: 0, steps: [] }),
       ["The workflow cannot be simulated: a step has too many agents."],
     ],
     [
       "the graph seat cap",
-      ended({ outcome: "step_limit", limit: "graph_seats", entries: 0, steps: [] }),
+      ended({ outcome: "step_limit", stopped_by: "graph_seats", entries: 0, steps: [] }),
       ["The workflow cannot be simulated: its steps have too many agents in all."],
     ],
     [
       "the graph size cap",
-      ended({ outcome: "step_limit", limit: "graph_size", entries: 0, steps: [] }),
+      ended({ outcome: "step_limit", stopped_by: "graph_size", entries: 0, steps: [] }),
       ["The workflow cannot be simulated: it has too many nodes or arrows."],
     ],
     [
@@ -363,7 +363,7 @@ describe("SimulatePanel", () => {
 
   it("leaves out the path and estimate of a workflow refused before its run starts", async () => {
     api.simulateWorkflow.mockResolvedValue(
-      simulated(ended({ outcome: "step_limit", limit: "graph_size", entries: 0, steps: [] })),
+      simulated(ended({ outcome: "step_limit", stopped_by: "graph_size", entries: 0, steps: [] })),
     );
     renderPanel();
     await screen.findByText("The workflow cannot be simulated: it has too many nodes or arrows.");

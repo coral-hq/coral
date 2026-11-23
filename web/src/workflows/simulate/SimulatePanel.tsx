@@ -18,9 +18,9 @@ import { isServerBusy, type Simulation } from "./useSimulation";
 /** The control a person last used, whose request disables it until the answer lands. */
 type Action = "answer" | "undo" | "reset";
 
-type Limit = NonNullable<SimResult["limit"]>;
+type StoppedBy = NonNullable<SimResult["stopped_by"]>;
 
-const LIMIT_TEXT: Readonly<Record<Limit, string>> = {
+const STOPPED_BY_TEXT: Readonly<Record<StoppedBy, string>> = {
   transitions: "The simulation stopped after too many steps.",
   work: "The simulation stopped: the run grew too large to simulate.",
   step_seats: "The workflow cannot be simulated: a step has too many agents.",
@@ -268,7 +268,9 @@ function Outcome({ result, compiled, simulation, onAnswer, name }: ResultProps &
         />
       );
     case "step_limit":
-      return <p className="text-foreground">{LIMIT_TEXT[result.limit ?? "transitions"]}</p>;
+      return (
+        <p className="text-foreground">{STOPPED_BY_TEXT[result.stopped_by ?? "transitions"]}</p>
+      );
     case "unsupported":
       return (
         <p className="text-foreground">

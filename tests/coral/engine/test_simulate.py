@@ -156,7 +156,7 @@ def test_approved_review_completes_with_three_sessions() -> None:
     assert result.sessions == SimSessions(anchor=1, orchestrator=0, steps=2, total=3)
     assert result.unconsumed == ()
     assert result.needs_input is None and result.rejection is None
-    assert result.limit is None
+    assert result.stopped_by is None
     assert result.view.status == "completed"
     assert len(result.trace_digest) == 64
 
@@ -661,7 +661,7 @@ def test_values_no_node_asks_for_are_reported_unconsumed_in_script_order() -> No
 def test_the_transition_cap_ends_in_step_limit() -> None:
     simulation = _run(_graph(fixture_text("two_steps")), max_transitions=5)
     assert simulation.result.outcome == "step_limit"
-    assert simulation.result.limit == "transitions"
+    assert simulation.result.stopped_by == "transitions"
     assert simulation.result.entries == 5
     assert simulation.state.status == "running"
 
@@ -672,7 +672,7 @@ def test_the_transition_cap_holds_between_a_handoffs_two_inputs() -> None:
     for cap in range(1, full):
         simulation = _run(graph, max_transitions=cap)
         result = simulation.result
-        assert (result.outcome, result.limit) == ("step_limit", "transitions")
+        assert (result.outcome, result.stopped_by) == ("step_limit", "transitions")
         # A handoff that would not fit is not started, so it is never cut in half.
         assert cap - 1 <= result.entries <= cap
         assert all(slot.status != "evaluating" for slot in simulation.state.slots)
@@ -955,7 +955,7 @@ NO_SESSIONS = SimSessions(anchor=0, orchestrator=0, steps=0, total=0)
 
 
 @pytest.mark.parametrize(
-    ("seats", "steps", "limit"),
+    ("seats", "steps", "stopped_by"),
     [
         (5000, 1, "step_seats"),
         (MAX_STEP_SEATS + 1, 1, "step_seats"),
@@ -964,11 +964,11 @@ NO_SESSIONS = SimSessions(anchor=0, orchestrator=0, steps=0, total=0)
     ids=["huge_roster", "one_seat_over_the_step_cap", "over_the_graph_cap"],
 )
 def test_too_many_roster_seats_end_in_step_limit_before_the_run_starts(
-    seats: int, steps: int, limit: str
+    seats: int, steps: int, stopped_by: str
 ) -> None:
     simulation = _run(_graph(_roster_text(seats, steps)))
     assert simulation.result.outcome == "step_limit"
-    assert simulation.result.limit == limit
+    assert simulation.result.stopped_by == stopped_by
     assert simulation.result.entries == 0
     assert simulation.result.sessions == NO_SESSIONS
 
@@ -1070,7 +1070,10 @@ def test_a_graph_over_the_node_cap_ends_in_step_limit_before_the_run_starts(
     graph = _graph(text)
     assert len(graph.nodes) > MAX_SIMULATED_NODES
     simulation = _run(graph, *answers[:MAX_SCRIPT_INPUTS])
-    assert (simulation.result.outcome, simulation.result.limit) == ("step_limit", "graph_size")
+    assert (simulation.result.outcome, simulation.result.stopped_by) == (
+        "step_limit",
+        "graph_size",
+    )
     assert simulation.result.entries == 0
     assert simulation.result.sessions == NO_SESSIONS
 
@@ -1087,7 +1090,7 @@ def test_a_join_graph_at_the_node_cap_simulates(fork: bool, tail: int, fill_arro
     if fill_arrows:
         assert len(graph.arrows) == MAX_SIMULATED_ARROWS
     simulation = _run(graph, *answers)
-    assert simulation.result.limit is None
+    assert simulation.result.stopped_by is None
     assert simulation.result.outcome in {"paused", "completed", "needs_input"}
     assert simulation.result.entries > 0
 
@@ -1107,7 +1110,11 @@ def test_a_graph_over_the_arrow_cap_ends_in_step_limit_before_the_run_starts() -
     over = _graph(_labelled_choice_text(MAX_SIMULATED_ARROWS - 1))
     assert len(over.nodes) < MAX_SIMULATED_NODES < len(over.arrows)
     refused = _run(over, ("review", "label", ["l0"])).result
-    assert (refused.outcome, refused.limit, refused.entries) == ("step_limit", "graph_size", 0)
+    assert (refused.outcome, refused.stopped_by, refused.entries) == (
+        "step_limit",
+        "graph_size",
+        0,
+    )
     at_cap = _graph(_labelled_choice_text(MAX_SIMULATED_ARROWS - 2))
     assert len(at_cap.arrows) == MAX_SIMULATED_ARROWS
     assert _run(at_cap, ("review", "label", ["l0"])).result.outcome == "completed"
@@ -1136,7 +1143,7 @@ def test_the_work_budget_ends_a_wide_loop_before_the_transition_cap() -> None:
         _graph(_wide_loop_text(MAX_STEP_SEATS, 32)), ("review", "label", [CHANGES] * 100)
     )
     assert simulation.result.outcome == "step_limit"
-    assert simulation.result.limit == "work"
+    assert simulation.result.stopped_by == "work"
     assert simulation.result.entries < DEFAULT_MAX_TRANSITIONS
     assert simulation.state.status == "running"
 
@@ -1159,14 +1166,14 @@ def test_the_work_budget_counts_the_receipts_a_wide_choice_adds() -> None:
     )
     assert len(graph.arrows) == MAX_SIMULATED_ARROWS
     simulation = _run(graph, ("review", "label", ["revise"] * 60))
-    assert (simulation.result.outcome, simulation.result.limit) == ("step_limit", "work")
+    assert (simulation.result.outcome, simulation.result.stopped_by) == ("step_limit", "work")
     # Charged one state per transition instead, the budget would allow about 40 choices.
     assert len([item for item in simulation.result.steps if item.kind == "decision"]) < 15
 
 
 def test_a_small_work_budget_ends_in_step_limit() -> None:
     simulation = _run(_graph(fixture_text("two_steps")), max_work=10)
-    assert (simulation.result.outcome, simulation.result.limit) == ("step_limit", "work")
+    assert (simulation.result.outcome, simulation.result.stopped_by) == ("step_limit", "work")
     assert 0 < simulation.result.entries < 5
 
 
@@ -1184,7 +1191,7 @@ def test_the_work_budget_charges_the_graph_scans_of_every_transition() -> None:
     )
     assert _run(_graph(small), max_work=300).result.outcome == "completed"
     large = _run(_graph(islands), max_work=300).result
-    assert (large.outcome, large.limit) == ("step_limit", "work")
+    assert (large.outcome, large.stopped_by) == ("step_limit", "work")
     assert _run(_graph(islands)).result.outcome == "completed"
 
 

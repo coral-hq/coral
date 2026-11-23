@@ -127,7 +127,7 @@ real run either.
 | `needs_input` | A value the next action needs is missing | `needs_input`: `node_id`, `activation_id`, `kind`, `allowed_values` |
 | `rejected` | The reducer refused a script value | `rejection`: `node_id`, `kind`, `value`, and the reducer's own `code` and `allowed_values`. A step label the step does not take is `handoff.invalid`; a decision label or gate value it does not take is `tool.illegal` |
 | `stalled` | Nothing can advance, or the reducer refused an input Simulate made itself (an acknowledgement, an unlabelled handoff, an evaluation, the start) | `stall_code`: the reducer's code when it refused one, else `null` |
-| `step_limit` | A bound ended the simulation | `limit` names it (below) |
+| `step_limit` | A bound ended the simulation | `stopped_by` names it (below) |
 | `unsupported` | An accepted entry emitted an unsupported or unknown effect | `unsupported_effect` |
 
 A test runs every workflow fixture and every built-in template, answering each question,
@@ -144,8 +144,8 @@ and asserts none ends `unsupported`, `stalled` or `rejected`.
 - `gates_reached` (one per visit) and `limits_hit` (back arrows whose limit redirected),
   in order;
 - `step_activations` and `sessions` (below);
-- `needs_input`, `rejection`, `unsupported_effect`, `stall_code` and `limit`, each `null`
-  unless the outcome sets it;
+- `needs_input`, `rejection`, `unsupported_effect`, `stall_code` and `stopped_by`, each
+  `null` unless the outcome sets it;
 - `unconsumed`, the final `view` (the `RunView` a real run's detail shows), `trace_digest`,
   and `entries`, the log length with rejected entries included.
 
@@ -157,11 +157,11 @@ the engine's defaults.
 
 | Bound | Value | Checked | Result |
 |---|---|---|---|
-| Seats on one step | 16 (`MAX_STEP_SEATS`) | before the run starts | `step_limit`, `limit: "step_seats"` |
-| Seats on all steps | 64 (`MAX_GRAPH_SEATS`) | before the run starts | `step_limit`, `limit: "graph_seats"` |
-| Nodes, arrows | 96, 192 (`MAX_SIMULATED_NODES`, `MAX_SIMULATED_ARROWS`) | before the run starts | `step_limit`, `limit: "graph_size"` |
-| Transitions | 5000 log entries (`DEFAULT_MAX_TRANSITIONS`) | before each input; a handoff (two inputs) that would not fit starts nothing and consumes nothing | `step_limit`, `limit: "transitions"` |
-| Work | 1 000 000 units (`DEFAULT_MAX_WORK`) | between driver actions | `step_limit`, `limit: "work"` |
+| Seats on one step | 16 (`MAX_STEP_SEATS`) | before the run starts | `step_limit`, `stopped_by: "step_seats"` |
+| Seats on all steps | 64 (`MAX_GRAPH_SEATS`) | before the run starts | `step_limit`, `stopped_by: "graph_seats"` |
+| Nodes, arrows | 96, 192 (`MAX_SIMULATED_NODES`, `MAX_SIMULATED_ARROWS`) | before the run starts | `step_limit`, `stopped_by: "graph_size"` |
+| Transitions | 5000 log entries (`DEFAULT_MAX_TRANSITIONS`) | before each input; a handoff (two inputs) that would not fit starts nothing and consumes nothing | `step_limit`, `stopped_by: "transitions"` |
+| Work | 1 000 000 units (`DEFAULT_MAX_WORK`) | between driver actions | `step_limit`, `stopped_by: "work"` |
 | Activations | 100 (`DEFAULT_RUN_ACTIVATIONS`) | by the reducer | `paused`, the activation cap |
 
 - The three caps checked before the run starts bound costs inside one transition, which a
@@ -221,6 +221,18 @@ says 4; Simulate says 3 for the approved path and 7 for three `changes_requested
   are unsupported. Scripts have no list lengths.
 - Timers, retries, runner loss, failed effects, `blocked` handoffs, turn ends, messages,
   usage limits, pause, resume and cancel: Simulate never feeds those inputs.
+- The orchestrator's lifecycle: run-level Retry, orchestrator turns and their backoff, and
+  orchestrator generations. Simulate feeds no `RetryRun`, `OrchestratorTurn` or
+  `TimerDue`, so `orchestrator_generation` stays 1. A run-level Retry clears only a
+  `failure_path` cause with an empty subject, and only the bridge creates one (a
+  `PauseRun` or a failed effect). The `failure_path` pauses a simulation reaches each name
+  a step's node or slot, so none is a run-level Retry's to clear.
+- Start's own refusals. Simulate validates as `:validate` does and does not apply the
+  rules `coral/bridge/start.py` adds: `profile.unsupported` (a roster entry that is not a
+  stance), `profile.missing` (a profile the caller has no revision of) and
+  `graph.concurrent_writers` (two implementers at once). A workflow Start would refuse can
+  therefore simulate as `completed`. Preflight (`check_startable`) still refuses the first
+  and the last; only Start itself refuses `profile.missing`.
 - Done-when commands are not run; `pass` and `fail` stand for the check's verdict.
 - Arrows taken are not reported; `steps` gives the order.
 
@@ -458,4 +470,3 @@ hook formats it).
 | Run estimates from Simulate: preflight's session count, budget from past medians | CRL-190 |
 | Bounding validation and the reducer's join liveness walk on large graphs | CRL-191 |
 | A request-body size cap for every Coral route | CRL-150 |
-| A runs API preflight test reaches the real `claude auth status` through provider detection | CRL-192 |
