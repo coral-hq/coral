@@ -37,6 +37,8 @@ FEED_BATCH = 32
 MAX_RUN_ACTIVATIONS = 1_000
 MAX_REJECTED_CALL_LIMIT = 10
 MAX_LIVE_SLOTS = 32
+# The activation cap of a run whose start names none; a simulation stops at it too.
+DEFAULT_RUN_ACTIVATIONS = 100
 # Live slots and open decisions together: each can add a row to one commit (a create,
 # a nudge, a request or a re-request), beside the orchestrator create, the anchor and
 # timer rows, within the commit's cap.
@@ -128,6 +130,7 @@ def engine_config_for(spec: RunStartSpec) -> EngineConfig:
 
 __all__ = [
     "BOUND_SESSIONS_REFRESH_S",
+    "DEFAULT_RUN_ACTIVATIONS",
     "DRIFT_HOLD",
     "ENGINE_LOG_PAGE",
     "ENGINE_VERSION",

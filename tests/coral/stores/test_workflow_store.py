@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import Session
 
 from coral.db.models_workflows import MAX_STORED_BYTES, CoralBase, WorkflowRow
@@ -368,3 +369,163 @@ def test_a_first_save_that_loses_the_insert_race_applies_the_owner_rule(
         assert _save(store, fixture_text("minimal"), owner=second_owner) == winner
     assert lookups == ["demo", "demo"]
     assert _get(store, winner.id) == winner
+
+
+# ── Insert-only create ──────────────────────────────────────────────────────
+
+
+def _create(
+    store: SqlWorkflowDefinitionStore,
+    yaml_text: str,
+    *,
+    owner: str | None = ALICE,
+    workspace_id: int = 1,
+) -> WorkflowDefinition:
+    graph, _ = compile_text(yaml_text)
+    return store.create(
+        workspace_id=workspace_id,
+        workflow_key=graph.workflow_id,
+        name=graph.name,
+        yaml_text=yaml_text,
+        compiled=graph,
+        runnable=True,
+        owner=owner,
+    )
+
+
+def _row_count(engine: Engine) -> int:
+    with engine.connect() as connection:
+        return connection.execute(text("SELECT COUNT(*) FROM coral_workflows")).scalar_one()
+
+
+def test_create_inserts_a_new_definition_owned_by_its_creator(
+    store: SqlWorkflowDefinitionStore, engine: Engine
+) -> None:
+    created = _create(store, fixture_text("loop"))
+
+    assert (created.workflow_key, created.user_id, created.runnable) == (
+        "review-loop",
+        ALICE,
+        True,
+    )
+    assert (created.created_at, created.updated_at) == (1_000, 1_000)
+    assert _get(store, created.id) == created
+    assert created.yaml_text == fixture_text("loop")
+    assert _stored_owner(engine, created.id) == ALICE
+
+
+@pytest.mark.parametrize(
+    "holder",
+    [
+        pytest.param(ALICE, id="own"),
+        pytest.param(BOB, id="other"),
+        pytest.param(None, id="legacy"),
+    ],
+)
+def test_create_refuses_a_key_any_definition_holds_and_leaves_it_unchanged(
+    store: SqlWorkflowDefinitionStore, engine: Engine, clock: _Clock, holder: str | None
+) -> None:
+    held = _save(store, fixture_text("minimal"), owner=holder)
+    clock.now += 60
+    edited = fixture_text("minimal").replace("Do the thing", "Do another thing")
+
+    with pytest.raises(WorkflowKeyTaken):
+        _create(store, edited)
+
+    assert _get(store, held.id, owner=holder) == held
+    assert _row_count(engine) == 1
+
+
+def test_a_create_that_loses_the_insert_race_is_refused_and_never_updates_the_winner(
+    store: SqlWorkflowDefinitionStore, monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    winner = _create(store, fixture_text("minimal"))
+    clock.now += 60
+    # The loser looked the key up before the winner committed, so only its insert collides.
+    lookups: list[str] = []
+
+    def stale(session: Session, *, workspace_id: int, workflow_key: str) -> WorkflowRow | None:
+        lookups.append(workflow_key)
+        return None
+
+    monkeypatch.setattr(store, "_find_by_key", stale)
+    edited = fixture_text("minimal").replace("Do the thing", "Do another thing")
+
+    with pytest.raises(WorkflowKeyTaken):
+        _create(store, edited)
+
+    # One attempt, no retry that would find the winner's row and update it.
+    assert lookups == ["demo"]
+    monkeypatch.undo()
+    assert _get(store, winner.id) == winner
+
+
+def test_concurrent_creates_of_one_key_leave_one_row_and_refuse_the_other(
+    store: SqlWorkflowDefinitionStore, engine: Engine
+) -> None:
+    texts = [fixture_text("minimal").replace("Do the thing", f"Do {n}") for n in range(2)]
+
+    outcomes = run_racing(2, lambda index: _create(store, texts[index]))
+
+    [created] = [outcome.value for outcome in outcomes if outcome.error is None]
+    refused = [type(outcome.error) for outcome in outcomes if outcome.error is not None]
+    assert refused == [WorkflowKeyTaken]
+    assert isinstance(created, WorkflowDefinition)
+    assert _get(store, created.id) == created
+    assert _row_count(engine) == 1
+
+
+def test_create_refuses_an_oversized_definition_before_writing(
+    store: SqlWorkflowDefinitionStore, engine: Engine
+) -> None:
+    with pytest.raises(WorkflowTooLargeError, match="yaml_text"):
+        _create(store, _noisy_workflow(os.urandom(20_000).hex()))
+
+    assert _row_count(engine) == 0
+
+
+def test_workflow_keys_lists_every_owners_keys_with_the_prefix_in_the_workspace(
+    store: SqlWorkflowDefinitionStore,
+) -> None:
+    for key, owner, workspace_id in (
+        ("demo", ALICE, 1),
+        ("demo-2", BOB, 1),
+        ("demo-3", None, 1),
+        ("demo-4", ALICE, 2),
+        ("other", ALICE, 1),
+    ):
+        yaml_text = fixture_text("minimal").replace("id: demo", f"id: {key}")
+        _save(store, yaml_text, owner=owner, workspace_id=workspace_id)
+
+    assert store.workflow_keys(workspace_id=1, prefix="demo") == {"demo", "demo-2", "demo-3"}
+    assert store.workflow_keys(workspace_id=2, prefix="demo") == {"demo-4"}
+    assert store.workflow_keys(workspace_id=1, prefix="nothing") == frozenset()
+
+
+@pytest.mark.parametrize("prefix", ["de_o", "de%", "d%o"])
+def test_workflow_keys_matches_its_prefix_literally(
+    store: SqlWorkflowDefinitionStore, prefix: str
+) -> None:
+    _save(store, fixture_text("minimal"))
+
+    assert store.workflow_keys(workspace_id=1, prefix=prefix) == frozenset()
+
+
+def test_workflow_keys_reads_the_key_column_only(
+    store: SqlWorkflowDefinitionStore, engine: Engine
+) -> None:
+    _save(store, fixture_text("minimal"))
+    statements: list[str] = []
+
+    def record(*args: Any) -> None:
+        statements.append(" ".join(args[2].split()))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        assert store.workflow_keys(workspace_id=1, prefix="demo") == {"demo"}
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    # Never the stored YAML or compiled JSON of every matching row.
+    [query] = [statement for statement in statements if statement.startswith("SELECT")]
+    assert query.startswith("SELECT coral_workflows.workflow_key FROM coral_workflows ")

@@ -1,29 +1,35 @@
 """
-Workflow validate/save/get/list router. Unmounted: the Coral server plugin registers it.
+Workflow validate/simulate/save/get/list router. Unmounted: the Coral server plugin registers it.
 
 Every route needs a signed-in caller. A caller saves, reads and lists their own
 definitions in the request's workspace, plus legacy ones saved before definitions had
-owners; saving a key another user holds is refused.
+owners; saving a key another user holds is refused. A simulation reads and stores
+nothing: it validates and dry-runs the text it is sent on a small pool of its own,
+at most so many at once for one user and in all.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from coral.alerts.types import normalize_owner
 from coral.api.errors import CoralApiError, CoralRoute, error_responses
 from coral.api.schemas import (
     InvalidResult,
     SavedWorkflowOut,
+    SimulatedResult,
+    SimulateRequest,
     ValidResult,
     WorkflowDetailOut,
     WorkflowSummaryOut,
     WorkflowYaml,
 )
+from coral.bridge.config import DEFAULT_RUN_ACTIVATIONS
+from coral.engine.simulate import SimScript, simulate
 from coral.model import LoadError
 from coral.omni.protocols import Viewer
 from coral.stores.workflows import (
@@ -35,8 +41,15 @@ from coral.stores.workflows import (
 from coral.validate import ValidateContext
 from coral.validate.pipeline import CheckResult, check_text
 
+if TYPE_CHECKING:
+    from coral.api.run_service import InFlight
+
 WORKFLOW_NOT_FOUND = "Workflow not found."
 WORKFLOW_KEY_TAKEN = "A workflow with this key already exists."
+# Simulations in flight at once, for one user and in all; each has a thread of its own.
+# One per user, as validating a large valid document can take seconds: four users fill it.
+MAX_SIMULATIONS_PER_USER = 1
+MAX_SIMULATIONS = 4
 # A refused save describes its document in at most this much: the loader's report can
 # quote the document once per issue.
 MAX_LOAD_ISSUES = 20
@@ -77,6 +90,27 @@ def _check_result(result: CheckResult) -> ValidResult | InvalidResult:
     )
 
 
+def simulated(
+    text: str, script: SimScript, context: ValidateContext
+) -> SimulatedResult | InvalidResult:
+    """
+    Validate ``text`` as ``:validate`` does, then simulate it with ``script`` when runnable.
+
+    The simulation runs with the server's bounds and the default run's activation cap.
+    """
+    checked = _check_result(check_text(text, context))
+    if isinstance(checked, InvalidResult):
+        return checked
+    graph = checked.compiled
+    runnable = checked.runnable and not graph.analysis.unresolved
+    simulation = (
+        simulate(graph, script, max_activations=DEFAULT_RUN_ACTIVATIONS).result
+        if runnable
+        else None
+    )
+    return SimulatedResult(**dict(checked), simulation=simulation)
+
+
 def _summary(definition: WorkflowDefinition) -> WorkflowSummaryOut:
     return WorkflowSummaryOut(
         id=definition.id,
@@ -89,11 +123,23 @@ def _summary(definition: WorkflowDefinition) -> WorkflowSummaryOut:
     )
 
 
+def saved_workflow_out(definition: WorkflowDefinition, result: CheckResult) -> SavedWorkflowOut:
+    """A stored definition with the validation of the text it stores."""
+    assert result.graph is not None and result.report is not None
+    return SavedWorkflowOut(
+        **_summary(definition).model_dump(),
+        valid=True,
+        problems=list(result.report.problems),
+        compiled=result.graph,
+    )
+
+
 def create_workflows_router(
     store: WorkflowDefinitionStore,
     *,
     viewer_dependency: Callable[..., Viewer] | Callable[..., Awaitable[Viewer]],
     workspace_id_dependency: Callable[..., int],
+    simulations: Callable[[Request], InFlight],
     validate_context: Callable[[], ValidateContext] = ValidateContext,
 ) -> APIRouter:
     """
@@ -102,6 +148,8 @@ def create_workflows_router(
     :param viewer_dependency: Resolves the caller, refusing with 401 or 403; it runs
         before the store is read.
     :param workspace_id_dependency: The request's workspace.
+    :param simulations: The pool a request's simulation runs on, validation included;
+        it refuses with 503 when it cannot take one.
     """
     router = APIRouter(route_class=CoralRoute)
     caller = Depends(viewer_dependency)
@@ -117,6 +165,23 @@ def create_workflows_router(
     def validate_workflow(body: WorkflowYaml) -> ValidResult | InvalidResult:
         """Load, compile and validate a workflow without storing it."""
         return _check_result(check_text(body.yaml, validate_context()))
+
+    @router.post(
+        "/workflows:simulate",
+        operation_id="coral_simulate_workflow",
+        response_model=SimulatedResult | InvalidResult,
+        responses=error_responses(401, 403, 422, 503),
+    )
+    async def simulate_workflow(
+        request: Request, body: SimulateRequest, viewer: Viewer = caller
+    ) -> SimulatedResult | InvalidResult:
+        """
+        Validate a workflow and, when it is runnable, dry-run it on the engine with stub
+        sessions, answering each question from the script; nothing is stored.
+        """
+        return await simulations(request).run(
+            viewer, lambda: simulated(body.yaml, body.script, validate_context())
+        )
 
     @router.post(
         "/workflows",
@@ -151,12 +216,7 @@ def create_workflows_router(
             raise CoralApiError("payload_too_large", str(error), 413) from error
         except WorkflowKeyTaken as error:
             raise CoralApiError("workflow_key_taken", WORKFLOW_KEY_TAKEN, 409) from error
-        return SavedWorkflowOut(
-            **_summary(definition).model_dump(),
-            valid=True,
-            problems=list(result.report.problems),
-            compiled=result.graph,
-        )
+        return saved_workflow_out(definition, result)
 
     @router.get(
         "/workflows",

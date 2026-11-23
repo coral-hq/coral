@@ -17,7 +17,8 @@
 - **Related:** [`run-stream.md`](run-stream.md) (the stream, K8),
   [`gates-and-inbox.md`](gates-and-inbox.md) (gate answers, the Inbox's Resume and
   Cancel), [`session-facade.md`](session-facade.md) (the engine bridge),
-  [`plugin.md`](plugin.md) (wiring).
+  [`simulate-and-templates.md`](simulate-and-templates.md) (Simulate, templates, and how
+  Simulate's session estimate differs from preflight's), [`plugin.md`](plugin.md) (wiring).
 
 ## Routes
 

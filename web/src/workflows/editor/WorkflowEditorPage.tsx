@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useId, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CoralPageHeader } from "@/brand/CoralPageHeader";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +17,8 @@ import type { WorkflowDetail } from "../api/workflowTypes";
 import { FlowCanvas } from "../canvas/FlowCanvas";
 import { isCoralAvailable, useCoralInfo } from "../gate/useCoralInfo";
 import { ProfilePicker } from "../profiles/ProfilePicker";
+import { SimulatePanel } from "../simulate/SimulatePanel";
+import { useSimulation } from "../simulate/useSimulation";
 import { StartRunDialog } from "../start/StartRunDialog";
 import { diagnosticsFromValidate, markersFromDiagnostics } from "./markers";
 import { useValidateLoop } from "./useValidateLoop";
@@ -81,6 +83,9 @@ function EditorSurface({
   const queryClient = useQueryClient();
   const [yaml, setYaml] = useState(initialYaml);
   const [startOpen, setStartOpen] = useState(false);
+  const [simulateOpen, setSimulateOpen] = useState(false);
+  const simulatePanelId = useId();
+  const simulateButtonRef = useRef<HTMLButtonElement>(null);
   const editorRef = useRef<YamlEditor | null>(null);
   const profilesOn = isCoralAvailable(useCoralInfo().data, CORAL_SUB_FEATURE.profilesDesk);
   const validation = useValidateLoop(yaml, initialCompiled);
@@ -89,6 +94,7 @@ function EditorSurface({
     [validation.response],
   );
   const markers = useMemo(() => markersFromDiagnostics(diagnostics), [diagnostics]);
+  const simulation = useSimulation(yaml, simulateOpen);
   const dirty = yaml !== initialYaml;
 
   const save = useMutation({
@@ -110,6 +116,14 @@ function EditorSurface({
 
   const runnable = validation.response?.runnable === true;
   const hasErrors = diagnostics.some((diagnostic) => diagnostic.severity === "error");
+  // The simulated run paints only the graph it ran on; once the YAML changes, the canvas
+  // follows the YAML again with no overlay.
+  const showSimulated = simulateOpen && !simulation.stale && simulation.overlay !== null;
+  // The panel's Close removes the focused control; focus goes back to the button that opened it.
+  const closeSimulate = () => {
+    setSimulateOpen(false);
+    simulateButtonRef.current?.focus();
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="workflow-editor">
@@ -123,6 +137,17 @@ function EditorSurface({
             {validation.isValidating && (
               <span className="text-muted-foreground text-xs">Validating…</span>
             )}
+            <Button
+              ref={simulateButtonRef}
+              variant="outline"
+              componentId="coral.editor.simulate"
+              aria-expanded={simulateOpen}
+              aria-controls={simulateOpen ? simulatePanelId : undefined}
+              disabled={hasErrors && !simulateOpen}
+              onClick={() => setSimulateOpen((open) => !open)}
+            >
+              Simulate
+            </Button>
             <Button
               variant="outline"
               componentId="coral.editor.save"
@@ -155,9 +180,15 @@ function EditorSurface({
           </Suspense>
         </div>
         <div className="min-h-[320px] min-w-0 flex-1 overflow-hidden rounded-lg border border-border">
-          <FlowCanvas compiled={validation.compiled} />
+          <FlowCanvas
+            compiled={showSimulated ? simulation.compiled : validation.compiled}
+            overlay={showSimulated ? simulation.overlay : null}
+          />
         </div>
       </div>
+      {simulateOpen && (
+        <SimulatePanel id={simulatePanelId} simulation={simulation} onClose={closeSimulate} />
+      )}
       <ProblemList diagnostics={diagnostics} error={validation.error} saveError={save.error} />
       <StartRunDialog
         workflowId={workflowId}

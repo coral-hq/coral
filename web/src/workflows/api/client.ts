@@ -1,24 +1,48 @@
 import { authenticatedFetch } from "@/lib/identity";
+import { apiErrorFromResponse } from "@/lib/sessionsApi";
 import type {
-  ValidateResponse,
-  WorkflowDetail,
-  WorkflowSummary,
-  WorkflowTemplate,
-} from "./workflowTypes";
-import { stubTemplates } from "./msw/handlers";
+  CoralOperations,
+  InvalidResult,
+  SavedWorkflowOut,
+  SimScript,
+  SimulatedResult,
+  TemplateOut,
+} from "./generated/coralApi";
+import type { ValidateResponse, WorkflowDetail, WorkflowSummary } from "./workflowTypes";
 
 const BASE = "/v1/coral";
 
+type Operation<Name extends keyof CoralOperations> = CoralOperations[Name];
+
+const TEMPLATES_PATH = "/v1/coral/templates" satisfies Operation<"coral_list_templates">["path"];
+const USE_TEMPLATE_PATH =
+  "/v1/coral/templates/{template_id}:use" satisfies Operation<"coral_use_template">["path"];
+const SIMULATE_PATH =
+  "/v1/coral/workflows:simulate" satisfies Operation<"coral_simulate_workflow">["path"];
+const NO_ARGUMENTS: Operation<"coral_use_template">["body"] = {};
+
 export const WORKFLOWS_QUERY_KEY = ["coral-workflows"] as const;
+export const TEMPLATES_QUERY_KEY = ["coral-templates"] as const;
 export const workflowQueryKey = (workflowKey: string) => ["coral-workflow", workflowKey] as const;
 
 export class WorkflowsApiError extends Error {
   readonly status: number;
+  /** The response's `Retry-After`, in milliseconds, when it sent one. */
+  readonly retryAfterMs: number | null;
+  /** The refusal's `error.code` in Coral's envelope, such as `server_busy`. */
+  readonly code: string | null;
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    retryAfterMs: number | null = null,
+    code: string | null = null,
+  ) {
     super(message);
     this.name = "WorkflowsApiError";
     this.status = status;
+    this.retryAfterMs = retryAfterMs;
+    this.code = code;
   }
 }
 
@@ -30,18 +54,28 @@ export function shouldRetryWorkflows(failureCount: number, error: unknown): bool
 
 async function readJson<T>(response: Response, what: string): Promise<T> {
   if (!response.ok) {
-    throw new WorkflowsApiError(`Failed to ${what} (${response.status})`, response.status);
+    const { retryAfterMs, code } = await apiErrorFromResponse(response);
+    throw new WorkflowsApiError(
+      `Failed to ${what} (${response.status})`,
+      response.status,
+      retryAfterMs,
+      code,
+    );
   }
   return (await response.json()) as T;
 }
 
-function postYaml(path: string, yaml: string, signal?: AbortSignal): Promise<Response> {
-  return authenticatedFetch(`${BASE}${path}`, {
+function postJson(url: string, body: unknown, signal?: AbortSignal): Promise<Response> {
+  return authenticatedFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ yaml }),
+    body: JSON.stringify(body),
     signal,
   });
+}
+
+function postYaml(path: string, yaml: string, signal?: AbortSignal): Promise<Response> {
+  return postJson(`${BASE}${path}`, { yaml }, signal);
 }
 
 /** Server validation; load errors are a 200 with `load_error`, not an exception. */
@@ -86,8 +120,28 @@ export async function saveWorkflow(yaml: string): Promise<WorkflowSummary & Vali
   return readJson(await postYaml("/workflows", yaml), "save workflow");
 }
 
-// Templates have no backend yet; this resolves locally so only its body changes when the
-// API lands.
-export function listTemplates(): Promise<WorkflowTemplate[]> {
-  return stubTemplates();
+/** The built-in templates, in gallery order. */
+export async function listTemplates(signal?: AbortSignal): Promise<TemplateOut[]> {
+  const payload = await readJson<unknown>(
+    await authenticatedFetch(TEMPLATES_PATH, { signal }),
+    "list templates",
+  );
+  if (!Array.isArray(payload)) throw new WorkflowsApiError("Invalid template list response", 502);
+  return payload as TemplateOut[];
+}
+
+/** A new workflow of the caller's made from a template; an existing one is never replaced. */
+export async function createFromTemplate(templateId: string): Promise<SavedWorkflowOut> {
+  const url = USE_TEMPLATE_PATH.replace("{template_id}", () => encodeURIComponent(templateId));
+  return readJson(await postJson(url, NO_ARGUMENTS), "use template");
+}
+
+/** A dry run of `yaml` answered from `script`; load errors are a 200, as validation's are. */
+export async function simulateWorkflow(
+  yaml: string,
+  script: SimScript,
+  signal?: AbortSignal,
+): Promise<SimulatedResult | InvalidResult> {
+  const body: Operation<"coral_simulate_workflow">["body"] = { yaml, script };
+  return readJson(await postJson(SIMULATE_PATH, body, signal), "simulate workflow");
 }

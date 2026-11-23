@@ -1,0 +1,51 @@
+# Implement with review loop: Coral's built-in starter workflow.
+# An implementer makes the change, a read-only reviewer approves it or asks for changes
+# (at most three passes), and you approve or reject the result before the run ends.
+#
+# To make the implementer prove its checks pass, add your project's commands to the
+# implement step, for example:
+#   done_when:
+#     commands:
+#       - run: npm test
+id: implement-review-loop
+name: Implement with review loop
+description: >-
+  An implementer makes the change, a read-only reviewer approves it or asks for changes,
+  up to three passes, then you approve or reject the result.
+nodes:
+  - {id: start, kind: start}
+  - id: implement
+    kind: step
+    name: Implement
+    goal: >-
+      Make the change the run's request describes. Run the project's tests, lint and format
+      checks for what you changed and fix what fails. On a later pass, address every finding
+      in the reviewer's handoff first. Hand off with what you changed and how you checked it.
+    roster: [implementer]
+    # Attempts count failed done-when checks, so this applies once you add done_when.
+    attempts: 3
+  - id: review
+    kind: step
+    name: Review
+    goal: >-
+      Review the change against the run's request without changing any file. Hand off with
+      the label approved when it is ready, or changes_requested with each finding and its
+      file and line.
+    roster: [reviewer]
+  - id: approve_change
+    kind: gate
+    name: Approve change
+    prompt: Approve the change?
+    outcomes: [approve, reject]
+  - {id: end, kind: end}
+arrows:
+  - {id: a1, from: start, to: implement}
+  - {id: a2, from: implement, to: review}
+  - {id: a3, from: review, to: approve_change, label: approved}
+  # A loop's limit counts passes: the third changes_requested goes to the gate instead.
+  - {id: a4, from: review, to: implement, label: changes_requested, back: true, limit: 3, at_limit: a7}
+  - {id: a5, from: approve_change, to: end, label: approve}
+  # A rejected change ends the run; a loop can have only one back arrow, and a4 is this loop's.
+  - {id: a6, from: approve_change, to: end, label: reject}
+  # At the loop's limit the review goes to the gate with its open findings.
+  - {id: a7, from: review, to: approve_change}

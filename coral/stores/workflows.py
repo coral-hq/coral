@@ -4,6 +4,7 @@ Slim workflow definition store: YAML and compiled IR inline, size-capped, owned 
 A definition belongs to the user who saved it (``None`` for the single local user).
 Reads see the owner's definitions and legacy ones saved before definitions had owners;
 saving a key another owner holds is refused, and the first save of a legacy one claims it.
+Creating one only inserts: a key any definition holds is refused, whoever owns it.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ class WorkflowTooLargeError(ValueError):
 
 
 class WorkflowKeyTaken(Exception):
-    """Another owner's definition holds this workflow key in the workspace."""
+    """A definition the caller may not replace holds this workflow key in the workspace."""
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,20 @@ class WorkflowDefinitionStore(Protocol):
         owner: str | None,
     ) -> WorkflowDefinition: ...
 
+    def create(
+        self,
+        *,
+        workspace_id: int,
+        workflow_key: str,
+        name: str,
+        yaml_text: str,
+        compiled: CompiledGraph,
+        runnable: bool,
+        owner: str | None,
+    ) -> WorkflowDefinition: ...
+
+    def workflow_keys(self, *, workspace_id: int, prefix: str) -> frozenset[str]: ...
+
     def get(
         self, *, workspace_id: int, workflow_id: str, owner: str | None
     ) -> WorkflowDefinition | None: ...
@@ -84,6 +99,46 @@ def check_stored_size(field: str, value: str) -> None:
         raise WorkflowTooLargeError(
             f"{field} is {len(framed)} bytes after compression; the limit is "
             f"{MAX_STORED_BYTES}. Shorten the workflow."
+        )
+
+
+@dataclass(frozen=True)
+class _Stored:
+    """A definition's stored columns, checked against the inline cap."""
+
+    yaml_text: str
+    compiled_json: str
+    content_hash: bytes
+    validation_state: str
+
+    @classmethod
+    def of(cls, yaml_text: str, compiled: CompiledGraph, runnable: bool) -> _Stored:
+        """:raises WorkflowTooLargeError: when the YAML or compiled JSON exceeds the cap."""
+        compiled_json = compiled.model_dump_json()
+        check_stored_size("yaml_text", yaml_text)
+        check_stored_size("compiled_json", compiled_json)
+        return cls(
+            yaml_text=yaml_text,
+            compiled_json=compiled_json,
+            content_hash=bytes.fromhex(compiled.content_hash),
+            validation_state=_RUNNABLE if runnable else _NOT_RUNNABLE,
+        )
+
+    def new_row(
+        self, *, workspace_id: int, workflow_key: str, name: str, owner: str | None, now: int
+    ) -> WorkflowRow:
+        return WorkflowRow(
+            workspace_id=workspace_id,
+            id=uuid.uuid4().hex,
+            workflow_key=workflow_key,
+            name=name,
+            user_id=owner,
+            yaml_text=self.yaml_text,
+            compiled_json=self.compiled_json,
+            content_hash=self.content_hash,
+            validation_state=self.validation_state,
+            created_at=now,
+            updated_at=now,
         )
 
 
@@ -139,11 +194,7 @@ class SqlWorkflowDefinitionStore:
         :raises WorkflowKeyTaken: when another owner's definition holds the key; it is
             left unchanged.
         """
-        compiled_json = compiled.model_dump_json()
-        check_stored_size("yaml_text", yaml_text)
-        check_stored_size("compiled_json", compiled_json)
-        content_hash = bytes.fromhex(compiled.content_hash)
-        state = _RUNNABLE if runnable else _NOT_RUNNABLE
+        stored = _Stored.of(yaml_text, compiled, runnable)
         now = self._clock()
 
         def write() -> WorkflowDefinition:
@@ -152,18 +203,12 @@ class SqlWorkflowDefinitionStore:
                     session, workspace_id=workspace_id, workflow_key=workflow_key
                 )
                 if row is None:
-                    row = WorkflowRow(
+                    row = stored.new_row(
                         workspace_id=workspace_id,
-                        id=uuid.uuid4().hex,
                         workflow_key=workflow_key,
                         name=name,
-                        user_id=owner,
-                        yaml_text=yaml_text,
-                        compiled_json=compiled_json,
-                        content_hash=content_hash,
-                        validation_state=state,
-                        created_at=now,
-                        updated_at=now,
+                        owner=owner,
+                        now=now,
                     )
                     session.add(row)
                 elif not _visible_to(row, owner):
@@ -171,16 +216,16 @@ class SqlWorkflowDefinitionStore:
                 else:
                     row.user_id = owner
                     if (
-                        bytes(row.content_hash) != content_hash
+                        bytes(row.content_hash) != stored.content_hash
                         or row.yaml_text != yaml_text
-                        or row.validation_state != state
+                        or row.validation_state != stored.validation_state
                         or row.name != name
                     ):
                         row.name = name
                         row.yaml_text = yaml_text
-                        row.compiled_json = compiled_json
-                        row.content_hash = content_hash
-                        row.validation_state = state
+                        row.compiled_json = stored.compiled_json
+                        row.content_hash = stored.content_hash
+                        row.validation_state = stored.validation_state
                         row.updated_at = now
                 session.flush()
                 return _to_definition(row)
@@ -191,6 +236,57 @@ class SqlWorkflowDefinitionStore:
             # A concurrent first save inserted the key after this one looked it up:
             # look again and apply the owner rule to the row that won.
             return write()
+
+    def create(
+        self,
+        *,
+        workspace_id: int,
+        workflow_key: str,
+        name: str,
+        yaml_text: str,
+        compiled: CompiledGraph,
+        runnable: bool,
+        owner: str | None,
+    ) -> WorkflowDefinition:
+        """Insert a new definition owned by ``owner``; an existing one is never changed.
+
+        :raises WorkflowKeyTaken: when any definition holds the key, whatever its owner,
+            including one a concurrent insert added after this one looked.
+        :raises WorkflowTooLargeError: when the YAML or compiled JSON exceeds the cap.
+        """
+        stored = _Stored.of(yaml_text, compiled, runnable)
+        row = stored.new_row(
+            workspace_id=workspace_id,
+            workflow_key=workflow_key,
+            name=name,
+            owner=owner,
+            now=self._clock(),
+        )
+        try:
+            with self._write_session("create_definition") as session:
+                held = self._find_by_key(
+                    session, workspace_id=workspace_id, workflow_key=workflow_key
+                )
+                if held is not None:
+                    raise WorkflowKeyTaken(workflow_key)
+                session.add(row)
+                session.flush()
+                created = _to_definition(row)
+        except IntegrityError as error:
+            # No retry: looking again would find the winner's row, which is not ours to change.
+            raise WorkflowKeyTaken(workflow_key) from error
+        return created
+
+    def workflow_keys(self, *, workspace_id: int, prefix: str) -> frozenset[str]:
+        """Every workflow key in the workspace that starts with ``prefix``, whoever owns it."""
+        with self._session("find_taken_workflow_keys") as session:
+            keys = session.scalars(
+                select(WorkflowRow.workflow_key).where(
+                    WorkflowRow.workspace_id == workspace_id,
+                    WorkflowRow.workflow_key.startswith(prefix, autoescape=True),
+                )
+            ).all()
+            return frozenset(keys)
 
     def _find_by_key(
         self, session: Session, *, workspace_id: int, workflow_key: str
