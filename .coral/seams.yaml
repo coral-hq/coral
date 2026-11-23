@@ -4064,7 +4064,15 @@ seams:
       passthrough names it, so a stale fd number in the daemon's env reaches
       neither a runner nor the zygote. adopt_launch_secrets takes the target
       mapping, the fd variable and the allowed names, so a harness can reuse
-      it. Measured on macOS: outside the sandbox the identity stack reads the
+      it. _build_runner_env also names the credentials it forwards
+      (HARNESS_CREDENTIAL_ENV_VARS, passthrough and provider config refs
+      present in the daemon's env), sorted and comma-separated, names only,
+      in OMNIGENT_RUNNER_FORWARDED_NAMES (no credential word, so probe 15 and
+      _credential_shaped_env_name do not flag it; never a stale or
+      passthrough-listed copy; absent when nothing is forwarded), so a Coral
+      claude-sdk harness can keep each of them out of its CLI's environment;
+      env_name_list parses the passthrough list for the host and that
+      harness. Measured on macOS: outside the sandbox the identity stack reads the
       direct-spawned runner's environment and finds neither token
       (own_runner_mint and own_runner_bearer not_present) and no
       credential-like name (own_runner_environ.names none). Residuals: a
@@ -4094,31 +4102,155 @@ seams:
       - tests/e2e/coral/test_sandbox_probe.py
     budget_lines: 120
     budget_exception:
-      lines: 416
+      lines: 425
       reason: >-
         Counted with git diff --numstat origin/development (added plus
-        removed lines; a new file counts every line).
-        tests/runner/test_launch_secrets.py (416, new): the round trip at
-        and under the cap, every refused payload (empty and duplicate-name
-        included) and descriptor kind (a pipe and a file among them), one
-        name as the allowed names, the writer's cap and full-socket cases,
-        the socket context, a real runner whose readable environment and
-        env=None child lack the tokens, concurrent launches that never cross
-        sockets, and a daemon without stdin or stdout whose child still reads
-        its socket. tests/host/test_connect.py (302): the zygote base env,
-        search path and HostProcess wiring tests, then the rewritten
-        direct-spawn launch test, the Windows env-delivery test, the
-        fail-closed launch cases, the passthrough fd-variable and name checks
-        and the direct fallback with the terminal mirror.
-        omnigent/runner/launch_secrets.py (210, new): the socket writer,
-        the spawn context and the bounded, validating reader.
-        tests/runner/test_runner_entry.py (126): the boot order test and
-        the after-boot test for both deliveries, with the delegated mint
-        path. The other files are within budget: omnigent/host/connect.py
-        118, omnigent/host/runner_zygote.py 15,
-        omnigent/runner/_entry.py 30, omnigent/runner/identity.py 34,
-        tests/host/test_runner_zygote.py 119,
+        removed lines; a new file counts every line), so a file shared with
+        S118 counts both seams' lines. tests/runner/test_launch_secrets.py
+        (425, new): the round trip at and under the cap, every refused
+        payload (empty and duplicate-name included) and descriptor kind (a
+        pipe and a file among them), one name as the allowed names, the
+        writer's cap and full-socket cases, the socket context, a real runner
+        whose readable environment and env=None child lack the tokens,
+        concurrent launches that never cross sockets, and a daemon without
+        stdin or stdout whose child still reads its socket.
+        tests/host/test_connect.py (376, S117 and S118: 18 for S118): the
+        zygote base env, search path and HostProcess wiring tests, then the
+        rewritten direct-spawn launch test, the Windows env-delivery test,
+        the fail-closed launch cases, the passthrough fd-variable and name
+        checks, the direct fallback with the terminal mirror, and the
+        forwarded-names list with a config-ref key and with nothing
+        forwarded. omnigent/runner/launch_secrets.py (220, new, 7 for S118):
+        the socket writer, the spawn context and the bounded, validating
+        reader. omnigent/host/connect.py (144, S117 and S118: 6 for S118):
+        the zygote's base env and its filters, the direct-spawn socket, the
+        fd variables never forwarded, and the forwarded-names list with its
+        shared parser. tests/runner/test_runner_entry.py (126): the boot
+        order test and the after-boot test for both deliveries, with the
+        delegated mint path. The other files are within budget:
+        omnigent/host/runner_zygote.py 15, omnigent/runner/_entry.py 30,
+        omnigent/runner/identity.py 34, tests/host/test_runner_zygote.py 119,
         tests/runner/test_identity.py 31.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+  - id: S118
+    title: A Coral step's Claude CLI never holds the model credential (per-session token at the executor's loopback proxy); harness config never reaches any CLI
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      The SDK copies the harness's whole os.environ into every Claude CLI it
+      starts, so the HARNESS_CLAUDE_SDK_* config, the printf %s '<key>'
+      helper among it, reached every claude-sdk CLI's environment. Now
+      create_app() moves every HARNESS_CLAUDE_SDK_* name out of os.environ
+      once (_take_harness_config) and every executor build, rebuilds
+      included, reads that config; only OMNIGENT_RUNNER_WORKSPACE still comes
+      from os.environ, and the resolvers read os.environ when called with no
+      config. This holds for every agent and on every platform. For
+      a Coral harness (HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL=1) on POSIX,
+      _scrub_coral_environ then pops, never to restore, every name in the
+      host's HARNESS_CREDENTIAL_ENV_VARS, every name
+      OMNIGENT_RUNNER_ENV_PASSTHROUGH or the host's
+      OMNIGENT_RUNNER_FORWARDED_NAMES lists (so a second provider's config-ref
+      key goes too; that variable reaches the harness through the runner's
+      env on both the fork and the exec path), CLAUDE_CODE_USE_ and
+      CLAUDE_CODE_SKIP_*_AUTH for
+      Bedrock, Vertex, Foundry, Mantle, Anthropic AWS and Anthropic Google
+      Cloud (every provider switch the pinned CLI 2.1.325 reads),
+      CLAUDE_CODE_USE_GATEWAY, every name whose value holds the configured
+      static key when that key has at least 20 characters (a shorter one also
+      occurs in ordinary values such as /usr/local/bin), and any proxy setting
+      (HTTP_PROXY, HTTPS_PROXY, NO_PROXY or ALL_PROXY in any case) whose value
+      holds an @. It never pops PATH, HOME, TMPDIR, TMP, TEMP, USER, LOGNAME,
+      SHELL, LANG, LC_*, TERM, ANTHROPIC_MODEL and its OMNIGENT_ alias,
+      userinfo-free proxy settings, SSL_CERT_FILE, SSL_CERT_DIR,
+      REQUESTS_CA_BUNDLE or NODE_EXTRA_CA_CERTS. static_printf_value (in
+      claude_gateway_shim.py, for the credential proxy to reuse) reads that
+      key back only from the exact "printf %s " + shlex.quote(key) form; an
+      empty literal is ignored. The environment from before the scrub goes
+      to the executor as credential_env, for running the credential command,
+      never the CLI. A direct-exec harness (zygote off or failed) on POSIX no
+      longer gets HARNESS_CLAUDE_SDK_API_KEY_HELPER or
+      HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND in its exec-time environment:
+      the process manager sends them through launch_secrets_in_pipe and
+      pass_fds, named by OMNIGENT_HARNESS_LAUNCH_FD, and create_app() reads
+      that socket (adopt_launch_secrets, only those two names) straight into
+      the config it took, never into os.environ; a refused socket exits 2
+      with one line naming no value, and a socket that cannot be sent fails
+      the spawn as a RuntimeError naming the error type only. Only the claude-sdk harness module uses the socket; other
+      harness modules, zygote forks (whose payload reaches only the forked
+      harness's memory, where the config is then taken) and Windows keep env
+      delivery, and no harness spawn env or env the host builds carries
+      OMNIGENT_HARNESS_LAUNCH_FD. Measured on macOS: a direct-exec harness's
+      readable environment lacks both names while its executor config has
+      them, and the Coral stack tests run a step through a zygote-forked and
+      a direct-exec harness. A browser test that found the CLI by
+      HARNESS_CLAUDE_SDK_AGENT_NAME in its environment now finds it by the
+      session's harness among its parents, skipping ancestors whose command
+      line it cannot read and stopping at the runner. Residuals: until the
+      credential proxy, a Coral CLI's helper command runs with the scrubbed
+      environment, a proxy with userinfo reaches neither the CLI nor the
+      gateway shim's upstream client (the snapshot keeps it for Steps 4-6),
+      and every CLI still gets the key on its --settings argv; a direct-exec harness's exec-time
+      environment still holds the forwarded credentials (CRL-197); Windows
+      keeps every name in the environment.
+    files:
+      - omnigent/host/connect.py
+      - omnigent/inner/claude_gateway_shim.py
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/inner/claude_sdk_harness.py
+      - omnigent/runner/launch_secrets.py
+      - omnigent/runtime/harnesses/process_manager.py
+      - tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py
+      - tests/host/test_connect.py
+      - tests/inner/test_claude_gateway_shim.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/runtime/harnesses/_claude_sdk_config_harness.py
+      - tests/runtime/harnesses/test_process_manager.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/inner/test_claude_gateway_shim.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 120
+    budget_exception:
+      lines: 615
+      reason: >-
+        Counted with git diff --numstat origin/development (added plus
+        removed lines; a new file counts every line), so a file shared with
+        S117 counts both seams' lines. tests/inner/test_claude_sdk_harness.py
+        (615): config taken once and reused by every build, every build
+        kwarg from that config, the Coral scrub (forwarded credentials, the
+        host's forwarded-names list, every provider switch, renamed copies of
+        either literal, the protected essentials and userinfo-free proxies,
+        the 20-character scan floor) and its snapshot, the platform and
+        non-Coral cases, the launch socket adopted into the config and
+        refused when untrusted, and the SDK's version check and CLI spawn
+        seeing no config. tests/host/test_connect.py (376, S117 and S118: 18
+        here, the harness fd variable in the passthrough test).
+        omnigent/runner/launch_secrets.py (220, S117 and S118: 7 here, the
+        harness fd variable and its two names).
+        tests/runtime/harnesses/test_process_manager.py (219): the real
+        direct-exec harness and a refusing one, the other-harness case, the
+        fork, off-POSIX and POSIX exec paths with the forwarded-names list,
+        and the unsendable socket. omnigent/inner/claude_sdk_harness.py
+        (206): the config take, the Coral scrub with its protected names and
+        scan floor, the resolvers reading the config and the socket read.
+        omnigent/host/connect.py (144, S117 and S118: 6 here, the harness fd
+        variable never forwarded). The other files are within budget:
+        omnigent/runtime/harnesses/process_manager.py 63,
+        tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py 61,
+        tests/inner/test_claude_sdk_executor.py 56,
+        tests/runtime/harnesses/_claude_sdk_config_harness.py 53,
+        tests/inner/test_claude_gateway_shim.py 26,
+        omnigent/inner/claude_gateway_shim.py 19,
+        omnigent/inner/claude_sdk_executor.py 6.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false

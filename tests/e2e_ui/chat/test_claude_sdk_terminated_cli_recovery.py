@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import itertools  # CORAL(S118)
 import json
 import os
 import signal
@@ -78,17 +79,18 @@ def _create_claude_sdk_session(
     return session_id, name
 
 
-def _claude_cli_pids(agent_name: str) -> set[int]:
-    """Return the test agent's Claude CLI PIDs owned by the e2e runner.
+def _claude_cli_pids(session_id: str) -> set[int]:
+    """Return the test session's Claude CLI PIDs owned by the e2e runner.
 
     Discovery is scoped to descendants of the test runner process
     (``_server_state["runner_pid"]``, refreshed by ``_ensure_runner_online``).
-    The unique agent marker and the agent's explicit model exclude other SDK
-    clients, including the runner's background title generation, from fault
-    injection.
+    The session's harness among the CLI's parents and the agent's explicit
+    model exclude other SDK clients, including the runner's background title
+    generation, from fault injection.
     """
+    runner_pid = int(_server_state["runner_pid"])
     try:
-        descendants = psutil.Process(int(_server_state["runner_pid"])).children(recursive=True)
+        descendants = psutil.Process(runner_pid).children(recursive=True)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return set()
     pids: set[int] = set()
@@ -107,13 +109,38 @@ def _claude_cli_pids(agent_name: str) -> set[int]:
         cmd = " ".join(args)
         if "stream-json" not in cmd:
             continue
-        if name == "claude" or "/claude" in cmd.lower():
-            try:
-                if proc.environ().get("HARNESS_CLAUDE_SDK_AGENT_NAME") == agent_name:
-                    pids.add(proc.pid)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
+        # CORAL(S118): the CLI's environment no longer names its agent; its harness does
+        if (name == "claude" or "/claude" in cmd.lower()) and _serves_session(
+            proc, session_id, runner_pid
+        ):
+            pids.add(proc.pid)
     return pids
+
+
+def _serves_session(proc: psutil.Process, session_id: str, runner_pid: int) -> bool:
+    """CORAL(S118): whether *proc* descends from the session's harness, below the runner.
+
+    The harness keeps its config out of the CLI's environment, so its command line names it.
+    An ancestor whose command line cannot be read (macOS denies other users' arguments) is
+    skipped, and the walk stops at the runner.
+    """
+    try:
+        parents = proc.parents()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    for parent in parents:
+        if parent.pid == runner_pid:
+            return False
+        try:
+            args = parent.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if any(
+            flag == "--conversation-id" and value == session_id
+            for flag, value in itertools.pairwise(args)
+        ):
+            return True
+    return False
 
 
 def _single_cli_launch(pids: set[int]) -> set[int]:
@@ -160,7 +187,7 @@ def test_next_turn_recovers_when_claude_cli_was_terminated(
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     try:
         runner_id = str(_server_state["runner_id"])
-        session_id, agent_name = _create_claude_sdk_session(
+        session_id, _agent_name = _create_claude_sdk_session(
             live_server, runner_id, mock_llm_server_url
         )
         try:
@@ -183,7 +210,7 @@ def test_next_turn_recovers_when_claude_cli_was_terminated(
 
             page.goto(f"{live_server}/c/{session_id}")
 
-            baseline_pids = _claude_cli_pids(agent_name)
+            baseline_pids = _claude_cli_pids(session_id)
             _send(page, f"Say ack. {token1}")
             expect(page.locator(_ASSISTANT).filter(has_text="ack one")).to_be_visible(
                 timeout=180_000
@@ -193,13 +220,13 @@ def test_next_turn_recovers_when_claude_cli_was_terminated(
             new_pids: set[int] = set()
             deadline = time.time() + 30
             while time.time() < deadline:
-                new_pids = _claude_cli_pids(agent_name) - baseline_pids
+                new_pids = _claude_cli_pids(session_id) - baseline_pids
                 if new_pids:
                     break
                 time.sleep(0.5)
             assert new_pids, (
                 "expected a claude-sdk CLI child process to be running after turn 1; "
-                f"baseline={baseline_pids}, now={_claude_cli_pids(agent_name)}"
+                f"baseline={baseline_pids}, now={_claude_cli_pids(session_id)}"
             )
             new_pids = _single_cli_launch(new_pids)
             for pid in new_pids:
@@ -228,7 +255,7 @@ def test_next_turn_recovers_when_claude_cli_was_terminated(
             expect(page.locator(_WORKING)).to_have_count(0, timeout=180_000)
             expect(page.locator(_ERROR_PILL)).to_have_count(0)
             expect(page.get_by_text(_TERMINATED_TEXT)).to_have_count(0)
-            replacement_pids = _single_cli_launch(_claude_cli_pids(agent_name) - baseline_pids)
+            replacement_pids = _single_cli_launch(_claude_cli_pids(session_id) - baseline_pids)
             assert replacement_pids.isdisjoint(new_pids)
         finally:
             httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)

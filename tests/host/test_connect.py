@@ -34,6 +34,7 @@ from websockets.http11 import Response
 from omnigent import debug_logging
 from omnigent.host import HOST_FATAL_EXIT_CODE
 from omnigent.host.connect import (
+    RUNNER_FORWARDED_NAMES_ENV_VAR,  # CORAL(S117)
     HostConnectError,
     HostProcess,
     HostRetryableConnectionError,
@@ -136,7 +137,10 @@ from omnigent.runner.identity import (
     RUNNER_WORKSPACE_ENV_VAR,
     token_bound_runner_id,
 )
-from omnigent.runner.launch_secrets import LAUNCH_SECRETS_FD_ENV_VAR  # CORAL(S117)
+from omnigent.runner.launch_secrets import (  # CORAL(S117)
+    HARNESS_LAUNCH_FD_ENV_VAR,  # CORAL(S118)
+    LAUNCH_SECRETS_FD_ENV_VAR,
+)
 from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
 from tests._helpers.polling import poll_until, poll_until_async  # CORAL(S108)
 from tests._helpers.providers import isolate_provider_resolution
@@ -5486,11 +5490,13 @@ def test_build_runner_env_passthrough_extends_forwarded_set() -> None:
         "HOME": "/root",
         # CORAL(S117): the daemon's own fd number never names a runner's launch socket.
         "OMNIGENT_RUNNER_ENV_PASSTHROUGH": "MY_GATEWAY_TOKEN, MY_GATEWAY_URL,"
-        + LAUNCH_SECRETS_FD_ENV_VAR,
+        + LAUNCH_SECRETS_FD_ENV_VAR
+        + f",{HARNESS_LAUNCH_FD_ENV_VAR}",  # CORAL(S118): nor a harness's
         "MY_GATEWAY_TOKEN": "tok-123",
         "MY_GATEWAY_URL": "https://llm.internal.example.com",
         "UNLISTED_SECRET": "nope",
         LAUNCH_SECRETS_FD_ENV_VAR: "7",
+        HARNESS_LAUNCH_FD_ENV_VAR: "8",  # CORAL(S118)
     }
 
     env = _build_runner_env(
@@ -5507,10 +5513,78 @@ def test_build_runner_env_passthrough_extends_forwarded_set() -> None:
     assert env["MY_GATEWAY_URL"] == "https://llm.internal.example.com"
     # Anything unnamed stays behind the allowlist.
     assert "UNLISTED_SECRET" not in env
-    assert LAUNCH_SECRETS_FD_ENV_VAR not in env  # CORAL(S117)
-    assert LAUNCH_SECRETS_FD_ENV_VAR not in _zygote_base_env(base)  # CORAL(S117)
-    # CORAL(S117): a fd number, so no credential detector may flag its name.
-    assert not _credential_shaped_env_name(LAUNCH_SECRETS_FD_ENV_VAR)
+    # CORAL(S117, S118): fd numbers, so no credential detector may flag their names.
+    for fd_env_var in (LAUNCH_SECRETS_FD_ENV_VAR, HARNESS_LAUNCH_FD_ENV_VAR):
+        assert fd_env_var not in env
+        assert fd_env_var not in _zygote_base_env(base)
+        assert not _credential_shaped_env_name(fd_env_var)
+
+
+def test_build_runner_env_names_every_forwarded_credential_but_no_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CORAL(S117): a runner learns the names it was forwarded, so a Coral harness can drop them.
+
+    A second provider's ``api_key_ref: env:MY_PROVIDER_KEY`` is forwarded by config alone.
+    """
+    config = {
+        "providers": {
+            "second-provider": {
+                "kind": "gateway",
+                "openai": {
+                    "api_key_ref": "env:MY_PROVIDER_KEY",
+                    "base_url": "https://second.example/v1",
+                    "models": {"default": "m"},
+                },
+            }
+        }
+    }
+    monkeypatch.setattr("omnigent.onboarding.provider_config.load_config", lambda: config)
+    values = {
+        name: f"sk-test-{os.urandom(16).hex()}"
+        for name in ("ANTHROPIC_API_KEY", "MY_PROVIDER_KEY", "PASSED_THROUGH")
+    }
+    base = {
+        "PATH": "/usr/bin",
+        "HOME": "/root",
+        "OMNIGENT_RUNNER_ENV_PASSTHROUGH": f"PASSED_THROUGH,{RUNNER_FORWARDED_NAMES_ENV_VAR}",
+        RUNNER_FORWARDED_NAMES_ENV_VAR: "STALE_NAME",
+        "UNLISTED_SECRET": "not-forwarded",
+        **values,
+    }
+
+    env = _build_runner_env(
+        base,
+        server_url="http://server",
+        runner_id="runner_abc",
+        binding_token="tok",
+        workspace="/ws",
+        parent_pid=42,
+    )
+
+    names = env[RUNNER_FORWARDED_NAMES_ENV_VAR]
+    assert names == "ANTHROPIC_API_KEY,MY_PROVIDER_KEY,PASSED_THROUGH"
+    assert sorted(name for name, value in values.items() if value in names) == []
+    # No credential word in its name, and the zygote's exec env never holds it.
+    assert not _credential_shaped_env_name(RUNNER_FORWARDED_NAMES_ENV_VAR)
+    assert RUNNER_FORWARDED_NAMES_ENV_VAR not in _zygote_base_env(base)
+
+
+def test_build_runner_env_names_nothing_when_nothing_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("omnigent.onboarding.provider_config.load_config", dict)
+
+    env = _build_runner_env(
+        {"PATH": "/usr/bin", "HOME": "/root"},
+        server_url="http://server",
+        runner_id="runner_abc",
+        binding_token="tok",
+        workspace="/ws",
+        parent_pid=42,
+    )
+
+    assert RUNNER_FORWARDED_NAMES_ENV_VAR not in env
 
 
 def test_dispatch_trace_context_reaches_runner_but_not_daemon(

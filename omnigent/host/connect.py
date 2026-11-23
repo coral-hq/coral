@@ -221,6 +221,7 @@ from omnigent.runner.identity import (
     token_bound_runner_id,
 )
 from omnigent.runner.launch_secrets import (  # CORAL(S117)
+    HARNESS_LAUNCH_FD_ENV_VAR,  # CORAL(S118)
     LAUNCH_SECRETS_FD_ENV_VAR,
     launch_secrets_in_pipe,
 )
@@ -1006,7 +1007,10 @@ _ZYGOTE_ONLY_ENV_NAMES: frozenset[str] = frozenset(
 _ZYGOTE_SEARCH_PATH_ENV_NAMES: frozenset[str] = frozenset({"LD_LIBRARY_PATH", "PYTHONPATH"})
 # CORAL(S117): a fd number in the daemon's own env names nothing a runner may read as its
 # launch socket, so no env the host builds carries one; a direct spawn sets its own.
-_LAUNCH_SECRETS_FD_ENV_VARS: frozenset[str] = frozenset({LAUNCH_SECRETS_FD_ENV_VAR})
+# CORAL(S118): the same holds for a harness's launch socket.
+_LAUNCH_SECRETS_FD_ENV_VARS: frozenset[str] = frozenset(
+    {LAUNCH_SECRETS_FD_ENV_VAR, HARNESS_LAUNCH_FD_ENV_VAR}
+)
 # CORAL(S117): a ``scheme://user:password@host`` authority; its userinfo may be a credential.
 _URL_USERINFO = re.compile(r"(?<=[A-Za-z0-9+.-])://[^/?#@\s]*@")
 # CORAL(S117): the name parts probe 15 counts as credentials (any case); with the suffixes and
@@ -1081,6 +1085,19 @@ HARNESS_CREDENTIAL_ENV_VARS: frozenset[str] = frozenset(
 # SDK knobs). Operator-controlled: the host owner names exactly what
 # their runners need; everything unnamed stays behind the allowlist.
 RUNNER_ENV_PASSTHROUGH_ENV_VAR: str = "OMNIGENT_RUNNER_ENV_PASSTHROUGH"
+# CORAL(S117): the names (never the values) of the credentials forwarded to a runner,
+# comma-separated, so a Coral harness can keep each one out of its CLI's environment.
+RUNNER_FORWARDED_NAMES_ENV_VAR: str = "OMNIGENT_RUNNER_FORWARDED_NAMES"
+
+
+def env_name_list(raw: str) -> frozenset[str]:
+    """CORAL(S117): the names in a comma-separated list such as the passthrough variable.
+
+    :param raw: The list, e.g. ``" MY_TOKEN, MY_URL,"``; blanks around names are ignored.
+    :returns: The non-empty names.
+    """
+    return frozenset(name.strip() for name in raw.split(",") if name.strip())
+
 
 # HTTP statuses on the WebSocket upgrade that are worth retrying. Everything
 # else in the 4xx range is a permanent client error (auth, authorization,
@@ -1224,11 +1241,7 @@ def _build_runner_env(
         host janitor. ``None`` preserves the standalone runner default.
     :returns: The runner subprocess environment.
     """
-    extra_names = {
-        name.strip()
-        for name in base_env.get(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "").split(",")
-        if name.strip()
-    }
+    extra_names = env_name_list(base_env.get(RUNNER_ENV_PASSTHROUGH_ENV_VAR, ""))  # CORAL(S117)
     # Forward env vars that the providers config references via
     # ``api_key_ref: env:VAR`` or ``api_key: $VAR``. Without this, a user
     # who configures a gateway provider with a custom env var (e.g.
@@ -1250,9 +1263,12 @@ def _build_runner_env(
             inference_config, include_dollar_key_refs=True
         )
     forwarded = HARNESS_CREDENTIAL_ENV_VARS | extra_names | config_env_vars
-    forwarded -= _LAUNCH_SECRETS_FD_ENV_VARS  # CORAL(S117): not even when passthrough names it
+    # CORAL(S117): not even when passthrough names them; the name list is this host's own
+    forwarded -= _LAUNCH_SECRETS_FD_ENV_VARS | {RUNNER_FORWARDED_NAMES_ENV_VAR}
     allowlisted = _runner_allowlisted_env(base_env)  # CORAL(S117): shared with the zygote's env
     env = {key: value for key, value in base_env.items() if key in allowlisted or key in forwarded}
+    if forwarded_names := sorted(name for name in env if name in forwarded):  # CORAL(S117)
+        env[RUNNER_FORWARDED_NAMES_ENV_VAR] = ",".join(forwarded_names)
     # Runners start in the session workspace, so resolve a relative override here.
     if auth_status_file := env.get("OMNIGENT_MCP_AUTH_STATUS_FILE"):
         env["OMNIGENT_MCP_AUTH_STATUS_FILE"] = str(Path(auth_status_file).expanduser().absolute())

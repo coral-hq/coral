@@ -2184,6 +2184,7 @@ class ClaudeSDKExecutor(Executor):
         require_api_credential: bool = False,
         tool_call_policy_hook: bool = False,
         isolate_claude_config: bool = False,  # CORAL(S113)
+        credential_env: Mapping[str, str] | None = None,  # CORAL(S118)
     ) -> None:
         """Create a ClaudeSDKExecutor.
 
@@ -2269,6 +2270,9 @@ class ClaudeSDKExecutor(Executor):
                 private directory instead of the user's: per launch inside a sandbox
                 wrap, else this executor's own. Refuse turns when *os_env* configures a
                 sandbox that could not wrap the CLI.
+            credential_env: CORAL(S118): a Coral harness's environment from before it
+                dropped the credentials its CLI must not inherit, for running the
+                credential command; ``None`` outside a Coral harness on POSIX.
         """
         # Fail loud: a Databricks model requires the gateway transport.
         if not gateway and model is not None and is_databricks_model_id(model):
@@ -2289,6 +2293,8 @@ class ClaudeSDKExecutor(Executor):
         # executor's own dir for a CLI that runs unwrapped
         self._isolate_claude_config = isolate_claude_config
         self._claude_config_isolated = False
+        # CORAL(S118): kept for running the credential command, never for the CLI's env
+        self._credential_env = dict(credential_env) if credential_env is not None else None
         self._unwrapped_claude_config_dir: pathlib.Path | None = None
         # CORAL(S115): the seed a wrapped non-Coral CLI's launcher copies in. Its dir is made
         # at the first launch, and again if it goes missing; after close, a launch fails.

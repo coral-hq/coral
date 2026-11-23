@@ -6948,6 +6948,62 @@ async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral,
     assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "inherited-oauth"
 
 
+# CORAL(S118): the host forwards these to a harness; a Coral harness's CLI gets none of them.
+@pytest.mark.parametrize(
+    "host_env",
+    [
+        {"MY_KEY": "<key>"},
+        {"OMNIGENT_ANTHROPIC_API_KEY": "<host secret>"},
+        {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_BEARER_TOKEN_BEDROCK": "<host secret>"},
+    ],
+    ids=["env-ref-key", "omnigent-prefixed-key", "bedrock-host-env"],
+)
+async def test_coral_harness_cli_env_holds_no_forwarded_credential(
+    monkeypatch, tmp_path, host_env
+):
+    import secrets
+    import shlex
+
+    from omnigent.inner import claude_sdk_harness
+
+    key = f"sk-ant-test-{secrets.token_hex(16)}"
+    host_secret = f"sk-ant-test-{secrets.token_hex(16)}"
+    values = {"<key>": key, "<host secret>": host_secret}
+    host_env = {name: values.get(value, value) for name, value in host_env.items()}
+    environ = {
+        "PATH": os.defpath,
+        "HOME": str(tmp_path),
+        "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL": "1",
+        "HARNESS_CLAUDE_SDK_API_KEY_HELPER": f"printf %s {shlex.quote(key)}",
+        **host_env,
+    }
+    monkeypatch.setattr(os, "environ", environ)
+    monkeypatch.setattr(claude_sdk_harness, "IS_POSIX", True)
+    # The subject is the CLI's environment, so this turn needs no OS sandbox.
+    monkeypatch.setattr(claude_sdk_harness, "_resolve_os_env", lambda config: None)
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor._find_system_claude", lambda: None)
+    factories = []
+    real_adapter = claude_sdk_harness.ExecutorAdapter
+
+    def recording_adapter(*, executor_factory, **kwargs):
+        factories.append(executor_factory)
+        return real_adapter(executor_factory=executor_factory, **kwargs)
+
+    monkeypatch.setattr(claude_sdk_harness, "ExecutorAdapter", recording_adapter)
+    claude_sdk_harness.create_app()
+
+    # The first build and a rebuild from the same factory.
+    for executor in (factories[0](), factories[0]()):
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        (client,) = fake_sdk.created_clients
+        for env in (spawn_envs[0], client.options.env):
+            assert sorted(set(host_env) & set(env)) == []
+            assert sorted(name for name in env if name.startswith("HARNESS_CLAUDE_SDK_")) == []
+            assert sorted(name for name, v in env.items() if key in v or host_secret in v) == []
+
+
 @pytest.mark.parametrize(
     ("sandbox_type", "binary_present"),
     [(None, True), ("none", True), ("windows_jobobject", True), ("linux_bwrap", False)],

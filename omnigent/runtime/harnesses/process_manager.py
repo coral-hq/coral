@@ -38,7 +38,7 @@ from typing import Any
 
 import httpx
 
-from omnigent._platform import IS_WINDOWS
+from omnigent._platform import IS_POSIX, IS_WINDOWS  # CORAL(S118)
 from omnigent.debug_logging import debug_event
 from omnigent.harness_plugins import missing_install_packages
 from omnigent.inner import _proc
@@ -46,6 +46,11 @@ from omnigent.inner._subprocess_lifecycle import close_subprocess_transport
 from omnigent.inner.agent_env import strip_desktop_session_env
 from omnigent.native.owner_claim import owner_is_gone, read_owner_claim, write_owner_claim
 from omnigent.runner.identity import strip_runner_auth_secrets
+from omnigent.runner.launch_secrets import (  # CORAL(S118)
+    CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
+    HARNESS_LAUNCH_FD_ENV_VAR,
+    launch_secrets_in_pipe,
+)
 from omnigent.runtime.harnesses import _HARNESS_MODULES
 from omnigent.runtime.harnesses._harness_zygote_client import (
     HarnessZygoteClient,
@@ -107,6 +112,12 @@ _TMP_PARENT_ENV_VAR = HARNESS_TMP_PARENT_ENV_VAR
 # reachable by any local process; on POSIX (uid-isolated UDS) it is defence in
 # depth.
 _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
+
+# CORAL(S118): the harness modules that read key-bearing config from a launch socket, and
+# its names; on POSIX direct exec these travel in the socket, never in the harness's env
+_LAUNCH_SECRET_ENV_VARS_BY_MODULE: dict[str, frozenset[str]] = {
+    "omnigent.inner.claude_sdk_harness": CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
+}
 
 # Sentinel each instance writes into its subdir on boot; the orphan sweep uses it
 # to tell a still-running sibling from a crashed one (kill children, remove dir).
@@ -555,6 +566,7 @@ def _build_harness_spawn_env(env: dict[str, str] | None) -> dict[str, str]:
     merged = strip_desktop_session_env(os.environ)
     if env:
         merged.update(env)
+    merged.pop(HARNESS_LAUNCH_FD_ENV_VAR, None)  # CORAL(S118): only a spawn's own socket sets it
     return strip_runner_auth_secrets(merged)
 
 
@@ -1349,7 +1361,8 @@ class HarnessProcessManager:
             str(parent_pid),
         ]
         spawn_started_at = time.monotonic()
-        process = await self._spawn_harness_process(runner_argv, effective_env)
+        # CORAL(S118): the module picks what a direct exec sends through a launch socket
+        process = await self._spawn_harness_process(runner_argv, effective_env, module_path)
         try:
             await _wait_for_bind(process, endpoint, harness, conversation_id)
             # The harness process has bound its socket and is ready to serve —
@@ -1434,6 +1447,7 @@ class HarnessProcessManager:
         self,
         runner_argv: list[str],
         effective_env: dict[str, str],
+        module_path: str,  # CORAL(S118)
     ) -> Any:
         """Spawn the harness ``_runner``, via the zygote fork path or direct exec.
 
@@ -1447,7 +1461,11 @@ class HarnessProcessManager:
 
         :param runner_argv: The ``_runner`` CLI flags (``--harness`` … ``--parent-pid``).
         :param effective_env: The harness subprocess environment.
+        :param module_path: CORAL(S118): the harness module, which picks the names that a
+            POSIX direct exec sends through a launch socket; a fork's payload never reaches
+            an exec-time environment, so it keeps them.
         :returns: The process handle (real ``Process`` or ``ZygoteHarnessProc``).
+        :raises RuntimeError: CORAL(S118): if the launch socket cannot be sent.
         """
         zygote = self._harness_zygote
         if zygote is not None and not self._harness_zygote_disabled:
@@ -1458,18 +1476,35 @@ class HarnessProcessManager:
                     "Harness zygote unavailable (%s); falling back to direct exec", exc
                 )
                 self._harness_zygote_disabled = True
-        return await asyncio.create_subprocess_exec(
-            sys.executable,
-            # -P keeps the inherited workspace cwd off sys.path so it can't
-            # shadow the installed omnigent the harness module comes from.
-            "-P",
-            "-m",
-            "omnigent.runtime.harnesses._runner",
-            *runner_argv,
-            stdout=None,
-            stderr=None,
-            env=effective_env,
-        )
+        # CORAL(S118): on POSIX a claude-sdk harness's key travels in a socket, not its env
+        secret_names = _LAUNCH_SECRET_ENV_VARS_BY_MODULE.get(module_path, frozenset())
+        with contextlib.ExitStack() as launch:
+            try:
+                spawn_env, secret_fds = launch.enter_context(
+                    launch_secrets_in_pipe(
+                        effective_env,
+                        secret_names if IS_POSIX else frozenset[str](),
+                        fd_env_var=HARNESS_LAUNCH_FD_ENV_VAR,
+                    )
+                )
+            except OSError as exc:
+                # A spawn failure callers handle; the type alone, so no value can surface.
+                raise RuntimeError(
+                    f"harness launch secrets could not be sent ({type(exc).__name__})"
+                ) from None
+            return await asyncio.create_subprocess_exec(
+                sys.executable,
+                # -P keeps the inherited workspace cwd off sys.path so it can't
+                # shadow the installed omnigent the harness module comes from.
+                "-P",
+                "-m",
+                "omnigent.runtime.harnesses._runner",
+                *runner_argv,
+                stdout=None,
+                stderr=None,
+                env=spawn_env,  # CORAL(S118)
+                pass_fds=secret_fds,  # CORAL(S118)
+            )
 
     async def _close_entry(self, entry: _SubprocessEntry) -> None:
         """

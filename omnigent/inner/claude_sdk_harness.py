@@ -90,16 +90,25 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping, MutableMapping  # CORAL(S118)
 from pathlib import Path
 
 from fastapi import FastAPI
 
+from omnigent._platform import IS_POSIX  # CORAL(S118)
+from omnigent.inner.claude_gateway_shim import static_printf_value  # CORAL(S118)
 from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import Executor
 from omnigent.inner.os_env_serialization import decode_sandbox_spec
+from omnigent.runner.launch_secrets import (  # CORAL(S118)
+    CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
+    HARNESS_LAUNCH_FD_ENV_VAR,
+    adopt_launch_secrets,
+)
 from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 from omnigent.spec.types import RetryPolicy
+from omnigent.util.env_credentials import env_names_with_omnigent_prefix  # CORAL(S118)
 
 _logger = logging.getLogger(__name__)
 
@@ -134,6 +143,55 @@ _ENV_REQUIRE_API_CREDENTIAL = "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL"
 _ENV_TOOL_CALL_POLICY_HOOK = "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK"
 # CORAL(S113): set for Coral specs; the CLI keeps its Claude config in a private dir
 _ENV_ISOLATE_CLAUDE_CONFIG = "HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG"
+# CORAL(S118): every name above starts with this; create_app() takes them all as config
+_ENV_PREFIX = "HARNESS_CLAUDE_SDK_"
+# CORAL(S118): switches that route a CLI around the credential it is given (the pinned CLI
+# reads each provider's USE and SKIP_..._AUTH); the executor sets CLAUDE_CODE_USE_GATEWAY in
+# the CLI's own env where the gateway needs it
+_CLAUDE_PROVIDERS = (
+    "BEDROCK",
+    "VERTEX",
+    "FOUNDRY",
+    "MANTLE",
+    "ANTHROPIC_AWS",
+    "ANTHROPIC_GOOGLE_CLOUD",
+)
+_CORAL_DROPPED_SWITCHES: frozenset[str] = frozenset(
+    {
+        "CLAUDE_CODE_USE_GATEWAY",
+        *(f"CLAUDE_CODE_USE_{provider}" for provider in _CLAUDE_PROVIDERS),
+        *(f"CLAUDE_CODE_SKIP_{provider}_AUTH" for provider in _CLAUDE_PROVIDERS),
+    }
+)
+# CORAL(S118): process and network essentials, and model routing, that the Coral scrub never
+# drops, by name or by value; LC_* too
+_CORAL_PROTECTED_NAMES: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "TERM",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+        *env_names_with_omnigent_prefix("ANTHROPIC_MODEL"),
+    }
+)
+# CORAL(S118): protected in any case, unless the value carries userinfo (the proxy's
+# credentials); the pre-scrub snapshot keeps every one for the proxy's upstream client
+_CORAL_PROXY_NAMES: frozenset[str] = frozenset(
+    {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"}
+)
+# CORAL(S118): a shorter key also occurs in ordinary values (a placeholder "local" is in
+# /usr/local/bin), so its copies are not searched for; a real provider key is far longer
+_MIN_SCANNED_LITERAL_CHARS = 20
 
 # Default permission mode for the Claude SDK. ``"auto"`` auto-approves
 # tool calls with background safety checks that verify actions align
@@ -141,7 +199,7 @@ _ENV_ISOLATE_CLAUDE_CONFIG = "HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG"
 _DEFAULT_PERMISSION_MODE = "auto"
 
 
-def _resolve_os_env() -> OSEnvSpec:
+def _resolve_os_env(config: Mapping[str, str] | None = None) -> OSEnvSpec:  # CORAL(S118)
     """
     Resolve the inner-executor :class:`OSEnvSpec` from env config.
 
@@ -154,10 +212,13 @@ def _resolve_os_env() -> OSEnvSpec:
     non-AP path, where the natives are visible without
     any explicit opt-in.
 
+    :param config: The harness config, e.g. from :func:`_take_harness_config`;
+        ``os.environ`` when ``None``.
     :returns: An :class:`OSEnvSpec` to hand to
         :class:`ClaudeSDKExecutor`.
     """
-    raw = os.environ.get(_ENV_OS_ENV, "").strip()
+    harness_config = os.environ if config is None else config  # CORAL(S118)
+    raw = harness_config.get(_ENV_OS_ENV, "").strip()
     if raw:
         try:
             payload = json.loads(raw)
@@ -190,7 +251,7 @@ def _resolve_os_env() -> OSEnvSpec:
     )
 
 
-def _resolve_retry_policy() -> RetryPolicy:
+def _resolve_retry_policy(config: Mapping[str, str] | None = None) -> RetryPolicy:  # CORAL(S118)
     """
     Resolve the inner-executor :class:`RetryPolicy` from env config.
 
@@ -207,10 +268,13 @@ def _resolve_retry_policy() -> RetryPolicy:
     bad config in logs than fail to start. Phase 1f of
     ``designs/RETRY_ACROSS_HARNESSES.md``.
 
+    :param config: The harness config, e.g. from :func:`_take_harness_config`;
+        ``os.environ`` when ``None``.
     :returns: A :class:`RetryPolicy` to hand to
         :class:`ClaudeSDKExecutor`.
     """
-    raw = os.environ.get(_ENV_RETRY_POLICY, "").strip()
+    harness_config = os.environ if config is None else config  # CORAL(S118)
+    raw = harness_config.get(_ENV_RETRY_POLICY, "").strip()
     if not raw:
         return RetryPolicy()
     try:
@@ -224,7 +288,9 @@ def _resolve_retry_policy() -> RetryPolicy:
         return RetryPolicy()
 
 
-def _resolve_skills_filter() -> str | list[str]:
+def _resolve_skills_filter(
+    config: Mapping[str, str] | None = None,
+) -> str | list[str]:  # CORAL(S118)
     """
     Resolve the inner-executor ``skills_filter`` from env config.
 
@@ -234,9 +300,12 @@ def _resolve_skills_filter() -> str | list[str]:
     to ``"all"`` — the SDK's default behavior of loading every
     host-discovered skill.
 
+    :param config: The harness config, e.g. from :func:`_take_harness_config`;
+        ``os.environ`` when ``None``.
     :returns: ``"all"``, ``"none"``, or a list of skill names.
     """
-    raw = os.environ.get(_ENV_SKILLS_FILTER, "").strip()
+    harness_config = os.environ if config is None else config  # CORAL(S118)
+    raw = harness_config.get(_ENV_SKILLS_FILTER, "").strip()
     if not raw:
         return "all"
     try:
@@ -260,7 +329,74 @@ def _resolve_skills_filter() -> str | list[str]:
     return "all"
 
 
-def _build_claude_sdk_executor() -> Executor:
+def _take_harness_config(environ: MutableMapping[str, str] | None = None) -> dict[str, str]:
+    """CORAL(S118): move this harness's config out of the environment the SDK hands the CLI.
+
+    :param environ: The environment to take from; ``os.environ`` when ``None``.
+    :returns: Every ``HARNESS_CLAUDE_SDK_*`` name with its value.
+    """
+    source = os.environ if environ is None else environ
+    return {name: source.pop(name) for name in [n for n in source if n.startswith(_ENV_PREFIX)]}
+
+
+def _scrub_coral_environ(
+    config: Mapping[str, str], environ: MutableMapping[str, str] | None = None
+) -> dict[str, str] | None:
+    """CORAL(S118): for a Coral harness on POSIX, drop what its CLI must not inherit.
+
+    The SDK copies the harness's environment whole into every CLI it starts, so this pops,
+    never to restore: every forwarded credential, every name listed for passthrough or as
+    forwarded by the host, the provider and gateway switches, every name whose value holds
+    the configured static key, and proxy settings that carry userinfo. The protected
+    process and network essentials stay.
+
+    :param config: The harness config from :func:`_take_harness_config`.
+    :param environ: The environment to scrub; ``os.environ`` when ``None``.
+    :returns: The environment as it was, for a credential command or the proxy's upstream
+        client, which may need what the CLI must not hold; ``None`` when nothing was scrubbed.
+    """
+    if config.get(_ENV_REQUIRE_API_CREDENTIAL) != "1" or not IS_POSIX:
+        return None
+    # The host's forwarding list; imported here because only a Coral harness needs it.
+    from omnigent.host.connect import (
+        HARNESS_CREDENTIAL_ENV_VARS,
+        RUNNER_ENV_PASSTHROUGH_ENV_VAR,
+        RUNNER_FORWARDED_NAMES_ENV_VAR,
+        env_name_list,
+    )
+
+    source = os.environ if environ is None else environ
+    snapshot = dict(source)
+    dropped = (
+        HARNESS_CREDENTIAL_ENV_VARS
+        | env_name_list(source.get(RUNNER_ENV_PASSTHROUGH_ENV_VAR, ""))
+        | env_name_list(source.get(RUNNER_FORWARDED_NAMES_ENV_VAR, ""))
+        | _CORAL_DROPPED_SWITCHES
+    )
+    literals = [
+        literal
+        for name in CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS
+        if (literal := static_printf_value(config.get(name, ""))) is not None
+        and len(literal) >= _MIN_SCANNED_LITERAL_CHARS
+    ]
+    for name, value in list(source.items()):
+        if name.upper() in _CORAL_PROXY_NAMES:
+            # An @ in a proxy setting is userinfo, with or without a scheme.
+            drop = "@" in value
+        elif name in _CORAL_PROTECTED_NAMES or name.startswith("LC_"):
+            drop = False
+        else:
+            drop = name in dropped or any(literal in value for literal in literals)
+        if drop:
+            del source[name]
+    return snapshot
+
+
+def _build_claude_sdk_executor(
+    config: Mapping[str, str] | None = None,
+    *,
+    credential_env: Mapping[str, str] | None = None,
+) -> Executor:
     """
     Construct a :class:`ClaudeSDKExecutor` from env-var config.
 
@@ -270,16 +406,20 @@ def _build_claude_sdk_executor() -> Executor:
     see the failure surface as a startup error on the first
     request, not at FastAPI app boot.
 
+    :param config: CORAL(S118): the harness config :func:`create_app` took, reused by
+        every rebuild; ``None`` reads ``os.environ``.
+    :param credential_env: CORAL(S118): a Coral harness's environment before the scrub.
     :returns: A configured :class:`ClaudeSDKExecutor` instance.
     :raises OSError: If ``HARNESS_CLAUDE_SDK_GATEWAY`` is set
         but credentials are missing — the inner executor's
         constructor fails loud (matches its existing behavior).
     """
-    gateway_raw = os.environ.get(_ENV_GATEWAY, "").strip().lower()
+    harness_config = os.environ if config is None else config  # CORAL(S118)
+    gateway_raw = harness_config.get(_ENV_GATEWAY, "").strip().lower()
     gateway = gateway_raw in ("1", "true", "yes")
-    bundle_dir_raw = os.environ.get(_ENV_BUNDLE_DIR, "").strip()
+    bundle_dir_raw = harness_config.get(_ENV_BUNDLE_DIR, "").strip()
     bundle_dir = Path(bundle_dir_raw) if bundle_dir_raw else None
-    agent_name_raw = os.environ.get(_ENV_AGENT_NAME, "").strip()
+    agent_name_raw = harness_config.get(_ENV_AGENT_NAME, "").strip()
     agent_name = agent_name_raw or None
     return ClaudeSDKExecutor(
         # Run the CLI in the session workspace: an explicit
@@ -290,27 +430,28 @@ def _build_claude_sdk_executor() -> Executor:
         # daemon's $HOME — disagreeing with the terminal and rooting the
         # sandbox at the whole home dir. Mirrors goose / kimi / pi / qwen
         # / hermes harness cwd resolution.
-        cwd=os.environ.get(_ENV_CWD) or os.environ.get("OMNIGENT_RUNNER_WORKSPACE") or None,
-        os_env=_resolve_os_env(),
-        model=os.environ.get(_ENV_MODEL),
-        permission_mode=os.environ.get(_ENV_PERMISSION_MODE, _DEFAULT_PERMISSION_MODE),
-        system_prompt_preset=os.environ.get(_ENV_SYSTEM_PROMPT_PRESET) or None,
+        cwd=harness_config.get(_ENV_CWD) or os.environ.get("OMNIGENT_RUNNER_WORKSPACE") or None,
+        os_env=_resolve_os_env(harness_config),
+        model=harness_config.get(_ENV_MODEL),
+        permission_mode=harness_config.get(_ENV_PERMISSION_MODE, _DEFAULT_PERMISSION_MODE),
+        system_prompt_preset=harness_config.get(_ENV_SYSTEM_PROMPT_PRESET) or None,
         gateway=gateway,
-        databricks_profile=os.environ.get(_ENV_DATABRICKS_PROFILE),
-        gateway_host=os.environ.get(_ENV_GATEWAY_HOST) or None,
-        base_url_override=os.environ.get(_ENV_GATEWAY_BASE_URL) or None,
-        gateway_auth_command=os.environ.get(_ENV_GATEWAY_AUTH_COMMAND) or None,
-        gateway_auth_refresh_interval_ms=os.environ.get(_ENV_GATEWAY_AUTH_REFRESH_INTERVAL_MS)
+        databricks_profile=harness_config.get(_ENV_DATABRICKS_PROFILE),
+        gateway_host=harness_config.get(_ENV_GATEWAY_HOST) or None,
+        base_url_override=harness_config.get(_ENV_GATEWAY_BASE_URL) or None,
+        gateway_auth_command=harness_config.get(_ENV_GATEWAY_AUTH_COMMAND) or None,
+        gateway_auth_refresh_interval_ms=harness_config.get(_ENV_GATEWAY_AUTH_REFRESH_INTERVAL_MS)
         or None,
-        retry_policy=_resolve_retry_policy(),
+        retry_policy=_resolve_retry_policy(harness_config),
         bundle_dir=bundle_dir,
         agent_name=agent_name,
-        skills_filter=_resolve_skills_filter(),
-        api_key_helper=os.environ.get(_ENV_API_KEY_HELPER) or None,
+        skills_filter=_resolve_skills_filter(harness_config),
+        api_key_helper=harness_config.get(_ENV_API_KEY_HELPER) or None,
         # CORAL(S13, S21)
-        require_api_credential=os.environ.get(_ENV_REQUIRE_API_CREDENTIAL) == "1",
-        tool_call_policy_hook=os.environ.get(_ENV_TOOL_CALL_POLICY_HOOK) == "1",
-        isolate_claude_config=os.environ.get(_ENV_ISOLATE_CLAUDE_CONFIG) == "1",  # CORAL(S113)
+        require_api_credential=harness_config.get(_ENV_REQUIRE_API_CREDENTIAL) == "1",
+        tool_call_policy_hook=harness_config.get(_ENV_TOOL_CALL_POLICY_HOOK) == "1",
+        isolate_claude_config=harness_config.get(_ENV_ISOLATE_CLAUDE_CONFIG) == "1",  # CORAL(S113)
+        credential_env=credential_env,  # CORAL(S118)
     )
 
 
@@ -329,5 +470,16 @@ def create_app() -> FastAPI:
         :class:`ClaudeSDKExecutor` is constructed lazily on the
         first turn.
     """
-    adapter = ExecutorAdapter(executor_factory=_build_claude_sdk_executor)
+    config = _take_harness_config()  # CORAL(S118): once; every executor build reuses it
+    # CORAL(S118): a direct-exec harness gets its key-bearing config over its launch socket,
+    # straight into the config, never into os.environ
+    adopt_launch_secrets(
+        config,
+        fd_env_var=HARNESS_LAUNCH_FD_ENV_VAR,
+        allowed=CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
+    )
+    credential_env = _scrub_coral_environ(config)  # CORAL(S118)
+    adapter = ExecutorAdapter(
+        executor_factory=lambda: _build_claude_sdk_executor(config, credential_env=credential_env)
+    )
     return adapter.build()

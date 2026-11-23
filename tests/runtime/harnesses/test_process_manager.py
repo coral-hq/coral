@@ -24,23 +24,34 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib  # CORAL(S118)
 import json
 import logging
 import os
+import secrets  # CORAL(S118)
 import shutil
 import signal
+import stat  # CORAL(S118)
 import sys
 import tempfile
 import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any  # CORAL(S118)
 
 import httpx
+import psutil  # CORAL(S118)
 import pytest
 
+from omnigent.host.connect import RUNNER_FORWARDED_NAMES_ENV_VAR  # CORAL(S118)
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
-from omnigent.runtime.harnesses import _HARNESS_MODULES
+from omnigent.runner.launch_secrets import (  # CORAL(S118)
+    CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
+    HARNESS_LAUNCH_FD_ENV_VAR,
+    MAX_LAUNCH_SECRETS_BYTES,
+)
+from omnigent.runtime.harnesses import _HARNESS_MODULES, process_manager  # CORAL(S118)
 from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from omnigent.runtime.harnesses.process_manager import (
     _AP_PID_FILE,
@@ -1810,6 +1821,212 @@ async def test_get_client_env_override_is_per_conversation(
         assert resp_b.json()["value"] == "beta"
     finally:
         await manager.shutdown()
+
+
+# ── CORAL(S118): a claude-sdk harness's key travels in a launch socket on direct exec ──
+
+_CLAUDE_SDK_CONFIG_HARNESS = "claude-sdk-config"
+_CLAUDE_SDK_CONFIG_MODULE = "tests.runtime.harnesses._claude_sdk_config_harness"
+_API_KEY_HELPER = "HARNESS_CLAUDE_SDK_API_KEY_HELPER"
+_GATEWAY_AUTH_COMMAND = "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND"
+
+
+def _digest(value: str) -> str:
+    """Compare secrets by digest, so a failure prints none of them."""
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+@pytest.mark.posix_only  # the launch socket is POSIX-only
+async def test_direct_exec_claude_sdk_harness_holds_its_key_in_config_not_env(
+    manager: HarnessProcessManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(_HARNESS_MODULES, _CLAUDE_SDK_CONFIG_HARNESS, _CLAUDE_SDK_CONFIG_MODULE)
+    monkeypatch.setitem(
+        process_manager._LAUNCH_SECRET_ENV_VARS_BY_MODULE,
+        _CLAUDE_SDK_CONFIG_MODULE,
+        CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
+    )
+    helper = f"printf %s sk-ant-test-{secrets.token_hex(16)}"
+    command = f"printf %s gateway-test-{secrets.token_hex(16)}"
+    env = {
+        _API_KEY_HELPER: helper,
+        _GATEWAY_AUTH_COMMAND: command,
+        "HARNESS_CLAUDE_SDK_MODEL": "claude-test-model",
+    }
+    await manager.start()
+    try:
+        client = await manager.get_client("conv_key", _CLAUDE_SDK_CONFIG_HARNESS, env=env)
+        readable = set(psutil.Process(manager._entries["conv_key"].process.pid).environ())
+        in_memory = (await client.get("/environ-names")).json()
+        config = (await client.get("/executor-config")).json()
+    finally:
+        await manager.shutdown()
+
+    # Its exec-time env names the socket's fd and keeps only the config that holds no key.
+    expected = {
+        _API_KEY_HELPER: False,
+        _GATEWAY_AUTH_COMMAND: False,
+        HARNESS_LAUNCH_FD_ENV_VAR: True,
+        "HARNESS_CLAUDE_SDK_MODEL": True,
+    }
+    assert {name: name in readable for name in expected} == expected
+    assert [
+        name
+        for name in in_memory
+        if name.startswith("HARNESS_CLAUDE_SDK_") or name == HARNESS_LAUNCH_FD_ENV_VAR
+    ] == []
+    assert config == {"api_key_helper": _digest(helper), "gateway_auth_command": _digest(command)}
+
+
+async def test_other_harnesses_keep_env_delivery(manager: HarnessProcessManager) -> None:
+    helper = f"printf %s sk-ant-test-{secrets.token_hex(16)}"
+    await manager.start()
+    try:
+        client = await manager.get_client(
+            "conv_other", _TEST_HARNESS_NAME, env={_API_KEY_HELPER: helper}
+        )
+        delivered = (await client.get(f"/env/{_API_KEY_HELPER}")).json()["value"]
+        fd_var = (await client.get(f"/env/{HARNESS_LAUNCH_FD_ENV_VAR}")).json()["value"]
+    finally:
+        await manager.shutdown()
+
+    delivered_digest = None if delivered is None else _digest(delivered)
+    sent_digest = _digest(helper)
+    assert delivered_digest == sent_digest
+    assert fd_var is None
+
+
+@pytest.mark.parametrize(
+    "spawn_path",
+    [
+        "zygote-fork",
+        "exec-off-posix",
+        pytest.param("exec-posix", marks=pytest.mark.posix_only),
+    ],
+)
+async def test_claude_sdk_key_travels_in_a_socket_only_on_a_posix_direct_exec(
+    manager: HarnessProcessManager,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    spawn_path: str,
+) -> None:
+    """A fork's payload reaches only the forked harness's memory; off POSIX there is no socket.
+
+    The runner's list of forwarded names reaches the harness on every path.
+    """
+    # A fake-only runner environment, so no frame of the spawn can hold a real value.
+    environ = {
+        "PATH": os.defpath,
+        "HOME": str(tmp_path),
+        HARNESS_LAUNCH_FD_ENV_VAR: "9",  # stale, in the runner's own env
+        RUNNER_FORWARDED_NAMES_ENV_VAR: "MY_PROVIDER_KEY",
+    }
+    monkeypatch.setattr(os, "environ", environ)
+    helper = f"printf %s sk-ant-test-{secrets.token_hex(16)}"
+    sent_digest = _digest(helper)
+    # Digests and flags only.
+    spawns: list[tuple[str | None, str | None, list[bool], str | None]] = []
+    passed: list[tuple[int, int]] = []
+
+    def record(env: dict[str, str], pass_fds: tuple[int, ...] = ()) -> None:
+        sent = env.get(_API_KEY_HELPER)
+        named = env.get(HARNESS_LAUNCH_FD_ENV_VAR)
+        fd_named = None if named is None else "passed" if named in map(str, pass_fds) else "stale"
+        passed.extend((fd, os.fstat(fd).st_ino) for fd in pass_fds)
+        sockets = [stat.S_ISSOCK(os.fstat(fd).st_mode) for fd in pass_fds]
+        forwarded = env.get(RUNNER_FORWARDED_NAMES_ENV_VAR)
+        spawns.append((_digest(sent) if sent else None, fd_named, sockets, forwarded))
+        raise RuntimeError("stop after the spawn request")
+
+    class _RecordingZygote:
+        async def fork_harness(self, argv: list[str], env: dict[str, str]) -> None:
+            record(env)
+
+    async def recording_exec(*args: object, env: dict[str, str], **kwargs: Any) -> None:
+        record(env, kwargs.get("pass_fds", ()))
+
+    await manager.start()
+    if spawn_path == "zygote-fork":
+        manager._harness_zygote = _RecordingZygote()  # type: ignore[assignment]
+    else:
+        monkeypatch.setattr(process_manager, "IS_POSIX", spawn_path == "exec-posix")
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_exec)
+    try:
+        with pytest.raises(RuntimeError, match="stop after the spawn request"):
+            await manager.get_client("conv_key", "claude-sdk", env={_API_KEY_HELPER: helper})
+    finally:
+        await manager.shutdown()
+
+    if spawn_path == "exec-posix":
+        # The real claude-sdk module sends its key in one socket, closed here after the spawn.
+        assert spawns == [(None, "passed", [True], "MY_PROVIDER_KEY")]
+        assert [fd for fd, inode in passed if _still_open(fd, inode)] == []
+    else:
+        # The key stays in the env, no stale fd number survives, and no socket is passed.
+        assert spawns == [(sent_digest, None, [], "MY_PROVIDER_KEY")]
+
+
+def _still_open(fd: int, inode: int) -> bool:
+    """Whether *fd* still names *inode*, not a later file that reused the number."""
+    try:
+        return os.fstat(fd).st_ino == inode
+    except OSError:
+        return False
+
+
+@pytest.mark.posix_only  # the launch socket is POSIX-only
+async def test_a_harness_refusing_its_launch_socket_fails_the_spawn_without_its_values(
+    manager: HarnessProcessManager,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setitem(_HARNESS_MODULES, _CLAUDE_SDK_CONFIG_HARNESS, _CLAUDE_SDK_CONFIG_MODULE)
+    # The socket also carries a name the harness does not accept from it.
+    monkeypatch.setitem(
+        process_manager._LAUNCH_SECRET_ENV_VARS_BY_MODULE,
+        _CLAUDE_SDK_CONFIG_MODULE,
+        CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS | {"HARNESS_CLAUDE_SDK_MODEL"},
+    )
+    helper = f"printf %s sk-ant-test-{secrets.token_hex(16)}"
+    model = f"model-test-{secrets.token_hex(16)}"
+    env = {_API_KEY_HELPER: helper, "HARNESS_CLAUDE_SDK_MODEL": model}
+    await manager.start()
+    try:
+        with pytest.raises(RuntimeError, match="exited with 2 during spawn"):
+            await manager.get_client("conv_refused", _CLAUDE_SDK_CONFIG_HARNESS, env=env)
+    finally:
+        await manager.shutdown()
+
+    captured = capfd.readouterr()
+    assert HARNESS_LAUNCH_FD_ENV_VAR in captured.err
+    assert [name for name, value in env.items() if value in captured.out + captured.err] == []
+
+
+@pytest.mark.posix_only  # the launch socket is POSIX-only
+async def test_an_unsendable_launch_socket_fails_the_spawn_as_a_runtime_error(
+    manager: HarnessProcessManager, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The runner's spawn handlers catch ``RuntimeError``; the message names no value."""
+    monkeypatch.setattr(os, "environ", {"PATH": os.defpath, "HOME": str(tmp_path)})
+    # Over the socket's payload cap, so the send fails before any process starts.
+    helper = f"printf %s sk-ant-test-{secrets.token_hex(16)}{'x' * MAX_LAUNCH_SECRETS_BYTES}"
+    spawned: list[bool] = []
+
+    async def recording_exec(*args: object, **kwargs: Any) -> None:
+        spawned.append(True)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_exec)
+    await manager.start()
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            await manager.get_client("conv_unsent", "claude-sdk", env={_API_KEY_HELPER: helper})
+    finally:
+        await manager.shutdown()
+
+    message = str(raised.value)
+    assert message == "harness launch secrets could not be sent (OSError)"
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__
+    assert spawned == []
 
 
 # ── Runner subprocess cleanup ──────────────────────

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex  # CORAL(S118)
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +21,7 @@ import uvicorn
 from omnigent.inner.claude_gateway_shim import (
     ClaudeGatewayShim,
     restore_thinking_display,
+    static_printf_value,  # CORAL(S118)
 )
 
 # ── restore_thinking_display unit tests ───────────────────
@@ -111,6 +113,30 @@ def test_restore_passes_through_unparseable_bodies(body: bytes) -> None:
     """Non-object JSON, invalid JSON, and non-dict thinking are forwarded
     verbatim rather than raising — the upstream owns request validation."""
     assert restore_thinking_display(body) == body
+
+
+# CORAL(S118): only the exact form written for a static key is a literal; anything else runs.
+@pytest.mark.parametrize(
+    "value", ["sk-ant-test-0123abcd", "it's a key", "$HOME `id` ;|&", "line\nbreak", ""]
+)
+def test_static_printf_value_reads_a_quoted_literal_back(value: str) -> None:
+    assert static_printf_value(f"printf %s {shlex.quote(value)}") == value
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'printf %s "$MY_KEY"',
+        "printf '%s' sk-ant-test",
+        "printf  %s sk-ant-test",
+        "printf %s sk-ant-test extra",
+        "printf %s 'unbalanced",
+        "databricks auth token --host https://example.cloud.databricks.com",
+        "",
+    ],
+)
+def test_static_printf_value_treats_other_commands_as_commands(command: str) -> None:
+    assert static_printf_value(command) is None
 
 
 # ── shim integration tests (real local upstream) ──────────

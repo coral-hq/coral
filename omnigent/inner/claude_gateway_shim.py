@@ -33,6 +33,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import shlex  # CORAL(S118)
 from collections.abc import Awaitable, Callable, Iterator, MutableMapping
 from typing import Any, TypeAlias
 
@@ -157,6 +158,24 @@ def restore_thinking_display(body: bytes) -> bytes:
     thinking["display"] = "summarized"
     logger.debug("Restored thinking.display=summarized for model %s", model)
     return json.dumps(parsed).encode("utf-8")
+
+
+def static_printf_value(command: str) -> str | None:
+    """CORAL(S118): the literal a static-key credential command prints, else ``None``.
+
+    Only the exact form written for a static key, ``"printf %s " + shlex.quote(value)``,
+    is a literal; any other command, however close, has to run.
+
+    :param command: A credential command, e.g. ``"printf %s sk-ant-..."``.
+    :returns: The literal, possibly ``""``, or ``None`` for a command to run.
+    """
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if len(words) != 3 or words[:2] != ["printf", "%s"]:
+        return None
+    return words[2] if command == f"printf %s {shlex.quote(words[2])}" else None
 
 
 class ClaudeGatewayShim:
