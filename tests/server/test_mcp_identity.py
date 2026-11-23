@@ -80,3 +80,24 @@ def test_runner_proven_matches_the_policy_actor_rule(
     assert mcp_policy_actor(request, turn, None) == (
         {"run_as": "turn@example.com"} if proven else None
     )
+
+
+@pytest.mark.parametrize(
+    ("token", "runner_id", "proven"),
+    [
+        pytest.param(_TOKEN, _RUNNER_ID, True, id="bound-to-the-session-runner"),
+        pytest.param(_SERVER_TOKEN, _RUNNER_ID, False, id="allow-listed"),
+        pytest.param(_SERVER_TOKEN, None, False, id="allow-listed-no-runner"),
+        pytest.param(
+            _SERVER_TOKEN, token_bound_runner_id(_SERVER_TOKEN), True, id="allow-listed-and-bound"
+        ),
+    ],
+)
+@pytest.mark.parametrize("label", ["coral.run_id", "Coral.Role"])
+def test_a_coral_session_takes_only_its_own_runner_token(
+    token: str, runner_id: str | None, proven: bool, label: str
+) -> None:
+    """CORAL(S49): the allow-list never proves a session with a ``coral.`` label."""
+    request = _request(token, frozenset({_SERVER_TOKEN}))
+
+    assert runner_proven(request, _conversation(runner_id, {label: "run-1"})) is proven

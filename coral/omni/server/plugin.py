@@ -977,6 +977,7 @@ async def coral_lifespan(
                     bound=bound,
                     bindings=bindings,
                     policy_store=services.policy_store,
+                    conversations=conv_store,
                 )
 
             stack.callback(

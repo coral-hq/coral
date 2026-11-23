@@ -142,6 +142,7 @@ def _tunnel_route_app(
     auth_provider: AuthProvider | None = None,
     resolve_managed_runner_owner: Callable[[str], str | None] | None = None,
     admit_managed_runner: Callable[[str], bool] | None = None,
+    requires_bound_token: Callable[[str], bool] | None = None,  # CORAL(S118)
 ) -> TunnelRouteApp:
     """Create a minimal app containing only the runner tunnel route.
 
@@ -165,6 +166,7 @@ def _tunnel_route_app(
             auth_provider=auth_provider,
             resolve_managed_runner_owner=resolve_managed_runner_owner,
             admit_managed_runner=admit_managed_runner,
+            requires_bound_token=requires_bound_token,
         ),
         prefix="/v1",
     )
@@ -2837,3 +2839,130 @@ async def test_sender_loop_ends_quietly_when_a_close_wins_mid_send() -> None:
     await asyncio.wait_for(frame_in_transport.wait(), timeout=5)
     await ws.close(code=4000)
     await asyncio.wait_for(sender, timeout=5)  # returns instead of raising
+
+
+# CORAL(S118): a Coral step's runner id connects only with its own binding token.
+async def _tunnel_close(
+    app: FastAPI, runner_id: str, token: str | None, client_host: str = "127.0.0.1"
+) -> dict[str, Any]:
+    """Connect a tunnel for *runner_id* with *token* (``None``: no header); return the close."""
+    headers = (
+        [] if token is None else [(RUNNER_TUNNEL_TOKEN_HEADER.lower().encode(), token.encode())]
+    )
+    communicator = ApplicationCommunicator(
+        app,
+        _websocket_scope(
+            f"/v1/runners/{runner_id}/tunnel", headers=headers, client_host=client_host
+        ),
+    )
+    await communicator.send_input({"type": "websocket.connect"})
+    assert (await communicator.receive_output(timeout=budget(5.0)))["type"] == "websocket.accept"
+    return await communicator.receive_output(timeout=budget(5.0))
+
+
+_TOKEN_REQUIRED = {
+    "type": "websocket.close",
+    "code": 4004,
+    "reason": "runner tunnel token is required",
+}
+
+
+async def test_a_token_less_loopback_tunnel_is_refused_for_a_coral_runner(
+    app: FastAPI, db_uri: str
+) -> None:
+    """The production app refuses a token-less loopback tunnel under a Coral step's runner id."""
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    token = "coral-step-token"
+    runner_id = token_bound_runner_id(token)
+    SqlAlchemyConversationStore(db_uri).create_conversation(
+        conversation_id="c" * 32,
+        agent_id="a" * 32,
+        runner_id=runner_id,
+        labels={"coral.run_id": "run-1"},
+    )
+
+    assert await _tunnel_close(app, runner_id, None) == _TOKEN_REQUIRED
+    assert app.state.tunnel_registry.online_runner_ids() == []
+    # Its own binding token still connects.
+    communicator = await _connect_route(
+        app,
+        f"/v1/runners/{runner_id}/tunnel",
+        headers=[(RUNNER_TUNNEL_TOKEN_HEADER.lower().encode(), token.encode())],
+    )
+    await _send_hello(communicator, app.state.tunnel_registry, runner_id=runner_id)
+    await communicator.send_input({"type": "websocket.disconnect", "code": 1000})
+    with contextlib.suppress(asyncio.TimeoutError):
+        await communicator.wait(timeout=budget(1.0))
+
+
+@pytest.mark.parametrize("client_host", ["127.0.0.1", "10.0.0.1"])
+async def test_an_allow_listed_tunnel_is_refused_for_a_coral_runner_on_an_accounts_server(
+    client_host: str,
+) -> None:
+    """With auth and an allow-list, no token-less or allow-listed tunnel claims a Coral runner."""
+    coral_runner = "runner_coral_step"
+    route_app = _tunnel_route_app(
+        allowed_tunnel_tokens=frozenset({"server-token"}),
+        auth_provider=_CredentialHeaderAuthProvider(),
+        requires_bound_token=lambda runner_id: runner_id == coral_runner,
+    )
+
+    assert await _tunnel_close(route_app.app, coral_runner, "server-token", client_host) == (
+        _TOKEN_REQUIRED
+    )
+    if client_host == "127.0.0.1":
+        assert await _tunnel_close(route_app.app, coral_runner, None) == _TOKEN_REQUIRED
+        # Another runner id keeps the token-less loopback path.
+        communicator = await _connect_route(route_app.app, "/v1/runners/runner_other/tunnel")
+        await _send_hello(communicator, route_app.registry, runner_id="runner_other")
+        await communicator.send_input({"type": "websocket.disconnect", "code": 1000})
+        with contextlib.suppress(asyncio.TimeoutError):
+            await communicator.wait(timeout=budget(1.0))
+    assert coral_runner not in route_app.registry.online_runner_ids()
+
+
+@pytest.mark.parametrize(
+    ("runner_id", "token", "client_host"),
+    [
+        pytest.param("runner_other", "server-token", "10.0.0.1", id="remote-allow-listed-other"),
+        pytest.param(
+            token_bound_runner_id("coral-step-token"),
+            "coral-step-token",
+            "127.0.0.1",
+            id="loopback-own-binding-token",
+        ),
+        pytest.param(
+            token_bound_runner_id("server-token"),
+            "server-token",
+            "127.0.0.1",
+            id="allow-listed-and-bound",
+        ),
+    ],
+)
+async def test_the_coral_fence_keeps_other_proofs_on_an_allow_listing_server(
+    runner_id: str, token: str, client_host: str
+) -> None:
+    """An allow-listed non-Coral runner, and a Coral runner's own token, still connect."""
+    coral_runners = {
+        "runner_coral_step",
+        token_bound_runner_id("coral-step-token"),
+        token_bound_runner_id("server-token"),
+    }
+    route_app = _tunnel_route_app(
+        allowed_tunnel_tokens=frozenset({"server-token"}),
+        requires_bound_token=coral_runners.__contains__,
+    )
+    communicator = await _connect_route(
+        route_app.app,
+        f"/v1/runners/{runner_id}/tunnel",
+        headers=[(RUNNER_TUNNEL_TOKEN_HEADER.lower().encode(), token.encode())],
+        client_host=client_host,
+    )
+    await _send_hello(communicator, route_app.registry, runner_id=runner_id)
+    try:
+        assert route_app.registry.online_runner_ids() == [runner_id]
+    finally:
+        await communicator.send_input({"type": "websocket.disconnect", "code": 1000})
+        with contextlib.suppress(asyncio.TimeoutError):
+            await communicator.wait(timeout=budget(1.0))

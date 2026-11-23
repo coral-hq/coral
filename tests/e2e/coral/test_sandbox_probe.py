@@ -934,6 +934,10 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
     _assert_pinned("probe 15", EXPECTED.get(sys.platform, {}), observed, written)
 
 
+# The server no longer takes this token as runner proof for a Coral session's /mcp calls or
+# tunnel, and runners strip it from their children. ``runner.names`` and ``harness.names``
+# stay pinned to it until the host spawns its runner zygote without its own environment:
+# a zygote-forked runner and harness still inherit the host's.
 EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
     # Pinned from one local run on macOS 27.2.1 with claude 2.1.325 (seatbelt).
     "darwin": {
@@ -970,8 +974,8 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
     outside, where a zygote-forked runner's or harness's environment is the host's own.
 
     Recorded with it: a host ``unknown`` counts as dead, so a relaunch can start while the
-    old runner lives on; on such a server runner-id rotation does not fence that runner,
-    since the server accepts the allow-listed token for every session (``mcp_identity.py``).
+    old runner lives on. The server takes the allow-listed token as runner proof only for a
+    session that is not Coral's (``mcp_identity.py``).
     """
     sk.require_claude_cli()
     mock = isolated_mock_llm_server_url

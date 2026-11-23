@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from coral.bridge.bound_sessions import BoundSession, BoundSessions
 from coral.stores.session_bindings import BindingNotFound, SessionBinding, SessionBindings
+from omnigent.db.db_models import workspace_scope
 
 _logger = logging.getLogger("coral.omni.server.rotation")
 
@@ -30,6 +31,30 @@ class _PolicyStore(Protocol):
         factory_params: dict[str, Any] | None = None,
         enabled: bool = True,
     ) -> Any: ...
+
+
+class _Conversations(Protocol):
+    def get_conversation(self, conversation_id: str) -> Any: ...
+
+    def set_labels(self, conversation_id: str, updates: dict[str, str]) -> None: ...
+
+
+def _carry_coral_labels(
+    workspace_id: int, old_id: str, new_id: str, conversations: _Conversations
+) -> None:
+    """Give *new_id* the ``coral.`` labels by which the server knows a session is Coral's."""
+    try:
+        with workspace_scope(workspace_id):
+            old = conversations.get_conversation(old_id)
+            labels = {
+                key: value
+                for key, value in (getattr(old, "labels", None) or {}).items()
+                if key.startswith("coral.")
+            }
+            if labels:
+                conversations.set_labels(new_id, labels)
+    except Exception:
+        _logger.exception("coral labels not carried old=%s new=%s", old_id, new_id)
 
 
 @dataclass
@@ -113,11 +138,13 @@ def follow_bound_supersession(
     bound: BoundSessions,
     bindings: SessionBindings,
     policy_store: _PolicyStore | None = None,
+    conversations: _Conversations | None = None,
 ) -> list[RotationFollowResult]:
     """Rebind every Coral workspace entry for *old_id* onto *new_id*.
 
     Transfers ``coral_session_bindings`` at the same generation, rekeys the
-    in-memory bound-session index, and best-effort re-attaches session policies.
+    in-memory bound-session index, and best-effort carries the ``coral.``
+    labels and re-attaches session policies.
     """
     if old_id == new_id:
         return []
@@ -141,6 +168,8 @@ def follow_bound_supersession(
             )
             continue
         bound.rekey(workspace_id, old_id, new_id)
+        if conversations is not None:
+            _carry_coral_labels(workspace_id, old_id, new_id, conversations)
         attached = _reattach_session_policies(old_id, new_id, policy_store)
         results.append(RotationFollowResult(workspace_id=workspace_id, binding=moved, bound=entry))
         _logger.info(
