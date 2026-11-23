@@ -60,6 +60,7 @@ pytestmark = [
         reason="requires explicit OMNIGENT_E2E_CLAUDE_NATIVE=1 and live Claude credentials",
     ),
     pytest.mark.timeout(480),
+    pytest.mark.usefixtures("real_claude_cli"),
 ]
 
 
