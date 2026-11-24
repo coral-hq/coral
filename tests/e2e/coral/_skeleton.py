@@ -9,6 +9,8 @@ tokens, deadlines and faults, and keep every assertion.
 from __future__ import annotations
 
 import contextlib
+import functools
+import itertools
 import json
 import os
 import re
@@ -20,6 +22,8 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -28,6 +32,7 @@ from typing import Any, TypeVar
 
 import httpx
 import psutil
+import pytest
 import yaml
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -41,9 +46,8 @@ from tests._helpers.host import Host, isolated_host
 from tests._helpers.live_server import terminate_process
 from tests._helpers.polling import poll_until
 from tests._helpers.server_runner import ServerRunner, server_runner
-from tests.e2e._harness_probes import cli_unavailable_reason, skip_if_harness_cli_missing
 from tests.e2e.conftest import configure_mock_llm, get_mock_message_requests
-from tests.e2e.coral._claude_sdk_kit import tool_results
+from tests.e2e.coral._claude_sdk_kit import KeychainStubs, install_keychain_stubs, tool_results
 from tests.e2e.coral._live_proxy import Secret
 from tests.e2e.coral.conftest import CORAL_TIER_B_HARNESS
 
@@ -62,6 +66,21 @@ _LAUNCHED_RUNNER = re.compile(
 _BRIEF_OPENING = "Coral step brief."
 # Kept from the test's environment; HOME and data dirs come from the helpers.
 _KEPT_ENV = ("LANG", "LC_ALL", "LC_CTYPE", "TMPDIR")
+# Every name a stack daemon's base environment may hold, each reviewed: none carries a
+# credential or points a tool at the developer's own (a token, an agent socket, a config dir).
+BASE_ENV_NAMES = frozenset(
+    {
+        *("LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "PATH"),
+        *("DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+        *("GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT"),
+    }
+)
+# Where a stack's processes have their homes, and what a login would leave in one: the macOS
+# login keychain's directory, and gh's stored hosts (also under the stack's GH_CONFIG_DIR).
+_STACK_HOMES = ("host/home", "server-home", "home")
+_LOGIN_TRACES = ("Library/Keychains", ".config/gh/hosts.yml")
+# The most call names one summary of the stand-ins' log shows.
+_SUMMARY_NAMES = 20
 # Appends the stack's config file to the server command line before the CLI parses it.
 _SERVER_BOOTSTRAP = """
 import os
@@ -95,7 +114,8 @@ class HostLaunch:
 @dataclass
 class Skeleton:
     """
-    One running stack; ``harness_tmp`` is the host's private harness socket root.
+    One running stack; ``harness_tmp`` is the host's private harness socket root, and
+    ``stubs`` the keychain stand-ins first on every stack process's ``PATH``.
 
     Without ``failure_log_tails``, as against a real model, failures carry no log text.
     ``respawned`` holds the hosts :func:`respawn_host` started; ``host`` is the newest.
@@ -108,6 +128,7 @@ class Skeleton:
     repo: Path
     harness_tmp: Path
     host_launch: HostLaunch
+    stubs: KeychainStubs
     failure_log_tails: bool = True
     respawned: list[Host] = field(default_factory=list)
     # The owner's JWT on a stack that requires identity; the client already sends it.
@@ -203,17 +224,63 @@ def _store_owner_login(home: Path, base_url: str, token: Secret) -> None:
         raise AssertionError(f"storing the owner's sign-in: {type(error).__name__}") from None
 
 
+@functools.cache
+def _claude_cli() -> tuple[str | None, str]:
+    """
+    Why the ``claude`` CLI cannot run here, if it cannot, and its version line: from one
+    ``--version`` a session. The pytest process never starts the CLI with its own
+    environment: the child gets :func:`minimal_env`, a throwaway home and config dir, and
+    keychain stand-ins first on its ``PATH``.
+    """
+    found = shutil.which("claude")
+    if found is None:
+        return "'claude' CLI is not on PATH", "unavailable (not on PATH)"
+    with tempfile.TemporaryDirectory(prefix="crl-cli-", ignore_cleanup_errors=True) as scratch:
+        home = Path(scratch) / "home"
+        home.mkdir()
+        stubs = install_keychain_stubs(Path(scratch) / "keychain-stubs" / "bin")
+        env = {
+            **stubs.first_on(minimal_env()),
+            "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+        }
+        try:
+            done = subprocess.run(
+                [found, "--version"],
+                env=env,
+                cwd=scratch,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            kind = type(error).__name__
+            return f"'claude' CLI at {found!r} is not runnable: {kind}", f"unavailable ({kind})"
+    version = done.stdout.strip() or f"exit {done.returncode}"
+    if done.returncode == 0:
+        return None, version
+    detail = (done.stderr or done.stdout).strip().splitlines()
+    suffix = f": {detail[0][:200]}" if detail else ""
+    return f"'claude' CLI at {found!r} exits {done.returncode}{suffix}", version
+
+
 def require_claude_cli() -> None:
     """Skip without a runnable ``claude`` CLI, or fail where the lane requires one."""
+    problem, _version = _claude_cli()
     if os.environ.get(REQUIRE_CLI_ENV) == "1":
-        reason = cli_unavailable_reason("claude")
-        assert reason is None, reason
-    skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)
+        assert problem is None, problem
+    if problem is not None:
+        pytest.skip(
+            f"{CORAL_TIER_B_HARNESS!r} harness requires a runnable 'claude' CLI; {problem}"
+        )
 
 
 def minimal_env() -> dict[str, str]:
     """
-    The environment every stack process starts from: no credential, no ambient CLI setup.
+    What the test's own ``git``, ``sh`` and probe children start from: no credential, no
+    ambient CLI setup. A stack's processes start from :func:`stack_env`, which puts the
+    stack's keychain stand-ins in front of this ``PATH``.
 
     The two switches turn off the CLI's self-update and non-essential traffic; the host
     forwards them to every step's CLI.
@@ -231,6 +298,35 @@ def minimal_env() -> dict[str, str]:
         DISABLE_AUTOUPDATER="1",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
     )
+    return env
+
+
+def stack_env(root: Path, stubs: KeychainStubs, tmp: Path) -> dict[str, str]:
+    """
+    The base environment of a stack's server and host, whose every name is in
+    :data:`BASE_ENV_NAMES`: :func:`minimal_env` with the stack's own temp dir and the stack's
+    keychain stand-ins first on ``PATH``, so a ``security`` or ``gh`` found through ``PATH``
+    is never the real one. ``gh`` and ``git`` are pointed at a login and a global config
+    under ``root``, where neither exists, and ``git`` may not prompt.
+
+    A program that runs ``/usr/bin/security`` by its full path, or asks the keychain
+    in-process, meets no stand-in: for those the barrier is the throwaway ``HOME`` the
+    helpers add.
+    """
+    env = stubs.first_on(
+        {
+            **minimal_env(),
+            "TMPDIR": str(tmp),
+            "GH_CONFIG_DIR": str(root / "gh"),
+            "GIT_CONFIG_GLOBAL": str(root / "gitconfig"),
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    unreviewed = sorted(set(env) - BASE_ENV_NAMES)
+    if unreviewed:
+        # A report with locals must show no value of a name that should not be here.
+        del env
+        raise AssertionError(f"unreviewed names in a stack's base environment: {unreviewed}")
     return env
 
 
@@ -296,11 +392,31 @@ def _under(path: str, needles: tuple[str, ...]) -> bool:
     return any(path == needle or path.startswith(needle + os.sep) for needle in needles)
 
 
+def _spellings(*paths: Path) -> tuple[str, ...]:
+    """
+    Each path as given and resolved: macOS resolves /tmp to /private/tmp, while a command
+    line or an environment keeps the one given.
+    """
+    spelled = (str(path).rstrip(os.sep) for given in paths for path in (given, given.resolve()))
+    return tuple(dict.fromkeys(spelled))
+
+
 def _argv(proc: psutil.Process) -> list[str]:
     try:
         return proc.cmdline()
     except (psutil.Error, OSError):
         return []
+
+
+def _runs_omnigent(argv: list[str]) -> bool:
+    """
+    Whether a command line runs an Omnigent module, as every process Omnigent starts of its
+    own does (``-m omnigent...``). A path that only holds the word does not count.
+    """
+    return any(
+        flag == "-m" and module.split(".")[0] == "omnigent"
+        for flag, module in itertools.pairwise(argv)
+    )
 
 
 def _omnigent_processes(needles: tuple[str, ...]) -> list[psutil.Process]:
@@ -329,7 +445,7 @@ def _omnigent_processes(needles: tuple[str, ...]) -> list[psutil.Process]:
 
 def cli_environs(root: Path) -> list[dict[str, str]]:
     """The environment of each live process the claude-sdk executor started a CLI with."""
-    needles = tuple(dict.fromkeys(str(path).rstrip(os.sep) for path in (root, root.resolve())))
+    needles = _spellings(root)
     found = []
     for proc in psutil.process_iter():
         with contextlib.suppress(psutil.Error, OSError):
@@ -350,11 +466,7 @@ class _StackProcesses:
     """
 
     def __init__(self, scopes: tuple[Path, ...]) -> None:
-        # Both spellings: macOS resolves /tmp to /private/tmp, argv keeps the one given.
-        spellings = (
-            str(path).rstrip(os.sep) for scope in scopes for path in (scope, scope.resolve())
-        )
-        self._needles = tuple(dict.fromkeys(spellings))
+        self._needles = _spellings(*scopes)
         self._descendants: dict[int, psutil.Process] = {}
 
     def remember(self, *pids: int | None) -> None:
@@ -381,6 +493,132 @@ class _StackProcesses:
         _, survivors = psutil.wait_procs(alive, timeout=5)
         names = process_names(survivors)
         assert not names, f"Stack processes survived teardown: {names}"
+
+
+def _started_with(proc: psutil.Process) -> tuple[str | None, str | None] | None:
+    """A process's exec-time ``PATH`` and ``HOME``; ``None`` if it is gone or neither was read."""
+    try:
+        environ = proc.environ()
+    except (psutil.Error, OSError):
+        return None
+    path, home = environ.get("PATH"), environ.get("HOME")
+    return None if path is None and home is None else (path, home)
+
+
+def keychain_bypasses(
+    stubs: KeychainStubs,
+    root: Path,
+    processes: Iterable[psutil.Process],
+    *,
+    unread_fails: bool = False,
+) -> list[str]:
+    """
+    ``pid:name`` of each process started outside the stack's keychain barrier: its ``PATH``
+    finds a keychain program elsewhere than the stack's stand-ins (by resolution, nothing
+    is run), or its ``HOME`` is not under the stack ``root``. Never a value of either.
+
+    psutil shows the environment a process was exec'd with. So this is evidence for the
+    server, the host, the runner zygote, a runner or harness exec'd directly, and each CLI;
+    a zygote-forked runner or harness shows its zygote's. A process that is gone, or whose
+    environment was not read, is skipped unless ``unread_fails``.
+    """
+    homes = _spellings(root)
+    outside = []
+    for proc in processes:
+        started = _started_with(proc)
+        if started is None:
+            if unread_fails:
+                outside.append(proc)
+            continue
+        path, home = started
+        if stubs.bypassed(path) or home is None or not _under(home.rstrip(os.sep), homes):
+            outside.append(proc)
+    return process_names(outside)
+
+
+def _checked_at_exit(daemons: Iterable[int]) -> list[psutil.Process]:
+    """
+    The live daemons and those of their descendants that are Omnigent processes or
+    ``claude`` CLIs. A ``git`` child, whose ``PATH`` production builds, is left out, whatever
+    paths its command line names.
+    """
+    found: dict[int, psutil.Process] = {}
+    for pid in daemons:
+        with contextlib.suppress(psutil.Error):
+            daemon = psutil.Process(pid)
+            found[pid] = daemon
+            below = daemon.children(recursive=True)
+            clis = {proc.pid for proc in claude_clis(below)}
+            for proc in below:
+                if proc.pid in clis or _runs_omnigent(_argv(proc)):
+                    found[proc.pid] = proc
+    return list(found.values())
+
+
+def keychain_problems(root: Path, stubs: KeychainStubs) -> list[str]:
+    """
+    What a stack must not leave, by name only: each stand-in call outside the expected ones
+    with its count, and a keychain or a ``gh`` login under its ``root``. An empty log says
+    only that nothing unexpected was recorded; a sandboxed CLI cannot write to it.
+    """
+    counts = Counter(stubs.unexpected())
+    problems = [f"{call} (x{count})" for call, count in sorted(counts.items())]
+    traces = [f"{home}/{trace}" for home in _STACK_HOMES for trace in _LOGIN_TRACES]
+    return problems + [trace for trace in ("gh/hosts.yml", *traces) if (root / trace).exists()]
+
+
+def keychain_calls_summary(stubs: KeychainStubs) -> str:
+    """
+    What the stand-ins were asked, by name and count, the most frequent first. At most
+    :data:`_SUMMARY_NAMES` names, each from the stand-ins' bounded vocabulary.
+    """
+    counts = Counter(stubs.calls())
+    ranked = sorted(counts.items(), key=lambda entry: (-entry[1], entry[0]))
+    shown = [f"{call} (x{count})" for call, count in ranked[:_SUMMARY_NAMES]]
+    more = f" and {len(ranked) - len(shown)} more names" if len(ranked) > len(shown) else ""
+    return f"{shown}{more}, {sum(counts.values())} in all"
+
+
+class KeychainStubCalls(UserWarning):
+    """A stack's :func:`keychain_calls_summary`, in pytest's warnings summary on any outcome."""
+
+
+@dataclass(frozen=True)
+class KeychainGuards:
+    """A stack's keychain checks: the three hooks :func:`skeleton_stack` installs."""
+
+    root: Path
+    stubs: KeychainStubs
+
+    def _inside(self, processes: Iterable[psutil.Process], *, unread_fails: bool) -> None:
+        outside = keychain_bypasses(self.stubs, self.root, processes, unread_fails=unread_fails)
+        assert not outside, (
+            "Stack processes started outside the keychain barrier "
+            f"(a PATH past the stack's stand-ins, or a HOME outside the stack): {outside}"
+        )
+
+    def started(self, *daemons: int) -> None:
+        """The daemons are live at start, so one whose environment cannot be read fails too."""
+        self._inside([psutil.Process(pid) for pid in daemons], unread_fails=True)
+
+    def exiting(self, daemons: Iterable[int]) -> None:
+        """The live daemons and what :func:`_checked_at_exit` finds below them, before a stop."""
+        self._inside(_checked_at_exit(daemons), unread_fails=False)
+
+    def ended(self) -> None:
+        """
+        Once every process has ended: warn with the stand-ins' calls, which a passing run
+        shows nowhere else, then fail on :func:`keychain_problems`.
+        """
+        summary = keychain_calls_summary(self.stubs)
+        warnings.warn(KeychainStubCalls(f"keychain stand-in calls: {summary}"), stacklevel=1)
+        problems = keychain_problems(self.root, self.stubs)
+        assert not problems, (
+            "The stack asked a keychain stand-in for a call outside the expected ones, or left "
+            f"a login: {problems}. A call names its subcommand and item as the stand-in bounded "
+            "them ('other' is a name outside its vocabulary). Add a read or a status query to "
+            "the expected calls; never a write."
+        )
 
 
 @contextmanager
@@ -426,11 +664,18 @@ def skeleton_stack(
     again by every restart. ``repo_files`` join the repository's first commit. At exit,
     a SIGTERM included, no process the stack started may survive.
 
+    Both daemons start from :func:`stack_env`. :class:`KeychainGuards` holds the rest: the
+    host and server at start, they and their live Omnigent and ``claude`` descendants at
+    exit, must have been exec'd inside the keychain barrier (:func:`keychain_bypasses`), and
+    once every process has ended the stand-ins' log may hold only the expected calls.
+
     With ``identity`` the server requires one: accounts with a throwaway cookie secret and
     first admin, :data:`IDENTITY_OWNER`. The host signs in with the owner's JWT, stored in
     its home before it starts, and the client sends it; every secret stays a :class:`Secret`.
     """
     root.mkdir(parents=True, exist_ok=True)
+    stubs = install_keychain_stubs(root / "keychain-stubs" / "bin")
+    guards = KeychainGuards(root, stubs)
     # Under /tmp to stay within the AF_UNIX path limit for harness sockets.
     harness_tmp = Path(tempfile.mkdtemp(dir="/tmp", prefix="crl-"))
     # The stack's own temp entries go here, short and removed with the stack.
@@ -438,13 +683,15 @@ def skeleton_stack(
     config = write_server_config(
         root / "server.yaml", mock_url=mock_url, lease_s=lease_s, grace_s=grace_s
     )
-    base_env = {**minimal_env(), "TMPDIR": str(stack_tmp)}
     processes = _StackProcesses((root, harness_tmp, stack_tmp))
     with ExitStack() as resources:
         resources.enter_context(_sigterm_unwinds())
         resources.callback(shutil.rmtree, harness_tmp, ignore_errors=True)
         resources.callback(shutil.rmtree, stack_tmp, ignore_errors=True)
+        # Registered before the reap, so it reads the log after every process has ended.
+        resources.callback(guards.ended)
         resources.callback(processes.reap)
+        base_env = stack_env(root, stubs, stack_tmp)
         server_env: dict[str, str | Secret | None] = {"CORAL_E2E_SERVER_CONFIG": str(config)}
         if allowlisted_token is None:
             server_env["OMNIGENT_RUNNER_TUNNEL_TOKEN"] = None
@@ -488,22 +735,25 @@ def skeleton_stack(
         )
         respawned: list[Host] = []
         resources.callback(lambda: [terminate_process(again.proc) for again in respawned])
-        # Runs first at exit, while the daemons still hold their children; a daemon that
-        # already ended is skipped, since its pid may belong to another process by now.
-        resources.callback(
-            lambda: processes.remember(
-                *(
-                    daemon.pid
-                    for daemon in (host.proc, *(again.proc for again in respawned), server.server)
-                    if daemon is not None and daemon.poll() is None
-                )
-            )
-        )
+
+        def live_daemons() -> list[int]:
+            # One that already ended is skipped: its pid may belong to another process by now.
+            daemons = (host.proc, *(again.proc for again in respawned), server.server)
+            return [
+                daemon.pid for daemon in daemons if daemon is not None and daemon.poll() is None
+            ]
+
+        # Runs at exit while the daemons still hold their children.
+        resources.callback(lambda: processes.remember(*live_daemons()))
+        # Runs first at exit, as a step of its own: its failure skips no later teardown step.
+        resources.callback(lambda: guards.exiting(live_daemons()))
         _reported(
             failure_log_tails,
             "The host's start",
             lambda: host.wait_online(client, timeout=health_timeout, poll_interval=0.25),
         )
+        assert server.server is not None
+        guards.started(host.proc.pid, server.server.pid)
         launched = psutil.Process(host.proc.pid)
         launch = HostLaunch(tuple(host.proc.args), launched.environ(), launched.cwd())
         info = client.get("/v1/coral/info")
@@ -517,6 +767,7 @@ def skeleton_stack(
             repo,
             harness_tmp,
             launch,
+            stubs,
             failure_log_tails=failure_log_tails,
             respawned=respawned,
             owner_token=owner_token,
@@ -591,7 +842,7 @@ def wait_for(
 
     With ``run_id``, a run whose status is in ``ends_on`` (paused, failed or cancelled)
     while the probe has nothing ends the wait at once. Either failure carries the run's
-    detail, ``claude --version`` and, unless the stack turned them off, its log tails; a
+    detail, the CLI's version line and, unless the stack turned them off, its log tails; a
     probe's own assertion is raised as it is.
     """
     found: list[_T] = []
@@ -642,14 +893,8 @@ def _diagnosis(headline: str, skeleton: Skeleton, run_id: str | None) -> str:
 
 
 def claude_version() -> str:
-    """The CLI's own version line, or why it could not be read."""
-    try:
-        done = subprocess.run(
-            ["claude", "--version"], capture_output=True, text=True, timeout=30, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return f"unavailable ({type(error).__name__})"
-    return done.stdout.strip() or f"exit {done.returncode}"
+    """The CLI's own version line, or why it could not be read; see :func:`_claude_cli`."""
+    return _claude_cli()[1]
 
 
 def review_loop_yaml(

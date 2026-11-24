@@ -36,6 +36,12 @@ SANDBOX_PROBES = {
     "test_probe_15_from_a_step_shell",
     "test_a_step_on_a_server_with_the_allow_listed_runner_token",
 }
+# A stack's own PATH must resolve ``security`` and ``gh`` to its stand-ins on macOS and on
+# Linux, so these stay in the one file both lanes run.
+KEYCHAIN_GUARDS = {
+    "test_every_stack_daemon_starts_with_the_keychain_stubs_first",
+    "test_a_stack_environment_resolves_the_keychain_programs_to_its_stubs",
+}
 
 
 def _groups() -> dict[str, dict[str, str]]:
@@ -72,7 +78,7 @@ def test_the_lane_collects_every_coral_e2e_proof_and_the_proxy_unit_test() -> No
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     }
 
-    assert collected >= SIGKILL_PROOFS | RUNNER_LOSS_PROOFS | SANDBOX_PROBES
+    assert collected >= SIGKILL_PROOFS | RUNNER_LOSS_PROOFS | SANDBOX_PROBES | KEYCHAIN_GUARDS
     assert PROXY_UNIT_TEST in paths
     assert "test_a_failing_live_run_shows_its_key_nowhere_in_the_report" in collected
 
@@ -139,7 +145,9 @@ def test_the_macos_lane_runs_the_seatbelt_tests_on_sandbox_changes() -> None:
     assert "schedule" in triggers
     # Every test in the files, the identity probe among them, runs with the pinned CLI.
     assert run["run"].split("uv run pytest", 1)[1].split()[: len(MACOS_TESTS)] == MACOS_TESTS
-    assert "test_probe_15_on_a_server_that_requires_identity" in (ROOT / SANDBOX_PROBE).read_text()
+    probes = (ROOT / SANDBOX_PROBE).read_text()
+    assert "test_probe_15_on_a_server_that_requires_identity" in probes
+    assert all(f"def {guard}(" in probes for guard in KEYCHAIN_GUARDS)
     [claude] = [step for step in steps if step.get("id") == "claude_cli"]
     assert claude["uses"] == "./.github/actions/setup-harness-cli"
     assert any(f"{REQUIRE_CLI_ENV}=1" in str(step.get("run", "")) for step in steps)

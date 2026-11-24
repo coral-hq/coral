@@ -18,7 +18,8 @@ own credential proxy with no session token. The second test runs one step on a s
 the allow-listed runner token, with the host exporting it. The third runs one step on a
 server that requires identity, after the same probe ran outside the sandbox and reached
 every owner path it tries. The plain tests at the end run the probe on synthetic
-targets, with no stack.
+targets, with no stack; the last of them check the keychain stand-ins every stack puts
+first on its processes' ``PATH``, and the guards that name a process started past them.
 
 Canaries, the allow-listed token and the identity stack's secrets are held in
 :class:`Secret` and the probe's output is reduced to its verdicts where it is read. Only
@@ -28,11 +29,13 @@ in the stack's start or teardown prints that throwaway value.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import functools
 import hashlib
 import http.server
+import inspect
 import json
 import mmap
 import os
@@ -41,6 +44,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import struct
@@ -49,13 +53,14 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.parse
 import uuid
 from collections import Counter
 from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import httpx
@@ -79,9 +84,16 @@ from omnigent.inner.os_env import _DEFAULT_ENV_PASSTHROUGH
 from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
 from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from tests._helpers.live_server import find_free_port, terminate_process
+from tests._helpers.polling import poll_until
 from tests.e2e.conftest import get_mock_message_requests, release_mock_gate
 from tests.e2e.coral import _skeleton as sk
-from tests.e2e.coral._claude_sdk_kit import LOCAL_HOSTS, EgressRecorder
+from tests.e2e.coral._claude_sdk_kit import (
+    KEYCHAIN_PROGRAMS,
+    LOCAL_HOSTS,
+    EgressRecorder,
+    KeychainStubs,
+    install_keychain_stubs,
+)
 from tests.e2e.coral._live_proxy import Secret
 
 # Absolute deadline for a scenario, below the marker's limit.
@@ -139,6 +151,8 @@ PROXY_PROBE_MODEL = "crl-credential-proxy-probe"
 # The runner tokens the probe looks for in an exec-time environment: a binding token that
 # mints an owner JWT, and the host's bearer. A host-launched POSIX runner's holds neither.
 RUNNER_CREDENTIALS = ("OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN", "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN")
+# The call a stack host's readiness probe makes on every platform: its copilot row asks gh.
+HOST_GH_PROBE = "gh auth token"
 
 
 @dataclass(frozen=True)
@@ -1211,6 +1225,14 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         implementer = sk.step_session(client, run_id, "implement")
         runner = sk.runner_pid(stack, implementer)
         step = sk.step_processes(runner, _session_cli(stack, runner, implementer))
+        # Each was exec'd, or forked from a zygote that was, inside the stack's keychain barrier.
+        outside = sk.keychain_bypasses(stack.stubs, stack.root, step.values(), unread_fails=True)
+        assert not outside, f"step processes started outside the keychain barrier: {outside}"
+        # The stubs' log works: the host's readiness probe asks gh for a token on every platform.
+        wait(
+            lambda: True if HOST_GH_PROBE in stack.stubs.calls() else None,
+            "the host's gh probe to reach the stack's stub",
+        )
         recorded = _recorded(stack, _harness_socket(stack, implementer))
         names = {f"{role}.names": _token_names(proc) for role, proc in step.items()}
         # The CLI holds a session token for a loopback proxy of its own, never the mock's URL.
@@ -1293,7 +1315,9 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         **{check: token for check, token in verdicts.items() if not check.startswith("control_")},
         **names,
     }
-    report = {"verdicts": observed, "recorded": recorded}
+    # Names and counts only: what the stack's processes asked a keychain program for.
+    stub_calls = dict(sorted(Counter(stack.stubs.calls()).items()))
+    report = {"verdicts": observed, "recorded": recorded, "keychain_stub_calls": stub_calls}
     written = _write_artifact("probe15-token", report)
     print(f"Allow-listed token on {sys.platform}:", json.dumps(report))
     _assert_recorded(recorded)
@@ -1683,10 +1707,19 @@ def _run_probe(targets: list[Target], env: Mapping[str, str], cwd: Path) -> Read
 
 
 @contextlib.contextmanager
-def _sleeper(env: Mapping[str, str], *argv: str) -> Iterator[int]:
-    """A Python child that waits with ``env`` and ``argv``; ended on exit."""
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *argv], env=env)
+def _sleeper(env: Mapping[str, str], *argv: str, ready: Path | None = None) -> Iterator[int]:
+    """
+    A Python child that waits with ``env`` and ``argv``; ended on exit. With ``ready``, it is
+    yielded once it has made that file: macOS execs a venv's interpreter twice, and between
+    the two the child's environment reads empty.
+    """
+    code = "import time; time.sleep(60)"
+    if ready is not None:
+        code = f"import pathlib; pathlib.Path({str(ready)!r}).touch(); {code}"
+    child = subprocess.Popen([sys.executable, "-c", code, *argv], env=env)
     try:
+        if ready is not None:
+            poll_until(ready.exists, interval_s=0.05)
         yield child.pid
     finally:
         terminate_process(child)
@@ -2714,3 +2747,448 @@ def test_a_stack_that_fails_to_start_shows_none_of_its_secrets(tmp_path: Path) -
         r"Host never came online",
     ):
         assert re.search(failure, report), failure
+
+
+def _stub_call(stubs: KeychainStubs, program: str, *argv: str) -> tuple[int, str]:
+    """
+    Run a stub by its own path; its status and all it printed. A fake value waits on its
+    input, a pipe that stays open: a stub that read to the end would not return, and one
+    that read a line would leave less than was written.
+    """
+    waiting = f"fake-stdin-{uuid.uuid4().hex}\n".encode()
+    reads, writes = os.pipe()
+    try:
+        os.write(writes, waiting)
+        done = subprocess.run(
+            [str(stubs.directory / program), *argv],
+            stdin=reads,
+            capture_output=True,
+            text=True,
+            env={},
+            timeout=30,
+            check=False,
+        )
+    finally:
+        os.close(writes)
+        with os.fdopen(reads, "rb") as unread:
+            left = unread.read()
+    assert left == waiting, "the stub read its input"
+    if stubs.log.is_file():
+        assert waiting.decode().strip() not in stubs.log.read_text(errors="replace")
+    return done.returncode, done.stdout + done.stderr
+
+
+def test_the_keychain_stubs_record_bounded_names_and_answer_as_no_login(tmp_path: Path) -> None:
+    stubs = install_keychain_stubs(tmp_path / "keychain-stubs" / "bin")
+    account, secret, long = "fake-account", f"sk-ant-test-{uuid.uuid4().hex}", "a" * 5000
+    asked = {
+        (
+            "security",
+            "find-generic-password",
+            "-a",
+            account,
+            "-w",
+            "-s",
+            "Claude Code-credentials",
+        ): ("security\tfind-generic-password\tClaude Code-credentials"),
+        ("security", "add-generic-password", "-a", account, "-s", "Fake Item", "-w", secret): (
+            "security\tadd-generic-password\tFake Item"
+        ),
+        ("security", "-i"): "security\t-i\t",
+        ("security", "show-keychain-info"): "security\tshow-keychain-info\t",
+        ("security", "Find-Generic-Password", "-s", "a tab\tand a\nnewline"): (
+            "security\tother\tother"
+        ),
+        ("security", long, "-s", long): "security\tother\tother",
+        ("security", "find-generic-password", "-s", f"{account}@fake/path", "-s"): (
+            "security\tfind-generic-password\tother"
+        ),
+        ("security",): "security\tother\t",
+        ("gh", "auth", "token", "--hostname", "fake.example.invalid"): "gh\tauth token\t",
+        (
+            "gh",
+            "secret",
+            "set",
+            "FAKE_NAME",
+            "--body",
+            secret,
+            "-s",
+            "ignored",
+        ): "gh\tsecret set\t",
+        ("gh", "api", f"repos/{account}/private"): "gh\tapi other\t",
+        ("gh",): "gh\tother other\t",
+    }
+    status = {"security": 44, "gh": 1}
+
+    answers = {call: _stub_call(stubs, *call) for call in asked}
+
+    # The real tools' "item not found" and "logged out", with nothing printed.
+    assert answers == {call: (status[call[0]], "") for call in asked}
+    # One line of bounded names per call: no account, secret, later argument or input.
+    assert stubs.log.read_text() == "".join(f"{line}\n" for line in asked.values())
+    assert stubs.calls()[:2] == [
+        "security find-generic-password Claude Code-credentials",
+        "security add-generic-password Fake Item",
+    ]
+    modes = {
+        path.relative_to(tmp_path).as_posix(): stat.S_IMODE(path.stat().st_mode)
+        for path in (
+            stubs.directory.parent,
+            stubs.directory,
+            stubs.log,
+            *stubs.directory.iterdir(),
+        )
+    }
+    assert modes == {
+        "keychain-stubs": 0o700,
+        "keychain-stubs/bin": 0o700,
+        "keychain-stubs/bin/security": 0o700,
+        "keychain-stubs/bin/gh": 0o700,
+        "keychain-stubs/calls.log": 0o600,
+    }
+    # A log that cannot be written changes neither the answer nor the silence.
+    stubs.log.unlink()
+    stubs.log.mkdir()
+    assert [_stub_call(stubs, program, "auth", "token") for program in KEYCHAIN_PROGRAMS] == [
+        (44, ""),
+        (1, ""),
+    ]
+    assert stubs.calls() == []
+
+
+def test_only_the_expected_keychain_calls_pass_and_any_other_is_named(tmp_path: Path) -> None:
+    stubs = install_keychain_stubs(tmp_path / "bin")
+    # The CLI's keychain reads and lock-state query, and the login checks through gh.
+    expected = [
+        "security\tfind-generic-password\tClaude Code",
+        "security\tfind-generic-password\tClaude Code-credentials",
+        "security\tfind-generic-password\tClaude Code-0a1b2c3d",
+        "security\tfind-generic-password\tClaude Code-credentials-0a1b2c3d",
+        "security\tfind-generic-password\tClaude Code-device-keys",
+        "security\tfind-generic-password\tClaude Code-doctor-probe",
+        "security\tshow-keychain-info\t",
+        "gh\tauth token\t",
+        "gh\tauth status\t",
+    ]
+    # A write, another item, a name the stub bounded to ``other``, any other gh call, another
+    # ``gh auth`` one among them; then two lines no stub writes.
+    others = [
+        ("security", "-i", ""),
+        ("security", "delete-generic-password", "Claude Code"),
+        ("security", "add-generic-password", "Claude Code-doctor-probe"),
+        ("security", "find-generic-password", "gh:github.com"),
+        ("security", "find-generic-password", "Claude Code-0A1B2C3D"),
+        ("security", "find-generic-password", "other"),
+        ("security", "find-generic-password", ""),
+        ("security", "show-keychain-info", "Claude Code"),
+        ("security", "other", ""),
+        ("gh", "api other", ""),
+        ("gh", "auth login", ""),
+        ("gh", "auth refresh", ""),
+        ("gh", "auth token", "Claude Code"),
+    ]
+    malformed = ["not a line a stub writes", "security\tfind-generic-password\tfake/path@host"]
+    unlisted = [*("\t".join(names) for names in others), *malformed]
+    guards = sk.KeychainGuards(tmp_path, stubs)
+
+    stubs.log.write_text("".join(f"{line}\n" for line in expected))
+    assert stubs.unexpected() == []
+    assert stubs.calls()[-2:] == [HOST_GH_PROBE, "gh auth status"]
+    stubs.log.write_text("".join(f"{line}\n" for line in (*expected, *unlisted, expected[0])))
+    # Each is named by its subcommand and its item, apart, as the stub bounded them.
+    named = [f"{program} subcommand {call!r} item {item!r}" for program, call, item in others]
+    assert stubs.unexpected() == [*named, "malformed", "malformed"]
+    # What a stack's teardown reports: each unexpected name with its count, nothing else.
+    stubs.log.write_text("security\t-i\t\n" * 3 + "gh\tapi other\t\n" + "gh\tauth token\t\n")
+    problems = ["gh subcommand 'api other' item '' (x1)", "security subcommand '-i' item '' (x3)"]
+    assert sk.keychain_problems(tmp_path, stubs) == problems
+    # And what it shows on any outcome: every call's name and count, in one warning.
+    calls = "['security -i (x3)', 'gh api other (x1)', 'gh auth token (x1)'], 5 in all"
+    with (
+        pytest.warns(sk.KeychainStubCalls) as shown,
+        pytest.raises(AssertionError, match=re.escape(f"left a login: {problems}. A call names")),
+    ):
+        guards.ended()
+    assert [str(warning.message) for warning in shown] == [f"keychain stand-in calls: {calls}"]
+    # A passing stack warns too, and a long log's summary stays a bounded list of names.
+    stubs.log.write_text("gh\tauth token\t\n")
+    with pytest.warns(sk.KeychainStubCalls, match=r": \['gh auth token \(x1\)'\], 1 in all$"):
+        guards.ended()
+    stubs.log.write_text("".join(f"gh\tauth token\t\ngh\tapi {'x' * n}\t\n" for n in range(1, 31)))
+    summary = sk.keychain_calls_summary(stubs)
+    assert summary.startswith("['gh auth token (x30)', 'gh api x (x1)', 'gh api xx (x1)', ")
+    assert summary.endswith("'] and 11 more names, 60 in all") and summary.count(" (x") == 20
+
+
+def test_a_stack_environment_resolves_the_keychain_programs_to_its_stubs(tmp_path: Path) -> None:
+    root = tmp_path / "stack"
+    stubs = install_keychain_stubs(root / "keychain-stubs" / "bin")
+    everything = list(KEYCHAIN_PROGRAMS)
+    plain = sk.minimal_env()["PATH"]
+
+    path = sk.stack_env(root, stubs, tmp_path / "t")["PATH"]
+
+    # By resolution only: nothing on either PATH is executed.
+    assert stubs.bypassed(path) == []
+    assert path.split(os.pathsep)[0] == str(stubs.directory)
+    # Without the stubs, macOS finds /usr/bin/security; a program found nowhere counts too.
+    assert stubs.bypassed(plain) == everything
+    shadow = install_keychain_stubs(tmp_path / "shadow" / "bin")
+    assert stubs.bypassed(shadow.first_on({"PATH": path})["PATH"]) == everything
+    (shadow.directory / "security").unlink()
+    assert stubs.bypassed(shadow.first_on({"PATH": path})["PATH"]) == ["gh"]
+    # An empty or relative entry ahead of the stubs searches the process's own directory.
+    for ahead in ("", "bin", "."):
+        assert stubs.bypassed(f"{ahead}{os.pathsep}{path}") == everything, ahead
+    assert stubs.bypassed(f"{path}{os.pathsep}") == []
+    assert stubs.bypassed("") == stubs.bypassed(None) == everything
+    # In front of an empty PATH the stubs stand alone, with no entry for the working directory.
+    alone = {"PATH": str(stubs.directory)}
+    assert stubs.first_on({}) == stubs.first_on({"PATH": ""}) == alone
+    given = {"PATH": "/usr/bin", "LANG": "C"}
+    assert stubs.first_on(given) == {**given, "PATH": f"{stubs.directory}{os.pathsep}/usr/bin"}
+    assert given == {"PATH": "/usr/bin", "LANG": "C"}
+
+
+def test_a_stack_base_environment_holds_only_reviewed_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "stack"
+    stubs = install_keychain_stubs(root / "keychain-stubs" / "bin")
+    # What a developer's shell may hold: none of it may reach a stack daemon.
+    ambient = (
+        *("SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL"),
+        *("XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "CLAUDE_CONFIG_DIR"),
+        *("ANTHROPIC_API_KEY", "KUBECONFIG", "GOOGLE_APPLICATION_CREDENTIALS", "USER"),
+    )
+    for name in ambient:
+        monkeypatch.setenv(name, f"/ambient/{name}")
+    for name in ("LANG", "LC_ALL", "LC_CTYPE"):
+        monkeypatch.setenv(name, "C")
+
+    env = sk.stack_env(root, stubs, tmp_path / "t")
+
+    assert set(env) == {
+        *("LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "PATH"),
+        *("DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+        *("GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT"),
+    }
+    assert set(env) == sk.BASE_ENV_NAMES
+    assert not [name for name, value in env.items() if "/ambient/" in value]
+    assert (env["TMPDIR"], env["GIT_TERMINAL_PROMPT"]) == (str(tmp_path / "t"), "0")
+    # gh and git read their login and global config under the stack's root, where none is.
+    for name in ("GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL"):
+        assert Path(env[name]).is_relative_to(root) and not Path(env[name]).exists(), name
+    # A name kept without a review here fails by name, before any daemon starts.
+    monkeypatch.setattr(sk, "_KEPT_ENV", (*sk._KEPT_ENV, "SSH_AUTH_SOCK"))
+    with pytest.raises(AssertionError, match=r"unreviewed names.*\['SSH_AUTH_SOCK'\]") as failed:
+        sk.stack_env(root, stubs, tmp_path / "t")
+    # Names only, in the message and in the locals a report would print for the failing frame.
+    [guard] = [frame for frame, _line in traceback.walk_tb(failed.tb)][1:]
+    assert guard.f_code.co_name == "stack_env" and "unreviewed" in guard.f_locals
+    assert "/ambient/" not in f"{failed.value}{guard.f_locals}"
+
+
+@pytest.mark.parametrize(
+    ("left", "failure"),
+    [
+        (None, r"^the fake host stops the start$"),
+        ("call", r"\[\"security subcommand 'fake-marker' item '' \(x1\)\"\]"),
+        ("login", r"\['host/home/\.config/gh/hosts\.yml'\]"),
+    ],
+    ids=["clean", "unexpected-call", "gh-login"],
+)
+def test_every_stack_daemon_starts_with_the_keychain_stubs_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, left: str | None, failure: str
+) -> None:
+    """
+    The server and the host get one base environment, whose ``PATH`` resolves the keychain
+    programs to the stack's own stubs; and a stack that leaves an unexpected stub call, or
+    a ``gh`` login in a home of its own, fails at exit by that name.
+    """
+    root = tmp_path / "stack"
+    stubs = KeychainStubs(root / "keychain-stubs" / "bin", root / "keychain-stubs" / "calls.log")
+    started: dict[str, dict[str, str]] = {}
+
+    @contextlib.contextmanager
+    def server(_root: Path, *, base_env: Mapping[str, str], **_kwargs: Any) -> Iterator[Any]:
+        started["server"] = dict(base_env)
+        yield SimpleNamespace(base_url="http://127.0.0.1:1", server=None)
+
+    def host(host_root: Path, _url: str, *, base_env: Mapping[str, str], **_kwargs: Any) -> None:
+        started["host"] = dict(base_env)
+        if left == "call":
+            # By its own path: the stack's stub, asked for what no mock stack expects.
+            _stub_call(stubs, "security", "fake-marker")
+        if left == "login":
+            hosts = host_root / "home" / ".config" / "gh" / "hosts.yml"
+            hosts.parent.mkdir(parents=True)
+            hosts.write_text("")
+        raise AssertionError("the fake host stops the start")
+
+    monkeypatch.setattr(sk, "server_runner", server)
+    monkeypatch.setattr(sk, "isolated_host", host)
+    with (
+        pytest.raises(AssertionError, match=failure),
+        sk.skeleton_stack(root, mock_url=None, host_config={}),
+    ):
+        pass
+
+    assert started["server"] == started["host"]
+    assert stubs.bypassed(started["host"]["PATH"]) == []
+
+
+def test_a_stack_installs_each_keychain_guard_as_a_step_of_its_own() -> None:
+    """
+    A guard dropped from ``skeleton_stack`` fails no stack run, so the three hooks are pinned
+    where they are installed; what each one catches is tested on :class:`sk.KeychainGuards`.
+    """
+    stack = ast.parse(inspect.getsource(sk.skeleton_stack))
+    at = {ast.unparse(node): node.lineno for node in ast.walk(stack) if isinstance(node, ast.Call)}
+    callbacks = {call: line for call, line in at.items() if call.startswith("resources.callback(")}
+
+    # Registered last, so it runs first at exit and its failure skips no other teardown step.
+    exiting = callbacks["resources.callback(lambda: guards.exiting(live_daemons()))"]
+    assert exiting == max(callbacks.values())
+    # Both daemons, once they are started.
+    assert at["guards.started(host.proc.pid, server.server.pid)"] > exiting
+    # Registered before the reap, so the log is read after every process has ended.
+    reap = callbacks["resources.callback(processes.reap)"]
+    assert callbacks["resources.callback(guards.ended)"] < reap
+
+
+def test_a_process_started_outside_the_keychain_barrier_is_named(tmp_path: Path) -> None:
+    root = tmp_path / "stack"
+    stubs = install_keychain_stubs(root / "keychain-stubs" / "bin")
+    inside = {**stubs.first_on(sk.minimal_env()), "HOME": str(root / "host" / "home")}
+
+    def named(children: list[psutil.Process], **how: bool) -> list[int]:
+        # Labels are ``pid:name`` and nothing else: no PATH, no HOME.
+        labels = sk.keychain_bypasses(stubs, root, children, **how)
+        assert all(re.fullmatch(r"\d+:[^/:]+", label) for label in labels), labels
+        return [int(label.partition(":")[0]) for label in labels]
+
+    started = (
+        inside,
+        {**inside, "PATH": sk.minimal_env()["PATH"]},
+        {**inside, "HOME": str(tmp_path / "elsewhere")},
+        # Neither PATH nor HOME: the environment counts as not read.
+        {"PROBE_TEST": "1"},
+    )
+    guards = sk.KeychainGuards(root, stubs)
+    with contextlib.ExitStack() as running:
+        children = [
+            psutil.Process(running.enter_context(_sleeper(env, ready=tmp_path / f"ready-{at}")))
+            for at, env in enumerate(started)
+        ]
+        kept, past_the_stubs, another_home, unread = (child.pid for child in children)
+
+        assert named(children) == [past_the_stubs, another_home]
+        # Where every process is known to be live, one that was not read is named too.
+        assert named(children, unread_fails=True) == [past_the_stubs, another_home, unread]
+        # A stack's start is such a place: its guard passes the first child and names the last.
+        guards.started(kept)
+        with pytest.raises(AssertionError, match=rf"keychain barrier .*\['{unread}:[^/:']+'\]$"):
+            guards.started(kept, unread)
+
+    assert named(children) == []
+    assert sk.keychain_bypasses(stubs, root, children[:1], unread_fails=True) == [f"{kept}:gone"]
+
+
+# A stand-in daemon: its children wait past the stubs, each once it has written its pid. One
+# is a CLI, one runs an Omnigent module, and one only names paths that hold the word.
+_DAEMON = """
+import os, subprocess, sys, time
+past = {**os.environ, "PATH": os.environ["PAST_THE_STUBS"]}
+waits = "import os, sys, time; open(sys.argv[-1], 'w').write(str(os.getpid())); time.sleep(60)"
+cli = sys.argv[1]
+subprocess.Popen([sys.executable, cli, "claude"], env=past)
+subprocess.Popen([sys.executable, "-c", waits, "-m", "omnigent.fake", "omnigent"], env=past)
+subprocess.Popen([sys.executable, "-c", waits, "-C", "/fake/omnigent/.omnigent", "git"], env=past)
+time.sleep(60)
+"""
+
+
+def test_the_exit_guard_checks_a_daemon_and_its_omnigent_and_claude_descendants(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "stack"
+    stubs = install_keychain_stubs(root / "keychain-stubs" / "bin")
+    cli = tmp_path / "claude"
+    cli.write_text(
+        "import os, sys, time\nopen(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)\n"
+    )
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    env = {
+        **stubs.first_on(sk.minimal_env()),
+        "HOME": str(root / "host" / "home"),
+        "PAST_THE_STUBS": sk.minimal_env()["PATH"],
+    }
+    daemon = subprocess.Popen(
+        [sys.executable, "-c", _DAEMON, str(cli)], env=env, cwd=marks, start_new_session=True
+    )
+    try:
+        poll_until(lambda: len(list(marks.iterdir())) == 3, interval_s=0.05)
+        poll_until(lambda: all(mark.read_text() for mark in marks.iterdir()), interval_s=0.05)
+        below = {mark.name: int(mark.read_text()) for mark in marks.iterdir()}
+
+        checked = sk._checked_at_exit([daemon.pid])
+
+        # The daemon itself started inside; a child that is neither Omnigent's nor a CLI,
+        # as a git child whose PATH production builds, is not checked whatever paths it names.
+        assert {proc.pid for proc in checked} == {daemon.pid, below["claude"], below["omnigent"]}
+        with pytest.raises(AssertionError, match="outside the keychain barrier") as failed:
+            sk.KeychainGuards(root, stubs).exiting([daemon.pid])
+        # By pid and name only: no PATH, no HOME.
+        message = str(failed.value)
+        named = {int(pid) for pid in re.findall(r"'(\d+):", message)}
+        assert named == {below["claude"], below["omnigent"]} and os.sep not in message
+    finally:
+        os.killpg(daemon.pid, signal.SIGKILL)
+        daemon.wait(timeout=10)
+    assert sk._checked_at_exit([daemon.pid]) == []
+
+
+def test_the_cli_probe_runs_claude_only_under_a_throwaway_home_with_the_stubs_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The pytest process asks the ``claude`` CLI for its version once, and never with its own
+    environment. The stand-in CLI here records where it was started.
+    """
+    seen = tmp_path / "seen"
+    fake = tmp_path / "bin" / "claude"
+    fake.parent.mkdir()
+    fake.write_text(
+        "#!/bin/sh\n"
+        '{ echo "$HOME"; echo "$CLAUDE_CONFIG_DIR"; command -v security; command -v gh;'
+        f' echo "${{GH_TOKEN-unset}}"; }} >> {shlex.quote(str(seen))}\n'
+        'echo "9.9.9 (stand-in)"\n'
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(tmp_path / "callers-home"))
+    monkeypatch.setenv("GH_TOKEN", "fake-token")
+    monkeypatch.delenv(sk.REQUIRE_CLI_ENV, raising=False)
+    sk._claude_cli.cache_clear()
+    try:
+        sk.require_claude_cli()
+        assert sk.claude_version() == "9.9.9 (stand-in)"
+        home, config, security, gh, token = seen.read_text().splitlines()
+        # A CLI that installed but does not run fails where the lane requires it, else skips.
+        fake.write_text("#!/bin/sh\necho broken >&2\nexit 3\n")
+        sk._claude_cli.cache_clear()
+        for required, outcome in (("0", pytest.skip.Exception), ("1", AssertionError)):
+            monkeypatch.setenv(sk.REQUIRE_CLI_ENV, required)
+            with pytest.raises(outcome, match="exits 3: broken"):
+                sk.require_claude_cli()
+    finally:
+        sk._claude_cli.cache_clear()
+
+    # One run for both callers, in a home made for it and removed with it.
+    assert home != os.environ["HOME"] and not Path(home).exists()
+    assert Path(config).is_relative_to(home)
+    stub_dir = Path(security).parent
+    assert stub_dir == Path(gh).parent and Path(home).parent in stub_dir.parents
+    assert token == "unset"
