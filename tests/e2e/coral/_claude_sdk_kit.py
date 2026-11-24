@@ -139,11 +139,20 @@ def make_executor(
     os_env: OSEnvSpec | None = None,
     isolate_claude_config: bool = False,
     api_key_helper: str = MOCK_API_KEY_HELPER,
+    gateway_base_url: str | None = None,
 ) -> ClaudeSDKExecutor:
     """
     The executor the harness builds; ``coral`` sets the credential and policy flags a
-    ``params.coral`` spec sets, and ``isolate_claude_config`` its private config dir.
+    ``params.coral`` spec sets, and ``isolate_claude_config`` its private config dir. With
+    ``gateway_base_url`` it is built as for an API key that names its own endpoint.
     """
+    gateway: dict[str, Any] = {}
+    if gateway_base_url is not None:
+        gateway = {
+            "gateway": True,
+            "base_url_override": gateway_base_url,
+            "gateway_auth_command": api_key_helper,
+        }
     return ClaudeSDKExecutor(
         cwd=str(workspace),
         os_env=os_env,
@@ -153,6 +162,7 @@ def make_executor(
         require_api_credential=coral,
         tool_call_policy_hook=coral,
         isolate_claude_config=isolate_claude_config,
+        **gateway,
     )
 
 

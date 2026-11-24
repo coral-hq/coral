@@ -103,6 +103,17 @@ MACOS_TESTS = [
     "tests/inner/sandbox/test_sandbox_behavior.py",
     SANDBOX_PROBE,
 ]
+# Probe 15's darwin pins also depend on how runners, harnesses and CLIs get their secrets.
+MACOS_SECRET_PATHS = [
+    "omnigent/host/connect.py",
+    "omnigent/host/runner_zygote.py",
+    "omnigent/runner/identity.py",
+    "omnigent/runner/launch_secrets.py",
+    "omnigent/runtime/harnesses/process_manager.py",
+    "omnigent/inner/claude_sdk_harness.py",
+    "omnigent/inner/claude_sdk_executor.py",
+    "omnigent/inner/claude_gateway_shim.py",
+]
 
 
 def test_the_macos_lane_runs_the_seatbelt_tests_on_sandbox_changes() -> None:
@@ -116,9 +127,15 @@ def test_the_macos_lane_runs_the_seatbelt_tests_on_sandbox_changes() -> None:
     assert job["runs-on"].startswith("macos-") and job["needs"] == "gate"
     for event in ("pull_request", "push"):
         paths = triggers[event]["paths"]
-        watched = [*MACOS_TESTS, "omnigent/inner/seatbelt_sandbox.py", MACOS.relative_to(ROOT)]
+        watched = [
+            *MACOS_TESTS,
+            "omnigent/inner/seatbelt_sandbox.py",
+            *MACOS_SECRET_PATHS,
+            MACOS.relative_to(ROOT),
+        ]
         for path in watched:
             assert any(fnmatch.fnmatch(str(path), glob) for glob in paths), (event, path)
+            assert (ROOT / path).is_file(), path
     assert "schedule" in triggers
     # Every test in the files, the identity probe among them, runs with the pinned CLI.
     assert run["run"].split("uv run pytest", 1)[1].split()[: len(MACOS_TESTS)] == MACOS_TESTS

@@ -1375,8 +1375,11 @@ def _listing_for_provider(
         ValueError,
         subprocess.SubprocessError,
     ) as exc:
+        # CORAL(S124): by type only; a client's error text can quote the credential it sent
         _logger.debug(
-            "model enumeration failed for %s", provider.detail or provider.kind, exc_info=True
+            "model enumeration failed for %s (%s)",
+            provider.detail or provider.kind,
+            type(exc).__name__,
         )
         if provider.kind == SUBSCRIPTION_KIND:
             # A failed cursor-agent listing probe says nothing about
@@ -2074,7 +2077,17 @@ def _fetch_openai_compatible_listing(
     if not provider.base_url:
         raise ValueError("provider has no base_url to list models from")
     token = _resolve_bearer_token(provider)
-    with httpx.Client(transport=transport, timeout=_HTTP_TIMEOUT_S) as client:
+    # CORAL(S124): a loopback endpoint is listed directly, so its bearer never goes through a
+    # forward proxy the environment names; SSL_CERT_FILE and SSL_CERT_DIR are still read
+    from omnigent_client._http import is_loopback_url
+
+    direct = is_loopback_url(provider.base_url)
+    with httpx.Client(
+        transport=transport,
+        timeout=_HTTP_TIMEOUT_S,
+        trust_env=not direct,
+        verify=httpx.create_ssl_context() if direct else True,
+    ) as client:
         resp = client.get(
             _models_url(provider.base_url),
             headers={"Authorization": f"Bearer {token}"},

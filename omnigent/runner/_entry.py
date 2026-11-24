@@ -686,6 +686,8 @@ def _make_auth_token_factory(
         RUNNER_DELEGATED_AUTH_ENV_VAR,
         RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
         RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+        consume_runner_auth_secret,  # CORAL(S123)
+        runner_auth_secret,  # CORAL(S123)
     )
 
     # Behind the Databricks Apps proxy (header auth) the server cannot mint a
@@ -702,11 +704,12 @@ def _make_auth_token_factory(
         and resolved_server_url
         and proxy_bearer_allowed_for(resolved_server_url)
     ):
-        os.environ.pop(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, None)
+        consume_runner_auth_secret(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR)  # CORAL(S123)
         return lambda: read_proxy_bearer(resolved_server_url)
 
     initial_token = (
-        os.environ.pop(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, "").strip()
+        # CORAL(S123): held in memory since boot; consumed here as before
+        (consume_runner_auth_secret(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR) or "").strip()
         if _allow_initial_token
         else ""
     )
@@ -720,7 +723,8 @@ def _make_auth_token_factory(
     # Prefer the host-launched runner's owner-bound capability so user
     # credentials stay out of the runner and credential discovery is skipped.
     delegated_auth = os.environ.get(RUNNER_DELEGATED_AUTH_ENV_VAR, "").strip() == "1"
-    binding_token = os.environ.get(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR, "").strip()
+    # CORAL(S123): held in memory since boot
+    binding_token = (runner_auth_secret(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR) or "").strip()
     # A binding token the server just refused to mint for (bare request), so
     # the managed fallback below doesn't resend the identical probe.
     refused_binding_token: str | None = None
@@ -1126,9 +1130,9 @@ def _runner_tunnel_binding_token_from_env() -> str | None:
         per-tunnel binding.
     :raises RuntimeError: If the token env var is set but empty.
     """
-    from omnigent.runner.identity import RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR
+    from omnigent.runner.identity import RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR, runner_auth_secret
 
-    token = os.environ.get(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR)
+    token = runner_auth_secret(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR)  # CORAL(S123)
     if token is None:
         return None
     if not token.strip():
@@ -2434,6 +2438,21 @@ def _ignore_finish_work_signal_until_handled() -> None:
         signal.signal(RUNNER_FINISH_WORK_SIGNAL, signal.SIG_IGN)
 
 
+def _hold_runner_auth_secrets() -> None:
+    """CORAL(S123): move the runner's tokens into memory before anything can spawn a child.
+
+    A direct-spawned runner reads them from its launch socket (exit 2 if that fails); a
+    zygote-forked or CLI-local one takes them from its environment.
+    """
+    from omnigent.runner.identity import take_runner_auth_secrets
+    from omnigent.runner.launch_secrets import adopt_launch_secrets
+
+    launched: dict[str, str] = {}
+    adopt_launch_secrets(launched)
+    take_runner_auth_secrets()
+    take_runner_auth_secrets(launched)
+
+
 def main() -> None:
     """Console entry point for the runner tunnel process.
 
@@ -2442,6 +2461,7 @@ def main() -> None:
     # Set the boot-time disposition before the slow imports below, so an early
     # hangup cannot kill the runner while they run.
     _ignore_finish_work_signal_until_handled()
+    _hold_runner_auth_secrets()  # CORAL(S123)
     from omnigent.process_logging import configure_process_logging
 
     configure_process_logging("runner", force=True)

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import sys
@@ -21,6 +22,7 @@ import coral
 import omnigent
 import tests.e2e.coral._claude_config_probe as probe
 from coral.omni.server.step_agents import checkout_read_paths
+from omnigent.inner import claude_sdk_executor
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import ExecutorError, TurnComplete
 from omnigent.inner.sandbox import _default_sandbox_for_platform
@@ -126,6 +128,99 @@ async def test_egress_recorder_sees_model_traffic_aimed_off_the_machine(
     assert "CONNECT api.example.invalid:443 HTTP/1.1" in egress
 
 
+def _request_shapes(mock_url: str, token: str) -> set[tuple[tuple[str, ...], str]]:
+    """Each Messages request of the turn with ``token``: its sorted betas and ``thinking``."""
+    return {
+        (tuple(sorted(entry["betas"])), json.dumps(entry["body"].get("thinking"), sort_keys=True))
+        for entry in get_mock_message_requests(mock_url)
+        if token in json.dumps(entry["body"])
+    }
+
+
+# A real CLI on the direct-key path, where no gateway switch turns its betas off.
+@pytest.mark.timeout(300)
+async def test_a_coral_direct_key_cli_sends_the_same_requests_through_its_proxy(
+    isolated_mock_llm_server_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    The ``anthropic-beta`` header and the ``thinking`` field of every model request a Coral
+    step's real CLI makes on an API key, as the mock upstream records them, in three launches:
+    as before the credential proxy (the CLI on the endpoint itself), through the proxy, and
+    through the proxy with the CLI told its base URL is the Anthropic API, which the executor
+    does only for an upstream that is. The proxy changes neither; the switch only adds betas;
+    and the proxy refuses none of the CLI's requests in either mode.
+    """
+    skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)
+    mock = isolated_mock_llm_server_url
+    home = write_claude_home(tmp_path, marker=tmp_path / "marker.txt")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_gateway_shim")
+    launches = {
+        "unproxied": {"IS_POSIX": False},
+        "proxied": {},
+        "assumed_first_party": {"_is_first_party_url": lambda url: True},
+    }
+    shapes: dict[str, set[tuple[tuple[str, ...], str]]] = {}
+    proxied: dict[str, bool] = {}
+    with EgressRecorder() as recorder:
+        _set_env(
+            monkeypatch,
+            mock_only_env(home=home, base_url=mock, proxy_url=recorder.url, inherited=os.environ),
+        )
+        for launch, patches in launches.items():
+            token = f"TIERB-{uuid.uuid4().hex[:8]}"
+            configure_mock_llm(mock, [{"text": f"done {token}"}] * 4, match=token)
+            with monkeypatch.context() as patched:
+                for name, value in patches.items():
+                    patched.setattr(claude_sdk_executor, name, value)
+                executor = make_executor(
+                    workspace, model=_MODEL, permission_mode="bypassPermissions", coral=True
+                )
+                executor._policy_evaluator = _allow_every_tool  # type: ignore[attr-defined]
+                try:
+                    async with asyncio.timeout(_TURN_BOUND_SECONDS):
+                        events = await collect_turn(executor, f"Reply. {token}", session_id=token)
+                except TimeoutError:
+                    pytest.fail(f"the {launch} turn was still running after 60s")
+                finally:
+                    proxied[launch] = executor._gateway_shim is not None
+                    await executor.close()
+            assert [e.message for e in events if isinstance(e, ExecutorError)] == [], launch
+            completed = [event for event in events if isinstance(event, TurnComplete)]
+            assert completed and f"done {token}" in (completed[-1].response or ""), launch
+            shapes[launch] = _request_shapes(mock, token)
+        egress = recorder.request_lines
+
+    print("request shapes:", json.dumps({k: sorted(v) for k, v in shapes.items()}))
+    assert proxied == {"unproxied": False, "proxied": True, "assumed_first_party": True}
+    assert egress == []
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "omnigent.inner.claude_gateway_shim"
+    ]
+    assert refusals == [], refusals
+    assert shapes["unproxied"] and shapes["proxied"] == shapes["unproxied"]
+    betas = {
+        launch: {beta for flags, _ in seen for beta in flags} for launch, seen in shapes.items()
+    }
+    thinking = {launch: {field for _, field in seen} for launch, seen in shapes.items()}
+    # No gateway switch here, so the CLI keeps its experimental betas and says how it thinks.
+    assert "claude-code-20250219" in betas["proxied"]
+    assert thinking["proxied"] != {"null"}, thinking
+    # Told it is on the Anthropic API, the CLI sends the same thinking field and more betas.
+    # Measured on 2.1.325: cache-diagnosis-2026-04-07, prompt-caching-scope-2026-01-05 and
+    # thinking-binding-controls-2026-08-01, betas that CLI adds only on a first-party URL.
+    assert thinking["assumed_first_party"] == thinking["proxied"]
+    restored = betas["assumed_first_party"] - betas["proxied"]
+    assert betas["assumed_first_party"] > betas["proxied"], sorted(restored)
+    assert "prompt-caching-scope-2026-01-05" in restored, sorted(restored)
+
+
 # Logs the keychain item each lookup names, then answers "not found", so no lookup reaches a
 # real keychain; the CLI runs ``security`` by its bare name.
 _SECURITY_STUB = """#!/bin/sh
@@ -182,14 +277,17 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     isolated_mock_llm_server_url: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
     A Coral step's real CLI, wrapped in its OS sandbox with a private config dir, completes a
-    turn on API-key auth against the mock. Its API key helper, which the CLI runs inside the
-    wrap, cannot write the throwaway home's plugins, sessions, session-env, backups or
-    .claude.json, or read its session key, credentials or keychain stand-in, and the home is
-    unchanged. Every keychain lookup names a per-dir item. An oversized tool result is
-    reported unsaved, with the pagination advice, since the dir has no ``projects/``.
+    turn on API-key auth against the mock, through its executor's credential proxy. Its API
+    key helper, which the CLI runs inside the wrap, cannot write the throwaway home's plugins,
+    sessions, session-env, backups or .claude.json, or read its session key, credentials or
+    keychain stand-in, and the home is unchanged. That helper's environment holds the proxy's
+    session token and nowhere the model key, and the proxy refuses none of the CLI's requests.
+    Every keychain lookup names a per-dir item. An oversized tool result is reported unsaved,
+    with the pagination advice, since the dir has no ``projects/``.
     """
     skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)
     token = f"TIERB-{uuid.uuid4().hex[:8]}"
@@ -204,8 +302,18 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     scratch.mkdir()
     shutil.copy(probe.__file__, workspace / "probe.py")
     report = workspace / "report.txt"
-    helper = shlex.join([sys.executable, str(workspace / "probe.py"), str(report), str(home)])
+    model_key = f"sk-ant-test-{secrets.token_hex(16)}"
+    # The probe gets the key's length and digest, and looks for it in its own environment.
+    probe_argv = [sys.executable, str(workspace / "probe.py"), str(report), str(home), ""]
+    helper = shlex.join([*probe_argv, probe.secret_spec(model_key)])
+    # The CLI's helper only prints its session token, so the probe runs in front of that.
+    monkeypatch.setattr(
+        claude_sdk_executor,
+        "_PROXY_TOKEN_HELPER",
+        f"{helper}; {claude_sdk_executor._PROXY_TOKEN_HELPER}",
+    )
     harness_root = Path(tempfile.mkdtemp(prefix="crl-", dir="/tmp"))
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_gateway_shim")
     try:
         with EgressRecorder() as recorder:
             env = mock_only_env(
@@ -234,7 +342,8 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
                 coral=True,
                 os_env=OSEnvSpec(type="caller_process", cwd=str(workspace), sandbox=sandbox),
                 isolate_claude_config=True,
-                api_key_helper=f"{helper}; printf %s mock-key",
+                api_key_helper=f"printf %s {model_key}",
+                gateway_base_url=isolated_mock_llm_server_url,
             )
             executor._policy_evaluator = _allow_every_tool  # type: ignore[attr-defined]
             # After the wrap made the only home dir it grants, ~/.npm/_logs.
@@ -263,12 +372,19 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     assert completed and f"done {token}" in (completed[-1].response or "")
     *verdicts, named = report.read_text().splitlines()
     own = ["config_private yes", "config_writable yes", "projects no", "config_seeded no"]
-    own += ["seed_source_write no", "securestorage_own yes"]
+    own += ["seed_source_write no", "securestorage_own yes", "proxy_token yes", "model_key no"]
     assert verdicts == [f"{name} no" for name in probe.HOME_CHECKS] + own, verdicts
     config_dir = Path(named.removeprefix("config_dir "))
     assert config_dir.name == "claude_config_dir" and scratch.resolve() in config_dir.parents
     assert not list(scratch.glob("omnigent-osenv-*")), "close left a launch scratch"
     assert probe.tree(home) == before, "the step changed the home"
+    # The pinned CLI needs no route the proxy does not forward, and always sent its token.
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "omnigent.inner.claude_gateway_shim"
+    ]
+    assert refusals == [], refusals
     _hashed_lookups(log)
     [*_, result] = tool_results(
         get_mock_message_requests(isolated_mock_llm_server_url), call_id=call_id

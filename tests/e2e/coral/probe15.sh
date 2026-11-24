@@ -255,6 +255,46 @@ except Exception:
     print("unclassified")
 '
 
+# Model requests to the step's own credential proxy on loopback port $1, which admits only
+# its CLI's session token: with no key, with a wrong key, and on a path that climbs to the
+# model route. refused when all three get 401/403; reachable when any is answered 2xx.
+PROXY='
+import http.client, json, sys
+port = int(sys.argv[1])
+body = json.dumps(
+    {
+        "model": "crl-credential-proxy-probe",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "probe"}],
+    }
+).encode()
+wrong = {"x-api-key": "crl-probe-wrong-key"}
+attempts = (("/v1/messages", {}), ("/v1/messages", wrong), ("/v1/models/../messages", wrong))
+def status(path, headers):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        headers = {"content-type": "application/json", **headers}
+        connection.request("POST", path, body, headers)
+        return connection.getresponse().status
+    finally:
+        connection.close()
+try:
+    codes = [status(path, headers) for path, headers in attempts]
+except PermissionError:
+    print("denied")
+except ConnectionRefusedError:
+    print("hidden")
+except Exception:
+    print("unclassified")
+else:
+    if all(code in (401, 403) for code in codes):
+        print("refused")
+    elif any(200 <= code < 300 for code in codes):
+        print("reachable")
+    else:
+        print("unclassified")
+'
+
 # mint or bearer ($2) for check $1 from process $3's environment, on server $4, owner
 # route $5: the read's verdict as $1.read, then what the credential did.
 identity_from_environ() {
@@ -336,6 +376,7 @@ for argument in "$@"; do
     socket | tcp | http) verdict=$(python3 -I -c "$CONNECT" "$kind" "$target") ;;
     python) verdict=$(python3 -I -c 'print("reachable")') ;;
     owner_http) verdict=$(python3 -I -c "$IDENTITY" owner_http "" "$target") ;;
+    credential_proxy) verdict=$(python3 -I -c "$PROXY" "$target") ;;
     # For these the target is a pid or a file, and expect is <server base> <owner route>.
     mint | bearer)
       identity_from_environ "$check" "$kind" "$target" "${expect%% *}" "${expect#* }"

@@ -1,8 +1,9 @@
 """
 Try a throwaway Claude config home and the CLI's own config dir; report ``name yes|no`` lines.
 
-Run as ``python _claude_config_probe.py <report> <home> [<seed source>]``. It prints nothing, so
-it can run as an API key helper. It writes only the report, entries in the cwd that it removes
+Run as ``python _claude_config_probe.py <report> <home> [<seed source> [<model key>]]``, the key
+given as :func:`secret_spec` gives it, never as itself. It prints nothing, so it can run as an
+API key helper. It writes only the report, entries in the cwd that it removes
 again, ``$CLAUDE_CONFIG_DIR``, the home and the seed source, which a wrapped CLI's launcher copies
 into ``$CLAUDE_CONFIG_DIR``. It overwrites a seeded file without creating it, and makes a new file
 only in a seeded dir below ``.claude``, so a path a sandbox hides reads ``no``: bwrap's private
@@ -13,6 +14,7 @@ try, and :func:`tree` snapshots it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -157,8 +159,32 @@ def _seeded(own: str) -> Callable[[], object]:
     return action
 
 
+# The session token a Coral CLI presents to its executor's credential proxy.
+PROXY_TOKEN = "OMNIGENT_CLAUDE_PROXY_TOKEN"
+
+
+def secret_spec(value: str) -> str:
+    """``<length>:<sha256>`` of a secret, which lets the probe look for it without holding it."""
+    return f"{len(value)}:{hashlib.sha256(value.encode()).hexdigest()}"
+
+
+def _environ_holds(spec: str) -> Callable[[], object]:
+    """Whether any environment value contains the secret ``spec`` describes."""
+
+    def action() -> bool:
+        length, _, digest = spec.partition(":")
+        size = int(length)
+        return any(
+            hashlib.sha256(value[start : start + size].encode()).hexdigest() == digest
+            for value in os.environ.values()
+            for start in range(len(value) - size + 1)
+        )
+
+    return action
+
+
 def _checks(
-    home: Path, own: str, scratch: str, seed_source: str = ""
+    home: Path, own: str, scratch: str, seed_source: str = "", model_key: str = ""
 ) -> dict[str, Callable[[], object]]:
     claude = home / ".claude"
     checks = {
@@ -189,6 +215,10 @@ def _checks(
     # The credential store and keychain item follow this name; it must name the private dir.
     store = os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
     checks["securestorage_own"] = lambda: bool(own) and store == own
+    if model_key:
+        # A Coral CLI's environment: its session token, and nowhere the model key itself.
+        checks["proxy_token"] = lambda: bool(os.environ.get(PROXY_TOKEN))
+        checks["model_key"] = _environ_holds(model_key)
     return checks
 
 
@@ -199,12 +229,12 @@ def _verdict(action: Callable[[], object]) -> str:
         return "no"
 
 
-def main(report: str, home: str, seed_source: str = "") -> None:
+def main(report: str, home: str, seed_source: str = "", model_key: str = "") -> None:
     own = os.environ.get("CLAUDE_CONFIG_DIR", "")
-    checks = _checks(Path(home), own, os.environ.get("TMPDIR", ""), seed_source)
+    checks = _checks(Path(home), own, os.environ.get("TMPDIR", ""), seed_source, model_key)
     lines = [f"{name} {_verdict(action)}" for name, action in checks.items()]
     Path(report).write_text("\n".join([*lines, f"config_dir {own}"]) + "\n")
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:5])
