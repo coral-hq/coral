@@ -43,6 +43,7 @@ import shlex
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -543,36 +544,43 @@ def _release_oldest(wait: sk.Wait, mock: str, tokens: tuple[str, ...]) -> str:
     return wait(advanced, "the released session's next call")
 
 
-def _one_cli(runner: int) -> int:
-    """The pid of the step's one ``claude`` CLI below its runner."""
-    tree = sk.group_tree(runner)
-    clis = sk.claude_clis(tree)
-    assert len(clis) == 1, f"{len(clis)} claude CLIs in {sk.process_names(tree)}"
-    return clis[0].pid
-
-
-def _session_cli(runner: int, session_id: str) -> int:
-    """
-    The pid of the ``claude`` CLI that serves ``session_id`` below a directly spawned runner.
-    Such a runner execs each harness with its conversation id, and may run a second harness,
-    with a CLI of its own, for another conversation of the same session.
-    """
-    serving = []
-    for cli in sk.claude_clis(sk.group_tree(runner)):
-        for argv in sk.argvs(cli.parents()):
-            if "--conversation-id" in argv[:-1]:
-                if argv[argv.index("--conversation-id") + 1] == session_id:
-                    serving.append(cli.pid)
-                break
-    assert len(serving) == 1, f"{len(serving)} claude CLIs serve the step's session"
-    return serving[0]
-
-
 def _harness_socket(stack: sk.Skeleton, session_id: str) -> Path:
     """The session's harness socket, under the stack's root or the default one."""
     roots = dict.fromkeys((stack.harness_tmp, resolve_harness_tmp_parent({})))
     [found] = [path for root in roots for path in root.glob(f"ap-*/conv-{session_id}.sock")]
     return found
+
+
+def _listener_pid(path: Path) -> int:
+    """The pid listening on the Unix socket at ``path``: the host connects and asks the kernel."""
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(5)
+        client.connect(str(path))
+        if sys.platform == "darwin":
+            # SOL_LOCAL and LOCAL_PEERPID of <sys/un.h>, which the socket module does not name.
+            return struct.unpack("i", client.getsockopt(0, 2, struct.calcsize("i")))[0]
+        peer = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        return struct.unpack("3i", peer)[0]
+
+
+def _session_cli(stack: sk.Skeleton, runner: int, session_id: str) -> int:
+    """
+    The pid of the ``claude`` CLI that serves ``session_id`` below its runner: the one below
+    the harness that listens on the session's socket. A runner may hold a second harness,
+    with a CLI of its own, while it writes the session's title; a zygote-forked harness has
+    no command line of its own to tell the two apart.
+    """
+    harness = _listener_pid(_harness_socket(stack, session_id))
+    tree = sk.group_tree(runner)
+    assert harness in {proc.pid for proc in tree}, (
+        f"the session's harness {harness} is not among {sk.process_names(tree)}"
+    )
+    below = psutil.Process(harness).children(recursive=True)
+    serving = sk.claude_clis(below)
+    assert len(serving) == 1, (
+        f"{len(serving)} claude CLIs serve the step's session: {sk.process_names(below)}"
+    )
+    return serving[0].pid
 
 
 def _socket_root(stack: sk.Skeleton, harness_socket: Path) -> str:
@@ -945,8 +953,9 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
         implement = sk.held_activation(wait, mock, impl_token, 1)
         review = sk.held_activation(wait, mock, review_token, 1)
         reviewer = sk.step_session(client, run_id, "review")
+        implementer = sk.step_session(client, run_id, "implement")
         runner = sk.runner_pid(stack, reviewer)
-        own_runner = sk.runner_pid(stack, sk.step_session(client, run_id, "implement"))
+        own_runner = sk.runner_pid(stack, implementer)
         harness_socket = _harness_socket(stack, reviewer)
         recorded = _recorded(stack, harness_socket)
         worktree = Path(sk.detail(client, run_id)["target"]["worktree_path"])
@@ -957,9 +966,9 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
         # key's digest: the reviewer's runner and CLI, the host daemon and the step's own CLI.
         processes = {
             "runner_environ": runner,
-            "cli_environ": _one_cli(runner),
+            "cli_environ": _session_cli(stack, runner, reviewer),
             "host_environ": stack.host.proc.pid,
-            "own_cli_environ": _one_cli(own_runner),
+            "own_cli_environ": _session_cli(stack, own_runner, implementer),
         }
         proxy, proxy_token = _cli_proxy(processes["own_cli_environ"])
         targets = [
@@ -1200,10 +1209,10 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         implement = sk.held_activation(wait, mock, impl_token, 1)
         review = sk.held_activation(wait, mock, review_token, 1)
         implementer = sk.step_session(client, run_id, "implement")
-        step = sk.step_processes(sk.runner_pid(stack, implementer))
+        runner = sk.runner_pid(stack, implementer)
+        step = sk.step_processes(runner, _session_cli(stack, runner, implementer))
         recorded = _recorded(stack, _harness_socket(stack, implementer))
         names = {f"{role}.names": _token_names(proc) for role, proc in step.items()}
-        runner = step["runner"].pid
         # The CLI holds a session token for a loopback proxy of its own, never the mock's URL.
         # Only a launch with no gateway leaves the CLI's experimental betas on (a gateway
         # launch switches them off or names the gateway); a mock upstream is not the
@@ -1531,7 +1540,7 @@ def test_probe_15_on_a_server_that_requires_identity(
         # Every credential is tried on this server's owner route, and only there.
         on_server = f"{stack.server.base_url} {stack.server.base_url}{sk.RUNS}"
         runner_live = _process_live(runner)
-        proxy, proxy_token = _cli_proxy(_session_cli(runner, implementer))
+        proxy, proxy_token = _cli_proxy(_session_cli(stack, runner, implementer))
         plant = f"crl-plant-{uid}"
         targets = [
             Target(

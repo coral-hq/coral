@@ -930,13 +930,16 @@ def _group_of(proc: psutil.Process) -> int | None:
         return None
 
 
-def step_processes(runner: int) -> dict[str, psutil.Process]:
+def step_processes(runner: int, cli: int | None = None) -> dict[str, psutil.Process]:
     """
-    A step's own processes: its runner, its one ``claude`` CLI, the harness (the CLI's
+    A step's own processes: its runner, its ``claude`` CLI, the harness (the CLI's
     farthest ancestor in the runner's group) and the launcher the harness started it with.
+
+    The CLI is the runner's only one unless ``cli`` names it: a runner may hold a second
+    harness, with a CLI of its own, while it writes the session's title.
     """
     tree = group_tree(runner)
-    clis = claude_clis(tree)
+    clis = [proc for proc in claude_clis(tree) if cli is None or proc.pid == cli]
     assert len(clis) == 1, f"{len(clis)} claude CLIs in {process_names(tree)}"
     chain = [clis[0], *clis[0].parents()]
     in_group = [
