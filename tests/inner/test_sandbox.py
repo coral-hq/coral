@@ -509,6 +509,8 @@ def test_policy_clones_keep_every_field(tmp_path: pathlib.Path) -> None:
         "git_ssh_socket_path": "/g.sock",
         "deny_unix_socket_paths": [path / "d.sock"],
         "deny_unix_socket_roots": [path / "root"],
+        "allow_unix_socket_paths": [path / "a.sock"],  # CORAL(S127)
+        "allow_unix_socket_roots": [path / "fork"],  # CORAL(S127)
         "credential_source_paths": [path / "s"],
         "launch_tmpdir_env": "X",
         "launch_tmpdir_parent": path / "l",
@@ -547,6 +549,67 @@ def test_with_denied_unix_socket_roots_resolves_dedupes_and_is_pure() -> None:
     both = [root.resolve(strict=False), other.resolve(strict=False)]
     assert extended.deny_unix_socket_roots == both
     assert extended.deny_unix_socket_paths == both
+
+
+# CORAL(S127): the sockets a networked seatbelt process may connect to outside its own dirs
+def test_sandbox_policy_round_trips_allow_unix_socket_paths(tmp_path: pathlib.Path) -> None:
+    """
+    The named sockets and socket roots survive the launcher wire and every clone; an old
+    payload has none.
+    """
+    sockets = [pathlib.Path("/private/tmp/omnigent-terminal-x/clip.sock")]
+    roots = [pathlib.Path("/private/tmp/omnigent-terminal-x/root")]
+    policy = dataclasses.replace(
+        _noop_policy(), allow_unix_socket_paths=sockets, allow_unix_socket_roots=roots
+    )
+    decoded = SandboxPolicy.from_jsonable(policy.to_jsonable())
+    assert decoded.allow_unix_socket_paths == sockets
+    assert decoded.allow_unix_socket_roots == roots
+    for clone in _with_every_clone(decoded, [tmp_path]):
+        assert clone.allow_unix_socket_paths == sockets
+        assert clone.allow_unix_socket_paths is not decoded.allow_unix_socket_paths
+        assert clone.allow_unix_socket_roots == roots
+        assert clone.allow_unix_socket_roots is not decoded.allow_unix_socket_roots
+    for payload in (_noop_policy().to_jsonable(), {}, {"allow_unix_socket_roots": "/x"}):
+        old = SandboxPolicy.from_jsonable(payload)
+        assert old.allow_unix_socket_paths is None and old.allow_unix_socket_roots is None
+
+
+# CORAL(S127)
+def test_with_allowed_unix_sockets_resolves_dedupes_and_is_pure(tmp_path: pathlib.Path) -> None:
+    from omnigent.inner.sandbox import with_allowed_unix_sockets, with_denied_unix_sockets
+
+    policy = _noop_policy()
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    sock = tmp_path / "link" / "clip.sock"
+    real = tmp_path.resolve() / "real" / "clip.sock"
+
+    augmented = with_allowed_unix_sockets(policy, [sock, sock, real])
+
+    assert augmented.allow_unix_socket_paths == [real]
+    assert augmented.allow_unix_socket_roots is None
+    assert augmented.deny_unix_socket_paths is None
+    assert policy.allow_unix_socket_paths is None
+    assert augmented is not policy
+    # Earlier entries stay, a looping path never raises, and the deny list is untouched.
+    other = tmp_path / "loop" / "o.sock"
+    extended = with_allowed_unix_sockets(
+        with_denied_unix_sockets(augmented, [real]), [other, sock]
+    )
+    assert extended.allow_unix_socket_paths is not None
+    assert extended.allow_unix_socket_paths[0] == real
+    assert len(extended.allow_unix_socket_paths) == 2
+    assert extended.deny_unix_socket_paths == [real]
+    # A socket root is resolved and kept once, beside the named sockets and the write roots.
+    link = tmp_path / "link"
+    rooted = with_allowed_unix_sockets(extended, [], roots=[link, real.parent])
+    rooted = with_allowed_unix_sockets(rooted, [sock], roots=[link])
+    assert rooted.allow_unix_socket_roots == [real.parent]
+    assert rooted.allow_unix_socket_paths == extended.allow_unix_socket_paths
+    assert rooted.write_roots == policy.write_roots
+    assert extended.allow_unix_socket_roots is None
 
 
 def _resolved_roots(

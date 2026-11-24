@@ -60,6 +60,7 @@ from .sandbox import (
     resolve_sandbox,
     with_additional_read_roots,
     with_additional_write_roots,
+    with_allowed_unix_sockets,  # CORAL(S127)
     with_denied_unix_sockets,
 )
 from .terminal_clipboard import TerminalClipboardBridge
@@ -2890,6 +2891,9 @@ def create_terminal_instance(
             ),
         )
 
+    # CORAL(S127): built before the policy, which names this bridge's socket
+    clipboard_bridge = TerminalClipboardBridge(private_dir, socket_path)
+
     # Resolve sandbox policy for the terminal process.
     sandbox: SandboxPolicy | None = None
     egress_rules: list[str] | None = None
@@ -2915,6 +2919,13 @@ def create_terminal_instance(
                 # unix-socket deny (its default allow_network=true would
                 # otherwise permit the connect).
                 sandbox = with_denied_unix_sockets(sandbox, [socket_path])
+                # CORAL(S127): the pane's own copy helper connects to this one, and a forked
+                # pane to sockets in its own tree, which the dir above keeps off the own dirs
+                sandbox = with_allowed_unix_sockets(
+                    sandbox,
+                    [clipboard_bridge.socket_path],
+                    roots=[cwd] if effective_os_env_spec.fork else [],
+                )
         # Plumb the egress allow-list from the OSEnvSandboxSpec
         # onto the instance so :meth:`launch` can start a
         # parent-side MITM proxy. SandboxPolicy itself only carries
@@ -2945,6 +2956,6 @@ def create_terminal_instance(
         tmux_start_on_attach=spec.tmux_start_on_attach,
         keep_alive_after_exit=spec.keep_alive_after_exit,
     )
-    instance._clipboard_bridge = TerminalClipboardBridge(private_dir, socket_path)
+    instance._clipboard_bridge = clipboard_bridge  # CORAL(S127)
 
     return TerminalCreateResult(instance=instance, cwd=cwd)

@@ -38,6 +38,7 @@ import omnigent.inner.seatbelt_sandbox as seatbelt_sandbox  # CORAL(S120)
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.sandbox import SandboxPolicy, with_denied_unix_sockets
 from omnigent.inner.seatbelt_sandbox import (
+    _CS_DARWIN_USER_TEMP_DIR,  # CORAL(S127)
     _DEFAULT_CWD_ALLOW_HIDDEN,
     _DEFAULT_READ_SUBPATHS,
     _SANDBOX_EXEC_PATH,
@@ -821,6 +822,371 @@ def test_per_user_harness_root_matches_the_harness_default() -> None:
     from omnigent.runtime.harnesses.paths import harness_tmp_parent
 
     assert _per_user_harness_root() == harness_tmp_parent({})
+
+
+# CORAL(S127): every Unix-domain socket, before any allow reopens a path
+_ALL_UNIX_SOCKETS_DENY = "(deny network-outbound (remote unix-socket))"
+
+
+# CORAL(S127): a shared network no longer reaches other programs' Unix-domain sockets
+@pytest.mark.parametrize("mode", ["allow_network", "no_network", "egress", "git_ssh"])
+def test_profile_refuses_other_programs_unix_sockets_by_default(tmp_path: Path, mode: str) -> None:
+    """
+    Where the host network is shared, one deny of every Unix-domain socket follows
+    ``(allow network*)``, then the resolver's socket and each caller-named socket are
+    allowed again, all before the first control-socket deny. The other three modes allow
+    no network to begin with and emit none of it, named sockets or not.
+    """
+    import dataclasses
+    import tempfile
+
+    from omnigent.inner.sandbox import with_allowed_unix_sockets
+
+    scratch = Path(tempfile.gettempdir()).resolve(strict=False) / "omnigent-osenv-s127"
+    named = Path("/crl-pane/clip.sock")
+    egress = {"egress_relay_port": 18080, "egress_socket_path": str(scratch / ".egress.sock")}
+    policy = _make_policy(
+        tmp_path,
+        allow_network=mode != "no_network",
+        write_roots=[scratch],
+        **(egress if mode == "egress" else {}),  # type: ignore[arg-type]
+    )
+    policy = dataclasses.replace(policy, private_tmpdir=scratch)
+    if mode == "git_ssh":
+        policy = dataclasses.replace(policy, git_ssh_socket_path=str(scratch / ".gitssh.sock"))
+    policy = with_allowed_unix_sockets(policy, [named])
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    resolver = _unix_socket_rule("allow", 'path-literal "/private/var/run/mDNSResponder"')
+    named_rule = _unix_socket_rule("allow", f'path-literal "{named}"')
+    if mode == "allow_network":
+        shared = lines.index("(allow network*)")
+        assert lines[shared + 1 : shared + 4] == [_ALL_UNIX_SOCKETS_DENY, resolver, named_rule]
+        assert lines.count(_ALL_UNIX_SOCKETS_DENY) == 1
+        assert lines.index(named_rule) < min(map(lines.index, _control_socket_denies(None)))
+    else:
+        assert "(allow network*)" not in lines
+        assert not {_ALL_UNIX_SOCKETS_DENY, resolver, named_rule} & set(lines)
+
+
+# CORAL(S127): naming a harness, tmux, deny-listed or credential socket cannot reopen it
+def test_profile_keeps_a_named_socket_under_a_denied_root_denied(tmp_path: Path) -> None:
+    import dataclasses
+
+    from omnigent.inner.sandbox import with_allowed_unix_sockets, with_denied_unix_socket_roots
+
+    root = Path("/tmp/crl-x").resolve(strict=False)
+    conv, tmux = root / "ap-1" / "conv.sock", Path("/crl-t/omnigent-terminal-x/tmux.sock")
+    pane, broker = Path("/crl-pane/tmux.sock"), Path("/crl-broker/token.sock")
+    policy = with_allowed_unix_sockets(_make_policy(tmp_path), [conv, tmux, pane, broker])
+    policy = with_denied_unix_socket_roots(with_denied_unix_sockets(policy, [pane]), [root])
+    policy = dataclasses.replace(policy, credential_source_paths=[broker])
+
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    first_deny = min(map(lines.index, _control_socket_denies(root)))
+    for sock in (conv, tmux, pane, broker):
+        assert lines.index(_unix_socket_rule("allow", f'path-literal "{sock}"')) < first_deny
+    for sock in (pane, broker):
+        assert lines.index(_unix_socket_rule("deny", f'path-literal "{sock}"')) > first_deny
+
+
+# CORAL(S127): a named socket is spelled by its real dir; a link planted at its name is not read
+def test_profile_names_an_allowed_socket_by_its_real_parent_dir(tmp_path: Path) -> None:
+    import dataclasses
+
+    real = tmp_path.resolve(strict=False) / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    (real / "clip.sock").symlink_to(real / "other.sock")
+    policy = dataclasses.replace(
+        _make_policy(tmp_path), allow_unix_socket_paths=[tmp_path / "link" / "clip.sock"]
+    )
+
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    assert _unix_socket_rule("allow", f'path-literal "{real / "clip.sock"}"') in lines
+    assert not [line for line in lines if "other.sock" in line or "/link/" in line]
+
+
+# CORAL(S127): a write root is the process's own, allowed before the control-socket denies
+def test_profile_allows_write_roots_before_the_control_socket_denies(tmp_path: Path) -> None:
+    """
+    Between filtered rules the later one wins. A write root's allow stands before the root
+    and tmux denies, so a tmux- or harness-shaped socket inside a write root stays denied.
+    Only the scratch and a write root inside a denied root follow those denies, as before.
+    """
+    import dataclasses
+    import tempfile
+
+    from omnigent.inner.sandbox import with_denied_unix_socket_roots
+
+    root = Path("/tmp/crl-x").resolve(strict=False)
+    scratch = Path(tempfile.gettempdir()).resolve(strict=False) / "omnigent-osenv-s127"
+    launch, other_case = root / "cabcdefgh", Path(str(root).swapcase()) / "c2"
+    work, extra = Path("/crl-work"), Path("/crl-extra")
+    policy = _make_policy(tmp_path, write_roots=[work, scratch, launch, extra, other_case])
+    policy = dataclasses.replace(policy, private_tmpdir=scratch)
+    policy = with_denied_unix_socket_roots(policy, [root])
+
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    denies = [lines.index(rule) for rule in _control_socket_denies(root)]
+    rules = {
+        path: _unix_socket_rule("allow", f'subpath "{path}"')
+        for path in (work, extra, scratch, launch, other_case)
+    }
+    for rule in rules.values():
+        assert lines.count(rule) == 1, rule
+    for path in (work, extra):
+        assert lines.index(_ALL_UNIX_SOCKETS_DENY) < lines.index(rules[path]) < min(denies)
+    for path in (scratch, launch, other_case):
+        assert lines.index(rules[path]) > max(denies)
+
+
+def _fake_guarded_dirs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+    """
+    CORAL(S127): point the builder's home, account home, temp dir and per-user temp dir at
+    fixed paths that do not exist, none inside another, so each guard is tested alone.
+    """
+    import os
+    import pwd
+    import tempfile
+    import types
+    import unicodedata
+
+    dirs = {
+        "home": Path(unicodedata.normalize("NFC", "/crl-users/zo\u00e9")),
+        "account_home": Path("/crl-accounts/me"),
+        "temp_dir": Path("/crl-temp"),
+        "user_temp_dir": Path("/crl-folders/ab/T"),
+    }
+    monkeypatch.setenv("HOME", str(dirs["home"]))
+    monkeypatch.setattr(
+        pwd, "getpwuid", lambda _uid: types.SimpleNamespace(pw_dir=str(dirs["account_home"]))
+    )
+    monkeypatch.setattr(tempfile, "tempdir", str(dirs["temp_dir"]))
+    monkeypatch.setattr(
+        os,
+        "confstr",
+        lambda name: f"{dirs['user_temp_dir']}/" if name == _CS_DARWIN_USER_TEMP_DIR else None,
+        raising=False,
+    )
+    return dirs
+
+
+# CORAL(S127): a write root that is or holds a dir other programs keep sockets in, in any letter
+# case or Unicode normal form, is not the process's own
+@pytest.mark.parametrize(
+    "guarded",
+    [
+        "home",
+        "home_parent",
+        "home_other_case",
+        "home_other_normal_form",
+        "account_home",
+        "temp_dir_other_case",
+        "user_temp_dir",
+        "user_temp_parent",
+        "system_run_dir",
+        "denied_root_other_case",
+        "denied_socket_other_case",
+    ],
+)
+def test_profile_does_not_allow_a_write_root_holding_other_programs_sockets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guarded: str
+) -> None:
+    """
+    Other programs keep sockets under the home dir (Docker's, OrbStack's, Claude Code's), the
+    temp dir, the per-user temp dir (which is another dir when ``$TMPDIR`` is set) and
+    ``/var/run``. The sandbox matches paths without regard to letter case or Unicode normal
+    form on the default macOS volume, so another spelling of a guarded dir is guarded too.
+    The home is both ``$HOME`` and the account's home, which a spawner's environment cannot
+    move.
+    """
+    import unicodedata
+
+    from omnigent.inner.sandbox import with_denied_unix_socket_roots
+
+    fake = _fake_guarded_dirs(monkeypatch)
+    home = fake["home"]
+    root, pane = Path("/tmp/crl-x").resolve(strict=False), Path("/crl-pane")
+    write_root = {
+        "home": home,
+        "home_parent": home.parent,
+        "home_other_case": Path(str(home).swapcase()),
+        "home_other_normal_form": Path(unicodedata.normalize("NFD", str(home))),
+        "account_home": fake["account_home"],
+        "temp_dir_other_case": Path(str(fake["temp_dir"]).swapcase()),
+        "user_temp_dir": fake["user_temp_dir"],
+        "user_temp_parent": fake["user_temp_dir"].parent,
+        "system_run_dir": Path("/private/var/run"),
+        "denied_root_other_case": Path(str(root).swapcase()),
+        "denied_socket_other_case": Path(str(pane).swapcase()),
+    }[guarded]
+    assert guarded == "home" or str(write_root) != str(home)
+    work = Path("/crl-work")
+    policy = _make_policy(tmp_path, write_roots=[write_root, work])
+    policy = with_denied_unix_sockets(policy, [pane / "tmux.sock"])
+    policy = with_denied_unix_socket_roots(policy, [root])
+
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    assert _unix_socket_rule("allow", f'subpath "{write_root}"') not in lines
+    assert lines.count(_unix_socket_rule("allow", f'subpath "{work}"')) == 1
+
+
+# CORAL(S127): under a shared system dir only the scratch and the named sockets stay reachable
+def test_profile_keeps_the_scratch_and_named_sockets_under_shared_system_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The scratch sits inside the per-user temp dir and the resolver's socket in ``/var/run``.
+    Guarding those two dirs withholds only their own allow: the scratch below one, and a
+    socket named by its literal path in the other, are still allowed.
+    """
+    import dataclasses
+
+    from omnigent.inner.sandbox import with_allowed_unix_sockets
+
+    user_temp = _fake_guarded_dirs(monkeypatch)["user_temp_dir"]
+    run_dir = Path("/private/var/run")
+    scratch, named = user_temp / "omnigent-osenv-s127", run_dir / "crl-named.sock"
+    policy = _make_policy(tmp_path, write_roots=[user_temp, run_dir, scratch])
+    policy = dataclasses.replace(policy, private_tmpdir=scratch)
+    policy = with_allowed_unix_sockets(policy, [named])
+
+    lines = _build_profile(policy, tmp_path.resolve(strict=False)).splitlines()
+
+    kept = [
+        f'subpath "{scratch}"',
+        f'path-literal "{named}"',
+        f'path-literal "{run_dir}/mDNSResponder"',
+    ]
+    for target in kept:
+        assert lines.count(_unix_socket_rule("allow", target)) == 1, target
+    for shared in (user_temp, user_temp.parent, run_dir):
+        assert _unix_socket_rule("allow", f'subpath "{shared}"') not in lines
+
+
+# CORAL(S127): the per-user temp dir is read by confstr's number, which Python has no name for
+@pytest.mark.skipif(sys.platform != "darwin", reason="the per-user temp dir is a macOS notion")
+def test_shared_socket_dirs_name_the_per_user_temp_dir() -> None:
+    shared = seatbelt_sandbox._shared_socket_dirs()
+
+    assert shared[0] == Path("/private/var/run") and len(shared) == 2
+    assert shared[1].is_absolute() and shared[1].name == "T"
+
+
+# CORAL(S127): a forked pane's tree is its own for sockets without becoming a write root
+def test_profile_allows_a_socket_root_under_the_write_root_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A forked pane's working tree is writable only through the pane dir, which holds the
+    deny-listed tmux socket and so is never an own dir. Named as a socket root, the tree is
+    allowed where a write root would be, before the control-socket denies, and gets no file
+    rule of its own. A socket root the guards refuse is not allowed, and a masked entry in
+    the tree is denied with every dir above it kept in place.
+    """
+    from omnigent.inner.sandbox import with_allowed_unix_sockets
+
+    home = _fake_guarded_dirs(monkeypatch)["home"]
+    pane = tmp_path.resolve(strict=False) / "omnigent-terminal-x"
+    fork_root = pane / "root"
+    fork_root.mkdir(parents=True)
+    (fork_root / ".env").touch()
+    policy = with_denied_unix_sockets(
+        _make_policy(fork_root, write_roots=[pane]), [pane / "tmux.sock"]
+    )
+    policy = with_allowed_unix_sockets(policy, [pane / "clip.sock"], roots=[fork_root, home])
+
+    lines = _build_profile(policy, fork_root).splitlines()
+
+    allowed = _unix_socket_rule("allow", f'subpath "{fork_root}"')
+    assert lines.count(allowed) == 1
+    first_deny = min(map(lines.index, _control_socket_denies(None)))
+    assert lines.index(_ALL_UNIX_SOCKETS_DENY) < lines.index(allowed) < first_deny
+    for refused in (pane, home):
+        assert _unix_socket_rule("allow", f'subpath "{refused}"') not in lines
+    assert not [line for line in lines if "file-write*" in line and f'"{fork_root}"' in line]
+    masked = _unix_socket_rule("deny", f'path-literal "{fork_root / ".env"}"')
+    kept_in_place = [f'(deny file-write-unlink (literal "{path}"))' for path in (fork_root, pane)]
+    assert lines.index(allowed) < lines.index(masked) < lines.index(kept_in_place[0])
+    assert [line for line in lines if "file-write-unlink" in line] == kept_in_place
+
+
+# CORAL(S127): a socket under a masked entry of a write root is not connectable either
+@pytest.mark.parametrize("cwd_is", ["writable", "read_only", "writable_without_network"])
+def test_profile_denies_unix_sockets_under_masked_entries_of_a_write_root(
+    tmp_path: Path, cwd_is: str
+) -> None:
+    """
+    A write root's allow covers the whole tree, and a connect is decided by the network
+    rules alone, so each masked dot-directory or dotfile under it gets a deny after that
+    allow. Outside a write root, or with no shared network, nothing was allowed.
+    """
+    cwd = tmp_path.resolve(strict=False)
+    (cwd / ".devenv" / "state").mkdir(parents=True)
+    (cwd / ".overmind.sock").touch()
+    (cwd / ".venv").mkdir()
+    policy = _make_policy(
+        cwd,
+        allow_hidden=[".venv"],
+        write_roots=[] if cwd_is == "read_only" else [cwd],
+        allow_network=cwd_is != "writable_without_network",
+    )
+
+    lines = _build_profile(policy, cwd).splitlines()
+
+    masked = [
+        _unix_socket_rule("deny", f'subpath "{cwd / ".devenv"}"'),
+        _unix_socket_rule("deny", f'path-literal "{cwd / ".overmind.sock"}"'),
+    ]
+    assert f'(deny file-read* file-write* (subpath "{cwd / ".devenv"}"))' in lines
+    kept_in_place = [line for line in lines if "file-write-unlink" in line]
+    if cwd_is == "writable":
+        allowed = lines.index(_unix_socket_rule("allow", f'subpath "{cwd}"'))
+        for rule in masked:
+            assert lines.count(rule) == 1 and lines.index(rule) > allowed, rule
+        # Moved into the scratch, the masked entries would sit under an allow no deny names.
+        assert kept_in_place == [f'(deny file-write-unlink (literal "{cwd}"))']
+        assert lines.index(kept_in_place[0]) > lines.index(
+            f'(allow file-write* (subpath "{cwd}"))'
+        )
+    else:
+        assert not set(masked) & set(lines) and not kept_in_place
+    assert not [line for line in lines if "unix-socket" in line and ".venv" in line]
+
+
+# CORAL(S127): no dir between a masked entry and its outermost write root can be moved away
+def test_profile_keeps_every_dir_above_a_masked_entry_in_place(tmp_path: Path) -> None:
+    """
+    A step cannot rename a masked entry, but it could rename a dir above it into another own
+    dir, where the entry's deny no longer names it. Each dir from the entry's parent up to
+    the outermost write root holding it is kept in place, once, and no other dir is.
+    """
+    cwd = tmp_path.resolve(strict=False) / "outer" / "work"
+    (cwd / "a" / "b" / ".hid").mkdir(parents=True)
+    (cwd / "plain" / "sub").mkdir(parents=True)
+    policy = _make_policy(
+        cwd,
+        write_roots=[cwd.parent, cwd, cwd / "a"],
+        cwd_hidden_scan_recursive=True,
+        mask_paths=[cwd / "a" / "keys", cwd.parent.parent / "elsewhere"],
+    )
+
+    lines = _build_profile(policy, cwd).splitlines()
+
+    for target in (
+        f'subpath "{cwd / "a" / "b" / ".hid"}"',
+        f'path-literal "{cwd / "a" / "keys"}"',
+    ):
+        assert lines.count(_unix_socket_rule("deny", target)) == 1, target
+    above = [cwd / "a" / "b", cwd / "a", cwd, cwd.parent]
+    assert [line for line in lines if "file-write-unlink" in line] == [
+        f'(deny file-write-unlink (literal "{path}"))' for path in above
+    ]
 
 
 def test_profile_no_unix_socket_deny_when_list_empty(tmp_path: Path) -> None:

@@ -3520,8 +3520,47 @@ def test_create_terminal_instance_denies_control_socket_but_keeps_private_dir_wr
             "private_dir dropped from write roots — a forked workspace would "
             "become read-only inside the pane"
         )
+        # CORAL(S127): the pane's copy helper keeps its own socket, the one the bridge serves
+        bridge = instance._clipboard_bridge
+        assert bridge is not None and bridge.socket_path == instance.private_dir / "clip.sock"
+        assert policy.allow_unix_socket_paths == [bridge.socket_path.resolve(strict=False)]
+        assert policy.allow_unix_socket_roots is None
     finally:
         shutil.rmtree(instance.private_dir, ignore_errors=True)
+
+    # CORAL(S127): a forked pane's tree is writable only through the pane dir, which holds the
+    # tmux socket and so is never an own dir; its sockets are named as the pane's own instead.
+    forked_env = OSEnvSpec(
+        type="caller_process",
+        cwd=str(tmp_path),
+        fork=True,
+        sandbox=OSEnvSandboxSpec(type=backend_type),
+    )
+    forked = create_terminal_instance(
+        name="bash", session_key="s3", spec=TerminalEnvSpec(command="bash", os_env=forked_env)
+    )
+    try:
+        fork_policy = forked.instance.sandbox_policy
+        fork_root = (forked.instance.private_dir / "root").resolve(strict=False)
+        assert forked.cwd == forked.instance.private_dir / "root"
+        assert fork_policy is not None and fork_policy.allow_unix_socket_roots == [fork_root]
+        assert fork_root not in fork_policy.write_roots
+        assert forked.instance.private_dir.resolve(strict=False) in fork_policy.write_roots
+    finally:
+        shutil.rmtree(forked.instance.private_dir, ignore_errors=True)
+
+    # CORAL(S127): with no active sandbox there is no policy to name a socket on
+    unsandboxed_env = OSEnvSpec(
+        type="caller_process", cwd=str(tmp_path), sandbox=OSEnvSandboxSpec(type="none")
+    )
+    unsandboxed = create_terminal_instance(
+        name="bash", session_key="s2", spec=TerminalEnvSpec(command="bash", os_env=unsandboxed_env)
+    ).instance
+    try:
+        assert unsandboxed.sandbox_policy is None
+        assert unsandboxed._clipboard_bridge is not None
+    finally:
+        shutil.rmtree(unsandboxed.private_dir, ignore_errors=True)
 
 
 # ── UTF-8 locale default for native TUI panes (issue #2427) ──────────────────

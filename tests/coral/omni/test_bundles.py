@@ -368,6 +368,104 @@ def test_a_spec_tool_cannot_take_an_exempt_tools_name(
         check_hygiene(loosen(_parsed(stance)), stance)
 
 
+def _with_os_env(
+    spec: AgentSpec,
+    *,
+    cwd: str = ".",
+    write_paths: list[object],
+    write_files: list[str] | None = None,
+) -> AgentSpec:
+    """*spec* with its OS environment's cwd and its sandbox's write grants replaced."""
+    assert spec.os_env is not None and spec.os_env.sandbox is not None
+    sandbox = dataclasses.replace(
+        spec.os_env.sandbox, write_paths=write_paths, write_files=write_files
+    )
+    return dataclasses.replace(
+        spec, os_env=dataclasses.replace(spec.os_env, cwd=cwd, sandbox=sandbox)
+    )
+
+
+_STAYS_IN_WORKSPACE_RULE = (
+    "breaks: os_env cwd, sandbox write_paths and write_files stay inside the workspace"
+)
+
+
+@pytest.mark.parametrize(
+    ("cwd", "write_paths"),
+    [
+        (".", ["~"]),
+        (".", [".", "~/"]),
+        (".", ["~other/src"]),
+        (".", ["/tmp"]),
+        (".", ["/private/var/folders"]),
+        (".", [{"path": "/tmp/omnigent-501", "copy_on_write": True}]),
+        (".", [".."]),
+        (".", ["src/../.."]),
+        (".", ["C:\\Users\\me"]),
+        (".", ["src\\..\\.."]),
+        ("~", ["."]),
+        ("/tmp", ["."]),
+        ("..", ["."]),
+    ],
+    ids=[
+        "home",
+        "home_beside_the_workspace",
+        "another_users_home",
+        "temp_root",
+        "temp_parent",
+        "harness_root",
+        "parent",
+        "parent_after_a_step_down",
+        "windows_drive",
+        "windows_parent",
+        "cwd_home",
+        "cwd_temp_root",
+        "cwd_parent",
+    ],
+)
+def test_a_step_whose_write_paths_leave_the_workspace_is_rejected(
+    cwd: str, write_paths: list[object]
+) -> None:
+    """
+    A write root outside the workspace can be, or hold, the host's home, its temp dir or a
+    harness socket root. The macOS sandbox does not count such a root as the step's own,
+    but a step that can write a dir can still move a socket out of it and connect.
+    """
+    spec = _with_os_env(_parsed(Stance.IMPLEMENTER), cwd=cwd, write_paths=write_paths)
+
+    with pytest.raises(StepBundleRejected) as refused:
+        check_hygiene(spec, Stance.IMPLEMENTER)
+    assert str(refused.value).endswith(_STAYS_IN_WORKSPACE_RULE)
+
+
+@pytest.mark.parametrize(
+    "write_file",
+    ["~/.docker/run/docker.sock", "/tmp/x/agent.sock", "../other/svc.sock", "C:\\x\\svc.sock"],
+    ids=["home", "temp_root", "parent", "windows_drive"],
+)
+def test_a_step_whose_write_files_leave_the_workspace_is_rejected(write_file: str) -> None:
+    """A file grant on another program's socket lets a step move it into its cwd and connect."""
+    spec = _with_os_env(
+        _parsed(Stance.IMPLEMENTER), write_paths=["."], write_files=["notes.txt", write_file]
+    )
+
+    with pytest.raises(StepBundleRejected) as refused:
+        check_hygiene(spec, Stance.IMPLEMENTER)
+    assert str(refused.value).endswith(_STAYS_IN_WORKSPACE_RULE)
+
+
+def test_a_step_may_write_the_workspace_and_dirs_inside_it() -> None:
+    paths: list[object] = [".", "build/out", "./cache", {"path": "data", "copy_on_write": False}]
+    for cwd in (".", "packages/app"):
+        spec = _with_os_env(
+            _parsed(Stance.IMPLEMENTER),
+            cwd=cwd,
+            write_paths=paths,
+            write_files=["notes.txt", "run/app.sock"],
+        )
+        check_hygiene(spec, Stance.IMPLEMENTER)
+
+
 def test_a_step_may_keep_a_local_tool_that_only_looks_like_an_engine_tool() -> None:
     spec = dataclasses.replace(
         _parsed(Stance.IMPLEMENTER),
