@@ -858,6 +858,13 @@ def test_profile_denies_pasteboard_spotlight_and_apple_events_lookups(tmp_path: 
     assert lines.index(denied[0]) > lines.index("(allow mach-lookup)")
 
 
+# CORAL(S122): signals reach the process itself and its children only
+def test_profile_allows_signals_to_self_and_children_only(tmp_path: Path) -> None:
+    lines = _build_profile(_make_policy(tmp_path), tmp_path.resolve(strict=False)).splitlines()
+    signals = [line for line in lines if line.startswith("(allow signal")]
+    assert signals == ["(allow signal (target self))", "(allow signal (target children))"]
+
+
 # CORAL(S111): other processes' command lines and environments stay unreadable
 @pytest.mark.parametrize("allow_network", [True, False])
 def test_profile_keeps_other_processes_arguments_and_environments_unreadable(
