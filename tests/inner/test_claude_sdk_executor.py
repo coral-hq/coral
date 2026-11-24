@@ -8168,6 +8168,8 @@ def test_a_static_key_reaches_no_log_however_its_listing_goes(monkeypatch, caplo
 
     monkeypatch.setattr(model_catalog, "listing_for_provider", _lister)
     caplog.set_level(logging.DEBUG)
+    # Another test in the session may have left this logger above DEBUG.
+    caplog.set_level(logging.DEBUG, logger="omnigent")
     vocabulary = _gateway_model_vocabulary(_GATEWAY_URL, f"printf %s {shlex.quote(written)}")
 
     assert vocabulary.alias_pins == {} and vocabulary.model_overrides == {}
@@ -9926,6 +9928,7 @@ async def test_an_isolated_cli_its_sandbox_cannot_wrap_never_starts(
     from omnigent.inner.claude_sdk_executor import CORAL_SANDBOX_UNAVAILABLE_CODE
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 
+    # CORAL(S119): the settings read is also told where the file is
     monkeypatch.setattr(  # never read the caller's real Claude settings
         "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda *where: {}
     )

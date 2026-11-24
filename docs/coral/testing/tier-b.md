@@ -31,8 +31,9 @@ the live variant unless `CORAL_E2E_LIVE=1` and `ANTHROPIC_API_KEY` are set.
 - `tests/e2e/coral/test_runner_loss.py`: a lost runner, a lost host and a step
   retry;
 - `tests/e2e/coral/test_sandbox_probe.py`: ADR-05's probe 15 on a single-user,
-  an allow-listed-token and an accounts server, and the test that binds the gate
-  label's table to the probe's pins.
+  an allow-listed-token and an accounts server, the test that binds the gate
+  label's table to the probe's pins, and the test that the installed CLI's
+  build still names the first-party switch (below).
 
 Explicit paths override `addopts`'s `--ignore=tests/e2e` (`pyproject.toml`). The proxy's file comes
 first so that `--dist=load` spreads the stack tests over both workers; the
@@ -140,7 +141,7 @@ their process trees.
 | `test_runner_loss.py::test_a_killed_step_runner_is_relaunched_in_the_same_session` | `killpg` of the step runner | one loss, one wake `relaunched`, the same session and generation, a new runner id; the run never pauses |
 | `test_runner_loss.py::test_an_offline_host_holds_the_step_and_its_return_relaunches_it` | host daemon SIGKILL; 30 s grace | the hold (`infra` / `infra.host_offline`, Cancel only, `:resume` and `:retry` 409), then `respawn_host`, the hold ends and the same session is relaunched as one loss |
 | `test_runner_loss.py::test_retrying_a_blocked_step_fences_salvages_resets_and_briefs_a_new_session` | a blocked handoff, then `:retry` | paused `recovery.restarting` until the restart finished; the old session closed and its tree gone; one salvage ref holding the old attempt's file; a reset worktree; generation 2 in a new session whose brief names the ref |
-| `test_sandbox_probe.py` (three stack tests) | none | ADR-05's probe 15 verdicts, pinned per platform: on a single-user server, on one that keeps the allow-listed runner token, and on an accounts server, where the same probe first runs outside the sandbox and must open every owner path |
+| `test_sandbox_probe.py` (three stack tests) | none | ADR-05's probe 15 verdicts, pinned per platform: on a single-user server, on one that keeps the allow-listed runner token (its steps on a plain API key, through the credential proxy), and on an accounts server. On the single-user and accounts servers the same probe first runs outside the sandbox: it must read each process and find no API key and no runner token, be refused by the step's credential proxy, and open every other owner path |
 
 The review loop is a test fixture, `tests/e2e/coral/fixtures/review_loop.yaml`
 ("Implement with review loop": implement, review with a `changes_requested`
@@ -150,7 +151,8 @@ CRL-157.
 **Probe 15's choreography.** The implementer's first call and the reviewer's
 calls are held, and the mock releases only the oldest held call, so the test
 releases one call at a time and orders the holds until the implementer's probe
-call is the oldest. The host-side controls then run, the probe call is
+call is the oldest. The host-side controls then run, the same probe runs
+outside any sandbox (next paragraph), the probe call is
 released, its result is read from the mock's ledger, the controls run again
 with the reviewer still held, and only then is the reviewer let go. Every
 target needs a host-side control; a target that went missing fails as a failed
@@ -161,21 +163,81 @@ writes `artifacts/probe15-<platform>.json` (and
 those files, with every open verdict given its owner ticket. They hold verdict
 tokens and the recorded versions only.
 
+**Probe 15 outside the sandbox.** Right before the step's probe call is
+released, `test_probe_15_from_a_step_shell` runs the same probe outside any
+sandbox, as the step's user, in the step's worktree, on the four process
+targets and the credential proxy. It expects (`OUTSIDE_PROBE15`):
+
+- each process is read (`reachable`): the reviewer's runner and CLI, the host
+  daemon and the step's own CLI;
+- the model API key is in none of their environments or command lines
+  (`.api_key` and `.argv_api_key` `not_present`);
+- each CLI's environment names `OMNIGENT_CLAUDE_PROXY_TOKEN`, its session
+  token, and no `HARNESS_CLAUDE_SDK_*` name;
+- `credential_proxy` is `refused`.
+
+The outside verdicts go into the artifact with the step's. Inside the sandbox
+the same reads stay `denied` on macOS and `hidden` on Linux, as pinned.
+
+**The `credential_proxy` check.** A Coral step's CLI talks to a credential
+proxy on loopback in its own harness, which holds the model key and admits
+only the CLI's session token (ADR-05, "Addendum: CRL-167 secrets out of
+exec-time environments"). The test reads the proxy's port and the token,
+redacted, from the step's own CLI's environment outside the sandbox, and gives
+the probe the port only. The probe posts a model request three times: with no
+key, with a wrong key, and on a path that climbs to the model route
+(`/v1/models/../messages`). It prints `refused` only when all three get 401
+or 403, and `reachable` when any is answered 2xx. The single-user and the
+identity test both run it, in the step and outside, and pin it `refused` with
+no owner. The mock's ledger must hold none of the three requests (they name
+the model `crl-credential-proxy-probe`) and must not hold the session token.
+The ledger records request bodies, not headers; that the token is in no
+upstream header is the shim's and the executor's unit tests. On Linux the pin
+is set by reasoning until the lane runs on that change.
+
 **The identity probe's choreography.**
 `test_probe_15_on_a_server_that_requires_identity` starts the stack with
 `skeleton_stack(identity=True)`: an accounts server with a throwaway cookie
 secret and first admin, the owner's JWT from `POST /auth/login` stored in the
 host's `~/.omnigent/auth_tokens.json` before the host starts, and the stack's
 client sending that JWT. The host spawns runners directly
-(`OMNIGENT_RUNNER_ZYGOTE=0`), so the test first checks, by name only, that the
-implementer's runner holds its binding token and the host's bearer. It plants
+(`OMNIGENT_RUNNER_ZYGOTE=0`) and hands each its binding token and the host's
+bearer over an inherited socket, so neither is in the runner's environment.
+The test proves the spawn path by the runner's parent, which must be the host
+daemon (a zygote-forked runner's is the zygote), or it fails as a failed
+control. It plants
 a cookie-secret canary in the host's home and opens throwaway listeners for
 other programs' services. With both steps' first calls held, it reads the run's
 `gate_integrity` and runs the same probe outside any sandbox in the step's
-worktree; that run must open every owner path, or the test fails as a broken
-probe. Then the step runs the probe, its controls run again, and the run must
+worktree. That run must read the runner's environment and find no token there
+(`own_runner_mint` and `own_runner_bearer` `not_present`, each `.read`
+`reachable`), be refused by the credential proxy and the bare owner route, and
+open every other owner path, or the test fails as a broken probe. Then the step
+runs the probe, its controls run again, and the run must
 complete. The verdicts, the outside verdicts and the recorded versions are
 written before any assertion, so a failing lane run still leaves them.
+
+**The plain-key stack test.**
+`test_a_step_on_a_server_with_the_allow_listed_runner_token` gives its host an
+API key with no endpoint of its own and names the mock in the host's
+`ANTHROPIC_BASE_URL`. So each step's CLI runs through its credential proxy on
+the path with no gateway. On that path the CLI defers its MCP tools behind
+`ToolSearch`, so each step's script loads them first (`load_step_tools`) and
+its queues are keyed on `ToolSearch` being offered. The test asserts, by name
+only, that the step's CLI names a loopback proxy that is not the mock, holds a
+session token, and has none of `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`,
+`CLAUDE_CODE_USE_GATEWAY` and `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`; and
+that the mock received betas beyond the three a gateway launch sends. Every
+proxy setting of the host names an `EgressRecorder`, which must see nothing:
+were the host's endpoint lost on the way, the proxy would forward to the
+Anthropic API.
+
+**The first-party switch.**
+`test_the_installed_cli_knows_the_first_party_switch` searches the installed
+CLI's build for `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` without running
+it. It skips only when no CLI is installed, and fails instead when
+`CORAL_E2E_REQUIRE_CLI=1` is set. Whether the lane's CLI (2.1.295) names the
+switch is not known until the lane runs it.
 
 **Pinning probe 15.** The macOS pins come from local runs; the Linux pins come
 from the `coral-e2e` lane's artifacts (`pytest-coral-e2e-<run id>`). The lane
@@ -191,8 +253,11 @@ release branch. For each failure in `test_sandbox_probe.py`:
   never re-pinned: a `.read` other than `denied` or `hidden`; `minted`,
   `mismatch`, `refused` or `not_present` on `mint`, `bearer` or `stored`;
   `reachable` on an environment or the cookie secret; a bare owner request on
-  the accounts server other than `refused`; or any `shell_env_names.names`
-  other than `none`.
+  the accounts server other than `refused`; `credential_proxy` other than
+  `refused`, `denied` or `hidden`; or any `shell_env_names.names`
+  other than `none`. An outside run that finds an API key or a runner token,
+  or a CLI without its session token, is escalated too, even where it reads
+  as a broken probe: the outside maps are never loosened to pass.
 - A person checks every pin copied from the lane, and the comment above the
   pins names the lane run. A move that changes a released policy row's open
   owners also needs a new sandbox policy revision and rows, and a server-side
@@ -241,21 +306,28 @@ failing live run's report, with `-l --tb=long`, never shows a fake key. Live
 failures carry no log tails. At teardown the test asserts that no file under
 its basetemp holds the key, reporting a count only, then deletes the basetemp.
 
-**What the token does not fence.** The token reaches the CLI's command line
-(its `--settings` key helper), which any local account can read, and the
-stack's server serves unauthenticated local requests. So while a live run
-lasts, another account on the machine could read the token and spend through
-the proxy. There is no spend cap. No process the test starts is given the key,
-but the key is not confined to the test process: removing it from the test's
-environment does not scrub the initial environment block of pytest, or of the
-shell and tools that started it, which another process of the same user outside
-the sandbox can read (CRL-167). A step's shell cannot read it directly: on macOS
+**What the token does not fence.** Since CRL-167 the per-run token reaches no
+command line. Each step's harness holds it in its credential proxy, and the
+step's CLI holds only that proxy's session token, in its environment; its
+`--settings` key helper prints that variable. So another account on the
+machine can no longer read a token from a step CLI's command line. A process
+of the same user outside the sandbox can still read the session token from a
+CLI's environment and spend through the two proxies while the run lasts, and
+the stack's server serves unauthenticated local requests. There is no spend
+cap. No process the test starts is given the key, but the key is not confined
+to the test process: removing it from the test's environment does not scrub
+the initial environment block of pytest, or of the shell and tools that
+started it, which another process of the same user outside the sandbox can
+read. Those are your own processes, not ones Coral starts. A step's shell
+cannot read it directly: on macOS
 27.2.1 since CRL-165 (S111, probe 15; no CI lane runs macOS, CRL-170), and on
 Linux because of pid namespaces. On a single-user server, though, a step can
 act as the owner, an accepted residual (ADR-05, "Addendum: CRL-159 probe 15 on
 identity-requiring servers"). The proxy path is the claude-sdk gateway path (it
 sets a base URL), so a host with only `ANTHROPIC_API_KEY` and no base URL is not
-exercised.
+exercised against the real API; the plain-key stack test and
+`test_a_coral_direct_key_cli_sends_the_same_requests_through_its_proxy` cover
+that path against the mock.
 
 ## The harness is claude-sdk
 
@@ -292,6 +364,30 @@ inherited environment and returns changes that:
 
 `test_claude_sdk_kit.py` checks that result against an environment full of
 credentials and proxy overrides.
+
+**Coral executors and the credential proxy.** A Coral executor
+(`make_executor(..., coral=True)`) sends its CLI through a credential proxy on
+loopback, which holds the key; the CLI's key helper only prints its session
+token (`claude_sdk_executor._PROXY_TOKEN_HELPER`). Two tests rely on that:
+
+- `test_a_coral_cli_keeps_its_claude_config_out_of_the_home` (the S113 test)
+  used to run its probe as the API key helper, inside the CLI's sandbox. It
+  now patches `_PROXY_TOKEN_HELPER` to run the probe in front of the token
+  helper, so the probe still runs inside the sandbox. The executor is built on
+  a gateway (`make_executor(..., gateway_base_url=<mock>)`) with a fake model
+  key. The probe gets that key as a length and a digest
+  (`_claude_config_probe.secret_spec`), never the key itself, and also reports
+  `proxy_token yes` and `model_key no`: its environment holds the session
+  token and nowhere the key. The test asserts that the proxy logged no refusal
+  during the turn, so the pinned CLI needs no route the proxy does not
+  forward.
+- `test_a_coral_direct_key_cli_sends_the_same_requests_through_its_proxy`
+  launches a real CLI on a plain key three times: on the endpoint itself,
+  through the proxy, and through the proxy with the first-party answer
+  forced. It compares the `anthropic-beta` header and the `thinking` field
+  the mock records. The proxy changes neither, and the first-party switch
+  only adds betas. It runs locally only: the forced answer patches the
+  executor in process, which a stack's separate harness process cannot take.
 
 `EgressRecorder` is a local proxy that answers every request with `403` and
 records its request line. The main test asserts that the recorder saw nothing
@@ -372,7 +468,8 @@ hello; the Tier B gate does not check it yet.
 
 Every model call is scripted, so Tier B does not show real model behaviour
 (following a brief, choosing tools and handoff labels, how often a reviewer
-loops), the direct API-key path without a gateway, real error texts and
+loops), the plain API-key path against the Anthropic API itself (the mock is
+not a first-party endpoint), real error texts and
 retries for 401, 429, 529 and overloaded answers (CRL-156), real streaming
 latency against the CLI's own watchdogs, or real spend. The kills land only
 while the CLI waits for a model answer: none lands while an MCP call to the

@@ -1127,7 +1127,11 @@ async def test_the_sdk_version_check_and_cli_spawn_see_no_harness_config(
     transport = SubprocessCLITransport(
         prompt="hi", options=ClaudeAgentOptions(cli_path=str(fake_cli))
     )
-    await transport.connect()
+    try:
+        await transport.connect()
+    except Exception as exc:
+        # By type only: the transport's frames hold a copy of this process's environment.
+        pytest.fail(f"the SDK transport did not start ({type(exc).__name__})", pytrace=False)
     try:
         await poll_until_async(
             lambda: (records / "version").exists() and (records / "session").exists()

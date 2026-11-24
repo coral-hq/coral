@@ -1836,10 +1836,22 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _fake_runner_environ(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Swap ``os.environ`` for a fake-only one, so no frame of a real spawn holds a real value.
+
+    Only the search paths a spawned harness needs to start and import are kept.
+    """
+    kept = ("PYTHONPATH", "LD_LIBRARY_PATH", "PYTHONHOME")
+    search_paths = {name: os.environ[name] for name in kept if name in os.environ}
+    environ = {"PATH": os.defpath, "HOME": str(home), **search_paths}
+    monkeypatch.setattr(os, "environ", environ)
+
+
 @pytest.mark.posix_only  # the launch socket is POSIX-only
 async def test_direct_exec_claude_sdk_harness_holds_its_key_in_config_not_env(
-    manager: HarnessProcessManager, monkeypatch: pytest.MonkeyPatch
+    manager: HarnessProcessManager, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _fake_runner_environ(monkeypatch, tmp_path)
     monkeypatch.setitem(_HARNESS_MODULES, _CLAUDE_SDK_CONFIG_HARNESS, _CLAUDE_SDK_CONFIG_MODULE)
     monkeypatch.setitem(
         process_manager._LAUNCH_SECRET_ENV_VARS_BY_MODULE,
@@ -1878,7 +1890,10 @@ async def test_direct_exec_claude_sdk_harness_holds_its_key_in_config_not_env(
     assert config == {"api_key_helper": _digest(helper), "gateway_auth_command": _digest(command)}
 
 
-async def test_other_harnesses_keep_env_delivery(manager: HarnessProcessManager) -> None:
+async def test_other_harnesses_keep_env_delivery(
+    manager: HarnessProcessManager, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_runner_environ(monkeypatch, tmp_path)
     helper = f"printf %s sk-ant-test-{secrets.token_hex(16)}"
     await manager.start()
     try:
@@ -1979,7 +1994,9 @@ async def test_a_harness_refusing_its_launch_socket_fails_the_spawn_without_its_
     manager: HarnessProcessManager,
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
+    _fake_runner_environ(monkeypatch, tmp_path)
     monkeypatch.setitem(_HARNESS_MODULES, _CLAUDE_SDK_CONFIG_HARNESS, _CLAUDE_SDK_CONFIG_MODULE)
     # The socket also carries a name the harness does not accept from it.
     monkeypatch.setitem(

@@ -1128,11 +1128,18 @@ async def test_handle_launch_keeps_runner_tokens_in_the_env_off_posix(
     host._auth_token_factory = lambda: "host-bootstrap-bearer"
     host._auth_token_factory_resolved = True
     monkeypatch.setattr("omnigent.host.connect.IS_POSIX", False)
+    # Names, digests and flags only: the rest of env= is this test process's environment.
     spawned: dict[str, object] = {}
     original_popen = subprocess.Popen
 
     def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
-        spawned.update(kwargs)
+        env = cast(dict[str, str], kwargs["env"])
+        tokens = {name: env[name] for name in RUNNER_AUTH_SECRET_ENV_VARS if name in env}
+        spawned.update(
+            fd_named=LAUNCH_SECRETS_FD_ENV_VAR in env,
+            fds_passed=bool(kwargs.get("pass_fds")),
+            tokens=_secret_digests(tokens),
+        )
         return original_popen(
             ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
@@ -1144,17 +1151,16 @@ async def test_handle_launch_keeps_runner_tokens_in_the_env_off_posix(
         result = await host._handle_launch(frame)
 
     assert result.status == "launched", result.error
-    env = cast(dict[str, str], spawned["env"])
-    assert LAUNCH_SECRETS_FD_ENV_VAR not in env
-    assert not spawned.get("pass_fds")
-    assert _secret_digests({name: env[name] for name in RUNNER_AUTH_SECRET_ENV_VARS}) == (
-        _secret_digests(
+    assert spawned == {
+        "fd_named": False,
+        "fds_passed": False,
+        "tokens": _secret_digests(
             {
                 RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: "tok_env",
                 RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR: "host-bootstrap-bearer",
             }
-        )
-    )
+        ),
+    }
     _cleanup_host(host)
 
 
@@ -1167,13 +1173,14 @@ async def test_handle_launch_fails_closed_when_the_runner_secrets_cannot_be_hand
     host = _make_host_process()
     host._auth_token_factory = lambda: bearer
     host._auth_token_factory_resolved = True
-    spawned: list[dict[str, str]] = []
+    # The launch socket's fd only: the rest of env= is this test process's environment.
+    spawned: list[int] = []
     socket_identity: list[tuple[int, int]] = []
 
     def _failing_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
-        env = cast(dict[str, str], kwargs["env"])
-        spawned.append(env)
-        status = os.fstat(int(env[LAUNCH_SECRETS_FD_ENV_VAR]))
+        fd = int(cast(dict[str, str], kwargs["env"])[LAUNCH_SECRETS_FD_ENV_VAR])
+        spawned.append(fd)
+        status = os.fstat(fd)
         socket_identity.append((status.st_dev, status.st_ino))
         raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
 
@@ -1189,8 +1196,8 @@ async def test_handle_launch_fails_closed_when_the_runner_secrets_cannot_be_hand
     if failure == "over_the_payload_cap":
         assert spawned == [], "a launch whose secrets do not fit must not spawn"
     else:
-        [env] = spawned
-        assert not _same_socket(int(env[LAUNCH_SECRETS_FD_ENV_VAR]), socket_identity[0])
+        [fd] = spawned
+        assert not _same_socket(fd, socket_identity[0])
     assert host._runners == {}
 
 

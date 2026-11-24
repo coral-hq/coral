@@ -4135,7 +4135,11 @@ def test_after_boot_the_runner_reads_its_tokens_from_memory_and_no_child_inherit
 
     monkeypatch.setattr("omnigent.runner._entry._run_tunnel_from_env", _tunnel)
 
-    main()
+    try:
+        main()
+    except SystemExit as exc:
+        # By code only: the boot's frames hold this process's whole environment.
+        pytest.fail(f"the runner's boot exited {exc.code}", pytrace=False)
 
     assert seen == {
         "environ": [],

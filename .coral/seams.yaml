@@ -3576,7 +3576,9 @@ seams:
       after a killed harness, when the next claude-sdk executor with the same
       temp dir connects or closes; dirs from before S116 and the other
       residuals in the CRL-179 addendum stay), the settings env merge
-      (CRL-167), env construction races and a relative config dir (CRL-182),
+      (closed by S119 on POSIX, where a Coral CLI now gets only model names,
+      switched-on opt-outs and credential-free network settings; Windows is
+      CRL-197), env construction races and a relative config dir (CRL-182),
       project config a step writes in its worktree (CRL-181), and the inbox
       sockets (CRL-174).
       No CI lane runs macOS (CRL-170). Mechanism, evidence and the full
@@ -3750,7 +3752,7 @@ seams:
       the auth note. Main residuals: CLIs that run unwrapped by design (no
       ticket) or because their sandbox could not be applied (CRL-183); the
       seed copy's secrets and CLAUDE_CODE_OAUTH_TOKEN, both readable in the
-      sandbox (CRL-167); a seed copy left in a launch scratch after a kill,
+      sandbox (CRL-197); a seed copy left in a launch scratch after a kill,
       and a scratch without one at each connect from the SDK's -v check
       (CRL-179; removed by S116 once the launch has exited, at a claude-sdk
       executor's next connect, client teardown or close, or, after a killed
@@ -3911,7 +3913,7 @@ seams:
       until the executor's __del__; other agents whose grants cover the temp
       dir can read and write live seeds and scratches and change their claims
       (ADR-05's accepted residual); a seed copy stays readable in the sandbox
-      while its executor runs (CRL-167); Windows is unchanged; no CI lane runs
+      while its executor runs (CRL-197); Windows is unchanged; no CI lane runs
       macOS (CRL-170), so the seatbelt rows run locally. Mechanism, evidence
       and the full residual list: ADR-05, "Addendum: CRL-179 launch temp dir
       cleanup".
@@ -4114,20 +4116,22 @@ seams:
         whose readable environment and env=None child lack the tokens,
         concurrent launches that never cross sockets, and a daemon without
         stdin or stdout whose child still reads its socket.
-        tests/host/test_connect.py (376, S117 and S118: 18 for S118): the
+        tests/host/test_connect.py (383, S117 and S118: 18 for S118): the
         zygote base env, search path and HostProcess wiring tests, then the
-        rewritten direct-spawn launch test, the Windows env-delivery test,
-        the fail-closed launch cases, the passthrough fd-variable and name
-        checks, the direct fallback with the terminal mirror, and the
+        rewritten direct-spawn launch test, the Windows env-delivery test
+        and the fail-closed launch cases (both keep names, digests and the
+        socket's fd, never the spawn's env), the passthrough fd-variable and
+        name checks, the direct fallback with the terminal mirror, and the
         forwarded-names list with a config-ref key and with nothing
         forwarded. omnigent/runner/launch_secrets.py (220, new, 7 for S118):
         the socket writer, the spawn context and the bounded, validating
         reader. omnigent/host/connect.py (144, S117 and S118: 6 for S118):
         the zygote's base env and its filters, the direct-spawn socket, the
         fd variables never forwarded, and the forwarded-names list with its
-        shared parser. tests/runner/test_runner_entry.py (126): the boot
+        shared parser. tests/runner/test_runner_entry.py (130): the boot
         order test and the after-boot test for both deliveries, with the
-        delegated mint path. The other files are within budget:
+        delegated mint path; a failed boot there is reported by exit code
+        alone. The other files are within budget:
         omnigent/host/runner_zygote.py 15, omnigent/runner/_entry.py 30,
         omnigent/runner/identity.py 34, tests/host/test_runner_zygote.py 119,
         tests/runner/test_identity.py 31.
@@ -4360,7 +4364,7 @@ seams:
       their key or command on --settings argv (CRL-197); a direct-exec
       harness's exec-time environment still holds the forwarded credentials
       (CRL-197); Windows keeps every name in the environment and the key on
-      argv. The user's settings env block is S119's: its endpoint, proxy and
+      argv (CRL-197). The user's settings env block is S119's: its endpoint, proxy and
       CA file feed this proxy and the rest no longer reaches a Coral CLI
       whole. The model listing for a loopback endpoint (the OpenAI-compatible
       fetch in omnigent/models/model_catalog.py, which a gateway's listing
@@ -4400,7 +4404,7 @@ seams:
       - tests/test_model_catalog.py
     budget_lines: 120
     budget_exception:
-      lines: 3057
+      lines: 3058
       reason: >-
         Counted with git diff --numstat origin/development (added plus
         removed lines; a new file counts every line), so a file shared with
@@ -4418,8 +4422,8 @@ seams:
         checks, no value in responses or DEBUG logs (malformed and failing
         upstreams included), redirects not followed, the quiet upstream
         client, the proxy and CA options, the listening log line, and a
-        loopback-only guard. tests/inner/test_claude_sdk_executor.py (3057,
-        the largest file; 2829 with --minimal, since the command's default
+        loopback-only guard. tests/inner/test_claude_sdk_executor.py (3058,
+        the largest file; 2830 with --minimal, since the command's default
         pairing now sets 114 unchanged lines of older tests against new
         ones; S118 and S119: 1355 here):
         the Coral gateway turn against a real loopback shim and recording
@@ -4456,21 +4460,22 @@ seams:
         plain shim's header building and response relay moved into helpers
         both modes share.
         tests/inner/test_claude_sdk_harness.py
-        (617): config taken once and reused by every build, every build
+        (621): config taken once and reused by every build, every build
         kwarg from that config, the Coral scrub (forwarded credentials, the
         host's forwarded-names list, every provider switch, renamed copies of
         either literal, the protected essentials and userinfo-free proxies,
         the 20-character scan floor) and its snapshot, the platform and
         non-Coral cases, the launch socket adopted into the config and
         refused when untrusted, and the SDK's version check and CLI spawn
-        seeing no config. tests/host/test_connect.py (376, S117 and S118: 18
+        seeing no config. tests/host/test_connect.py (383, S117 and S118: 18
         here, the harness fd variable in the passthrough test).
         omnigent/runner/launch_secrets.py (220, S117 and S118: 7 here, the
         harness fd variable and its two names).
-        tests/runtime/harnesses/test_process_manager.py (219): the real
-        direct-exec harness and a refusing one, the other-harness case, the
-        fork, off-POSIX and POSIX exec paths with the forwarded-names list,
-        and the unsendable socket. omnigent/inner/claude_sdk_executor.py
+        tests/runtime/harnesses/test_process_manager.py (236): the real
+        direct-exec harness and a refusing one, the other-harness case (each
+        real spawn from a fake-only runner environment), the fork, off-POSIX
+        and POSIX exec paths with the forwarded-names list, and the
+        unsendable socket. omnigent/inner/claude_sdk_executor.py
         (792, S118 and S119: 395 here): the executor's credential and its TTL
         and environment, the
         token helper and options env, the snapshot's upstream proxy with
@@ -4617,13 +4622,13 @@ seams:
       - tests/inner/test_claude_sdk_executor.py
     budget_lines: 120
     budget_exception:
-      lines: 3057
+      lines: 3058
       reason: >-
         Counted with git diff --numstat origin/development (added plus removed
         lines), so a file shared with S118 counts both seams' lines.
-        tests/inner/test_claude_sdk_executor.py (3057; 2829 with --minimal,
+        tests/inner/test_claude_sdk_executor.py (3058; 2830 with --minimal,
         since the command's default pairing now sets 114 unchanged lines of
-        older tests against new ones; S118 and S119: 1474 here by the
+        older tests against new ones; S118 and S119: 1475 here by the
         --minimal count): a throwaway settings.json at a trusted and at each
         untrusted place under a fake-only harness environment, the names a
         Coral CLI gets by name and digest and the endpoint, proxy and CA its
