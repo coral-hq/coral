@@ -4189,13 +4189,59 @@ seams:
       a direct-exec harness. A browser test that found the CLI by
       HARNESS_CLAUDE_SDK_AGENT_NAME in its environment now finds it by the
       session's harness among its parents, skipping ancestors whose command
-      line it cannot read and stopping at the runner. Residuals: until the
-      credential proxy, a Coral CLI's helper command runs with the scrubbed
-      environment, a proxy with userinfo reaches neither the CLI nor the
-      gateway shim's upstream client (the snapshot keeps it for Steps 4-6),
-      and every CLI still gets the key on its --settings argv; a direct-exec harness's exec-time
-      environment still holds the forwarded credentials (CRL-197); Windows
-      keeps every name in the environment.
+      line it cannot read and stopping at the runner. ClaudeGatewayShim gains
+      a credential mode (credential=UpstreamCredential): the CLI holds only
+      session_token (token_urlsafe(32)). Before reading the body the shim
+      requires every presented x-api-key and authorization Bearer to equal it
+      (as bytes, hmac.compare_digest; at least one, none repeated), else 401.
+      It forwards only POST /v1/messages, POST /v1/messages/count_tokens, GET
+      /v1/models and GET /v1/models/<id> (else 404, logged by method and
+      segment count); it builds the upstream path from raw_path and answers
+      400 to a path that is not origin-form or has an empty, . or .. segment,
+      @, a backslash or an encoded dot, slash, backslash, @, ? or #, and to a
+      joined URL that leaves the upstream's scheme, host, port or base path,
+      or to a model id outside [A-Za-z0-9][A-Za-z0-9._:-]{0,127}; a body over
+      32 MiB gets 413. Its uvicorn runs the h11 parser (a request head is
+      capped at 16 KiB) with no connection limit, which amends R1 item 4:
+      idle unauthenticated sockets would fill a limit and refuse the CLI.
+      It refuses to start on a plain http upstream that is not loopback
+      (OSError naming the scheme only), drops X-Original-URL, X-Rewrite-URL,
+      X-HTTP-Method-Override, X-HTTP-Method, X-Method-Override, Forwarded and
+      every X-Forwarded-* header, forwards nothing for a CLI that leaves
+      mid-upload, closes the upstream response when the CLI leaves
+      mid-answer, and aclose() cancels exchanges still running, so a
+      credential command loses its process group.
+      The real credential replaces the token in the header form(s) the CLI
+      used; an upstream 401 refreshes a command credential and resends once
+      per request and at most once per 30 s. UpstreamCredential holds a
+      printf %s literal without a shell; any other command runs as /bin/sh -c
+      in its own session from Path.home() with the env snapshot its caller
+      passes, stdout capped at 64 KiB, stderr discarded, killed with its
+      process group after 600 s or on cancellation, one run at a time, cached
+      for its TTL (900 s by default) and a failure for 30 s; a value must
+      strip to one printable ASCII token of at most 4 KiB. In credential mode
+      every error answer and log line names exception types only (a failed
+      credential gets a fixed 401, anything else a 502 naming the type), and
+      the upstream client's httpx and httpcore records below WARNING are
+      dropped while a credential request runs. upstream_proxy and
+      upstream_ca_file configure the upstream client (redirects not followed,
+      the CA added to httpx's default trust); a client that cannot be built
+      fails start() with an OSError naming the type. Without a credential,
+      proxy or CA the shim's client, limits and forwarding are unchanged; the
+      listening log line names the upstream without userinfo, query or
+      fragment in both modes. Measured under the httptools and h11 parsers:
+      traversal, @, absolute-form and percent-encoded targets reach no
+      upstream and run no command; under httptools, which the credential
+      mode no longer runs, an absolute-form target naming an allowed route
+      reaches only the configured upstream. Residuals: until the executor uses the
+      credential proxy (Step 5a), a Coral CLI's helper command runs with the
+      scrubbed environment, a proxy with userinfo reaches neither the CLI nor
+      the gateway shim's upstream client (Steps 5a and 6 pass the snapshot's
+      or settings' proxy as upstream_proxy), every CLI still gets the key on
+      its --settings argv, and the executor's close() stops the shim before
+      it awaits evictions; a direct-exec harness's exec-time environment
+      still holds the forwarded credentials (CRL-197); Windows keeps every
+      name in the environment.
     files:
       - omnigent/host/connect.py
       - omnigent/inner/claude_gateway_shim.py
@@ -4220,11 +4266,29 @@ seams:
       - tests/e2e/coral/test_sandbox_probe.py
     budget_lines: 120
     budget_exception:
-      lines: 615
+      lines: 1450
       reason: >-
         Counted with git diff --numstat origin/development (added plus
         removed lines; a new file counts every line), so a file shared with
-        S117 counts both seams' lines. tests/inner/test_claude_sdk_harness.py
+        S117 counts both seams' lines. tests/inner/test_claude_gateway_shim.py
+        (1450): real loopback shims and upstreams for the credential mode's
+        header forms, dropped override headers, static key without a shell,
+        token refusals and the header-first check, the route allow-list and
+        model ids, unsafe targets under both HTTP parsers, the joined-URL
+        check, plain http upstreams on loopback only, the body cap, the h11
+        head bound and no connection limit, a CLI leaving mid-upload or
+        mid-answer, the SSE relay and thinking.display restore, command
+        caching, refresh and negative-cache bounds, the runner's shell, group,
+        home, env, timeout, cancellation, aclose() kill and output cap, value
+        checks, no value in responses or DEBUG logs (malformed and failing
+        upstreams included), redirects not followed, the quiet upstream
+        client, the proxy and CA options, the listening log line, and a
+        loopback-only guard. omnigent/inner/claude_gateway_shim.py (728): the
+        credential mode (R1, R3, with the security review's hardening), its
+        own credential runner (R7) and the upstream client options (R17); the
+        plain shim's header building and response relay moved into helpers
+        both modes share.
+        tests/inner/test_claude_sdk_harness.py
         (615): config taken once and reused by every build, every build
         kwarg from that config, the Coral scrub (forwarded credentials, the
         host's forwarded-names list, every provider switch, renamed copies of
@@ -4248,8 +4312,6 @@ seams:
         tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py 61,
         tests/inner/test_claude_sdk_executor.py 56,
         tests/runtime/harnesses/_claude_sdk_config_harness.py 53,
-        tests/inner/test_claude_gateway_shim.py 26,
-        omnigent/inner/claude_gateway_shim.py 19,
         omnigent/inner/claude_sdk_executor.py 6.
       approver: nicholasjano (delegated)
     anchor_exempt: []
