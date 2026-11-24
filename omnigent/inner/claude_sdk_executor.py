@@ -37,6 +37,7 @@ import pathlib
 import re  # CORAL(S116)
 import secrets  # CORAL(S115)
 import shutil
+import stat  # CORAL(S119)
 import sys
 import tempfile  # CORAL(S113)
 import threading  # CORAL(S116)
@@ -50,7 +51,12 @@ from types import ModuleType
 from typing import Any, NamedTuple, Protocol, TypeAlias, cast
 from urllib.parse import urlsplit  # CORAL(S118)
 
-from omnigent._platform import IS_POSIX, resolve_cli_binary, stable_user_id  # CORAL(S118)
+from omnigent._platform import (  # CORAL(S118, S119)
+    IS_DARWIN,
+    IS_POSIX,
+    resolve_cli_binary,
+    stable_user_id,
+)
 from omnigent.cli_invocation import cli_invocation
 from omnigent.databricks_ai_gateway import (
     CLAUDE_CODE_AGENT,
@@ -86,7 +92,7 @@ from .claude_gateway_shim import (
     ClaudeGatewayShim,
     UpstreamCredential,  # CORAL(S118)
     UpstreamCredentialError,  # CORAL(S118)
-    check_upstream_transport,  # CORAL(S118)
+    check_upstream_url,  # CORAL(S118, S119)
     static_credential_literal,  # CORAL(S118)
     static_printf_value,  # CORAL(S118)
 )
@@ -174,6 +180,43 @@ _NO_PROXY_ENV = ("NO_PROXY", "no_proxy")
 # CORAL(S118): how long the model listing waits for a credential command, as before the proxy
 _LISTING_CREDENTIAL_WAIT_S = 15.0
 _LOOPBACK_NO_PROXY = ("127.0.0.1", "localhost")
+# CORAL(S119): what a Coral CLI behind the credential proxy takes from the user's settings env:
+# model routing, and these opt-outs when their value switches them on
+_SETTINGS_ENV_MODEL_NAMES = frozenset(
+    {
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        *ALIAS_MODEL_ENV_VARS.values(),
+    }
+)
+_SETTINGS_ENV_OPT_OUT_NAMES = frozenset(
+    {
+        "DISABLE_TELEMETRY",
+        "DISABLE_ERROR_REPORTING",
+        "DISABLE_AUTOUPDATER",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    }
+)
+# Never a value that switches one off: the host may have switched it on.
+_SETTINGS_ENV_SWITCH_VALUES = frozenset({"1", "true"})
+# CORAL(S119): the settings names that say where the real credential goes and through what.
+# The proxy's upstream hop takes them; the CLI gets a proxy name only when its value is bare.
+_SETTINGS_ENV_BASE_URL = "ANTHROPIC_BASE_URL"
+_SETTINGS_ENV_CA_FILE = "NODE_EXTRA_CA_CERTS"
+_SETTINGS_ENV_PROXY_NAMES = frozenset(
+    spelling
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "ALL_PROXY")
+    for spelling in (name, name.lower())  # the two spellings a client reads
+)
+# CORAL(S119): the proxy kinds the credential proxy's upstream client can use
+_UPSTREAM_PROXY_SCHEMES = ("http", "https")
+# CORAL(S119): the settings trust rule compares paths as macOS volumes do by default, and
+# gives up on a path with more links than any real one
+_PATHS_IGNORE_CASE = IS_DARWIN
+_MAX_FOLLOWED_LINKS = 40
+# CORAL(S119): where the user's Claude settings file is, read from the host's environment once
+_SETTINGS_LOCATION_ENV = ("CLAUDE_CONFIG_DIR", "HOME")
 _CORAL_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec"}
 _SUBSCRIPTION_TOKEN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
 # CORAL(S113): an isolated CLI's Claude config is a private dir, never the user's
@@ -1480,6 +1523,10 @@ class _CredentialExposedError(RuntimeError):
     """CORAL(S118): a proxied CLI's launch would still hold the model key; names no value."""
 
 
+class _CredentialProxyRefusedError(RuntimeError):
+    """CORAL(S119): a credential proxy that may not start, or could not; names no value."""
+
+
 def _keep_loopback_unproxied(env: dict[str, str]) -> None:
     """CORAL(S118): append loopback to the ``NO_PROXY`` a CLI would inherit, in both spellings.
 
@@ -1521,23 +1568,7 @@ def _is_first_party_url(url: str) -> bool:
     )
 
 
-def _check_upstream_url_text(url: str) -> None:
-    """CORAL(S118): refuse an upstream URL the proxy cannot join a request path to.
-
-    With a control character, a query or a fragment, every proxied request would fail or
-    go to another path, and only after a CLI had started.
-
-    :param url: The proxy's upstream, e.g. ``"https://gateway.example/anthropic"``.
-    :raises OSError: With a message that holds no part of *url*.
-    """
-    if not url.isprintable() or "?" in url or "#" in url:
-        raise OSError(
-            "Claude credential proxy needs an upstream URL with no control character, "
-            "no query and no fragment"
-        )
-
-
-def _proxy_for_upstream(upstream_url: str, environ: Mapping[str, str]) -> str | None:
+def _proxy_for_upstream(upstream_url: str, environ: Mapping[str, str]) -> tuple[str, str] | None:
     """CORAL(S118): the proxy *environ* names for *upstream_url*, as a client reads it there.
 
     The scheme's own variable wins over ``ALL_PROXY``. As in urllib, a lower-case name that
@@ -1547,26 +1578,31 @@ def _proxy_for_upstream(upstream_url: str, environ: Mapping[str, str]) -> str | 
 
     :param upstream_url: The proxy's upstream, e.g. ``"https://gateway.example/anthropic"``.
     :param environ: A harness environment snapshot.
-    :returns: A proxy URL, possibly with userinfo, or ``None`` when none applies.
+    :returns: The variable read (CORAL(S119)) and its proxy URL, possibly with userinfo,
+        e.g. ``("HTTPS_PROXY", "http://proxy.example:3128")``; ``None`` when none applies.
     """
     from omnigent_client._http import is_loopback_url
 
-    def setting(name: str) -> str:
-        return environ.get(name.upper(), "") if name not in environ else environ[name]
+    def setting(name: str) -> tuple[str, str]:
+        spelling = name if name in environ else name.upper()
+        return spelling, environ.get(spelling, "")
 
     upstream = urlsplit(upstream_url)
-    proxy = setting(f"{upstream.scheme}_proxy") or setting("all_proxy")
-    if not proxy or is_loopback_url(upstream_url):
+    proxy = setting(f"{upstream.scheme}_proxy")
+    proxy = proxy if proxy[1] else setting("all_proxy")
+    if not proxy[1] or is_loopback_url(upstream_url):
         return None
     host = upstream.hostname or ""
     target = f"{host}:{upstream.port}" if upstream.port else host
-    bypasses = {"no": setting("no_proxy")}
+    bypasses = {"no": setting("no_proxy")[1]}
     # Missing from typeshed stubs; present at runtime.
     bypass = urllib.request.proxy_bypass_environment  # type: ignore[missing-attribute]
     return None if bypass(target, bypasses) else proxy
 
 
-def _claude_user_settings_env(cwd: str | None = None) -> dict[str, str]:
+def _claude_user_settings_env(
+    cwd: str | None = None, environ: Mapping[str, str] | None = None
+) -> dict[str, str]:
     """Read the ``env`` block of Claude Code's user ``settings.json``.
 
     The file is located by
@@ -1574,19 +1610,158 @@ def _claude_user_settings_env(cwd: str | None = None) -> dict[str, str]:
 
     :param cwd: The CLI's working directory, e.g. ``"/home/user/repo"``;
         ``None`` means this process's working directory.
+    :param environ: CORAL(S119): where the file's location is read; ``os.environ`` when ``None``.
     :returns: The string-valued entries, e.g.
         ``{"ANTHROPIC_BEDROCK_BASE_URL": "https://gateway.example"}``; empty
         when the file is missing, unreadable, or has no ``env`` object.
     """
     from omnigent.onboarding.ambient import read_claude_user_settings
 
-    settings = read_claude_user_settings(cwd)
+    settings = read_claude_user_settings(cwd, environ)  # CORAL(S119)
     env = settings.get("env") if settings is not None else None
     if not isinstance(env, dict):
         return {}
     return {
         key: value for key, value in env.items() if isinstance(key, str) and isinstance(value, str)
     }
+
+
+class _SettingsEnv(NamedTuple):
+    """CORAL(S119): the user's settings env as a Coral CLI behind the credential proxy gets it.
+
+    :param cli: The names the CLI's own environment takes, e.g. ``{"ANTHROPIC_MODEL": ...}``.
+    :param upstream: The endpoint, proxy and CA names the proxy's upstream hop takes.
+    :param ignored: Endpoint and network names taken by neither, for a warning by name.
+    """
+
+    cli: dict[str, str]
+    upstream: dict[str, str]
+    ignored: tuple[str, ...]
+
+
+def _is_outside(path: str, directory: str) -> bool:
+    """CORAL(S119): whether resolving *path* never enters *directory*.
+
+    Each prefix of *path* is resolved one link at a time, so a link that leads through
+    *directory* counts as inside it, whatever it points at afterwards. On macOS names
+    are compared without case, as its default volumes compare them.
+
+    :param path: An absolute path, e.g. ``"/home/user/.claude/settings.json"``.
+    :param directory: A directory, e.g. a step's worktree.
+    :returns: ``False`` also when either cannot be resolved.
+    """
+
+    def spelled(text: str) -> str:
+        return text.casefold() if _PATHS_IGNORE_CASE else text
+
+    try:
+        root = spelled(os.path.realpath(directory))
+        pending = list(reversed(pathlib.PurePath(path).parts[1:]))
+        current, links = os.sep, 0
+        while pending:
+            part = pending.pop()
+            if part == os.pardir:
+                current = os.path.dirname(current)
+                continue
+            current = os.path.join(current, part)
+            if f"{spelled(current)}{os.sep}".startswith(f"{root.rstrip(os.sep)}{os.sep}"):
+                return False
+            try:
+                if not stat.S_ISLNK(os.lstat(current).st_mode):
+                    continue
+            except (FileNotFoundError, NotADirectoryError):
+                continue  # nothing there to follow; any other failure is not "outside"
+            links += 1
+            if links > _MAX_FOLLOWED_LINKS:
+                return False
+            target = pathlib.PurePath(os.readlink(current))
+            current = os.sep if target.is_absolute() else os.path.dirname(current)
+            pending.extend(reversed(target.parts[1:] if target.is_absolute() else target.parts))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _settings_file_steers_upstream(cwd: str | None, environ: Mapping[str, str]) -> bool:
+    """CORAL(S119): whether the user's settings file may say where the real credential goes.
+
+    Only a file a step can neither place nor write: under an absolute ``CLAUDE_CONFIG_DIR``,
+    or the default one in the user's home, and outside the CLI's working directory. A
+    relative value, a leading ``~`` included, is read from that directory.
+
+    :param cwd: The CLI's working directory; ``None`` means this process's.
+    :param environ: The host's ``CLAUDE_CONFIG_DIR`` and ``HOME``, e.g. from before a scrub.
+    :returns: Whether its endpoint, proxy and CA names are taken.
+    """
+    from omnigent.onboarding.ambient import claude_user_settings_path
+
+    configured = environ.get("CLAUDE_CONFIG_DIR")
+    if configured and not os.path.isabs(configured):
+        return False
+    workdir = cwd or os.getcwd()
+    # Joined to the cwd, as the CLI would read a default dir under a relative home.
+    settings_path = os.path.join(workdir, claude_user_settings_path(cwd, environ))
+    return _is_outside(settings_path, workdir)
+
+
+def _is_bare_proxy_setting(name: str, value: str) -> bool:
+    """CORAL(S119): whether a proxy setting holds nothing a CLI should not: no userinfo
+    (an ``@``, with or without a scheme), and for a proxy URL no path beyond ``/``, query
+    or fragment, where a credential can sit too.
+
+    :param name: A proxy name, e.g. ``"HTTPS_PROXY"`` or ``"no_proxy"``.
+    :param value: Its value, e.g. ``"http://proxy.example:3128"``.
+    """
+    if "@" in value:
+        return False
+    if name.upper() == "NO_PROXY":
+        return True  # a host list, where a slash is a network's prefix length
+    location = value.strip().split("://", 1)[-1].removesuffix("/")
+    return not any(mark in location for mark in "/?#")
+
+
+def _allowed_settings_env(
+    block: Mapping[str, str], *, trusted: bool, cwd: str | None
+) -> _SettingsEnv:
+    """CORAL(S119): split the user's settings env between a Coral CLI and its credential proxy.
+
+    The CLI takes model routing, opt-outs that are switched on and, from a trusted file, bare
+    proxy names (:func:`_is_bare_proxy_setting`) and the CA file. The proxy's upstream hop
+    takes the trusted file's endpoint, proxy names (upper or lower case, whatever they hold)
+    and CA file. Every other name goes to neither: provider switches, credentials and headers
+    among them.
+
+    :param block: The ``env`` object of the user's ``settings.json``.
+    :param trusted: Whether :func:`_settings_file_steers_upstream` holds for the file.
+    :param cwd: The CLI's working directory; ``None`` means this process's.
+    :returns: The split, with the endpoint and network names it ignored.
+    """
+    cli: dict[str, str] = {}
+    upstream: dict[str, str] = {}
+    ignored: list[str] = []
+    workdir = cwd or os.getcwd()
+    for name, value in block.items():
+        if name in _SETTINGS_ENV_MODEL_NAMES:
+            cli[name] = value
+        elif name in _SETTINGS_ENV_OPT_OUT_NAMES:
+            if value.lower() in _SETTINGS_ENV_SWITCH_VALUES:
+                cli[name] = value
+        elif name == _SETTINGS_ENV_BASE_URL and trusted:
+            upstream[name] = value
+        elif name in _SETTINGS_ENV_PROXY_NAMES and trusted:
+            upstream[name] = value
+            if _is_bare_proxy_setting(name, value):
+                cli[name] = value
+        elif (
+            name == _SETTINGS_ENV_CA_FILE
+            and trusted
+            and os.path.isabs(value)
+            and _is_outside(value, workdir)
+        ):
+            upstream[name] = cli[name] = value
+        elif name in (_SETTINGS_ENV_BASE_URL, _SETTINGS_ENV_CA_FILE, *_SETTINGS_ENV_PROXY_NAMES):
+            ignored.append(name)
+    return _SettingsEnv(cli, upstream, tuple(ignored))
 
 
 def _resolve_gateway_env(
@@ -2447,6 +2622,18 @@ class ClaudeSDKExecutor(Executor):
         self._credential_literal: str | None = None
         # CORAL(S118): whether the proxy of a CLI with no gateway forwards to the Anthropic API
         self._proxy_is_first_party = False
+        # CORAL(S119): the settings names the proxy's upstream hop takes, fixed once it starts,
+        # and the ignored ones already warned about
+        self._settings_upstream_env: dict[str, str] = {}
+        self._settings_env_warned: set[tuple[str, str]] = set()
+        # CORAL(S119): where the user's settings file is, as the host's environment said when
+        # this executor was built: a connect of any session takes the name out of os.environ
+        host_env = os.environ if credential_env is None else credential_env
+        self._settings_location_env = {
+            name: host_env[name] for name in _SETTINGS_LOCATION_ENV if name in host_env
+        }
+        # CORAL(S119): one turn at a time builds, starts or drops the shim
+        self._gateway_shim_lock = asyncio.Lock()
         self._unwrapped_claude_config_dir: pathlib.Path | None = None
         # CORAL(S115): the seed a wrapped non-Coral CLI's launcher copies in. Its dir is made
         # at the first launch, and again if it goes missing; after close, a launch fails.
@@ -2661,14 +2848,172 @@ class ClaudeSDKExecutor(Executor):
         """CORAL(S118): where a proxied CLI's requests go on to, as it would have sent them.
 
         :param env: The CLI's ``options.env`` as built so far.
-        :returns: The gateway's URL; without a gateway, the endpoint the harness had before
-            its scrub, else the Anthropic API. ``None`` for a gateway whose env names none.
+        :returns: The gateway's URL; without a gateway, the endpoint the user's settings
+            name (CORAL(S119)), else the one the harness had before its scrub, else the
+            Anthropic API. ``None`` for a gateway whose env names none.
             Whitespace around a configured URL is dropped, as an HTTP client would drop it.
         """
         if self._gateway:
             return (env.get("ANTHROPIC_BASE_URL") or "").strip() or None
         environ = os.environ if self._credential_env is None else self._credential_env
-        return (environ.get("ANTHROPIC_BASE_URL") or "").strip() or _ANTHROPIC_API_URL
+        # CORAL(S119): the settings block came first in the CLI's own environment too
+        sources = (self._settings_upstream_env, environ)
+        named = ((source.get(_SETTINGS_ENV_BASE_URL) or "").strip() for source in sources)
+        return next((url for url in named if url), _ANTHROPIC_API_URL)
+
+    def _take_settings_env(self) -> dict[str, str]:
+        """CORAL(S119): read the user's settings env for a Coral CLI behind the credential proxy.
+
+        Keeps the endpoint and network names for the proxy's upstream hop until the proxy
+        starts, after which they stay as they were, and warns once per name it ignored.
+
+        :returns: The names the CLI's environment takes; none on a gateway or when the CLI
+            loads user settings itself, where nothing was merged before either.
+        :raises _CredentialProxyRefusedError: Before the proxy starts, when a settings file
+            a step could place or write names the endpoint.
+        """
+        if self._gateway or _loads_user_settings(self._skills_filter):
+            return {}
+        where = self._settings_location_env
+        trusted = _settings_file_steers_upstream(self._cwd, where)
+        block = _claude_user_settings_env(self._cwd, where)
+        taken = _allowed_settings_env(block, trusted=trusted, cwd=self._cwd)
+        if self._gateway_shim is None:
+            # The user named an endpoint for the key; no other one gets it in its place.
+            if not trusted and (block.get(_SETTINGS_ENV_BASE_URL) or "").strip():
+                raise _CredentialProxyRefusedError(
+                    f"{_SETTINGS_ENV_BASE_URL} is set in a Claude settings file that is not "
+                    "trusted to name the model endpoint. Keep that file under an absolute "
+                    "CLAUDE_CONFIG_DIR, or the default one in the user's home, outside the "
+                    "step's working directory, or remove the setting from it"
+                )
+            self._settings_upstream_env = taken.upstream
+        self._warn_ignored_settings(
+            taken.ignored,
+            "it is not an absolute path outside the step's working directory"
+            if trusted
+            else "its credential proxy takes endpoint and network settings only from a "
+            "settings file under an absolute CLAUDE_CONFIG_DIR, or the default one in the "
+            "user's home, outside the step's working directory",
+        )
+        cli = dict(taken.cli)
+        for name in taken.cli.keys() & _SETTINGS_ENV_PROXY_NAMES:
+            # The other spelling says the same to the CLI, as it does to the proxy's own hop.
+            twin = name.lower() if name.isupper() else name.upper()
+            if twin not in taken.upstream:
+                cli[twin] = taken.cli[name]
+        return cli
+
+    def _warn_ignored_settings(
+        self, names: Sequence[str], reason: str, source: str = "the user's Claude settings"
+    ) -> None:
+        """CORAL(S119): warn once per executor for each endpoint or network name not taken.
+
+        :param names: Variable names, e.g. ``("NODE_EXTRA_CA_CERTS",)``; no value is logged.
+        :param reason: Why, e.g. ``"it is not an absolute path ..."``.
+        :param source: Where the name was set.
+        """
+        for name in sorted(names):
+            if (source, name) not in self._settings_env_warned:
+                self._settings_env_warned.add((source, name))
+                logger.warning("Ignoring %s from %s for this step: %s", name, source, reason)
+
+    def _settings_network_env(self) -> dict[str, str] | None:
+        """CORAL(S119): the names that decide the upstream hop's proxy once settings name any.
+
+        A settings name replaces the harness's under either spelling, as it came first in
+        the CLI's own environment.
+
+        :returns: The harness's environment from before its scrub under the settings
+            block's proxy names; ``None`` when the settings name none.
+        """
+        proxies = {
+            name: value
+            for name, value in self._settings_upstream_env.items()
+            if name in _SETTINGS_ENV_PROXY_NAMES
+        }
+        if not proxies:
+            return None
+        replaced = {name.upper() for name in proxies}
+        inherited = os.environ if self._credential_env is None else self._credential_env
+        kept = {name: value for name, value in inherited.items() if name.upper() not in replaced}
+        return {**kept, **proxies}
+
+    def _upstream_hop_proxy(self, upstream: str) -> tuple[str | None, bool]:
+        """CORAL(S119): the proxy for the credential proxy's hop to *upstream*.
+
+        The user's settings names decide when they name any, else the harness's
+        environment from before its scrub.
+
+        :param upstream: The checked upstream, e.g. ``"https://gateway.example/anthropic"``.
+        :returns: The proxy URL, possibly with userinfo, or ``None``; and whether the
+            client may read the environment's proxies itself, which it may not once
+            settings names took part.
+        :raises _CredentialProxyRefusedError: For a proxy the upstream client cannot use,
+            e.g. a SOCKS one; names the variable only.
+        """
+        settings_env = self._settings_network_env()
+        network_env = self._credential_env if settings_env is None else settings_env
+        named = None if network_env is None else _proxy_for_upstream(upstream, network_env)
+        if named is None:
+            return None, settings_env is None
+        name, proxy = named[0], named[1].strip()
+        try:
+            scheme = urlsplit(proxy).scheme.lower()
+        except ValueError:
+            scheme = ""
+        if scheme not in _UPSTREAM_PROXY_SCHEMES:
+            raise _CredentialProxyRefusedError(
+                f"{name} names a proxy for the model endpoint that is not an http:// or "
+                "https:// URL, the only kinds this step's credential proxy can use"
+            )
+        return proxy, settings_env is None
+
+    def _upstream_ca_file(self) -> str | None:
+        """CORAL(S119): the CA file added to the trust of a direct-key proxy's upstream hop.
+
+        The user's settings name it, else the host's environment, as the CLI's own model
+        connection took it; the host's is held to the same path rule.
+
+        :returns: An absolute path outside the step's working directory, or ``None``.
+        """
+        if (ca_file := self._settings_upstream_env.get(_SETTINGS_ENV_CA_FILE)) is not None:
+            return ca_file
+        environ = os.environ if self._credential_env is None else self._credential_env
+        ca_file = environ.get(_SETTINGS_ENV_CA_FILE)
+        if not ca_file:
+            return None
+        if os.path.isabs(ca_file) and _is_outside(ca_file, self._cwd or os.getcwd()):
+            return ca_file
+        self._warn_ignored_settings(
+            (_SETTINGS_ENV_CA_FILE,),
+            "it is not an absolute path outside the step's working directory",
+            source="the host's environment",
+        )
+        return None
+
+    @staticmethod
+    def _proxy_refusal(refused: _CredentialProxyRefusedError) -> ExecutorError:
+        """CORAL(S119): the turn's error for a credential proxy that may not or could not start."""
+        return ExecutorError(
+            message=f"This step's Claude CLI was not started: {refused}.",
+            code=CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE,
+            retryable=False,
+        )
+
+    def _check_proxy_upstream(self, env: Mapping[str, str]) -> None:
+        """CORAL(S118, S119): refuse an upstream, or a proxy to it, the key may not go to.
+
+        :param env: The CLI's ``options.env`` as built so far.
+        :raises _CredentialProxyRefusedError: With a message that names no value.
+        """
+        if not (upstream := self._proxy_upstream(env)):
+            return
+        try:
+            check_upstream_url(upstream)
+        except OSError as exc:  # its message names the scheme at most
+            raise _CredentialProxyRefusedError(str(exc)) from None
+        self._upstream_hop_proxy(upstream)
 
     def _credential_exposure(self, options: SdkOptions) -> str | None:
         """CORAL(S118): where a proxied CLI's launch would still hold the static key, if anywhere.
@@ -2773,6 +3118,37 @@ class ClaudeSDKExecutor(Executor):
             if self._claude_config_seed_dir_made:
                 shutil.rmtree(self._claude_config_seed_path.parent, ignore_errors=True)
 
+    def _new_gateway_shim(
+        self, env: Mapping[str, str], credential: UpstreamCredential | None, *, direct: bool
+    ) -> ClaudeGatewayShim:
+        """CORAL(S118, S119): the shim for this executor's CLIs, not yet started.
+
+        :param env: The CLI's ``options.env``; a gateway's names its URL.
+        :param credential: The real credential of a Coral CLI, else ``None`` for a plain shim.
+        :param direct: Whether this is a Coral CLI on a key with no gateway.
+        :raises OSError: For an upstream the credential may not go to; names no value.
+        :raises _CredentialProxyRefusedError: For a proxy the upstream client cannot use.
+        """
+        # CORAL(S118): never None here: a gateway's env names its URL (checked by the caller)
+        upstream = self._proxy_upstream(env) or env["ANTHROPIC_BASE_URL"]
+        if credential is None:
+            return ClaudeGatewayShim(upstream_base_url=upstream)
+        # Checked again here: a turn of another session may have read the settings since.
+        check_upstream_url(upstream)
+        self._proxy_is_first_party = direct and _is_first_party_url(upstream)
+        # CORAL(S118): the shim holds the credential; its upstream hop takes the proxy the
+        # harness had before the scrub, which may carry userinfo.
+        # CORAL(S119): after the proxy and CA file the user's settings name. The harness's
+        # environment does not hold those, so the client then reads no proxy from it.
+        upstream_proxy, env_proxies = self._upstream_hop_proxy(upstream)
+        return ClaudeGatewayShim(
+            upstream_base_url=upstream,
+            credential=credential,
+            upstream_proxy=upstream_proxy,
+            upstream_ca_file=self._upstream_ca_file() if direct else None,
+            upstream_env_proxies=env_proxies,
+        )
+
     async def _route_options_through_gateway_shim(self, options: SdkOptions) -> None:
         """
         Point a new client's ``ANTHROPIC_BASE_URL`` at the local shim.
@@ -2803,24 +3179,28 @@ class ClaudeSDKExecutor(Executor):
                 "ClaudeSDKExecutor(gateway=True) built SDK options without "
                 "env['ANTHROPIC_BASE_URL']; cannot route through the gateway shim."
             )
-        if self._gateway_shim is None:
-            # CORAL(S118): never None here: a gateway's env names its URL (checked above)
-            upstream = self._proxy_upstream(env) or env["ANTHROPIC_BASE_URL"]
-            self._proxy_is_first_party = direct and _is_first_party_url(upstream)
-            # CORAL(S118): for a Coral CLI the shim holds the credential; its upstream hop takes
-            # the proxy the harness had before the scrub, which may carry userinfo
-            snapshot = None if credential is None else self._credential_env
-            self._gateway_shim = ClaudeGatewayShim(
-                upstream_base_url=upstream,
-                credential=credential,
-                upstream_proxy=None
-                if snapshot is None
-                else _proxy_for_upstream(upstream, snapshot),
-            )
-        await self._gateway_shim.start()
-        env["ANTHROPIC_BASE_URL"] = self._gateway_shim.base_url
+        # CORAL(S119): a proxy that fails to start is dropped, so the next turn builds one
+        # from the settings as they are then
+        async with self._gateway_shim_lock:
+            shim = self._gateway_shim
+            try:
+                if shim is None:
+                    shim = self._new_gateway_shim(env, credential, direct=direct)
+                    self._gateway_shim = shim
+                await shim.start()
+            except OSError as exc:
+                if credential is None:
+                    raise
+                self._gateway_shim = None
+                if shim is not None:
+                    await shim.aclose()
+                detail = str(exc)
+                if exc.errno is not None:  # the system's own text may name a path
+                    detail = f"its credential proxy could not start ({type(exc).__name__})"
+                raise _CredentialProxyRefusedError(detail) from None
+        env["ANTHROPIC_BASE_URL"] = shim.base_url
         # CORAL(S118): the session token is all the CLI holds; its hop here stays off proxies
-        if (session_token := self._gateway_shim.session_token) is not None:
+        if (session_token := shim.session_token) is not None:
             env[_PROXY_TOKEN_ENV] = session_token
             _keep_loopback_unproxied(env)
         # CORAL(S118): behind a proxy for the Anthropic API itself the CLI keeps the behaviour
@@ -3937,18 +4317,18 @@ class ClaudeSDKExecutor(Executor):
                 retryable=False,
             )
             return
+        # CORAL(S119): an isolated CLI behind the credential proxy gets only allow-listed names
+        # from the user's settings env; read here, so the endpoint it names is checked below
+        cli_settings_env: dict[str, str] | None = None
         # CORAL(S118): the credential leaves this machine over https only, to a URL the proxy
         # can forward to; refuse before the model listing below, the first request to carry it
-        if self._upstream_credential is not None and (upstream := self._proxy_upstream(env)):
+        if self._upstream_credential is not None:
             try:
-                _check_upstream_url_text(upstream)
-                check_upstream_transport(upstream)
-            except OSError as exc:  # its message names the scheme at most
-                yield ExecutorError(
-                    message=f"This step's Claude CLI was not started: {exc}.",
-                    code=CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE,
-                    retryable=False,
-                )
+                if self._isolate_claude_config:
+                    cli_settings_env = self._take_settings_env()
+                self._check_proxy_upstream(env)
+            except _CredentialProxyRefusedError as exc:
+                yield self._proxy_refusal(exc)
                 return
         # Teach Claude Code this gateway's spellings so no model surface routes
         # to an id the gateway rejects: pins for the family aliases, rewrites
@@ -4018,7 +4398,9 @@ class ClaudeSDKExecutor(Executor):
         bundle_plugins: list[Any] = []  # type: ignore[explicit-any]  # SdkPluginConfig is a TypedDict — typed Any here to keep the import lazy
         if self._bundle_dir is not None and (self._bundle_dir / "skills").is_dir():
             bundle_plugins.append({"type": "local", "path": str(self._bundle_dir)})
-        if resolved.setting_sources == [] and not self._gateway:
+        if cli_settings_env is not None:  # CORAL(S119): never the whole block
+            env = {**cli_settings_env, **env}
+        elif resolved.setting_sources == [] and not self._gateway:
             # The CLI then skips the user settings env, which may hold the only provider endpoint.
             env = {**_claude_user_settings_env(self._cwd), **env}
         # CORAL(S13): user settings can carry a subscription token
@@ -4302,6 +4684,9 @@ class ClaudeSDKExecutor(Executor):
             yield ExecutorError(
                 message=str(exc), code=CORAL_CREDENTIAL_EXPOSED_CODE, retryable=False
             )
+            return
+        except _CredentialProxyRefusedError as exc:  # CORAL(S119): its proxy did not start
+            yield self._proxy_refusal(exc)
             return
 
         # ── LLM_REQUEST policy evaluation ────────────────────────

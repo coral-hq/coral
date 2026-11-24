@@ -4210,7 +4210,8 @@ seams:
       capped at 16 KiB) with no connection limit, which amends R1 item 4:
       idle unauthenticated sockets would fill a limit and refuse the CLI.
       It refuses to start on a plain http upstream that is not loopback
-      (OSError naming the scheme only), drops X-Original-URL, X-Rewrite-URL,
+      (OSError naming the scheme only; S119 widens this check), drops
+      X-Original-URL, X-Rewrite-URL,
       X-HTTP-Method-Override, X-HTTP-Method, X-Method-Override, Forwarded and
       every X-Forwarded-* header, forwards nothing for a CLI that leaves
       mid-upload, closes the upstream response when the CLI leaves
@@ -4355,14 +4356,21 @@ seams:
       only for an upstream that is the Anthropic API, which no test may reach.
       A real Anthropic upstream is not measured (no test holds a real key).
       Residuals: on the Anthropic API a token holder can use the model routes
-      with any server-side tools that API offers; the settings block's
-      endpoint, proxy and CA reach the shim in Step 6, until when a settings
-      ANTHROPIC_BASE_URL is ignored on the direct-key path and the rest of the
-      settings env block still reaches the CLI; non-Coral CLIs keep
+      with any server-side tools that API offers; non-Coral CLIs keep
       their key or command on --settings argv (CRL-197); a direct-exec
       harness's exec-time environment still holds the forwarded credentials
       (CRL-197); Windows keeps every name in the environment and the key on
-      argv.
+      argv. The user's settings env block is S119's: its endpoint, proxy and
+      CA file feed this proxy and the rest no longer reaches a Coral CLI
+      whole. The model listing for a loopback endpoint (the OpenAI-compatible
+      fetch in omnigent/models/model_catalog.py, which a gateway's listing
+      uses) is made with trust_env off and httpx's default trust, so its
+      bearer never goes through a forward proxy the environment names; this
+      holds for every caller of that fetch, and a listing for any other
+      endpoint is unchanged. Measured: with HTTP_PROXY naming a recording
+      server, a loopback gateway received the listing and the proxied request
+      and the recording server nothing (before, it received the listing with
+      the key).
     files:
       - omnigent/host/connect.py
       - omnigent/inner/claude_gateway_shim.py
@@ -4378,6 +4386,7 @@ seams:
       - tests/inner/test_claude_sdk_harness.py
       - tests/runtime/harnesses/_claude_sdk_config_harness.py
       - tests/runtime/harnesses/test_process_manager.py
+      - tests/test_model_catalog.py
     tests:
       - tests/host/test_connect.py
       - tests/inner/test_claude_gateway_shim.py
@@ -4388,14 +4397,16 @@ seams:
       - tests/e2e/coral/test_sandbox_probe.py
       - tests/e2e/coral/test_tier_b_executor.py
       - tests/e2e/coral/test_tier_b_tool_gate.py
+      - tests/test_model_catalog.py
     budget_lines: 120
     budget_exception:
-      lines: 1450
+      lines: 3057
       reason: >-
         Counted with git diff --numstat origin/development (added plus
         removed lines; a new file counts every line), so a file shared with
-        S117 counts both seams' lines. tests/inner/test_claude_gateway_shim.py
-        (1450): real loopback shims and upstreams for the credential mode's
+        S117 or S119 counts both seams' lines.
+        tests/inner/test_claude_gateway_shim.py (1557, S118 and S119: 1450
+        here): real loopback shims and upstreams for the credential mode's
         header forms, dropped override headers, static key without a shell,
         token refusals and the header-first check, the route allow-list and
         model ids, unsafe targets under both HTTP parsers, the joined-URL
@@ -4407,7 +4418,10 @@ seams:
         checks, no value in responses or DEBUG logs (malformed and failing
         upstreams included), redirects not followed, the quiet upstream
         client, the proxy and CA options, the listening log line, and a
-        loopback-only guard. tests/inner/test_claude_sdk_executor.py (1352):
+        loopback-only guard. tests/inner/test_claude_sdk_executor.py (3057,
+        the largest file; 2829 with --minimal, since the command's default
+        pairing now sets 114 unchanged lines of older tests against new
+        ones; S118 and S119: 1355 here):
         the Coral gateway turn against a real loopback shim and recording
         upstream (token helper, session token, loopback URL and NO_PROXY in
         the CLI's options; the real command and snapshot in the shim; the key
@@ -4433,7 +4447,8 @@ seams:
         fail-closed check on that path, the real harness factory keeping the
         host's endpoint and helper environment in the proxy, and the unchanged
         non-Coral, off-POSIX and gateway turns.
-        omnigent/inner/claude_gateway_shim.py (762): the
+        omnigent/inner/claude_gateway_shim.py (785, S118 and S119: 762
+        here): the
         credential mode (R1, R3, with the security review's hardening), its
         own credential runner (R7), the one stripped form of a static key and
         the upstream client options (R17), a loopback upstream reached
@@ -4456,7 +4471,8 @@ seams:
         direct-exec harness and a refusing one, the other-harness case, the
         fork, off-POSIX and POSIX exec paths with the forwarded-names list,
         and the unsendable socket. omnigent/inner/claude_sdk_executor.py
-        (395): the executor's credential and its TTL and environment, the
+        (792, S118 and S119: 395 here): the executor's credential and its TTL
+        and environment, the
         token helper and options env, the snapshot's upstream proxy with
         NO_PROXY, the one-source model listing with its bounded wait (R2),
         the transport refusal before it, the fail-closed check (R4 item 2),
@@ -4471,9 +4487,167 @@ seams:
         omnigent/host/connect.py (144, S117 and S118: 6
         here, the harness fd variable never forwarded). The other files are
         within budget: omnigent/runtime/harnesses/process_manager.py 63,
-        omnigent/models/model_catalog.py 5,
+        omnigent/models/model_catalog.py 17, tests/test_model_catalog.py
+        37 (the loopback listing's test at its own layer),
         tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py 61,
         tests/runtime/harnesses/_claude_sdk_config_harness.py 53.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+  - id: S119
+    title: A Coral CLI takes only model routing from the user's settings env; its endpoint and network settings feed the proxy
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      The claude-sdk executor merged the whole env block of the user's
+      settings.json (minus the subscription tokens and the config-dir names)
+      into a hermetic CLI's options env, so a Coral step's CLI got any secret,
+      provider switch or header kept there, and behind the credential proxy
+      (S118) the block's ANTHROPIC_BASE_URL was overwritten by the loopback URL
+      and so ignored. Now, for an isolated Coral CLI behind the credential proxy
+      (isolate_claude_config with the proxy active, so Coral on POSIX), run_turn
+      reads the block once per turn through _allowed_settings_env. The CLI's
+      options env takes from it only: ANTHROPIC_MODEL,
+      ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL and the
+      ANTHROPIC_DEFAULT_*_MODEL aliases; DISABLE_TELEMETRY,
+      DISABLE_ERROR_REPORTING, DISABLE_AUTOUPDATER and
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC when the value is 1 or true in
+      any case, so a settings file can switch an opt-out on and never switch
+      the host's off; HTTPS_PROXY, HTTP_PROXY, NO_PROXY and ALL_PROXY (upper
+      or lower case, the two spellings a client reads) when the value is bare:
+      no @, which is userinfo with or without a scheme, and for a proxy URL no
+      path beyond /, query or fragment, where a credential can sit too; and
+      NODE_EXTRA_CA_CERTS. A proxy name the CLI gets is set under its other
+      spelling too unless the settings name that one, so the CLI reads the
+      proxy its credential proxy uses, whatever twin it would have inherited.
+      Loopback is still appended to the CLI's NO_PROXY under both spellings.
+      Every other name is dropped: CLAUDE_CODE_USE_BEDROCK and the other
+      provider switches with their endpoints, ANTHROPIC_API_KEY,
+      ANTHROPIC_AUTH_TOKEN, ANTHROPIC_CUSTOM_HEADERS, AWS_*, GITHUB_TOKEN,
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS, CLAUDE_CODE_API_KEY_HELPER_TTL_MS and the
+      first-party switch among them. The proxy's upstream hop takes the block's
+      ANTHROPIC_BASE_URL, which comes before the pre-scrub environment's and
+      then https://api.anthropic.com (set to nothing counts as unset; the
+      upstream check below and S118's whitespace stripping and first-party
+      rule read whichever wins); the block's proxy names, where a settings
+      name replaces the harness's under either spelling and the rules of S118
+      then apply to the merged names (the scheme's own name before ALL_PROXY,
+      an empty lower-case name means no proxy, none when NO_PROXY covers the
+      endpoint, never one for a loopback endpoint), a proxy with userinfo, a
+      path or a query reaching only this hop; and NODE_EXTRA_CA_CERTS as the
+      shim's upstream_ca_file, else, on the direct-key path, the pre-scrub
+      environment's NODE_EXTRA_CA_CERTS: a direct-key CLI made the model
+      connection itself and Node added that CA there, so a host behind TLS
+      interception keeps working (a gateway's shim never took one). When
+      settings proxy names took part the shim is built with
+      upstream_env_proxies=False, so its client does not read the harness's
+      environment proxies a second time and overrule a settings NO_PROXY or an
+      empty name. One check, check_upstream_url in claude_gateway_shim.py,
+      replaces S118's transport and URL-text checks for every credential
+      upstream (the settings', the pre-scrub environment's or a gateway's), in
+      run_turn before the model listing and again where the shim is built and
+      where it starts: https, or plain http to loopback, with a host, a
+      numeric port if it names one, and no userinfo (read from the authority;
+      the client would send it as Basic auth in the credential's place),
+      backslash, control character, query or fragment. Each refusal is
+      coral_credential_upstream_refused and names no part of the URL. A proxy
+      chosen for the upstream whose scheme is not http or https (SOCKS, or no
+      scheme) refuses the turn under that code by variable name: the upstream
+      client cannot use one, and skipping it would send the key around the
+      user's proxy. Trust rule: the endpoint, proxy and CA names are taken
+      only when CLAUDE_CONFIG_DIR is absolute or unset (the default dir in the
+      user's home) and the settings path never enters the CLI's working
+      directory while it is resolved one link at a time, so a link that leads
+      through that directory is refused whatever it points at later; on macOS
+      names are compared without case, as its default volumes compare them,
+      which is stricter than needed on a case-sensitive volume. A relative
+      value, a leading ~ included, is read from that directory, which a step
+      can write. The file is located by the CLAUDE_CONFIG_DIR and HOME of the
+      pre-scrub environment (the executor's own at construction when it was
+      given none), never the live ones, which a connect of any session empties
+      of CLAUDE_CONFIG_DIR for a moment. A CA file, the settings' or the
+      host's, must itself be absolute and outside that directory by the same
+      rule. From a file that is not trusted the proxy and CA names reach
+      neither the CLI nor the proxy, each warned about once per executor by
+      name only (no value, no path), and a non-empty ANTHROPIC_BASE_URL
+      refuses the turn before the proxy starts and before the model listing,
+      naming the variable only, rather than the key going to another endpoint
+      than the user named. Once the proxy runs, where the key goes is settled,
+      so an endpoint written there later is only warned about and a step
+      cannot stop its own later turns. Model names and opt-outs are taken from
+      any settings file. The names for the upstream hop are fixed once the
+      proxy starts; the CLI's names are read at each turn, as the block was. A
+      proxy that fails to start (a CA file that cannot be loaded, a proxy URL
+      the client rejects) is not kept: its turn is refused under the same code
+      by error type, and the next turn builds a proxy from the settings as
+      they are then, one turn at a time.
+      omnigent/onboarding/ambient.py gains claude_user_settings_path, the path
+      read_claude_user_settings reads (which now calls it), so the trust rule
+      checks the very path that is read; both take an optional environ for the
+      file's location, and with none what is read is unchanged. Unchanged:
+      a gateway CLI and a CLI that loads user settings itself neither get nor
+      use the block (nothing was merged for them before); a Coral executor
+      with no credential proxy (Windows) and every non-Coral executor keep the
+      whole-block merge. Not done here: the block's model names are not added
+      to the credential command's environment (DESIGN R7, dropped as
+      unnecessary). Residuals: a settings file from a relative
+      CLAUDE_CONFIG_DIR still chooses model names and can switch opt-outs on
+      (CRL-182), and an endpoint a step plants there makes later executors in
+      that worktree refuse until it is removed; the trust rule knows the CLI's
+      working directory only, so a settings or CA file under another path the
+      sandbox may write (a broad write grant) is still trusted; a CA file that
+      cannot be loaded refuses the turn, where Node only warned; a SOCKS or
+      scheme-less proxy refuses a Coral step; a settings proxy with userinfo,
+      a path or a query is not given to the CLI, whose other traffic then uses
+      the proxy it inherits; the harness's own scrub (S118) still leaves the
+      CLI a userinfo-free proxy that has a path or a query; provider switches
+      in the settings block no longer apply to Coral steps (a step runs on its
+      configured key or provider); a helper command no longer sees the
+      settings block's variables, only the harness's pre-scrub environment.
+    files:
+      - omnigent/inner/claude_gateway_shim.py
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/onboarding/ambient.py
+      - tests/inner/test_claude_gateway_shim.py
+      - tests/inner/test_claude_sdk_executor.py
+    tests:
+      - tests/inner/test_claude_gateway_shim.py
+      - tests/inner/test_claude_sdk_executor.py
+    budget_lines: 120
+    budget_exception:
+      lines: 3057
+      reason: >-
+        Counted with git diff --numstat origin/development (added plus removed
+        lines), so a file shared with S118 counts both seams' lines.
+        tests/inner/test_claude_sdk_executor.py (3057; 2829 with --minimal,
+        since the command's default pairing now sets 114 unchanged lines of
+        older tests against new ones; S118 and S119: 1474 here by the
+        --minimal count): a throwaway settings.json at a trusted and at each
+        untrusted place under a fake-only harness environment, the names a
+        Coral CLI gets by name and digest and the endpoint, proxy and CA its
+        proxy gets, the real harness factory sending the key to the settings
+        endpoint, the name-only warnings, the untrusted endpoint's refusal and
+        the blank and late ones that refuse nothing, the CA path rule and the
+        host's CA file after the settings', every refused form of settings
+        endpoint, the endpoint's precedence, settings proxies before the
+        harness's and under both spellings in the CLI, the refused proxy
+        kinds, a settings change after the proxy started, a failed proxy start
+        and its recovery, the file located by the snapshot, the gateway,
+        settings-loading and off-POSIX cases, and the opt-out, bare-proxy and
+        trust rules case by case, links through the cwd and macOS case
+        included; QA's rows on malformed settings files, non-text values,
+        NO_PROXY as urllib reads it and the unchanged non-Coral merge.
+        omnigent/inner/claude_sdk_executor.py (792, S118 and S119: 397
+        here): the allow-list and its split, the trust rule's link walk, the
+        settings names kept for the upstream hop, the host's CA file, the
+        refusals (untrusted endpoint, proxy kind, failed start) and the
+        filtered merge. omnigent/inner/claude_gateway_shim.py (785, S118 and
+        S119: 23 here, the upstream_env_proxies option and the one
+        upstream check). tests/inner/test_claude_gateway_shim.py (1557, S118
+        and S119: 107 here, that option's test and the check's cases).
+        Within budget: omnigent/onboarding/ambient.py 29.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false

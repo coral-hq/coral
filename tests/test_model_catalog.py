@@ -2710,6 +2710,43 @@ def test_openai_compatible_listing_hits_the_versioned_base() -> None:
     ]
 
 
+# CORAL(S118): a loopback endpoint is listed with no proxy from the environment, so its
+# bearer stays on the machine; any other endpoint keeps the client it had.
+@pytest.mark.parametrize(
+    ("base_url", "direct"),
+    [
+        ("http://127.0.0.1:8080/v1", True),
+        ("http://localhost:8080/v1", True),
+        ("https://[::1]:8443/v1", True),
+        ("https://gw.example.com/v1", False),
+        ("http://localhost.gw.example.com/v1", False),
+    ],
+)
+def test_openai_compatible_listing_reads_no_environment_proxy_for_loopback(
+    monkeypatch: pytest.MonkeyPatch, base_url: str, direct: bool
+) -> None:
+    built: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    def _recording_client(**kwargs: object) -> httpx.Client:
+        built.append(real_client(**kwargs))  # type: ignore[arg-type]
+        return built[-1]
+
+    monkeypatch.setattr(model_catalog.httpx, "Client", _recording_client)
+    provider = ResolvedModelProvider(
+        kind="key", family="openai", base_url=base_url, api_key="test-key"
+    )
+
+    listing = model_catalog._fetch_openai_compatible_listing(
+        provider,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"data": []})),
+    )
+
+    assert listing.source == "openai-compatible"
+    (client,) = built
+    assert client.trust_env is (not direct)
+
+
 def test_openai_compatible_listing_mints_bearer_via_auth_command(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -31,6 +31,7 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Mapping  # CORAL(S119)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -571,7 +572,28 @@ def read_claude_managed_settings(
     return None
 
 
-def read_claude_user_settings(cwd: str | None = None) -> dict[str, object] | None:
+def claude_user_settings_path(
+    cwd: str | None = None, environ: Mapping[str, str] | None = None
+) -> Path:
+    """CORAL(S119): where :func:`read_claude_user_settings` reads, for a caller that must
+    know whether the CLI's working directory holds the file.
+
+    :param cwd: The CLI's working directory, e.g. ``"/home/user/repo"``;
+        ``None`` means this process's working directory.
+    :param environ: Where ``CLAUDE_CONFIG_DIR`` and ``HOME`` are read, e.g. a snapshot of
+        the host's environment; ``os.environ`` when ``None``.
+    :returns: The path, relative when *cwd* is ``None`` and ``CLAUDE_CONFIG_DIR`` is relative.
+    """
+    source = os.environ if environ is None else environ
+    configured = source.get("CLAUDE_CONFIG_DIR")
+    home = Path(environ["HOME"]) if environ is not None and environ.get("HOME") else Path.home()
+    config_dir = Path(configured) if configured else home / ".claude"
+    return Path(cwd or "") / config_dir / "settings.json"
+
+
+def read_claude_user_settings(
+    cwd: str | None = None, environ: Mapping[str, str] | None = None
+) -> dict[str, object] | None:
     """Return Claude Code's user ``settings.json``, parsed.
 
     Uses ``$CLAUDE_CONFIG_DIR/settings.json`` when set, else
@@ -581,12 +603,11 @@ def read_claude_user_settings(cwd: str | None = None) -> dict[str, object] | Non
 
     :param cwd: The CLI's working directory, e.g. ``"/home/user/repo"``;
         ``None`` means this process's working directory.
+    :param environ: CORAL(S119): as for :func:`claude_user_settings_path`.
     :returns: The settings object, or ``None`` when the file is missing,
         unreadable, or not an object.
     """
-    configured = os.environ.get("CLAUDE_CONFIG_DIR")
-    config_dir = Path(configured) if configured else Path.home() / ".claude"
-    settings_path = Path(cwd or "") / config_dir / "settings.json"
+    settings_path = claude_user_settings_path(cwd, environ)  # CORAL(S119)
     try:
         payload = json.loads(settings_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):

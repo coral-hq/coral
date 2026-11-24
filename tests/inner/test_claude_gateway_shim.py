@@ -790,6 +790,67 @@ async def test_a_credential_shim_takes_plain_http_upstreams_on_loopback_only(
         assert plain.base_url.startswith("http://127.0.0.1:")
 
 
+# CORAL(S119): one check says where the real credential may go, for the executor's turn and
+# for the shim's start; what it refuses it refuses without quoting the URL.
+@pytest.mark.parametrize(
+    ("url", "refused"),
+    [
+        ("https://gateway.example/anthropic", None),
+        ("https://gateway.example:8443", None),
+        ("https://[2001:db8::1]:8443/anthropic", None),
+        ("http://127.0.0.1:8080/anthropic", None),
+        ("http://localhost:8080", None),
+        ("https://gateway.example/v1/@handle", None),  # an @ in the path is no userinfo
+        ("http://gateway.example", "got http"),
+        ("ftp://gateway.example", "got another scheme"),
+        ("gateway.example/anthropic", "got another scheme"),
+        ("https://user:<secret>@gateway.example/anthropic", "user name"),
+        ("https://<secret>@gateway.example", "user name"),
+        ("https://@gateway.example", "user name"),
+        ("http://user:<secret>@127.0.0.1:8080", "user name"),
+        ("http://<secret>.example\\@localhost", "backslash"),
+        ("https://gateway.example\\anthropic", "backslash"),
+        ("https:///anthropic", "a host"),
+        ("https://", "a host"),
+        ("https://:8443/anthropic", "a host"),
+        ("https://[2001:db8::1", "a host"),
+        ("https://gateway.example:notaport", "numeric port"),
+        ("https://gateway.example:99999", "numeric port"),
+        ("https://name:<secret>", "numeric port"),
+        ("https://gateway.example/\x00anthropic", "control character"),
+        ("https://gateway.example/v1?beta=<secret>", "query"),
+        ("https://gateway.example/#<secret>", "fragment"),
+    ],
+)
+def test_one_check_says_where_the_real_credential_may_go(url: str, refused: str | None) -> None:
+    secret = f"pw-{secrets.token_hex(8)}"
+    url = url.replace("<secret>", secret)
+    if refused is None:
+        shim_module.check_upstream_url(url)
+        return
+    with pytest.raises(OSError) as raised:
+        shim_module.check_upstream_url(url)
+    message = str(raised.value)
+    assert refused in message
+    shown = (secret, "gateway", "example", "notaport", "99999", "8443", "anthropic", "handle")
+    assert not [text for text in shown if text in message]
+
+
+@pytest.mark.asyncio
+async def test_a_credential_shim_does_not_start_on_an_upstream_with_userinfo() -> None:
+    upstream_url = "https://user:pw-fake@gateway.example/anthropic"
+    shim = ClaudeGatewayShim(upstream_url, credential=_literal_credential())
+    try:
+        with pytest.raises(OSError, match="no user name, password") as raised:
+            await shim.start()
+        assert "pw-fake" not in str(raised.value)
+        assert shim._server is None and shim._client is None
+    finally:
+        await shim.aclose()
+    async with _running_shim(upstream_url, None) as plain:  # the plain shim is unchanged
+        assert plain.base_url.startswith("http://127.0.0.1:")
+
+
 @pytest.mark.asyncio
 async def test_a_static_key_is_held_without_starting_a_shell(
     upstream: _RecordingUpstream, monkeypatch: pytest.MonkeyPatch
@@ -1006,8 +1067,10 @@ async def test_an_absolute_form_target_reaches_only_the_configured_upstream(
 async def test_a_joined_url_outside_the_upstream_base_path_is_refused(
     upstream: _RecordingUpstream,
 ) -> None:
-    base = f"http://127.0.0.1:{upstream.port}/base?misplaced=query"
+    base = f"http://127.0.0.1:{upstream.port}/base"
     async with _running_shim(base, _literal_credential()) as shim:
+        # CORAL(S119): no shim starts on such a base any more; the request check still holds
+        shim._upstream_base_url = f"{base}?misplaced=query"
         response = await _send(shim, _token_headers(shim))
     assert response.status_code == 400
     assert upstream.requests == []
@@ -1463,6 +1526,50 @@ async def test_the_upstream_ca_file_extends_default_trust_and_fails_closed(tmp_p
         with pytest.raises(OSError, match=r"could not configure its upstream client \(\w+\)$"):
             await shim.start()
         await shim.aclose()
+
+
+# CORAL(S119): a caller that chose the proxy from the user's settings, or chose none, is not
+# overruled by a proxy the harness's environment names.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chosen", "env_proxies", "plain", "through"),
+    [
+        (None, True, False, "environment.example"),
+        (None, None, False, "environment.example"),  # not said: as before the option
+        (None, False, False, None),
+        ("http://chosen.example:3128", False, False, "chosen.example"),
+        (None, False, True, None),  # a shim with no credential is told the same way
+    ],
+    ids=["environment-decides", "unsaid", "none-chosen", "proxy-chosen", "none-chosen-plain"],
+)
+async def test_an_upstream_client_told_its_proxy_takes_none_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    chosen: str | None,
+    env_proxies: bool | None,
+    plain: bool,
+    through: str | None,
+) -> None:
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://environment.example:3128")
+    said = {} if env_proxies is None else {"upstream_env_proxies": env_proxies}
+    shim = ClaudeGatewayShim(
+        "https://gateway.example/anthropic",
+        credential=None if plain else _literal_credential(),
+        upstream_proxy=chosen,
+        **said,
+    )
+    # Never contacted: only the client's route to this upstream is read.
+    client = shim._new_upstream_client()
+    try:
+        route = client._transport_for_url(httpx.URL("https://gateway.example/anthropic"))
+        proxy_url = getattr(route._pool, "_proxy_url", None)  # type: ignore[attr-defined]
+        routed_through = None if proxy_url is None else proxy_url.host.decode("ascii")
+    finally:
+        await client.aclose()
+        await shim.aclose()
+
+    assert routed_through == through
 
 
 @pytest.mark.asyncio

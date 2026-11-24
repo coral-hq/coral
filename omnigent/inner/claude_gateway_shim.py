@@ -499,23 +499,38 @@ async def _until_client_leaves(receive: _Receive) -> None:
         pass
 
 
-def check_upstream_transport(url: str) -> None:
-    """CORAL(S118): the real credential goes over https, or over plain http to loopback only.
+def check_upstream_url(url: str) -> None:
+    """CORAL(S118, S119): the one check of where the real credential may be sent.
 
-    :raises OSError: Otherwise; the message names the scheme only when it is ``http``.
+    An https URL, or a plain http one to loopback, with a host, a numeric port if it names
+    one, and no user name or password, which the client would send in the credential's
+    place. A backslash, a control character, a query or a fragment is refused too: two
+    parsers could read different hosts in it, or no request path could be joined to it.
+
+    :param url: The proxy's upstream, e.g. ``"https://gateway.example/anthropic"``.
+    :raises OSError: Otherwise; of *url* the message names at most an ``http`` scheme.
     """
     from omnigent_client._http import is_loopback_url
 
-    try:
-        scheme = urlsplit(url).scheme.lower()
-    except ValueError:
-        scheme = ""
-    if scheme == "https" or (scheme == "http" and is_loopback_url(url)):
-        return
-    shown = "http" if scheme == "http" else "another scheme"
-    raise OSError(
-        f"Claude credential proxy needs an https upstream or a loopback http one (got {shown})"
+    malformed = (
+        "Claude credential proxy needs an upstream URL with a host, a numeric port if it "
+        "names one, and no user name, password, backslash, control character, query or fragment"
     )
+    if not url.isprintable() or any(mark in url for mark in "\\?#"):
+        raise OSError(malformed)
+    try:
+        parts = urlsplit(url)
+        scheme, host, _ = parts.scheme.lower(), parts.hostname, parts.port
+    except ValueError:  # a port that is no number, or an address that is none
+        raise OSError(malformed) from None
+    if scheme not in ("http", "https") or (scheme == "http" and not is_loopback_url(url)):
+        shown = "http" if scheme == "http" else "another scheme"
+        raise OSError(
+            f"Claude credential proxy needs an https upstream or a loopback http one (got {shown})"
+        )
+    # Read from the authority as written: an empty user name before the @ is userinfo too.
+    if "@" in parts.netloc or not host:
+        raise OSError(malformed)
 
 
 async def _send_error(send: _Send, status: int, error_type: str, message: str) -> None:
@@ -581,9 +596,12 @@ class ClaudeGatewayShim:
         ``"https://example.databricks.com/ai-gateway/anthropic"``.
     :param credential: CORAL(S118): the real credential; when set, the shim accepts only
         :attr:`session_token` and forwards only the model routes. ``None`` keeps the plain shim.
-    :param upstream_proxy: CORAL(S118): proxy URL for the upstream hop, e.g.
+    :param upstream_proxy: CORAL(S118, S119): proxy URL for the upstream hop, e.g.
         ``"http://proxy.example:3128"``; ``None`` keeps httpx's environment proxies.
-    :param upstream_ca_file: CORAL(S118): a PEM CA added to the default trust for the upstream.
+    :param upstream_ca_file: CORAL(S118, S119): a PEM CA added to the default trust for the
+        upstream.
+    :param upstream_env_proxies: CORAL(S119): ``False`` when the caller chose *upstream_proxy*,
+        or none, from settings the environment does not hold, so it is not read again.
     """
 
     def __init__(
@@ -593,11 +611,13 @@ class ClaudeGatewayShim:
         credential: UpstreamCredential | None = None,
         upstream_proxy: str | None = None,
         upstream_ca_file: str | None = None,
+        upstream_env_proxies: bool = True,  # CORAL(S119)
     ) -> None:
         # CORAL(S118): credential mode and the upstream client's options
         self._credential = credential
         self._upstream_proxy = upstream_proxy
         self._upstream_ca_file = upstream_ca_file
+        self._upstream_env_proxies = upstream_env_proxies  # CORAL(S119)
         # The prefix keeps it from ever having an Anthropic key's shape (``sk-...``).
         self._session_token = (
             f"session-{secrets.token_urlsafe(32)}" if credential is not None else None
@@ -648,13 +668,16 @@ class ClaudeGatewayShim:
         :raises OSError: When the proxy or CA cannot be used; names the error type only.
         """
         options = (self._credential, self._upstream_proxy, self._upstream_ca_file)
-        if all(option is None for option in options):
+        if all(option is None for option in options) and self._upstream_env_proxies:
             return httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT)
         from omnigent_client._http import is_loopback_url
 
         # With no proxy named, a loopback upstream is reached directly: the real credential
         # never goes through a forward proxy the environment names.
-        direct = self._upstream_proxy is None and is_loopback_url(self._upstream_base_url)
+        # CORAL(S119): nor does any upstream whose caller already decided against a proxy
+        direct = self._upstream_proxy is None and (
+            not self._upstream_env_proxies or is_loopback_url(self._upstream_base_url)
+        )
         try:
             # A context built here still reads SSL_CERT_FILE and SSL_CERT_DIR when direct.
             verify = (
@@ -702,7 +725,7 @@ class ClaudeGatewayShim:
             await self._client.aclose()
             self._client = None  # CORAL(S118): a client that fails to build leaves none
         if self._credential is not None:
-            check_upstream_transport(self._upstream_base_url)  # CORAL(S118)
+            check_upstream_url(self._upstream_base_url)  # CORAL(S118, S119)
         self._client = self._new_upstream_client()  # CORAL(S118)
         if self._credential is not None:
             _quiet_upstream_client_logs()  # CORAL(S118)
