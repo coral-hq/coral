@@ -18,6 +18,7 @@ import functools
 import json
 import logging
 import os
+import platform  # CORAL(S120)
 import re
 import signal  # CORAL(S108)
 import subprocess
@@ -160,6 +161,7 @@ from omnigent.host.identity import HostIdentity, load_or_create_host_identity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
 from omnigent.inner import _proc
+from omnigent.inner.seatbelt_sandbox import process_read_canary_open  # CORAL(S120)
 from omnigent.onboarding.harness_accounts import (
     HARNESS_ACCOUNT_KEYS,
     probe_harness_account,
@@ -2365,6 +2367,15 @@ class HostProcess:
         )
         if coral_step:
             env[RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR] = "1"
+            # CORAL(S120): a host whose seatbelt let the canary read through runs no Coral step.
+            if await self._run_host_subprocess_in_thread(process_read_canary_open):
+                return self._launch_failed(
+                    frame,
+                    f"host {self._identity.name!r} runs no Coral step: its macOS "
+                    f"{platform.mac_ver()[0]} sandbox check either let a sandboxed read of "
+                    "another process's arguments through or could not run (the host log says "
+                    "which). Restart the host to check again after a Coral or macOS update.",
+                )
         if frame.inference_config is not None:
             try:
                 inference_path = await asyncio.to_thread(
@@ -5926,7 +5937,8 @@ class HostProcess:
             interactive_shells=self._interactive_shells,
             telemetry_opt_out=_tel_opt_out,
             installation_id=_tel_install_id,
-            capabilities=host_capabilities(),  # CORAL(S102): adds the OS sandbox token
+            # CORAL(S102): adds the OS sandbox token; CORAL(S120): off the loop, it may run a check
+            capabilities=await self._run_host_subprocess_in_thread(host_capabilities),
             connection_id=connection_id,
         )
         try:
