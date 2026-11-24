@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import stat
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -31,3 +33,61 @@ def absolute_harness_tmp_parent(path: Path) -> Path:
 def resolve_harness_tmp_parent(env: Mapping[str, str] | None = None) -> Path:
     """Return one short absolute socket root for cross-process propagation."""
     return absolute_harness_tmp_parent(harness_tmp_parent(env))
+
+
+def private_dir_problem(info: os.stat_result) -> str | None:
+    """CORAL(S124): why an lstat/fstat result is not this user's own real private directory."""
+    if stat.S_ISLNK(info.st_mode):
+        return "is a symlink (a symlinked harness socket root is refused; set the real path)"
+    if not stat.S_ISDIR(info.st_mode):
+        return "is not a directory"
+    if info.st_uid != os.geteuid():
+        return f"is owned by uid {info.st_uid}, not this user"
+    if info.st_mode & 0o022:
+        return f"is writable by group or other (mode {stat.S_IMODE(info.st_mode):#o})"
+    return None
+
+
+def ensure_private_dir(path: Path) -> None:
+    """
+    CORAL(S124): create *path* 0700, or refuse it unless it is this user's own real directory.
+
+    Parents are created unchecked, so ``/tmp -> /private/tmp`` and nested configured roots
+    work. The leaf is opened without following a symlink, then checked and tightened to 0700
+    through the descriptor; a group- or other-writable leaf is refused, since others could
+    have planted entries in it.
+
+    :raises RuntimeError: When *path* is a symlink, not a directory, owned by another user,
+        or writable by group or other.
+    """
+    if IS_WINDOWS:
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(path, 0o700)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
+    try:
+        try:
+            fd = os.open(path, flags)
+        except PermissionError:
+            # An owner-unreadable dir (e.g. 0300) cannot be opened; accept it unchanged
+            # only when lstat shows it is already this user's own real, owner-only dir.
+            info = os.lstat(path)
+            if private_dir_problem(info) is None and not info.st_mode & 0o077:
+                return
+            raise
+    except OSError as exc:
+        problem = f"cannot be opened ({exc.strerror})"
+        with contextlib.suppress(OSError):
+            problem = private_dir_problem(os.lstat(path)) or problem
+        raise RuntimeError(f"Refusing harness directory {path}: it {problem}") from exc
+    try:
+        info = os.fstat(fd)
+        problem = private_dir_problem(info)
+        if problem is not None:
+            raise RuntimeError(f"Refusing harness directory {path}: it {problem}")
+        if info.st_mode & 0o077:
+            os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)

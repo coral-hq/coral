@@ -3472,8 +3472,10 @@ seams:
       per-user default harness root, carried over the launcher wire and
       through clones. Resolving them never raises: a configured root that
       cannot be resolved is left out with a warning (once per setting and
-      process), a path swapped while it resolves keeps its plain spelling, and
-      the default is always kept, so a bad or raced setting cannot fail
+      process), a configured root that is a symlink loop is kept by its plain
+      spelling with a warning (a loop holds no socket, and S124 refuses a
+      symlinked root), a path swapped while it resolves keeps its plain
+      spelling, and the default is always kept, so a bad or raced setting cannot fail
       resolve_sandbox into an unsandboxed run. Seatbelt denies each root as a
       subpath of its real path, and the per-user default root even for a
       policy that carries no roots (an old launcher payload), after every
@@ -3493,7 +3495,8 @@ seams:
       claude-sdk turn are unaffected. bwrap ignores the field: --tmpfs /tmp
       already hides the default root. Not covered: AF_UNIX harness sockets
       under another instance's own root, a harness root inside a sandbox write
-      root, a root created as a symlink after the profile is built, a Linux
+      root (a root created as a symlink after the profile is built is now
+      refused by S124's process manager check), a Linux
       root under a path bwrap binds and processes outside the sandbox
       (CRL-173), socket paths found through fsgetpath and other programs'
       sockets, a tmux server on a custom -S path among them (CRL-174), the
@@ -3528,7 +3531,9 @@ seams:
         tests, the resolve_sandbox test, the never-raise and warn-once cases
         (a symlink loop at either root, ~nosuchuser, a deleted cwd, a relative
         root, a broad root, a path swapped while it resolves) and the
-        scratch-recording test. tests/inner/test_seatbelt_sandbox.py (193
+        scratch-recording test. The looping configured root kept by its
+        spelling added 14 lines to omnigent/inner/sandbox.py and 3 to
+        tests/inner/test_sandbox.py. tests/inner/test_seatbelt_sandbox.py (193
         changed lines): the placement test in four network modes, the guard
         cases, the pane-shaped test, the always-denied default root and its
         drift test, and the narrowed empty-list test.
@@ -4220,6 +4225,60 @@ seams:
       - tests/inner/test_seatbelt_sandbox.py
       - tests/inner/sandbox/test_sandbox_behavior.py
     budget_lines: 70
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S124
+    title: The harness process manager keeps its socket root and instance dirs this user's own private real directories
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS: HarnessProcessManager created its socket root and
+      each ap-<uuid> instance dir with mkdir(exist_ok=True), which silently
+      follows a symlink planted at either path, so the sockets landed outside
+      S112's sandbox deny; the orphan sweep followed a symlinked root or
+      ap-* entry before reading sentinels and killing socket holders.
+      paths.ensure_private_dir now creates parents unchecked (so /tmp ->
+      /private/tmp and nested configured roots work), creates the leaf 0700,
+      opens it with O_NOFOLLOW|O_DIRECTORY and, through the descriptor,
+      refuses a symlink, a non-directory, another owner (euid) or group or
+      other write bits with a RuntimeError naming the path, else tightens it
+      to 0700 (keeps jcode's 0755 root working). start() checks the root
+      before the sweep, and every spawn re-checks the root and the instance
+      dir. The sweep lstats the root and skips it with a warning unless it
+      passes the same checks (it never creates it), and lstats each ap-*
+      entry, skipping a symlink, non-directory or foreign one before reading
+      or killing anything. A symlinked configured root is refused, reversing
+      the upstream short-alias spelling allowance (only its spelling was
+      tested). A root the owner cannot open (0300) is kept unchanged only when
+      lstat shows it is this user's real, owner-only dir. Windows only
+      creates. Not covered: a same-user process racing the check and the
+      socket bind (the bearer, S123, covers it).
+    files:
+      - omnigent/runtime/harnesses/paths.py
+      - omnigent/runtime/harnesses/process_manager.py
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/e2e/test_orphan_sweep_unreadable_tmp_parent_e2e.py
+    tests:
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/runtime/test_process_manager.py
+      - tests/host/test_maintenance.py
+      - tests/e2e/test_orphan_sweep_unreadable_tmp_parent_e2e.py
+    budget_lines: 120
+    budget_exception:
+      lines: 137
+      reason: >-
+        tests/runtime/harnesses/test_process_manager.py (137 added lines):
+        the refused-root cases (symlink, mode 0777, foreign owner), the 0755
+        tightening, the unreadable 0300 kept and 0355 refused and nested-root test, the planted instance-dir symlink test,
+        the sweep test over a symlinked root and a symlinked ap-* entry, and
+        three sweep race tests moved from Path.exists / Path.is_dir / chmod
+        0333 to the lstat and listing the sweep now does. The other files are
+        within budget: omnigent/runtime/harnesses/paths.py 60,
+        omnigent/runtime/harnesses/process_manager.py 24.
+      approver: pending
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

@@ -22,6 +22,7 @@ from omnigent.inner.sandbox import (
     HOST_SANDBOX_BACKEND_ENV,
     SandboxPolicy,
     _launcher_inline_source,
+    _resolved_path,
     create_exec_launcher,
     run_launcher,
 )
@@ -604,6 +605,8 @@ def test_harness_socket_roots_never_raise_and_keep_the_default(
     if setting == "loop":
         setting = str(tmp_path / "loop")
         pathlib.Path(setting).symlink_to(setting)
+        # CORAL(S112): a looping configured root is kept by its plain spelling
+        kept = [_resolved_path(pathlib.Path(setting))]
     elif setting == "deleted_cwd":
         gone = tmp_path / "gone"
         gone.mkdir()

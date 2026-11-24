@@ -1213,9 +1213,11 @@ def _harness_socket_roots() -> list[Path]:
     CORAL(S112): this process's harness socket root, then the per-user default.
 
     Never raises, so a bad setting cannot fail :func:`resolve_sandbox` into an unsandboxed
-    run: a configured root that cannot be resolved (``~nosuchuser``, a symlink loop, a
-    relative root in a deleted cwd) is left out with a warning, and the default is always
-    kept. A relative root, or one holding the temp or home dir, is kept with a warning.
+    run: a configured root that cannot be resolved (``~nosuchuser``, a relative root in a
+    deleted cwd) is left out with a warning, and the default is always kept. A symlink loop
+    is kept by its plain spelling with a warning (the deny is harmless and the harness
+    process manager refuses a symlinked root). A relative root, or one holding the temp or
+    home dir, is kept with a warning.
     """
     try:
         from omnigent.runtime.harnesses.paths import (
@@ -1230,9 +1232,9 @@ def _harness_socket_roots() -> list[Path]:
     setting = os.environ.get(HARNESS_TMP_PARENT_ENV_VAR, "")
     try:
         configured = _resolved_path(resolve_harness_tmp_parent())
-        if configured.is_symlink():  # realpath stops at a symlink loop
-            raise RuntimeError("symlink loop")
-        if not harness_tmp_parent().is_absolute() or _holds_temp_or_home(configured):
+        if configured.is_symlink():  # CORAL(S112): realpath stops at a loop; keep it as spelled
+            _warn_once(setting, "The harness socket root is a symlink loop; denying it as spelled")
+        elif not harness_tmp_parent().is_absolute() or _holds_temp_or_home(configured):
             _warn_once(setting, "The harness socket root is relative or holds the temp or home")
         roots.append(configured)
     except (OSError, RuntimeError) as exc:

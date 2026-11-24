@@ -41,7 +41,7 @@ import pytest
 
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
 from omnigent.runtime.harnesses import _HARNESS_MODULES
-from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
+from omnigent.runtime.harnesses.paths import ensure_private_dir, resolve_harness_tmp_parent
 from omnigent.runtime.harnesses.process_manager import (
     _AP_PID_FILE,
     _TMP_PARENT_ENV_VAR,
@@ -318,6 +318,119 @@ def test_resolve_harness_tmp_parent_makes_relative_path_absolute(
     resolved = resolve_harness_tmp_parent()
 
     assert resolved == tmp_path / "harness-sockets"
+
+
+# CORAL(S124): the harness socket root must be this user's own real, private directory
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
+@pytest.mark.parametrize("plant", ["symlink", "dangling-symlink", "mode-0777", "foreign-owner"])
+async def test_start_refuses_an_unsafe_root(
+    short_tmp_parent: Path, monkeypatch: pytest.MonkeyPatch, plant: str
+) -> None:
+    real = short_tmp_parent / "real"
+    real.mkdir(mode=0o700)
+    root = real
+    if plant == "symlink":
+        root = short_tmp_parent / "link"
+        root.symlink_to(real, target_is_directory=True)
+    elif plant == "dangling-symlink":  # CORAL(S124): mkdir must not create the link target
+        root = short_tmp_parent / "link"
+        root.symlink_to(real / "planted", target_is_directory=True)
+    elif plant == "mode-0777":
+        real.chmod(0o777)
+    else:
+        monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+
+    with pytest.raises(RuntimeError, match=str(root)):
+        await HarnessProcessManager(tmp_parent=root).start()
+
+    assert list(real.iterdir()) == []
+
+
+# CORAL(S124): an owner-only root that cannot be opened is kept as is; a looser one is refused
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
+@pytest.mark.parametrize(("mode", "accepted"), [(0o300, True), (0o355, False)])
+def test_ensure_private_dir_on_an_unreadable_root(
+    short_tmp_parent: Path, mode: int, accepted: bool
+) -> None:
+    root = short_tmp_parent / "unreadable"
+    root.mkdir(mode=0o700)
+    root.chmod(mode)
+    try:
+        if accepted:
+            ensure_private_dir(root)
+        else:
+            with pytest.raises(RuntimeError, match=str(root)):
+                ensure_private_dir(root)
+        assert root.stat().st_mode & 0o777 == mode
+    finally:
+        root.chmod(0o700)
+
+
+# CORAL(S124)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
+async def test_start_tightens_an_owned_0755_root_and_creates_nested_roots(
+    short_tmp_parent: Path,
+) -> None:
+    loose = short_tmp_parent / "loose"
+    loose.mkdir(mode=0o700)
+    loose.chmod(0o755)
+    nested = short_tmp_parent / "a" / "b"
+    for root in (loose, nested):
+        manager = HarnessProcessManager(tmp_parent=root)
+        await manager.start()
+        try:
+            assert root.stat().st_mode & 0o777 == 0o700
+            assert manager.instance_dir.stat().st_mode & 0o777 == 0o700
+        finally:
+            await manager.shutdown()
+
+
+# CORAL(S124)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink check.")
+async def test_recreating_the_instance_dir_refuses_a_planted_symlink(
+    short_tmp_parent: Path,
+) -> None:
+    manager = HarnessProcessManager(tmp_parent=short_tmp_parent)
+    await manager.start()
+    elsewhere = short_tmp_parent / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    try:
+        shutil.rmtree(manager.instance_dir)
+        manager.instance_dir.symlink_to(elsewhere, target_is_directory=True)
+        with pytest.raises(RuntimeError, match="symlink"):
+            manager._ensure_instance_dir()
+        assert list(elsewhere.iterdir()) == []
+    finally:
+        await manager.shutdown()
+
+
+# CORAL(S124): the sweep never follows a symlinked root or instance dir
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink check.")
+async def test_sweep_skips_symlinked_root_and_instance_dirs(
+    short_tmp_parent: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    killed: list[Path] = []
+
+    async def record_kill(instance_dir: Path) -> None:
+        killed.append(instance_dir)
+
+    monkeypatch.setattr(
+        "omnigent.runtime.harnesses.process_manager._kill_orphan_runners", record_kill
+    )
+    stale = short_tmp_parent / "real" / "ap-dead"
+    stale.mkdir(mode=0o700, parents=True)
+    (stale / _AP_PID_FILE).write_text("99999999", encoding="utf-8")
+    linked_root = short_tmp_parent / "link"
+    linked_root.symlink_to(stale.parent, target_is_directory=True)
+    root = short_tmp_parent / "root"
+    root.mkdir(mode=0o700)
+    (root / "ap-link").symlink_to(stale, target_is_directory=True)
+
+    await sweep_orphaned_harness_processes(tmp_parent=linked_root)
+    await sweep_orphaned_harness_processes(tmp_parent=root)
+
+    assert killed == []
+    assert (stale / _AP_PID_FILE).exists()
 
 
 async def test_shutdown_without_start_is_noop(
@@ -1546,20 +1659,25 @@ async def test_orphan_sweep_from_another_pid_namespace_keeps_a_live_harness(
         await manager.shutdown()
 
 
-@pytest.mark.posix_only
 async def test_orphan_sweep_survives_unreadable_tmp_parent(
     short_tmp_parent: Path,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Warn and continue startup when the configured parent cannot be listed."""
-    if os.geteuid() == 0:
-        pytest.skip("permission checks do not apply to root")
     locked_parent = short_tmp_parent / "fp"
     locked_parent.mkdir(mode=0o700)
     (locked_parent / "ap-unreachable").mkdir(mode=0o700)
-    # Write+search without read: our own instance dir can be created,
-    # but the sweep cannot enumerate the configured shared parent.
-    locked_parent.chmod(0o333)
+    # CORAL(S124): an unreadable root is now refused before the sweep (it cannot be
+    # opened to check), so the listing failure is injected instead of made with chmod.
+    real_iterdir = Path.iterdir
+
+    def _locked_iterdir(self: Path) -> Iterator[Path]:
+        if self == locked_parent:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _locked_iterdir)
     manager = HarnessProcessManager(tmp_parent=locked_parent)
     try:
         await manager.start()
@@ -1568,7 +1686,7 @@ async def test_orphan_sweep_survives_unreadable_tmp_parent(
             for record in caplog.records
         )
     finally:
-        locked_parent.chmod(0o700)
+        monkeypatch.undo()
         with contextlib.suppress(Exception):
             await manager.shutdown()
 
@@ -1579,17 +1697,18 @@ async def test_orphan_sweep_survives_tmp_parent_stat_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A tmp-parent stat race must not abort manager startup."""
-    real_exists = Path.exists
+    real_lstat = os.lstat
     raised = False
 
-    def _racy_exists(self: Path) -> bool:
+    # CORAL(S124): the sweep lstats the root instead of following it
+    def _racy_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
         nonlocal raised
-        if self == short_tmp_parent and not raised:
+        if Path(str(path)) == short_tmp_parent and not raised:
             raised = True
             raise OSError("tmp parent changed during sweep")
-        return real_exists(self)
+        return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "exists", _racy_exists)
+    monkeypatch.setattr(os, "lstat", _racy_lstat)
     manager = HarnessProcessManager(tmp_parent=short_tmp_parent)
     try:
         await manager.start()
@@ -1644,7 +1763,7 @@ async def test_orphan_sweep_treats_vanishing_child_as_benign_race(
     short_tmp_parent: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An injected is_dir race must not prevent cleanup of the next dead orphan."""
+    """An injected lstat race must not prevent cleanup of the next dead orphan."""
     vanishing = short_tmp_parent / "ap-avanishing"
     vanishing.mkdir(mode=0o700)
     (vanishing / _AP_PID_FILE).write_text("99999999", encoding="utf-8")
@@ -1652,14 +1771,15 @@ async def test_orphan_sweep_treats_vanishing_child_as_benign_race(
     dead.mkdir(mode=0o700)
     (dead / _AP_PID_FILE).write_text("99999999", encoding="utf-8")
 
-    real_is_dir = Path.is_dir
+    real_lstat = os.lstat
 
-    def _racy_is_dir(self: Path, **kwargs: object) -> bool:
-        if self.name == "ap-avanishing":
-            raise FileNotFoundError(2, "vanished mid-sweep", str(self))
-        return real_is_dir(self, **kwargs)  # type: ignore[arg-type]
+    # CORAL(S124): the sweep lstats each instance dir instead of following it
+    def _racy_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if Path(str(path)).name == "ap-avanishing":
+            raise FileNotFoundError(2, "vanished mid-sweep", str(path))
+        return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "is_dir", _racy_is_dir)
+    monkeypatch.setattr(os, "lstat", _racy_lstat)
     manager = HarnessProcessManager(tmp_parent=short_tmp_parent)
     try:
         await manager.start()
