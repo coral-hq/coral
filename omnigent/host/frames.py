@@ -53,6 +53,7 @@ from omnigent.inner.native_attachments import (
     CAP_FILESYSTEM_ATTACHMENTS,
 )
 from omnigent.inner.sandbox import _default_sandbox_for_platform
+from omnigent.inner.seatbelt_sandbox import process_read_canary_open  # CORAL(S120)
 from omnigent.scheduled_context import parse_scheduled_run
 from omnigent.util.json_types import JsonObject as _JsonObject
 from omnigent.util.tunnel_limits import RUNNER_TUNNEL_MAX_MESSAGE_BYTES
@@ -137,6 +138,9 @@ def host_capabilities() -> list[str]:
     binary = _OS_SANDBOX_BINARIES.get(backend)
     if binary is None or shutil.which(binary) is None:
         backend = "none"
+    # CORAL(S120): a seatbelt that let the process-read canary through is reported as such.
+    elif backend == "darwin_seatbelt" and process_read_canary_open():
+        backend = "darwin_seatbelt_canary_open"
     # CORAL(S50): installed tool providers' new tokens come last; imported here so
     # that importing this module (server and host) loads no entry point.
     from omnigent.tools.extensions import extension_host_capabilities

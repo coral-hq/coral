@@ -34,6 +34,7 @@ from unittest.mock import patch
 
 import pytest
 
+import omnigent.inner.seatbelt_sandbox as seatbelt_sandbox  # CORAL(S120)
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.sandbox import SandboxPolicy, with_denied_unix_sockets
 from omnigent.inner.seatbelt_sandbox import (
@@ -879,6 +880,55 @@ def test_profile_keeps_other_processes_arguments_and_environments_unreadable(
         assert lines.index(deny_info) < lines.index(exception)
     assert lines.index(deny_args) > lines.index("(allow sysctl-read)")
     assert lines.index(deny_sysmond) > lines.index("(allow mach-lookup)")
+
+
+# CORAL(S120): the host's process-read canary sees each S111 rule go
+@pytest.mark.skipif(sys.platform != "darwin", reason="darwin_seatbelt requires macOS")
+@pytest.mark.parametrize(
+    "dropped",
+    [
+        (),
+        ("(deny process-info*)", '(deny sysctl-read (sysctl-name-prefix "kern.procargs"))'),
+        ('(deny mach-lookup (global-name-prefix "com.apple.sysmond"))',),
+    ],
+    ids=["rules_hold", "procargs_open", "sysmond_open"],
+)
+def test_the_canary_reads_through_only_when_a_process_read_rule_is_gone(
+    monkeypatch: pytest.MonkeyPatch, dropped: tuple[str, ...]
+) -> None:
+    """
+    With the real profile the canary is closed; without the procargs denies, or the
+    sysmond deny, its sandboxed read finds the marker and the canary is open.
+    """
+    real = seatbelt_sandbox._build_profile
+
+    def without_rules(*args: object, **kwargs: object) -> str:
+        lines = real(*args, **kwargs).splitlines()  # type: ignore[arg-type]
+        assert all(rule in lines for rule in dropped)
+        return "\n".join(line for line in lines if line not in dropped)
+
+    monkeypatch.setattr(seatbelt_sandbox, "_build_profile", without_rules)
+    seatbelt_sandbox.process_read_canary_open.cache_clear()
+    try:
+        assert seatbelt_sandbox.process_read_canary_open() is bool(dropped)
+    finally:
+        seatbelt_sandbox.process_read_canary_open.cache_clear()
+
+
+def test_the_canary_fails_closed_when_its_check_cannot_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A check that cannot start its target counts as open on macOS, and closed elsewhere."""
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no spawn")
+
+    monkeypatch.setattr(seatbelt_sandbox.subprocess, "Popen", refuse)
+    seatbelt_sandbox.process_read_canary_open.cache_clear()
+    try:
+        assert seatbelt_sandbox.process_read_canary_open() is (sys.platform == "darwin")
+    finally:
+        seatbelt_sandbox.process_read_canary_open.cache_clear()
 
 
 def test_profile_network_section_for_active_egress_emits_narrow_allows(
