@@ -991,6 +991,60 @@ def test_sandbox_cannot_reach_the_pasteboard_spotlight_or_apple_events(
     assert kept == marker, "the sandboxed write reached the pasteboard"
 
 
+# CORAL(S122): five Pool exits, then signals to its parent shell and a process outside; the
+# alarm bounds a hang.
+_SIGNAL_PROBE = """
+import multiprocessing, os, signal, sys
+signal.alarm(60)
+def square(x):
+    return x * x
+if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn')
+    for _ in range(5):
+        with multiprocessing.Pool(2) as pool:
+            assert sum(pool.map(square, range(10))) == 285
+    for name, pid in (('parent', os.getppid()), ('outside', int(sys.argv[1]))):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except PermissionError:
+            print(name, 'refused')
+"""
+
+
+# CORAL(S122): a sandboxed shell signals its own children, never its parent or one outside
+def test_sandbox_shell_signals_its_own_children_only(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+) -> None:
+    """
+    A seatbelt-sandboxed shell's timeout kills its hung command and a ``multiprocessing.Pool``
+    exits cleanly, while a signal to its parent in the same sandbox or to a process started
+    outside it is refused.
+    """
+    if active_sandbox_type != "darwin_seatbelt":
+        pytest.skip("the signal rule is a seatbelt profile rule")
+    (tmp_path / "probe.py").write_text(_SIGNAL_PROBE)
+    spec = OSEnvSpec(
+        type="caller_process", cwd=str(tmp_path), sandbox=active_sandbox_spec_factory()
+    )
+    with contextlib.ExitStack() as cleanup:
+        outside = subprocess.Popen(["sleep", "120"])
+        cleanup.callback(outside.wait)
+        cleanup.callback(outside.kill)
+        os_env = create_os_environment(spec)
+        cleanup.callback(os_env.close)
+        hung = run_async(os_env.shell("sleep 60", timeout=2))
+        probe = run_async(os_env.shell(shlex.join([sys.executable, "probe.py", str(outside.pid)])))
+        alive = outside.poll() is None
+    assert hung.get("timed_out") is True, f"the timeout could not kill the command: {hung}"
+    assert (
+        probe.get("exit_code") == 0 and probe.get("stdout") == "parent refused\noutside refused\n"
+    ), probe
+    assert alive, "the sandboxed shell signalled a process outside the sandbox"
+
+
 # ---------------------------------------------------------------------------
 # Control sockets
 # ---------------------------------------------------------------------------

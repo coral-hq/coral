@@ -4191,3 +4191,35 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S122
+    title: A macOS sandboxed step signals its own children
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 26.3.1: the step profile allowed signals only to the
+      process itself, so the os_env shell's timeout could not kill a hung
+      command (EPERM; a sleep 30 under a 2 s timeout ran all 30 s and
+      returned an error) and a multiprocessing.Pool (spawn) exited cleanly in
+      only 4 of 20 runs. Every profile _build_profile emits (the os_env step
+      shell, every spawn-time CLI wrap and sandboxed terminal panes) now also
+      allows (signal (target children)): the timeout kills at 2 s and the Pool
+      exits cleanly in 20 of 20 runs, while the process's parent, a
+      grandchild, a process in a second sandbox launch with the same profile
+      and a process started outside stay refused. (target same-sandbox) was
+      rejected: within one launch it lets a wrapped CLI's tool commands kill
+      siblings such as the CLI's policy hook. (target pgrp) reached a process
+      outside. S111's process-read denies and S121's Mach denies are
+      unchanged.
+    files:
+      - omnigent/inner/seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_seatbelt_sandbox.py
+    tests:
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+    budget_lines: 70
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

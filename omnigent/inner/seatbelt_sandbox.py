@@ -740,6 +740,9 @@ def _build_profile(
             "(allow process-info* (target self))",
             "(allow process-info-listpids)",
             "(allow signal (target self))",
+            # CORAL(S122): a shell timeout or a Pool exit signals its own children. Not
+            # same-sandbox: a wrapped CLI's tool commands could then kill its policy hook.
+            "(allow signal (target children))",
             "",
             ";; Mach / IPC / sysctl baseline. Verified empirically as the",
             ";; minimum needed for the Python helper to boot and run user",
