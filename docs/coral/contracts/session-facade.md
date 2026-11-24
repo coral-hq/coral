@@ -1437,8 +1437,8 @@ test until someone classifies it.
   daemon's whole environment, and on the direct-spawn fallback it held the
   runner's tunnel binding token and the host's initial bearer. Since S123, on
   POSIX, the zygote starts from the allow-listed runner environment without
-  credential-shaped names, and a direct-spawned runner takes both tokens over
-  an inherited socket and keeps them in memory. A direct-spawned runner's
+  credential-shaped names, and a direct-spawned runner takes its auth tokens
+  over an inherited socket and keeps them in memory. A direct-spawned runner's
   environment still holds the credentials the host forwards (CRL-197). A
   binding token proves the runner on `/mcp` and, on a server whose
   authentication can mint tokens (accounts or OIDC), mints an owner JWT

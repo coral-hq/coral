@@ -36,7 +36,7 @@ from omnigent.runner.launch_secrets import (  # CORAL(S124)
     CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
     HARNESS_LAUNCH_FD_ENV_VAR,
     LAUNCH_SECRETS_EXIT_CODE,
-    launch_secrets_pipe,
+    launch_secrets_socket,
 )
 from omnigent.runtime.harnesses import _HARNESS_MODULES
 from tests._helpers.polling import poll_until_async  # CORAL(S124)
@@ -826,7 +826,7 @@ def test_create_app_adopts_its_launch_socket_into_its_config_not_os_environ(
     }
     sent_digests = {name: _digest(value) for name, value in sent.items()}
     assert set(sent) == CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS
-    fd = launch_secrets_pipe(sent)
+    fd = launch_secrets_socket(sent)
     sent_inode = os.fstat(fd).st_ino
     environ = _WriteRecordingEnviron(
         {
@@ -875,7 +875,7 @@ def test_create_app_refuses_a_launch_socket_it_cannot_trust(
     helper = claude_sdk_harness._ENV_API_KEY_HELPER
     fd: int | None = None
     if refused == "other-config":
-        fd = launch_secrets_pipe({"HARNESS_CLAUDE_SDK_MODEL": value})
+        fd = launch_secrets_socket({"HARNESS_CLAUDE_SDK_MODEL": value})
     elif refused == "not-json":
         fd = _socket_carrying(f'{{"{helper}": "{value}"'.encode())
     elif refused == "a-pipe":

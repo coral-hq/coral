@@ -51,7 +51,9 @@ Since CRL-166 it can no longer connect to the harness sockets of other Omnigent
 sessions under this host's socket root or the default `/tmp/omnigent-<uid>`, to
 other Omnigent terminals' tmux servers, or to your own tmux server's default
 socket (`tmux-<uid>`, with `-L` labels and `TMUX_TMPDIR`). Both were measured
-on macOS 27.2.1 only, and no CI lane runs macOS (CRL-170). Since CRL-167, on
+on macOS 27.2.1; a macOS CI lane (CRL-170) now runs the sandbox tests and
+probe 15 on changes to the files they depend on and weekly, and is not a
+required check. Since CRL-167, on
 Linux and macOS a Coral step's Claude CLI no longer holds your model API key,
 in its environment or on its command line. The key stays in a proxy on
 loopback inside the step's own harness process, and the CLI holds a

@@ -30,8 +30,8 @@ from omnigent.runner.launch_secrets import (
     LAUNCH_SECRETS_FD_ENV_VAR,
     MAX_LAUNCH_SECRETS_BYTES,
     adopt_launch_secrets,
-    launch_secrets_in_pipe,
-    launch_secrets_pipe,
+    launch_secrets_in_socket,
+    launch_secrets_socket,
 )
 
 
@@ -57,6 +57,8 @@ def _socket_holding(
 ) -> tuple[int, socket.socket | None]:
     """A socket whose reading end holds *payload*; its writer stays open only when asked."""
     writer, reader = socket.socketpair()
+    # Room for a payload over the cap: nothing reads until the writer is done.
+    writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * MAX_LAUNCH_SECRETS_BYTES)
     writer.sendall(payload)
     if writer_stays_open:
         return reader.detach(), writer
@@ -68,6 +70,12 @@ def _token_payload(value: str) -> bytes:
     return json.dumps({RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: value}).encode()
 
 
+def _padded_to(values: dict[str, str], name: str, size: int) -> dict[str, str]:
+    """*values* with *name* lengthened until the payload the writer sends is *size* bytes."""
+    unpadded = len(json.dumps(values, separators=(",", ":")))
+    return {**values, name: values[name] + "x" * (size - unpadded)}
+
+
 @pytest.mark.parametrize("size", ["small", "at_the_cap"])
 def test_sent_values_move_into_the_target_and_the_fd_closes(size: str) -> None:
     values = {
@@ -75,9 +83,8 @@ def test_sent_values_move_into_the_target_and_the_fd_closes(size: str) -> None:
         RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR: _fake("bearer"),
     }
     if size == "at_the_cap":
-        unpadded = len(json.dumps(values, separators=(",", ":")))
-        values[RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR] += "x" * (MAX_LAUNCH_SECRETS_BYTES - unpadded)
-    read_fd = launch_secrets_pipe(values)
+        values = _padded_to(values, RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, MAX_LAUNCH_SECRETS_BYTES)
+    read_fd = launch_secrets_socket(values)
     environ = {LAUNCH_SECRETS_FD_ENV_VAR: str(read_fd), "PATH": "/bin"}
     target: dict[str, str] = {}
 
@@ -102,7 +109,7 @@ def test_one_name_given_as_the_names_to_send_is_refused() -> None:
 
     # A str iterates as characters, which would leave the token in the child's env.
     with pytest.raises(TypeError):
-        with launch_secrets_in_pipe(env, RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR):
+        with launch_secrets_in_socket(env, RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR):
             pass
 
 
@@ -136,6 +143,14 @@ _REFUSED_PAYLOADS: dict[str, Callable[[str], bytes]] = {
     "oversize": lambda value: _token_payload(value + "x" * MAX_LAUNCH_SECRETS_BYTES),
     # Valid JSON padded past the cap: refused for its size, not for its parse.
     "padded_past_the_cap": lambda value: _token_payload(value) + b" " * MAX_LAUNCH_SECRETS_BYTES,
+    "one_byte_over_the_cap": lambda value: json.dumps(
+        _padded_to(
+            {RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: value},
+            RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+            MAX_LAUNCH_SECRETS_BYTES + 1,
+        ),
+        separators=(",", ":"),
+    ).encode(),
     "truncated": lambda value: _token_payload(value)[:-2],
     "empty_object": lambda _value: b"{}",
     "duplicate_name": lambda value: (
@@ -207,12 +222,16 @@ def test_a_descriptor_that_is_not_a_launch_socket_exits_2(
     assert _is_open(2)
 
 
-def test_the_writer_refuses_a_payload_over_the_cap_and_leaves_no_fd_open() -> None:
+def test_the_writer_refuses_a_payload_one_byte_over_the_cap_and_leaves_no_fd_open() -> None:
     fds = psutil.Process().num_fds()
-    over = {RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: "x" * MAX_LAUNCH_SECRETS_BYTES}
+    over = _padded_to(
+        {RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: _fake("binding")},
+        RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+        MAX_LAUNCH_SECRETS_BYTES + 1,
+    )
 
     with pytest.raises(OSError) as refused:
-        launch_secrets_pipe(over)
+        launch_secrets_socket(over)
 
     assert refused.value.errno == errno.E2BIG
     assert psutil.Process().num_fds() == fds
@@ -230,9 +249,11 @@ def test_the_writer_raises_on_a_full_socket_instead_of_waiting(
     parent_end.setblocking(True)
     ends = (parent_end.fileno(), child_end.fileno())
     monkeypatch.setattr(launch_secrets.socket, "socketpair", lambda *_: (parent_end, child_end))
+    # A kernel that keeps the buffer small: growing it would make room on macOS.
+    monkeypatch.setattr(launch_secrets, "_LAUNCH_SOCKET_SEND_BUFFER_BYTES", 0)
 
     with pytest.raises(BlockingIOError):
-        launch_secrets_pipe({RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: _fake("binding")})
+        launch_secrets_socket({RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: _fake("binding")})
 
     assert [fd for fd in ends if _is_open(fd)] == []
 
@@ -245,7 +266,7 @@ def test_the_socket_context_moves_only_the_named_values_and_closes_its_fd() -> N
     # A stale fd number from the parent's own environment never reaches the child.
     env = {**values, "PATH": "/bin", LAUNCH_SECRETS_FD_ENV_VAR: "9"}
 
-    with launch_secrets_in_pipe(env, RUNNER_AUTH_SECRET_ENV_VARS) as (spawn_env, pass_fds):
+    with launch_secrets_in_socket(env, RUNNER_AUTH_SECRET_ENV_VARS) as (spawn_env, pass_fds):
         [read_fd] = pass_fds
         assert spawn_env == {"PATH": "/bin", LAUNCH_SECRETS_FD_ENV_VAR: str(read_fd)}
         sent = json.loads(os.read(read_fd, MAX_LAUNCH_SECRETS_BYTES + 1))
@@ -253,11 +274,11 @@ def test_the_socket_context_moves_only_the_named_values_and_closes_its_fd() -> N
     assert not _is_open(read_fd)
 
     # Nothing to move (Windows keeps env delivery): the env is copied without a socket.
-    with launch_secrets_in_pipe(env, ()) as (spawn_env, pass_fds):
+    with launch_secrets_in_socket(env, ()) as (spawn_env, pass_fds):
         assert (sorted(spawn_env), pass_fds) == (sorted({*values, "PATH"}), ())
 
     # A failed spawn still closes the child's end.
-    with pytest.raises(OSError), launch_secrets_in_pipe(env, values) as (_env, pass_fds):
+    with pytest.raises(OSError), launch_secrets_in_socket(env, values) as (_env, pass_fds):
         raise OSError(errno.ENOENT, "spawn failed")
     assert not _is_open(pass_fds[0])
 
@@ -287,10 +308,12 @@ def test_a_real_runner_holds_its_sent_tokens_while_its_readable_env_lacks_them(
 ) -> None:
     # Every runner auth secret, whatever the list holds: the child reports on each by name.
     values = {name: _fake("secret") for name in sorted(RUNNER_AUTH_SECRET_ENV_VARS)}
+    # A bearer the size of a JWT with group claims: more than a default macOS socket buffers.
+    values = _padded_to(values, RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, 12 * 1024)
     passed = {name: os.environ[name] for name in ("PATH", "PYTHONPATH") if name in os.environ}
     env = {**passed, "HOME": str(tmp_path), "TMPDIR": str(tmp_path), **values}
 
-    with launch_secrets_in_pipe(env, RUNNER_AUTH_SECRET_ENV_VARS) as (spawn_env, pass_fds):
+    with launch_secrets_in_socket(env, RUNNER_AUTH_SECRET_ENV_VARS) as (spawn_env, pass_fds):
         child = subprocess.Popen(
             [sys.executable, "-c", _CHILD],
             env=spawn_env,
@@ -345,7 +368,7 @@ def test_concurrent_launches_never_cross_sockets(tmp_path: Path) -> None:
     together = threading.Barrier(len(launches), timeout=30)
 
     def _launch(values: dict[str, str]) -> tuple[dict[str, object], list[int]]:
-        with launch_secrets_in_pipe({**passed, **values}, RUNNER_AUTH_SECRET_ENV_VARS) as (
+        with launch_secrets_in_socket({**passed, **values}, RUNNER_AUTH_SECRET_ENV_VARS) as (
             spawn_env,
             pass_fds,
         ):
@@ -378,11 +401,11 @@ def test_concurrent_launches_never_cross_sockets(tmp_path: Path) -> None:
 _DAEMON_WITHOUT_STDIN_OR_STDOUT = """
 import os, subprocess, sys
 from omnigent.runner.identity import RUNNER_AUTH_SECRET_ENV_VARS
-from omnigent.runner.launch_secrets import launch_secrets_in_pipe
+from omnigent.runner.launch_secrets import launch_secrets_in_socket
 
 os.close(0)
 os.close(1)
-with launch_secrets_in_pipe(os.environ, RUNNER_AUTH_SECRET_ENV_VARS) as (spawn_env, pass_fds):
+with launch_secrets_in_socket(os.environ, RUNNER_AUTH_SECRET_ENV_VARS) as (spawn_env, pass_fds):
     child = subprocess.run(
         [sys.executable, "-c", sys.argv[1]],
         env=spawn_env,

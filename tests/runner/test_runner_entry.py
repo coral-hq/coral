@@ -74,7 +74,7 @@ from omnigent.runner.identity import (
 )
 from omnigent.runner.launch_secrets import (  # CORAL(S123)
     LAUNCH_SECRETS_FD_ENV_VAR,
-    launch_secrets_pipe,
+    launch_secrets_socket,
 )
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
 from omnigent.runner.transports.ws_tunnel.frames import (
@@ -4092,7 +4092,7 @@ def test_after_boot_the_runner_reads_its_tokens_from_memory_and_no_child_inherit
         for name, value in values.items():
             monkeypatch.setenv(name, value)
     else:
-        monkeypatch.setenv(LAUNCH_SECRETS_FD_ENV_VAR, str(launch_secrets_pipe(values)))
+        monkeypatch.setenv(LAUNCH_SECRETS_FD_ENV_VAR, str(launch_secrets_socket(values)))
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://runner.test")
     monkeypatch.setattr("omnigent.runner._entry._runner_auth_factory", None)
     monkeypatch.setattr(

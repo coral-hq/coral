@@ -225,7 +225,7 @@ from omnigent.runner.identity import (
 from omnigent.runner.launch_secrets import (  # CORAL(S123)
     HARNESS_LAUNCH_FD_ENV_VAR,  # CORAL(S124)
     LAUNCH_SECRETS_FD_ENV_VAR,
-    launch_secrets_in_pipe,
+    launch_secrets_in_socket,
 )
 from omnigent.runner.transports.ws_tunnel.diagnostics import TunnelDiagnostics
 from omnigent.runner.transports.ws_tunnel.frames import (
@@ -2748,7 +2748,7 @@ class HostProcess:
             # CORAL(S123): on POSIX the runner's tokens travel in an inherited socket, not its env
             secret_names = RUNNER_AUTH_SECRET_ENV_VARS if IS_POSIX else frozenset[str]()
             with (
-                launch_secrets_in_pipe(env, secret_names) as (spawn_env, secret_fds),
+                launch_secrets_in_socket(env, secret_names) as (spawn_env, secret_fds),
                 child_logging_popen_kwargs(spawn_env) as logging_kwargs,
             ):
                 if secret_fds:  # CORAL(S123): beside the terminal mirror's fd, if any

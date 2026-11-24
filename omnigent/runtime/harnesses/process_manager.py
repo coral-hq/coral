@@ -49,7 +49,7 @@ from omnigent.runner.identity import strip_runner_auth_secrets
 from omnigent.runner.launch_secrets import (  # CORAL(S124)
     CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
     HARNESS_LAUNCH_FD_ENV_VAR,
-    launch_secrets_in_pipe,
+    launch_secrets_in_socket,
 )
 from omnigent.runtime.harnesses import _HARNESS_MODULES
 from omnigent.runtime.harnesses._harness_zygote_client import (
@@ -1481,7 +1481,7 @@ class HarnessProcessManager:
         with contextlib.ExitStack() as launch:
             try:
                 spawn_env, secret_fds = launch.enter_context(
-                    launch_secrets_in_pipe(
+                    launch_secrets_in_socket(
                         effective_env,
                         secret_names if IS_POSIX else frozenset[str](),
                         fd_env_var=HARNESS_LAUNCH_FD_ENV_VAR,

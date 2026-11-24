@@ -140,6 +140,7 @@ from omnigent.runner.identity import (
 from omnigent.runner.launch_secrets import (  # CORAL(S123)
     HARNESS_LAUNCH_FD_ENV_VAR,  # CORAL(S124)
     LAUNCH_SECRETS_FD_ENV_VAR,
+    MAX_LAUNCH_SECRETS_BYTES,
 )
 from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
 from tests._helpers.polling import poll_until, poll_until_async  # CORAL(S108)
@@ -1023,28 +1024,33 @@ async def test_handle_launch_spawns_subprocess(
         workspace=str(workspace),
     )
 
-    spawned_env: dict[str, str] = {}
-    spawned_kwargs: dict[str, object] = {}
-    # CORAL(S123): what the runner's inherited launch socket held, and which socket it was.
-    sent: dict[str, str] = {}
-    socket_identity: list[tuple[int, int]] = []
+    # CORAL(S123): names, digests and the checked kwargs only; the rest of env= is this
+    # test process's environment.
+    spawned: dict[str, object] = {}
 
     original_popen = subprocess.Popen
 
     def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
-        """Capture the env vars and spawn a no-op process.
+        """Record what the checks below need and spawn a no-op process.
 
         :param args: Command args (ignored — we spawn a real sleep).
         :param kwargs: Popen kwargs including env and stdin.
         :returns: A real subprocess handle.
         """
-        env = kwargs.get("env", {})
-        spawned_env.update(env)
-        spawned_kwargs.update(kwargs)
-        if fd_text := spawned_env.get(LAUNCH_SECRETS_FD_ENV_VAR):  # CORAL(S123)
-            status = os.fstat(int(fd_text))
-            socket_identity.append((status.st_dev, status.st_ino))
-            sent.update(_secret_digests(json.loads(os.read(int(fd_text), 8192))))
+        env = cast(dict[str, str], kwargs["env"])
+        fd = int(env[LAUNCH_SECRETS_FD_ENV_VAR])
+        status = os.fstat(fd)
+        spawned.update(
+            server_url=env.get("RUNNER_SERVER_URL"),
+            workspace=env.get("OMNIGENT_RUNNER_WORKSPACE"),
+            token_names=sorted(RUNNER_AUTH_SECRET_ENV_VARS & set(env)),
+            fd=fd,
+            fd_passed=fd in cast(tuple[int, ...], kwargs.get("pass_fds", ())),
+            socket=(status.st_dev, status.st_ino),
+            sent=_secret_digests(json.loads(os.read(fd, 8192))),
+            stdin=kwargs.get("stdin"),
+            cwd=kwargs.get("cwd"),
+        )
         # Spawn a real process that sleeps briefly so poll() returns None.
         return original_popen(
             ["sleep", "10"],
@@ -1068,26 +1074,27 @@ async def test_handle_launch_spawns_subprocess(
     )
 
     # Verify env vars passed to the subprocess.
-    assert spawned_env.get("RUNNER_SERVER_URL") == "http://localhost:8000"
-    assert spawned_env.get("OMNIGENT_RUNNER_WORKSPACE") == str(workspace)
+    assert spawned["server_url"] == "http://localhost:8000"
+    assert spawned["workspace"] == str(workspace)
     # CORAL(S123): the tokens travel in an inherited socket, never in the runner's exec-time env.
-    assert sorted(RUNNER_AUTH_SECRET_ENV_VARS & set(spawned_env)) == []
-    fd = int(spawned_env[LAUNCH_SECRETS_FD_ENV_VAR])
-    assert fd in cast(tuple[int, ...], spawned_kwargs.get("pass_fds", ()))
-    assert sent == _secret_digests(
+    assert spawned["token_names"] == []
+    assert spawned["fd_passed"] is True
+    assert spawned["sent"] == _secret_digests(
         {
             RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: "test_token_abc",
             RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR: "host-bootstrap-bearer",
         }
     )
-    assert not _same_socket(fd, socket_identity[0]), "the host kept the runner's socket open"
+    assert not _same_socket(cast(int, spawned["fd"]), cast(tuple[int, int], spawned["socket"])), (
+        "the host kept the runner's socket open"
+    )
 
     # Runners must get a clean /dev/null stdin, not the daemon's inherited fd:
     # a long-lived (e.g. nohup'd) daemon can end up with a closed/recycled
     # stdin, and an inherited bad fd crashes the runner at interpreter startup
     # ("init_sys_streams: Bad file descriptor") so it never connects. If this
     # regresses, long-lived daemons intermittently fail to start sessions.
-    assert spawned_kwargs.get("stdin") == subprocess.DEVNULL, (
+    assert spawned["stdin"] == subprocess.DEVNULL, (
         "runner subprocess must be spawned with stdin=subprocess.DEVNULL"
     )
 
@@ -1095,7 +1102,7 @@ async def test_handle_launch_spawns_subprocess(
     # cwd: a daemon launched from a directory that was later deleted (temp
     # checkout, removed worktree) makes every Path.cwd() in the runner raise
     # FileNotFoundError, and native terminals then fail to start.
-    assert spawned_kwargs.get("cwd") == str(workspace), (
+    assert spawned["cwd"] == str(workspace), (
         "runner subprocess must be spawned with cwd=<session workspace>"
     )
 
@@ -1169,7 +1176,8 @@ async def test_handle_launch_keeps_runner_tokens_in_the_env_off_posix(
 async def test_handle_launch_fails_closed_when_the_runner_secrets_cannot_be_handed_over(
     tmp_path: Path, failure: str
 ) -> None:
-    bearer = "x" * 5000 if failure == "over_the_payload_cap" else "host-bootstrap-bearer"
+    over_the_cap = failure == "over_the_payload_cap"
+    bearer = "x" * (MAX_LAUNCH_SECRETS_BYTES + 1) if over_the_cap else "host-bootstrap-bearer"
     host = _make_host_process()
     host._auth_token_factory = lambda: bearer
     host._auth_token_factory_resolved = True
@@ -1185,15 +1193,15 @@ async def test_handle_launch_fails_closed_when_the_runner_secrets_cannot_be_hand
         raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
 
     frame = HostLaunchRunnerFrame(
-        request_id="req_pipe", binding_token="tok_pipe_fail", workspace=str(tmp_path)
+        request_id="req_socket", binding_token="tok_socket_fail", workspace=str(tmp_path)
     )
     with patch("omnigent.host.connect.subprocess.Popen", side_effect=_failing_popen):
         result = await host._handle_launch(frame)
 
     assert result.status == "failed"
     assert result.error is not None and "failed to spawn runner" in result.error
-    assert "tok_pipe_fail" not in result.error and bearer not in result.error
-    if failure == "over_the_payload_cap":
+    assert "tok_socket_fail" not in result.error and bearer not in result.error
+    if over_the_cap:
         assert spawned == [], "a launch whose secrets do not fit must not spawn"
     else:
         [fd] = spawned

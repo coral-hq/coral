@@ -1102,8 +1102,8 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
 
 # The server no longer takes this token as runner proof for a Coral session's /mcp calls or
 # tunnel, and runners strip it from their children. ``runner.names`` and ``harness.names``
-# stay pinned to it until the host spawns its runner zygote without its own environment:
-# a zygote-forked runner and harness still inherit the host's.
+# are ``none``: the host starts its runner zygote from the allow-listed runner environment,
+# so a zygote-forked runner and harness never inherit the host's copy.
 EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
     # Pinned from one local run on macOS 27.2.1 with claude 2.1.325 (seatbelt).
     "darwin": {

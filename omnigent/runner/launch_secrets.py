@@ -31,8 +31,10 @@ HARNESS_LAUNCH_FD_ENV_VAR = "OMNIGENT_HARNESS_LAUNCH_FD"
 CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS: frozenset[str] = frozenset(
     {"HARNESS_CLAUDE_SDK_API_KEY_HELPER", "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND"}
 )
-# Fits an empty UNIX socket's buffer on Linux and macOS, so the parent's write never waits.
-MAX_LAUNCH_SECRETS_BYTES = 4096
+# Room for three names, one of them a bearer JWT that carries group claims.
+MAX_LAUNCH_SECRETS_BYTES = 16 * 1024
+# macOS gives a UNIX stream socket 8 KiB to send into; Linux's default is already larger.
+_LAUNCH_SOCKET_SEND_BUFFER_BYTES = 2 * MAX_LAUNCH_SECRETS_BYTES
 # The parent wrote everything and closed its end before the spawn, so EOF is already there.
 LAUNCH_SECRETS_READ_TIMEOUT_S = 5.0
 LAUNCH_SECRETS_EXIT_CODE = 2
@@ -42,12 +44,12 @@ class _LaunchSecretsRefused(Exception):
     """Why the launch secrets were refused, in words that never hold a value."""
 
 
-def launch_secrets_pipe(values: Mapping[str, str]) -> int:
+def launch_secrets_socket(values: Mapping[str, str]) -> int:
     """Write *values* as one JSON object into a new UNIX socket pair and return the child's end.
 
-    The parent's end is non-blocking, so a buffer too small for the payload raises rather
-    than waits, and it is shut down and closed before this returns. The child's end is
-    above fd 2, which the child's own stdio replaces.
+    The parent's end gets a send buffer that holds the largest payload and is non-blocking,
+    so a buffer the kernel kept smaller raises rather than waits; it is shut down and closed
+    before this returns. The child's end is above fd 2, which the child's own stdio replaces.
 
     :param values: Names and secrets, e.g. the runner's binding token and bearer.
     :returns: The child's end, not inheritable until passed through ``pass_fds``.
@@ -59,6 +61,14 @@ def launch_secrets_pipe(values: Mapping[str, str]) -> int:
         raise OSError(errno.E2BIG, "the launch secrets exceed the payload cap")
     parent_end, child_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     with parent_end, child_end:
+        # Only ever grown: the whole payload must fit before any child exists to read it.
+        if (
+            parent_end.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+            < _LAUNCH_SOCKET_SEND_BUFFER_BYTES
+        ):
+            parent_end.setsockopt(
+                socket.SOL_SOCKET, socket.SO_SNDBUF, _LAUNCH_SOCKET_SEND_BUFFER_BYTES
+            )
         parent_end.setblocking(False)
         parent_end.sendall(payload)
         parent_end.shutdown(socket.SHUT_WR)
@@ -72,7 +82,7 @@ def launch_secrets_pipe(values: Mapping[str, str]) -> int:
 
 
 @contextlib.contextmanager
-def launch_secrets_in_pipe(
+def launch_secrets_in_socket(
     env: Mapping[str, str],
     names: Collection[str],
     *,
@@ -88,7 +98,7 @@ def launch_secrets_in_pipe(
     :param env: The child's environment, holding the secrets.
     :param names: The names that move into the socket; empty keeps env delivery.
     :param fd_env_var: The variable that tells the child its end.
-    :raises OSError: From :func:`launch_secrets_pipe`; nothing falls back to the env.
+    :raises OSError: From :func:`launch_secrets_socket`; nothing falls back to the env.
     :raises TypeError: If *names* is one ``str``, which would iterate as characters.
     """
     if isinstance(names, str):
@@ -98,7 +108,7 @@ def launch_secrets_in_pipe(
     if not values:
         yield spawn_env, ()
         return
-    child_fd = launch_secrets_pipe(values)
+    child_fd = launch_secrets_socket(values)
     spawn_env[fd_env_var] = str(child_fd)
     try:
         yield spawn_env, (child_fd,)

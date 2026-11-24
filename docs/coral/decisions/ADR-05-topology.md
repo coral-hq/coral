@@ -797,11 +797,11 @@ binding token and the initial bearer, as residual (b) says. The
 allow-listed-token test
 (`test_a_step_on_a_server_with_the_allow_listed_runner_token`) measured the
 zygote path on both platforms. S123 gives the zygote the filtered runner
-environment and hands a direct-spawned runner its two tokens over an inherited
-socket (see "Addendum: CRL-167 secrets out of exec-time environments"). Still
-open: a direct-spawned runner's `env=` carries the credential-shaped
-allow-listed names, this token among them, and the forwarded credentials
-(CRL-197).
+environment and hands a direct-spawned runner its auth tokens, this token
+among them, over an inherited socket (see "Addendum: CRL-167 secrets out of
+exec-time environments"). Still open: a direct-spawned runner's `env=`
+carries the credential-shaped names of the runner allow-list and the
+forwarded credentials (CRL-197).
 
 ## Addendum: CRL-165 process reads on macOS (2026-11-22)
 
@@ -2683,23 +2683,29 @@ it.
   allow-listed and forwarded name in the fork payload, which lives in the
   forked runner's memory only.
 - **Runner tokens over a socket pair.** When the host spawns a runner directly
-  (zygote off, failed or dead), it no longer puts
-  `OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN` and
-  `OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN` in the runner's `env=`. It writes them
-  as one JSON object of at most 4096 bytes into one end of a UNIX socket pair,
-  closes that end, and passes the other to the runner, naming its number in
-  `OMNIGENT_RUNNER_LAUNCH_FD` (`omnigent/runner/launch_secrets.py`). It is a
-  socket, not a pipe: on Linux a process of the same user can reopen an
-  inherited pipe through `/proc/<pid>/fd`, but not a socket. If the tokens
-  cannot be sent, the launch fails; nothing falls back to the environment.
+  (zygote off, failed or dead), it no longer puts any name of the runner auth
+  secret list (`RUNNER_AUTH_SECRET_ENV_VARS`, `omnigent/runner/identity.py`)
+  in the runner's `env=`. The list has three names since the allow-listed
+  tunnel token joined it (CRL-168): `OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN`,
+  `OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN` and `OMNIGENT_RUNNER_TUNNEL_TOKEN`,
+  the last only when the runner's environment holds it. The host writes them
+  as one JSON object of at most 16 KiB, room for a bearer JWT with group
+  claims, into one end of a UNIX socket pair, closes that end, and passes the
+  other to the runner, naming its number in `OMNIGENT_RUNNER_LAUNCH_FD`
+  (`omnigent/runner/launch_secrets.py`). It first grows that end's send
+  buffer to 32 KiB where the default is smaller (macOS: 8 KiB), so the write
+  never waits. It is a socket, not a pipe: on Linux a process of the same
+  user can reopen an inherited pipe through `/proc/<pid>/fd`, but not a
+  socket. If the tokens cannot be sent, a payload over the cap included, the
+  launch fails; nothing falls back to the environment.
 - **Tokens held in memory.** The runner's `main()` reads that socket before
   it logs or starts anything. It must be a socket, end within 5 s and hold
-  only those two names, each once; otherwise the runner prints one line that
-  names no value and exits 2. Then the runner moves both tokens out of
-  `os.environ` into a holder in its own memory
+  only names from that list, each once; otherwise the runner prints one line
+  that names no value and exits 2. Then the runner moves every name in the
+  list, all three, out of `os.environ` into a holder in its own memory
   (`omnigent/runner/identity.py`), which also covers a zygote fork's payload
   and a CLI-local runner's environment. So no child the runner starts inherits
-  either token.
+  any of them.
 - **Forwarded names.** The host also tells each runner which credentials it
   forwarded, by name only, in `OMNIGENT_RUNNER_FORWARDED_NAMES`, so a Coral
   harness can drop them (next).
@@ -2883,7 +2889,7 @@ name or digest only.
 | What | Where | Result |
 |---|---|---|
 | A real zygote started from `_zygote_base_env` with fake host secrets, a runner it forks and that runner's harness (`tests/host/test_runner_zygote.py::test_forked_runner_and_harness_expose_only_allow_listed_names`) | macOS, local | each shows only allowed names, the control fd and the platform's `__CF_USER_TEXT_ENCODING` and `__PYVENV_LAUNCHER__`; no fake secret |
-| A real direct-spawned child that reads its launch socket (`tests/runner/test_launch_secrets.py`) | macOS, local | it holds both tokens in memory; its readable environment names the fd and neither token; a child it starts inherits neither |
+| A real direct-spawned child that reads its launch socket (`tests/runner/test_launch_secrets.py`) | macOS, local | with a 12 KiB payload, it holds all three runner auth secrets in memory; its readable environment names the fd and none of them; a child it starts inherits none |
 | A real direct-exec claude-sdk harness (`tests/runtime/harnesses/test_process_manager.py`) | macOS, local | its readable environment lacks both key-bearing names while its executor config has them |
 | The allow-listed-token stack test, `runner.names` and `harness.names` | macOS, local; Linux by reasoning | `none` |
 | The identity stack test, run outside the sandbox on a direct-spawned runner | macOS, local; Linux by reasoning | the runner's environment is read and holds neither token (`own_runner_mint`, `own_runner_bearer`: `not_present`) and no credential-like name |
@@ -2990,6 +2996,7 @@ tests that bind it to the pins are unchanged.
 | A settings file under a relative `CLAUDE_CONFIG_DIR` still chooses model names and switches opt-outs on; an endpoint a step plants there makes later executors in that worktree refuse until it is removed | CRL-182 |
 | The trust rule knows only the CLI's working directory: a settings or CA file under another path that a broad write grant lets a step write is still trusted | CRL-184 |
 | A harness socket has no bearer on POSIX; the launch-socket helper is there for it to reuse | CRL-173 |
+| A static key shorter than 20 characters is not searched for under other variable names: the harness's scrub and the fail-closed check look only for longer keys by value. The drops by name still apply | CRL-198 |
 | The session token. A same-user process outside the sandbox can read it from the CLI's environment, and code inside the CLI's own sandbox inherits it: the key helper, hooks and stdio MCP servers, so also a hook from project settings a step plants (CRL-181). It works only at that loopback proxy, on the four model routes with any server-side tools the API offers, while the harness lives. Before, the same readers got the key itself | accepted |
 | An endpoint that echoes request headers in an error body shows the CLI the real credential | accepted |
 | Managed settings that override `ANTHROPIC_BASE_URL` or `apiKeyHelper`: the step then fails closed and no key leaks | accepted |

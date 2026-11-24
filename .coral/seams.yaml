@@ -4227,7 +4227,7 @@ seams:
     upstream_candidate: false
 
   - id: S123
-    title: A runner's exec-time environment holds no credential-shaped name (the zygote starts from the allow-listed runner environment; a direct-spawned runner takes its tokens from an inherited socket and holds them in memory)
+    title: A zygote-forked runner's exec-time environment holds no credential-shaped name (the zygote starts from the allow-listed runner environment); a direct-spawned runner takes its auth tokens from an inherited socket and holds them in memory
     owner: WS-INTEGRATION
     status: landed
     category: coral-specific
@@ -4278,11 +4278,16 @@ seams:
       runner and the harness it forked expose only allow-listed names, the
       control fd and the platform's __CF_USER_TEXT_ENCODING and
       __PYVENV_LAUNCHER__. A direct-spawned runner (zygote off or failed)
-      no longer gets OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN or
-      OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN in env= on POSIX: _spawn_runner_proc
-      moves them through launch_secrets_in_pipe into an AF_UNIX stream
-      socket pair (launch_secrets_pipe: one JSON object of at most 4096
-      bytes, sent through a non-blocking end that is shut down and closed
+      no longer gets any name of RUNNER_AUTH_SECRET_ENV_VARS in env= on
+      POSIX: OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN,
+      OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN and, since S118 added it to that
+      list, the allow-listed OMNIGENT_RUNNER_TUNNEL_TOKEN when the runner's
+      env holds it. _spawn_runner_proc moves them through
+      launch_secrets_in_socket into an AF_UNIX stream
+      socket pair (launch_secrets_socket: one JSON object of at most 16 KiB,
+      room for a bearer JWT with group claims, sent through a non-blocking
+      end whose send buffer is first grown to 32 KiB where the default is
+      smaller, as on macOS (8 KiB), and that is shut down and closed
       before the spawn; a child's end that a closed standard stream left at
       fd 0-2 moves above 2, where the child's own stdio cannot replace it),
       names the child's end in OMNIGENT_RUNNER_LAUNCH_FD (no credential word,
@@ -4295,16 +4300,17 @@ seams:
       with no env fallback; Windows keeps env delivery. The runner's main()
       sets its boot signal disposition, then _hold_runner_auth_secrets:
       adopt_launch_secrets reads the socket (a socket only, non-blocking
-      under 5 s, a non-empty JSON object of strings naming only the two
-      tokens, each once, otherwise one stderr line that names no value and
+      under 5 s, a non-empty JSON object of strings naming only names of
+      that list, each once, otherwise one stderr line that names no value and
       exit 2; one str as the allowed names is a TypeError), and
-      take_runner_auth_secrets moves both names out of os.environ (a zygote
+      take_runner_auth_secrets moves every name of the list out of
+      os.environ (a zygote
       fork's payload or a CLI-local runner's environment) and the sent values
       into a holder in omnigent/runner/identity.py. _make_auth_token_factory
       and _runner_tunnel_binding_token_from_env (the pi-native launch reads
       through it) read the holder, falling back to os.environ, and the
       initial bearer is still consumed on use, so no child of the runner
-      inherits either token whatever environment it is given, the env=None
+      inherits any of them whatever environment it is given, the env=None
       gh and git spawns included. _runner_allowlisted_env and
       _build_runner_env never carry OMNIGENT_RUNNER_LAUNCH_FD, not even when
       passthrough names it, so a stale fd number in the daemon's env reaches
@@ -4325,10 +4331,15 @@ seams:
       direct-spawned runner's env= still carries the
       credential-shaped allow-listed names and the forwarded credentials
       (CRL-197); a CLI-local runner still gets its binding token at exec
-      (CRL-197) and a Windows runner both tokens (accepted); a credential in
+      (CRL-197) and a Windows runner its auth tokens (accepted); a credential in
       the value of a name that is not credential-shaped, outside URL
       userinfo (such as a signed query string), still reaches the zygote.
+      The macOS sandbox lane (S119) also runs on changes to
+      omnigent/host/runner_zygote.py, omnigent/runner/identity.py and
+      omnigent/runner/launch_secrets.py, which probe 15's darwin pins now
+      depend on; tests/coral/test_ci_lane.py pins those paths.
     files:
+      - .github/workflows/macos-sandbox.yml
       - omnigent/host/connect.py
       - omnigent/host/runner_zygote.py
       - omnigent/runner/_entry.py
@@ -4348,28 +4359,30 @@ seams:
       - tests/e2e/coral/test_sandbox_probe.py
     budget_lines: 120
     budget_exception:
-      lines: 425
+      lines: 446
       reason: >-
         Counted with git diff --numstat origin/development (added plus
         removed lines; a new file counts every line), so a file shared with
         S124 counts both seams' lines. tests/runner/test_launch_secrets.py
-        (425, new): the round trip at and under the cap, every refused
-        payload (empty and duplicate-name included) and descriptor kind (a
-        pipe and a file among them), one name as the allowed names, the
-        writer's cap and full-socket cases, the socket context, a real runner
+        (446, new): the round trip at and under the cap, every refused
+        payload (empty, duplicate-name and one byte over the cap included)
+        and descriptor kind (a pipe and a file among them), one name as the
+        allowed names, the writer's one-byte-over-the-cap and full-socket
+        cases, the socket context, a real runner sent a 12 KiB payload
         whose readable environment and env=None child lack the tokens,
         concurrent launches that never cross sockets, and a daemon without
         stdin or stdout whose child still reads its socket.
-        tests/host/test_connect.py (383, S123 and S124: 18 for S124): the
+        tests/host/test_connect.py (410, S123 and S124: 18 for S124): the
         zygote base env, search path and HostProcess wiring tests, then the
         rewritten direct-spawn launch test, the Windows env-delivery test
-        and the fail-closed launch cases (both keep names, digests and the
-        socket's fd, never the spawn's env), the passthrough fd-variable and
-        name checks, the direct fallback with the terminal mirror, and the
+        and the fail-closed launch cases (all three keep names, digests and
+        the socket's fd, never the spawn's env), the passthrough fd-variable
+        and name checks, the direct fallback with the terminal mirror, and the
         forwarded-names list with a config-ref key and with nothing
-        forwarded. omnigent/runner/launch_secrets.py (220, new, 7 for S124):
-        the socket writer, the spawn context and the bounded, validating
-        reader. omnigent/host/connect.py (144, S123 and S124: 6 for S124):
+        forwarded. omnigent/runner/launch_secrets.py (230, new, 7 for S124):
+        the socket writer with its send buffer, the spawn context and the
+        bounded, validating reader. omnigent/host/connect.py (144, S123 and
+        S124: 6 for S124):
         the zygote's base env and its filters, the direct-spawn socket, the
         fd variables never forwarded, and the forwarded-names list with its
         shared parser. tests/runner/test_runner_entry.py (130): the boot
@@ -4378,7 +4391,8 @@ seams:
         alone. The other files are within budget:
         omnigent/host/runner_zygote.py 15, omnigent/runner/_entry.py 30,
         omnigent/runner/identity.py 34, tests/host/test_runner_zygote.py 119,
-        tests/runner/test_identity.py 31.
+        tests/runner/test_identity.py 31, .github/workflows/macos-sandbox.yml
+        16 (S123 and S124: the added path filters).
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
@@ -4426,7 +4440,7 @@ seams:
       never the CLI. A direct-exec harness (zygote off or failed) on POSIX no
       longer gets HARNESS_CLAUDE_SDK_API_KEY_HELPER or
       HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND in its exec-time environment:
-      the process manager sends them through launch_secrets_in_pipe and
+      the process manager sends them through launch_secrets_in_socket and
       pass_fds, named by OMNIGENT_HARNESS_LAUNCH_FD, and create_app() reads
       that socket (adopt_launch_secrets, only those two names) straight into
       the config it took, never into os.environ; a refused socket exits 2
@@ -4618,8 +4632,14 @@ seams:
       endpoint is unchanged. Measured: with HTTP_PROXY naming a recording
       server, a loopback gateway received the listing and the proxied request
       and the recording server nothing (before, it received the listing with
-      the key).
+      the key). The macOS sandbox lane (S119) also runs on changes to
+      omnigent/inner/claude_sdk_executor.py,
+      omnigent/inner/claude_gateway_shim.py,
+      omnigent/inner/claude_sdk_harness.py and
+      omnigent/runtime/harnesses/process_manager.py, which probe 15's darwin
+      pins now depend on; tests/coral/test_ci_lane.py pins those paths.
     files:
+      - .github/workflows/macos-sandbox.yml
       - omnigent/host/connect.py
       - omnigent/inner/claude_gateway_shim.py
       - omnigent/inner/claude_sdk_executor.py
@@ -4648,7 +4668,7 @@ seams:
       - tests/test_model_catalog.py
     budget_lines: 120
     budget_exception:
-      lines: 3058
+      lines: 3060
       reason: >-
         Counted with git diff --numstat origin/development (added plus
         removed lines; a new file counts every line), so a file shared with
@@ -4666,10 +4686,10 @@ seams:
         checks, no value in responses or DEBUG logs (malformed and failing
         upstreams included), redirects not followed, the quiet upstream
         client, the proxy and CA options, the listening log line, and a
-        loopback-only guard. tests/inner/test_claude_sdk_executor.py (3058,
-        the largest file; 2830 with --minimal, since the command's default
+        loopback-only guard. tests/inner/test_claude_sdk_executor.py (3060,
+        the largest file; 2832 with --minimal, since the command's default
         pairing now sets 114 unchanged lines of older tests against new
-        ones; S124 and S125: 1355 here):
+        ones; S124 and S125: 1357 here):
         the Coral gateway turn against a real loopback shim and recording
         upstream (token helper, session token, loopback URL and NO_PROXY in
         the CLI's options; the real command and snapshot in the shim; the key
@@ -4711,10 +4731,12 @@ seams:
         the 20-character scan floor) and its snapshot, the platform and
         non-Coral cases, the launch socket adopted into the config and
         refused when untrusted, and the SDK's version check and CLI spawn
-        seeing no config. tests/host/test_connect.py (383, S123 and S124: 18
+        seeing no config. tests/host/test_connect.py (410, S123 and S124: 18
         here, the harness fd variable in the passthrough test).
-        omnigent/runner/launch_secrets.py (220, S123 and S124: 7 here, the
+        omnigent/runner/launch_secrets.py (230, S123 and S124: 7 here, the
         harness fd variable and its two names).
+        .github/workflows/macos-sandbox.yml (16, S123 and S124: the added
+        path filters).
         tests/runtime/harnesses/test_process_manager.py (236): the real
         direct-exec harness and a refusing one, the other-harness case (each
         real spawn from a fake-only runner environment), the fork, off-POSIX
@@ -4866,11 +4888,11 @@ seams:
       - tests/inner/test_claude_sdk_executor.py
     budget_lines: 120
     budget_exception:
-      lines: 3058
+      lines: 3060
       reason: >-
         Counted with git diff --numstat origin/development (added plus removed
         lines), so a file shared with S124 counts both seams' lines.
-        tests/inner/test_claude_sdk_executor.py (3058; 2830 with --minimal,
+        tests/inner/test_claude_sdk_executor.py (3060; 2832 with --minimal,
         since the command's default pairing now sets 114 unchanged lines of
         older tests against new ones; S124 and S125: 1475 here by the
         --minimal count): a throwaway settings.json at a trusted and at each
