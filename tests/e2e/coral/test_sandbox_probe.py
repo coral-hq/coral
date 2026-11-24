@@ -47,7 +47,6 @@ import shutil
 import signal
 import socket
 import stat
-import struct
 import subprocess
 import sys
 import tempfile
@@ -82,9 +81,9 @@ from omnigent.inner.claude_gateway_shim import ClaudeGatewayShim, UpstreamCreden
 from omnigent.inner.claude_sdk_executor import _ASSUME_FIRST_PARTY_ENV, _find_system_claude
 from omnigent.inner.os_env import _DEFAULT_ENV_PASSTHROUGH
 from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
-from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from tests._helpers.live_server import find_free_port, terminate_process
 from tests._helpers.polling import poll_until
+from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.e2e.conftest import get_mock_message_requests, release_mock_gate
 from tests.e2e.coral import _skeleton as sk
 from tests.e2e.coral._claude_sdk_kit import (
@@ -558,45 +557,6 @@ def _release_oldest(wait: sk.Wait, mock: str, tokens: tuple[str, ...]) -> str:
     return wait(advanced, "the released session's next call")
 
 
-def _harness_socket(stack: sk.Skeleton, session_id: str) -> Path:
-    """The session's harness socket, under the stack's root or the default one."""
-    roots = dict.fromkeys((stack.harness_tmp, resolve_harness_tmp_parent({})))
-    [found] = [path for root in roots for path in root.glob(f"ap-*/conv-{session_id}.sock")]
-    return found
-
-
-def _listener_pid(path: Path) -> int:
-    """The pid listening on the Unix socket at ``path``: the host connects and asks the kernel."""
-    with socket.socket(socket.AF_UNIX) as client:
-        client.settimeout(5)
-        client.connect(str(path))
-        if sys.platform == "darwin":
-            # SOL_LOCAL and LOCAL_PEERPID of <sys/un.h>, which the socket module does not name.
-            return struct.unpack("i", client.getsockopt(0, 2, struct.calcsize("i")))[0]
-        peer = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        return struct.unpack("3i", peer)[0]
-
-
-def _session_cli(stack: sk.Skeleton, runner: int, session_id: str) -> int:
-    """
-    The pid of the ``claude`` CLI that serves ``session_id`` below its runner: the one below
-    the harness that listens on the session's socket. A runner may hold a second harness,
-    with a CLI of its own, while it writes the session's title; a zygote-forked harness has
-    no command line of its own to tell the two apart.
-    """
-    harness = _listener_pid(_harness_socket(stack, session_id))
-    tree = sk.group_tree(runner)
-    assert harness in {proc.pid for proc in tree}, (
-        f"the session's harness {harness} is not among {sk.process_names(tree)}"
-    )
-    below = psutil.Process(harness).children(recursive=True)
-    serving = sk.claude_clis(below)
-    assert len(serving) == 1, (
-        f"{len(serving)} claude CLIs serve the step's session: {sk.process_names(below)}"
-    )
-    return serving[0].pid
-
-
 def _socket_root(stack: sk.Skeleton, harness_socket: Path) -> str:
     """The root the runner put the socket under, as recorded beside the pins."""
     root = harness_socket.parent.parent
@@ -970,7 +930,7 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
         implementer = sk.step_session(client, run_id, "implement")
         runner = sk.runner_pid(stack, reviewer)
         own_runner = sk.runner_pid(stack, implementer)
-        harness_socket = _harness_socket(stack, reviewer)
+        harness_socket = sk.harness_socket(stack, reviewer)
         recorded = _recorded(stack, harness_socket)
         worktree = Path(sk.detail(client, run_id)["target"]["worktree_path"])
         probe_digest = _sha256(PROBE.read_bytes())
@@ -980,9 +940,9 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
         # key's digest: the reviewer's runner and CLI, the host daemon and the step's own CLI.
         processes = {
             "runner_environ": runner,
-            "cli_environ": _session_cli(stack, runner, reviewer),
+            "cli_environ": sk.session_cli(stack, runner, reviewer),
             "host_environ": stack.host.proc.pid,
-            "own_cli_environ": _session_cli(stack, own_runner, implementer),
+            "own_cli_environ": sk.session_cli(stack, own_runner, implementer),
         }
         proxy, proxy_token = _cli_proxy(processes["own_cli_environ"])
         targets = [
@@ -1224,7 +1184,7 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         review = sk.held_activation(wait, mock, review_token, 1)
         implementer = sk.step_session(client, run_id, "implement")
         runner = sk.runner_pid(stack, implementer)
-        step = sk.step_processes(runner, _session_cli(stack, runner, implementer))
+        step = sk.step_processes(runner, sk.session_cli(stack, runner, implementer))
         # Each was exec'd, or forked from a zygote that was, inside the stack's keychain barrier.
         outside = sk.keychain_bypasses(stack.stubs, stack.root, step.values(), unread_fails=True)
         assert not outside, f"step processes started outside the keychain barrier: {outside}"
@@ -1233,7 +1193,7 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
             lambda: True if HOST_GH_PROBE in stack.stubs.calls() else None,
             "the host's gh probe to reach the stack's stub",
         )
-        recorded = _recorded(stack, _harness_socket(stack, implementer))
+        recorded = _recorded(stack, sk.harness_socket(stack, implementer))
         names = {f"{role}.names": _token_names(proc) for role, proc in step.items()}
         # The CLI holds a session token for a loopback proxy of its own, never the mock's URL.
         # Only a launch with no gateway leaves the CLI's experimental betas on (a gateway
@@ -1552,7 +1512,7 @@ def test_probe_15_on_a_server_that_requires_identity(
         # Read while the step holds its host: the label the owner's run shows on this server.
         detail = sk.detail(client, run_id)
         recorded = {
-            **_recorded(stack, _harness_socket(stack, implementer)),
+            **_recorded(stack, sk.harness_socket(stack, implementer)),
             "server_mode": "accounts",
             "runner_spawn": spawn,
             # The host runs this checkout, so it reports this revision.
@@ -1564,7 +1524,7 @@ def test_probe_15_on_a_server_that_requires_identity(
         # Every credential is tried on this server's owner route, and only there.
         on_server = f"{stack.server.base_url} {stack.server.base_url}{sk.RUNS}"
         runner_live = _process_live(runner)
-        proxy, proxy_token = _cli_proxy(_session_cli(stack, runner, implementer))
+        proxy, proxy_token = _cli_proxy(sk.session_cli(stack, runner, implementer))
         plant = f"crl-plant-{uid}"
         targets = [
             Target(
@@ -2869,6 +2829,8 @@ def test_only_the_expected_keychain_calls_pass_and_any_other_is_named(tmp_path: 
         "security\tshow-keychain-info\t",
         "gh\tauth token\t",
         "gh\tauth status\t",
+        "gh\tpr view\t",
+        "gh\trepo view\t",
     ]
     # A write, another item, a name the stub bounded to ``other``, any other gh call, another
     # ``gh auth`` one among them; then two lines no stub writes.
@@ -2885,6 +2847,8 @@ def test_only_the_expected_keychain_calls_pass_and_any_other_is_named(tmp_path: 
         ("gh", "api other", ""),
         ("gh", "auth login", ""),
         ("gh", "auth refresh", ""),
+        ("gh", "pr merge", ""),
+        ("gh", "repo delete", ""),
         ("gh", "auth token", "Claude Code"),
     ]
     malformed = ["not a line a stub writes", "security\tfind-generic-password\tfake/path@host"]
@@ -2893,7 +2857,7 @@ def test_only_the_expected_keychain_calls_pass_and_any_other_is_named(tmp_path: 
 
     stubs.log.write_text("".join(f"{line}\n" for line in expected))
     assert stubs.unexpected() == []
-    assert stubs.calls()[-2:] == [HOST_GH_PROBE, "gh auth status"]
+    assert stubs.calls()[-4:] == [HOST_GH_PROBE, "gh auth status", "gh pr view", "gh repo view"]
     stubs.log.write_text("".join(f"{line}\n" for line in (*expected, *unlisted, expected[0])))
     # Each is named by its subcommand and its item, apart, as the stub bounded them.
     named = [f"{program} subcommand {call!r} item {item!r}" for program, call, item in others]
@@ -3150,6 +3114,19 @@ def test_the_exit_guard_checks_a_daemon_and_its_omnigent_and_claude_descendants(
     assert sk._checked_at_exit([daemon.pid]) == []
 
 
+def _recording_cli(fake: Path, seen: Path) -> Path:
+    """A stand-in CLI that records the home, config dir and keychain programs it starts with."""
+    fake.parent.mkdir(exist_ok=True)
+    fake.write_text(
+        "#!/bin/sh\n"
+        '{ echo "$HOME"; echo "$CLAUDE_CONFIG_DIR"; command -v security; command -v gh;'
+        f' echo "${{GH_TOKEN-unset}}"; }} >> {shlex.quote(str(seen))}\n'
+        'echo "9.9.9 (stand-in)"\n'
+    )
+    fake.chmod(0o755)
+    return fake
+
+
 def test_the_cli_probe_runs_claude_only_under_a_throwaway_home_with_the_stubs_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3158,15 +3135,7 @@ def test_the_cli_probe_runs_claude_only_under_a_throwaway_home_with_the_stubs_fi
     environment. The stand-in CLI here records where it was started.
     """
     seen = tmp_path / "seen"
-    fake = tmp_path / "bin" / "claude"
-    fake.parent.mkdir()
-    fake.write_text(
-        "#!/bin/sh\n"
-        '{ echo "$HOME"; echo "$CLAUDE_CONFIG_DIR"; command -v security; command -v gh;'
-        f' echo "${{GH_TOKEN-unset}}"; }} >> {shlex.quote(str(seen))}\n'
-        'echo "9.9.9 (stand-in)"\n'
-    )
-    fake.chmod(0o755)
+    fake = _recording_cli(tmp_path / "bin" / "claude", seen)
     monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("HOME", str(tmp_path / "callers-home"))
     monkeypatch.setenv("GH_TOKEN", "fake-token")
@@ -3192,3 +3161,36 @@ def test_the_cli_probe_runs_claude_only_under_a_throwaway_home_with_the_stubs_fi
     stub_dir = Path(security).parent
     assert stub_dir == Path(gh).parent and Path(home).parent in stub_dir.parents
     assert token == "unset"
+
+
+def test_the_harness_gate_probes_claude_under_a_throwaway_home_with_the_stubs_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The gate the in-process Tier B tests skip by asks ``claude`` whether it runs in a home
+    and config dir made for that one start, with keychain stand-ins first on its ``PATH``.
+    Another vendor's CLI is still probed with the caller's environment.
+    """
+    seen = tmp_path / "seen"
+    for name in ("claude", "codex"):
+        fake = _recording_cli(tmp_path / "bin" / name, seen)
+    monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(tmp_path / "callers-home"))
+    # A fake one, so the recording holds nothing of the caller's and shows it is dropped.
+    monkeypatch.setenv("GH_TOKEN", "fake-gh-token")
+    cli_unavailable_reason.cache_clear()
+    try:
+        assert cli_unavailable_reason("claude") is None
+        home, config, security, gh, token = seen.read_text().splitlines()
+        seen.unlink()
+        assert cli_unavailable_reason("codex") is None
+        other_home, *_ = seen.read_text().splitlines()
+    finally:
+        cli_unavailable_reason.cache_clear()
+
+    assert home != os.environ["HOME"] and not Path(home).exists()
+    assert Path(config).is_relative_to(home)
+    stub_dir = Path(security).parent
+    assert stub_dir == Path(gh).parent and Path(home).parent in stub_dir.parents
+    assert token == "unset", "the caller's credentials must not reach the probed CLI"
+    assert other_home == os.environ["HOME"]

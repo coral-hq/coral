@@ -17,6 +17,8 @@ import re
 import secrets
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -41,13 +43,19 @@ from sqlalchemy.pool import NullPool
 from coral.db.models.sessions import SessionBindingRow
 from coral.db.models.work import WorkerLeaseRow, WorkRow
 from omnigent.cli_auth import _normalize_server_url
+from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from omnigent.testing.process_reaper import _cmdline_references_dir, _is_pytest_process
 from tests._helpers.host import Host, isolated_host
 from tests._helpers.live_server import terminate_process
 from tests._helpers.polling import poll_until
 from tests._helpers.server_runner import ServerRunner, server_runner
 from tests.e2e.conftest import configure_mock_llm, get_mock_message_requests
-from tests.e2e.coral._claude_sdk_kit import KeychainStubs, install_keychain_stubs, tool_results
+from tests.e2e.coral._claude_sdk_kit import (
+    KeychainStubs,
+    install_keychain_stubs,
+    throwaway_cli_env,
+    tool_results,
+)
 from tests.e2e.coral._live_proxy import Secret
 from tests.e2e.coral.conftest import CORAL_TIER_B_HARNESS
 
@@ -235,20 +243,12 @@ def _claude_cli() -> tuple[str | None, str]:
     found = shutil.which("claude")
     if found is None:
         return "'claude' CLI is not on PATH", "unavailable (not on PATH)"
-    with tempfile.TemporaryDirectory(prefix="crl-cli-", ignore_cleanup_errors=True) as scratch:
-        home = Path(scratch) / "home"
-        home.mkdir()
-        stubs = install_keychain_stubs(Path(scratch) / "keychain-stubs" / "bin")
-        env = {
-            **stubs.first_on(minimal_env()),
-            "HOME": str(home),
-            "CLAUDE_CONFIG_DIR": str(home / ".claude"),
-        }
+    with throwaway_cli_env(minimal_env()) as env:
         try:
             done = subprocess.run(
                 [found, "--version"],
                 env=env,
-                cwd=scratch,
+                cwd=env["HOME"],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -1175,16 +1175,55 @@ def _group_of(proc: psutil.Process) -> int | None:
         return None
 
 
-def step_processes(runner: int, cli: int | None = None) -> dict[str, psutil.Process]:
+def harness_socket(stack: Skeleton, session_id: str) -> Path:
+    """The session's harness socket, under the stack's root or the default one."""
+    roots = dict.fromkeys((stack.harness_tmp, resolve_harness_tmp_parent({})))
+    [found] = [path for root in roots for path in root.glob(f"ap-*/conv-{session_id}.sock")]
+    return found
+
+
+def listener_pid(path: Path) -> int:
+    """The pid listening on the Unix socket at ``path``: the host connects and asks the kernel."""
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(5)
+        client.connect(str(path))
+        if sys.platform == "darwin":
+            # SOL_LOCAL and LOCAL_PEERPID of <sys/un.h>, which the socket module does not name.
+            return struct.unpack("i", client.getsockopt(0, 2, struct.calcsize("i")))[0]
+        peer = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        return struct.unpack("3i", peer)[0]
+
+
+def session_cli(stack: Skeleton, runner: int, session_id: str) -> int:
+    """
+    The pid of the ``claude`` CLI that serves ``session_id`` below its runner: the one below
+    the harness that listens on the session's socket. A runner may hold a second harness,
+    with a CLI of its own, while it writes the session's title; a zygote-forked harness has
+    no command line of its own to tell the two apart.
+    """
+    harness = listener_pid(harness_socket(stack, session_id))
+    tree = group_tree(runner)
+    assert harness in {proc.pid for proc in tree}, (
+        f"the session's harness {harness} is not among {process_names(tree)}"
+    )
+    below = psutil.Process(harness).children(recursive=True)
+    serving = claude_clis(below)
+    assert len(serving) == 1, (
+        f"{len(serving)} claude CLIs serve the step's session: {process_names(below)}"
+    )
+    return serving[0].pid
+
+
+def step_processes(runner: int, cli: int) -> dict[str, psutil.Process]:
     """
     A step's own processes: its runner, its ``claude`` CLI, the harness (the CLI's
     farthest ancestor in the runner's group) and the launcher the harness started it with.
 
-    The CLI is the runner's only one unless ``cli`` names it: a runner may hold a second
-    harness, with a CLI of its own, while it writes the session's title.
+    ``cli`` names the CLI, from :func:`session_cli`: a runner may hold a second harness,
+    with a CLI of its own, while it writes the session's title.
     """
     tree = group_tree(runner)
-    clis = [proc for proc in claude_clis(tree) if cli is None or proc.pid == cli]
+    clis = [proc for proc in claude_clis(tree) if proc.pid == cli]
     assert len(clis) == 1, f"{len(clis)} claude CLIs in {process_names(tree)}"
     chain = [clis[0], *clis[0].parents()]
     in_group = [

@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -92,6 +92,8 @@ _EXPECTED_CALLS = re.compile(
     r"|security\tfind-generic-password\tClaude Code-(device-keys|doctor-probe)"
     r"|security\tshow-keychain-info\t"
     r"|gh\tauth (token|status)\t"
+    # The runner's GitHub panel reads the branch's pull request and its repository.
+    r"|gh\t(pr|repo) view\t"
 )
 
 
@@ -240,6 +242,27 @@ def install_keychain_stubs(directory: Path, *, log: Path | None = None) -> Keych
     return KeychainStubs(directory, log)
 
 
+@contextlib.contextmanager
+def throwaway_cli_env(base: Mapping[str, str] | None = None) -> Iterator[dict[str, str]]:
+    """
+    The environment for one start of a real CLI outside any test's home, such as a version
+    query: a throwaway ``HOME`` and Claude config dir, and keychain stand-ins first on
+    ``PATH``, all removed on exit. Without ``base`` it starts from the few names a CLI needs
+    out of the caller's environment, so no credential there reaches the CLI or a traceback.
+    """
+    if base is None:
+        base = {name: os.environ[name] for name in _INHERITED_NAMES if name in os.environ}
+    with tempfile.TemporaryDirectory(prefix="crl-cli-", ignore_cleanup_errors=True) as scratch:
+        home = Path(scratch) / "home"
+        home.mkdir()
+        stubs = install_keychain_stubs(Path(scratch) / "keychain-stubs" / "bin")
+        yield {
+            **stubs.first_on(base),
+            "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+        }
+
+
 def write_claude_home(root: Path, *, marker: Path) -> Path:
     """Create a fresh ``HOME`` whose ``.claude.json`` declares the stdio probe MCP server."""
     home = root / "home"
@@ -254,9 +277,17 @@ def write_claude_home(root: Path, *, marker: Path) -> Path:
 
 
 def mock_only_env(
-    *, home: Path, base_url: str, proxy_url: str, inherited: Mapping[str, str]
+    *,
+    home: Path,
+    base_url: str,
+    proxy_url: str,
+    inherited: Mapping[str, str],
+    stubs: KeychainStubs,
 ) -> dict[str, str | None]:
     """Changes that leave the CLI only the mock; ``None`` unsets each non-allowlisted name.
+
+    The caller's own ``stubs`` go first on ``PATH``, so a keychain lookup by name never
+    depends on what the shell that started pytest prepared.
 
     :param base_url: Mock root URL with no ``/v1`` suffix, e.g. ``"http://127.0.0.1:5123"``.
     """
@@ -270,6 +301,7 @@ def mock_only_env(
     changes.update({name.lower(): value for name, value in proxies.items()})
     changes.update(
         {
+            "PATH": stubs.first_on(inherited)["PATH"],
             "HOME": str(home),
             # The CLI reads .claude.json and settings.json here, not in the real ~/.claude.
             "CLAUDE_CONFIG_DIR": str(home),
@@ -358,7 +390,10 @@ async def collect_turn(
 def cli_versions() -> dict[str, str]:
     """Versions the executor would run: the system ``claude`` it resolves and the SDK."""
     cli = _find_system_claude()
-    output = subprocess.run([cli, "--version"], capture_output=True, text=True, check=False)
+    with throwaway_cli_env() as env:
+        output = subprocess.run(
+            [cli, "--version"], env=env, capture_output=True, text=True, check=False
+        )
     return {
         "cli_path": cli,
         "cli_version": output.stdout.strip(),
@@ -438,7 +473,11 @@ async def _run_probe_turn(
         for queue in extra_queues:
             configure_mock_llm(base_url, **queue)
         changes = mock_only_env(
-            home=home, base_url=base_url, proxy_url=recorder.url, inherited=os.environ
+            home=home,
+            base_url=base_url,
+            proxy_url=recorder.url,
+            inherited=os.environ,
+            stubs=install_keychain_stubs(root / "keychain-stubs" / "bin"),
         )
         apply_env(changes, os.environ)
         apply_env(extra_env, os.environ)

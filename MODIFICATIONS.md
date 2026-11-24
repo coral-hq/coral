@@ -219,6 +219,7 @@ OPS-01's generator will maintain this file later.
 | `tests/db/test_cockroachdb.py` | S104 | coral-specific | The tests that rewind or clear the Alembic revision (baseline upgrade, interrupted-bootstrap resume, account-generation backfill, project-preferences copy) each run on a new CockroachDB database that is dropped afterwards, not on the shared worker database, which keeps Coral's tables between tests. |
 | `tests/db/test_crdb_core.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/dev/lint/test_custom_lint.py` | S39 | coral-specific | Asserts `coral-import-boundary` is registered last in `custom_lint.RULES` (S39). |
+| `tests/e2e/_harness_probes.py` | S126 | coral-specific | `cli_unavailable_reason` probes the `claude` CLI under a throwaway `HOME` and `CLAUDE_CONFIG_DIR` with `security` and `gh` stand-ins first on `PATH`, instead of the caller's home and keychain; other CLIs are probed as before (S126). |
 | `tests/e2e/integrations/deploy/gensee/test_managed_lifecycle.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e/integrations/deploy/kubernetes/e2e_managed_host_config.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |
 | `tests/e2e/omnigent/_snapshot.py` | S95 | coral-specific | Brand transform (S95): user-visible "Omnigent" text in its strings and CLI help says Coral. |

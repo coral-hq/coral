@@ -133,7 +133,8 @@ def _plant_claude_canaries(home: Path) -> tuple[str, list[str]]:
 def _step_claude_config(stack: sk.Skeleton, run_id: str) -> dict[str, Any]:
     """Where the implement step's live CLI keeps its Claude config."""
     session_id = sk.step_session(stack.client, run_id, "implement")
-    environ = sk.step_processes(sk.runner_pid(stack, session_id))["cli"].environ()
+    runner = sk.runner_pid(stack, session_id)
+    environ = sk.step_processes(runner, sk.session_cli(stack, runner, session_id))["cli"].environ()
     config_dir = Path(environ.get("CLAUDE_CONFIG_DIR", ""))
     return {
         "name": config_dir.name,

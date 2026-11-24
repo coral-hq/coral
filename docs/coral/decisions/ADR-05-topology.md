@@ -3004,8 +3004,108 @@ tests that bind it to the pins are unchanged.
 | Single-user servers, where a step acts as the owner | accepted ("Addendum: CRL-159 probe 15 on identity-requiring servers") |
 | Behind the proxy a CLI on a plain Anthropic key skips its bootstrap call, its fast-mode status prefetch and the key on its telemetry requests, none of them on a turn's path. The first-party switch does not reach the places that test the raw URL: the side-query beta on hook-agent and named model calls, the `cc_project` attribution tag, the resume cache warm-up, a server-flagged reminder experiment, and one resend without `thinking.display` after a 400 or 422. Read from CLI 2.1.325, not measured | accepted; the detail is in S124's note (`.coral/seams.yaml`) |
 | A settings proxy with a user name, a password, a path or a query is not given to the CLI, whose other traffic uses the proxy it inherits; the harness's scrub still leaves the CLI a proxy without `@` that has a path or a query | accepted |
-| In local Tier B runs a CLI without a private config dir makes two keychain lookups per launch, which the `security` stub records; the base checkout does the same | CRL-180, CRL-197 |
+| In local Tier B runs a CLI without a private config dir makes two keychain lookups per launch, which the test's own `security` stand-in records ("Addendum: CRL-199 test stacks and the keychain"); the base checkout does the same | CRL-180, CRL-197 |
 
 Console-managed settings and policy limits are not on this list: read from
 CLI 2.1.325, a CLI whose only credential is a key helper was never eligible
 for them, on any base URL, and a Coral step's key has always been a helper's.
+
+## Addendum: CRL-199 test stacks and the keychain (2026-11-24)
+
+This is about the test stacks of
+[`../testing/tier-b.md`](../testing/tier-b.md), not about product behaviour.
+Local runs were meant to stay off the developer's keychain through a
+`security` stub first on the caller's `PATH`. That stub never reached a
+stack. The detail of the fix is in the guide's "Keychain and GitHub
+stand-ins".
+
+**What was found.**
+
+- A stack built its `PATH` itself (`minimal_env` in
+  `tests/e2e/coral/_skeleton.py`): the directories of python, `git`, `claude`
+  and `node`, then the system directories. A stub directory on the caller's
+  `PATH` was not carried over. On
+  macOS every stack process resolved `security` to `/usr/bin/security`. A
+  `gh` that shares a directory with `git`, `claude` or `node` was on the
+  stack's `PATH` too.
+- The lookups a stack's host and runner could make, read from the code and
+  from the CLI 2.1.325 build:
+  - the host's readiness probe, at start and then on timers, runs
+    `claude auth status`. The CLI runs `security find-generic-password` by
+    name. A stack sets no config dir variable, so it asks for the default
+    items, `Claude Code-credentials` and `Claude Code`, the names a real
+    login uses;
+  - the same probe runs `gh auth token`. The installed `gh` binary names
+    `/usr/bin/security` by its full path, so a `security` stub on `PATH`
+    does not intercept it;
+  - a runner's GitHub panel runs `gh pr view`, `gh repo view` and
+    `gh auth status` when a `gh` is on its `PATH`.
+- During CRL-167 a sampler of process names and pids saw processes named
+  `security` below host-level `claude` and `gh` processes in stack runs,
+  from 0 to 12 per run.
+- Every stack process ran under a throwaway `HOME`.
+- Nothing was read from those processes. What the lookups returned is not
+  known. Whether to sign in again or rotate a token after local stack runs
+  from before this change is each developer's own decision.
+
+**What changed.** Tests only, and one seam in an Omnigent test file (S126).
+
+- Every stack installs its own `security` and `gh` stand-ins and puts them
+  first on the `PATH` of the server and the host, and so of every process
+  they start. `security` answers "item not found" and `gh` "logged out". Each
+  call is logged as bounded names: a subcommand and a keychain service, never
+  an account, an argument or an input.
+- The stack's base environment is a reviewed list of names. It points
+  `GH_CONFIG_DIR` and `GIT_CONFIG_GLOBAL` under the stack's root and sets
+  `GIT_TERMINAL_PROMPT=0`.
+- Guards fail a stack, by `pid:name` only, when a process was started with a
+  `PATH` that finds `security` or `gh` elsewhere, or with a `HOME` outside
+  the stack's root. At teardown the stack fails, by name and count, on a
+  stand-in call outside a list of reads and status queries, and on a
+  keychain directory or a `gh` login left in a stack home.
+- The in-process Tier B tests bring their own stand-ins too
+  (`mock_only_env(stubs=...)`).
+- The `claude --version` checks that decide whether a test skips run under a
+  throwaway home with stand-ins first on `PATH`. S126 does this for
+  Omnigent's gate in `tests/e2e/_harness_probes.py`.
+
+**What the guards prove.** They check the exec-time `PATH` and `HOME` of the
+server, the host, the runner zygote, a runner or harness that was exec'd
+directly, and each CLI. A zygote-forked runner or harness shows its zygote's
+environment. A stand-in stops only a caller that finds the program through
+`PATH`. A caller that runs `/usr/bin/security` by its full path, or uses the
+keychain API in its own process, is stopped only by the throwaway `HOME`.
+Whether a throwaway `HOME` hides the login keychain from `/usr/bin/security`
+is not measured. The System and data-protection keychains do not depend on
+`HOME`.
+
+**What was measured.** On macOS 27.2.1 with claude 2.1.325, a mock model and
+fake keys; only names and counts were read.
+
+| What | Result |
+|---|---|
+| A real CLI in its seatbelt wrap, with stand-ins it cannot read first on `PATH` and readable ones second (`tests/e2e/coral/test_tier_b_executor.py::test_a_wrapped_cli_stops_at_a_keychain_stub_it_cannot_read`, local only) | the turn completes and the second stand-ins record nothing: the CLI's `security` lookup ends at the entry it cannot run. A shell in the same wrap gets status 126 for `security` and for `gh` |
+| One local run of `test_sandbox_probe.py` and `test_skeleton.py`: seven real stacks | no guard failed. The stand-ins recorded `security find-generic-password` on `Claude Code` and `Claude Code-credentials`, and `gh auth token`; the two review-loop stacks also `gh auth status`, `gh pr view` and `gh repo view`. Those two failed the teardown check on `gh pr view` and `gh repo view`, which then joined the expected calls |
+| A sampler of process names beside that run | no process named `security` or `gh` (a stand-in runs as `sh`). A sampler can miss a process that lives for milliseconds |
+
+**Not measured.**
+
+- **Linux.** Nothing here has run on Linux until the `coral-e2e` lane runs on
+  this change. By the code, a bwrap sandbox does not contain the stand-ins'
+  directory, so a sandboxed lookup of `gh` by name goes on to the machine's
+  own `gh`.
+- **CLI 2.1.295**, which both lanes install: its build was not searched for
+  keychain calls, and its wrapped lookup was not run. An unlisted call fails
+  the teardown check by name.
+- **The expected calls after `gh pr view` and `gh repo view` joined them**
+  ran on a stack only in this change's CI lanes, not locally.
+
+**Residuals and owners.**
+
+| Residual | Owner |
+|---|---|
+| Other vendors' CLIs. The host's readiness probe starts each one it finds, on the stack's `PATH` or, whatever `PATH` says, in `/usr/local/bin` or `/opt/homebrew/bin`. They run under the stack's throwaway `HOME` and meet no stand-in | CRL-200 |
+| In production the host's account probes (`claude auth status`) and the runner's GitHub panel (`gh`) run the real programs with the user's own login. This change does not touch them; in a test stack, whatever they start by name meets the stand-ins | none: unchanged product behaviour |
+| Omnigent's other E2E helpers copy the caller's `PATH` into their processes (read from a sample) | none: no lane of this fork runs those tests, the inherited `E2E Tests` workflow being disabled |
+| The stack sample (`test_tier_b_sample.py`, `test_tier_b_reviewer_stack.py`) runs with the developer's real `HOME` and no stand-ins | accepted: opt-in, for clean machines only |
+| A caller that reaches the keychain without `PATH` in a stack process: only the throwaway `HOME` is in its way | CRL-200 |

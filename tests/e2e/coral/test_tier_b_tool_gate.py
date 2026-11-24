@@ -17,6 +17,7 @@ from tests.e2e.conftest import configure_mock_llm, get_mock_message_requests
 from tests.e2e.coral._claude_sdk_kit import (
     EgressRecorder,
     collect_turn,
+    install_keychain_stubs,
     make_executor,
     mock_only_env,
     probe_tool,
@@ -60,7 +61,11 @@ async def _scripted_turn(
     workspace.mkdir()
     with EgressRecorder() as recorder:
         env = mock_only_env(
-            home=home, base_url=base_url, proxy_url=recorder.url, inherited=os.environ
+            home=home,
+            base_url=base_url,
+            proxy_url=recorder.url,
+            inherited=os.environ,
+            stubs=install_keychain_stubs(root / "keychain-stubs" / "bin"),
         )
         for name, value in env.items():
             if value is None:
