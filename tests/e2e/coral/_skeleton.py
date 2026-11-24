@@ -49,6 +49,7 @@ from tests.e2e.coral.conftest import CORAL_TIER_B_HARNESS
 
 HANDOFF_TOOL = "mcp__omnigent__coral_submit_handoff"
 SHELL_TOOL = "mcp__omnigent__sys_os_shell"
+TOOL_SEARCH = "ToolSearch"
 WRITE_TOOL = "mcp__omnigent__sys_os_write"
 RUNS = "/v1/coral/runs"
 RUN_ID_LABEL = "coral.run_id"
@@ -1073,9 +1074,29 @@ def mock_auth(mock_url: str) -> dict[str, Any]:
     return {"auth": {"type": "api_key", "api_key": "mock-key", "base_url": mock_url}}
 
 
-def queue(mock_url: str, token: str, responses: list[dict[str, Any]]) -> None:
-    """Replace the queue of ``token``; only the step sessions' own calls may draw from it."""
-    configure_mock_llm(mock_url, responses, match=token, required_tools=[HANDOFF_TOOL])
+def queue(
+    mock_url: str, token: str, responses: list[dict[str, Any]], *, offering: str = HANDOFF_TOOL
+) -> None:
+    """
+    Replace the queue of ``token``; only the step sessions' own calls may draw from it. They
+    are the calls ``offering`` a tool: the handoff tool, or :data:`TOOL_SEARCH` for a CLI that
+    defers its MCP tools.
+    """
+    configure_mock_llm(mock_url, responses, match=token, required_tools=[offering])
+
+
+def load_step_tools(call_id: str) -> list[dict[str, Any]]:
+    """
+    Mock responses that have a CLI load the step's two MCP tools. Off the gateway path the
+    CLI's betas stay on and it offers ToolSearch in their place until each is selected; from
+    then on its calls offer them.
+    """
+    return [
+        tool_call(
+            TOOL_SEARCH, {"query": f"select:{tool}", "max_results": 1}, call_id=f"{call_id}-{n}"
+        )
+        for n, tool in enumerate((SHELL_TOOL, HANDOFF_TOOL))
+    ]
 
 
 def held(response: dict[str, Any]) -> dict[str, Any]:

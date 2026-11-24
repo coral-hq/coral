@@ -4195,7 +4195,8 @@ seams:
       session's harness among its parents, skipping ancestors whose command
       line it cannot read and stopping at the runner. ClaudeGatewayShim gains
       a credential mode (credential=UpstreamCredential): the CLI holds only
-      session_token (token_urlsafe(32)). Before reading the body the shim
+      session_token ("session-" and token_urlsafe(32), so it never has the
+      shape of an Anthropic key). Before reading the body the shim
       requires every presented x-api-key and authorization Bearer to equal it
       (as bytes, hmac.compare_digest; at least one, none repeated), else 401.
       It forwards only POST /v1/messages, POST /v1/messages/count_tokens, GET
@@ -4290,10 +4291,74 @@ seams:
       by reasoning until the coral-e2e lane runs), the mock's ledger holding
       none of those requests and the session token in no request body (it
       records no headers; the unit tests cover those). The pinned CLI needed no
-      route beyond the four the shim forwards. Residuals: a Coral direct-key
-      (non-gateway) CLI still gets the key on its --settings argv and ignores
-      the host's ANTHROPIC_BASE_URL until Step 5b; the settings block's
-      endpoint, proxy and CA reach the shim in Step 6; non-Coral CLIs keep
+      route beyond the four the shim forwards. A Coral executor on an API
+      key with no gateway now uses the same proxy (activation is
+      require_api_credential, a credential command and POSIX). Its upstream
+      is the ANTHROPIC_BASE_URL of the pre-scrub environment (the executor's
+      own environment when it was given none), else
+      https://api.anthropic.com, so the host's endpoint, which the scrub
+      takes from the CLI, still decides where the key goes, and a helper
+      command that reads a forwarded variable runs with that environment.
+      Its credential is cached for that environment's
+      CLAUDE_CODE_API_KEY_HELPER_TTL_MS (0 included: the value is never reused,
+      as in the CLI), else the pinned CLI's own 300 s. The transport refusal
+      and the fail-closed check apply to it, and a proxied CLI's upstream URL
+      with whitespace around it, a control character, a query or a fragment
+      refuses the turn under the same code, naming no part of the URL, where
+      the proxy would have failed every request after a CLI started. It gets no
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS or CLAUDE_CODE_USE_GATEWAY. Its
+      CLI gets _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1 exactly when that
+      upstream is the Anthropic API by the CLI's own rule, which is a host
+      match on api.anthropic.com with no non-default port; the executor never
+      says yes for a URL with userinfo, a backslash or whitespace. The CLI
+      reads that private switch at every site of its effective first-party
+      check, so behind the loopback URL it keeps the betas, attribution
+      fields and model handling it had on the Anthropic API; a gateway CLI
+      never gets it. The next three statements are read from one build
+      (2.1.325), not measured. First, the switch does not reach the sites
+      that test the raw
+      URL: the side-query beta on hook-agent and named model calls, the
+      cc_project attribution tag, the resume cache warm-up, a server-flagged
+      reminder experiment, and one resend without thinking.display after an
+      upstream 400 or 422. Second, a CLI whose only credential is a key helper
+      is not eligible for Console-managed settings or policy limits on any base
+      URL (both checks ask for a key with the helper skipped), and a Coral
+      step's key has always been a helper's, so neither applied before this
+      seam and nothing is lost. Third, while its base URL is not an Anthropic
+      host the CLI withholds a key that is not Anthropic-shaped (sk-ant-, or
+      sk- and 86 characters) from Anthropic's own hosts, so the session token
+      stays on loopback; Coral does not rely on that, since the token is
+      accepted only by the loopback proxy while the executor lives. What does
+      change for a CLI that held an Anthropic key on the default endpoint: its
+      bootstrap call, its fast-mode status prefetch and the key on its
+      telemetry requests are now skipped, none of them on a turn's path.
+      Measured on macOS 27.2 with claude 2.1.325 against the mock: a Coral
+      CLI on a key sends the same anthropic-beta header and thinking field
+      through the proxy as it did on the endpoint itself (eight betas,
+      thinking adaptive with display updates), with the switch forced it adds
+      cache-diagnosis-2026-04-07, prompt-caching-scope-2026-01-05 and
+      thinking-binding-controls-2026-08-01 and the same thinking field, and
+      the proxy refuses none of its requests in either mode; the stack test on
+      the allow-listed runner token runs its steps on a key with the host's
+      ANTHROPIC_BASE_URL naming the mock, each CLI on its own loopback proxy
+      with no CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, the mock receiving betas
+      beyond the three a gateway launch sends, and every proxy setting of the
+      host naming a recorder that refuses and sees no request (with an
+      unresolvable https endpoint in the mock's place the recorder saw the
+      proxy's CONNECT and the mock nothing). Off a gateway the CLI defers MCP
+      tools behind ToolSearch, so that test's script loads them first. A test
+      in the same file fails when the installed CLI's build no longer names the
+      switch; the coral-e2e lane runs it against its pinned CLI (2.1.295, in
+      .github/actions/setup-harness-cli/locks/claude), and whether that build
+      names the switch is not known until the lane runs. The switch's added
+      betas are measured only by the local Tier B test: a stack sets the switch
+      only for an upstream that is the Anthropic API, which no test may reach.
+      A real Anthropic upstream is not measured (no test holds a real key).
+      Residuals: on the Anthropic API a token holder can use the model routes
+      with any server-side tools that API offers; the settings block's
+      endpoint, proxy and CA reach the shim in Step 6, until when a settings
+      ANTHROPIC_BASE_URL is ignored on the direct-key path and the rest of the
+      settings env block still reaches the CLI; non-Coral CLIs keep
       their key or command on --settings argv (CRL-197); a direct-exec
       harness's exec-time environment still holds the forwarded credentials
       (CRL-197); Windows keeps every name in the environment and the key on
@@ -4322,6 +4387,7 @@ seams:
       - tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py
       - tests/e2e/coral/test_sandbox_probe.py
       - tests/e2e/coral/test_tier_b_executor.py
+      - tests/e2e/coral/test_tier_b_tool_gate.py
     budget_lines: 120
     budget_exception:
       lines: 1450
@@ -4341,7 +4407,7 @@ seams:
         checks, no value in responses or DEBUG logs (malformed and failing
         upstreams included), redirects not followed, the quiet upstream
         client, the proxy and CA options, the listening log line, and a
-        loopback-only guard. tests/inner/test_claude_sdk_executor.py (845):
+        loopback-only guard. tests/inner/test_claude_sdk_executor.py (1352):
         the Coral gateway turn against a real loopback shim and recording
         upstream (token helper, session token, loopback URL and NO_PROXY in
         the CLI's options; the real command and snapshot in the shim; the key
@@ -4354,9 +4420,20 @@ seams:
         newline and at the scan floor, the plain-http gateway refused before
         any request, NO_PROXY under either spelling, the snapshot's proxy
         names read as urllib reads them, a loopback upstream reached
-        directly, and close(): the order, a close cut short or failed, a
-        second cancel, and a credential with no shim.
-        omnigent/inner/claude_gateway_shim.py (759): the
+        directly, close(): the order, a close cut short or failed, a
+        second cancel, and a credential with no shim; and the Coral
+        direct-key turn: the same holdings with a static key and with a
+        helper command reading a forwarded variable, the upstream's
+        precedence and the first-party switch for each, an inherited switch
+        overridden only for the Anthropic API, the first-party rule case by
+        case, the helper's cache time (the snapshot's, 0 included, else the
+        CLI's own), the token never Anthropic-key-shaped, one proxy and token
+        across sessions, reconnects and rebuilds, the transport refusal, the
+        refusal of an upstream URL the proxy cannot join a path to, and the
+        fail-closed check on that path, the real harness factory keeping the
+        host's endpoint and helper environment in the proxy, and the unchanged
+        non-Coral, off-POSIX and gateway turns.
+        omnigent/inner/claude_gateway_shim.py (762): the
         credential mode (R1, R3, with the security review's hardening), its
         own credential runner (R7), the one stripped form of a static key and
         the upstream client options (R17), a loopback upstream reached
@@ -4379,12 +4456,15 @@ seams:
         direct-exec harness and a refusing one, the other-harness case, the
         fork, off-POSIX and POSIX exec paths with the forwarded-names list,
         and the unsendable socket. omnigent/inner/claude_sdk_executor.py
-        (308): the executor's credential and its TTL and environment, the
+        (395): the executor's credential and its TTL and environment, the
         token helper and options env, the snapshot's upstream proxy with
         NO_PROXY, the one-source model listing with its bounded wait (R2),
         the transport refusal before it, the fail-closed check (R4 item 2),
-        and close(): the order (R17) and the shim stop and dir removals that
-        survive a cancelled or failed close.
+        close(): the order (R17) and the shim stop and dir removals that
+        survive a cancelled or failed close; and the direct-key path (R5):
+        the upstream from the pre-scrub environment, the CLI's own helper
+        cache time, the first-party rule and switch, and the refusal of an
+        upstream URL the proxy cannot join a path to.
         omnigent/inner/claude_sdk_harness.py
         (208): the config take, the Coral scrub with its protected names and
         scan floor, the resolvers reading the config and the socket read.

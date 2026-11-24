@@ -6878,15 +6878,34 @@ async def _turn_with_recording_sdk(executor):
     return events, fake_sdk, spawn_envs
 
 
-async def test_coral_spec_without_api_credential_is_refused_before_the_cli(monkeypatch):
+@pytest.mark.parametrize(
+    "no_credential",
+    [
+        {},
+        {"api_key_helper": ""},
+        # CORAL(S118): an endpoint and a key in the harness's snapshot are no credential command
+        {
+            "credential_env": {
+                "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                "ANTHROPIC_API_KEY": "sk-ant-test-not-a-helper",
+            }
+        },
+    ],
+    ids=["none", "empty-helper", "snapshot-key"],
+)
+async def test_coral_spec_without_api_credential_is_refused_before_the_cli(
+    monkeypatch, no_credential
+):
     from omnigent.inner.claude_sdk_executor import (
         CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE,
         CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE,
     )
 
-    executor = _coral_executor(monkeypatch, require_api_credential=True)
+    executor = _coral_executor(monkeypatch, require_api_credential=True, **no_credential)
 
     events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    # CORAL(S118): with no command to run there is no credential proxy to start either
+    assert (executor._upstream_credential, executor._gateway_shim) == (None, None)
 
     errors = [e for e in events if isinstance(e, ExecutorError)]
     assert len(errors) == 1 and len(events) == 1
@@ -6917,7 +6936,8 @@ async def test_coral_spec_with_api_credential_reaches_the_cli(monkeypatch, crede
         monkeypatch.setattr(
             executor, "_apply_gateway_model_vocabulary", AsyncMock(return_value={})
         )
-        monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
+    # CORAL(S118): either way the CLI would go through a credential proxy, not started here
+    monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
 
     events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
 
@@ -6949,6 +6969,8 @@ async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral,
         api_key_helper="printf %s sk-ant-test",
         skills_filter="none",
     )
+    # CORAL(S118): the Coral CLI's credential proxy is not this test's subject
+    monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
 
     events, _, spawn_envs = await _turn_with_recording_sdk(executor)
 
@@ -6975,8 +6997,6 @@ async def test_coral_harness_cli_env_holds_no_forwarded_credential(
     import secrets
     import shlex
 
-    from omnigent.inner import claude_sdk_harness
-
     key = f"sk-ant-test-{secrets.token_hex(16)}"
     host_secret = f"sk-ant-test-{secrets.token_hex(16)}"
     values = {"<key>": key, "<host secret>": host_secret}
@@ -6988,6 +7008,27 @@ async def test_coral_harness_cli_env_holds_no_forwarded_credential(
         "HARNESS_CLAUDE_SDK_API_KEY_HELPER": f"printf %s {shlex.quote(key)}",
         **host_env,
     }
+    factory = _coral_harness_factory(monkeypatch, environ)
+
+    # The first build and a rebuild from the same factory.
+    for executor in (factory(), factory()):
+        try:
+            events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        finally:
+            await executor.close()  # each build has a credential proxy of its own
+
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        (client,) = fake_sdk.created_clients
+        for env in (spawn_envs[0], client.options.env):
+            assert sorted(set(host_env) & set(env)) == []
+            assert sorted(name for name in env if name.startswith("HARNESS_CLAUDE_SDK_")) == []
+            assert sorted(name for name, v in env.items() if key in v or host_secret in v) == []
+
+
+def _coral_harness_factory(monkeypatch, environ: dict[str, str]):
+    """The executor factory of a claude-sdk harness started with *environ* as its environment."""
+    from omnigent.inner import claude_sdk_harness
+
     monkeypatch.setattr(os, "environ", environ)
     monkeypatch.setattr(claude_sdk_harness, "IS_POSIX", True)
     # The subject is the CLI's environment, so this turn needs no OS sandbox.
@@ -7002,17 +7043,51 @@ async def test_coral_harness_cli_env_holds_no_forwarded_credential(
 
     monkeypatch.setattr(claude_sdk_harness, "ExecutorAdapter", recording_adapter)
     claude_sdk_harness.create_app()
+    return factories[0]
 
-    # The first build and a rebuild from the same factory.
-    for executor in (factories[0](), factories[0]()):
+
+# CORAL(S118): what the scrub takes from a Coral CLI still serves its step: the host's endpoint
+# is the proxy's upstream, and a key helper that reads a forwarded variable runs with it.
+@pytest.mark.posix_only
+async def test_a_coral_harness_on_a_key_keeps_the_hosts_endpoint_and_helper_env_in_its_proxy(
+    monkeypatch, tmp_path
+):
+    from omnigent.host.connect import RUNNER_ENV_PASSTHROUGH_ENV_VAR
+
+    key = _fake_key()
+    upstream = _RecordingUpstream()
+    base_url = await upstream.start()
+    environ = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL": "1",
+        "HARNESS_CLAUDE_SDK_API_KEY_HELPER": 'printf %s "$MY_FORWARDED_KEY"',
+        RUNNER_ENV_PASSTHROUGH_ENV_VAR: "MY_FORWARDED_KEY",
+        "MY_FORWARDED_KEY": key,
+        "ANTHROPIC_BASE_URL": base_url,
+    }
+    executor = _coral_harness_factory(monkeypatch, environ)()
+    try:
         events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
-
-        assert any(isinstance(e, TurnComplete) for e in events), events
         (client,) = fake_sdk.created_clients
-        for env in (spawn_envs[0], client.options.env):
-            assert sorted(set(host_env) & set(env)) == []
-            assert sorted(name for name in env if name.startswith("HARNESS_CLAUDE_SDK_")) == []
-            assert sorted(name for name, v in env.items() if key in v or host_secret in v) == []
+        statuses = await _through_the_proxy(client.options.env, key)
+        shim = executor._gateway_shim
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+    finally:
+        await executor.close()
+        await upstream.stop()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    # The CLI lost both names to the scrub: it holds the proxy's URL and no key.
+    for env in (spawn_envs[0], client.options.env):
+        assert "MY_FORWARDED_KEY" not in env and env["ANTHROPIC_BASE_URL"] == shim_url
+        assert sorted(name for name, value in env.items() if key in value) == []
+    assert shim_url != base_url and upstream_url == base_url
+    # The helper printed the forwarded key in the proxy, which sent it where the host pointed.
+    assert statuses == (200, 401)
+    (proxied,) = upstream.requests
+    assert (proxied.method, proxied.path) == ("POST", "/v1/messages")
+    assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
 
 
 # CORAL(S118): a Coral gateway CLI holds a session token; its executor's proxy holds the key.
@@ -7178,21 +7253,30 @@ async def test_a_coral_gateway_command_runs_once_in_the_proxy_for_the_listing_an
     assert not any(command in text or key in text for text in carried)
 
 
-@pytest.mark.parametrize("case", ["non-coral-gateway", "coral-gateway-off-posix", "coral-key"])
-async def test_only_a_coral_gateway_cli_on_posix_goes_through_the_credential_proxy(
-    monkeypatch, case
-):
+_FIRST_PARTY_FLAG = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"
+_UNCHANGED_CASES = [
+    "non-coral-gateway",
+    "coral-gateway-off-posix",
+    "non-coral-key",
+    "coral-key-off-posix",
+]
+
+
+@pytest.mark.parametrize("case", _UNCHANGED_CASES)
+async def test_only_a_coral_cli_on_posix_goes_through_the_credential_proxy(monkeypatch, case):
     from omnigent.inner import claude_sdk_executor
 
     command = f"printf %s {shlex.quote(_fake_key())}"
     monkeypatch.delenv("NO_PROXY", raising=False)
     monkeypatch.delenv("no_proxy", raising=False)
-    if case == "coral-key":
+    # An endpoint the harness inherits is the CLI's own business off the proxy.
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setattr(claude_sdk_executor, "IS_POSIX", not case.endswith("-off-posix"))
+    if "-key" in case:
         executor = _coral_executor(
-            monkeypatch, require_api_credential=True, api_key_helper=command
+            monkeypatch, require_api_credential=case.startswith("coral"), api_key_helper=command
         )
     else:
-        monkeypatch.setattr(claude_sdk_executor, "IS_POSIX", case == "non-coral-gateway")
         executor = _gateway_executor(monkeypatch, command, coral=case != "non-coral-gateway")
     try:
         events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
@@ -7206,12 +7290,416 @@ async def test_only_a_coral_gateway_cli_on_posix_goes_through_the_credential_pro
     assert any(isinstance(e, TurnComplete) for e in events), events
     # As before: the CLI runs the real command itself, and no session token exists.
     assert _sha256(json.loads(client.options.settings)["apiKeyHelper"]) == _sha256(command)
-    added = {"OMNIGENT_CLAUDE_PROXY_TOKEN", "NO_PROXY", "no_proxy"} & set(client.options.env)
+    added = {_PROXY_TOKEN, "NO_PROXY", "no_proxy", _FIRST_PARTY_FLAG} & set(client.options.env)
     assert sorted(added) == []
-    if case == "coral-key":
+    assert executor._upstream_credential is None
+    if "-key" in case:
         assert proxied is None and "ANTHROPIC_BASE_URL" not in client.options.env
     else:
         assert proxied == (True, True, client.options.env["ANTHROPIC_BASE_URL"])
+
+
+# CORAL(S118): a Coral CLI on a plain API key goes through the same proxy. Its upstream is the
+# endpoint the harness had before the scrub, else the Anthropic API.
+def _direct_key_executor(monkeypatch, command: str, **kwargs):
+    """A Coral executor on an API key with no endpoint of its own, as the workflow builds one."""
+    return _coral_executor(
+        monkeypatch, require_api_credential=True, api_key_helper=command, **kwargs
+    )
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize("credential", ["static-key", "command"])
+async def test_a_coral_direct_key_cli_holds_a_session_token_and_its_proxy_the_key(
+    monkeypatch, tmp_path, credential
+):
+    from omnigent.inner import claude_gateway_shim, claude_sdk_executor
+
+    key = _fake_key()
+    upstream = _RecordingUpstream()
+    base_url = await upstream.start()
+    # The scrub took the host's endpoint out of the harness's environment; the snapshot has it.
+    snapshot = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "ANTHROPIC_BASE_URL": base_url}
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("NO_PROXY", "corp.example")
+    monkeypatch.delenv("no_proxy", raising=False)
+    if credential == "static-key":
+        command = f"printf %s {shlex.quote(key)}"
+        started = Mock(side_effect=AssertionError("a process started for a static key"))
+        monkeypatch.setattr(claude_gateway_shim, "_run_credential_command", started)
+        ttl_s = 300.0  # the pinned CLI's own default for a key helper
+    else:
+        # A helper that reads a variable the host forwards: only the snapshot still has it.
+        command = 'printf %s "$FAKE_FORWARDED_KEY"'
+        monkeypatch.delenv("FAKE_FORWARDED_KEY", raising=False)
+        snapshot |= {"FAKE_FORWARDED_KEY": key, "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "60000"}
+        ttl_s = 60.0
+    executor = _direct_key_executor(monkeypatch, command, credential_env=snapshot)
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        options, shim = client.options, executor._gateway_shim
+        statuses = await _through_the_proxy(options.env, key)
+        held = shim._credential
+        held_command, held_value = _sha256(held._command), _sha256(await held.get())
+        held_names, held_ttl_s = sorted(held._env), held._ttl_s
+        token_is_the_shims = options.env[_PROXY_TOKEN] == shim.session_token
+        # The pinned CLI's own pattern for an Anthropic key, which it keeps for Anthropic hosts.
+        key_shaped = re.match(r"^(sk-ant-|sk-[\w-]{86}$)", shim.session_token) is not None
+        token_prefixed = shim.session_token.startswith("session-")
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+    finally:
+        await executor.close()
+        await upstream.stop()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    settings = json.loads(options.settings)
+    assert settings["apiKeyHelper"] == claude_sdk_executor._PROXY_TOKEN_HELPER
+    for env in (spawn_envs[0], options.env):
+        assert sorted(name for name, value in env.items() if key in value) == []
+    carried = f"{options.settings}{json.dumps(options.extra_args)}"
+    assert key not in carried and "FAKE_FORWARDED_KEY" not in carried
+    assert options.env["ANTHROPIC_BASE_URL"] == shim_url
+    assert re.fullmatch(r"http://127\.0\.0\.1:\d+", shim_url)
+    assert token_is_the_shims and token_prefixed and not key_shaped
+    for name in ("NO_PROXY", "no_proxy"):
+        assert options.env[name].split(",") == ["corp.example", "127.0.0.1", "localhost"]
+    # The host's endpoint is the proxy's upstream; a loopback one is not the Anthropic API.
+    assert upstream_url == base_url
+    gateway_only = {"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "CLAUDE_CODE_USE_GATEWAY"}
+    assert sorted((gateway_only | {_FIRST_PARTY_FLAG}) & set(options.env)) == []
+    assert (held_command, held_value) == (_sha256(command), _sha256(key))
+    assert held_names == sorted(snapshot) and held_ttl_s == ttl_s
+    # Only the CLI's own request went upstream (no gateway, so no model listing), with the key.
+    assert statuses == (200, 401)
+    (proxied,) = upstream.requests
+    assert (proxied.method, proxied.path) == ("POST", "/v1/messages")
+    assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
+
+
+_ANTHROPIC_API = "https://api.anthropic.com"
+_OTHER_ENDPOINT = "https://gateway.example/anthropic"
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("snapshot_url", "inherited_url", "upstream", "first_party"),
+    [
+        (None, None, _ANTHROPIC_API, True),
+        ("", None, _ANTHROPIC_API, True),
+        (f"{_ANTHROPIC_API}/", None, _ANTHROPIC_API, True),
+        ("https://API.Anthropic.com:443", None, "https://API.Anthropic.com:443", True),
+        (_OTHER_ENDPOINT, None, _OTHER_ENDPOINT, False),
+        (f"{_ANTHROPIC_API}:8443", None, f"{_ANTHROPIC_API}:8443", False),
+        # A path stays in the upstream, less its trailing slash, and does not change the answer.
+        (f"{_ANTHROPIC_API}/v1/", None, f"{_ANTHROPIC_API}/v1", True),
+        (f"{_OTHER_ENDPOINT}/", None, _OTHER_ENDPOINT, False),
+        (f"{_ANTHROPIC_API}.example", None, f"{_ANTHROPIC_API}.example", False),
+        ("http://127.0.0.1:9/anthropic", None, "http://127.0.0.1:9/anthropic", False),
+        # The snapshot is the harness's environment from before the scrub: it alone decides.
+        (None, _OTHER_ENDPOINT, _ANTHROPIC_API, True),
+        # An executor built with no snapshot reads its own environment.
+        (
+            "no-snapshot",
+            _OTHER_ENDPOINT,
+            _OTHER_ENDPOINT,
+            False,
+        ),
+        ("no-snapshot", None, _ANTHROPIC_API, True),
+    ],
+    ids=[
+        "unset",
+        "empty",
+        "anthropic",
+        "anthropic-default-port",
+        "gateway",
+        "anthropic-other-port",
+        "anthropic-path",
+        "gateway-trailing-slash",
+        "look-alike-host",
+        "loopback-http",
+        "snapshot-over-environment",
+        "no-snapshot-environment",
+        "no-snapshot-unset",
+    ],
+)
+async def test_a_coral_direct_key_proxy_goes_where_the_harness_was_pointed(
+    monkeypatch, tmp_path, snapshot_url, inherited_url, upstream, first_party
+):
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    snapshot = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    if snapshot_url is not None:
+        snapshot["ANTHROPIC_BASE_URL"] = snapshot_url
+    if inherited_url is None:
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", inherited_url)
+    monkeypatch.delenv(_FIRST_PARTY_FLAG, raising=False)
+    fake_sdk = _make_recovery_fake_sdk()
+    # Nothing is sent: the autouse guard fails this test on any contact outside loopback.
+    executor = _direct_key_executor(
+        monkeypatch, command, credential_env=None if snapshot_url == "no-snapshot" else snapshot
+    )
+    try:
+        for session in ("first", "second"):
+            events = await _session_turn(executor, fake_sdk, session)
+            assert any(isinstance(e, TurnComplete) for e in events), events
+        shim = executor._gateway_shim
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+    finally:
+        await executor.close()
+
+    assert upstream_url == upstream
+    first, second = (client.options.env for client in fake_sdk.created_clients)
+    # Both CLIs are on the one loopback proxy; each treats it as the Anthropic API only when
+    # the proxy's upstream is that API by the CLI's own rule.
+    for env in (first, second):
+        assert env["ANTHROPIC_BASE_URL"] == shim_url
+        assert env.get(_FIRST_PARTY_FLAG) == ("1" if first_party else None)
+    assert _sha256(first[_PROXY_TOKEN]) == _sha256(second[_PROXY_TOKEN])
+
+
+@pytest.mark.parametrize(
+    ("url", "first_party"),
+    [
+        ("https://api.anthropic.com", True),
+        ("https://api.anthropic.com/", True),
+        ("https://api.anthropic.com/v1?beta=true", True),
+        ("https://API.ANTHROPIC.COM", True),
+        ("https://api.anthropic.com:443", True),
+        # The CLI compares hosts only, so the scheme does not change its answer.
+        ("http://api.anthropic.com", True),
+        ("http://api.anthropic.com:80", True),
+        ("https://api.anthropic.com:8443", False),
+        ("https://api.anthropic.com:80", False),
+        ("https://api.anthropic.com.", False),
+        ("https://api.anthropic.com.evil.example", False),
+        ("https://evil.example/api.anthropic.com", False),
+        ("https://eu.api.anthropic.com", False),
+        ("https://anthropic.com", False),
+        ("http://127.0.0.1:8080", False),
+        ("ftp://api.anthropic.com", False),
+        ("api.anthropic.com", False),
+        ("", False),
+        ("https://api.anthropic.com:port", False),
+        # Never first-party here: URLs two parsers could read as different hosts.
+        ("https://user@api.anthropic.com", False),
+        ("https://api.anthropic.com\\@evil.example", False),
+        ("https://evil.example\\@api.anthropic.com", False),
+        ("https://api.anthropic.com/a\\b", False),
+        ("https://api.anthropic.com /", False),
+        ("https://api.anthropic.com\t", False),
+        ("https://evil.example/?next=@api.anthropic.com", False),
+        ("https://api.anthropic.com:443/v1/", True),
+        ("https://api.anthropic.com#fragment", True),
+        ("https://api.anthropic.com.example", False),
+        ("https://xapi.anthropic.com", False),
+        ("https://api.anthropic.com:65536", False),
+        ("//api.anthropic.com", False),
+        ("https:api.anthropic.com", False),
+        ("https://api.anthropic.com#@evil.example", False),
+        # Spellings another parser folds into the API's host are not first-party here either.
+        ("https://api%2eanthropic.com", False),
+        ("https://api.anthropic．com", False),
+        ("https://аpi.anthropic.com", False),
+    ],
+)
+def test_the_first_party_rule_is_the_clis_host_match_and_never_looser(url, first_party):
+    from omnigent.inner.claude_sdk_executor import _is_first_party_url
+
+    assert _is_first_party_url(url) is first_party
+    if first_party:
+        # The proxy's own client reads the same host, so the key goes where the CLI is told.
+        assert httpx.URL(url).host == "api.anthropic.com"
+
+
+@pytest.mark.posix_only
+async def test_a_coral_gateway_cli_is_never_told_its_gateway_is_the_anthropic_api(monkeypatch):
+    # A gateway CLI was on the shim's loopback URL before the credential proxy too.
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    executor = _gateway_executor(monkeypatch, command, base_url_override=_ANTHROPIC_API)
+    monkeypatch.setattr(executor, "_apply_gateway_model_vocabulary", AsyncMock(return_value={}))
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        upstream_url = executor._gateway_shim._upstream_base_url
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    assert upstream_url == _ANTHROPIC_API and _FIRST_PARTY_FLAG not in client.options.env
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("upstream", "inherited", "set_for_the_cli", "cli_reads"),
+    [
+        (_ANTHROPIC_API, "0", "1", "1"),
+        (_ANTHROPIC_API, None, "1", "1"),
+        # Behind any other endpoint the executor neither sets, clears nor overrides it.
+        (_OTHER_ENDPOINT, "1", None, "1"),
+        (_OTHER_ENDPOINT, "0", None, "0"),
+        (_OTHER_ENDPOINT, None, None, None),
+    ],
+)
+async def test_an_inherited_first_party_switch_is_overridden_only_for_the_anthropic_api(
+    monkeypatch, upstream, inherited, set_for_the_cli, cli_reads
+):
+    snapshot = {"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": upstream}
+    if inherited is None:
+        monkeypatch.delenv(_FIRST_PARTY_FLAG, raising=False)
+    else:
+        monkeypatch.setenv(_FIRST_PARTY_FLAG, inherited)
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    executor = _direct_key_executor(monkeypatch, command, credential_env=snapshot)
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    assert client.options.env.get(_FIRST_PARTY_FLAG) == set_for_the_cli
+    assert spawn_envs[0].get(_FIRST_PARTY_FLAG) == cli_reads
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("snapshot_ttl_ms", "inherited_ttl_ms", "ttl_s"),
+    [
+        ("60000", None, 60.0),
+        (None, None, 300.0),
+        # Not a time the CLI accepts either: its own default stands.
+        ("soon", None, 300.0),
+        ("-5", None, 300.0),
+        # Zero is a time the CLI accepts: the helper's value is never reused.
+        ("0", None, 0.0),
+        # The snapshot is the harness's environment from before the scrub: it alone decides.
+        (None, "60000", 300.0),
+        ("no-snapshot", "120000", 120.0),
+        ("no-snapshot", None, 300.0),
+    ],
+)
+def test_a_coral_direct_key_helper_is_cached_for_as_long_as_the_cli_cached_it(
+    monkeypatch, snapshot_ttl_ms, inherited_ttl_ms, ttl_s
+):
+    name = "CLAUDE_CODE_API_KEY_HELPER_TTL_MS"
+    snapshot = {"PATH": "/usr/bin:/bin"}
+    if snapshot_ttl_ms is not None:
+        snapshot[name] = snapshot_ttl_ms
+    if inherited_ttl_ms is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, inherited_ttl_ms)
+    credential_env = None if snapshot_ttl_ms == "no-snapshot" else snapshot
+    command = 'printf %s "$FAKE_FORWARDED_KEY"'
+
+    direct = _direct_key_executor(monkeypatch, command, credential_env=credential_env)
+    gateway = _gateway_executor(monkeypatch, command, credential_env=credential_env)
+
+    assert direct._upstream_credential._ttl_s == ttl_s
+    # A gateway's cache time is its own refresh interval, never the harness's variable.
+    assert gateway._upstream_credential._ttl_s == 900.0
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("upstream", "in_snapshot", "names"),
+    [
+        ("http://gateway.example/anthropic", True, "https"),
+        # Plain http is refused for the API's own host too, and for a look-alike of loopback.
+        ("http://api.anthropic.com", True, "https"),
+        ("http://localhost.gateway.example:8080", True, "https"),
+        ("gateway.example/anthropic", True, "https"),
+        # An executor built with no snapshot is held to its own environment's endpoint.
+        ("http://gateway.example/anthropic", False, "https"),
+        # A URL the proxy cannot join a path to, on https or loopback or not.
+        ("https://gateway.example/\x00anthropic", True, "control character"),
+        ("https://api.anthropic.com?beta=true", True, "query"),
+        ("https://api.anthropic.com/#v1", True, "fragment"),
+    ],
+    ids=[
+        "gateway",
+        "anthropic-host",
+        "loopback-look-alike",
+        "no-scheme",
+        "no-snapshot",
+        "control-character",
+        "query",
+        "fragment",
+    ],
+)
+async def test_a_coral_direct_key_upstream_the_key_may_not_go_to_is_refused_before_any_cli(
+    monkeypatch, tmp_path, upstream, in_snapshot, names
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE
+
+    key = _fake_key()
+    snapshot = {"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": upstream}
+    if in_snapshot:
+        # The harness's own environment lost the endpoint in the scrub; an https one there
+        # would not make the snapshot's acceptable.
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", _OTHER_ENDPOINT)
+    else:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", upstream)
+    executor = _direct_key_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(key)}",
+        credential_env=snapshot if in_snapshot else None,
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        proxy_built = executor._gateway_shim is not None
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in events] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    assert names in events[0].message
+    named = (key, "gateway.example", "api.anthropic.com", "127.0.0.1", "beta", "v1")
+    assert not [text for text in named if text in events[0].message]
+    assert not proxy_built and fake_sdk.created_clients == [] and spawn_envs == []
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "configured",
+    ["https://gateway.example/anthropic\n", "\thttps://gateway.example/anthropic "],
+    ids=["trailing-newline", "tab-and-space"],
+)
+async def test_whitespace_around_a_configured_upstream_is_dropped(monkeypatch, configured):
+    executor = _direct_key_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(_fake_key())}",
+        credential_env={"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": configured},
+    )
+    try:
+        # A URL that worked with a stray space before the proxy keeps working behind it.
+        assert executor._proxy_upstream({}) == "https://gateway.example/anthropic"
+    finally:
+        await executor.close()
+
+
+@pytest.mark.posix_only
+async def test_a_coral_direct_key_turn_is_refused_when_its_cli_would_still_hold_the_key(
+    monkeypatch, tmp_path
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_EXPOSED_CODE
+
+    key = _fake_key()
+    monkeypatch.setenv("UNLISTED_COPY", f"Bearer {key}")
+    executor = _direct_key_executor(
+        monkeypatch, f"printf %s {shlex.quote(key)}", credential_env={"PATH": "/usr/bin:/bin"}
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in events] == [(CORAL_CREDENTIAL_EXPOSED_CODE, False)]
+    assert key not in events[0].message and "UNLISTED_COPY" in events[0].message
+    assert fake_sdk.created_clients == [] and spawn_envs == []
 
 
 def test_a_static_key_lists_gateway_models_as_a_value_never_as_a_command(caplog):
@@ -7356,7 +7844,10 @@ async def _session_turn(executor, fake_sdk, session_id: str) -> list:
 
 
 @pytest.mark.posix_only
-async def test_every_client_of_a_coral_gateway_executor_shares_one_proxy_and_token(monkeypatch):
+@pytest.mark.parametrize(("path", "ttl_s"), [("gateway", 900.0), ("direct-key", 300.0)])
+async def test_every_client_of_a_coral_executor_shares_one_proxy_and_token(
+    monkeypatch, path, ttl_s
+):
     from omnigent.inner import claude_sdk_executor
 
     built = []
@@ -7371,10 +7862,14 @@ async def test_every_client_of_a_coral_gateway_executor_shares_one_proxy_and_tok
     # and the upstream hop keeps the client's environment proxies.
     monkeypatch.setenv("OMNIGENT_CLAUDE_PROXY_TOKEN", "stale")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    # With no endpoint of its own, a CLI on a plain key is behind a proxy for the Anthropic API.
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv(_FIRST_PARTY_FLAG, raising=False)
     command = f"printf %s {shlex.quote(_fake_key())}"
     fake_sdk = _make_recovery_fake_sdk()
-    executor = _gateway_executor(monkeypatch, command)
-    rebuilt = _gateway_executor(monkeypatch, command)
+    build = _gateway_executor if path == "gateway" else _direct_key_executor
+    executor = build(monkeypatch, command)
+    rebuilt = build(monkeypatch, command)
     try:
         # A second session, then the first one reconnecting after its client closed.
         for session in ("first", "second", "first"):
@@ -7402,7 +7897,11 @@ async def test_every_client_of_a_coral_gateway_executor_shares_one_proxy_and_tok
     assert len(built) == 2 and [held[0], held[3]] == proxies
     assert _sha256(held[3][1]) != _sha256(held[0][1])
     assert held_names == [name for name in harness_names if name != _PROXY_TOKEN]
-    assert (credential._ttl_s, shim._upstream_proxy) == (900.0, None)
+    assert (credential._ttl_s, shim._upstream_proxy) == (ttl_s, None)
+    # Each CLI of the plain-key executor is told its proxy is the Anthropic API; none of a
+    # gateway's is.
+    told = [client.options.env.get(_FIRST_PARTY_FLAG) for client in fake_sdk.created_clients]
+    assert told == ["1" if path == "direct-key" else None] * 4
 
 
 @pytest.mark.parametrize(
@@ -7835,6 +8334,8 @@ async def test_coral_spec_with_os_sandbox_reaches_the_cli(monkeypatch, sandbox_t
     monkeypatch.setattr(
         "omnigent.inner.claude_sdk_executor.shutil.which", lambda name: f"/usr/bin/{name}"
     )
+    # CORAL(S118): the Coral CLI's credential proxy is not this test's subject
+    monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
 
     events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
 

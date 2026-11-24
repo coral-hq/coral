@@ -153,10 +153,18 @@ CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE = (
 )
 CORAL_SANDBOX_UNAVAILABLE_CODE = "coral_sandbox_unavailable"
 CORAL_POLICY_HOOK_UNAVAILABLE_CODE = "coral_policy_hook_unavailable"
-# CORAL(S118): a Coral gateway CLI presents this session token to its executor's loopback
-# proxy, which holds the real credential; the helper puts no secret on any command line
+# CORAL(S118): a Coral CLI presents this session token to its executor's loopback proxy,
+# which holds the real credential; the helper puts no secret on any command line
 _PROXY_TOKEN_ENV = "OMNIGENT_CLAUDE_PROXY_TOKEN"
 _PROXY_TOKEN_HELPER = f'printf %s "${_PROXY_TOKEN_ENV}"'
+# CORAL(S118): where a Coral CLI with a key and no endpoint sent it, and the CLI's own switch
+# for treating its base URL, here the proxy's loopback one, as that API
+_ANTHROPIC_API_URL = "https://api.anthropic.com"
+_ANTHROPIC_API_HOST = "api.anthropic.com"
+_ASSUME_FIRST_PARTY_ENV = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"
+# CORAL(S118): the pinned CLI's own cache time for a key helper, which the proxy now runs
+_KEY_HELPER_TTL_ENV = "CLAUDE_CODE_API_KEY_HELPER_TTL_MS"
+_CLI_KEY_HELPER_TTL_S = 300.0
 # CORAL(S118): the refusal when that CLI's launch would still hold the key itself
 CORAL_CREDENTIAL_EXPOSED_CODE = "coral_credential_exposed"
 # CORAL(S118): the refusal when the proxy's upstream is plain http to another machine
@@ -1487,6 +1495,48 @@ def _keep_loopback_unproxied(env: dict[str, str]) -> None:
         env[name] = ",".join(hosts)
 
 
+def _is_first_party_url(url: str) -> bool:
+    """CORAL(S118): whether the pinned CLI would take *url* for the Anthropic API itself.
+
+    The CLI compares the URL's host, a non-default port included, with the API's. A URL with
+    userinfo, a backslash or whitespace is never first-party here: two parsers could read
+    different hosts in it, and a wrong "no" only leaves the CLI on its custom-endpoint
+    behaviour.
+
+    :param url: A base URL, e.g. ``"https://api.anthropic.com"``.
+    :returns: Whether a CLI behind the proxy for *url* may treat the proxy as that API.
+    """
+    if "@" in url or "\\" in url or any(character.isspace() for character in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    default_port = {"https": 443, "http": 80}.get(parts.scheme.lower())
+    return (
+        default_port is not None
+        and parts.hostname == _ANTHROPIC_API_HOST
+        and port in (None, default_port)
+    )
+
+
+def _check_upstream_url_text(url: str) -> None:
+    """CORAL(S118): refuse an upstream URL the proxy cannot join a request path to.
+
+    With a control character, a query or a fragment, every proxied request would fail or
+    go to another path, and only after a CLI had started.
+
+    :param url: The proxy's upstream, e.g. ``"https://gateway.example/anthropic"``.
+    :raises OSError: With a message that holds no part of *url*.
+    """
+    if not url.isprintable() or "?" in url or "#" in url:
+        raise OSError(
+            "Claude credential proxy needs an upstream URL with no control character, "
+            "no query and no fragment"
+        )
+
+
 def _proxy_for_upstream(upstream_url: str, environ: Mapping[str, str]) -> str | None:
     """CORAL(S118): the proxy *environ* names for *upstream_url*, as a client reads it there.
 
@@ -2391,10 +2441,12 @@ class ClaudeSDKExecutor(Executor):
         self._claude_config_isolated = False
         # CORAL(S118): kept for running the credential command, never for the CLI's env
         self._credential_env = dict(credential_env) if credential_env is not None else None
-        # CORAL(S118): set below for a Coral gateway on POSIX: the one holder of the real
+        # CORAL(S118): set below for a Coral CLI on POSIX: the one holder of the real
         # credential, and a static key long enough to tell from ordinary values
         self._upstream_credential: UpstreamCredential | None = None
         self._credential_literal: str | None = None
+        # CORAL(S118): whether the proxy of a CLI with no gateway forwards to the Anthropic API
+        self._proxy_is_first_party = False
         self._unwrapped_claude_config_dir: pathlib.Path | None = None
         # CORAL(S115): the seed a wrapped non-Coral CLI's launcher copies in. Its dir is made
         # at the first launch, and again if it goes missing; after close, a launch fails.
@@ -2574,10 +2626,10 @@ class ClaudeSDKExecutor(Executor):
         # ``_CLAUDE_API_KEY_HELPER_ENV_KEY`` from ``_extra_env`` only.
         if api_key_helper:
             self._extra_env[_CLAUDE_API_KEY_HELPER_ENV_KEY] = api_key_helper
-        # CORAL(S118): a Coral gateway CLI goes through the credential proxy (no Windows shell
-        # runs the token helper, so there the CLI keeps the command)
+        # CORAL(S118): a Coral CLI goes through the credential proxy, with or without a gateway
+        # (no Windows shell runs the token helper, so there the CLI keeps the command)
         command = self._extra_env.get(_CLAUDE_API_KEY_HELPER_ENV_KEY)
-        if require_api_credential and gateway and command and IS_POSIX:
+        if require_api_credential and command and IS_POSIX:
             self._upstream_credential = self._new_upstream_credential(command)
             # The stripped form the proxy sends, so a copy without a trailing newline is found.
             literal = static_credential_literal(command) or ""
@@ -2590,14 +2642,33 @@ class ClaudeSDKExecutor(Executor):
         :param command: The real credential command, e.g. ``"databricks auth token ..."``.
         :returns: The credential the proxy and the model listing share.
         """
-        ttl_ms = _parse_optional_int(self._extra_env.get("CLAUDE_CODE_API_KEY_HELPER_TTL_MS"))
         # The pre-scrub snapshot holds what the command may need and the CLI must not.
         environ = os.environ if self._credential_env is None else self._credential_env
+        ttl_ms = _parse_optional_int(self._extra_env.get(_KEY_HELPER_TTL_ENV))
+        ttl_s = ttl_ms / 1000 if ttl_ms and ttl_ms > 0 else None
+        if not self._gateway:
+            # Without a gateway the CLI took its cache time from the harness, else its own;
+            # as for the CLI, 0 is a time: the value is never reused.
+            ttl_ms = _parse_optional_int(environ.get(_KEY_HELPER_TTL_ENV))
+            ttl_s = ttl_ms / 1000 if ttl_ms is not None and ttl_ms >= 0 else _CLI_KEY_HELPER_TTL_S
         return UpstreamCredential(
             command,
-            ttl_s=ttl_ms / 1000 if ttl_ms and ttl_ms > 0 else None,
+            ttl_s=ttl_s,
             env={name: value for name, value in environ.items() if name != _PROXY_TOKEN_ENV},
         )
+
+    def _proxy_upstream(self, env: Mapping[str, str]) -> str | None:
+        """CORAL(S118): where a proxied CLI's requests go on to, as it would have sent them.
+
+        :param env: The CLI's ``options.env`` as built so far.
+        :returns: The gateway's URL; without a gateway, the endpoint the harness had before
+            its scrub, else the Anthropic API. ``None`` for a gateway whose env names none.
+            Whitespace around a configured URL is dropped, as an HTTP client would drop it.
+        """
+        if self._gateway:
+            return (env.get("ANTHROPIC_BASE_URL") or "").strip() or None
+        environ = os.environ if self._credential_env is None else self._credential_env
+        return (environ.get("ANTHROPIC_BASE_URL") or "").strip() or _ANTHROPIC_API_URL
 
     def _credential_exposure(self, options: SdkOptions) -> str | None:
         """CORAL(S118): where a proxied CLI's launch would still hold the static key, if anywhere.
@@ -2711,7 +2782,8 @@ class ClaudeSDKExecutor(Executor):
         which silences opus thinking; the shim restores the field. See
         the :mod:`~omnigent.inner.claude_gateway_shim` module
         docstring for the full failure chain. No-op off the gateway
-        path.
+        path, except for a Coral CLI on an API key (CORAL(S118)), whose
+        shim is its credential proxy in front of :meth:`_proxy_upstream`.
 
         :param options: SDK options about to be passed to
             ``ClaudeSDKClient``; ``options.env["ANTHROPIC_BASE_URL"]``
@@ -2720,19 +2792,23 @@ class ClaudeSDKExecutor(Executor):
             without an ``ANTHROPIC_BASE_URL`` — a config bug that
             would silently bypass the shim.
         """
-        if not self._gateway:
+        # CORAL(S118): a Coral CLI with a key and no gateway is routed too, to hold no key
+        credential = self._upstream_credential
+        direct = not self._gateway and credential is not None
+        if not self._gateway and not direct:
             return
         env = getattr(options, "env", None)
-        if not isinstance(env, dict) or "ANTHROPIC_BASE_URL" not in env:
+        if not isinstance(env, dict) or not (direct or "ANTHROPIC_BASE_URL" in env):
             raise RuntimeError(
                 "ClaudeSDKExecutor(gateway=True) built SDK options without "
                 "env['ANTHROPIC_BASE_URL']; cannot route through the gateway shim."
             )
         if self._gateway_shim is None:
-            upstream = env["ANTHROPIC_BASE_URL"]
+            # CORAL(S118): never None here: a gateway's env names its URL (checked above)
+            upstream = self._proxy_upstream(env) or env["ANTHROPIC_BASE_URL"]
+            self._proxy_is_first_party = direct and _is_first_party_url(upstream)
             # CORAL(S118): for a Coral CLI the shim holds the credential; its upstream hop takes
             # the proxy the harness had before the scrub, which may carry userinfo
-            credential = self._upstream_credential
             snapshot = None if credential is None else self._credential_env
             self._gateway_shim = ClaudeGatewayShim(
                 upstream_base_url=upstream,
@@ -2747,6 +2823,10 @@ class ClaudeSDKExecutor(Executor):
         if (session_token := self._gateway_shim.session_token) is not None:
             env[_PROXY_TOKEN_ENV] = session_token
             _keep_loopback_unproxied(env)
+        # CORAL(S118): behind a proxy for the Anthropic API itself the CLI keeps the behaviour
+        # it had on that API; behind any other endpoint it stays on a custom one, as before
+        if self._proxy_is_first_party:
+            env[_ASSUME_FIRST_PARTY_ENV] = "1"
 
     async def _get_or_create_client(
         self,
@@ -3857,10 +3937,11 @@ class ClaudeSDKExecutor(Executor):
                 retryable=False,
             )
             return
-        # CORAL(S118): the credential leaves this machine over https only; refuse before the
-        # model listing below, the first request that would carry it
-        if self._upstream_credential is not None and (upstream := env.get("ANTHROPIC_BASE_URL")):
+        # CORAL(S118): the credential leaves this machine over https only, to a URL the proxy
+        # can forward to; refuse before the model listing below, the first request to carry it
+        if self._upstream_credential is not None and (upstream := self._proxy_upstream(env)):
             try:
+                _check_upstream_url_text(upstream)
                 check_upstream_transport(upstream)
             except OSError as exc:  # its message names the scheme at most
                 yield ExecutorError(

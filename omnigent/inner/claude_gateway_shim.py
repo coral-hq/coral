@@ -598,7 +598,10 @@ class ClaudeGatewayShim:
         self._credential = credential
         self._upstream_proxy = upstream_proxy
         self._upstream_ca_file = upstream_ca_file
-        self._session_token = secrets.token_urlsafe(32) if credential is not None else None
+        # The prefix keeps it from ever having an Anthropic key's shape (``sk-...``).
+        self._session_token = (
+            f"session-{secrets.token_urlsafe(32)}" if credential is not None else None
+        )
         self._last_refresh_at: float | None = None
         self._exchanges: set[asyncio.Task[None]] = set()  # upstream exchanges aclose() stops
         self._upstream_base_url = upstream_base_url.rstrip("/")
@@ -634,7 +637,7 @@ class ClaudeGatewayShim:
         """
         CORAL(S118): the only credential the CLI holds in credential mode.
 
-        :returns: 256 random URL-safe bits, or ``None`` without a credential.
+        :returns: ``"session-"`` and 256 random URL-safe bits; ``None`` without a credential.
         """
         return self._session_token
 

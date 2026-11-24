@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import http.server
 import json
+import mmap
 import os
 import platform
 import re
@@ -71,12 +73,14 @@ from coral.omni.process_map import SANDBOX_POLICY_REVISION
 from coral.omni.server.step_agents import checkout_read_paths
 from omnigent._platform import stable_user_id
 from omnigent.inner.claude_gateway_shim import ClaudeGatewayShim, UpstreamCredential
+from omnigent.inner.claude_sdk_executor import _ASSUME_FIRST_PARTY_ENV, _find_system_claude
 from omnigent.inner.os_env import _DEFAULT_ENV_PASSTHROUGH
 from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
 from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from tests._helpers.live_server import find_free_port, terminate_process
 from tests.e2e.conftest import get_mock_message_requests, release_mock_gate
 from tests.e2e.coral import _skeleton as sk
+from tests.e2e.coral._claude_sdk_kit import LOCAL_HOSTS, EgressRecorder
 from tests.e2e.coral._live_proxy import Secret
 
 # Absolute deadline for a scenario, below the marker's limit.
@@ -122,6 +126,13 @@ _TOKEN_NAME = re.compile(r"^OMNIGENT_RUNNER_.*TOKEN.*$")
 # The only model credential a Coral step's CLI holds: its session token at its executor's
 # loopback credential proxy, which swaps it for the real key.
 PROXY_TOKEN_NAME = "OMNIGENT_CLAUDE_PROXY_TOKEN"
+FIRST_PARTY_FLAG_NAME = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"
+# Every beta a gateway launch sends, its experimental betas being switched off (measured on
+# claude 2.1.325); a CLI on a key with no gateway sends more.
+GATEWAY_PATH_BETAS = frozenset(
+    {"claude-code-20250219", "effort-2025-11-24", "interleaved-thinking-2025-05-14"}
+)
+_PROXY_NAMES = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
 # The model the probe's own requests to that proxy name: none may reach the mock's ledger.
 PROXY_PROBE_MODEL = "crl-credential-proxy-probe"
 # The runner tokens the probe looks for in an exec-time environment: a binding token that
@@ -608,6 +619,48 @@ def _cli_proxy(cli: int) -> tuple[Target, Secret]:
     return Target("credential_proxy", "credential_proxy", str(url.port), live=live), token
 
 
+def _fenced(recorder_url: str) -> dict[str, str]:
+    """
+    Host environment that sends every request of the host, its runners and their CLIs to
+    another machine through ``recorder_url`` instead; the host forwards the names it lists.
+    """
+    return {
+        **dict.fromkeys(_PROXY_NAMES, recorder_url),
+        "NO_PROXY": LOCAL_HOSTS,
+        "OMNIGENT_RUNNER_ENV_PASSTHROUGH": ",".join((*_PROXY_NAMES, "NO_PROXY")),
+    }
+
+
+def _betas_sent(mock: str, token: str) -> set[str]:
+    """Every ``anthropic-beta`` flag on the model requests that carry ``token``."""
+    return {
+        beta
+        for entry in get_mock_message_requests(mock)
+        if token in json.dumps(entry["body"])
+        for beta in entry["betas"]
+    }
+
+
+def _cli_build_files(launcher: Path) -> list[Path]:
+    """
+    The files that may hold the CLI's code: the launcher, and for an npm install's small
+    launcher every file of 1 MiB or more in its package and the platform packages beside it.
+    """
+    if launcher.stat().st_size >= 1 << 20:
+        return [launcher]
+    package = next((d for d in launcher.parents if (d / "package.json").is_file()), None)
+    roots = [] if package is None else [package, *package.parent.glob("claude-code-*")]
+    return [
+        launcher,
+        *(
+            path
+            for root in roots
+            for path in root.rglob("*")
+            if path.is_file() and not path.is_symlink() and path.stat().st_size >= 1 << 20
+        ),
+    ]
+
+
 def _key_exposed_outside(verdicts: Mapping[str, str]) -> list[str]:
     """
     How the run outside the sandbox departs from :data:`OUTSIDE_PROBE15`, as tokens and names:
@@ -1088,6 +1141,12 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
     Recorded with it: a host ``unknown`` counts as dead, so a relaunch can start while the
     old runner lives on; on such a server runner-id rotation does not fence that runner,
     since the server accepts the allow-listed token for every session (``mcp_identity.py``).
+
+    The host's credential here is an API key with no endpoint of its own; the host's
+    ``ANTHROPIC_BASE_URL`` names the mock. So each step's CLI runs on the direct-key path:
+    through its executor's credential proxy, whose upstream is that inherited endpoint.
+    Were that endpoint ever lost on the way, the proxy would forward to the Anthropic API:
+    every proxy setting of the host names a recorder that refuses, and it must see nothing.
     """
     sk.require_claude_cli()
     mock = isolated_mock_llm_server_url
@@ -1099,21 +1158,32 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
     # Per run and held redacted: the server keeps it and the host exports it. Only the
     # stack helpers' frames hold it, so only a start or teardown failure prints it.
     allowlisted = Secret(secrets.token_urlsafe(32))
-    sk.queue(mock, impl_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, NOTHING, call_id=f"n-{uid}"))])
-    sk.queue(
-        mock, review_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, README, call_id=f"r-{uid}"))]
-    )
+    # On a key with no gateway the CLI defers its MCP tools, so each step loads them first.
+    queue = functools.partial(sk.queue, offering=sk.TOOL_SEARCH)
+    first_calls = {
+        impl_token: sk.tool_call(sk.SHELL_TOOL, NOTHING, call_id=f"n-{uid}"),
+        review_token: sk.tool_call(sk.SHELL_TOOL, README, call_id=f"r-{uid}"),
+    }
+    for token, call in first_calls.items():
+        queue(mock, token, [*sk.load_step_tools(f"s-{token}"), sk.held(call)])
     deadline = time.monotonic() + SCENARIO_S
 
-    with sk.skeleton_stack(
-        tmp_path / "stack",
-        mock_url=mock,
-        host_config=sk.mock_auth(mock),
-        host_env={"OMNIGENT_RUNNER_TUNNEL_TOKEN": allowlisted.reveal()},
-        lease_s=SHORT_LEASE_S,
-        allowlisted_token=allowlisted.reveal(),
-        repo_files={PROBE.name: PROBE.read_bytes()},
-    ) as stack:
+    with (
+        EgressRecorder() as fence,
+        sk.skeleton_stack(
+            tmp_path / "stack",
+            mock_url=mock,
+            host_config={"auth": {"type": "api_key", "api_key": "mock-key"}},
+            host_env={
+                "OMNIGENT_RUNNER_TUNNEL_TOKEN": allowlisted.reveal(),
+                "ANTHROPIC_BASE_URL": mock,
+                **_fenced(fence.url),
+            },
+            lease_s=SHORT_LEASE_S,
+            allowlisted_token=allowlisted.reveal(),
+            repo_files={PROBE.name: PROBE.read_bytes()},
+        ) as stack,
+    ):
         client = stack.client
         run_id = sk.start_review_loop(
             stack,
@@ -1130,6 +1200,19 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         recorded = _recorded(stack, _harness_socket(stack, implementer))
         names = {f"{role}.names": _token_names(proc) for role, proc in step.items()}
         runner = step["runner"].pid
+        # The CLI holds a session token for a loopback proxy of its own, never the mock's URL.
+        # Only a launch with no gateway leaves the CLI's experimental betas on (a gateway
+        # launch switches them off or names the gateway); a mock upstream is not the
+        # Anthropic API, so the CLI is not told to assume it is.
+        proxy, _session_token = _cli_proxy(step["cli"].pid)
+        cli_names = set(step["cli"].environ())
+        direct_key_path = {
+            "proxy_is_not_the_mock": proxy.target != str(urllib.parse.urlsplit(mock).port),
+            "betas_left_on": "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" not in cli_names,
+            "no_gateway_switch": "CLAUDE_CODE_USE_GATEWAY" not in cli_names,
+            "not_assumed_first_party": FIRST_PARTY_FLAG_NAME not in cli_names,
+            "fenced": set(_PROXY_NAMES) <= cli_names,
+        }
         # The shell's own runner, as the step tries to read it: where the allow-listed token sits.
         targets = [
             Target("control_file", "file", PROBE.name, f"sha256:{_sha256(PROBE.read_bytes())}"),
@@ -1143,7 +1226,7 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         misjudged = _misjudged(targets)
         assert not misjudged, f"targets of another kind than their pins: {misjudged}"
         checks = {target.check for target in targets}
-        sk.queue(
+        queue(
             mock,
             impl_token,
             [
@@ -1157,7 +1240,7 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
                 DONE,
             ],
         )
-        sk.queue(
+        queue(
             mock,
             review_token,
             [sk.handoff_call(review, call_id=f"ok-{uid}", report="README.md is unchanged."), DONE],
@@ -1173,11 +1256,22 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         run = wait(lambda: sk.finished(client, run_id), "the run to finish")
         accepted = sk.result_texts(mock, handed)
         leaked = _ledger_holds(mock, {"allowlisted_token": allowlisted})
+        # What the proxy forwarded: the requests as the mock received them.
+        betas = {token: _betas_sent(mock, token) for token in (impl_token, review_token)}
+        egress = fence.request_lines
 
     assert not after, f"failed control after the probe: {after}"
     verdicts = _assert_reading(reading, targets)
     _controls_held(verdicts)
     assert not leaked, f"the mock's ledger holds {leaked}"
+    assert all(direct_key_path.values()), f"not the direct-key proxy path: {direct_key_path}"
+    assert egress == [], f"the stack reached for another machine: {egress}"
+    print(
+        "anthropic-beta through the proxy:", json.dumps({k: sorted(v) for k, v in betas.items()})
+    )
+    # Each step's model calls reached the mock, with betas only a launch with no gateway sends.
+    beyond_a_gateway = {token: sorted(sent - GATEWAY_PATH_BETAS) for token, sent in betas.items()}
+    assert all(beyond_a_gateway.values()), f"no experimental beta reached the mock: {betas}"
     runs = (run["status"], run["causes"]) == ("completed", []) and any(
         '"accepted": true' in text for text in accepted
     )
@@ -1688,6 +1782,30 @@ def _stored_file(path: Path, server: str, token: Secret | None) -> Path:
     entry = {"user_id": "probe-test"} if token is None else {"token": token.reveal()}
     path.write_text(json.dumps({server: entry}))
     return path
+
+
+def test_the_installed_cli_knows_the_first_party_switch() -> None:
+    """
+    Behind its proxy a Coral step's CLI on an Anthropic API key keeps its first-party
+    behaviour through a private switch of the CLI, so the installed build must name it.
+    Here, not beside the executor's unit tests, because this lane installs the pinned CLI.
+    """
+    sk.require_claude_cli()
+    cli = _find_system_claude()
+    assert cli is not None, "the executor finds no claude CLI where the stack tests run one"
+    assert FIRST_PARTY_FLAG_NAME == _ASSUME_FIRST_PARTY_ENV
+    name = FIRST_PARTY_FLAG_NAME.encode()
+
+    def names_it(path: Path) -> bool:
+        with path.open("rb") as build, mmap.mmap(build.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            return m.find(name) != -1
+
+    files = [path for path in _cli_build_files(Path(cli).resolve()) if path.stat().st_size]
+    assert any(names_it(path) for path in files), (
+        f"{FIRST_PARTY_FLAG_NAME} is not in the installed claude CLI "
+        f"({sorted({path.name for path in files})}): a Coral step on an Anthropic API key "
+        "would lose the CLI's first-party behaviour behind its proxy"
+    )
 
 
 def test_the_probe_classifies_files_and_tokens(tmp_path: Path) -> None:

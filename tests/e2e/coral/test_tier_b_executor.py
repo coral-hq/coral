@@ -128,6 +128,99 @@ async def test_egress_recorder_sees_model_traffic_aimed_off_the_machine(
     assert "CONNECT api.example.invalid:443 HTTP/1.1" in egress
 
 
+def _request_shapes(mock_url: str, token: str) -> set[tuple[tuple[str, ...], str]]:
+    """Each Messages request of the turn with ``token``: its sorted betas and ``thinking``."""
+    return {
+        (tuple(sorted(entry["betas"])), json.dumps(entry["body"].get("thinking"), sort_keys=True))
+        for entry in get_mock_message_requests(mock_url)
+        if token in json.dumps(entry["body"])
+    }
+
+
+# A real CLI on the direct-key path, where no gateway switch turns its betas off.
+@pytest.mark.timeout(300)
+async def test_a_coral_direct_key_cli_sends_the_same_requests_through_its_proxy(
+    isolated_mock_llm_server_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    The ``anthropic-beta`` header and the ``thinking`` field of every model request a Coral
+    step's real CLI makes on an API key, as the mock upstream records them, in three launches:
+    as before the credential proxy (the CLI on the endpoint itself), through the proxy, and
+    through the proxy with the CLI told its base URL is the Anthropic API, which the executor
+    does only for an upstream that is. The proxy changes neither; the switch only adds betas;
+    and the proxy refuses none of the CLI's requests in either mode.
+    """
+    skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)
+    mock = isolated_mock_llm_server_url
+    home = write_claude_home(tmp_path, marker=tmp_path / "marker.txt")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_gateway_shim")
+    launches = {
+        "unproxied": {"IS_POSIX": False},
+        "proxied": {},
+        "assumed_first_party": {"_is_first_party_url": lambda url: True},
+    }
+    shapes: dict[str, set[tuple[tuple[str, ...], str]]] = {}
+    proxied: dict[str, bool] = {}
+    with EgressRecorder() as recorder:
+        _set_env(
+            monkeypatch,
+            mock_only_env(home=home, base_url=mock, proxy_url=recorder.url, inherited=os.environ),
+        )
+        for launch, patches in launches.items():
+            token = f"TIERB-{uuid.uuid4().hex[:8]}"
+            configure_mock_llm(mock, [{"text": f"done {token}"}] * 4, match=token)
+            with monkeypatch.context() as patched:
+                for name, value in patches.items():
+                    patched.setattr(claude_sdk_executor, name, value)
+                executor = make_executor(
+                    workspace, model=_MODEL, permission_mode="bypassPermissions", coral=True
+                )
+                executor._policy_evaluator = _allow_every_tool  # type: ignore[attr-defined]
+                try:
+                    async with asyncio.timeout(_TURN_BOUND_SECONDS):
+                        events = await collect_turn(executor, f"Reply. {token}", session_id=token)
+                except TimeoutError:
+                    pytest.fail(f"the {launch} turn was still running after 60s")
+                finally:
+                    proxied[launch] = executor._gateway_shim is not None
+                    await executor.close()
+            assert [e.message for e in events if isinstance(e, ExecutorError)] == [], launch
+            completed = [event for event in events if isinstance(event, TurnComplete)]
+            assert completed and f"done {token}" in (completed[-1].response or ""), launch
+            shapes[launch] = _request_shapes(mock, token)
+        egress = recorder.request_lines
+
+    print("request shapes:", json.dumps({k: sorted(v) for k, v in shapes.items()}))
+    assert proxied == {"unproxied": False, "proxied": True, "assumed_first_party": True}
+    assert egress == []
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "omnigent.inner.claude_gateway_shim"
+    ]
+    assert refusals == [], refusals
+    assert shapes["unproxied"] and shapes["proxied"] == shapes["unproxied"]
+    betas = {
+        launch: {beta for flags, _ in seen for beta in flags} for launch, seen in shapes.items()
+    }
+    thinking = {launch: {field for _, field in seen} for launch, seen in shapes.items()}
+    # No gateway switch here, so the CLI keeps its experimental betas and says how it thinks.
+    assert "claude-code-20250219" in betas["proxied"]
+    assert thinking["proxied"] != {"null"}, thinking
+    # Told it is on the Anthropic API, the CLI sends the same thinking field and more betas.
+    # Measured on 2.1.325: cache-diagnosis-2026-04-07, prompt-caching-scope-2026-01-05 and
+    # thinking-binding-controls-2026-08-01, betas that CLI adds only on a first-party URL.
+    assert thinking["assumed_first_party"] == thinking["proxied"]
+    restored = betas["assumed_first_party"] - betas["proxied"]
+    assert betas["assumed_first_party"] > betas["proxied"], sorted(restored)
+    assert "prompt-caching-scope-2026-01-05" in restored, sorted(restored)
+
+
 # Logs the keychain item each lookup names, then answers "not found", so no lookup reaches a
 # real keychain; the CLI runs ``security`` by its bare name.
 _SECURITY_STUB = """#!/bin/sh
