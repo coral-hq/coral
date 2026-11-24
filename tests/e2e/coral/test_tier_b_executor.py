@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import sys
@@ -21,6 +22,7 @@ import coral
 import omnigent
 import tests.e2e.coral._claude_config_probe as probe
 from coral.omni.server.step_agents import checkout_read_paths
+from omnigent.inner import claude_sdk_executor
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import ExecutorError, TurnComplete
 from omnigent.inner.sandbox import _default_sandbox_for_platform
@@ -182,14 +184,17 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     isolated_mock_llm_server_url: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
     A Coral step's real CLI, wrapped in its OS sandbox with a private config dir, completes a
-    turn on API-key auth against the mock. Its API key helper, which the CLI runs inside the
-    wrap, cannot write the throwaway home's plugins, sessions, session-env, backups or
-    .claude.json, or read its session key, credentials or keychain stand-in, and the home is
-    unchanged. Every keychain lookup names a per-dir item. An oversized tool result is
-    reported unsaved, with the pagination advice, since the dir has no ``projects/``.
+    turn on API-key auth against the mock, through its executor's credential proxy. Its API
+    key helper, which the CLI runs inside the wrap, cannot write the throwaway home's plugins,
+    sessions, session-env, backups or .claude.json, or read its session key, credentials or
+    keychain stand-in, and the home is unchanged. That helper's environment holds the proxy's
+    session token and nowhere the model key, and the proxy refuses none of the CLI's requests.
+    Every keychain lookup names a per-dir item. An oversized tool result is reported unsaved,
+    with the pagination advice, since the dir has no ``projects/``.
     """
     skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)
     token = f"TIERB-{uuid.uuid4().hex[:8]}"
@@ -204,8 +209,18 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     scratch.mkdir()
     shutil.copy(probe.__file__, workspace / "probe.py")
     report = workspace / "report.txt"
-    helper = shlex.join([sys.executable, str(workspace / "probe.py"), str(report), str(home)])
+    model_key = f"sk-ant-test-{secrets.token_hex(16)}"
+    # The probe gets the key's length and digest, and looks for it in its own environment.
+    probe_argv = [sys.executable, str(workspace / "probe.py"), str(report), str(home), ""]
+    helper = shlex.join([*probe_argv, probe.secret_spec(model_key)])
+    # The CLI's helper only prints its session token, so the probe runs in front of that.
+    monkeypatch.setattr(
+        claude_sdk_executor,
+        "_PROXY_TOKEN_HELPER",
+        f"{helper}; {claude_sdk_executor._PROXY_TOKEN_HELPER}",
+    )
     harness_root = Path(tempfile.mkdtemp(prefix="crl-", dir="/tmp"))
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_gateway_shim")
     try:
         with EgressRecorder() as recorder:
             env = mock_only_env(
@@ -234,7 +249,8 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
                 coral=True,
                 os_env=OSEnvSpec(type="caller_process", cwd=str(workspace), sandbox=sandbox),
                 isolate_claude_config=True,
-                api_key_helper=f"{helper}; printf %s mock-key",
+                api_key_helper=f"printf %s {model_key}",
+                gateway_base_url=isolated_mock_llm_server_url,
             )
             executor._policy_evaluator = _allow_every_tool  # type: ignore[attr-defined]
             # After the wrap made the only home dir it grants, ~/.npm/_logs.
@@ -263,12 +279,19 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     assert completed and f"done {token}" in (completed[-1].response or "")
     *verdicts, named = report.read_text().splitlines()
     own = ["config_private yes", "config_writable yes", "projects no", "config_seeded no"]
-    own += ["seed_source_write no", "securestorage_own yes"]
+    own += ["seed_source_write no", "securestorage_own yes", "proxy_token yes", "model_key no"]
     assert verdicts == [f"{name} no" for name in probe.HOME_CHECKS] + own, verdicts
     config_dir = Path(named.removeprefix("config_dir "))
     assert config_dir.name == "claude_config_dir" and scratch.resolve() in config_dir.parents
     assert not list(scratch.glob("omnigent-osenv-*")), "close left a launch scratch"
     assert probe.tree(home) == before, "the step changed the home"
+    # The pinned CLI needs no route the proxy does not forward, and always sent its token.
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "omnigent.inner.claude_gateway_shim"
+    ]
+    assert refusals == [], refusals
     _hashed_lookups(log)
     [*_, result] = tool_results(
         get_mock_message_requests(isolated_mock_llm_server_url), call_id=call_id

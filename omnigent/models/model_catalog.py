@@ -1375,8 +1375,11 @@ def _listing_for_provider(
         ValueError,
         subprocess.SubprocessError,
     ) as exc:
+        # CORAL(S118): by type only; a client's error text can quote the credential it sent
         _logger.debug(
-            "model enumeration failed for %s", provider.detail or provider.kind, exc_info=True
+            "model enumeration failed for %s (%s)",
+            provider.detail or provider.kind,
+            type(exc).__name__,
         )
         if provider.kind == SUBSCRIPTION_KIND:
             # A failed cursor-agent listing probe says nothing about

@@ -41,14 +41,16 @@ import sys
 import tempfile  # CORAL(S113)
 import threading  # CORAL(S116)
 import time
+import urllib.request  # CORAL(S118)
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
 from types import ModuleType
 from typing import Any, NamedTuple, Protocol, TypeAlias, cast
+from urllib.parse import urlsplit  # CORAL(S118)
 
-from omnigent._platform import resolve_cli_binary, stable_user_id
+from omnigent._platform import IS_POSIX, resolve_cli_binary, stable_user_id  # CORAL(S118)
 from omnigent.cli_invocation import cli_invocation
 from omnigent.databricks_ai_gateway import (
     CLAUDE_CODE_AGENT,
@@ -78,7 +80,16 @@ from omnigent.util.reasoning_effort import CLAUDE_EFFORTS, validate_effort
 
 from ._subprocess_lifecycle import close_anyio_subprocess_transport
 from .async_utils import run_sync_on_thread
-from .claude_gateway_shim import DATABRICKS_CLAUDE_ADAPTIVE_THINKING_PREFIXES, ClaudeGatewayShim
+from .claude_gateway_shim import (
+    DATABRICKS_CLAUDE_ADAPTIVE_THINKING_PREFIXES,
+    MIN_SCANNED_LITERAL_CHARS,  # CORAL(S118)
+    ClaudeGatewayShim,
+    UpstreamCredential,  # CORAL(S118)
+    UpstreamCredentialError,  # CORAL(S118)
+    check_upstream_transport,  # CORAL(S118)
+    static_credential_literal,  # CORAL(S118)
+    static_printf_value,  # CORAL(S118)
+)
 from .datamodel import OSEnvSandboxSpec, OSEnvSpec
 from .executor import (
     Executor,
@@ -142,6 +153,19 @@ CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE = (
 )
 CORAL_SANDBOX_UNAVAILABLE_CODE = "coral_sandbox_unavailable"
 CORAL_POLICY_HOOK_UNAVAILABLE_CODE = "coral_policy_hook_unavailable"
+# CORAL(S118): a Coral gateway CLI presents this session token to its executor's loopback
+# proxy, which holds the real credential; the helper puts no secret on any command line
+_PROXY_TOKEN_ENV = "OMNIGENT_CLAUDE_PROXY_TOKEN"
+_PROXY_TOKEN_HELPER = f'printf %s "${_PROXY_TOKEN_ENV}"'
+# CORAL(S118): the refusal when that CLI's launch would still hold the key itself
+CORAL_CREDENTIAL_EXPOSED_CODE = "coral_credential_exposed"
+# CORAL(S118): the refusal when the proxy's upstream is plain http to another machine
+CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE = "coral_credential_upstream_refused"
+# CORAL(S118): the CLI's hop to that proxy must bypass any proxy it inherits
+_NO_PROXY_ENV = ("NO_PROXY", "no_proxy")
+# CORAL(S118): how long the model listing waits for a credential command, as before the proxy
+_LISTING_CREDENTIAL_WAIT_S = 15.0
+_LOOPBACK_NO_PROXY = ("127.0.0.1", "localhost")
 _CORAL_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec"}
 _SUBSCRIPTION_TOKEN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
 # CORAL(S113): an isolated CLI's Claude config is a private dir, never the user's
@@ -1345,7 +1369,9 @@ class _GatewayModelVocabulary(NamedTuple):
 _EMPTY_GATEWAY_VOCABULARY = _GatewayModelVocabulary(alias_pins={}, model_overrides={})
 
 
-def _gateway_model_vocabulary(base_url: str, auth_command: str | None) -> _GatewayModelVocabulary:
+def _gateway_model_vocabulary(
+    base_url: str, auth_command: str | None, bearer: str | None = None
+) -> _GatewayModelVocabulary:
     """Read Claude Code's model vocabulary off a gateway's model listing.
 
     Claude Code resolves a family alias — ``opus`` / ``sonnet`` / ``haiku`` /
@@ -1370,26 +1396,44 @@ def _gateway_model_vocabulary(base_url: str, auth_command: str | None) -> _Gatew
     :param base_url: The gateway's ``ANTHROPIC_BASE_URL``.
     :param auth_command: The gateway ``apiKeyHelper`` command; minted into the
         bearer the listing is fetched with.
+    :param bearer: CORAL(S118): the credential itself, from the executor's credential
+        proxy, in place of *auth_command*.
     :returns: The pins and rewrites the listing supports. Empty — leaving
         today's behavior — when the gateway lists no Claude models or the
         listing cannot be fetched.
     """
     from omnigent.onboarding.provider_config import ANTHROPIC_FAMILY, GATEWAY_KIND
 
+    # CORAL(S118): a static key is passed as its value, stripped as the proxy sends it, so
+    # listing models starts no shell; a literal that is not one token is never sent
+    if (
+        bearer is None
+        and auth_command is not None
+        and static_printf_value(auth_command) is not None
+    ):
+        bearer = static_credential_literal(auth_command)
+        if bearer is None:
+            logger.warning(
+                "claude-sdk: the gateway's static key is not one printable token; leaving "
+                "ANTHROPIC_DEFAULT_*_MODEL and modelOverrides unset"
+            )
+            return _EMPTY_GATEWAY_VOCABULARY
     provider = model_catalog.ResolvedModelProvider(
         kind=GATEWAY_KIND,
         family=ANTHROPIC_FAMILY,
         base_url=base_url,
-        auth_command=auth_command,
+        api_key=bearer or None,
+        auth_command=auth_command if bearer is None else None,
         detail="claude-sdk gateway transport",
     )
     try:
         listing = model_catalog.listing_for_provider(provider)
-    except Exception:  # best-effort; unpinned aliases are the safe default
+    except Exception as exc:  # noqa: BLE001 — best-effort; unpinned aliases are the safe default
+        # CORAL(S118): by type only; the failure's text may quote the credential command
         logger.warning(
-            "claude-sdk: could not list the gateway's models; leaving "
+            "claude-sdk: could not list the gateway's models (%s); leaving "
             "ANTHROPIC_DEFAULT_*_MODEL and modelOverrides unset",
-            exc_info=True,
+            type(exc).__name__,
         )
         return _EMPTY_GATEWAY_VOCABULARY
     served = [entry.id for entry in listing.models if entry.family == "claude"]
@@ -1418,6 +1462,58 @@ def _claude_settings_payload(
     if model_overrides:
         settings["modelOverrides"] = model_overrides
     return json.dumps(settings, separators=(",", ":")) if settings else None
+
+
+# CORAL(S118): shim stops that outlive a cancelled ``close()``, held so they run to the end
+_SHIM_STOPS: set[asyncio.Future[None]] = set()
+
+
+class _CredentialExposedError(RuntimeError):
+    """CORAL(S118): a proxied CLI's launch would still hold the model key; names no value."""
+
+
+def _keep_loopback_unproxied(env: dict[str, str]) -> None:
+    """CORAL(S118): append loopback to the ``NO_PROXY`` a CLI would inherit, in both spellings.
+
+    The CLI reaches its credential proxy over plain loopback HTTP, which an inherited
+    ``HTTP_PROXY`` would otherwise intercept.
+
+    :param env: The CLI's ``options.env``, changed in place.
+    """
+    inherited = [env.get(name) or os.environ.get(name) or "" for name in _NO_PROXY_ENV]
+    for name, own, other in zip(_NO_PROXY_ENV, inherited, reversed(inherited), strict=True):
+        hosts = [host.strip() for host in (own or other).split(",") if host.strip()]
+        hosts += [host for host in _LOOPBACK_NO_PROXY if host not in hosts]
+        env[name] = ",".join(hosts)
+
+
+def _proxy_for_upstream(upstream_url: str, environ: Mapping[str, str]) -> str | None:
+    """CORAL(S118): the proxy *environ* names for *upstream_url*, as a client reads it there.
+
+    The scheme's own variable wins over ``ALL_PROXY``. As in urllib, a lower-case name that
+    is set, even to nothing, hides its upper-case twin, so an empty one means "no proxy".
+    ``NO_PROXY`` is honoured here because an explicit proxy skips it, and a loopback
+    upstream never gets a proxy.
+
+    :param upstream_url: The proxy's upstream, e.g. ``"https://gateway.example/anthropic"``.
+    :param environ: A harness environment snapshot.
+    :returns: A proxy URL, possibly with userinfo, or ``None`` when none applies.
+    """
+    from omnigent_client._http import is_loopback_url
+
+    def setting(name: str) -> str:
+        return environ.get(name.upper(), "") if name not in environ else environ[name]
+
+    upstream = urlsplit(upstream_url)
+    proxy = setting(f"{upstream.scheme}_proxy") or setting("all_proxy")
+    if not proxy or is_loopback_url(upstream_url):
+        return None
+    host = upstream.hostname or ""
+    target = f"{host}:{upstream.port}" if upstream.port else host
+    bypasses = {"no": setting("no_proxy")}
+    # Missing from typeshed stubs; present at runtime.
+    bypass = urllib.request.proxy_bypass_environment  # type: ignore[missing-attribute]
+    return None if bypass(target, bypasses) else proxy
 
 
 def _claude_user_settings_env(cwd: str | None = None) -> dict[str, str]:
@@ -2295,6 +2391,10 @@ class ClaudeSDKExecutor(Executor):
         self._claude_config_isolated = False
         # CORAL(S118): kept for running the credential command, never for the CLI's env
         self._credential_env = dict(credential_env) if credential_env is not None else None
+        # CORAL(S118): set below for a Coral gateway on POSIX: the one holder of the real
+        # credential, and a static key long enough to tell from ordinary values
+        self._upstream_credential: UpstreamCredential | None = None
+        self._credential_literal: str | None = None
         self._unwrapped_claude_config_dir: pathlib.Path | None = None
         # CORAL(S115): the seed a wrapped non-Coral CLI's launcher copies in. Its dir is made
         # at the first launch, and again if it goes missing; after close, a launch fails.
@@ -2474,6 +2574,52 @@ class ClaudeSDKExecutor(Executor):
         # ``_CLAUDE_API_KEY_HELPER_ENV_KEY`` from ``_extra_env`` only.
         if api_key_helper:
             self._extra_env[_CLAUDE_API_KEY_HELPER_ENV_KEY] = api_key_helper
+        # CORAL(S118): a Coral gateway CLI goes through the credential proxy (no Windows shell
+        # runs the token helper, so there the CLI keeps the command)
+        command = self._extra_env.get(_CLAUDE_API_KEY_HELPER_ENV_KEY)
+        if require_api_credential and gateway and command and IS_POSIX:
+            self._upstream_credential = self._new_upstream_credential(command)
+            # The stripped form the proxy sends, so a copy without a trailing newline is found.
+            literal = static_credential_literal(command) or ""
+            if len(literal) >= MIN_SCANNED_LITERAL_CHARS:
+                self._credential_literal = literal
+
+    def _new_upstream_credential(self, command: str) -> UpstreamCredential:
+        """CORAL(S118): *command* as the proxy runs it: the CLI's helper TTL, the harness's env.
+
+        :param command: The real credential command, e.g. ``"databricks auth token ..."``.
+        :returns: The credential the proxy and the model listing share.
+        """
+        ttl_ms = _parse_optional_int(self._extra_env.get("CLAUDE_CODE_API_KEY_HELPER_TTL_MS"))
+        # The pre-scrub snapshot holds what the command may need and the CLI must not.
+        environ = os.environ if self._credential_env is None else self._credential_env
+        return UpstreamCredential(
+            command,
+            ttl_s=ttl_ms / 1000 if ttl_ms and ttl_ms > 0 else None,
+            env={name: value for name, value in environ.items() if name != _PROXY_TOKEN_ENV},
+        )
+
+    def _credential_exposure(self, options: SdkOptions) -> str | None:
+        """CORAL(S118): where a proxied CLI's launch would still hold the static key, if anywhere.
+
+        :param options: The SDK options a new client is about to connect with.
+        :returns: Variable names or "its settings or arguments", never a value; ``None``
+            when the key is in neither the CLI's environment nor its settings or extra
+            arguments (other options, the system prompt among them, are not searched).
+        """
+        literal = self._credential_literal
+        if literal is None:
+            return None
+        spawn_env = {**os.environ, **(getattr(options, "env", None) or {})}
+        names = sorted(name for name, value in spawn_env.items() if literal in value)
+        if names:
+            return f"environment variable(s) {', '.join(names)}"
+        extra_args = getattr(options, "extra_args", None) or {}
+        argv = [str(getattr(options, "settings", None) or "")]
+        argv += [str(part) for flag in extra_args.items() for part in flag if part is not None]
+        escaped = json.dumps(literal)[1:-1]  # as the settings JSON would spell it
+        held = any(literal in text or escaped in text for text in argv)
+        return "its settings or arguments" if held else None
 
     def __del__(self) -> None:
         wrapper_path = getattr(self, "_cli_wrapper_path", None)
@@ -2583,9 +2729,24 @@ class ClaudeSDKExecutor(Executor):
                 "env['ANTHROPIC_BASE_URL']; cannot route through the gateway shim."
             )
         if self._gateway_shim is None:
-            self._gateway_shim = ClaudeGatewayShim(upstream_base_url=env["ANTHROPIC_BASE_URL"])
+            upstream = env["ANTHROPIC_BASE_URL"]
+            # CORAL(S118): for a Coral CLI the shim holds the credential; its upstream hop takes
+            # the proxy the harness had before the scrub, which may carry userinfo
+            credential = self._upstream_credential
+            snapshot = None if credential is None else self._credential_env
+            self._gateway_shim = ClaudeGatewayShim(
+                upstream_base_url=upstream,
+                credential=credential,
+                upstream_proxy=None
+                if snapshot is None
+                else _proxy_for_upstream(upstream, snapshot),
+            )
         await self._gateway_shim.start()
         env["ANTHROPIC_BASE_URL"] = self._gateway_shim.base_url
+        # CORAL(S118): the session token is all the CLI holds; its hop here stays off proxies
+        if (session_token := self._gateway_shim.session_token) is not None:
+            env[_PROXY_TOKEN_ENV] = session_token
+            _keep_loopback_unproxied(env)
 
     async def _get_or_create_client(
         self,
@@ -2601,6 +2762,12 @@ class ClaudeSDKExecutor(Executor):
             mcp_auth = _claude_mcp_auth_statuses()
             self._warn_seeded_servers_signed_in_on_host(seeded_servers, mcp_auth)  # CORAL(S115)
             await self._route_options_through_gateway_shim(options)
+            # CORAL(S118): fail closed before every connect rather than hand the CLI the key
+            if (held_in := self._credential_exposure(options)) is not None:
+                raise _CredentialExposedError(
+                    "This step's Claude CLI would hold the model API key, which only its "
+                    f"credential proxy may hold; it is in {held_in}. The CLI was not started."
+                )
             # Tee CLI stderr so the connect timeout error carries the
             # tail; ``_on_stderr`` alone only logs at DEBUG.
             connect_stderr: list[str] = []
@@ -2820,20 +2987,37 @@ class ClaudeSDKExecutor(Executor):
         await self._close_live_client(session_key)
 
     async def close(self) -> None:
-        session_keys = list(self._clients)
-        for session_key in session_keys:
-            await self.close_session(session_key)
-        if self._gateway_shim is not None:
-            await self._gateway_shim.aclose()
-            self._gateway_shim = None
-        self._remove_unwrapped_claude_config_dir()  # CORAL(S113)
-        self._remove_claude_config_seed()  # CORAL(S115)
-        # CORAL(S116): clients evicted on cancel finish closing first; then the last sweep
-        loop = asyncio.get_running_loop()
-        evictions = [task for task in self._cancel_close_tasks if task.get_loop() is loop]
-        if evictions:
-            await asyncio.wait(evictions, timeout=_CLOSE_WAIT_SECONDS)
+        try:
+            session_keys = list(self._clients)
+            for session_key in session_keys:
+                await self.close_session(session_key)
+            # CORAL(S116): clients evicted on cancel finish closing first; then the last sweep
+            # CORAL(S118): and before the shim stops, so no CLI outlives the port it calls
+            loop = asyncio.get_running_loop()
+            evictions = [task for task in self._cancel_close_tasks if task.get_loop() is loop]
+            if evictions:
+                await asyncio.wait(evictions, timeout=_CLOSE_WAIT_SECONDS)
+        finally:
+            # CORAL(S118): a close cut short (the adapter bounds it) or one that failed still
+            # stops the shim, which holds the credential; a second cancel cannot stop the stop
+            stop = asyncio.ensure_future(self._stop_gateway_shim())
+            _SHIM_STOPS.add(stop)
+            stop.add_done_callback(_SHIM_STOPS.discard)
+            try:
+                await asyncio.shield(stop)
+            finally:
+                self._remove_unwrapped_claude_config_dir()  # CORAL(S113)
+                self._remove_claude_config_seed()  # CORAL(S115)
         await _sweep_orphaned_temp_dirs(_CLOSE_WAIT_SECONDS, wait_turn=_CLOSE_WAIT_SECONDS)
+
+    async def _stop_gateway_shim(self) -> None:
+        """CORAL(S118): stop the shim, and a credential command still running without one."""
+        shim, self._gateway_shim = self._gateway_shim, None
+        credential = getattr(self, "_upstream_credential", None)
+        if shim is not None:
+            await shim.aclose()  # stops its credential too
+        elif credential is not None:
+            await credential.aclose()
 
     async def interrupt_session(self, session_key: str) -> bool:
         state = self._clients.get(session_key)
@@ -2990,7 +3174,10 @@ class ClaudeSDKExecutor(Executor):
         return "default"
 
     async def _apply_gateway_model_vocabulary(
-        self, env: dict[str, str], auth_command: str | None
+        self,
+        env: dict[str, str],
+        auth_command: str | None,
+        credential: UpstreamCredential | None = None,
     ) -> dict[str, str]:
         """
         Pin the family aliases in *env* and report Claude Code's id rewrites.
@@ -3009,19 +3196,39 @@ class ClaudeSDKExecutor(Executor):
         :param env: The child-process env dict, mutated in place with the pins.
         :param auth_command: The gateway ``apiKeyHelper`` command used to mint
             a bearer for the model listing.
+        :param credential: CORAL(S118): the credential proxy's own holder of that command;
+            the listing takes its bearer there, so the command has one runner.
         :returns: Canonical-to-served rewrites for the ``modelOverrides``
             setting. Empty off the gateway or when discovery found nothing.
         """
         base_url = env.get("ANTHROPIC_BASE_URL")
         if not self._gateway or not base_url:
             return {}
-        if self._gateway_vocabulary is None:
-            self._gateway_vocabulary = await run_sync_on_thread(
-                _gateway_model_vocabulary, base_url, auth_command
-            )
-        for var, model_id in self._gateway_vocabulary.alias_pins.items():
+        vocabulary = self._gateway_vocabulary
+        if vocabulary is None:
+            try:
+                # CORAL(S118): only the proxy's credential runs the command; the listing waits
+                # as long as its own run of it did, and the run goes on for the proxy
+                bearer = (
+                    None
+                    if credential is None
+                    else await asyncio.wait_for(credential.get(), _LISTING_CREDENTIAL_WAIT_S)
+                )
+            except (UpstreamCredentialError, TimeoutError) as exc:  # CORAL(S118): best-effort
+                logger.warning(
+                    "claude-sdk: no credential to list the gateway's models with (%s); "
+                    "leaving ANTHROPIC_DEFAULT_*_MODEL and modelOverrides unset",
+                    type(exc).__name__,
+                )
+                vocabulary = _EMPTY_GATEWAY_VOCABULARY
+            else:
+                vocabulary = await run_sync_on_thread(
+                    _gateway_model_vocabulary, base_url, auth_command, bearer
+                )
+            self._gateway_vocabulary = vocabulary
+        for var, model_id in vocabulary.alias_pins.items():
             env.setdefault(var, model_id)
-        return self._gateway_vocabulary.model_overrides
+        return vocabulary.model_overrides
 
     def _install_framework_context_hook(
         self, sdk: _ClaudeSDK, options: SdkOptions, session_key: str
@@ -3650,12 +3857,29 @@ class ClaudeSDKExecutor(Executor):
                 retryable=False,
             )
             return
+        # CORAL(S118): the credential leaves this machine over https only; refuse before the
+        # model listing below, the first request that would carry it
+        if self._upstream_credential is not None and (upstream := env.get("ANTHROPIC_BASE_URL")):
+            try:
+                check_upstream_transport(upstream)
+            except OSError as exc:  # its message names the scheme at most
+                yield ExecutorError(
+                    message=f"This step's Claude CLI was not started: {exc}.",
+                    code=CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE,
+                    retryable=False,
+                )
+                return
         # Teach Claude Code this gateway's spellings so no model surface routes
         # to an id the gateway rejects: pins for the family aliases, rewrites
         # for the canonical ids the CLI names itself (the refusal-fallback).
         # No-op off the gateway transport.
-        model_overrides = await self._apply_gateway_model_vocabulary(env, api_key_helper)
-        settings_payload = _claude_settings_payload(api_key_helper, model_overrides)
+        model_overrides = await self._apply_gateway_model_vocabulary(
+            env, api_key_helper, self._upstream_credential
+        )
+        # CORAL(S118): a proxied CLI's helper prints its session token; the real command, which
+        # the proxy holds, is in none of its settings, environment or arguments
+        cli_helper = api_key_helper if self._upstream_credential is None else _PROXY_TOKEN_HELPER
+        settings_payload = _claude_settings_payload(cli_helper, model_overrides)
 
         # Capture stderr from the CLI subprocess for diagnostics
         stderr_lines: list[str] = []
@@ -3986,12 +4210,18 @@ class ClaudeSDKExecutor(Executor):
                 compacted_messages=compacted_messages,
             )
 
-        client = await self._get_or_create_client(
-            sdk,
-            session_key=session_key,
-            options=options,
-            model=model,
-        )
+        try:
+            client = await self._get_or_create_client(
+                sdk,
+                session_key=session_key,
+                options=options,
+                model=model,
+            )
+        except _CredentialExposedError as exc:  # CORAL(S118): refused before any CLI process
+            yield ExecutorError(
+                message=str(exc), code=CORAL_CREDENTIAL_EXPOSED_CODE, retryable=False
+            )
+            return
 
         # ── LLM_REQUEST policy evaluation ────────────────────────
         # If the executor adapter installed a ``_policy_evaluator``

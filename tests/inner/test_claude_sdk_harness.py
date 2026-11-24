@@ -939,8 +939,10 @@ def test_a_coral_harness_drops_every_forwarded_credential_and_provider_switch(
     ]
 
 
+# A key configured with a trailing newline is used stripped, so its copies are found stripped.
+@pytest.mark.parametrize("tail", ["", "\n"], ids=["as-written", "trailing-newline"])
 def test_a_coral_harness_drops_renamed_copies_of_its_gateway_literal(
-    fake_environ: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    fake_environ: dict[str, str], monkeypatch: pytest.MonkeyPatch, tail: str
 ) -> None:
     monkeypatch.setattr(claude_sdk_harness, "IS_POSIX", True)
     token = f"gateway-test-{secrets.token_hex(16)}"
@@ -948,7 +950,7 @@ def test_a_coral_harness_drops_renamed_copies_of_its_gateway_literal(
         {
             "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL": "1",
             "HARNESS_CLAUDE_SDK_API_KEY_HELPER": "databricks auth token --host https://x.example",
-            "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND": f"printf %s {shlex.quote(token)}",
+            "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND": f"printf %s {shlex.quote(token + tail)}",
             "RENAMED_GATEWAY_TOKEN": token,
             "HEADER_COPY": f"Authorization: Bearer {token}",
             "UNRELATED_SETTING": "kept",

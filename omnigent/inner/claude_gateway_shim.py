@@ -238,6 +238,11 @@ def restore_thinking_display(body: bytes) -> bytes:
     return json.dumps(parsed).encode("utf-8")
 
 
+# CORAL(S118): a shorter key also occurs in ordinary values (a placeholder "local" is in
+# /usr/local/bin), so its copies are not searched for; a real provider key is far longer
+MIN_SCANNED_LITERAL_CHARS = 20
+
+
 def static_printf_value(command: str) -> str | None:
     """CORAL(S118): the literal a static-key credential command prints, else ``None``.
 
@@ -278,6 +283,25 @@ def _checked_credential(raw: str | bytes) -> str:
             "the model credential is not one printable token of at most 4 KiB"
         )
     return value.decode("ascii")
+
+
+def static_credential_literal(command: str) -> str | None:
+    """CORAL(S118): the static key *command* holds, in the one form the proxy sends.
+
+    Every search for copies of the key and every request that carries it uses this form, so
+    a key configured with a trailing newline is still one key.
+
+    :param command: A credential command, e.g. ``"printf %s sk-ant-..."``.
+    :returns: The stripped key; ``None`` for a command to run, and for a literal that is
+        not one printable token (the proxy refuses to send that).
+    """
+    literal = static_printf_value(command)
+    if literal is None:
+        return None
+    try:
+        return _checked_credential(literal)
+    except UpstreamCredentialError:
+        return None
 
 
 async def _read_capped_stdout(process: asyncio.subprocess.Process) -> bytes:
@@ -475,7 +499,7 @@ async def _until_client_leaves(receive: _Receive) -> None:
         pass
 
 
-def _check_upstream_transport(url: str) -> None:
+def check_upstream_transport(url: str) -> None:
     """CORAL(S118): the real credential goes over https, or over plain http to loopback only.
 
     :raises OSError: Otherwise; the message names the scheme only when it is ``http``.
@@ -623,9 +647,15 @@ class ClaudeGatewayShim:
         options = (self._credential, self._upstream_proxy, self._upstream_ca_file)
         if all(option is None for option in options):
             return httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT)
+        from omnigent_client._http import is_loopback_url
+
+        # With no proxy named, a loopback upstream is reached directly: the real credential
+        # never goes through a forward proxy the environment names.
+        direct = self._upstream_proxy is None and is_loopback_url(self._upstream_base_url)
         try:
-            verify: ssl.SSLContext | bool = (
-                True
+            # A context built here still reads SSL_CERT_FILE and SSL_CERT_DIR when direct.
+            verify = (
+                httpx.create_ssl_context()
                 if self._upstream_ca_file is None
                 else _upstream_ssl_context(self._upstream_ca_file)
             )
@@ -633,6 +663,7 @@ class ClaudeGatewayShim:
                 timeout=_UPSTREAM_TIMEOUT,
                 follow_redirects=False,
                 proxy=self._upstream_proxy,
+                trust_env=not direct,
                 verify=verify,
             )
         except Exception as exc:  # noqa: BLE001 — the proxy URL may hold userinfo
@@ -668,7 +699,7 @@ class ClaudeGatewayShim:
             await self._client.aclose()
             self._client = None  # CORAL(S118): a client that fails to build leaves none
         if self._credential is not None:
-            _check_upstream_transport(self._upstream_base_url)  # CORAL(S118)
+            check_upstream_transport(self._upstream_base_url)  # CORAL(S118)
         self._client = self._new_upstream_client()  # CORAL(S118)
         if self._credential is not None:
             _quiet_upstream_client_logs()  # CORAL(S118)

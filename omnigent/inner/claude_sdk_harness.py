@@ -96,7 +96,10 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from omnigent._platform import IS_POSIX  # CORAL(S118)
-from omnigent.inner.claude_gateway_shim import static_printf_value  # CORAL(S118)
+from omnigent.inner.claude_gateway_shim import (  # CORAL(S118)
+    MIN_SCANNED_LITERAL_CHARS,
+    static_credential_literal,
+)
 from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import Executor
@@ -189,10 +192,6 @@ _CORAL_PROTECTED_NAMES: frozenset[str] = frozenset(
 _CORAL_PROXY_NAMES: frozenset[str] = frozenset(
     {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"}
 )
-# CORAL(S118): a shorter key also occurs in ordinary values (a placeholder "local" is in
-# /usr/local/bin), so its copies are not searched for; a real provider key is far longer
-_MIN_SCANNED_LITERAL_CHARS = 20
-
 # Default permission mode for the Claude SDK. ``"auto"`` auto-approves
 # tool calls with background safety checks that verify actions align
 # with the request.
@@ -376,8 +375,9 @@ def _scrub_coral_environ(
     literals = [
         literal
         for name in CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS
-        if (literal := static_printf_value(config.get(name, ""))) is not None
-        and len(literal) >= _MIN_SCANNED_LITERAL_CHARS
+        # the stripped form the proxy sends: a copy without a trailing newline is found too
+        if (literal := static_credential_literal(config.get(name, ""))) is not None
+        and len(literal) >= MIN_SCANNED_LITERAL_CHARS
     ]
     for name, value in list(source.items()):
         if name.upper() in _CORAL_PROXY_NAMES:

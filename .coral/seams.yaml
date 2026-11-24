@@ -4169,7 +4169,11 @@ seams:
       REQUESTS_CA_BUNDLE or NODE_EXTRA_CA_CERTS. static_printf_value (in
       claude_gateway_shim.py, for the credential proxy to reuse) reads that
       key back only from the exact "printf %s " + shlex.quote(key) form; an
-      empty literal is ignored. The environment from before the scrub goes
+      empty literal is ignored. static_credential_literal gives the one form
+      of that key used everywhere, stripped as the proxy sends it (None when
+      it is not one printable token), so the scrub, the fail-closed check and
+      the model listing find and send a key configured with a trailing
+      newline without it. The environment from before the scrub goes
       to the executor as credential_env, for running the credential command,
       never the CLI. A direct-exec harness (zygote off or failed) on POSIX no
       longer gets HARNESS_CLAUDE_SDK_API_KEY_HELPER or
@@ -4233,20 +4237,73 @@ seams:
       traversal, @, absolute-form and percent-encoded targets reach no
       upstream and run no command; under httptools, which the credential
       mode no longer runs, an absolute-form target naming an allowed route
-      reaches only the configured upstream. Residuals: until the executor uses the
-      credential proxy (Step 5a), a Coral CLI's helper command runs with the
-      scrubbed environment, a proxy with userinfo reaches neither the CLI nor
-      the gateway shim's upstream client (Steps 5a and 6 pass the snapshot's
-      or settings' proxy as upstream_proxy), every CLI still gets the key on
-      its --settings argv, and the executor's close() stops the shim before
-      it awaits evictions; a direct-exec harness's exec-time environment
-      still holds the forwarded credentials (CRL-197); Windows keeps every
-      name in the environment.
+      reaches only the configured upstream. A Coral (require_api_credential)
+      gateway executor on POSIX now uses that mode. It builds one
+      UpstreamCredential from the real command, the CLI's helper TTL and the
+      pre-scrub environment, and its shim holds it: the CLI's settings carry
+      apiKeyHelper printf %s "$OMNIGENT_CLAUDE_PROXY_TOKEN", and its options
+      env the loopback base URL, the shim's session token and
+      127.0.0.1,localhost appended to the NO_PROXY and no_proxy it would
+      inherit, so the real command is in none of its settings, environment
+      or arguments, and there is no fallback that puts the token on argv.
+      The shim's upstream hop takes the proxy the pre-scrub environment names
+      for the upstream (the scheme's own name, then ALL_PROXY, read as urllib
+      reads them: a lower-case name that is set, even to nothing, hides its
+      upper-case twin; none when NO_PROXY covers the host), so a proxy with
+      userinfo reaches the upstream client and never the CLI. A loopback
+      upstream gets no proxy, and with none named the shim's client for it
+      ignores the environment's proxies (trust_env off, SSL_CERT_FILE and
+      SSL_CERT_DIR still read). The gateway model
+      listing takes its bearer from the same credential, waiting at most 15 s
+      for a command as its own run did, and for every
+      executor a static printf %s key goes to the listing as a value, in its
+      stripped form, so no shell starts; a key that is not one printable
+      token lists nothing. A listing or credential failure is logged by
+      exception type only, in the executor and in
+      omnigent/models/model_catalog.py's DEBUG line, which no longer carries
+      the traceback (a client's error text can quote the header it refused).
+      A proxied executor whose gateway URL is plain http to another machine
+      refuses the turn (coral_credential_upstream_refused, naming the scheme
+      at most) before the listing sends the credential anywhere. Before
+      every connect of a proxied CLI, a static key of at
+      least 20 characters found in any value of os.environ plus the options
+      env, or in the settings or extra arguments, refuses the turn
+      (coral_credential_exposed) naming variable names only; the check is a
+      substring search for the stripped key and its JSON-escaped spelling, so
+      it does not see an encoded or split copy, a key under 20 characters, a
+      command credential's value, or other options such as the system
+      prompt. close() awaits
+      clients evicted on cancel before it stops the shim, so no CLI outlives
+      the port it calls; a close() that is cancelled (the adapter bounds it
+      at 3 s) or fails still stops the shim, shielded from a second cancel,
+      and removes the private config dir and seed, for every gateway
+      executor, and a credential command still running with no shim is
+      stopped too. Measured on macOS 27.2 with claude 2.1.325: probe 15
+      run outside the sandbox reads the reviewer's runner and CLI, the host
+      and the step's own CLI and finds the API key in none of their
+      environments or command lines (before this, on both CLIs' command
+      lines), each CLI's environment names OMNIGENT_CLAUDE_PROXY_TOKEN and no
+      HARNESS_CLAUDE_SDK_* name, and from the step's shell the step's own
+      proxy refuses a model request with no key, with a wrong key and on a
+      path that climbs to the model route (credential_proxy pinned refused,
+      closed, in the single-user and identity probes; the Linux pins are set
+      by reasoning until the coral-e2e lane runs), the mock's ledger holding
+      none of those requests and the session token in no request body (it
+      records no headers; the unit tests cover those). The pinned CLI needed no
+      route beyond the four the shim forwards. Residuals: a Coral direct-key
+      (non-gateway) CLI still gets the key on its --settings argv and ignores
+      the host's ANTHROPIC_BASE_URL until Step 5b; the settings block's
+      endpoint, proxy and CA reach the shim in Step 6; non-Coral CLIs keep
+      their key or command on --settings argv (CRL-197); a direct-exec
+      harness's exec-time environment still holds the forwarded credentials
+      (CRL-197); Windows keeps every name in the environment and the key on
+      argv.
     files:
       - omnigent/host/connect.py
       - omnigent/inner/claude_gateway_shim.py
       - omnigent/inner/claude_sdk_executor.py
       - omnigent/inner/claude_sdk_harness.py
+      - omnigent/models/model_catalog.py
       - omnigent/runner/launch_secrets.py
       - omnigent/runtime/harnesses/process_manager.py
       - tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py
@@ -4264,6 +4321,7 @@ seams:
       - tests/runtime/harnesses/test_process_manager.py
       - tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py
       - tests/e2e/coral/test_sandbox_probe.py
+      - tests/e2e/coral/test_tier_b_executor.py
     budget_lines: 120
     budget_exception:
       lines: 1450
@@ -4283,13 +4341,30 @@ seams:
         checks, no value in responses or DEBUG logs (malformed and failing
         upstreams included), redirects not followed, the quiet upstream
         client, the proxy and CA options, the listening log line, and a
-        loopback-only guard. omnigent/inner/claude_gateway_shim.py (728): the
+        loopback-only guard. tests/inner/test_claude_sdk_executor.py (845):
+        the Coral gateway turn against a real loopback shim and recording
+        upstream (token helper, session token, loopback URL and NO_PROXY in
+        the CLI's options; the real command and snapshot in the shim; the key
+        upstream from the listing and the proxied request), a command
+        credential run once, one shim and token per executor, the unchanged
+        non-Coral, off-POSIX and direct-key turns, the static-key listing
+        and its failure logs with no value at DEBUG, a failing or slow
+        credential command, the fail-closed check for each place a copy can
+        sit, before every connect, for a key configured with a trailing
+        newline and at the scan floor, the plain-http gateway refused before
+        any request, NO_PROXY under either spelling, the snapshot's proxy
+        names read as urllib reads them, a loopback upstream reached
+        directly, and close(): the order, a close cut short or failed, a
+        second cancel, and a credential with no shim.
+        omnigent/inner/claude_gateway_shim.py (759): the
         credential mode (R1, R3, with the security review's hardening), its
-        own credential runner (R7) and the upstream client options (R17); the
+        own credential runner (R7), the one stripped form of a static key and
+        the upstream client options (R17), a loopback upstream reached
+        directly among them; the
         plain shim's header building and response relay moved into helpers
         both modes share.
         tests/inner/test_claude_sdk_harness.py
-        (615): config taken once and reused by every build, every build
+        (617): config taken once and reused by every build, every build
         kwarg from that config, the Coral scrub (forwarded credentials, the
         host's forwarded-names list, every provider switch, renamed copies of
         either literal, the protected essentials and userinfo-free proxies,
@@ -4303,16 +4378,22 @@ seams:
         tests/runtime/harnesses/test_process_manager.py (219): the real
         direct-exec harness and a refusing one, the other-harness case, the
         fork, off-POSIX and POSIX exec paths with the forwarded-names list,
-        and the unsendable socket. omnigent/inner/claude_sdk_harness.py
-        (206): the config take, the Coral scrub with its protected names and
+        and the unsendable socket. omnigent/inner/claude_sdk_executor.py
+        (308): the executor's credential and its TTL and environment, the
+        token helper and options env, the snapshot's upstream proxy with
+        NO_PROXY, the one-source model listing with its bounded wait (R2),
+        the transport refusal before it, the fail-closed check (R4 item 2),
+        and close(): the order (R17) and the shim stop and dir removals that
+        survive a cancelled or failed close.
+        omnigent/inner/claude_sdk_harness.py
+        (208): the config take, the Coral scrub with its protected names and
         scan floor, the resolvers reading the config and the socket read.
-        omnigent/host/connect.py (144, S117 and S118: 6 here, the harness fd
-        variable never forwarded). The other files are within budget:
-        omnigent/runtime/harnesses/process_manager.py 63,
+        omnigent/host/connect.py (144, S117 and S118: 6
+        here, the harness fd variable never forwarded). The other files are
+        within budget: omnigent/runtime/harnesses/process_manager.py 63,
+        omnigent/models/model_catalog.py 5,
         tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py 61,
-        tests/inner/test_claude_sdk_executor.py 56,
-        tests/runtime/harnesses/_claude_sdk_config_harness.py 53,
-        omnigent/inner/claude_sdk_executor.py 6.
+        tests/runtime/harnesses/_claude_sdk_config_harness.py 53.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false

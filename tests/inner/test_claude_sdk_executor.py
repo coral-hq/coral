@@ -3,9 +3,13 @@
 
 import asyncio
 import base64
+import hashlib  # CORAL(S118)
 import json
 import logging
 import os
+import re  # CORAL(S118)
+import secrets  # CORAL(S118)
+import shlex  # CORAL(S118)
 import shutil  # CORAL(S116)
 import subprocess  # CORAL(S116)
 import sys
@@ -16,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx  # CORAL(S118)
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -32,6 +37,12 @@ from omnigent.inner.executor import (
     ToolCallRequest,
     ToolCallStatus,
     TurnComplete,
+)
+
+# CORAL(S118): the shim tests' autouse guard applies here too: any shim upstream must be loopback
+from tests.inner.test_claude_gateway_shim import (
+    _loopback_upstreams_only,  # noqa: F401
+    _RecordingUpstream,
 )
 
 
@@ -7002,6 +7013,784 @@ async def test_coral_harness_cli_env_holds_no_forwarded_credential(
             assert sorted(set(host_env) & set(env)) == []
             assert sorted(name for name in env if name.startswith("HARNESS_CLAUDE_SDK_")) == []
             assert sorted(name for name, v in env.items() if key in v or host_secret in v) == []
+
+
+# CORAL(S118): a Coral gateway CLI holds a session token; its executor's proxy holds the key.
+_GATEWAY_URL = "https://gateway.example/anthropic"
+
+
+def _fake_key() -> str:
+    return f"sk-ant-test-{secrets.token_hex(16)}"
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _gateway_executor(monkeypatch, command: str, *, coral: bool = True, **kwargs):
+    """A generic-provider gateway executor, as the workflow builds one for a key and base URL."""
+    options = {"base_url_override": _GATEWAY_URL, **kwargs}
+    return _coral_executor(
+        monkeypatch,
+        require_api_credential=coral,
+        gateway=True,
+        gateway_auth_command=command,
+        api_key_helper=command,
+        **options,
+    )
+
+
+def _list_models_for_real(monkeypatch) -> None:
+    """Undo the directory's listing stub: this turn lists its loopback gateway's models."""
+    from omnigent.models import model_catalog
+
+    monkeypatch.setattr(
+        model_catalog,
+        "listing_for_provider",
+        lambda provider: model_catalog._listing_for_provider(provider, transport=None),
+    )
+
+
+async def _through_the_proxy(env: dict, key: str) -> tuple[int, int]:
+    """One model request with the CLI's session token and one with the key itself."""
+    async with httpx.AsyncClient(trust_env=False) as cli:
+        url = f"{env['ANTHROPIC_BASE_URL']}/v1/messages"
+        token = {"x-api-key": env["OMNIGENT_CLAUDE_PROXY_TOKEN"]}
+        with_token = await cli.post(url, headers=token, content=b"{}")
+        with_key = await cli.post(url, headers={"x-api-key": key}, content=b"{}")
+    return with_token.status_code, with_key.status_code
+
+
+@pytest.mark.posix_only
+async def test_a_coral_gateway_cli_holds_a_session_token_and_its_proxy_the_key(
+    monkeypatch, tmp_path
+):
+    from omnigent.inner import claude_gateway_shim, claude_sdk_executor
+
+    key = _fake_key()
+    command = f"printf %s {shlex.quote(key)}"
+    upstream = _RecordingUpstream()
+    base_url = await upstream.start()
+    snapshot = {"PATH": os.defpath, "HOME": str(tmp_path), "FORWARDED_BY_THE_HOST": "1"}
+    monkeypatch.setenv("NO_PROXY", "corp.example")
+    monkeypatch.delenv("no_proxy", raising=False)
+    # A static key is a value: neither the model listing nor the proxy starts a process for it.
+    started = Mock(side_effect=AssertionError("a process started for a static key"))
+    monkeypatch.setattr("omnigent.models.model_catalog.subprocess.run", started)
+    monkeypatch.setattr(claude_gateway_shim, "_run_credential_command", started)
+    _list_models_for_real(monkeypatch)
+    executor = _gateway_executor(
+        monkeypatch, command, base_url_override=base_url, credential_env=snapshot
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        options, shim = client.options, executor._gateway_shim
+        statuses = await _through_the_proxy(options.env, key)
+        held = shim._credential
+        held_command, held_value = _sha256(held._command), _sha256(await held.get())
+        held_names = sorted(held._env)
+        token_is_the_shims = options.env["OMNIGENT_CLAUDE_PROXY_TOKEN"] == shim.session_token
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+    finally:
+        await executor.close()
+        await upstream.stop()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert not started.called
+    settings = json.loads(options.settings)
+    assert settings["apiKeyHelper"] == claude_sdk_executor._PROXY_TOKEN_HELPER
+    assert settings["apiKeyHelper"] == 'printf %s "$OMNIGENT_CLAUDE_PROXY_TOKEN"'
+    for env in (spawn_envs[0], options.env):
+        assert sorted(name for name, value in env.items() if key in value) == []
+    in_argv = key in options.settings or key in json.dumps(options.extra_args)
+    assert not in_argv, "the key is in the CLI's settings or arguments"
+    assert options.env["ANTHROPIC_BASE_URL"] == shim_url
+    assert re.fullmatch(r"http://127\.0\.0\.1:\d+", shim_url)
+    assert token_is_the_shims
+    # Loopback is appended to what the CLI would inherit, under both spellings.
+    for name in ("NO_PROXY", "no_proxy"):
+        assert options.env[name].split(",") == ["corp.example", "127.0.0.1", "localhost"]
+    assert upstream_url == base_url
+    # The proxy holds the real command, and runs it with the harness's snapshot only.
+    assert (held_command, held_value) == (_sha256(command), _sha256(key))
+    assert held_names == sorted(snapshot)
+    # The model listing and the CLI's own request both carried the key; the key itself is no
+    # token, so a request presenting it is refused and never forwarded.
+    assert statuses == (200, 401)
+    seen = [(r.method, r.path) for r in upstream.requests]
+    assert seen == [("GET", "/v1/models"), ("POST", "/v1/messages")], seen
+    listing, proxied = upstream.requests
+    assert _sha256(listing.headers["authorization"]) == _sha256(f"Bearer {key}")
+    assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
+
+
+@pytest.mark.posix_only
+async def test_a_coral_gateway_command_runs_once_in_the_proxy_for_the_listing_and_the_cli(
+    monkeypatch, tmp_path
+):
+    key = _fake_key()
+    counter = tmp_path / "credential-runs"
+    command = 'printf x >> "$RUN_COUNTER"; printf %s "$FAKE_UPSTREAM_KEY"'
+    upstream = _RecordingUpstream()
+    base_url = await upstream.start()
+    # Only the snapshot can print the key: the harness's own environment lost it in the scrub.
+    snapshot = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "RUN_COUNTER": str(counter),
+        "FAKE_UPSTREAM_KEY": key,
+        "OMNIGENT_CLAUDE_PROXY_TOKEN": "stale",
+    }
+    monkeypatch.setattr(
+        "omnigent.models.model_catalog.subprocess.run",
+        Mock(side_effect=AssertionError("the model listing ran the command itself")),
+    )
+    _list_models_for_real(monkeypatch)
+    executor = _gateway_executor(
+        monkeypatch,
+        command,
+        base_url_override=base_url,
+        credential_env=snapshot,
+        gateway_auth_refresh_interval_ms="60000",
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        options = client.options
+        statuses = await _through_the_proxy(options.env, key)
+        credential = executor._gateway_shim._credential
+        ttl_s, held_names = credential._ttl_s, sorted(credential._env)
+    finally:
+        await executor.close()
+        await upstream.stop()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert statuses == (200, 401)
+    assert counter.read_text() == "x", "the command ran more than once"
+    assert ttl_s == 60.0
+    assert held_names == sorted(set(snapshot) - {"OMNIGENT_CLAUDE_PROXY_TOKEN"})
+    listing, proxied = upstream.requests
+    assert _sha256(listing.headers["authorization"]) == _sha256(f"Bearer {key}")
+    assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
+    # The command stays with the proxy: it is in no CLI env value, setting or argument.
+    carried = [*spawn_envs[0].values(), options.settings, json.dumps(options.extra_args)]
+    assert not any(command in text or key in text for text in carried)
+
+
+@pytest.mark.parametrize("case", ["non-coral-gateway", "coral-gateway-off-posix", "coral-key"])
+async def test_only_a_coral_gateway_cli_on_posix_goes_through_the_credential_proxy(
+    monkeypatch, case
+):
+    from omnigent.inner import claude_sdk_executor
+
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    if case == "coral-key":
+        executor = _coral_executor(
+            monkeypatch, require_api_credential=True, api_key_helper=command
+        )
+    else:
+        monkeypatch.setattr(claude_sdk_executor, "IS_POSIX", case == "non-coral-gateway")
+        executor = _gateway_executor(monkeypatch, command, coral=case != "non-coral-gateway")
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        shim = executor._gateway_shim
+        # (no token, no credential, its URL), told by presence so a failure prints no value
+        proxied = shim and (shim.session_token is None, shim._credential is None, shim.base_url)
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    # As before: the CLI runs the real command itself, and no session token exists.
+    assert _sha256(json.loads(client.options.settings)["apiKeyHelper"]) == _sha256(command)
+    added = {"OMNIGENT_CLAUDE_PROXY_TOKEN", "NO_PROXY", "no_proxy"} & set(client.options.env)
+    assert sorted(added) == []
+    if case == "coral-key":
+        assert proxied is None and "ANTHROPIC_BASE_URL" not in client.options.env
+    else:
+        assert proxied == (True, True, client.options.env["ANTHROPIC_BASE_URL"])
+
+
+def test_a_static_key_lists_gateway_models_as_a_value_never_as_a_command(caplog):
+    from omnigent.inner.claude_sdk_executor import _gateway_model_vocabulary
+    from omnigent.models.model_catalog import ModelEntry, ModelListing
+
+    key = _fake_key()
+    listing = ModelListing(
+        source="openai-compatible",
+        verified=True,
+        models=(ModelEntry(id="gw-claude-opus-4-8", family="claude"),),
+        note="",
+    )
+    target = "omnigent.models.model_catalog.listing_for_provider"
+    with patch(target, return_value=listing) as lister:
+        literal = _gateway_model_vocabulary(_GATEWAY_URL, f"printf %s {shlex.quote(key)}")
+        resolved = _gateway_model_vocabulary(_GATEWAY_URL, None, key)
+    for call in lister.call_args_list:
+        provider = call.args[0]
+        assert provider.auth_command is None
+        assert _sha256(provider.api_key) == _sha256(key)
+    assert literal == resolved
+    assert literal.model_overrides == {"claude-opus-4-8": "gw-claude-opus-4-8"}
+    # A failed listing is logged by its exception type alone.
+    failure = RuntimeError(f"listing failed with {key}")
+    with patch(target, side_effect=failure), caplog.at_level(logging.WARNING):
+        _gateway_model_vocabulary(_GATEWAY_URL, "databricks auth token")
+    (record,) = [r for r in caplog.records if "could not list" in r.getMessage()]
+    assert "RuntimeError" in record.getMessage() and record.exc_info is None
+    assert key not in caplog.text
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "planted", ["os-environ", "options-env", "settings", "nowhere", "short-key"]
+)
+async def test_a_coral_turn_is_refused_when_its_cli_would_still_hold_the_key(monkeypatch, planted):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_EXPOSED_CODE
+
+    # Shorter than the scan floor, a key is not told apart from ordinary values.
+    key = "sk-ant-test-0123456" if planted == "short-key" else _fake_key()
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(key)}")
+    if planted in ("os-environ", "short-key"):
+        monkeypatch.setenv("UNLISTED_COPY", f"Bearer {key}")
+    elif planted == "options-env":
+        executor._extra_env["UNLISTED_COPY"] = key
+    elif planted == "settings":
+        rewrites = AsyncMock(return_value={"claude-opus-4-8": f"gw-{key}"})
+        monkeypatch.setattr(executor, "_apply_gateway_model_vocabulary", rewrites)
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    finally:
+        await executor.close()
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    if planted in ("nowhere", "short-key"):
+        assert errors == [] and len(spawn_envs) == 1
+        return
+    assert [(e.code, e.retryable) for e in errors] == [(CORAL_CREDENTIAL_EXPOSED_CODE, False)]
+    assert len(events) == 1 and key not in errors[0].message
+    where = "its settings or arguments" if planted == "settings" else "UNLISTED_COPY"
+    assert where in errors[0].message
+    assert fake_sdk.created_clients == [] and spawn_envs == []
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("proxies", "taken_from"),
+    [
+        ({"HTTPS_PROXY": "http://user:<password>@proxy.example:3128"}, "HTTPS_PROXY"),
+        (
+            {"https_proxy": "http://lower.example:1", "HTTPS_PROXY": "http://upper.example:1"},
+            "https_proxy",
+        ),
+        ({"ALL_PROXY": "http://all.example:1"}, "ALL_PROXY"),
+        ({"HTTP_PROXY": "http://plain.example:1"}, None),
+        ({"HTTPS_PROXY": "http://proxy.example:1", "NO_PROXY": "x.test,gateway.example"}, None),
+        ({"HTTPS_PROXY": "http://proxy.example:1", "no_proxy": "*"}, None),
+        ({}, None),
+    ],
+    ids=["userinfo", "lower-case-wins", "all", "other-scheme", "no-proxy", "no-proxy-all", "none"],
+)
+async def test_the_proxys_upstream_hop_takes_its_proxy_from_the_harness_snapshot(
+    monkeypatch, tmp_path, proxies, taken_from
+):
+    password = f"pw-{secrets.token_hex(8)}"
+    proxies = {name: value.replace("<password>", password) for name, value in proxies.items()}
+    wanted = proxies.get(taken_from) if taken_from else None
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    snapshot = {"PATH": os.defpath, "HOME": str(tmp_path), **proxies}
+    executor = _gateway_executor(
+        monkeypatch, f"printf %s {shlex.quote(_fake_key())}", credential_env=snapshot
+    )
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        chosen = executor._gateway_shim._upstream_proxy
+        cli_env = fake_sdk.created_clients[0].options.env
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert (chosen is None, _sha256(chosen or "")) == (wanted is None, _sha256(wanted or ""))
+    assert sorted(name for name, value in cli_env.items() if password in value) == []
+
+
+# CORAL(S118): a CLI evicted on cancel is gone before the proxy's port is free for another bind
+async def test_close_waits_for_a_cancel_eviction_before_it_stops_the_proxy(monkeypatch):
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(_fake_key())}")
+    order: list[str] = []
+    release = asyncio.Event()
+
+    async def _slow_teardown(_client) -> None:
+        await release.wait()
+        order.append("evicted")
+
+    async def _stop_proxy() -> None:
+        order.append("proxy stopped")
+
+    monkeypatch.setattr(executor, "_force_close_client", _slow_teardown)
+    executor._gateway_shim = SimpleNamespace(aclose=_stop_proxy)
+    executor._clients["evicted"] = SimpleNamespace(client=object())
+    executor._evict_client_on_cancel("evicted")
+    closing = asyncio.create_task(executor.close())
+    done, _ = await asyncio.wait({closing}, timeout=0.2)
+    assert not done, "close() returned while a cancel eviction was still closing"
+    assert order == [], "the proxy stopped while a CLI was still closing"
+    release.set()
+    await closing
+
+    assert order == ["evicted", "proxy stopped"]
+
+
+_PROXY_TOKEN = "OMNIGENT_CLAUDE_PROXY_TOKEN"
+
+
+async def _session_turn(executor, fake_sdk, session_id: str) -> list:
+    """One turn of *session_id* on *fake_sdk*, which keeps every client the executor builds."""
+    messages = [{"role": "user", "content": "hi", "session_id": session_id}]
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        return [event async for event in executor.run_turn(messages, [], "")]
+
+
+@pytest.mark.posix_only
+async def test_every_client_of_a_coral_gateway_executor_shares_one_proxy_and_token(monkeypatch):
+    from omnigent.inner import claude_sdk_executor
+
+    built = []
+    real_shim = claude_sdk_executor.ClaudeGatewayShim
+
+    def recording_shim(**kwargs):
+        built.append(real_shim(**kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(claude_sdk_executor, "ClaudeGatewayShim", recording_shim)
+    # No snapshot: the command gets the harness's own environment, less the proxy's name,
+    # and the upstream hop keeps the client's environment proxies.
+    monkeypatch.setenv("OMNIGENT_CLAUDE_PROXY_TOKEN", "stale")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    fake_sdk = _make_recovery_fake_sdk()
+    executor = _gateway_executor(monkeypatch, command)
+    rebuilt = _gateway_executor(monkeypatch, command)
+    try:
+        # A second session, then the first one reconnecting after its client closed.
+        for session in ("first", "second", "first"):
+            events = await _session_turn(executor, fake_sdk, session)
+            assert any(isinstance(e, TurnComplete) for e in events), events
+            await executor.close_session("first")
+        shim, credential = executor._gateway_shim, executor._upstream_credential
+        await _session_turn(rebuilt, fake_sdk, "first")
+        proxies = [(each.base_url, each.session_token) for each in built]
+        held_names, harness_names = sorted(credential._env), sorted(os.environ)
+    finally:
+        await executor.close()
+        await rebuilt.close()
+
+    held = [
+        (client.options.env["ANTHROPIC_BASE_URL"], client.options.env[_PROXY_TOKEN])
+        for client in fake_sdk.created_clients
+    ]
+    assert len(held) == 4 and len(set(held[:3])) == 1
+    # The token reaches a CLI in its environment only, never spelled on its command line.
+    for (_, token), client in zip(held, fake_sdk.created_clients, strict=True):
+        assert token not in f"{client.options.settings}{client.options.extra_args}"
+    assert built[0] is shim and shim._credential is credential
+    # An executor rebuilt from the same config has a proxy and a token of its own.
+    assert len(built) == 2 and [held[0], held[3]] == proxies
+    assert _sha256(held[3][1]) != _sha256(held[0][1])
+    assert held_names == [name for name in harness_names if name != _PROXY_TOKEN]
+    assert (credential._ttl_s, shim._upstream_proxy) == (900.0, None)
+
+
+@pytest.mark.parametrize(
+    ("inherited", "options_env", "upper", "lower"),
+    [
+        ({"no_proxy": "corp.example"}, {}, "corp.example,", "corp.example,"),
+        ({"NO_PROXY": "a.example", "no_proxy": "b.example"}, {}, "a.example,", "b.example,"),
+        ({"NO_PROXY": "a.example"}, {"NO_PROXY": "own.example"}, "own.example,", "own.example,"),
+        ({"NO_PROXY": "a.example"}, {"no_proxy": "b.example"}, "a.example,", "b.example,"),
+        ({"NO_PROXY": "*"}, {}, "*,", "*,"),
+        ({}, {}, "", ""),
+        # Hosts already listed keep their place and are not repeated; blanks are dropped.
+        ({"NO_PROXY": " localhost , x.example,,127.0.0.1"}, {}, None, None),
+    ],
+    ids=["lower-only", "each-its-own", "options-env-wins", "one-of-each", "all", "none", "listed"],
+)
+@pytest.mark.posix_only
+def test_loopback_joins_the_no_proxy_a_cli_would_inherit_under_either_spelling(
+    monkeypatch, inherited, options_env, upper, lower
+):
+    from omnigent.inner.claude_sdk_executor import _keep_loopback_unproxied
+
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in inherited.items():
+        monkeypatch.setenv(name, value)
+    env = dict(options_env)
+    _keep_loopback_unproxied(env)
+    listed = "localhost,x.example,127.0.0.1"
+    assert env == {
+        "NO_PROXY": listed if upper is None else f"{upper}127.0.0.1,localhost",
+        "no_proxy": listed if lower is None else f"{lower}127.0.0.1,localhost",
+    }
+
+
+def test_the_snapshots_proxy_follows_the_schemes_own_name_and_the_upstreams_port():
+    from omnigent.inner.claude_sdk_executor import _proxy_for_upstream
+
+    own, every = "http://own.example:1", "http://all.example:1"
+    both = {"ALL_PROXY": every, "HTTPS_PROXY": own}
+    assert _proxy_for_upstream("https://gateway.example/anthropic", both) == own
+    ported = {"HTTPS_PROXY": own, "NO_PROXY": "gateway.example:8443"}
+    assert _proxy_for_upstream("https://gateway.example:8443/anthropic", ported) is None
+    assert _proxy_for_upstream("https://gateway.example:9443/anthropic", ported) == own
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "key",
+    ['sk-ant-test-0123456789abcdef"\\', "sk-ant-test-01234567", "sk-ant-test-0123456"],
+    ids=["json-escaped", "at-the-floor", "short"],
+)
+def test_the_exposure_check_reads_settings_and_arguments_as_the_cli_gets_them(monkeypatch, key):
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(key)}")
+    clean = {"env": {"PATH": os.defpath}, "settings": None, "extra_args": {"flag": None}}
+    holding = {
+        "settings": {"settings": json.dumps({"modelOverrides": {"m": f"gw-{key}"}})},
+        "arguments": {"extra_args": {"flag": None, "append-system-prompt": f"x {key}"}},
+        "environment": {"env": {"B_COPY": key, "A_COPY": f"Bearer {key}"}},
+    }
+    found = {
+        where: executor._credential_exposure(SimpleNamespace(**{**clean, **held}))
+        for where, held in holding.items()
+    }
+
+    assert executor._credential_exposure(SimpleNamespace(**clean)) is None
+    assert executor._credential_exposure(SimpleNamespace()) is None
+    expected = {
+        "settings": "its settings or arguments",
+        "arguments": "its settings or arguments",
+        "environment": "environment variable(s) A_COPY, B_COPY",
+    }
+    # Under the scan floor a key is not told apart from ordinary values, wherever it sits.
+    assert found == (expected if len(key) >= 20 else dict.fromkeys(expected))
+
+
+@pytest.mark.posix_only
+async def test_the_exposure_check_runs_before_every_connect_not_only_the_first(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_EXPOSED_CODE
+
+    key = _fake_key()
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(key)}")
+    fake_sdk = _make_recovery_fake_sdk()
+    try:
+        first = await _session_turn(executor, fake_sdk, "first")
+        monkeypatch.setenv("LATE_COPY", key)
+        refused = await _session_turn(executor, fake_sdk, "second")
+        monkeypatch.delenv("LATE_COPY")
+        retried = await _session_turn(executor, fake_sdk, "second")
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in refused] == [(CORAL_CREDENTIAL_EXPOSED_CODE, False)]
+    assert "LATE_COPY" in refused[0].message and key not in refused[0].message
+    # The refusal built no client and left the session able to connect once the copy is gone.
+    for events in (first, retried):
+        assert any(isinstance(e, TurnComplete) for e in events), events
+    assert len(fake_sdk.created_clients) == 2
+
+
+@pytest.mark.posix_only
+async def test_a_failing_coral_gateway_command_lists_no_models_and_logs_its_type_only(
+    monkeypatch, tmp_path, caplog
+):
+    marker = f"helper-text-{secrets.token_hex(8)}"
+    counter = tmp_path / "credential-runs"
+    command = f'printf x >> "$RUN_COUNTER"; echo {marker}; exit 3'
+    snapshot = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "RUN_COUNTER": str(counter)}
+    lister = Mock(side_effect=AssertionError("models were listed without a credential"))
+    monkeypatch.setattr("omnigent.models.model_catalog.listing_for_provider", lister)
+    executor = _gateway_executor(monkeypatch, command, credential_env=snapshot)
+    fake_sdk = _make_recovery_fake_sdk()
+    caplog.set_level(logging.DEBUG)
+    try:
+        # The second session's turn finds the empty vocabulary kept, and no second run.
+        for session in ("first", "second"):
+            events = await _session_turn(executor, fake_sdk, session)
+            assert any(isinstance(e, TurnComplete) for e in events), events
+    finally:
+        await executor.close()
+
+    assert counter.read_text() == "x" and not lister.called
+    for client in fake_sdk.created_clients:
+        settings = json.loads(client.options.settings)
+        assert sorted(settings) == ["apiKeyHelper"]
+        pins = [name for name in client.options.env if name.startswith("ANTHROPIC_DEFAULT_")]
+        assert pins == []
+    (record,) = [r for r in caplog.records if "no credential to list" in r.getMessage()]
+    assert "UpstreamCredentialError" in record.getMessage() and record.exc_info is None
+    assert marker not in caplog.text
+
+
+# CORAL(S118): the adapter reaps an abandoned executor under a short bound, which cancels a
+# close() still waiting for an eviction; the shim holds the credential, so it stops anyway.
+def _executor_with_a_slow_eviction(monkeypatch, coral: bool, ran: list[str]):
+    """A gateway executor mid-eviction, its shim stop and dir removals recorded in *ran*."""
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(_fake_key())}", coral=coral)
+    evicted = asyncio.Event()
+
+    async def _slow_teardown(_client) -> None:
+        await evicted.wait()
+
+    async def _stop_proxy() -> None:
+        ran.append("proxy stopped")
+
+    monkeypatch.setattr(executor, "_force_close_client", _slow_teardown)
+    monkeypatch.setattr(
+        executor, "_remove_unwrapped_claude_config_dir", lambda: ran.append("config dir")
+    )
+    monkeypatch.setattr(executor, "_remove_claude_config_seed", lambda: ran.append("seed"))
+    executor._gateway_shim = SimpleNamespace(aclose=_stop_proxy)
+    executor._clients["evicted"] = SimpleNamespace(client=object())
+    executor._evict_client_on_cancel("evicted")
+    return executor, evicted
+
+
+@pytest.mark.parametrize("coral", [True, False], ids=["coral", "non-coral"])
+@pytest.mark.parametrize("cut_short", ["bounded", "failed"])
+async def test_a_close_cut_short_still_stops_the_proxy_and_removes_the_private_dirs(
+    monkeypatch, coral, cut_short
+):
+    ran: list[str] = []
+    executor, evicted = _executor_with_a_slow_eviction(monkeypatch, coral, ran)
+    if cut_short == "bounded":
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(executor.close(), timeout=0.05)
+    else:
+        executor._clients["live"] = SimpleNamespace(client=object())
+        failure = RuntimeError("a session would not close")
+        monkeypatch.setattr(executor, "close_session", AsyncMock(side_effect=failure))
+        with pytest.raises(RuntimeError):
+            await executor.close()
+    stopped_while_evicting = (list(ran), executor._gateway_shim is None)
+    evicted.set()
+    await asyncio.gather(*executor._cancel_close_tasks)
+
+    assert stopped_while_evicting == (["proxy stopped", "config dir", "seed"], True)
+
+
+async def test_a_second_cancel_cannot_interrupt_the_proxys_stop(monkeypatch):
+    ran: list[str] = []
+    executor, evicted = _executor_with_a_slow_eviction(monkeypatch, True, ran)
+    stopping, release, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def _slow_stop() -> None:
+        stopping.set()
+        await release.wait()
+        ran.append("proxy stopped")
+        stopped.set()
+
+    executor._gateway_shim = SimpleNamespace(aclose=_slow_stop)
+    closing = asyncio.create_task(executor.close())
+    await asyncio.sleep(0)  # close() is now waiting for the eviction
+    closing.cancel()
+    await asyncio.wait_for(stopping.wait(), timeout=5)
+    closing.cancel()
+    await asyncio.wait({closing})
+    # The stop goes on by itself; the dirs did not wait for it.
+    left_behind = (closing.cancelled(), list(ran))
+    release.set()
+    await asyncio.wait_for(stopped.wait(), timeout=5)
+    evicted.set()
+    await asyncio.gather(*executor._cancel_close_tasks)
+
+    assert left_behind == (True, ["config dir", "seed"])
+    assert ran == ["config dir", "seed", "proxy stopped"] and executor._gateway_shim is None
+
+
+@pytest.mark.posix_only
+async def test_close_stops_a_credential_command_started_before_any_proxy(monkeypatch):
+    executor = _gateway_executor(monkeypatch, "databricks auth token --host https://x.example")
+    stopped = AsyncMock()
+    monkeypatch.setattr(executor._upstream_credential, "aclose", stopped)
+
+    await executor.close()
+
+    assert executor._gateway_shim is None and stopped.await_count == 1
+
+
+# CORAL(S118): one form of a static key everywhere: stripped, as the proxy sends it.
+@pytest.mark.posix_only
+async def test_a_key_configured_with_a_trailing_newline_is_found_without_it(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_EXPOSED_CODE
+
+    key = _fake_key()
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(key + chr(10))}")
+    monkeypatch.setenv("UNLISTED_COPY", f"Bearer {key}")
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        sent = _sha256(await executor._upstream_credential.get())
+    finally:
+        await executor.close()
+
+    assert sent == _sha256(key)
+    assert [(e.code, e.retryable) for e in events] == [(CORAL_CREDENTIAL_EXPOSED_CODE, False)]
+    assert "UNLISTED_COPY" in events[0].message and key not in events[0].message
+    assert fake_sdk.created_clients == [] and spawn_envs == []
+
+
+@pytest.mark.parametrize("configured", ["trailing-newline", "two-lines", "refused-by-the-client"])
+def test_a_static_key_reaches_no_log_however_its_listing_goes(monkeypatch, caplog, configured):
+    from omnigent.inner.claude_sdk_executor import _gateway_model_vocabulary
+    from omnigent.models import model_catalog
+
+    key = _fake_key()
+    written = {"trailing-newline": f"{key}\n", "two-lines": f"{key}\nmore"}.get(configured, key)
+    listed: list[str] = []
+
+    def _refuse(request: httpx.Request) -> httpx.Response:
+        # As a client library does when it will not send a header: its text quotes the value.
+        raise httpx.LocalProtocolError(f"Illegal header value {request.headers['authorization']}")
+
+    def _lister(provider):
+        listed.append(_sha256(provider.api_key or ""))
+        return model_catalog._listing_for_provider(
+            provider, transport=httpx.MockTransport(_refuse)
+        )
+
+    monkeypatch.setattr(model_catalog, "listing_for_provider", _lister)
+    caplog.set_level(logging.DEBUG)
+    vocabulary = _gateway_model_vocabulary(_GATEWAY_URL, f"printf %s {shlex.quote(written)}")
+
+    assert vocabulary.alias_pins == {} and vocabulary.model_overrides == {}
+    # Two lines are no key at all, so nothing is listed; otherwise the stripped key is.
+    assert listed == ([] if configured == "two-lines" else [_sha256(key)])
+    assert key not in caplog.text
+    assert [record for record in caplog.records if record.exc_info] == []
+    logged = "not one printable token" if configured == "two-lines" else "LocalProtocolError"
+    assert logged in caplog.text
+
+
+# CORAL(S118): the credential leaves the machine over https only, the model listing included.
+@pytest.mark.posix_only
+@pytest.mark.parametrize("coral", [True, False], ids=["coral", "non-coral"])
+async def test_a_coral_gateway_on_plain_http_elsewhere_is_refused_before_any_request(
+    monkeypatch, coral
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE
+    from omnigent.models import model_catalog
+
+    key = _fake_key()
+    listed = Mock(wraps=model_catalog.listing_for_provider)
+    monkeypatch.setattr(model_catalog, "listing_for_provider", listed)
+    # Never contacted: the autouse guard fails this test if anything tries.
+    executor = _gateway_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(key)}",
+        coral=coral,
+        base_url_override="http://gateway.example/anthropic",
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        proxy_built = executor._gateway_shim is not None
+    finally:
+        await executor.close()
+
+    if not coral:  # as before: a plain shim, and the CLI holds the command itself
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        assert listed.call_count == 1 and proxy_built
+        return
+    assert [(e.code, e.retryable) for e in events] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    assert "https" in events[0].message
+    assert not [text for text in (key, "gateway.example") if text in events[0].message]
+    assert not listed.called and not proxy_built
+    assert fake_sdk.created_clients == [] and spawn_envs == []
+
+
+@pytest.mark.parametrize(
+    ("upstream", "environ", "taken_from"),
+    [
+        # As urllib reads it: a lower-case name set to nothing means no proxy.
+        (_GATEWAY_URL, {"https_proxy": "", "HTTPS_PROXY": "http://upper.example:1"}, None),
+        (_GATEWAY_URL, {"https_proxy": "", "ALL_PROXY": "http://all.example:1"}, "ALL_PROXY"),
+        (_GATEWAY_URL, {"all_proxy": "", "ALL_PROXY": "http://all.example:1"}, None),
+        (
+            _GATEWAY_URL,
+            {"HTTPS_PROXY": "http://p.example:1", "no_proxy": "", "NO_PROXY": "gateway.example"},
+            "HTTPS_PROXY",
+        ),
+        # A loopback upstream is never reached through a forward proxy.
+        ("http://127.0.0.1:8080/anthropic", {"HTTP_PROXY": "http://p.example:1"}, None),
+        ("https://localhost:8443", {"https_proxy": "http://p.example:1"}, None),
+        ("http://[::1]:8080", {"ALL_PROXY": "http://p.example:1"}, None),
+    ],
+    ids=["empty-lower", "empty-lower-all", "empty-all", "empty-no-proxy", "v4", "name", "v6"],
+)
+def test_the_snapshots_proxy_is_read_as_urllib_reads_it_and_never_for_loopback(
+    upstream, environ, taken_from
+):
+    from omnigent.inner.claude_sdk_executor import _proxy_for_upstream
+
+    assert _proxy_for_upstream(upstream, environ) == (environ[taken_from] if taken_from else None)
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize("snapshot_given", [True, False], ids=["snapshot", "harness-environ"])
+async def test_a_loopback_upstream_is_reached_directly_whatever_proxy_is_named(
+    monkeypatch, tmp_path, snapshot_given
+):
+    key = _fake_key()
+    upstream, forward_proxy = _RecordingUpstream(), _RecordingUpstream()
+    base_url = await upstream.start()
+    proxy_url = await forward_proxy.start()
+    for name in ("NO_PROXY", "no_proxy", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", proxy_url)
+    snapshot = {"PATH": os.defpath, "HOME": str(tmp_path), "HTTP_PROXY": proxy_url}
+    executor = _gateway_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(key)}",
+        base_url_override=base_url,
+        credential_env=snapshot if snapshot_given else None,
+    )
+    try:
+        _, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        statuses = await _through_the_proxy(fake_sdk.created_clients[0].options.env, key)
+    finally:
+        await executor.close()
+        await upstream.stop()
+        await forward_proxy.stop()
+
+    assert statuses == (200, 401)
+    assert [(r.method, r.path) for r in upstream.requests] == [("POST", "/v1/messages")]
+    assert forward_proxy.requests == []
+
+
+async def test_the_model_listing_waits_a_bounded_time_for_a_credential_command(
+    monkeypatch, caplog
+):
+    from omnigent.inner import claude_sdk_executor
+
+    lister = Mock(side_effect=AssertionError("models were listed without a credential"))
+    monkeypatch.setattr("omnigent.models.model_catalog.listing_for_provider", lister)
+    monkeypatch.setattr(claude_sdk_executor, "_LISTING_CREDENTIAL_WAIT_S", 0.01)
+    executor = _gateway_executor(monkeypatch, "databricks auth token --host https://x.example")
+    never = asyncio.Event()
+    waiting = SimpleNamespace(get=never.wait)
+    caplog.set_level(logging.WARNING)
+
+    overrides = await executor._apply_gateway_model_vocabulary(
+        {"ANTHROPIC_BASE_URL": _GATEWAY_URL}, None, waiting
+    )
+
+    assert overrides == {} and not lister.called
+    (record,) = [r for r in caplog.records if "no credential to list" in r.getMessage()]
+    assert "TimeoutError" in record.getMessage() and record.exc_info is None
 
 
 @pytest.mark.parametrize(
