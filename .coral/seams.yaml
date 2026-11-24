@@ -4149,3 +4149,45 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S121
+    title: The macOS sandbox keeps the pasteboard, Spotlight and Apple Events out of reach
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 26.3.1: the step profile's broad (allow mach-lookup)
+      let a sandboxed shell look up com.apple.pasteboard.1 (it read and wrote
+      a private named pasteboard, so the general pasteboard too),
+      com.apple.metadata.mds (mdfind listed folders the file rules hide) and
+      com.apple.coreservices.appleevents. Every profile _build_profile emits
+      (the os_env step shell, every spawn-time CLI wrap and sandboxed
+      terminal panes) now denies, after the broad allow and in the
+      global-name-prefix form S111 uses, the com.apple.pasteboard.,
+      com.apple.coreservices.uasharedpasteboard (Universal Clipboard),
+      com.apple.metadata., com.apple.spotlight., com.apple.corespotlight and
+      com.apple.coreservices.appleevents lookups. Inside the sandbox those
+      lookups fail, a named pasteboard reads and writes nothing and mdfind
+      returns nothing, while osascript and notifyd still work; python, node,
+      git and the claude CLI still start, and a claude -p Bash-tool turn
+      runs. A sandboxed pane's pbcopy still goes through the clipboard bridge,
+      but pbpaste and the claude TUI's image paste (osascript reading the
+      clipboard) now get nothing; text pasted through the terminal is
+      unaffected. Screen capture (WindowServer, replayd) is not denied: it
+      stays behind TCC, and WindowServer is too broad to deny without
+      measurement. Whether the Universal Clipboard and CoreSpotlight services
+      leaked data was not measured; they are denied by name. The keychain
+      stays blocked by the ~/Library file deny (S5). A renamed service makes
+      the rule a silent no-op; the behaviour test detects that only on a Mac
+      that runs it.
+    files:
+      - omnigent/inner/seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_seatbelt_sandbox.py
+    tests:
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+    budget_lines: 130
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

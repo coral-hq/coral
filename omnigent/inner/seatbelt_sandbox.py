@@ -777,6 +777,14 @@ def _build_profile(
             # CORAL(S111): sysmond hands any process's command line to pgrep and pkill. A
             # per-service deny does work under (version 1) (measured on macOS 27.2.1).
             '(deny mach-lookup (global-name-prefix "com.apple.sysmond"))',
+            # CORAL(S121): the pasteboard, Spotlight (whose queries list files the file rules
+            # hide) and Apple Events.
+            '(deny mach-lookup (global-name-prefix "com.apple.pasteboard.")'
+            ' (global-name-prefix "com.apple.coreservices.uasharedpasteboard")'
+            ' (global-name-prefix "com.apple.metadata.")'
+            ' (global-name-prefix "com.apple.spotlight.")'
+            ' (global-name-prefix "com.apple.corespotlight")'
+            ' (global-name-prefix "com.apple.coreservices.appleevents"))',
             "(allow ipc-posix-shm)",
             "(allow ipc-posix-sem)",
             "(allow sysctl-read)",
