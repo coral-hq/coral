@@ -88,6 +88,7 @@
     "homebrew-tap-pr.yml",
     "kustomize-validate.yml",
     "lint.yml",
+    "macos-sandbox.yml",
     "maintainer-approval-rerun-run.yml",
     "maintainer-approval-rerun.yml",
     "maintainer-approval.yml",

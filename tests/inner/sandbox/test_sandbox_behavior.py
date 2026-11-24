@@ -879,6 +879,172 @@ def test_sandbox_cannot_read_another_process_command_line_or_environment(
     assert alive, "the target died during the reads, so a denied read proves nothing"
 
 
+# CORAL(S121): looks up each Mach service, reads and writes a private named pasteboard and
+# counts Spotlight's folders; prints yes/no only, never a query result.
+_MACH_SERVICE_PROBE = """
+import ctypes, pathlib, subprocess
+board, marker = pathlib.Path('markers').read_text().split()
+libc = ctypes.CDLL(None)
+bootstrap = ctypes.c_uint32.in_dll(libc, 'bootstrap_port')
+
+def run(*argv):
+    return subprocess.run(argv, capture_output=True, text=True, timeout=30).stdout.strip()
+
+def pasteboard(script):
+    return run('osascript', '-l', 'JavaScript', '-e', "ObjC.import('AppKit');"
+               f" var p = $.NSPasteboard.pasteboardWithName('{board}'); {script}")
+
+def say(name, value):
+    print(name, 'yes' if value else 'no')
+
+say('osascript', run('osascript', '-l', 'JavaScript', '-e', '1+1') == '2')
+for name in ('pasteboard.1', 'coreservices.uasharedpasteboardmanager.xpc', 'metadata.mds',
+             'spotlight.SearchAgent', 'corespotlightservice', 'coreservices.appleevents'):
+    say(name, libc.bootstrap_look_up(bootstrap, f'com.apple.{name}'.encode(),
+                                     ctypes.byref(ctypes.c_uint32())) == 0)
+say('board_read', pasteboard('ObjC.unwrap(p.stringForType($.NSPasteboardTypeString))') == marker)
+say('board_write', pasteboard(
+    f"p.clearContents; p.setStringForType('written-{marker}', $.NSPasteboardTypeString)"
+) == 'true')
+say('spotlight', run('mdfind', '-count', 'kMDItemContentType == "public.folder"') not in ('', '0'))
+say('notifyd', libc.bootstrap_look_up(bootstrap, b'com.apple.system.notification_center',
+                                      ctypes.byref(ctypes.c_uint32())) == 0)
+"""
+
+
+def _pasteboard(board: str, script: str) -> str:
+    """Run *script* against the private named pasteboard *board*, outside any sandbox."""
+    js = f"ObjC.import('AppKit'); var p = $.NSPasteboard.pasteboardWithName('{board}'); {script}"
+    return subprocess.run(
+        ["osascript", "-l", "JavaScript", "-e", js], capture_output=True, text=True, timeout=30
+    ).stdout.strip()
+
+
+# CORAL(S121): a sandboxed shell reaches neither the pasteboard, Spotlight nor Apple Events
+@pytest.mark.parametrize("launch_path", ["helper", "launcher"])
+def test_sandbox_cannot_reach_the_pasteboard_spotlight_or_apple_events(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    launch_path: str,
+) -> None:
+    """
+    A seatbelt-sandboxed shell or CLI wrap can neither look up the pasteboard, Spotlight
+    or Apple Events services, read or write a private named pasteboard (served by the
+    general pasteboard's service), nor list files through Spotlight, which all work
+    outside the sandbox; notifyd stays reachable. The user's clipboard is never touched.
+    """
+    if active_sandbox_type != "darwin_seatbelt":
+        pytest.skip("the pasteboard, Spotlight and Apple Events are macOS Mach services")
+    board, marker = f"test.omnigent.sandbox.{uuid.uuid4().hex}", f"board-{uuid.uuid4().hex}"
+    (tmp_path / "probe.py").write_text(_MACH_SERVICE_PROBE)
+    (tmp_path / "markers").write_text(f"{board} {marker}")
+    probe = [sys.executable, "probe.py"]
+    run_probe = functools.partial(
+        subprocess.run,
+        cwd=tmp_path,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONPATH": os.environ["PYTHONPATH"],
+            "TMPDIR": tempfile.gettempdir(),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    spec = OSEnvSpec(
+        type="caller_process", cwd=str(tmp_path), sandbox=active_sandbox_spec_factory()
+    )
+    put = f"p.clearContents; p.setStringForType('{marker}', $.NSPasteboardTypeString)"
+    get = "ObjC.unwrap(p.stringForType($.NSPasteboardTypeString))"
+    with contextlib.ExitStack() as cleanup:
+        cleanup.callback(_pasteboard, board, "p.releaseGlobally")
+        _pasteboard(board, put)
+        outside = run_probe(probe)
+        written = _pasteboard(board, get)
+        _pasteboard(board, put)
+        if launch_path == "helper":
+            os_env = create_os_environment(spec)
+            cleanup.callback(os_env.close)
+            result = run_async(os_env.shell(shlex.join(probe)))
+            inside, inside_detail = str(result.get("stdout", "")), result
+        else:
+            launcher = create_exec_launcher(sys.executable, resolve_sandbox(spec, tmp_path))
+            cleanup.callback(Path(launcher).unlink, missing_ok=True)
+            completed = run_probe([launcher, "probe.py"])
+            inside, inside_detail = completed.stdout, completed.stderr
+        kept = _pasteboard(board, get)
+    reads = ["pasteboard.1", "coreservices.uasharedpasteboardmanager.xpc", "metadata.mds"]
+    reads += ["spotlight.SearchAgent", "corespotlightservice", "coreservices.appleevents"]
+    reads += ["board_read", "board_write", "spotlight"]
+    reached = ["osascript yes", *(f"{read} yes" for read in reads), "notifyd yes"]
+    refused = ["osascript yes", *(f"{read} no" for read in reads), "notifyd yes"]
+    # A Mac with Spotlight indexing off lists nothing outside either; the mds lookup row still
+    # shows the deny, and the osascript row that a "no" inside is not a failed launch.
+    observed_outside = [
+        "spotlight yes" if line == "spotlight no" else line for line in outside.stdout.splitlines()
+    ]
+    assert observed_outside == reached, f"failed outside: {outside.stdout}; {outside.stderr}"
+    assert written == f"written-{marker}", "the outside write did not land"
+    assert inside.splitlines() == refused, f"reached inside: {inside_detail}"
+    assert kept == marker, "the sandboxed write reached the pasteboard"
+
+
+# CORAL(S122): five Pool exits, then signals to its parent shell and a process outside; the
+# alarm bounds a hang.
+_SIGNAL_PROBE = """
+import multiprocessing, os, signal, sys
+signal.alarm(60)
+def square(x):
+    return x * x
+if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn')
+    for _ in range(5):
+        with multiprocessing.Pool(2) as pool:
+            assert sum(pool.map(square, range(10))) == 285
+    for name, pid in (('parent', os.getppid()), ('outside', int(sys.argv[1]))):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except PermissionError:
+            print(name, 'refused')
+"""
+
+
+# CORAL(S122): a sandboxed shell signals its own children, never its parent or one outside
+def test_sandbox_shell_signals_its_own_children_only(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+) -> None:
+    """
+    A seatbelt-sandboxed shell's timeout kills its hung command and a ``multiprocessing.Pool``
+    exits cleanly, while a signal to its parent in the same sandbox or to a process started
+    outside it is refused.
+    """
+    if active_sandbox_type != "darwin_seatbelt":
+        pytest.skip("the signal rule is a seatbelt profile rule")
+    (tmp_path / "probe.py").write_text(_SIGNAL_PROBE)
+    spec = OSEnvSpec(
+        type="caller_process", cwd=str(tmp_path), sandbox=active_sandbox_spec_factory()
+    )
+    with contextlib.ExitStack() as cleanup:
+        outside = subprocess.Popen(["sleep", "120"])
+        cleanup.callback(outside.wait)
+        cleanup.callback(outside.kill)
+        os_env = create_os_environment(spec)
+        cleanup.callback(os_env.close)
+        hung = run_async(os_env.shell("sleep 60", timeout=2))
+        probe = run_async(os_env.shell(shlex.join([sys.executable, "probe.py", str(outside.pid)])))
+        alive = outside.poll() is None
+    assert hung.get("timed_out") is True, f"the timeout could not kill the command: {hung}"
+    assert (
+        probe.get("exit_code") == 0 and probe.get("stdout") == "parent refused\noutside refused\n"
+    ), probe
+    assert alive, "the sandboxed shell signalled a process outside the sandbox"
+
+
 # ---------------------------------------------------------------------------
 # Control sockets
 # ---------------------------------------------------------------------------

@@ -4649,6 +4649,8 @@ def test_host_capabilities_always_advertise_the_os_sandbox(
     """CORAL(S102): the hello names the OS sandbox, or ``none`` when its binary is missing."""
     base = list(HOST_CAPABILITIES)
     monkeypatch.setattr("omnigent.inner.sandbox.sys.platform", platform)
+    # CORAL(S120): the process-read canary holds; its open case is the next test.
+    monkeypatch.setattr("omnigent.host.frames.process_read_canary_open", lambda: False)
     monkeypatch.setattr(
         "omnigent.host.frames.shutil.which",
         lambda name: f"/usr/bin/{name}" if name == binary_on_path else None,
@@ -4659,6 +4661,27 @@ def test_host_capabilities_always_advertise_the_os_sandbox(
 
     assert capabilities == [*base, expected_token]
     assert base == HOST_CAPABILITIES
+
+
+# CORAL(S120): a seatbelt that let the canary read through is reported as such
+@pytest.mark.parametrize(
+    ("platform", "binary", "expected"),
+    [
+        ("darwin", "sandbox-exec", "os_sandbox:darwin_seatbelt_canary_open"),
+        ("linux", "bwrap", "os_sandbox:linux_bwrap"),
+    ],
+)
+def test_host_capabilities_report_a_seatbelt_the_canary_read_through(
+    monkeypatch: pytest.MonkeyPatch, platform: str, binary: str, expected: str
+) -> None:
+    monkeypatch.setattr("omnigent.inner.sandbox.sys.platform", platform)
+    monkeypatch.setattr("omnigent.host.frames.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("omnigent.host.frames.process_read_canary_open", lambda: True)
+
+    with installed_tool_providers():
+        capabilities = host_capabilities()
+
+    assert capabilities == [*HOST_CAPABILITIES, expected]
 
 
 def test_hello_with_sandbox_tokens_decodes_where_tokens_are_unknown() -> None:
@@ -9483,8 +9506,7 @@ def test_direct_fallback_runner_gets_the_terminal_mirror_and_its_launch_socket(
         env = {
             LOG_TO_STDERR_ENV_VAR: "1",
             LOG_TTY_FD_ENV_VAR: str(daemon_fd),
-            RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: "fake-binding",
-            RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR: "fake-bearer",
+            **dict.fromkeys(RUNNER_AUTH_SECRET_ENV_VARS, "fake-secret"),
         }
         _spawn_with_fake_zygote(monkeypatch, tmp_path, zygote, popen_kwargs, env=env)
 
@@ -12536,7 +12558,11 @@ async def _launch_group_runners(
         spawned.append(pair)
         return pair[0]
 
-    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+    # CORAL(S120): the canary holds; a real one would spawn through the Popen patch.
+    with (
+        patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen),
+        patch("omnigent.host.connect.process_read_canary_open", return_value=False),
+    ):
         for token in tokens:
             result = await host._handle_launch(_launch_frame(token, workspace))
             assert result.status == "launched", result.error
@@ -12551,6 +12577,27 @@ def _quiet_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> HostProcess:
     host._maintenance_janitor = SimpleNamespace(trigger=lambda _reason: None)  # type: ignore[assignment]
     host._ws = _FakeTunnel()  # type: ignore[assignment]
     return host
+
+
+# CORAL(S120): a host whose seatbelt let the canary read through launches no Coral step
+async def test_a_canary_that_read_through_refuses_coral_steps_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _quiet_host(monkeypatch, tmp_path)
+    monkeypatch.setattr("omnigent.host.connect.process_read_canary_open", lambda: True)
+    spawn = Mock(side_effect=AssertionError("a refused Coral step spawned"))
+
+    with patch("omnigent.host.connect.subprocess.Popen", spawn):
+        result = await host._handle_launch(
+            _launch_frame("coral", _workspace(tmp_path, coral_step=True))
+        )
+
+    assert result.status != "launched"
+    assert result.error is not None and "runs no Coral step" in result.error
+    spawn.assert_not_called()
+    runners = await _launch_group_runners(host, tmp_path, ["other"], coral_step=False)
+    with _killed_at_exit(*(proc for pair in runners.values() for proc in pair)):
+        assert set(runners) == {"other"}
 
 
 @pytest.mark.parametrize("ref_format", ["files", "reftable"])

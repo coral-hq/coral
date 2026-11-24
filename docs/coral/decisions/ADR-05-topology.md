@@ -2654,7 +2654,7 @@ orchestrator's or the anchor's. Unless a line says otherwise, everything here
 is POSIX only, and Windows keeps its behaviour. The macOS results are from
 local runs on macOS 27.2.1 with claude 2.1.325, a mock model and fake keys.
 Linux has not run: its pins are set by reasoning until the `coral-e2e` lane
-runs on this change. No CI lane runs macOS (CRL-170).
+runs on this change. The macOS sandbox lane (CRL-170) also runs probe 15 on it.
 
 **Runners (S123).** A forked process's readable environment
 (`/proc/<pid>/environ` on Linux, `KERN_PROCARGS2` on macOS) is the one its

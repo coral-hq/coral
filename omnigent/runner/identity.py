@@ -97,6 +97,8 @@ RUNNER_AUTH_SECRET_ENV_VARS: frozenset[str] = frozenset(
     {
         RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
         RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+        # CORAL(S118): the server's allow-listed tunnel token, which a host may export.
+        "OMNIGENT_RUNNER_TUNNEL_TOKEN",
     }
 )
 

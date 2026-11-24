@@ -285,10 +285,8 @@ sys.stdin.readline()
 def test_a_real_runner_holds_its_sent_tokens_while_its_readable_env_lacks_them(
     tmp_path: Path,
 ) -> None:
-    values = {
-        RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: _fake("binding"),
-        RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR: _fake("bearer"),
-    }
+    # Every runner auth secret, whatever the list holds: the child reports on each by name.
+    values = {name: _fake("secret") for name in sorted(RUNNER_AUTH_SECRET_ENV_VARS)}
     passed = {name: os.environ[name] for name in ("PATH", "PYTHONPATH") if name in os.environ}
     env = {**passed, "HOME": str(tmp_path), "TMPDIR": str(tmp_path), **values}
 

@@ -28,7 +28,7 @@ from coral.db.enum_codecs import RunPauseReason, RunStatus, SessionBindingRole, 
 from coral.engine.types import HandoffEvaluated, HandoffReceived, Input, RetryStep
 from coral.model.ir import CompiledGraph
 from coral.omni.runner.tool_provider import CoralToolProvider
-from coral.omni.server.tool_bridge import LOOKUP_FAILED, register_engine_tools
+from coral.omni.server.tool_bridge import LOOKUP_FAILED, NOT_THE_RUNNER, register_engine_tools
 from coral.stores.session_bindings import SessionBinding
 from coral.tools.catalog import CHOOSE_ARROW, ENGINE_TOOLS, SUBMIT_HANDOFF, EngineToolDecl
 from coral.tools.dispatch import EngineToolCall, ToolDispatcher
@@ -115,10 +115,10 @@ def _spec(stance: str | None, harness: str = "claude-sdk") -> AgentSpec:
     )
 
 
-def _runner_request(token: str = TOKEN) -> Request:
-    """A ``/mcp`` request carrying runner tunnel ``token``; the server allow-lists none."""
+def _runner_request(token: str = TOKEN, allowed: frozenset[str] | None = None) -> Request:
+    """A ``/mcp`` request carrying runner tunnel ``token``, on a server allow-listing *allowed*."""
     app = Starlette()
-    app.state.runner_tunnel_tokens = None
+    app.state.runner_tunnel_tokens = allowed
     headers = [(RUNNER_TUNNEL_TOKEN_HEADER.lower().encode(), token.encode())]
     return Request({"type": "http", "method": "POST", "path": "/", "headers": headers, "app": app})
 
@@ -493,6 +493,29 @@ async def test_registration_refuses_a_lookup_that_keeps_found_rows(
                     stack=stack,
                 )
     assert all(server_tool(decl.name) is None for decl in ENGINE_TOOLS)
+
+
+async def test_the_allow_listed_token_is_refused_on_a_coral_session(mcp: _Mcp) -> None:
+    """A step holding the server's allow-listed token cannot hand off as another step's runner."""
+    mcp.port.add_run(_plain())
+    mcp.lookup.add(step_binding(SLOT, session_id=SESSION))
+    allowed = "server-allow-listed-token"
+    with workspace_scope(WORKSPACE):
+        mcp.store.set_labels(SESSION, {"coral.run_id": "run-1"})
+
+    refused = await mcp.call(
+        f"mcp__omnigent__{SUBMIT}",
+        HANDOFF,
+        request=_runner_request(allowed, frozenset({allowed})),
+    )
+
+    assert _error(refused) == NOT_THE_RUNNER
+    _assert_untouched(mcp)
+    # The step's own runner token still hands off on that server.
+    handoff = await mcp.call(
+        f"mcp__omnigent__{SUBMIT}", HANDOFF, request=_runner_request(TOKEN, frozenset({allowed}))
+    )
+    assert _reply(handoff) == ToolReply(accepted=True, next=STOP)
 
 
 async def test_an_unbound_session_is_not_run_member(mcp: _Mcp) -> None:

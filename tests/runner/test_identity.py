@@ -60,6 +60,8 @@ def test_strip_removes_every_registered_secret_name() -> None:
     """
     assert RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR in RUNNER_AUTH_SECRET_ENV_VARS
     assert RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR in RUNNER_AUTH_SECRET_ENV_VARS
+    # CORAL(S118): the server's allow-listed tunnel token is a runner secret too.
+    assert "OMNIGENT_RUNNER_TUNNEL_TOKEN" in RUNNER_AUTH_SECRET_ENV_VARS
 
     seeded = {name: f"secret-{name}" for name in RUNNER_AUTH_SECRET_ENV_VARS}
     seeded["KEEP_ME"] = "keep"

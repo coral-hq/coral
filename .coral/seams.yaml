@@ -2263,7 +2263,12 @@ seams:
       policy actor is unchanged for every token case. S10 passes the result
       to server tools as ServerToolCall.runner_proven. Proof is
       runner-granular: anything holding the runner's token proves every
-      session that runner serves.
+      session that runner serves. `coral_bound(conversation)` says a session
+      is Coral's by a `coral.` label key (S46: clients can neither write nor
+      remove one); on such a session the allow-list never proves the runner,
+      only a token bound to its runner_id does, so a step holding the
+      server's allow-listed `OMNIGENT_RUNNER_TUNNEL_TOKEN` cannot call Coral's
+      engine tools as another step's runner.
     files:
       - omnigent/server/mcp_identity.py
       - tests/server/test_mcp_identity.py
@@ -2271,14 +2276,15 @@ seams:
       - tests/server/test_mcp_identity.py
     budget_lines: 40
     budget_exception:
-      lines: 82
+      lines: 103
       reason: >-
-        tests/server/test_mcp_identity.py (new, 82 lines) checks
+        tests/server/test_mcp_identity.py (new, 103 lines) checks
         runner_proven and the policy actor over eleven token cases (bound,
         padded, another runner's, missing, blank, a session without a runner
         or on a stable id, allow-listed with and without a runner, not
-        allow-listed, a blank allow-list entry). omnigent/server/mcp_identity.py
-        (22) is within budget.
+        allow-listed, a blank allow-list entry), and the allow-list refused on
+        a Coral-labelled session. omnigent/server/mcp_identity.py (39) is
+        within budget.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
@@ -3421,8 +3427,9 @@ seams:
       exec-time environments and argv, where unsandboxed processes still read
       them. An unknown operation fails profile compilation, but a renamed
       service or sysctl name would make a rule a silent no-op; the behaviour
-      test detects that only on a Mac that runs it, and no CI lane runs macOS
-      (CRL-170).
+      test detects that on a Mac that runs it, the macOS CI lane runs it
+      (S119), and each host checks the procargs and sysmond rules once at
+      start (S120).
     files:
       - omnigent/inner/seatbelt_sandbox.py
       - tests/inner/sandbox/test_sandbox_behavior.py
@@ -3978,6 +3985,243 @@ seams:
         tests/inner/test_proc_and_platform.py 23,
         tests/e2e/coral/test_tier_b_executor.py 2.
       approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S117
+    title: Omnigent's own runner launch of a Coral step goes through Coral's relauncher
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Every Omnigent runner launch (a person's message after its connect
+      grace, ensure_runner_connected for the resource routes and
+      retry_session, a wake, a scheduled fire, the held-session relaunch)
+      lands in `_launch_runner_on_host_impl`, which checked none of Coral's
+      step rules, so it could replace a runner the host still called alive
+      or launch on a host without the Coral runner token. helpers.py now has
+      a one-owner registry, `register_runner_launch_owner`; before the
+      per-session relaunch lock the latest owner sees the row and returns
+      None (Omnigent launches as before), a runner id (the owner brought the
+      runner up; the launch reports it acknowledged) or raises
+      OmnigentError (refused). With nothing registered nothing changes.
+      Coral registers `OmnigentStepRelauncher.claim_launch` with the session
+      engine: a session with a `coral.run_id` label and a step binding goes
+      through `ensure_runner` at its binding's generation (retryable refusal
+      -> RUNNER_UNAVAILABLE, else CONFLICT); Coral's own create and relaunch
+      launch of that session is let through by a context variable.
+    files:
+      - omnigent/server/routes/_sessions/helpers.py
+    tests:
+      - tests/coral/omni/test_session_facade.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S118
+    title: No allow-listed or token-less runner proof for a Coral step's runner
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A server started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` (as `omnigent
+      run`'s local one is) accepted that token, and a loopback peer with no
+      token at all, as the tunnel of any path runner id, also on an accounts
+      server, where the token-less peer is owned by `local`. So a step could
+      connect a tunnel under another step's runner id. runner_tunnel.py takes
+      `requires_bound_token(runner_id)`; when the handshake resolved no
+      token-bound runner id and it says yes, the handshake closes 4004
+      ("runner tunnel token is required") before hello or registration; a
+      token that derives the path runner id (allow-listed or not) still
+      passes. app.py passes a check that a session bound to the runner id has
+      a `coral.` label (S49's `coral_bound`); Coral's supersession follower
+      carries those labels to a session that takes over a step's binding. Coral runners always present the binding token their id
+      derives from. identity.py adds `OMNIGENT_RUNNER_TUNNEL_TOKEN` to
+      RUNNER_AUTH_SECRET_ENV_VARS, so runners strip it from every child they
+      spawn. Residual: a runner zygote still forks with the host's own
+      environment, so a host that exports the token still hands it to
+      zygote-forked runners and harnesses; a tunnel opened before its session
+      row exists is not yet seen as Coral's; the runner lookup is scoped to
+      the handshake's workspace, as the tunnel's owner lookup is; a label
+      carry that fails after a binding transfer is only logged, leaving the
+      superseding session unfenced.
+    files:
+      - omnigent/runner/identity.py
+      - omnigent/server/app.py
+      - omnigent/server/routes/runner_tunnel.py
+      - tests/runner/test_identity.py
+      - tests/server/integration/test_runner_tunnel_route.py
+    tests:
+      - tests/runner/test_identity.py
+      - tests/server/integration/test_runner_tunnel_route.py
+    budget_lines: 40
+    budget_exception:
+      lines: 129
+      reason: >-
+        tests/server/integration/test_runner_tunnel_route.py gains 129 lines:
+        the production app refusing a token-less loopback tunnel for a
+        Coral-labelled session's runner id and taking its own binding token,
+        and the route on an accounts server with an allow-list refusing the
+        allow-listed and token-less tunnels for a Coral runner id from
+        loopback and remote peers while another runner id keeps the
+        token-less loopback path, and the proofs that still connect there (a
+        remote allow-listed non-Coral runner, a Coral runner's own token, an
+        allow-listed token that derives the path id). The other files are
+        within budget.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S119
+    title: A macOS CI lane runs the seatbelt sandbox tests and probe 15's darwin pins
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      `.github/workflows/macos-sandbox.yml` runs on a GitHub-hosted
+      `macos-26` runner, behind the security gate, for pull requests and
+      `development` pushes that touch the sandbox code, the host launch path, its tests, the probe's
+      stack helpers, the claude CLI pin or `uv.lock` (path filters), weekly
+      for new runner images, and by hand. It installs the pinned claude CLI
+      from the in-repo action, records the macOS and CLI versions in the job
+      summary, sets `CORAL_E2E_REQUIRE_CLI=1`, and runs
+      `tests/inner/test_seatbelt_sandbox.py` (S111's profile test and S120's
+      canary tests), `tests/inner/sandbox/test_sandbox_behavior.py` (S111's
+      process-read test among the darwin cases) and
+      `tests/e2e/coral/test_sandbox_probe.py` (probe 15, the allow-listed
+      token step and the identity probe, with their darwin pins). It
+      deselects the control-socket helper case, whose nested socket path
+      under the default `/var/folders` scratch is longer than macOS's
+      104-byte sun_path (a test bug, measured on macOS 26.3.1). It is not a
+      required check and merge-ready does not wait on it.
+      `tests/coral/test_ci_lane.py` pins the lane.
+    files:
+      - .github/workflows/macos-sandbox.yml
+    tests:
+      - tests/coral/test_ci_lane.py
+    budget_lines: 40
+    budget_exception:
+      lines: 140
+      reason: >-
+        .github/workflows/macos-sandbox.yml is a new 140-line workflow: the
+        two 21-line path filter lists (pull request and push), the gate, and
+        the macOS job's checkout, Python, uv, Node and claude CLI setup, the
+        version summary, the dependency install and the pytest step.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S120
+    title: Each macOS host checks once that its sandbox keeps a process's arguments unreadable
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      `process_read_canary_open()` in seatbelt_sandbox.py runs once per host
+      process (cached): it starts a throwaway process with a marker in its
+      arguments, and runs a reader outside and then inside the step profile
+      (`resolve` plus `wrap_launcher_argv`, as a step's shell gets it). The
+      reader gets the marker on stdin and reports whether the target's
+      KERN_PROCARGS2 holds it, whether `pgrep -lf` (sysmond) finds it, and
+      whether it reads its own arguments. Only "found both ways outside,
+      neither way inside, own arguments read" is closed; any other result or
+      any error is open, logged with the macOS version. `host_capabilities()`
+      then reports `os_sandbox:darwin_seatbelt_canary_open` instead of
+      `os_sandbox:darwin_seatbelt`, which preflight and the gate label read as
+      no sandbox, and the host's launch handler refuses every Coral step
+      runner (S108's run-worktree check) with a message that names the macOS
+      version; other runners launch as before. The hello's capabilities are
+      built off the event loop. Not checked: `launchctl print` and the other
+      S111 reads (the CI lane covers them). The gate label's CRL-170 blocker
+      row is unchanged. Measured on macOS 26.3.1: about 0.15 s.
+    files:
+      - omnigent/inner/seatbelt_sandbox.py
+      - omnigent/host/frames.py
+      - omnigent/host/connect.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/host/test_connect.py
+    tests:
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/host/test_connect.py
+    budget_lines: 120
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S121
+    title: The macOS sandbox keeps the pasteboard, Spotlight and Apple Events out of reach
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 26.3.1: the step profile's broad (allow mach-lookup)
+      let a sandboxed shell look up com.apple.pasteboard.1 (it read and wrote
+      a private named pasteboard, so the general pasteboard too),
+      com.apple.metadata.mds (mdfind listed folders the file rules hide) and
+      com.apple.coreservices.appleevents. Every profile _build_profile emits
+      (the os_env step shell, every spawn-time CLI wrap and sandboxed
+      terminal panes) now denies, after the broad allow and in the
+      global-name-prefix form S111 uses, the com.apple.pasteboard.,
+      com.apple.coreservices.uasharedpasteboard (Universal Clipboard),
+      com.apple.metadata., com.apple.spotlight., com.apple.corespotlight and
+      com.apple.coreservices.appleevents lookups. Inside the sandbox those
+      lookups fail, a named pasteboard reads and writes nothing and mdfind
+      returns nothing, while osascript and notifyd still work; python, node,
+      git and the claude CLI still start, and a claude -p Bash-tool turn
+      runs. A sandboxed pane's pbcopy still goes through the clipboard bridge,
+      but pbpaste and the claude TUI's image paste (osascript reading the
+      clipboard) now get nothing; text pasted through the terminal is
+      unaffected. Screen capture (WindowServer, replayd) is not denied: it
+      stays behind TCC, and WindowServer is too broad to deny without
+      measurement. Whether the Universal Clipboard and CoreSpotlight services
+      leaked data was not measured; they are denied by name. The keychain
+      stays blocked by the ~/Library file deny (S5). A renamed service makes
+      the rule a silent no-op; the behaviour test detects that only on a Mac
+      that runs it.
+    files:
+      - omnigent/inner/seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_seatbelt_sandbox.py
+    tests:
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+    budget_lines: 130
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S122
+    title: A macOS sandboxed step signals its own children
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 26.3.1: the step profile allowed signals only to the
+      process itself, so the os_env shell's timeout could not kill a hung
+      command (EPERM; a sleep 30 under a 2 s timeout ran all 30 s and
+      returned an error) and a multiprocessing.Pool (spawn) exited cleanly in
+      only 4 of 20 runs. Every profile _build_profile emits (the os_env step
+      shell, every spawn-time CLI wrap and sandboxed terminal panes) now also
+      allows (signal (target children)): the timeout kills at 2 s and the Pool
+      exits cleanly in 20 of 20 runs, while the process's parent, a
+      grandchild, a process in a second sandbox launch with the same profile
+      and a process started outside stay refused. (target same-sandbox) was
+      rejected: within one launch it lets a wrapped CLI's tool commands kill
+      siblings such as the CLI's policy hook. (target pgrp) reached a process
+      outside. S111's process-read denies and S121's Mach denies are
+      unchanged.
+    files:
+      - omnigent/inner/seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_seatbelt_sandbox.py
+    tests:
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+    budget_lines: 70
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

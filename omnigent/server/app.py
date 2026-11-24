@@ -4974,6 +4974,15 @@ def create_app(
                 return owner
         return None
 
+    def _serves_coral_session(runner_id: str) -> bool:
+        """CORAL(S118): whether *runner_id* is bound to a Coral session."""
+        from omnigent.server.mcp_identity import coral_bound
+
+        return any(
+            coral_bound(conv)
+            for conv in conversation_store.list_conversations_by_runner_id(runner_id)
+        )
+
     # WS tunnel endpoint for runners (RUNNER.md §2-3).
     app.include_router(
         create_runner_tunnel_router(
@@ -4990,6 +4999,7 @@ def create_app(
             mint_managed_runner_token=(
                 _mint_managed_runner_token if runner_account_store is not None else None
             ),
+            requires_bound_token=_serves_coral_session,  # CORAL(S118)
         ),
         prefix="/v1",
         tags=["runners"],
