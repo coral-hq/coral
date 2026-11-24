@@ -26,7 +26,7 @@ started lazily with the first gateway client and stopped by the
 executor's ``close()`` (or with the harness subprocess, whichever
 comes first).
 
-CORAL(S118): given an :class:`UpstreamCredential`, the shim is a narrow
+CORAL(S124): given an :class:`UpstreamCredential`, the shim is a narrow
 credential proxy. The CLI holds only :attr:`ClaudeGatewayShim.session_token`;
 the shim checks it, forwards the four model routes only, and puts the real
 credential in the header form the CLI used. Errors and logs name exception
@@ -37,19 +37,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hmac  # CORAL(S118)
+import hmac  # CORAL(S124)
 import json
 import logging
-import re  # CORAL(S118)
-import secrets  # CORAL(S118)
-import shlex  # CORAL(S118)
-import ssl  # CORAL(S118)
-import time  # CORAL(S118)
+import re  # CORAL(S124)
+import secrets  # CORAL(S124)
+import shlex  # CORAL(S124)
+import ssl  # CORAL(S124)
+import time  # CORAL(S124)
 from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping
-from contextvars import ContextVar  # CORAL(S118)
-from pathlib import Path  # CORAL(S118)
+from contextvars import ContextVar  # CORAL(S124)
+from pathlib import Path  # CORAL(S124)
 from typing import Any, TypeAlias
-from urllib.parse import urlsplit  # CORAL(S118)
+from urllib.parse import urlsplit  # CORAL(S124)
 
 import httpx
 import uvicorn
@@ -60,8 +60,8 @@ from omnigent.databricks_ai_gateway import (
     is_ug_route,
     with_gateway_attribution_pairs,
 )
-from omnigent.inner import _proc  # CORAL(S118)
-from omnigent.inner._subprocess_lifecycle import close_subprocess_transport  # CORAL(S118)
+from omnigent.inner import _proc  # CORAL(S124)
+from omnigent.inner._subprocess_lifecycle import close_subprocess_transport  # CORAL(S124)
 from omnigent.telemetry.surface import harness_client_surface
 
 logger = logging.getLogger(__name__)
@@ -138,7 +138,7 @@ _Scope: TypeAlias = MutableMapping[str, Any]  # type: ignore[explicit-any]  # AS
 _Receive: TypeAlias = Callable[[], Awaitable[MutableMapping[str, Any]]]  # type: ignore[explicit-any]  # ASGI message dicts
 _Send: TypeAlias = Callable[[MutableMapping[str, Any]], Awaitable[None]]  # type: ignore[explicit-any]  # ASGI message dicts
 
-# CORAL(S118): bounds of the credential proxy. h11 caps a request head at 16 KiB and the token is
+# CORAL(S124): bounds of the credential proxy. h11 caps a request head at 16 KiB and the token is
 # checked before any body is read, so a client without it holds little memory. No connection
 # limit: idle unauthenticated sockets would fill it and refuse the CLI.
 _CREDENTIAL_PROXY_HTTP_PARSER = "h11"
@@ -184,7 +184,7 @@ _SERVING_CREDENTIAL_REQUEST: ContextVar[bool] = ContextVar(
 
 
 class _QuietCredentialProxyClient(logging.Filter):
-    """CORAL(S118): keep the upstream client's records below WARNING out of credential requests."""
+    """CORAL(S124): keep the upstream client's records below WARNING out of credential requests."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         return record.levelno >= logging.WARNING or not _SERVING_CREDENTIAL_REQUEST.get()
@@ -194,7 +194,7 @@ _QUIET_CLIENT_FILTER = _QuietCredentialProxyClient()
 
 
 def _quiet_upstream_client_logs() -> None:
-    """CORAL(S118): install the filter once on every httpx and httpcore logger."""
+    """CORAL(S124): install the filter once on every httpx and httpcore logger."""
     for name in _UPSTREAM_CLIENT_LOGGERS:
         client_logger = logging.getLogger(name)
         if _QUIET_CLIENT_FILTER not in client_logger.filters:
@@ -238,13 +238,13 @@ def restore_thinking_display(body: bytes) -> bytes:
     return json.dumps(parsed).encode("utf-8")
 
 
-# CORAL(S118): a shorter key also occurs in ordinary values (a placeholder "local" is in
+# CORAL(S124): a shorter key also occurs in ordinary values (a placeholder "local" is in
 # /usr/local/bin), so its copies are not searched for; a real provider key is far longer
 MIN_SCANNED_LITERAL_CHARS = 20
 
 
 def static_printf_value(command: str) -> str | None:
-    """CORAL(S118): the literal a static-key credential command prints, else ``None``.
+    """CORAL(S124): the literal a static-key credential command prints, else ``None``.
 
     Only the exact form written for a static key, ``"printf %s " + shlex.quote(value)``,
     is a literal; any other command, however close, has to run.
@@ -262,11 +262,11 @@ def static_printf_value(command: str) -> str | None:
 
 
 class UpstreamCredentialError(RuntimeError):
-    """CORAL(S118): the model credential is unavailable; the message never holds a value."""
+    """CORAL(S124): the model credential is unavailable; the message never holds a value."""
 
 
 def _checked_credential(raw: str | bytes) -> str:
-    """CORAL(S118): the stripped value when it is one printable ASCII token of at most 4 KiB.
+    """CORAL(S124): the stripped value when it is one printable ASCII token of at most 4 KiB.
 
     :raises UpstreamCredentialError: Otherwise, with a fixed message.
     """
@@ -286,7 +286,7 @@ def _checked_credential(raw: str | bytes) -> str:
 
 
 def static_credential_literal(command: str) -> str | None:
-    """CORAL(S118): the static key *command* holds, in the one form the proxy sends.
+    """CORAL(S124): the static key *command* holds, in the one form the proxy sends.
 
     Every search for copies of the key and every request that carries it uses this form, so
     a key configured with a trailing newline is still one key.
@@ -305,7 +305,7 @@ def static_credential_literal(command: str) -> str | None:
 
 
 async def _read_capped_stdout(process: asyncio.subprocess.Process) -> bytes:
-    """CORAL(S118): the command's stdout to EOF, then its exit; refuses more than 64 KiB."""
+    """CORAL(S124): the command's stdout to EOF, then its exit; refuses more than 64 KiB."""
     if process.stdout is None:
         raise UpstreamCredentialError("the model credential helper has no output")
     output = bytearray()
@@ -318,7 +318,7 @@ async def _read_capped_stdout(process: asyncio.subprocess.Process) -> bytes:
 
 
 async def _run_credential_command(command: str, env: Mapping[str, str]) -> bytes:
-    """CORAL(S118): run *command* as the CLI ran its helper, outside the step's worktree.
+    """CORAL(S124): run *command* as the CLI ran its helper, outside the step's worktree.
 
     ``/bin/sh -c`` in its own session, from the user's home (a step cannot plant a relative
     helper there), stderr discarded; the whole group is killed on timeout or cancellation.
@@ -356,7 +356,7 @@ async def _run_credential_command(command: str, env: Mapping[str, str]) -> bytes
 
 
 class UpstreamCredential:
-    """CORAL(S118): the real credential, held in the harness; the CLI only sees a session token.
+    """CORAL(S124): the real credential, held in the harness; the CLI only sees a session token.
 
     A static key (``printf %s <quoted key>``) is held as its value and needs no shell. Any other
     command runs through :func:`_run_credential_command` with the *env* snapshot the caller
@@ -440,14 +440,14 @@ class UpstreamCredential:
 
 
 def _upstream_ssl_context(ca_file: str) -> ssl.SSLContext:
-    """CORAL(S118): httpx's default trust plus *ca_file*; raises when the CA cannot load."""
+    """CORAL(S124): httpx's default trust plus *ca_file*; raises when the CA cannot load."""
     context = httpx.create_ssl_context()
     context.load_verify_locations(cafile=ca_file)
     return context
 
 
 def _loggable_url(url: str) -> str:
-    """CORAL(S118): scheme, host, port and path of *url*: no userinfo, query or fragment."""
+    """CORAL(S124): scheme, host, port and path of *url*: no userinfo, query or fragment."""
     try:
         parsed = httpx.URL(url)
     except httpx.InvalidURL:
@@ -456,7 +456,7 @@ def _loggable_url(url: str) -> str:
 
 
 def _is_clean_raw_path(raw_path: bytes) -> bool:
-    """CORAL(S118): origin-form only: no dot or empty segment, authority or encoded separator,
+    """CORAL(S124): origin-form only: no dot or empty segment, authority or encoded separator,
     and a model id is one plain word (no ``%``, ``;`` or ``#`` an upstream could reinterpret)."""
     if not raw_path.startswith(b"/") or any(byte < 0x21 or byte > 0x7E for byte in raw_path):
         return False
@@ -469,7 +469,7 @@ def _is_clean_raw_path(raw_path: bytes) -> bool:
 
 
 def _is_forwarded_route(method: str, path: str) -> bool:
-    """CORAL(S118): the model routes the CLI needs; nothing else gets the real credential."""
+    """CORAL(S124): the model routes the CLI needs; nothing else gets the real credential."""
     if (method, path) in _FORWARDED_ROUTES:
         return True
     model_id = path.removeprefix(_MODEL_ROUTE_PREFIX)
@@ -477,7 +477,7 @@ def _is_forwarded_route(method: str, path: str) -> bool:
 
 
 async def _receive_capped_body(receive: _Receive, send: _Send) -> bytes | None:
-    """CORAL(S118): the complete request body, or ``None`` when there is nothing to forward:
+    """CORAL(S124): the complete request body, or ``None`` when there is nothing to forward:
     a body over ``_MAX_REQUEST_BODY_BYTES`` (answered 413) or a CLI that left mid-upload."""
     body = bytearray()
     while True:
@@ -494,13 +494,13 @@ async def _receive_capped_body(receive: _Receive, send: _Send) -> bytes | None:
 
 
 async def _until_client_leaves(receive: _Receive) -> None:
-    """CORAL(S118): return once the CLI disconnects; its request body was read already."""
+    """CORAL(S124): return once the CLI disconnects; its request body was read already."""
     while (await receive())["type"] != "http.disconnect":
         pass
 
 
 def check_upstream_url(url: str) -> None:
-    """CORAL(S118, S119): the one check of where the real credential may be sent.
+    """CORAL(S124, S125): the one check of where the real credential may be sent.
 
     An https URL, or a plain http one to loopback, with a host, a numeric port if it names
     one, and no user name or password, which the client would send in the credential's
@@ -534,7 +534,7 @@ def check_upstream_url(url: str) -> None:
 
 
 async def _send_error(send: _Send, status: int, error_type: str, message: str) -> None:
-    """CORAL(S118): an Anthropic-shaped error answer with a fixed, value-free message."""
+    """CORAL(S124): an Anthropic-shaped error answer with a fixed, value-free message."""
     body = json.dumps({"type": "error", "error": {"type": error_type, "message": message}})
     await send(
         {
@@ -548,7 +548,7 @@ async def _send_error(send: _Send, status: int, error_type: str, message: str) -
 
 async def _relay_response(upstream: httpx.Response, send: _Send) -> None:
     """
-    Stream an upstream response back to the CLI unbuffered (CORAL(S118): both modes use it).
+    Stream an upstream response back to the CLI unbuffered (CORAL(S124): both modes use it).
 
     :param upstream: An open streaming response.
     :param send: ASGI send callable.
@@ -594,13 +594,13 @@ class ClaudeGatewayShim:
     :param upstream_base_url: The real gateway base URL the CLI would
         otherwise talk to, e.g.
         ``"https://example.databricks.com/ai-gateway/anthropic"``.
-    :param credential: CORAL(S118): the real credential; when set, the shim accepts only
+    :param credential: CORAL(S124): the real credential; when set, the shim accepts only
         :attr:`session_token` and forwards only the model routes. ``None`` keeps the plain shim.
-    :param upstream_proxy: CORAL(S118, S119): proxy URL for the upstream hop, e.g.
+    :param upstream_proxy: CORAL(S124, S125): proxy URL for the upstream hop, e.g.
         ``"http://proxy.example:3128"``; ``None`` keeps httpx's environment proxies.
-    :param upstream_ca_file: CORAL(S118, S119): a PEM CA added to the default trust for the
+    :param upstream_ca_file: CORAL(S124, S125): a PEM CA added to the default trust for the
         upstream.
-    :param upstream_env_proxies: CORAL(S119): ``False`` when the caller chose *upstream_proxy*,
+    :param upstream_env_proxies: CORAL(S125): ``False`` when the caller chose *upstream_proxy*,
         or none, from settings the environment does not hold, so it is not read again.
     """
 
@@ -611,13 +611,13 @@ class ClaudeGatewayShim:
         credential: UpstreamCredential | None = None,
         upstream_proxy: str | None = None,
         upstream_ca_file: str | None = None,
-        upstream_env_proxies: bool = True,  # CORAL(S119)
+        upstream_env_proxies: bool = True,  # CORAL(S125)
     ) -> None:
-        # CORAL(S118): credential mode and the upstream client's options
+        # CORAL(S124): credential mode and the upstream client's options
         self._credential = credential
         self._upstream_proxy = upstream_proxy
         self._upstream_ca_file = upstream_ca_file
-        self._upstream_env_proxies = upstream_env_proxies  # CORAL(S119)
+        self._upstream_env_proxies = upstream_env_proxies  # CORAL(S125)
         # The prefix keeps it from ever having an Anthropic key's shape (``sk-...``).
         self._session_token = (
             f"session-{secrets.token_urlsafe(32)}" if credential is not None else None
@@ -655,7 +655,7 @@ class ClaudeGatewayShim:
     @property
     def session_token(self) -> str | None:
         """
-        CORAL(S118): the only credential the CLI holds in credential mode.
+        CORAL(S124): the only credential the CLI holds in credential mode.
 
         :returns: ``"session-"`` and 256 random URL-safe bits; ``None`` without a credential.
         """
@@ -663,7 +663,7 @@ class ClaudeGatewayShim:
 
     def _new_upstream_client(self) -> httpx.AsyncClient:
         """
-        CORAL(S118): the upstream client; the plain shim keeps today's client exactly.
+        CORAL(S124): the upstream client; the plain shim keeps today's client exactly.
 
         :raises OSError: When the proxy or CA cannot be used; names the error type only.
         """
@@ -674,7 +674,7 @@ class ClaudeGatewayShim:
 
         # With no proxy named, a loopback upstream is reached directly: the real credential
         # never goes through a forward proxy the environment names.
-        # CORAL(S119): nor does any upstream whose caller already decided against a proxy
+        # CORAL(S125): nor does any upstream whose caller already decided against a proxy
         direct = self._upstream_proxy is None and (
             not self._upstream_env_proxies or is_loopback_url(self._upstream_base_url)
         )
@@ -723,12 +723,12 @@ class ClaudeGatewayShim:
         if self._client is not None:
             # A prior failed start left a client behind; don't leak it.
             await self._client.aclose()
-            self._client = None  # CORAL(S118): a client that fails to build leaves none
+            self._client = None  # CORAL(S124): a client that fails to build leaves none
         if self._credential is not None:
-            check_upstream_url(self._upstream_base_url)  # CORAL(S118, S119)
-        self._client = self._new_upstream_client()  # CORAL(S118)
+            check_upstream_url(self._upstream_base_url)  # CORAL(S124, S125)
+        self._client = self._new_upstream_client()  # CORAL(S124)
         if self._credential is not None:
-            _quiet_upstream_client_logs()  # CORAL(S118)
+            _quiet_upstream_client_logs()  # CORAL(S124)
         config = uvicorn.Config(
             self._asgi_app,
             host="127.0.0.1",
@@ -736,7 +736,7 @@ class ClaudeGatewayShim:
             log_level="warning",
             lifespan="off",  # plain ASGI callable; no lifespan protocol
             interface="asgi3",  # bound methods defeat uvicorn's auto-detection
-            # CORAL(S118): the credential proxy's parser bounds request heads
+            # CORAL(S124): the credential proxy's parser bounds request heads
             http=_CREDENTIAL_PROXY_HTTP_PARSER if self._credential is not None else "auto",
         )
         server = _NoSignalServer(config)
@@ -760,7 +760,7 @@ class ClaudeGatewayShim:
         logger.info(
             "Claude gateway shim listening on %s → %s",
             self.base_url,
-            _loggable_url(self._upstream_base_url),  # CORAL(S118)
+            _loggable_url(self._upstream_base_url),  # CORAL(S124)
         )
 
     async def aclose(self) -> None:
@@ -771,7 +771,7 @@ class ClaudeGatewayShim:
         """
         if self._server is not None:
             self._server.should_exit = True
-        # CORAL(S118): stop credential exchanges still running; a running command loses its group
+        # CORAL(S124): stop credential exchanges still running; a running command loses its group
         if stopping := list(self._exchanges):
             for exchange in stopping:
                 exchange.cancel()
@@ -800,7 +800,7 @@ class ClaudeGatewayShim:
         """
         if scope["type"] != "http":
             return
-        if self._credential is not None:  # CORAL(S118)
+        if self._credential is not None:  # CORAL(S124)
             await self._serve_credential_request(scope, receive, send)
             return
         if self._client is None:
@@ -823,7 +823,7 @@ class ClaudeGatewayShim:
 
         headers = self._forwarded_headers(
             scope["headers"]
-        )  # CORAL(S118): shared with credential mode
+        )  # CORAL(S124): shared with credential mode
         query = scope.get("query_string", b"").decode("latin-1")
         url = f"{self._upstream_base_url}{path}" + (f"?{query}" if query else "")
 
@@ -831,7 +831,7 @@ class ClaudeGatewayShim:
             async with self._client.stream(
                 method, url, headers=headers, content=request_body
             ) as upstream:
-                await _relay_response(upstream, send)  # CORAL(S118): shared with credential mode
+                await _relay_response(upstream, send)  # CORAL(S124): shared with credential mode
         except httpx.HTTPError as exc:
             logger.exception("Claude gateway shim upstream error: %s", exc)
             error_body = json.dumps(
@@ -859,7 +859,7 @@ class ClaudeGatewayShim:
         The request headers to send upstream, with the gateway attribution.
 
         :param scope_headers: The CLI's raw ASGI headers.
-        :param credential: CORAL(S118): the real credential; it replaces the presented
+        :param credential: CORAL(S124): the real credential; it replaces the presented
             ``x-api-key`` / ``authorization`` in the same form(s). ``None`` forwards them as sent.
         :returns: Header pairs, hop-by-hop, ``host`` and ``content-length`` dropped.
         """
@@ -867,16 +867,16 @@ class ClaudeGatewayShim:
         presented: set[str] = set()
         for raw_name, raw_value in scope_headers:
             name = raw_name.decode("latin-1")
-            if credential is not None and name.lower() in _CREDENTIAL_HEADERS:  # CORAL(S118)
+            if credential is not None and name.lower() in _CREDENTIAL_HEADERS:  # CORAL(S124)
                 presented.add(name.lower())
-            elif credential is not None and (  # CORAL(S118): no routing overrides upstream
+            elif credential is not None and (  # CORAL(S124): no routing overrides upstream
                 name.lower() in _REQUEST_OVERRIDE_HEADERS
                 or name.lower().startswith("x-forwarded-")
             ):
                 continue
             elif name.lower() not in _REQUEST_HEADER_EXCLUDES:
                 headers.append((name, raw_value.decode("latin-1")))
-        if credential is not None:  # CORAL(S118): the header form(s) the CLI used
+        if credential is not None:  # CORAL(S124): the header form(s) the CLI used
             if "x-api-key" in presented:
                 headers.append(("x-api-key", credential))
             if "authorization" in presented:
@@ -894,7 +894,7 @@ class ClaudeGatewayShim:
         self, scope: _Scope, receive: _Receive, send: _Send
     ) -> None:
         """
-        CORAL(S118): serve one credential-mode request; any failure names its type only.
+        CORAL(S124): serve one credential-mode request; any failure names its type only.
 
         :param scope: ASGI HTTP scope.
         :param receive: ASGI receive callable.
@@ -927,7 +927,7 @@ class ClaudeGatewayShim:
         self, scope: _Scope, receive: _Receive, send: _Send
     ) -> None:
         """
-        CORAL(S118): check the session token from the headers, then the route, path and body
+        CORAL(S124): check the session token from the headers, then the route, path and body
         size, then forward with the real credential until the answer ends or the CLI leaves.
 
         :param scope: ASGI HTTP scope.
@@ -995,7 +995,7 @@ class ClaudeGatewayShim:
         send: _Send,
     ) -> None:
         """
-        CORAL(S118): forward with the real credential and relay the answer; one refresh on an
+        CORAL(S124): forward with the real credential and relay the answer; one refresh on an
         upstream 401.
 
         :param credential: The real credential.
@@ -1031,7 +1031,7 @@ class ClaudeGatewayShim:
 
     def _presents_session_token(self, scope_headers: list[tuple[bytes, bytes]]) -> bool:
         """
-        CORAL(S118): every presented ``x-api-key`` and ``authorization: Bearer`` is the session
+        CORAL(S124): every presented ``x-api-key`` and ``authorization: Bearer`` is the session
         token, at least one is present and none is repeated; compared as bytes in constant time.
         """
         expected = (self._session_token or "").encode("ascii")
@@ -1053,7 +1053,7 @@ class ClaudeGatewayShim:
         return bool(matches) and all(matches)
 
     def _is_under_upstream(self, url: str) -> bool:
-        """CORAL(S118): *url* has the upstream's scheme, host and port and stays under its path."""
+        """CORAL(S124): *url* has the upstream's scheme, host and port and stays under its path."""
         try:
             joined, upstream = httpx.URL(url), httpx.URL(self._upstream_base_url)
         except httpx.InvalidURL:
@@ -1065,7 +1065,7 @@ class ClaudeGatewayShim:
         ) and joined.path.startswith(upstream.path.rstrip("/") + "/")
 
     def _claim_refresh(self) -> bool:
-        """CORAL(S118): allow one upstream-401 refresh per ``_REFRESH_MIN_INTERVAL_S``."""
+        """CORAL(S124): allow one upstream-401 refresh per ``_REFRESH_MIN_INTERVAL_S``."""
         if self._credential is None or not self._credential.refreshable:
             return False
         now = time.monotonic()

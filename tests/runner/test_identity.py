@@ -8,16 +8,16 @@ import sys
 
 import pytest
 
-from omnigent.runner import identity  # CORAL(S117)
+from omnigent.runner import identity  # CORAL(S123)
 from omnigent.runner.identity import (
     RUNNER_AUTH_SECRET_ENV_VARS,
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
-    consume_runner_auth_secret,  # CORAL(S117)
-    runner_auth_secret,  # CORAL(S117)
+    consume_runner_auth_secret,  # CORAL(S123)
+    runner_auth_secret,  # CORAL(S123)
     strip_runner_auth_secrets,
-    take_runner_auth_secrets,  # CORAL(S117)
+    take_runner_auth_secrets,  # CORAL(S123)
     token_bound_runner_id,
     touch_connect_marker,
 )
@@ -110,7 +110,7 @@ def test_strip_runner_auth_secrets_does_not_mutate_input() -> None:
     assert result is not source
 
 
-# CORAL(S117): the runner's tokens after boot live in an in-memory holder.
+# CORAL(S123): the runner's tokens after boot live in an in-memory holder.
 def test_held_runner_tokens_win_over_os_environ_and_each_take_moves_them_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

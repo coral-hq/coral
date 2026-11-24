@@ -2710,7 +2710,7 @@ def test_openai_compatible_listing_hits_the_versioned_base() -> None:
     ]
 
 
-# CORAL(S118): a loopback endpoint is listed with no proxy from the environment, so its
+# CORAL(S124): a loopback endpoint is listed with no proxy from the environment, so its
 # bearer stays on the machine; any other endpoint keeps the client it had.
 @pytest.mark.parametrize(
     ("base_url", "direct"),

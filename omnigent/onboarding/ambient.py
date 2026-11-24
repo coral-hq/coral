@@ -31,7 +31,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Mapping  # CORAL(S119)
+from collections.abc import Mapping  # CORAL(S125)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -575,7 +575,7 @@ def read_claude_managed_settings(
 def claude_user_settings_path(
     cwd: str | None = None, environ: Mapping[str, str] | None = None
 ) -> Path:
-    """CORAL(S119): where :func:`read_claude_user_settings` reads, for a caller that must
+    """CORAL(S125): where :func:`read_claude_user_settings` reads, for a caller that must
     know whether the CLI's working directory holds the file.
 
     :param cwd: The CLI's working directory, e.g. ``"/home/user/repo"``;
@@ -603,11 +603,11 @@ def read_claude_user_settings(
 
     :param cwd: The CLI's working directory, e.g. ``"/home/user/repo"``;
         ``None`` means this process's working directory.
-    :param environ: CORAL(S119): as for :func:`claude_user_settings_path`.
+    :param environ: CORAL(S125): as for :func:`claude_user_settings_path`.
     :returns: The settings object, or ``None`` when the file is missing,
         unreadable, or not an object.
     """
-    settings_path = claude_user_settings_path(cwd, environ)  # CORAL(S119)
+    settings_path = claude_user_settings_path(cwd, environ)  # CORAL(S125)
     try:
         payload = json.loads(settings_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):

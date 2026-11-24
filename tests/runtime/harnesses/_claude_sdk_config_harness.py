@@ -1,4 +1,4 @@
-"""CORAL(S118): the real claude-sdk harness app, with routes that report its config safely.
+"""CORAL(S124): the real claude-sdk harness app, with routes that report its config safely.
 
 Spawned through the process manager to show where a direct-exec harness keeps its key: its
 executor's config (reported by digest), not its environment (reported by name). It never

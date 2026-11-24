@@ -36,7 +36,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping  # CORAL(S117)
+from collections.abc import Callable, Mapping  # CORAL(S123)
 from pathlib import Path
 from typing import BinaryIO
 
@@ -171,7 +171,7 @@ class ZygoteManager:
     :param python_executable: Interpreter to launch the zygote with; defaults
         to ``sys.executable``.
     :param log_path: Optional file for the zygote's own stdout/stderr.
-    :param base_env: CORAL(S117): returns the environment the zygote is exec'd
+    :param base_env: CORAL(S123): returns the environment the zygote is exec'd
         with, called at each spawn; ``None`` uses ``os.environ``. Every runner and
         harness the zygote forks exposes that environment to outside readers.
     """
@@ -181,11 +181,11 @@ class ZygoteManager:
         *,
         python_executable: str | None = None,
         log_path: Path | None = None,
-        base_env: Callable[[], Mapping[str, str]] | None = None,  # CORAL(S117)
+        base_env: Callable[[], Mapping[str, str]] | None = None,  # CORAL(S123)
     ) -> None:
         self._python = python_executable or sys.executable
         self._log_path = log_path
-        self._base_env = base_env  # CORAL(S117)
+        self._base_env = base_env  # CORAL(S123)
         self._proc: subprocess.Popen[bytes] | None = None
         self._sock: socket.socket | None = None
         self._control_failed = False
@@ -237,7 +237,7 @@ class ZygoteManager:
                 child_sock.close()
                 raise ZygoteUnavailable(f"failed to spawn runner zygote: {exc}") from exc
             except BaseException:
-                # CORAL(S117): a raising base_env callable leaves no socket open either.
+                # CORAL(S123): a raising base_env callable leaves no socket open either.
                 parent_sock.close()
                 child_sock.close()
                 raise
@@ -269,7 +269,7 @@ class ZygoteManager:
         :returns: The spawned zygote process.
         :raises OSError: If the interpreter could not be spawned.
         """
-        # CORAL(S117): read at each spawn, so a respawned zygote sees the daemon's env then.
+        # CORAL(S123): read at each spawn, so a respawned zygote sees the daemon's env then.
         base_env = os.environ if self._base_env is None else self._base_env()
         env = {**base_env, ZYGOTE_CONTROL_FD_ENV_VAR: str(child_fd)}
         # glibc reads these once, when its allocator initializes at exec. This is

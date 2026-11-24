@@ -9,44 +9,44 @@ Opus thinking output (Opus 4.7+ defaults ``display`` to ``"omitted"``).
 from __future__ import annotations
 
 import asyncio
-import base64  # CORAL(S118)
-import contextlib  # CORAL(S118)
+import base64  # CORAL(S124)
+import contextlib  # CORAL(S124)
 import json
-import logging  # CORAL(S118)
-import re  # CORAL(S118)
-import secrets  # CORAL(S118)
-import shlex  # CORAL(S118)
-import threading  # CORAL(S118)
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator  # CORAL(S118)
+import logging  # CORAL(S124)
+import re  # CORAL(S124)
+import secrets  # CORAL(S124)
+import shlex  # CORAL(S124)
+import threading  # CORAL(S124)
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator  # CORAL(S124)
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # CORAL(S118)
-from pathlib import Path  # CORAL(S118)
-from types import SimpleNamespace  # CORAL(S118)
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # CORAL(S124)
+from pathlib import Path  # CORAL(S124)
+from types import SimpleNamespace  # CORAL(S124)
 from typing import Any
 
 import httpx
-import psutil  # type: ignore[import-untyped]  # CORAL(S118)
+import psutil  # type: ignore[import-untyped]  # CORAL(S124)
 import pytest
 import uvicorn
 
-from omnigent.inner import claude_gateway_shim as shim_module  # CORAL(S118)
+from omnigent.inner import claude_gateway_shim as shim_module  # CORAL(S124)
 from omnigent.inner.claude_gateway_shim import (
     ClaudeGatewayShim,
-    UpstreamCredential,  # CORAL(S118)
-    UpstreamCredentialError,  # CORAL(S118)
+    UpstreamCredential,  # CORAL(S124)
+    UpstreamCredentialError,  # CORAL(S124)
     restore_thinking_display,
-    static_printf_value,  # CORAL(S118)
+    static_printf_value,  # CORAL(S124)
 )
-from tests._helpers.https_server import enable_https  # CORAL(S118)
-from tests._helpers.polling import poll_until_async  # CORAL(S118)
+from tests._helpers.https_server import enable_https  # CORAL(S124)
+from tests._helpers.polling import poll_until_async  # CORAL(S124)
 
-# CORAL(S118): every upstream a shim test reaches must be a loopback server.
+# CORAL(S124): every upstream a shim test reaches must be a loopback server.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 @pytest.fixture(autouse=True)
 def _loopback_upstreams_only(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """CORAL(S118): refuse, and fail the test on, any non-loopback upstream or proxy."""
+    """CORAL(S124): refuse, and fail the test on, any non-loopback upstream or proxy."""
     reached: list[str] = []
     original = httpx.AsyncHTTPTransport.handle_async_request
 
@@ -157,7 +157,7 @@ def test_restore_passes_through_unparseable_bodies(body: bytes) -> None:
     assert restore_thinking_display(body) == body
 
 
-# CORAL(S118): only the exact form written for a static key is a literal; anything else runs.
+# CORAL(S124): only the exact form written for a static key is a literal; anything else runs.
 @pytest.mark.parametrize(
     "value", ["sk-ant-test-0123abcd", "it's a key", "$HOME `id` ;|&", "line\nbreak", ""]
 )
@@ -193,16 +193,16 @@ class _CapturedRequest:
     :param path: Request path, e.g. ``"/v1/messages"``.
     :param headers: Lower-cased header name → value.
     :param body: Raw request body bytes.
-    :param raw_path: CORAL(S118): the undecoded request target path.
-    :param query: CORAL(S118): the raw query string.
+    :param raw_path: CORAL(S124): the undecoded request target path.
+    :param query: CORAL(S124): the raw query string.
     """
 
     method: str
     path: str
     headers: dict[str, str]
     body: bytes
-    raw_path: bytes = b""  # CORAL(S118)
-    query: bytes = b""  # CORAL(S118)
+    raw_path: bytes = b""  # CORAL(S124)
+    query: bytes = b""  # CORAL(S124)
 
 
 @dataclass
@@ -219,7 +219,7 @@ class _RecordingUpstream:
     _server: uvicorn.Server | None = None
     _task: asyncio.Task[None] | None = None
     port: int | None = None
-    # CORAL(S118): credentials answered 401, and the HTTP parser (h11 keeps absolute-form targets)
+    # CORAL(S124): credentials answered 401, and the HTTP parser (h11 keeps absolute-form targets)
     rejected_credentials: set[str] = field(default_factory=set)
     http: str = "auto"
 
@@ -247,11 +247,11 @@ class _RecordingUpstream:
                     k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]
                 },
                 body=bytes(body),
-                raw_path=scope.get("raw_path", b""),  # CORAL(S118)
-                query=scope.get("query_string", b""),  # CORAL(S118)
+                raw_path=scope.get("raw_path", b""),  # CORAL(S124)
+                query=scope.get("query_string", b""),  # CORAL(S124)
             )
         )
-        # CORAL(S118): a rejected credential gets the upstream's own 401
+        # CORAL(S124): a rejected credential gets the upstream's own 401
         seen = self.requests[-1].headers
         presented = {seen.get("x-api-key"), seen.get("authorization", "").removeprefix("Bearer ")}
         if presented & self.rejected_credentials:
@@ -298,7 +298,7 @@ class _RecordingUpstream:
             log_level="warning",
             lifespan="off",
             interface="asgi3",  # bound methods defeat uvicorn's auto-detection
-            http=self.http,  # CORAL(S118)
+            http=self.http,  # CORAL(S124)
         )
         self._server = uvicorn.Server(config)
         self._task = asyncio.create_task(self._server.serve())
@@ -547,7 +547,7 @@ async def test_gateway_executor_routes_new_client_through_shim(monkeypatch) -> N
             await executor._gateway_shim.aclose()
 
 
-# ── credential mode: CORAL(S118) ──────────────────────────
+# ── credential mode: CORAL(S124) ──────────────────────────
 # Fake values only. Secrets are compared by presence; failures name labels, never values.
 
 _FAKE_KEY = f"sk-ant-test-{secrets.token_hex(8)}"
@@ -790,7 +790,7 @@ async def test_a_credential_shim_takes_plain_http_upstreams_on_loopback_only(
         assert plain.base_url.startswith("http://127.0.0.1:")
 
 
-# CORAL(S119): one check says where the real credential may go, for the executor's turn and
+# CORAL(S125): one check says where the real credential may go, for the executor's turn and
 # for the shim's start; what it refuses it refuses without quoting the URL.
 @pytest.mark.parametrize(
     ("url", "refused"),
@@ -1069,7 +1069,7 @@ async def test_a_joined_url_outside_the_upstream_base_path_is_refused(
 ) -> None:
     base = f"http://127.0.0.1:{upstream.port}/base"
     async with _running_shim(base, _literal_credential()) as shim:
-        # CORAL(S119): no shim starts on such a base any more; the request check still holds
+        # CORAL(S125): no shim starts on such a base any more; the request check still holds
         shim._upstream_base_url = f"{base}?misplaced=query"
         response = await _send(shim, _token_headers(shim))
     assert response.status_code == 400
@@ -1528,7 +1528,7 @@ async def test_the_upstream_ca_file_extends_default_trust_and_fails_closed(tmp_p
         await shim.aclose()
 
 
-# CORAL(S119): a caller that chose the proxy from the user's settings, or chose none, is not
+# CORAL(S125): a caller that chose the proxy from the user's settings, or chose none, is not
 # overruled by a proxy the harness's environment names.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(

@@ -1432,10 +1432,10 @@ test until someone classifies it.
   host. A shell the claude-sdk sandbox does not confine can act as its
   siblings and as the owner: it can drive a sibling's turn, handoff included,
   through that sibling's harness socket, and it can read other processes'
-  environments and command lines. Before S117, on the zygote path a runner's
+  environments and command lines. Before S123, on the zygote path a runner's
   or harness's environment, as another process reads it, was the host
   daemon's whole environment, and on the direct-spawn fallback it held the
-  runner's tunnel binding token and the host's initial bearer. Since S117, on
+  runner's tunnel binding token and the host's initial bearer. Since S123, on
   POSIX, the zygote starts from the allow-listed runner environment without
   credential-shaped names, and a direct-spawned runner takes both tokens over
   an inherited socket and keeps them in memory. A direct-spawned runner's
@@ -1478,10 +1478,10 @@ test until someone classifies it.
   each launch. Its sandbox grants nothing of the user's `~/.claude` or
   `~/.claude.json`, so neither it nor anything it starts can read or write
   them. That was measured on macOS 27.2.1 and is checked on Linux by a bwrap
-  test in CI. Since S118, on POSIX, the CLI holds no model credential: it
+  test in CI. Since S124, on POSIX, the CLI holds no model credential: it
   holds a per-session token for a loopback proxy in its harness, which holds
   the credential, and the credentials the host forwards are removed from a
-  Coral harness's environment. Since S119 the CLI takes from the `env` block
+  Coral harness's environment. Since S125 the CLI takes from the `env` block
   of the user's `~/.claude/settings.json` only model names, opt-outs that are
   switched on, and proxy and CA-file settings that hold no credential; the
   block's endpoint and network settings feed the proxy, and the rest is
@@ -1600,7 +1600,7 @@ drift (CRL-161).
 | A runner's first start in a repo probes git's untracked cache for about 6 s; a turn that ends inside it looks like a drift (`pending_input`). The E2E presets `core.untrackedCache=true` | CRL-161 |
 | Omnigent's own launch paths reach a step's runner without Coral's checks ("One relaunch path", Residuals) | CRL-162 |
 | A relaunch or a fence that meets another stop of the same runner in progress ("A stop in progress reads as stopped", Residuals) | CRL-163 |
-| Probe 15's exposures. Secrets in exec-time environments and argv are closed for Coral steps on POSIX by S117, S118 and S119 (CRL-167; ADR-05, "Addendum: CRL-167 secrets out of exec-time environments"). Still open: other agents' CLIs, direct-spawned and CLI-local runners, claude-native steps and Windows (CRL-197); the allow-listed runner token on Coral-bound sessions (CRL-168) | CRL-197, CRL-168 |
+| Probe 15's exposures. Secrets in exec-time environments and argv are closed for Coral steps on POSIX by S123, S124 and S125 (CRL-167; ADR-05, "Addendum: CRL-167 secrets out of exec-time environments"). Still open: other agents' CLIs, direct-spawned and CLI-local runners, claude-native steps and Windows (CRL-197); the allow-listed runner token on Coral-bound sessions (CRL-168) | CRL-197, CRL-168 |
 | What keeps every gate's `gate_integrity` at `not_enforced` ([`gates-and-inbox.md`](gates-and-inbox.md), "Enforced gates"): other programs' sockets and loopback services; files a step leaves that the owner's tools run; macOS CI and Mach services; the owner's other and earlier runs; password guessing at `/auth/login`. OIDC servers wait on a consented native sign-in | CRL-174, CRL-181, CRL-170, CRL-171, CRL-193, CRL-195; OIDC CRL-194 |
 | A force-deleted `coral__` agent leaves the live steps that run it unable to hand off, with only `/mcp` failing closed, until the nudge cap pauses the run: consult the required-policy provider on the no-agent branch keyed on the binding, or stop the run's sessions on a forced delete | CRL-154 |
 | Showing the salvage ref in the web, and the retention and cleanup of `refs/coral/salvage/*` ([`workspace-ops.md`](workspace-ops.md), "Restart ladder") | CRL-158 |

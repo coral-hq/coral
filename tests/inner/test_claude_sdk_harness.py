@@ -17,29 +17,29 @@ the e2e suite and requires API keys.
 
 from __future__ import annotations
 
-import hashlib  # CORAL(S118)
-import json  # CORAL(S118)
-import os  # CORAL(S118)
-import secrets  # CORAL(S118)
-import shlex  # CORAL(S118)
-import socket  # CORAL(S118)
-import sys  # CORAL(S118)
-from collections.abc import Callable  # CORAL(S118)
-from pathlib import Path  # CORAL(S118)
+import hashlib  # CORAL(S124)
+import json  # CORAL(S124)
+import os  # CORAL(S124)
+import secrets  # CORAL(S124)
+import shlex  # CORAL(S124)
+import socket  # CORAL(S124)
+import sys  # CORAL(S124)
+from collections.abc import Callable  # CORAL(S124)
+from pathlib import Path  # CORAL(S124)
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from omnigent.inner import claude_sdk_harness
-from omnigent.runner.launch_secrets import (  # CORAL(S118)
+from omnigent.runner.launch_secrets import (  # CORAL(S124)
     CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
     HARNESS_LAUNCH_FD_ENV_VAR,
     LAUNCH_SECRETS_EXIT_CODE,
     launch_secrets_pipe,
 )
 from omnigent.runtime.harnesses import _HARNESS_MODULES
-from tests._helpers.polling import poll_until_async  # CORAL(S118)
+from tests._helpers.polling import poll_until_async  # CORAL(S124)
 
 
 def test_harness_module_registered_in_module_registry() -> None:
@@ -53,7 +53,7 @@ def test_harness_module_registered_in_module_registry() -> None:
 
 
 def test_create_app_returns_fastapi_with_required_routes(
-    fake_environ: dict[str, str],  # CORAL(S118): create_app() pops config from os.environ
+    fake_environ: dict[str, str],  # CORAL(S124): create_app() pops config from os.environ
 ) -> None:
     """``create_app()`` returns a FastAPI app exposing the harness API.
 
@@ -544,7 +544,7 @@ def test_coral_credential_and_policy_flags_thread_through(
     assert captured[kwarg] is expected
 
 
-# CORAL(S118): the harness takes its config, and for Coral its CLI's credentials, out of
+# CORAL(S124): the harness takes its config, and for Coral its CLI's credentials, out of
 # os.environ, which the SDK copies whole into every CLI it spawns.
 
 _CONFIG_PREFIX = "HARNESS_CLAUDE_SDK_"

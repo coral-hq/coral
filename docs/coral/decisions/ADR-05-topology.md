@@ -477,7 +477,7 @@ sandbox does not confine.
   in its local server's environment; it is that server's runner's binding
   token, and the server accepts it for every session
   (`omnigent/server/mcp_identity.py`). Whether a Coral step can run on such a
-  server is unverified. Since S117, on POSIX, a host-launched runner's
+  server is unverified. Since S123, on POSIX, a host-launched runner's
   exec-time environment holds neither its binding token nor the initial
   bearer (see "Addendum: CRL-167 secrets out of exec-time
   environments").
@@ -501,7 +501,7 @@ not planned. Reopened by CRL-166: planned as defence in depth in CRL-173 (see
 
 | Follow-up | Owner |
 |---|---|
-| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | **Run on single-user servers only**, without credentials, in CRL-137 (`tests/e2e/coral/test_sandbox_probe.py`). macOS seatbelt, one local run: a step reaches a sibling's harness socket (before S112, now `denied`, see "Addendum: CRL-166 harness sockets on macOS"), other processes' environments and command lines (the model API key in every claude-sdk CLI's among them; before S111, now `denied`, see "Addendum: CRL-165 process reads on macOS") and the server; the three probed credential files (Claude's, Omnigent's secrets and the host's tunnel tokens, in the stack's isolated home), the config file's key and the stack's bridge dir are `denied`; no other credential store was probed. Linux bwrap, the `coral-e2e` lane: the server is reachable and every other target is `hidden`, the step's own CLI included. A step runs on an allow-listed-token server, and the token was in its runner's and harness's environment as read from outside the sandbox (before S117; now in neither on the zygote path); the step's shell read it on macOS only (before S111; now `denied`). Tables, limits and owners (CRL-165 to CRL-168; the single-user server rows are an accepted residual): "Addendum: CRL-137 probe verdicts". **Run on an accounts server**, with the CLI's stored credentials and owner-JWT minting, in CRL-159: "Addendum: CRL-159 probe 15 on identity-requiring servers" |
+| The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | **Run on single-user servers only**, without credentials, in CRL-137 (`tests/e2e/coral/test_sandbox_probe.py`). macOS seatbelt, one local run: a step reaches a sibling's harness socket (before S112, now `denied`, see "Addendum: CRL-166 harness sockets on macOS"), other processes' environments and command lines (the model API key in every claude-sdk CLI's among them; before S111, now `denied`, see "Addendum: CRL-165 process reads on macOS") and the server; the three probed credential files (Claude's, Omnigent's secrets and the host's tunnel tokens, in the stack's isolated home), the config file's key and the stack's bridge dir are `denied`; no other credential store was probed. Linux bwrap, the `coral-e2e` lane: the server is reachable and every other target is `hidden`, the step's own CLI included. A step runs on an allow-listed-token server, and the token was in its runner's and harness's environment as read from outside the sandbox (before S123; now in neither on the zygote path); the step's shell read it on macOS only (before S111; now `denied`). Tables, limits and owners (CRL-165 to CRL-168; the single-user server rows are an accepted residual): "Addendum: CRL-137 probe verdicts". **Run on an accounts server**, with the CLI's stored credentials and owner-JWT minting, in CRL-159: "Addendum: CRL-159 probe 15 on identity-requiring servers" |
 | Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced | **Built** in CRL-159 as `gate_integrity` on the run detail; `enforced` needs an accounts server, verified config, no native steps and an empty table row for the run's host. Every row has open blockers today: CRL-170, CRL-171, CRL-174, CRL-181, CRL-193, CRL-195 ("Addendum: CRL-159 probe 15 on identity-requiring servers"; [`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md), "Enforced gates") |
 | Run probe 15 on native steps before HRN-03 enables them | CRL-138 |
 
@@ -602,9 +602,9 @@ detectors, and the test refuses a pinned `reachable` without an owner.
 |---|---|---|---|---|
 | `harness_socket` (the reviewer's) | `reachable` | | | CRL-166 (closed by S112, see "Addendum: CRL-166 harness sockets on macOS") |
 | `runner_environ` (the reviewer's runner) | `reachable` | `none` | `not_present` / `not_present` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS") |
-| `cli_environ` (the reviewer's CLI) | `reachable` | `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` and 13 `HARNESS_CLAUDE_SDK_*` names | `reachable` / `reachable` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS"); the key CRL-167 (closed for Coral CLIs by S118, see "Addendum: CRL-167 secrets out of exec-time environments") |
+| `cli_environ` (the reviewer's CLI) | `reachable` | `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` and 13 `HARNESS_CLAUDE_SDK_*` names | `reachable` / `reachable` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS"); the key CRL-167 (closed for Coral CLIs by S124, see "Addendum: CRL-167 secrets out of exec-time environments") |
 | `host_environ` | `reachable` | `none` | `not_present` / `not_present` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS") |
-| `own_cli_environ` (the step's own CLI) | `reachable` | as `cli_environ` | `reachable` / `reachable` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS"); the key CRL-167 (closed for Coral CLIs by S118, see "Addendum: CRL-167 secrets out of exec-time environments") |
+| `own_cli_environ` (the step's own CLI) | `reachable` | as `cli_environ` | `reachable` / `reachable` | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS"); the key CRL-167 (closed for Coral CLIs by S124, see "Addendum: CRL-167 secrets out of exec-time environments") |
 | `credential_files.claude` | `denied` | | | |
 | `credential_files.omnigent_secrets` | `denied` | | | |
 | `credential_files.host_tunnel` | `denied` | | | |
@@ -701,7 +701,7 @@ Reading the tables:
   Keychain (the step profile allows `mach-lookup`), `~/.aws`, `~/.ssh`, or
   `gh`'s and `databricks`' configs. Residual (d) is narrowed for these files
   only, and credentials the host was started with stayed readable in its
-  runners' environments to processes outside the sandbox, until S117 took
+  runners' environments to processes outside the sandbox, until S123 took
   them out of a zygote-forked runner's ("Addendum: CRL-167 secrets out of
   exec-time environments"). Since S111 a macOS step's shell does not read
   them directly (measured on 27.2.1).
@@ -722,7 +722,7 @@ itself: the probe only measures exposures that already exist.
 |---|---|
 | A step connects to another session's harness socket (`harness_socket`, macOS) | CRL-166 (closed by S112, see "Addendum: CRL-166 harness sockets on macOS") |
 | A step reads other processes' environments and command lines (`runner_environ`, `cli_environ`, `host_environ`, `own_cli_environ`, macOS) | CRL-165 (closed by S111, see "Addendum: CRL-165 process reads on macOS") |
-| Secrets in exec-time environments and argv, the model API key among them (every `.api_key` and `.argv_api_key` `reachable`, macOS, before S111; processes outside the sandbox read them until S117 and S118) | CRL-167 (closed for Coral steps on POSIX by S117, S118 and S119, see "Addendum: CRL-167 secrets out of exec-time environments"; what stays open is CRL-197) |
+| Secrets in exec-time environments and argv, the model API key among them (every `.api_key` and `.argv_api_key` `reachable`, macOS, before S111; processes outside the sandbox read them until S123 and S124) | CRL-167 (closed for Coral steps on POSIX by S123, S124 and S125, see "Addendum: CRL-167 secrets out of exec-time environments"; what stays open is CRL-197) |
 | The allow-listed runner token in the step runner's environment (below) | CRL-168 |
 | A single-user server takes any local process as its owner (`server_loopback`, `server_localhost`, both platforms) | accepted: such servers are never Enforced ("Addendum: CRL-159 probe 15 on identity-requiring servers") |
 
@@ -741,7 +741,7 @@ a server that keeps `OMNIGENT_RUNNER_TUNNEL_TOKEN` (the binding token of
 `omnigent run`'s local server, which that server accepts for every session),
 with the host exporting the same test-only value. The names are read from
 outside the sandbox, from each process's environment as another process reads
-it (`EXPECTED_TOKEN`). Since S117 the runner and harness rows read `none`:
+it (`EXPECTED_TOKEN`). Since S123 the runner and harness rows read `none`:
 measured on macOS 27.2.1, and set by reasoning on Linux until the `coral-e2e`
 lane runs on that change (see "Addendum: CRL-167 secrets out of exec-time
 environments").
@@ -749,26 +749,26 @@ environments").
 | Observation | macOS (`EXPECTED_TOKEN["darwin"]`) | Linux (`EXPECTED_TOKEN["linux"]`) |
 |---|---|---|
 | The step runs and hands off (`step_runs`) | `true` | `true` |
-| Token names in the runner's environment (`runner.names`) | `none` (before S117: `OMNIGENT_RUNNER_TUNNEL_TOKEN`) | `none`, by reasoning (before S117: `OMNIGENT_RUNNER_TUNNEL_TOKEN`, lane run 44980984569) |
-| In the harness's environment (`harness.names`) | `none` (before S117: `OMNIGENT_RUNNER_TUNNEL_TOKEN`) | `none`, by reasoning (before S117: `OMNIGENT_RUNNER_TUNNEL_TOKEN`, lane run 44980984569) |
+| Token names in the runner's environment (`runner.names`) | `none` (before S123: `OMNIGENT_RUNNER_TUNNEL_TOKEN`) | `none`, by reasoning (before S123: `OMNIGENT_RUNNER_TUNNEL_TOKEN`, lane run 44980984569) |
+| In the harness's environment (`harness.names`) | `none` (before S123: `OMNIGENT_RUNNER_TUNNEL_TOKEN`) | `none`, by reasoning (before S123: `OMNIGENT_RUNNER_TUNNEL_TOKEN`, lane run 44980984569) |
 | In the sandbox launcher's environment (`launcher.names`) | `none` | `none` |
 | In the CLI's environment (`cli.names`) | `none` | `none` |
 | In the step's own shell (`shell_env_names`) | `not_present`, names `none` | `not_present`, names `none` |
 | The step's shell reading its own runner's environment (`runner_environ`) | `denied` since S111 (before: `reachable`, names `OMNIGENT_RUNNER_TUNNEL_TOKEN`) | `hidden` |
 
-So the step runs on such a server. Before S117 the token was in its runner's
+So the step runs on such a server. Before S123 the token was in its runner's
 and harness's readable environments on both platforms; now it is in none of
 the five. The step's own shell read it from its runner on macOS only (before
 S111; now `denied`); on Linux that read is `hidden`. The server still accepts
 the token for every session (CRL-168).
 
-Since S118 this test's host holds an API key with no gateway, and its
+Since S124 this test's host holds an API key with no gateway, and its
 `ANTHROPIC_BASE_URL` names the mock. So each step's CLI runs on the direct-key
 path, through its harness's credential proxy (see "Addendum: CRL-167 secrets
 out of exec-time environments").
 
 **Exec-time and live environments.** These are exec-time environments. Before
-S117 the host started its runner zygote with its whole `os.environ`
+S123 the host started its runner zygote with its whole `os.environ`
 (`omnigent/host/runner_zygote.py`, `_spawn_zygote_process`); it now starts it
 from the allow-listed runner environment without credential-shaped names. A
 forked runner, and a harness the zygote forks for it, keep the zygote's
@@ -789,14 +789,14 @@ another process reads there is what they started with.
   survived that way, because the server accepts the allow-listed token for every
   session (`omnigent/server/mcp_identity.py`).
 
-**Residual (b), extended, then closed by S117.** Before S117, on the zygote
+**Residual (b), extended, then closed by S123.** Before S123, on the zygote
 path a reader saw the host daemon's whole environment, for runners and
 zygote-forked harnesses alike. On the direct-spawn fallback
 (`OMNIGENT_RUNNER_ZYGOTE=0`, or the zygote unavailable or dead), it saw the
 binding token and the initial bearer, as residual (b) says. The
 allow-listed-token test
 (`test_a_step_on_a_server_with_the_allow_listed_runner_token`) measured the
-zygote path on both platforms. S117 gives the zygote the filtered runner
+zygote path on both platforms. S123 gives the zygote the filtered runner
 environment and hands a direct-spawned runner its two tokens over an inherited
 socket (see "Addendum: CRL-167 secrets out of exec-time environments"). Still
 open: a direct-spawned runner's `env=` carries the credential-shaped
@@ -919,7 +919,7 @@ command lines, on macOS 27.2.1.
   process), as do other agents' CLIs and the other paths that addendum lists
   (CRL-197).
 - The server accepts the allow-listed runner token for every session
-  (CRL-168). Since S117 it is no longer in a zygote-forked runner's or
+  (CRL-168). Since S123 it is no longer in a zygote-forked runner's or
   harness's readable environment; a direct-spawned runner's `env=` still
   carries it (CRL-197).
 - A sandboxed process still reaches the clipboard and Spotlight. Apple Events
@@ -1209,7 +1209,7 @@ are open, is the owner's risk decision (on a single-user server a step acts
 as the owner on both platforms, an accepted residual). S111 and S112 closed
 the process reads and the connect to harness sockets under the configured and
 per-user default roots. S113 closed a sandboxed step CLI's access to the
-user's Claude config files (since S119 only model names, switched-on opt-outs
+user's Claude config files (since S125 only model names, switched-on opt-outs
 and credential-free network settings of its settings `env` block reach the
 CLI, see "Addendum: CRL-167 secrets out of exec-time environments"). All
 three were measured on macOS 27.2.1, and no CI lane runs macOS
@@ -1381,7 +1381,7 @@ where stated.
   `tests/e2e/coral/test_tier_b_executor.py::test_a_coral_cli_keeps_its_claude_config_out_of_the_home`
   runs the real CLI in its seatbelt wrap with the Coral flags, API-key auth and
   the mock model. It is a local test, not in a CI lane. The probe runs as the
-  API key helper (since S118, in front of the credential proxy's token
+  API key helper (since S124, in front of the credential proxy's token
   helper), which the CLI starts inside its wrap: every home check
   fails, and the private dir checks pass. The turn completes and the home is
   unchanged. A `security` stub first on `PATH` was asked only for per-dir
@@ -1477,13 +1477,13 @@ away from the user's Claude config files.
   `~/.claude/settings.json`: the executor read it outside the sandbox and
   merged it into the CLI's environment, minus the two config dir names and
   S13's token names, so code in the wrap could read those values. Closed by
-  S119 on POSIX: the CLI gets only model names, switched-on opt-outs and
+  S125 on POSIX: the CLI gets only model names, switched-on opt-outs and
   credential-free network settings, and the endpoint feeds its credential
   proxy (see "Addendum: CRL-167 secrets out of exec-time environments"). On
   Windows the whole block still merges (CRL-197).
 - A relative `CLAUDE_CONFIG_DIR` forwarded by the host makes that merge read
   a `settings.json` under the step's worktree, which a step can create. Since
-  S119 such a file can still choose model names and switch opt-outs on, but
+  S125 such a file can still choose model names and switch opt-outs on, but
   not the endpoint, a proxy or a CA file. S13's token strips can also be
   undone by a concurrent connect on one executor. Both are from code and
   predate S113 (CRL-182).
@@ -1859,7 +1859,7 @@ listed here.
   `/proc/<pid>/environ` were not measured (CRL-197). A `skills: none` agent
   without a gateway also still gets the `env` block of the user's
   `~/.claude/settings.json` merged into its CLI's environment, as before;
-  S119 changes that for Coral CLIs only (CRL-197).
+  S125 changes that for Coral CLIs only (CRL-197).
 - Leftover copies of the seed (CRL-179). With S115 a launch scratch can hold
   a copy of the user's MCP servers with their secrets, as a 0600 file in a
   0700 dir.
@@ -2348,9 +2348,9 @@ single-user test does, on a stack from `skeleton_stack(identity=True)`
   with it. The test reads only that file's metadata (`_metadata_live`,
   `test_sandbox_probe.py:400`).
 - The host spawns the runner directly (`OMNIGENT_RUNNER_ZYGOTE=0`, `:1482`).
-  Before S117 such a runner's exec-time environment held its tunnel binding
+  Before S123 such a runner's exec-time environment held its tunnel binding
   token and the host's bearer, and the test checked by name that both were
-  there. Since S117 the host hands it both over an inherited socket, so its
+  there. Since S123 the host hands it both over an inherited socket, so its
   environment holds neither. The test now proves the spawn path another way:
   the runner's parent must be the host daemon, or it fails as a failed control
   (`:1511-1514`). A zygote-forked runner's parent is the zygote.
@@ -2394,7 +2394,7 @@ same probe outside any sandbox, as the step's user, in the step's worktree
 
 - it reads the runner's environment and finds neither token there
   (`own_runner_mint` and `own_runner_bearer` `not_present`, each `.read`
-  `reachable`); before S117 it minted an owner JWT from the binding token and
+  `reachable`); before S123 it minted an owner JWT from the binding token and
   acted as the owner with the bearer;
 - it acts as the owner with the stored JWT;
 - it reads the server's environment and the cookie canary;
@@ -2646,8 +2646,8 @@ start with. S111 stopped a sandboxed step on macOS from reading them, and
 bwrap's pid namespace does on Linux. Processes outside the sandbox could
 still read them, and code inside a CLI's own sandbox inherits the CLI's
 environment. CRL-167 takes the secrets out for Coral, with three seams in
-Omnigent files (`.coral/seams.yaml`): S117 for runners, S118 for the model
-credential and S119 for the user's settings `env` block.
+Omnigent files (`.coral/seams.yaml`): S123 for runners, S124 for the model
+credential and S125 for the user's settings `env` block.
 
 A Coral CLI below is the Claude CLI of a Coral agent: a step's, the
 orchestrator's or the anchor's. Unless a line says otherwise, everything here
@@ -2656,7 +2656,7 @@ local runs on macOS 27.2.1 with claude 2.1.325, a mock model and fake keys.
 Linux has not run: its pins are set by reasoning until the `coral-e2e` lane
 runs on this change. No CI lane runs macOS (CRL-170).
 
-**Runners (S117).** A forked process's readable environment
+**Runners (S123).** A forked process's readable environment
 (`/proc/<pid>/environ` on Linux, `KERN_PROCARGS2` on macOS) is the one its
 parent was exec'd with, whatever it later does to `os.environ`. The host
 exec'd its runner zygote with the daemon's whole environment, so the zygote,
@@ -2704,7 +2704,7 @@ it.
   forwarded, by name only, in `OMNIGENT_RUNNER_FORWARDED_NAMES`, so a Coral
   harness can drop them (next).
 
-**Harness config and forwarded credentials (S118).** The Claude Agent SDK
+**Harness config and forwarded credentials (S124).** The Claude Agent SDK
 copies the harness's whole `os.environ` into every CLI it starts. The
 harness's own config sat there as `HARNESS_CLAUDE_SDK_*` names, the key helper
 (`printf %s '<key>'`) among them.
@@ -2743,7 +2743,7 @@ harness's own config sat there as `HARNESS_CLAUDE_SDK_*` names, the key helper
   the harness's memory, for two uses only: running a credential command, and
   the proxy's own connection to the model endpoint.
 
-**The credential proxy (S118).** A Coral CLI no longer gets the model
+**The credential proxy (S124).** A Coral CLI no longer gets the model
 credential. Its executor holds it, in the harness process, behind a proxy on
 loopback. The proxy is `ClaudeGatewayShim`
 (`omnigent/inner/claude_gateway_shim.py`), which gateway launches already ran
@@ -2827,7 +2827,7 @@ executor that has a credential command, with a gateway or on a plain API key.
   CLI outlives the port it calls. A cancelled or failed close still stops it,
   and a credential command still running is killed.
 
-**The first-party switch (S118).** On a plain Anthropic key the CLI used to
+**The first-party switch (S124).** On a plain Anthropic key the CLI used to
 talk to `api.anthropic.com` itself. Behind the proxy its base URL is loopback,
 which the pinned CLI treats as a custom endpoint. So the executor sets the
 CLI's private switch `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` exactly when
@@ -2841,7 +2841,7 @@ handling. A test fails when the installed CLI's build no longer names the
 switch
 (`tests/e2e/coral/test_sandbox_probe.py::test_the_installed_cli_knows_the_first_party_switch`).
 
-**The settings `env` block (S119).** For a Coral CLI on a plain key the
+**The settings `env` block (S125).** For a Coral CLI on a plain key the
 executor used to merge the whole `env` block of the user's
 `~/.claude/settings.json` into the CLI's environment, minus S13's token names
 and the config dir names. Now the block is split:
@@ -2887,7 +2887,7 @@ name or digest only.
 | A real direct-exec claude-sdk harness (`tests/runtime/harnesses/test_process_manager.py`) | macOS, local | its readable environment lacks both key-bearing names while its executor config has them |
 | The allow-listed-token stack test, `runner.names` and `harness.names` | macOS, local; Linux by reasoning | `none` |
 | The identity stack test, run outside the sandbox on a direct-spawned runner | macOS, local; Linux by reasoning | the runner's environment is read and holds neither token (`own_runner_mint`, `own_runner_bearer`: `not_present`) and no credential-like name |
-| Probe 15 run outside the sandbox on a single-user stack: the reviewer's runner and CLI, the host and the step's own CLI | macOS, local; Linux by reasoning | each is read (`reachable`); the API key is in none of their environments or command lines (`not_present`; before S118 it was on both CLIs' command lines); each CLI's environment names `OMNIGENT_CLAUDE_PROXY_TOKEN` and no `HARNESS_CLAUDE_SDK_*` name |
+| Probe 15 run outside the sandbox on a single-user stack: the reviewer's runner and CLI, the host and the step's own CLI | macOS, local; Linux by reasoning | each is read (`reachable`); the API key is in none of their environments or command lines (`not_present`; before S124 it was on both CLIs' command lines); each CLI's environment names `OMNIGENT_CLAUDE_PROXY_TOKEN` and no `HARNESS_CLAUDE_SDK_*` name |
 | `credential_proxy`: from the step's shell and from outside, a model request to the step's own proxy with no key, with a wrong key, and on a path that climbs to the model route | macOS, local, single-user and identity stacks; Linux by reasoning | `refused`, pinned closed with no owner; the mock received none of the three, and the session token is in no request body it recorded |
 | A Coral step's real sandboxed CLI behind the proxy (`tests/e2e/coral/test_tier_b_executor.py`, local only) | macOS, local | the key helper's environment inside the sandbox holds the session token and not the model key; the proxy refused none of the CLI's requests, so the pinned CLI needs no route beyond the four |
 | A real CLI on a plain key, with and without the proxy (same file) | macOS, local | the same `anthropic-beta` header and `thinking` field either way; with the first-party answer forced, three more betas and the same `thinking` field |
@@ -2995,7 +2995,7 @@ tests that bind it to the pins are unchanged.
 | Managed settings that override `ANTHROPIC_BASE_URL` or `apiKeyHelper`: the step then fails closed and no key leaks | accepted |
 | The host daemon's own environment, the LaunchAgent's `EnvironmentVariables` included | accepted: the user's own process |
 | Single-user servers, where a step acts as the owner | accepted ("Addendum: CRL-159 probe 15 on identity-requiring servers") |
-| Behind the proxy a CLI on a plain Anthropic key skips its bootstrap call, its fast-mode status prefetch and the key on its telemetry requests, none of them on a turn's path. The first-party switch does not reach the places that test the raw URL: the side-query beta on hook-agent and named model calls, the `cc_project` attribution tag, the resume cache warm-up, a server-flagged reminder experiment, and one resend without `thinking.display` after a 400 or 422. Read from CLI 2.1.325, not measured | accepted; the detail is in S118's note (`.coral/seams.yaml`) |
+| Behind the proxy a CLI on a plain Anthropic key skips its bootstrap call, its fast-mode status prefetch and the key on its telemetry requests, none of them on a turn's path. The first-party switch does not reach the places that test the raw URL: the side-query beta on hook-agent and named model calls, the `cc_project` attribution tag, the resume cache warm-up, a server-flagged reminder experiment, and one resend without `thinking.display` after a 400 or 422. Read from CLI 2.1.325, not measured | accepted; the detail is in S124's note (`.coral/seams.yaml`) |
 | A settings proxy with a user name, a password, a path or a query is not given to the CLI, whose other traffic uses the proxy it inherits; the harness's scrub still leaves the CLI a proxy without `@` that has a path or a query | accepted |
 | In local Tier B runs a CLI without a private config dir makes two keychain lookups per launch, which the `security` stub records; the base checkout does the same | CRL-180, CRL-197 |
 

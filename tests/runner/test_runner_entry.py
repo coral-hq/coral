@@ -31,7 +31,7 @@ import pytest
 from omnigent.errors import OmnigentError
 from omnigent.native import _native_forwarder_health as native_forwarder_health
 from omnigent.native import native_terminal
-from omnigent.runner import identity, subagent_work  # CORAL(S117)
+from omnigent.runner import identity, subagent_work  # CORAL(S123)
 from omnigent.runner._entry import (
     _DEFAULT_RUNNER_IDLE_TIMEOUT_S,
     _DEFAULT_RUNNER_THREADPOOL_MAX_WORKERS,
@@ -68,11 +68,11 @@ from omnigent.runner.identity import (
     RUNNER_AUTH_REJECTED_EXIT_CODE,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_INTERACTIVE_SHELLS_ENV_VAR,
-    RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,  # CORAL(S117)
+    RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,  # CORAL(S123)
     RUNNER_TUNNEL_TOKEN_HEADER,
-    runner_auth_secret,  # CORAL(S117)
+    runner_auth_secret,  # CORAL(S123)
 )
-from omnigent.runner.launch_secrets import (  # CORAL(S117)
+from omnigent.runner.launch_secrets import (  # CORAL(S123)
     LAUNCH_SECRETS_FD_ENV_VAR,
     launch_secrets_pipe,
 )
@@ -4030,7 +4030,7 @@ def test_main_preserves_unexpected_runtime_errors(
     assert capsys.readouterr().err == ""
 
 
-# CORAL(S117): a runner holds its tokens in memory from the start of main().
+# CORAL(S123): a runner holds its tokens in memory from the start of main().
 @pytest.fixture
 def held_runner_auth_secrets(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """This test's own empty in-memory holder of the runner's tokens."""

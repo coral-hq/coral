@@ -14,7 +14,7 @@ import contextlib
 import importlib.util
 import json
 import os
-import secrets  # CORAL(S117)
+import secrets  # CORAL(S123)
 import signal
 import socket
 import subprocess
@@ -30,7 +30,7 @@ import psutil
 import pytest
 
 import omnigent
-from omnigent.host.connect import (  # CORAL(S117): the allow-list and the zygote's env
+from omnigent.host.connect import (  # CORAL(S123): the allow-list and the zygote's env
     _RUNNER_ENV_ALLOWLIST,
     _RUNNER_ENV_ALLOWLIST_PREFIXES,
     HostProcess,
@@ -44,13 +44,13 @@ from omnigent.host.runner_zygote import (
     ZygoteUnavailable,
 )
 from omnigent.inner import _proc
-from omnigent.process_logging import LOG_TTY_FD_ENV_VAR  # CORAL(S117)
+from omnigent.process_logging import LOG_TTY_FD_ENV_VAR  # CORAL(S123)
 from omnigent.runner import _zygote
 from omnigent.runner._zygote import (
     _ZYGOTE_TEST_CHILD_EXIT_ENV_VAR,
-    _ZYGOTE_TEST_CHILD_HARNESS_ENV_VAR,  # CORAL(S117)
+    _ZYGOTE_TEST_CHILD_HARNESS_ENV_VAR,  # CORAL(S123)
     _ZYGOTE_TEST_CHILD_SLEEP_ENV_VAR,
-    ZYGOTE_CONTROL_FD_ENV_VAR,  # CORAL(S117)
+    ZYGOTE_CONTROL_FD_ENV_VAR,  # CORAL(S123)
     _disk_build_stamp,
     _GraphStamp,
     _package_source_stamps,
@@ -58,7 +58,7 @@ from omnigent.runner._zygote import (
     _source_files_match,
     _ZygoteServer,
 )
-from tests._helpers.polling import poll_until  # CORAL(S117)
+from tests._helpers.polling import poll_until  # CORAL(S123)
 
 # The zygote is POSIX-only: these tests exercise os.fork() and pass_fds, which
 # do not exist on Windows.
@@ -1055,7 +1055,7 @@ def test_operator_malloc_override_wins_at_the_zygote_exec(monkeypatch, tmp_path)
     assert captured["MALLOC_ARENA_MAX"] == "16"
 
 
-# CORAL(S117): fake host secrets the host env may hold; the last three are allow-listed.
+# CORAL(S123): fake host secrets the host env may hold; the last three are allow-listed.
 _FAKE_HOST_SECRET_NAMES = (
     "ANTHROPIC_API_KEY",
     "OMNIGENT_RUNNER_TUNNEL_TOKEN",
@@ -1139,7 +1139,7 @@ def test_forked_runner_and_harness_expose_only_allow_listed_names(tmp_path: Path
         manager.stop()
 
 
-# CORAL(S117): the zygote's exec env is computed after its control socketpair exists.
+# CORAL(S123): the zygote's exec env is computed after its control socketpair exists.
 def test_raising_base_env_leaves_no_control_socket_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``base_env`` callable that raises closes both control socket ends and propagates."""
     created: list[socket.socket] = []

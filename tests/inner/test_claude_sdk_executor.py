@@ -3,13 +3,13 @@
 
 import asyncio
 import base64
-import hashlib  # CORAL(S118)
+import hashlib  # CORAL(S124)
 import json
 import logging
 import os
-import re  # CORAL(S118)
-import secrets  # CORAL(S118)
-import shlex  # CORAL(S118)
+import re  # CORAL(S124)
+import secrets  # CORAL(S124)
+import shlex  # CORAL(S124)
 import shutil  # CORAL(S116)
 import subprocess  # CORAL(S116)
 import sys
@@ -20,7 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-import httpx  # CORAL(S118)
+import httpx  # CORAL(S124)
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -39,7 +39,7 @@ from omnigent.inner.executor import (
     TurnComplete,
 )
 
-# CORAL(S118): the shim tests' autouse guard applies here too: any shim upstream must be loopback
+# CORAL(S124): the shim tests' autouse guard applies here too: any shim upstream must be loopback
 from tests.inner.test_claude_gateway_shim import (
     _loopback_upstreams_only,  # noqa: F401
     _RecordingUpstream,
@@ -6883,7 +6883,7 @@ async def _turn_with_recording_sdk(executor):
     [
         {},
         {"api_key_helper": ""},
-        # CORAL(S118): an endpoint and a key in the harness's snapshot are no credential command
+        # CORAL(S124): an endpoint and a key in the harness's snapshot are no credential command
         {
             "credential_env": {
                 "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
@@ -6904,7 +6904,7 @@ async def test_coral_spec_without_api_credential_is_refused_before_the_cli(
     executor = _coral_executor(monkeypatch, require_api_credential=True, **no_credential)
 
     events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
-    # CORAL(S118): with no command to run there is no credential proxy to start either
+    # CORAL(S124): with no command to run there is no credential proxy to start either
     assert (executor._upstream_credential, executor._gateway_shim) == (None, None)
 
     errors = [e for e in events if isinstance(e, ExecutorError)]
@@ -6936,7 +6936,7 @@ async def test_coral_spec_with_api_credential_reaches_the_cli(monkeypatch, crede
         monkeypatch.setattr(
             executor, "_apply_gateway_model_vocabulary", AsyncMock(return_value={})
         )
-    # CORAL(S118): either way the CLI would go through a credential proxy, not started here
+    # CORAL(S124): either way the CLI would go through a credential proxy, not started here
     monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
 
     events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
@@ -6969,7 +6969,7 @@ async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral,
         api_key_helper="printf %s sk-ant-test",
         skills_filter="none",
     )
-    # CORAL(S118): the Coral CLI's credential proxy is not this test's subject
+    # CORAL(S124): the Coral CLI's credential proxy is not this test's subject
     monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
 
     events, _, spawn_envs = await _turn_with_recording_sdk(executor)
@@ -6981,7 +6981,7 @@ async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral,
     assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "inherited-oauth"
 
 
-# CORAL(S118): the host forwards these to a harness; a Coral harness's CLI gets none of them.
+# CORAL(S124): the host forwards these to a harness; a Coral harness's CLI gets none of them.
 @pytest.mark.parametrize(
     "host_env",
     [
@@ -7046,7 +7046,7 @@ def _coral_harness_factory(monkeypatch, environ: dict[str, str]):
     return factories[0]
 
 
-# CORAL(S118): what the scrub takes from a Coral CLI still serves its step: the host's endpoint
+# CORAL(S124): what the scrub takes from a Coral CLI still serves its step: the host's endpoint
 # is the proxy's upstream, and a key helper that reads a forwarded variable runs with it.
 @pytest.mark.posix_only
 async def test_a_coral_harness_on_a_key_keeps_the_hosts_endpoint_and_helper_env_in_its_proxy(
@@ -7090,7 +7090,7 @@ async def test_a_coral_harness_on_a_key_keeps_the_hosts_endpoint_and_helper_env_
     assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
 
 
-# CORAL(S118): a Coral gateway CLI holds a session token; its executor's proxy holds the key.
+# CORAL(S124): a Coral gateway CLI holds a session token; its executor's proxy holds the key.
 _GATEWAY_URL = "https://gateway.example/anthropic"
 
 
@@ -7299,7 +7299,7 @@ async def test_only_a_coral_cli_on_posix_goes_through_the_credential_proxy(monke
         assert proxied == (True, True, client.options.env["ANTHROPIC_BASE_URL"])
 
 
-# CORAL(S118): a Coral CLI on a plain API key goes through the same proxy. Its upstream is the
+# CORAL(S124): a Coral CLI on a plain API key goes through the same proxy. Its upstream is the
 # endpoint the harness had before the scrub, else the Anthropic API.
 def _direct_key_executor(monkeypatch, command: str, **kwargs):
     """A Coral executor on an API key with no endpoint of its own, as the workflow builds one."""
@@ -7617,7 +7617,7 @@ def test_a_coral_direct_key_helper_is_cached_for_as_long_as_the_cli_cached_it(
         ("https://gateway.example/\x00anthropic", True, "control character"),
         ("https://api.anthropic.com?beta=true", True, "query"),
         ("https://api.anthropic.com/#v1", True, "fragment"),
-        # CORAL(S119): the same check refuses userinfo and a port that is no number
+        # CORAL(S125): the same check refuses userinfo and a port that is no number
         ("https://user:pw-beta@gateway.example/anthropic", True, "user name"),
         ("https://gateway.example:v1", True, "numeric port"),
     ],
@@ -7811,7 +7811,7 @@ async def test_the_proxys_upstream_hop_takes_its_proxy_from_the_harness_snapshot
     assert sorted(name for name, value in cli_env.items() if password in value) == []
 
 
-# CORAL(S118): a CLI evicted on cancel is gone before the proxy's port is free for another bind
+# CORAL(S124): a CLI evicted on cancel is gone before the proxy's port is free for another bind
 async def test_close_waits_for_a_cancel_eviction_before_it_stops_the_proxy(monkeypatch):
     executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(_fake_key())}")
     order: list[str] = []
@@ -7947,7 +7947,7 @@ def test_the_snapshots_proxy_follows_the_schemes_own_name_and_the_upstreams_port
 
     own, every = "http://own.example:1", "http://all.example:1"
     both = {"ALL_PROXY": every, "HTTPS_PROXY": own}
-    named = ("HTTPS_PROXY", own)  # CORAL(S119): with the variable it was read from
+    named = ("HTTPS_PROXY", own)  # CORAL(S125): with the variable it was read from
     assert _proxy_for_upstream("https://gateway.example/anthropic", both) == named
     ported = {"HTTPS_PROXY": own, "NO_PROXY": "gateway.example:8443"}
     assert _proxy_for_upstream("https://gateway.example:8443/anthropic", ported) is None
@@ -8040,7 +8040,7 @@ async def test_a_failing_coral_gateway_command_lists_no_models_and_logs_its_type
     assert marker not in caplog.text
 
 
-# CORAL(S118): the adapter reaps an abandoned executor under a short bound, which cancels a
+# CORAL(S124): the adapter reaps an abandoned executor under a short bound, which cancels a
 # close() still waiting for an eviction; the shim holds the credential, so it stops anyway.
 def _executor_with_a_slow_eviction(monkeypatch, coral: bool, ran: list[str]):
     """A gateway executor mid-eviction, its shim stop and dir removals recorded in *ran*."""
@@ -8127,7 +8127,7 @@ async def test_close_stops_a_credential_command_started_before_any_proxy(monkeyp
     assert executor._gateway_shim is None and stopped.await_count == 1
 
 
-# CORAL(S118): one form of a static key everywhere: stripped, as the proxy sends it.
+# CORAL(S124): one form of a static key everywhere: stripped, as the proxy sends it.
 @pytest.mark.posix_only
 async def test_a_key_configured_with_a_trailing_newline_is_found_without_it(monkeypatch):
     from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_EXPOSED_CODE
@@ -8181,14 +8181,14 @@ def test_a_static_key_reaches_no_log_however_its_listing_goes(monkeypatch, caplo
     assert logged in caplog.text
 
 
-# CORAL(S118): the credential leaves the machine over https only, the model listing included.
+# CORAL(S124): the credential leaves the machine over https only, the model listing included.
 @pytest.mark.posix_only
 @pytest.mark.parametrize("coral", [True, False], ids=["coral", "non-coral"])
 @pytest.mark.parametrize(
     ("gateway_url", "names"),
     [
         ("http://gateway.example/anthropic", "https"),
-        # CORAL(S119): nor to a URL whose userinfo the client would send in its place
+        # CORAL(S125): nor to a URL whose userinfo the client would send in its place
         ("https://user:pw-fake@gateway.example/anthropic", "user name"),
     ],
     ids=["plain-http", "userinfo"],
@@ -8312,7 +8312,7 @@ async def test_the_model_listing_waits_a_bounded_time_for_a_credential_command(
     assert "TimeoutError" in record.getMessage() and record.exc_info is None
 
 
-# CORAL(S119): a Coral CLI behind the credential proxy takes only allow-listed names from the
+# CORAL(S125): a Coral CLI behind the credential proxy takes only allow-listed names from the
 # user's settings env. The proxy's upstream hop takes the endpoint and network names, and only
 # from a settings file a step can neither place nor write.
 _SETTINGS_MODEL_NAMES = (
@@ -8473,7 +8473,7 @@ async def test_a_coral_cli_takes_allowed_settings_names_and_its_proxy_the_networ
     assert ca == str(ca_file) and reads_environment is False
 
 
-# CORAL(S119): through the real harness factory, the user's settings endpoint gets the key and
+# CORAL(S125): through the real harness factory, the user's settings endpoint gets the key and
 # the CLI gets none of the settings block's credentials or provider switches.
 @pytest.mark.posix_only
 async def test_a_coral_harness_sends_its_key_to_the_settings_endpoint_and_its_cli_no_secret(
@@ -8813,7 +8813,7 @@ async def test_the_proxys_upstream_hop_takes_settings_proxies_before_the_harness
     assert sorted(name for name, value in cli_env.items() if password in value) == []
 
 
-# CORAL(S119): where nothing was merged before, nothing is merged or used now: on a gateway, and
+# CORAL(S125): where nothing was merged before, nothing is merged or used now: on a gateway, and
 # for a CLI that loads user settings itself (from its own private config dir).
 @pytest.mark.posix_only
 @pytest.mark.parametrize("case", ["gateway", "cli-loads-user-settings"])
@@ -8864,7 +8864,7 @@ async def test_a_coral_cli_that_never_got_the_settings_block_still_gets_and_uses
     assert options == (None, None if case == "gateway" else str(ca_file), True)
 
 
-# CORAL(S119): off POSIX no credential proxy runs, so a Coral CLI keeps the whole block, the
+# CORAL(S125): off POSIX no credential proxy runs, so a Coral CLI keeps the whole block, the
 # endpoint it names included.
 async def test_a_coral_cli_with_no_credential_proxy_keeps_the_whole_settings_block(
     monkeypatch, tmp_path
@@ -9017,7 +9017,7 @@ def test_a_settings_proxy_with_userinfo_goes_to_the_upstream_hop_only(name, valu
         assert (mixed.cli, mixed.upstream, mixed.ignored) == ({}, {}, ())
 
 
-# CORAL(S119): a settings file that holds no usable env block gives a Coral CLI and its proxy
+# CORAL(S125): a settings file that holds no usable env block gives a Coral CLI and its proxy
 # nothing, and stops no turn.
 @pytest.mark.posix_only
 @pytest.mark.parametrize(
@@ -9065,7 +9065,7 @@ async def test_a_settings_file_with_no_env_block_gives_a_coral_cli_and_its_proxy
     assert not [r for r in caplog.records if "Claude settings" in r.getMessage()]
 
 
-# CORAL(S119): only string values are settings: a number, a switch or a list under an allowed
+# CORAL(S125): only string values are settings: a number, a switch or a list under an allowed
 # name reaches neither the CLI nor the proxy.
 @pytest.mark.posix_only
 async def test_a_settings_value_that_is_not_text_reaches_neither_the_cli_nor_the_proxy(
@@ -9103,7 +9103,7 @@ async def test_a_settings_value_that_is_not_text_reaches_neither_the_cli_nor_the
     assert upstream_url == _OTHER_ENDPOINT and options == (None, None, True)
 
 
-# CORAL(S119): until the proxy starts, each turn reads the settings endpoint again, so a turn
+# CORAL(S125): until the proxy starts, each turn reads the settings endpoint again, so a turn
 # refused for it succeeds once the user has fixed the file.
 @pytest.mark.posix_only
 async def test_a_refused_settings_endpoint_is_read_again_until_the_proxy_starts(
@@ -9135,7 +9135,7 @@ async def test_a_refused_settings_endpoint_is_read_again_until_the_proxy_starts(
     assert upstream_url == _SETTINGS_UPSTREAM and len(fake_sdk.created_clients) == 1
 
 
-# CORAL(S119): the user named an endpoint for the key in a settings file a step could place or
+# CORAL(S125): the user named an endpoint for the key in a settings file a step could place or
 # write. The turn is refused, rather than the key going to the harness's endpoint in its place.
 @pytest.mark.posix_only
 @pytest.mark.parametrize(
@@ -9174,7 +9174,7 @@ async def test_an_endpoint_in_a_settings_file_a_step_could_write_refuses_the_tur
     assert fake_sdk.created_clients == [] and spawn_envs == []
 
 
-# CORAL(S119): an endpoint set to nothing there names none, so nothing is refused; and once
+# CORAL(S125): an endpoint set to nothing there names none, so nothing is refused; and once
 # the proxy runs, where the key goes is settled, so a file a step writes later stops no turn.
 @pytest.mark.posix_only
 async def test_a_blank_or_late_untrusted_settings_endpoint_refuses_no_turn(
@@ -9203,7 +9203,7 @@ async def test_a_blank_or_late_untrusted_settings_endpoint_refuses_no_turn(
     assert " ANTHROPIC_BASE_URL " in warning and "planted" not in caplog.text
 
 
-# CORAL(S119): with both spellings of a proxy name in the settings, each goes its own way: the
+# CORAL(S125): with both spellings of a proxy name in the settings, each goes its own way: the
 # upstream hop reads them as urllib does, and the CLI gets whichever holds no userinfo.
 @pytest.mark.posix_only
 async def test_both_spellings_of_a_settings_proxy_name_each_go_their_own_way(
@@ -9243,7 +9243,7 @@ async def test_both_spellings_of_a_settings_proxy_name_each_go_their_own_way(
         assert sorted(name for name, value in cli_env.items() if password in value) == []
 
 
-# CORAL(S119): the settings NO_PROXY is read as urllib reads it, whatever the CLI itself
+# CORAL(S125): the settings NO_PROXY is read as urllib reads it, whatever the CLI itself
 # would have made of an entry.
 @pytest.mark.parametrize(
     ("upstream", "no_proxy", "bypassed"),
@@ -9279,7 +9279,7 @@ def test_a_no_proxy_entry_covers_the_upstream_as_urllib_reads_it(upstream, no_pr
         assert chosen == (None if bypassed else ("HTTPS_PROXY", proxy))
 
 
-# CORAL(S119): the trust rule follows links on both sides, and asks only whether the file is
+# CORAL(S125): the trust rule follows links on both sides, and asks only whether the file is
 # under the CLI's directory.
 @pytest.mark.parametrize(
     ("case", "steers"),
@@ -9347,7 +9347,7 @@ def test_the_settings_trust_rule_follows_links_and_dot_dot_segments(
     assert _settings_file_steers_upstream(None, where) is steers
 
 
-# CORAL(S119): macOS volumes ignore case by default, so there a path under the cwd in another
+# CORAL(S125): macOS volumes ignore case by default, so there a path under the cwd in another
 # spelling is under it; elsewhere it is another directory.
 @pytest.mark.parametrize("ignores_case", [True, False], ids=["macos", "elsewhere"])
 def test_the_settings_trust_rule_compares_paths_as_the_platform_does(
@@ -9373,7 +9373,7 @@ def test_the_settings_trust_rule_compares_paths_as_the_platform_does(
     )
 
 
-# CORAL(S119): the default config dir is trusted for being in the user's home, so a home that
+# CORAL(S125): the default config dir is trusted for being in the user's home, so a home that
 # is itself relative, and so under the CLI's directory, is not.
 @pytest.mark.posix_only
 @pytest.mark.parametrize("cwd_given", [True, False], ids=["cwd", "process-cwd"])
@@ -9389,7 +9389,7 @@ def test_a_relative_home_makes_the_default_config_dir_untrusted(monkeypatch, tmp
     assert _settings_file_steers_upstream(str(workspace) if cwd_given else None, where) is False
 
 
-# CORAL(S119): a CLI that is not Coral's still gets the user's settings env whole, every name
+# CORAL(S125): a CLI that is not Coral's still gets the user's settings env whole, every name
 # a Coral CLI would lose included.
 @pytest.mark.parametrize("credential", ["none", "key-helper"])
 async def test_a_cli_that_is_not_corals_still_gets_the_whole_settings_block(
@@ -9408,7 +9408,7 @@ async def test_a_cli_that_is_not_corals_still_gets_the_whole_settings_block(
     assert executor._gateway_shim is None and executor._settings_upstream_env == {}
 
 
-# CORAL(S118): only a loopback endpoint is listed directly. A listing for any other endpoint
+# CORAL(S124): only a loopback endpoint is listed directly. A listing for any other endpoint
 # still goes through the proxy the environment names, as before.
 async def test_a_model_listing_off_the_machine_still_takes_the_environments_proxy(monkeypatch):
     from omnigent.models import model_catalog
@@ -9435,7 +9435,7 @@ async def test_a_model_listing_off_the_machine_still_takes_the_environments_prox
     ]
 
 
-# CORAL(S119): the endpoint is the proxy's alone. The CLI's part of the split never holds it,
+# CORAL(S125): the endpoint is the proxy's alone. The CLI's part of the split never holds it,
 # whatever the executor later writes under that name.
 @pytest.mark.parametrize("url", [_SETTINGS_UPSTREAM, "", "http://127.0.0.1:8080"])
 def test_the_settings_endpoint_is_never_in_the_clis_part_of_the_split(url):
@@ -9452,7 +9452,7 @@ def test_the_settings_endpoint_is_never_in_the_clis_part_of_the_split(url):
     )
 
 
-# CORAL(S118): a loopback listing is direct, and a local endpoint's own CA still comes from
+# CORAL(S124): a loopback listing is direct, and a local endpoint's own CA still comes from
 # the environment's trust settings.
 def test_a_loopback_model_listing_still_trusts_the_environments_ca_file(monkeypatch, tmp_path):
     from http.server import ThreadingHTTPServer
@@ -9485,7 +9485,7 @@ def test_a_loopback_model_listing_still_trusts_the_environments_ca_file(monkeypa
     assert (listing.source, list(listing.models)) == ("openai-compatible", [])
 
 
-# CORAL(S119): the filter is for an isolated CLI. A proxied Coral CLI that is not isolated
+# CORAL(S125): the filter is for an isolated CLI. A proxied Coral CLI that is not isolated
 # keeps the whole block, as before, and its proxy takes nothing from it.
 @pytest.mark.posix_only
 async def test_a_proxied_coral_cli_that_is_not_isolated_keeps_the_whole_settings_block(
@@ -9519,7 +9519,7 @@ async def test_a_proxied_coral_cli_that_is_not_isolated_keeps_the_whole_settings
     assert upstream_url == _OTHER_ENDPOINT and options == (None, None, True)
 
 
-# CORAL(S119): with no CA file in the settings, the proxy's upstream hop trusts the one the
+# CORAL(S125): with no CA file in the settings, the proxy's upstream hop trusts the one the
 # host's environment names, as the CLI's own model connection did, under the same path rule.
 @pytest.mark.posix_only
 @pytest.mark.parametrize(
@@ -9569,7 +9569,7 @@ async def test_the_proxys_upstream_hop_trusts_the_hosts_ca_file_after_the_settin
     assert not [text for text in ("ca.pem", "certs", str(tmp_path)) if text in "".join(warnings)]
 
 
-# CORAL(S119): the settings file is where the host's environment said when the executor was
+# CORAL(S125): the settings file is where the host's environment said when the executor was
 # built. A connect of another session takes CLAUDE_CONFIG_DIR out of os.environ for a moment;
 # a turn in that moment reads the same file, not the default one in the user's home.
 @pytest.mark.posix_only
@@ -9596,7 +9596,7 @@ async def test_the_settings_file_is_located_by_the_snapshot_not_the_live_environ
     assert client.options.env["ANTHROPIC_MODEL"] == "claude-test-configured"
 
 
-# CORAL(S119): a proxy that cannot start is not kept. Its turn is refused by error type only,
+# CORAL(S125): a proxy that cannot start is not kept. Its turn is refused by error type only,
 # and the next turn builds a proxy from the settings as the user has fixed them.
 @pytest.mark.posix_only
 @pytest.mark.parametrize(
@@ -9662,7 +9662,7 @@ async def test_a_proxy_that_fails_to_start_is_rebuilt_from_the_fixed_settings(
     assert ca == str(good_ca) and len(fake_sdk.created_clients) == 1
 
 
-# CORAL(S119): a turn of another session can read a changed settings file between this turn's
+# CORAL(S125): a turn of another session can read a changed settings file between this turn's
 # check and its proxy's build. The build checks again, so this turn is refused like that one
 # and no parser error leaves it.
 @pytest.mark.posix_only
@@ -9695,7 +9695,7 @@ async def test_an_upstream_changed_before_the_proxy_is_built_refuses_the_turn(
     assert not proxy_built and fake_sdk.created_clients == []
 
 
-# CORAL(S119): the upstream client reaches the endpoint through an http or https proxy only.
+# CORAL(S125): the upstream client reaches the endpoint through an http or https proxy only.
 # Another kind, in the settings or the harness's environment, refuses the turn by variable
 # name; it is never skipped, which would send the key around the user's proxy.
 @pytest.mark.posix_only
@@ -9745,7 +9745,7 @@ async def test_a_proxy_the_upstream_client_cannot_use_refuses_the_turn(
     assert shim is None and fake_sdk.created_clients == []
 
 
-# CORAL(S119): a settings proxy name replaces the harness's under either spelling in the CLI
+# CORAL(S125): a settings proxy name replaces the harness's under either spelling in the CLI
 # too, as it does for the proxy's own hop, so the CLI never reads two proxies under one name.
 @pytest.mark.posix_only
 async def test_a_settings_proxy_name_reaches_the_cli_under_both_spellings(monkeypatch, tmp_path):
@@ -9811,7 +9811,7 @@ async def test_coral_spec_with_os_sandbox_reaches_the_cli(monkeypatch, sandbox_t
     monkeypatch.setattr(
         "omnigent.inner.claude_sdk_executor.shutil.which", lambda name: f"/usr/bin/{name}"
     )
-    # CORAL(S118): the Coral CLI's credential proxy is not this test's subject
+    # CORAL(S124): the Coral CLI's credential proxy is not this test's subject
     monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
 
     events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
@@ -9928,7 +9928,7 @@ async def test_an_isolated_cli_its_sandbox_cannot_wrap_never_starts(
     from omnigent.inner.claude_sdk_executor import CORAL_SANDBOX_UNAVAILABLE_CODE
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 
-    # CORAL(S119): the settings read is also told where the file is
+    # CORAL(S125): the settings read is also told where the file is
     monkeypatch.setattr(  # never read the caller's real Claude settings
         "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda *where: {}
     )

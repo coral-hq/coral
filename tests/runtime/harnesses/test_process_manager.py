@@ -24,34 +24,34 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib  # CORAL(S118)
+import hashlib  # CORAL(S124)
 import json
 import logging
 import os
-import secrets  # CORAL(S118)
+import secrets  # CORAL(S124)
 import shutil
 import signal
-import stat  # CORAL(S118)
+import stat  # CORAL(S124)
 import sys
 import tempfile
 import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any  # CORAL(S118)
+from typing import Any  # CORAL(S124)
 
 import httpx
-import psutil  # CORAL(S118)
+import psutil  # CORAL(S124)
 import pytest
 
-from omnigent.host.connect import RUNNER_FORWARDED_NAMES_ENV_VAR  # CORAL(S118)
+from omnigent.host.connect import RUNNER_FORWARDED_NAMES_ENV_VAR  # CORAL(S124)
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
-from omnigent.runner.launch_secrets import (  # CORAL(S118)
+from omnigent.runner.launch_secrets import (  # CORAL(S124)
     CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
     HARNESS_LAUNCH_FD_ENV_VAR,
     MAX_LAUNCH_SECRETS_BYTES,
 )
-from omnigent.runtime.harnesses import _HARNESS_MODULES, process_manager  # CORAL(S118)
+from omnigent.runtime.harnesses import _HARNESS_MODULES, process_manager  # CORAL(S124)
 from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from omnigent.runtime.harnesses.process_manager import (
     _AP_PID_FILE,
@@ -1823,7 +1823,7 @@ async def test_get_client_env_override_is_per_conversation(
         await manager.shutdown()
 
 
-# ── CORAL(S118): a claude-sdk harness's key travels in a launch socket on direct exec ──
+# ── CORAL(S124): a claude-sdk harness's key travels in a launch socket on direct exec ──
 
 _CLAUDE_SDK_CONFIG_HARNESS = "claude-sdk-config"
 _CLAUDE_SDK_CONFIG_MODULE = "tests.runtime.harnesses._claude_sdk_config_harness"

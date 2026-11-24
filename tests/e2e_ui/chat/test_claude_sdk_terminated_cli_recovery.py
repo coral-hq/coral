@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
-import itertools  # CORAL(S118)
+import itertools  # CORAL(S124)
 import json
 import os
 import signal
@@ -109,7 +109,7 @@ def _claude_cli_pids(session_id: str) -> set[int]:
         cmd = " ".join(args)
         if "stream-json" not in cmd:
             continue
-        # CORAL(S118): the CLI's environment no longer names its agent; its harness does
+        # CORAL(S124): the CLI's environment no longer names its agent; its harness does
         if (name == "claude" or "/claude" in cmd.lower()) and _serves_session(
             proc, session_id, runner_pid
         ):
@@ -118,7 +118,7 @@ def _claude_cli_pids(session_id: str) -> set[int]:
 
 
 def _serves_session(proc: psutil.Process, session_id: str, runner_pid: int) -> bool:
-    """CORAL(S118): whether *proc* descends from the session's harness, below the runner.
+    """CORAL(S124): whether *proc* descends from the session's harness, below the runner.
 
     The harness keeps its config out of the CLI's environment, so its command line names it.
     An ancestor whose command line cannot be read (macOS denies other users' arguments) is

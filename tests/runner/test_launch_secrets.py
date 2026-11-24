@@ -1,4 +1,4 @@
-"""CORAL(S117): a launch socket carries a runner's tokens past its exec-time environment."""
+"""CORAL(S123): a launch socket carries a runner's tokens past its exec-time environment."""
 
 from __future__ import annotations
 

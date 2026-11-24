@@ -10,7 +10,7 @@ import os
 import signal
 import time
 import uuid
-from collections.abc import Mapping, MutableMapping  # CORAL(S117)
+from collections.abc import Mapping, MutableMapping  # CORAL(S123)
 from pathlib import Path
 
 RUNNER_ID_ENV_VAR = "OMNIGENT_RUNNER_ID"
@@ -176,13 +176,13 @@ def strip_runner_auth_secrets(env: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if key not in RUNNER_AUTH_SECRET_ENV_VARS}
 
 
-# CORAL(S117): the runner's auth secrets after boot, in memory only, so no child it spawns
+# CORAL(S123): the runner's auth secrets after boot, in memory only, so no child it spawns
 # inherits them, whatever environment that child is given.
 _held_runner_auth_secrets: dict[str, str] = {}
 
 
 def take_runner_auth_secrets(source: MutableMapping[str, str] | None = None) -> None:
-    """CORAL(S117): move the runner-auth secrets out of *source* into this process's memory.
+    """CORAL(S123): move the runner-auth secrets out of *source* into this process's memory.
 
     :param source: Where they arrived: ``os.environ`` by default (a zygote fork's payload or
         a CLI-local runner's environment), or the values read from a launch socket. A value
@@ -196,13 +196,13 @@ def take_runner_auth_secrets(source: MutableMapping[str, str] | None = None) -> 
 
 
 def runner_auth_secret(name: str) -> str | None:
-    """CORAL(S117): a held runner-auth secret, else ``os.environ``'s (code run without a boot)."""
+    """CORAL(S123): a held runner-auth secret, else ``os.environ``'s (code run without a boot)."""
     held = _held_runner_auth_secrets.get(name)
     return held if held is not None else os.environ.get(name)
 
 
 def consume_runner_auth_secret(name: str) -> str | None:
-    """CORAL(S117): remove a runner-auth secret from memory and ``os.environ``, returning it."""
+    """CORAL(S123): remove a runner-auth secret from memory and ``os.environ``, returning it."""
     held = _held_runner_auth_secrets.pop(name, None)
     from_environ = os.environ.pop(name, None)
     return held if held is not None else from_environ

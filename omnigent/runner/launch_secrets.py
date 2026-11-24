@@ -1,4 +1,4 @@
-"""CORAL(S117): hand a child its launch secrets through an inherited socket, never its environment.
+"""CORAL(S123): hand a child its launch secrets through an inherited socket, never its environment.
 
 Another same-user process can read a process's exec-time environment for that process's
 whole life, and on Linux it can reopen an inherited pipe through ``/proc/<pid>/fd``. It can
@@ -24,10 +24,10 @@ from omnigent.runner.identity import RUNNER_AUTH_SECRET_ENV_VARS
 
 # No credential word in the name: it holds only a fd number.
 LAUNCH_SECRETS_FD_ENV_VAR = "OMNIGENT_RUNNER_LAUNCH_FD"
-# CORAL(S118): a direct-exec claude-sdk harness's socket. Its name must not start with the
+# CORAL(S124): a direct-exec claude-sdk harness's socket. Its name must not start with the
 # harness's config prefix, which the harness sweeps from its environment as config.
 HARNESS_LAUNCH_FD_ENV_VAR = "OMNIGENT_HARNESS_LAUNCH_FD"
-# CORAL(S118): the claude-sdk harness config that can carry a key; only these use the socket.
+# CORAL(S124): the claude-sdk harness config that can carry a key; only these use the socket.
 CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS: frozenset[str] = frozenset(
     {"HARNESS_CLAUDE_SDK_API_KEY_HELPER", "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND"}
 )
