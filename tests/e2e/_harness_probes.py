@@ -16,6 +16,7 @@ per-file edits.
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import subprocess
 import sys
@@ -160,6 +161,16 @@ def _cli_probe_args(binary: str) -> list[str]:
     return [binary, "--version"]
 
 
+def _probe_env(binary: str) -> contextlib.AbstractContextManager[dict[str, str] | None]:
+    """CORAL(S126): ``claude`` is probed in a throwaway home, keychain stand-ins first on PATH."""
+    if binary != "claude":
+        return contextlib.nullcontext()
+    # Imported late: the kit imports this package's conftest, which imports this module.
+    from tests.e2e.coral._claude_sdk_kit import throwaway_cli_env
+
+    return throwaway_cli_env()
+
+
 @cache
 def cli_unavailable_reason(binary: str) -> str | None:
     """
@@ -173,13 +184,15 @@ def cli_unavailable_reason(binary: str) -> str | None:
         return f"{binary!r} CLI is not on PATH"
 
     try:
-        proc = subprocess.run(
-            _cli_probe_args(binary),
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
+        with _probe_env(binary) as env:
+            proc = subprocess.run(
+                _cli_probe_args(binary),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"{binary!r} CLI at {path!r} is not runnable: {exc}"
 

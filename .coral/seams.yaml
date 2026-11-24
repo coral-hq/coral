@@ -4923,3 +4923,34 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S126
+    title: The harness CLI gate probes claude in a throwaway home with keychain stand-ins
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      `cli_unavailable_reason` in `tests/e2e/_harness_probes.py` ran
+      `claude --version` with the caller's environment, once per pytest
+      process: under `just coral test-e2e` that is the developer's own HOME,
+      Claude config dir and `PATH`, where the CLI's keychain lookups by name
+      reach `/usr/bin/security`. Coral's in-process Tier B tests skip by this
+      gate. Now the `claude` probe gets the caller's environment with a
+      throwaway `HOME` and `CLAUDE_CONFIG_DIR` and with `security` and `gh`
+      stand-ins first on `PATH` (`throwaway_cli_env` in
+      `tests/e2e/coral/_claude_sdk_kit.py`), all removed after the one start.
+      The probe's result and its messages are unchanged, and every other
+      CLI (`codex`, `pi`, `node`, `qwen`) is probed as before. The kit is
+      imported inside the helper, since it imports `tests/e2e/conftest.py`,
+      which imports this module. Residuals: the caller's other variables
+      still reach `claude --version`; a failing probe's message still quotes
+      the CLI's first output line; the other vendors' probes still start
+      with the caller's home.
+    files:
+      - tests/e2e/_harness_probes.py
+    tests:
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

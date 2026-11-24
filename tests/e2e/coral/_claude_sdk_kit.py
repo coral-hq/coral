@@ -6,6 +6,9 @@ import asyncio
 import contextlib
 import json
 import os
+import re
+import shlex
+import shutil
 import socketserver
 import subprocess
 import sys
@@ -13,7 +16,8 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +41,60 @@ _INHERITED_NAMES = frozenset(
 )
 _INHERITED_PREFIXES = ("PYTEST_", "COV_CORE_", "COVERAGE_")
 _PROXY_NAMES = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+
+# The programs that reach a keychain by name. ``gh`` is one because the real one runs
+# /usr/bin/security by its full path, which no ``security`` stand-in on PATH intercepts.
+KEYCHAIN_PROGRAMS = ("security", "gh")
+_STUB_SCRIPT = r"""#!/bin/sh
+# Test stand-in for @PROGRAM@: answers as a machine with no login. It records bounded names
+# only (a subcommand, a keychain service), never an account, a secret, an input or an output.
+exec 2>/dev/null
+word() {
+  case $1 in
+    '' | *[!abcdefghijklmnopqrstuvwxyz-]*) word=other ;;
+    *) word=$1; [ "${#1}" -le 40 ] || word=other ;;
+  esac
+}
+@NAMES@
+printf '%s\t%s\t%s\n' @PROGRAM@ "$call" "$item" >> @LOG@
+exit @STATUS@
+"""
+# The subcommand, and the service of the last ``-s``.
+_SECURITY_NAMES = r"""word "${1-}"
+call=$word
+item=
+while [ "$#" -gt 1 ]; do
+  if [ "$1" = -s ]; then
+    case $2 in
+      '' | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\ ._:-]*) item=other ;;
+      *) item=$2; [ "${#2}" -le 64 ] || item=other ;;
+    esac
+  fi
+  shift
+done"""
+# The command and its subcommand.
+_GH_NAMES = r"""word "${1-}"
+call=$word
+word "${2-}"
+call="$call $word"
+item="""
+# Each stand-in's names and its status: the real ``security``'s "item not found", and what
+# ``gh auth token`` exits with when logged out.
+_STUBS = {"security": (_SECURITY_NAMES, 44), "gh": (_GH_NAMES, 1)}
+# A line as a stand-in writes it: the program, one or two bounded words, a bounded service.
+_LOG_LINE = re.compile(r"(security|gh)\t[a-z-]{1,40}( [a-z-]{1,40})?\t[A-Za-z0-9 ._:-]{0,64}")
+# The only calls a mock stack may make, as log lines: the CLI's keychain reads and its
+# lock-state query (the shapes CLI 2.1.325 holds), and the login checks through gh of
+# Omnigent's readiness probe and of the CLI. A write (``-i``, ``add-``, ``delete-``), another
+# item, or a name a stand-in bounded to ``other`` is unexpected.
+_EXPECTED_CALLS = re.compile(
+    r"security\tfind-generic-password\tClaude Code(-credentials)?(-[0-9a-f]{8})?"
+    r"|security\tfind-generic-password\tClaude Code-(device-keys|doctor-probe)"
+    r"|security\tshow-keychain-info\t"
+    r"|gh\tauth (token|status)\t"
+    # The runner's GitHub panel reads the branch's pull request and its repository.
+    r"|gh\t(pr|repo) view\t"
+)
 
 
 _REFUSAL = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -88,6 +146,123 @@ class EgressRecorder:
         self._thread.join(timeout=5)
 
 
+def _shown(line: str) -> str:
+    """A log line for a message: its names, or ``malformed`` for one no stand-in writes."""
+    return " ".join(line.split("\t")).rstrip() if _LOG_LINE.fullmatch(line) else "malformed"
+
+
+def _unlisted(line: str) -> str:
+    """A log line for a failure: its subcommand and item apart, as the stand-in bounded them."""
+    if not _LOG_LINE.fullmatch(line):
+        return "malformed"
+    program, call, item = line.split("\t")
+    return f"{program} subcommand {call!r} item {item!r}"
+
+
+@dataclass(frozen=True)
+class KeychainStubs:
+    """
+    Stand-ins for :data:`KEYCHAIN_PROGRAMS` in ``directory``, and the ``log`` of what they
+    were asked: one line of bounded names per call, ``program<TAB>call<TAB>item``.
+    """
+
+    directory: Path
+    log: Path
+
+    def first_on(self, env: Mapping[str, str]) -> dict[str, str]:
+        """
+        ``env`` with the stand-ins first on ``PATH``. An empty or missing ``PATH`` gains no
+        empty entry, which would search the working directory.
+        """
+        entries = filter(None, (str(self.directory), env.get("PATH", "")))
+        return {**env, "PATH": os.pathsep.join(entries)}
+
+    def _lines(self) -> list[str]:
+        try:
+            return self.log.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return []
+
+    def calls(self) -> list[str]:
+        """Each call's names, oldest first: ``security find-generic-password Claude Code``."""
+        return [_shown(line) for line in self._lines()]
+
+    def unexpected(self) -> list[str]:
+        """
+        The calls a mock stack should not make, each naming what to review:
+        ``security subcommand 'add-generic-password' item 'Claude Code'``.
+        """
+        return [_unlisted(line) for line in self._lines() if not _EXPECTED_CALLS.fullmatch(line)]
+
+    def bypassed(self, path: str | None) -> list[str]:
+        """
+        The programs a process with this ``PATH`` would find elsewhere than these stand-ins,
+        or nowhere, so the answer is one on macOS and Linux; nothing is executed. An empty
+        or relative entry ahead of them searches that process's own directory, so it counts
+        for every program.
+        """
+        entries = (path or "").split(os.pathsep)
+        own = str(self.directory)
+        ahead = entries[: entries.index(own)] if own in entries else entries
+        if not path or not all(os.path.isabs(entry) for entry in ahead):
+            return list(KEYCHAIN_PROGRAMS)
+        return [
+            program
+            for program in KEYCHAIN_PROGRAMS
+            if not self._is_own(program, shutil.which(program, path=path))
+        ]
+
+    def _is_own(self, program: str, found: str | None) -> bool:
+        try:
+            return found is not None and os.path.samefile(found, self.directory / program)
+        except OSError:
+            return False
+
+
+def install_keychain_stubs(directory: Path, *, log: Path | None = None) -> KeychainStubs:
+    """
+    Write the stand-ins into ``directory``, owner-only, and start their log: by default
+    ``calls.log`` beside it. The same on every platform.
+
+    ``security`` exits 44 and ``gh`` exits 1; neither prints or reads anything, and a log
+    that cannot be written changes neither. A directory this creates is owner-only too.
+    """
+    directory = Path(os.path.abspath(directory))
+    for missing in (*reversed(directory.parents), directory):
+        if not missing.exists():
+            missing.mkdir(mode=0o700)
+    directory.chmod(0o700)
+    log = directory.parent / "calls.log" if log is None else Path(os.path.abspath(log))
+    os.close(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
+    for program, (names, status) in _STUBS.items():
+        script = _STUB_SCRIPT.replace("@NAMES@", names).replace("@PROGRAM@", program)
+        script = script.replace("@LOG@", shlex.quote(str(log))).replace("@STATUS@", str(status))
+        (directory / program).write_text(script)
+        (directory / program).chmod(0o700)
+    return KeychainStubs(directory, log)
+
+
+@contextlib.contextmanager
+def throwaway_cli_env(base: Mapping[str, str] | None = None) -> Iterator[dict[str, str]]:
+    """
+    The environment for one start of a real CLI outside any test's home, such as a version
+    query: a throwaway ``HOME`` and Claude config dir, and keychain stand-ins first on
+    ``PATH``, all removed on exit. Without ``base`` it starts from the few names a CLI needs
+    out of the caller's environment, so no credential there reaches the CLI or a traceback.
+    """
+    if base is None:
+        base = {name: os.environ[name] for name in _INHERITED_NAMES if name in os.environ}
+    with tempfile.TemporaryDirectory(prefix="crl-cli-", ignore_cleanup_errors=True) as scratch:
+        home = Path(scratch) / "home"
+        home.mkdir()
+        stubs = install_keychain_stubs(Path(scratch) / "keychain-stubs" / "bin")
+        yield {
+            **stubs.first_on(base),
+            "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+        }
+
+
 def write_claude_home(root: Path, *, marker: Path) -> Path:
     """Create a fresh ``HOME`` whose ``.claude.json`` declares the stdio probe MCP server."""
     home = root / "home"
@@ -102,9 +277,17 @@ def write_claude_home(root: Path, *, marker: Path) -> Path:
 
 
 def mock_only_env(
-    *, home: Path, base_url: str, proxy_url: str, inherited: Mapping[str, str]
+    *,
+    home: Path,
+    base_url: str,
+    proxy_url: str,
+    inherited: Mapping[str, str],
+    stubs: KeychainStubs,
 ) -> dict[str, str | None]:
     """Changes that leave the CLI only the mock; ``None`` unsets each non-allowlisted name.
+
+    The caller's own ``stubs`` go first on ``PATH``, so a keychain lookup by name never
+    depends on what the shell that started pytest prepared.
 
     :param base_url: Mock root URL with no ``/v1`` suffix, e.g. ``"http://127.0.0.1:5123"``.
     """
@@ -118,6 +301,7 @@ def mock_only_env(
     changes.update({name.lower(): value for name, value in proxies.items()})
     changes.update(
         {
+            "PATH": stubs.first_on(inherited)["PATH"],
             "HOME": str(home),
             # The CLI reads .claude.json and settings.json here, not in the real ~/.claude.
             "CLAUDE_CONFIG_DIR": str(home),
@@ -206,7 +390,10 @@ async def collect_turn(
 def cli_versions() -> dict[str, str]:
     """Versions the executor would run: the system ``claude`` it resolves and the SDK."""
     cli = _find_system_claude()
-    output = subprocess.run([cli, "--version"], capture_output=True, text=True, check=False)
+    with throwaway_cli_env() as env:
+        output = subprocess.run(
+            [cli, "--version"], env=env, capture_output=True, text=True, check=False
+        )
     return {
         "cli_path": cli,
         "cli_version": output.stdout.strip(),
@@ -286,7 +473,11 @@ async def _run_probe_turn(
         for queue in extra_queues:
             configure_mock_llm(base_url, **queue)
         changes = mock_only_env(
-            home=home, base_url=base_url, proxy_url=recorder.url, inherited=os.environ
+            home=home,
+            base_url=base_url,
+            proxy_url=recorder.url,
+            inherited=os.environ,
+            stubs=install_keychain_stubs(root / "keychain-stubs" / "bin"),
         )
         apply_env(changes, os.environ)
         apply_env(extra_env, os.environ)

@@ -11,7 +11,18 @@ with:
 uv run --no-sync pytest tests/e2e/coral --reruns 0 -rs -n 2 --dist=loadscope
 ```
 
-Each test that starts the CLI skips when `claude` is not on `PATH`;
+You need not prepare your shell for that command. Each stack, and each test
+that drives the executor in process, puts its own `security` and `gh`
+stand-ins first on the `PATH` of the processes it starts and gives them a
+throwaway `HOME` ("Keychain and GitHub stand-ins" below). A stub on your own
+`PATH` is not what protects a stack run: a stack builds its `PATH` itself, so
+a stub directory on yours never reaches its processes. The one exception is the stack
+sample, which runs with your real `HOME` and stays opt-in for clean machines
+("Check for proxied HTTP(S) egress" below).
+
+Each test that starts the CLI skips when `claude` is not on `PATH`, or does
+not run: the check starts `claude --version` once per pytest process, in a
+throwaway home with stand-ins first on its `PATH`.
 `test_live_proxy.py` and `test_claude_sdk_kit.py` need no CLI. The walking-skeleton tests
 (`test_skeleton.py`, `test_runner_loss.py`, `test_sandbox_probe.py`) fail
 instead when `CORAL_E2E_REQUIRE_CLI=1` is set, as the lane sets it. The stack
@@ -84,11 +95,16 @@ inputs from the caller; faults and assertions stay in the tests.
   `mkdtemp(dir="/tmp", prefix="crl-")` (`OMNIGENT_HARNESS_TMP_PARENT`, under the
   AF_UNIX path limit), and its own `TMPDIR` (`prefix="crl-t-"`), both removed
   with the stack. No recipe sets `OMNIGENT_HARNESS_TMP_PARENT` by hand.
-- `minimal_env()` is the base environment, with no credential: `PATH` with
+- `minimal_env()` is an environment with no credential: `PATH` with
   python, git, `claude` and `node` and the system directories, the locale
-  names and `TMPDIR` (the stack then gives its own), and
+  names and `TMPDIR`, and
   `DISABLE_AUTOUPDATER=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. The
-  happy path asserts both switches reach the step's live CLI.
+  happy path asserts both switches reach the step's live CLI. The test's own
+  `git`, `sh` and probe children start from it.
+- `stack_env()` is the base environment of the stack's server and host:
+  `minimal_env()` with the stack's keychain stand-ins first on `PATH`, the
+  stack's own `TMPDIR`, and `gh`'s and git's config pointed under the stack's
+  root ("Keychain and GitHub stand-ins" below).
 - At exit, a SIGTERM included, no process the stack started may survive: the
   stack fails if a server, host, runner, CLI or tool process of it is left.
 - `start_server(skeleton)` restarts the server after a test's
@@ -266,6 +282,175 @@ release branch. For each failure in `test_sandbox_probe.py`:
   binding test fails until they exist. A row still unreleased on the pull
   request that adds it is corrected in place, with the pins, instead.
 
+## Keychain and GitHub stand-ins
+
+A test that starts real CLIs must not reach your keychain or your `gh` login.
+On macOS the Claude CLI reads its login by running `security`, found by name
+through `PATH`. `gh` is the second program that matters: the installed `gh`
+binary names `/usr/bin/security` by its full path (read from the binary, not
+run), which no `security` stand-in on `PATH` can intercept. So the real `gh`
+must not run at all.
+
+`install_keychain_stubs(directory)` in `tests/e2e/coral/_claude_sdk_kit.py`
+writes a `security` and a `gh` stand-in into a directory, the same two shell
+scripts on every platform:
+
+- `security` exits 44, the real tool's "item not found". `gh` exits 1, as
+  `gh auth token` does when logged out. Neither prints or reads anything.
+- Each call adds one line to a log, `calls.log` beside the directory unless
+  the caller names another: the program, the subcommand (for `gh`, its first
+  two words) and, for `security`, the service after `-s`.
+- A subcommand is written only when it is 1 to 40 lower-case letters and
+  hyphens, and a service only when it is 1 to 64 letters, digits, spaces and
+  `._:-`. Anything else is written as `other`. The account, every other
+  argument and any input are never written.
+- The scripts and their directory are owner-only, and so is the log.
+
+**A stack brings its own.** `skeleton_stack` does this for every stack, with
+nothing for the test to pass:
+
+- It installs the stand-ins in `<root>/keychain-stubs/bin`; their log is
+  `<root>/keychain-stubs/calls.log`.
+- It starts the server and the host from `stack_env()`: `minimal_env()` with
+  the stand-ins' directory first on `PATH`. Omnigent passes `PATH` on to the
+  runners, harnesses and CLIs the host starts, so they find the stand-ins
+  first too.
+- `stack_env()` also sets `GH_CONFIG_DIR` to `<root>/gh` and
+  `GIT_CONFIG_GLOBAL` to `<root>/gitconfig`, neither of which exists, and
+  `GIT_TERMINAL_PROMPT=0`. Every name in it must be in `BASE_ENV_NAMES`, a
+  reviewed list in which no name carries a credential or points a tool at your
+  own. An unreviewed name fails the stack before any process starts.
+- Every stack process runs under a throwaway `HOME` below the stack's root.
+  The shared helpers give the server `server-home` and the host `host/home`,
+  and the processes those two start keep it.
+
+**A stub on your own `PATH` is not the protection.** A stack builds its `PATH`
+itself: the directories of python, `git`, `claude` and `node`, then the system
+directories. A stub directory on the `PATH` of the shell that started pytest
+is not among them.
+Before the stack had its own stand-ins (CRL-199), a `security` stub on the
+caller's `PATH` never reached a stack process: every stack process on macOS
+resolved `security` to `/usr/bin/security`, and the stub's empty log said
+nothing about them.
+
+**The guards.** psutil shows the environment a process was exec'd with.
+`keychain_bypasses` in `_skeleton.py` takes that `PATH` and `HOME` and names a
+process, as `pid:name` only, when its `PATH` would find `security` or `gh`
+anywhere but at the stack's stand-ins, or when its `HOME` is not under the
+stack's root. It resolves names and runs nothing. `KeychainGuards` applies it
+at every stack's start and exit, and one test applies it to a held step:
+
+| Guard | Where | Processes |
+|---|---|---|
+| At start | every stack, once the host is online | the host daemon and the server; one whose environment cannot be read fails |
+| At exit | every stack, as the first teardown step | the live server and hosts, and those of their live descendants that run an Omnigent module (`-m omnigent...`) or are `claude` CLIs. A `git` child is left out, because production builds its `PATH`. One that is gone or unread is skipped |
+| On a held step | `test_a_step_on_a_server_with_the_allow_listed_runner_token` | the step's runner, harness, launcher and CLI; one that is unread fails |
+
+The held-step test also waits until `gh auth token` is in the log. That shows
+the log works: the host's readiness probe asks `gh` for a token on every
+platform.
+
+What the guards check is the exec-time `PATH` and `HOME` of the server, the
+host, the runner zygote, a runner or harness that was exec'd directly, and
+each CLI. A zygote-forked runner or harness shows its zygote's environment.
+What they do not prove:
+
+- **A caller that skips `PATH`.** A program that runs `/usr/bin/security` by
+  its full path, or asks the keychain through the system API in its own
+  process, meets no stand-in. Only the throwaway `HOME` stands in its way.
+  Whether a throwaway `HOME` hides the login keychain from
+  `/usr/bin/security` is not measured. The System keychain and the
+  data-protection keychain do not depend on `HOME`.
+- **A process that is not there to read.** A child that lives for
+  milliseconds, such as the readiness probe's `gh`, is seen only through the
+  stand-ins' log. A process that changes its own `PATH` after it starts still
+  shows the one it started with.
+- **An empty log.** It says only that nothing unexpected was recorded. A
+  sandboxed CLI cannot write to the stack's log (below).
+
+A guard failure reads `Stack processes started outside the keychain barrier`
+and lists `pid:name`. It means a stack process could have found the real
+programs. Find out why before you run a stack again.
+
+**The teardown check.** Once every stack process has ended, the stack:
+
+- emits a `KeychainStubCalls` warning with what the stand-ins were asked, by
+  name and count, the 20 most frequent names at most. pytest lists it in its
+  warnings summary whether the test passed or failed, for example
+  `keychain stand-in calls: ['gh auth token (x3)'], 3 in all`;
+- fails on a call outside the expected ones, naming the program, the
+  subcommand, the item and a count;
+- fails when a stack home holds `Library/Keychains` or `gh`'s `hosts.yml`, or
+  `<root>/gh/hosts.yml` exists: something signed in.
+
+The expected calls (`_EXPECTED_CALLS` in `_claude_sdk_kit.py`) are reads and
+status queries only:
+
+| Call | Who makes it |
+|---|---|
+| `security find-generic-password` on `Claude Code` or `Claude Code-credentials`, each with or without `-<8 hex>` | the Claude CLI reading its login. The plain names come from a CLI started with no config dir variable, as the host's readiness probe starts it (`claude auth status`). The `-<8 hex>` names come from a CLI with a config dir of its own, such as a Coral step's or an in-process test's |
+| `security find-generic-password` on `Claude Code-device-keys` or `Claude Code-doctor-probe`; `security show-keychain-info` | the Claude CLI: reads of two more items the CLI 2.1.325 build names, and its lock-state query |
+| `gh auth token` | the host's readiness probe: its Copilot row asks `gh` for a token |
+| `gh pr view`, `gh repo view` | the runner's GitHub panel, which reads the branch's pull request and its repository whenever a `gh` is on `PATH`. In a stack the stand-in is that `gh` |
+| `gh auth status` | the same panel, when it reached neither; and the Claude CLI's own check after `gh auth token` gives it nothing (named in the CLI 2.1.325 build) |
+
+A keychain write (`security -i`, `add-generic-password`,
+`delete-generic-password`), another item, any other `gh` call (`gh api`,
+`gh auth login`) and any `other` fail the stack. When a CLI or Omnigent
+upgrade adds a call, the failure names it. Add a read or a status query to the
+list on purpose; never add a write. The list was built from the CLI 2.1.325
+build; the lanes install 2.1.295, whose build was not searched.
+
+**Sandboxed CLIs.** A step's CLI runs in a sandbox that, by its rules, cannot
+read the stack's stand-ins. On macOS seatbelt with CLI 2.1.325 this was
+measured in process: the CLI finds `security` at the first `PATH` entry,
+cannot run it, takes that as "no login", completes its turn and does not look
+further down `PATH`. No log line is written.
+`test_a_wrapped_cli_stops_at_a_keychain_stub_it_cannot_read` in
+`test_tier_b_executor.py` (local only) pins it: unreadable stand-ins come
+first, readable ones in the workspace second, and the second ones must record
+nothing. For `security` that is the CLI's own lookup. For `gh` it is a shell's
+lookup inside the sandbox, since no Tier B turn made the CLI call `gh`. Not
+measured: CLI 2.1.295, and Linux. Under bwrap the stand-ins' directory does
+not exist inside the sandbox, so by the code a lookup by name goes on to the
+next `PATH` entry: Linux has no `security`, and a `gh` found there is the
+machine's real one.
+
+**In-process tests.** `mock_only_env(..., stubs=...)` requires the caller's
+own stand-ins and puts them first on the `PATH` it returns, in front of the
+inherited one. Each test installs them in its temp dir. A test whose CLI runs
+in the sandbox installs them in the workspace
+(`install_keychain_stubs(workspace / "stubbin", log=workspace / "security.log")`),
+the one place the sandbox can both run them and write their log. The two
+sandboxed tests then assert that every recorded call reads a `-<8 hex>` item,
+and on macOS that there was at least one.
+
+**The CLI check.** `sk.require_claude_cli()` and
+`skip_if_harness_cli_missing("claude-sdk")` each start `claude --version` once
+per pytest process, with a throwaway `HOME` and `CLAUDE_CONFIG_DIR` and
+stand-ins first on `PATH`, all removed afterwards (`throwaway_cli_env`). The
+first starts from `minimal_env()`. The second keeps the caller's other
+variables (seam S126 in `tests/e2e/_harness_probes.py`).
+
+**Where it runs.** The `coral-e2e` lane (Ubuntu) runs every stack test, so
+every guard and teardown check. The macOS sandbox lane
+(`.github/workflows/macos-sandbox.yml`, not a required check) runs
+`test_sandbox_probe.py`: its three stack tests and the stand-ins' unit tests.
+
+**Not covered.**
+
+- The stack sample (`test_tier_b_sample.py`, `test_tier_b_reviewer_stack.py`)
+  uses the shared `live_server` fixture: your real `HOME`, your `PATH`, no
+  stand-ins. Run it only on a clean machine (below).
+- Other vendors' CLIs. The host's readiness probe starts each one it finds
+  with `--version`, on the stack's `PATH` or, whatever `PATH` says, in
+  `/usr/local/bin` or `/opt/homebrew/bin`. They run under the stack's
+  throwaway `HOME` and meet no stand-in (CRL-200).
+- Omnigent's other E2E tests outside `tests/e2e/coral/`. Their helpers copy
+  the caller's `PATH` (read from a sample of them). No lane of this fork runs
+  them: the inherited `E2E Tests` workflow is disabled. Run locally, they get
+  what your shell holds.
+
 ## The live variant
 
 `test_skeleton.py::test_live_review_loop_survives_server_sigkills` runs the
@@ -320,7 +505,9 @@ the initial environment block of pytest, or of the shell and tools that
 started it, which another process of the same user outside the sandbox can
 read. Those are your own processes, not ones Coral starts. A step's shell
 cannot read it directly: on macOS
-27.2.1 since CRL-165 (S111, probe 15; no CI lane runs macOS, CRL-170), and on
+27.2.1 since CRL-165 (S111, probe 15; the macOS sandbox lane,
+`.github/workflows/macos-sandbox.yml`, runs probe 15 on changes to the files
+it depends on and weekly, and is not a required check), and on
 Linux because of pid namespaces. On a single-user server, though, a step can
 act as the owner, an accepted residual (ADR-05, "Addendum: CRL-159 probe 15 on
 identity-requiring servers"). The proxy path is the claude-sdk gateway path (it
@@ -355,6 +542,10 @@ inherited environment and returns changes that:
 - Set `HOME` and `CLAUDE_CONFIG_DIR` to a fresh directory from
   `write_claude_home`, whose `.claude.json` declares the stdio probe MCP server
   `probe`.
+- Put the caller's own keychain stand-ins (`stubs=`, required) first on
+  `PATH`, in front of the inherited one, so a lookup of `security` or `gh` by
+  name does not depend on what your shell prepared ("Keychain and GitHub
+  stand-ins" above).
 - Set `ANTHROPIC_BASE_URL` to the mock root URL, and
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. The executor gets its key from
   `api_key_helper="printf %s mock-key"`.
@@ -404,7 +595,8 @@ recorder could also mean the CLI ignores proxy settings.
 shared session-scoped `live_server` fixture in `tests/e2e/conftest.py` starts
 the runner with this process's environment and real `HOME`. The runner's CLI
 can therefore read your `~/.claude` settings, hooks, MCP servers and login, and
-the test cannot install the recorder. The sample skips unless you opt in. Run
+the test cannot install the recorder or the keychain stand-ins. The sample
+skips unless you opt in. Run
 it only where no Claude login or provider credential exists, such as a clean CI
 runner or container:
 
@@ -494,13 +686,18 @@ leader change between live replicas is covered in process only
 
 ## Add a Tier B test
 
+One rule first: a test helper that starts real CLIs builds its own
+environment, with its own keychain stand-ins and a throwaway home. It must not
+rely on the caller's `PATH`.
+
 1. Put the test in `tests/e2e/coral/`. The version gate applies by itself.
 2. Call `skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)` first.
 3. For an executor-level test, use `isolated_mock_llm_server_url`,
    `write_claude_home`, `mock_only_env` with an `EgressRecorder`, and
    `make_executor(..., permission_mode="bypassPermissions")`. Pass
-   `inherited=os.environ` to `mock_only_env`. Assert that
-   `recorder.request_lines` is empty.
+   `inherited=os.environ` and
+   `stubs=install_keychain_stubs(tmp_path / "keychain-stubs" / "bin")` to
+   `mock_only_env`. Assert that `recorder.request_lines` is empty.
 4. For a stack-level test, use `http_client`, `live_runner_id` and
    `mock_llm_server_url` with the queue guards above.
 5. Assert on what the turn produced: the final text, the marker file, or the
