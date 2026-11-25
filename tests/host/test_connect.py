@@ -12592,7 +12592,8 @@ async def test_a_canary_that_read_through_refuses_coral_steps_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     host = _quiet_host(monkeypatch, tmp_path)
-    monkeypatch.setattr("omnigent.host.connect.process_read_canary_open", lambda: True)
+    failed = ("clone of a masked entry's dir (inside)", "step profile load")  # CORAL(S128)
+    monkeypatch.setattr("omnigent.host.connect.process_read_canary_open", lambda: failed)
     spawn = Mock(side_effect=AssertionError("a refused Coral step spawned"))
 
     with patch("omnigent.host.connect.subprocess.Popen", spawn):
@@ -12602,6 +12603,7 @@ async def test_a_canary_that_read_through_refuses_coral_steps_only(
 
     assert result.status != "launched"
     assert result.error is not None and "runs no Coral step" in result.error
+    assert f"check failed ({', '.join(failed)})" in result.error  # CORAL(S128): by name
     spawn.assert_not_called()
     runners = await _launch_group_runners(host, tmp_path, ["other"], coral_step=False)
     with _killed_at_exit(*(proc for pair in runners.values() for proc in pair)):

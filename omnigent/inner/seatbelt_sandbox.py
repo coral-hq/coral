@@ -117,6 +117,8 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import ctypes  # CORAL(S128)
+import errno  # CORAL(S128)
 import functools  # CORAL(S120)
 import logging
 import os
@@ -690,7 +692,9 @@ def _build_profile(
     7. Extra read roots, write roots, write files.
     8. Dotfile / escaping-symlink mask — per-path denies that win
        over the cwd allow exactly because deny beats allow in SBPL.
-    9. Network rules.
+    9. CORAL(S128): each dir above a denied path, not renamed,
+       removed or cloned.
+    10. Network rules.
 
     :param policy: The resolved :class:`SandboxPolicy`. Provides cwd
         writability, scratch tmpdir, read/write roots, dotfile
@@ -1093,6 +1097,17 @@ def _build_profile(
         for denial in sensitive_denials:
             lines.append(f"(deny file-read* file-write* (subpath {_quote(str(denial))}))")
 
+    # CORAL(S128): a deny names a path. A dir above a denied entry that is moved or cloned
+    # takes the entry to a path no deny names, so each one stays put and is not cloned.
+    credential_sources = [path.resolve() for path in policy.credential_source_paths or []]
+    denied = [*(entry.path for entry in mask_entries), *sensitive_denials, *credential_sources]
+    kept_in_place = _dirs_above(denied)
+    if kept_in_place:
+        lines.append("")
+        lines.append(";; Dirs above a denied entry: not renamed, removed or cloned")
+        for held in kept_in_place:
+            lines.append(f"(deny file-write-unlink file-clone (literal {_quote(str(held))}))")
+
     # ----------------------------------------------------------------
     # Network rules
     # ----------------------------------------------------------------
@@ -1202,21 +1217,14 @@ def _build_profile(
         for own in own_dirs_in_denied_roots:
             lines.append(f"(allow network-outbound (remote unix-socket (subpath {_quote(own)})))")
         # CORAL(S127): an own dir's allow covers its masked entries too, and a connect needs
-        # no file access, so a socket under one would connect unread.
+        # no file access, so a socket under one would connect unread. CORAL(S128): the dirs
+        # above each entry are kept in place by the file rules above, in every network mode.
         socket_dirs = [*own_dirs, *own_dirs_in_denied_roots]
-        writable = [*socket_dirs, *(_resolved_path(root) for root in policy.write_roots)]
-        holders: list[Path] = []
         for entry in mask_entries:
             if _is_under_any(entry.path, socket_dirs):
                 target = "subpath" if entry.kind == "dir" else "path-literal"
                 quoted = _quote(str(entry.path))
                 lines.append(f"(deny network-outbound (remote unix-socket ({target} {quoted})))")
-                above = [held for held in entry.path.parents if _is_under_any(held, writable)]
-                holders += [held for held in above if held not in holders]
-        # Nor by moving a dir above one into another own dir, where no deny names it: each
-        # dir from the entry's parent up to its outermost write root stays where it is.
-        for holder in holders:
-            lines.append(f"(deny file-write-unlink (literal {_quote(str(holder))}))")
 
     # ----------------------------------------------------------------
     # AF_UNIX control-socket denials.
@@ -1243,8 +1251,8 @@ def _build_profile(
             lines.append(f"(deny file-write* (literal {_quote(canonical)}))")
             lines.append(f"(deny file-write* (literal {_quote(str(Path(canonical).parent))}))")
 
-    for source_path in policy.credential_source_paths or []:
-        quoted = _quote(str(source_path.resolve()))
+    for source_path in credential_sources:  # CORAL(S128): resolved once, above
+        quoted = _quote(str(source_path))
         lines.append(f"(deny file-read* file-write* (literal {quoted}))")
         lines.append(f"(deny network-outbound (remote unix-socket (path-literal {quoted})))")
 
@@ -2208,6 +2216,14 @@ def _is_under_any(path: Path | str, dirs: Sequence[Path | str]) -> bool:
     return any(_folded(path).is_relative_to(_folded(directory)) for directory in dirs)
 
 
+def _dirs_above(paths: Sequence[Path]) -> list[Path]:
+    """CORAL(S128): every dir above each of *paths*, up to the root, once, nearest first."""
+    above: dict[Path, None] = {}
+    for path in paths:
+        above.update(dict.fromkeys(path.parents))
+    return list(above)
+
+
 def _shared_socket_dirs() -> list[Path]:
     """
     CORAL(S127): system dirs every program keeps sockets in, never a process's own.
@@ -2424,42 +2440,73 @@ def _cleanup_profile_files() -> None:
 atexit.register(_cleanup_profile_files)
 
 
+# CORAL(S120), CORAL(S128): the canary's checks in its reader's print order, each with whether
+# the sandbox must let it through (the controls); the masked entry is ``box/.masked``.
+_CANARY_CHECKS = (
+    ("another process's arguments by sysctl", False),
+    ("another process's arguments by pgrep", False),
+    ("its own arguments", True),
+    ("clone of a masked entry's dir", False),
+    ("clone of the dir above it", False),
+    ("clone of a plain dir", True),
+    ("rename of a masked entry's dir", False),
+    ("rename of a plain dir", True),
+)
+
 # CORAL(S120): reads the marker from stdin, so no reader's command line holds it, and prints
-# 1/0 for: the target's KERN_PROCARGS2 (arguments and environment) holds it, ``pgrep -lf``
-# (sysmond) finds it, and the reader reads its own arguments (the control).
+# 1 or 0 for each check above. CORAL(S128): it clones into the write root named last.
 _CANARY_READ = """
-import ctypes, os, subprocess, sys
+import ctypes, os, shutil, subprocess, sys
 marker = sys.stdin.read().encode()
+libc = ctypes.CDLL(None)
 
 def args(pid):
     size = ctypes.c_size_t(1 << 20)
     data = ctypes.create_string_buffer(size.value)
     mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
-    if ctypes.CDLL(None).sysctl(mib, 3, data, ctypes.byref(size), None, 0) != 0:
+    if libc.sysctl(mib, 3, data, ctypes.byref(size), None, 0) != 0:
         return b''
     return data.raw[: size.value]
 
+def cloned(source):
+    target = os.path.join(sys.argv[2], 'clone')
+    made = libc.clonefile(os.fsencode(source), os.fsencode(target), 0) == 0
+    shutil.rmtree(target, ignore_errors=True)
+    return made
+
+def renamed(source):
+    try:
+        os.rename(source, source + '.moved')
+    except OSError:
+        return False
+    os.rename(source + '.moved', source)
+    return True
+
 pgrep = subprocess.run(['/usr/bin/pgrep', '-lf', marker], capture_output=True, timeout=10)
 target = args(int(sys.argv[1]))
-print(int(marker in target), int(marker in pgrep.stdout), int(bool(args(os.getpid()))))
+print(int(marker in target), int(marker in pgrep.stdout), int(bool(args(os.getpid()))),
+      int(cloned('box')), int(cloned(os.getcwd())), int(cloned('plain')),
+      int(renamed('box')), int(renamed('plain')))
 """
 
 
 # CORAL(S120): the step profile's process-read rules, checked once per host process.
+# CORAL(S128): and that the rule keeping the dirs above a masked entry in place loads and holds.
 @functools.cache
-def process_read_canary_open() -> bool:
+def process_read_canary_open() -> tuple[str, ...]:
     """
-    Whether a step-profile sandbox on this host read a throwaway process's arguments.
+    The names of the checks a step-profile sandbox failed on this host; empty if none did.
 
-    Outside the sandbox the reader must find the marker both ways; inside it must find it
-    neither way while still reading its own arguments. Anything else, an error included,
-    counts as open, so a host that cannot show the rules hold runs no Coral step.
-    ``launchctl print`` is not checked. ``False`` off macOS, where the rules do not apply.
+    A reader runs outside the sandbox and then inside it, against a throwaway process's
+    marker and a throwaway tree. Outside, every check in ``_CANARY_CHECKS`` must succeed;
+    inside, only the controls. Anything else, an error or a profile that does not load
+    included, is a failure, so a host that cannot show the rules hold runs no Coral step.
+    The tree is on the per-user temp dir's volume; where even that cannot clone a dir, the
+    clone checks are skipped. ``launchctl print`` is not checked. Empty off macOS.
     """
     if sys.platform != "darwin":
-        return False
+        return ()
     marker = f"coral-canary-{uuid.uuid4().hex}"
-    seen: list[str] = []
     try:
         target = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)", marker],
@@ -2468,31 +2515,87 @@ def process_read_canary_open() -> bool:
             stderr=subprocess.DEVNULL,
         )
         try:
-            with tempfile.TemporaryDirectory() as scratch:
-                cwd = Path(scratch).resolve()
+            # CORAL(S128): on the boot volume, which clones dirs wherever ``$TMPDIR`` points.
+            user_temp = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
+            with tempfile.TemporaryDirectory(
+                prefix="omnigent-sandbox-check-", dir=user_temp
+            ) as scratch:
+                base = Path(scratch).resolve()
+                cwd, spare = base / "work", base / "spare"
+                for made in (cwd / "box", cwd / "plain", spare):
+                    made.mkdir(parents=True)
+                (cwd / "box" / ".masked").touch()
+                clones = _clones_dirs(cwd / "plain", spare / "clone")
                 backend = SeatbeltSandboxBackend()
-                policy = backend.resolve(OSEnvSpec(type="caller_process", cwd=str(cwd)), cwd)
-                read = [sys.executable, "-I", "-c", _CANARY_READ, str(target.pid)]
-                for argv in (read, backend.wrap_launcher_argv(read, policy, cwd)):
-                    done = subprocess.run(
+                grant = OSEnvSandboxSpec(
+                    type=backend.type_name,
+                    write_paths=[".", str(spare)],
+                    mask_paths=["box/.masked"],
+                )
+                policy = backend.resolve(
+                    OSEnvSpec(type="caller_process", cwd=str(cwd), sandbox=grant), cwd
+                )
+                read = [sys.executable, "-I", "-c", _CANARY_READ, str(target.pid), str(spare)]
+                runs = [
+                    subprocess.run(
                         argv, cwd=cwd, input=marker, capture_output=True, text=True, timeout=20
                     )
-                    seen.append(f"{done.returncode}: {done.stdout.strip()}")
+                    for argv in (read, backend.wrap_launcher_argv(read, policy, cwd))
+                ]
         finally:
             target.kill()
             target.wait()
     except Exception as exc:  # noqa: BLE001 -- any failure fails closed
-        _LOGGER.error("The sandbox process-read check could not run: %r", exc)
-        return True
-    if seen != ["0: 1 1 1", "0: 0 0 1"]:
+        _LOGGER.error("The sandbox check could not run: %r", exc)
+        return ("check run",)
+    failed = _canary_failures(runs, clones=clones)
+    if failed:
         _LOGGER.error(
-            "The sandbox process-read check failed on macOS %s (outside %r, inside %r; "
-            "want '0: 1 1 1' and '0: 0 0 1'); this host runs no Coral step.",
+            "The sandbox check failed on macOS %s: %s; this host runs no Coral step.",
             platform.mac_ver()[0],
-            *seen,
+            ", ".join(failed),
         )
-        return True
-    return False
+    return failed
+
+
+def _canary_failures(
+    runs: Sequence[subprocess.CompletedProcess[str]], *, clones: bool
+) -> tuple[str, ...]:
+    """CORAL(S128): each check the reader's runs, outside and then inside, did not pass."""
+    failed: list[str] = []
+    for where, run in zip(("outside", "inside"), runs, strict=True):
+        results = run.stdout.split()
+        if run.returncode != 0 or len(results) != len(_CANARY_CHECKS):
+            failed.append("step profile load" if where == "inside" else "reader run (outside)")
+            continue
+        for (name, allowed), result in zip(_CANARY_CHECKS, results, strict=True):
+            wanted = str(int(where == "outside" or allowed))
+            if result != wanted and (clones or not name.startswith("clone ")):
+                failed.append(f"{name} ({where})")
+    return tuple(failed)
+
+
+def _clones_dirs(source: Path, target: Path) -> bool:
+    """CORAL(S128): whether *source*'s volume clones a dir; HFS+, exFAT and network ones do not."""
+    try:
+        _clone_dir(source, target)
+    except OSError as exc:
+        if exc.errno != errno.ENOTSUP:
+            raise
+        _LOGGER.warning(
+            "The sandbox check's volume cannot clone a dir; its clone checks are skipped."
+        )
+        return False
+    shutil.rmtree(target)
+    return True
+
+
+def _clone_dir(source: Path, target: Path) -> None:
+    """CORAL(S128): ``clonefile(2)`` of *source* to *target*, outside any sandbox."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.clonefile(os.fsencode(source), os.fsencode(target), 0) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(source))
 
 
 register_backend(SeatbeltSandboxBackend())

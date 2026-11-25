@@ -2475,13 +2475,13 @@ class HostProcess:
         if coral_step:
             env[RUNNER_GROUP_ENDS_WITH_RUNNER_ENV_VAR] = "1"
             # CORAL(S120): a host whose seatbelt let the canary read through runs no Coral step.
-            if await self._run_host_subprocess_in_thread(process_read_canary_open):
+            # CORAL(S128): the refusal names each check that failed.
+            if failed := await self._run_host_subprocess_in_thread(process_read_canary_open):
                 return self._launch_failed(
                     frame,
                     f"host {self._identity.name!r} runs no Coral step: its macOS "
-                    f"{platform.mac_ver()[0]} sandbox check either let a sandboxed read of "
-                    "another process's arguments through or could not run (the host log says "
-                    "which). Restart the host to check again after a Coral or macOS update.",
+                    f"{platform.mac_ver()[0]} sandbox check failed ({', '.join(failed)}). "
+                    "Restart the host to check again after a Coral or macOS update.",
                 )
         if frame.inference_config is not None:
             try:
