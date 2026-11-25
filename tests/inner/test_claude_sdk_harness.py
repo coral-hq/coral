@@ -522,13 +522,15 @@ def test_bundle_dir_unset_passes_none(
         ("HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK", "tool_call_policy_hook"),
         # CORAL(S113)
         ("HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG", "isolate_claude_config"),
+        # CORAL(S129)
+        ("HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX", "require_cli_sandbox"),
     ],
 )
 @pytest.mark.parametrize(("value", "expected"), [("1", True), ("", False), (None, False)])
 def test_coral_credential_and_policy_flags_thread_through(
     monkeypatch: pytest.MonkeyPatch, env_name: str, kwarg: str, value: str | None, expected: bool
 ) -> None:
-    """CORAL(S13, S21, S113): the Coral flags reach the executor."""
+    """CORAL(S13, S21, S113, S129): the Coral flags reach the executor."""
     if value is None:
         monkeypatch.delenv(env_name, raising=False)
     else:
@@ -542,6 +544,149 @@ def test_coral_credential_and_policy_flags_thread_through(
         claude_sdk_harness._build_claude_sdk_executor()
 
     assert captured[kwarg] is expected
+
+
+# CORAL(S129): workflow.py marks the orchestrator, which has no os_env, for a read-only CLI
+# sandbox; a payload, a malformed one included, or no flag keeps what the harness gave before.
+_READ_ONLY_FLAG = "HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX"
+_STEP_PAYLOAD = json.dumps(
+    {
+        "type": "caller_process",
+        "cwd": "/step",
+        "sandbox": {"type": "linux_bwrap", "write_paths": ["."]},
+    }
+)
+
+
+@pytest.mark.parametrize(
+    ("config", "resolved"),
+    [
+        ({_READ_ONLY_FLAG: "1"}, "stance"),
+        ({_READ_ONLY_FLAG: "1", "HARNESS_CLAUDE_SDK_OS_ENV": ""}, "stance"),
+        ({_READ_ONLY_FLAG: "1", "HARNESS_CLAUDE_SDK_OS_ENV": _STEP_PAYLOAD}, "payload"),
+        ({_READ_ONLY_FLAG: "1", "HARNESS_CLAUDE_SDK_OS_ENV": "{not-json"}, "none"),
+        ({_READ_ONLY_FLAG: "1", "HARNESS_CLAUDE_SDK_OS_ENV": "[]"}, "none"),
+        ({_READ_ONLY_FLAG: "true"}, "none"),
+        ({"HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX": "1"}, "none"),
+        ({}, "none"),
+    ],
+    ids=[
+        "no-payload",
+        "cleared-payload",
+        "payload-wins",
+        "malformed-payload",
+        "non-dict-payload",
+        "flag-not-1",
+        "require-flag-only",
+        "no-flag",
+    ],
+)
+def test_only_the_read_only_flag_without_a_payload_gives_a_cli_sandbox(
+    config: dict[str, str], resolved: str
+) -> None:
+    from omnigent.inner.sandbox import _default_sandbox_for_platform
+
+    platform_type = _default_sandbox_for_platform().type
+    expected = {
+        "stance": (".", platform_type, []),
+        "payload": ("/step", "linux_bwrap", ["."]),
+        "none": (None, "none", None),
+    }[resolved]
+
+    os_env = claude_sdk_harness._resolve_os_env(config)
+
+    assert os_env.sandbox is not None
+    assert (os_env.cwd, os_env.sandbox.type, os_env.sandbox.write_paths) == expected
+
+
+def _package_layout(layout: str, tmp_path: Path, package: Path) -> tuple[Path, Path, Path | None]:
+    """The harness module's path, ``sys.prefix`` and the expected grant for one layout."""
+    module = package / "inner" / "claude_sdk_harness.py"
+    venv = tmp_path / "venv"
+    if layout in ("checkout", "no-backend"):
+        return module, venv, package
+    if layout == "installed":
+        return module, package.parent, None
+    if layout == "symlinked-prefix":
+        (tmp_path / "prefix").symlink_to(package.parent)
+        return module, tmp_path / "prefix", None
+    if layout == "symlinked-checkout":
+        (tmp_path / "checkout").symlink_to(package.parent)
+        return tmp_path / "checkout" / package.name / "inner" / module.name, venv, package
+    # Fake trees, the package being the directory two levels above the module.
+    home = tmp_path / "home"
+    fake = {
+        "symlinked-subpackage": tmp_path / "checkout" / "omnigent",
+        "no-init": tmp_path / "checkout" / "omnigent",
+        "the-home": home,
+        "above-the-home": tmp_path,
+    }[layout]
+    fake.mkdir(parents=True, exist_ok=True)
+    if layout != "no-init":
+        (fake / "__init__.py").write_text("")
+    if layout == "symlinked-subpackage":  # the subpackage's real files lie in the home
+        (home / "inner").mkdir()
+        (fake / "inner").symlink_to(home / "inner")
+        return fake / "inner" / module.name, venv, fake.resolve()
+    return fake / "inner" / module.name, venv, None
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "checkout",
+        "installed",
+        "no-backend",
+        "symlinked-checkout",
+        "symlinked-prefix",
+        "symlinked-subpackage",
+        "the-home",
+        "above-the-home",
+        "no-init",
+    ],
+)
+def test_the_read_only_cli_sandbox_grants_the_package_only_outside_the_prefix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, layout: str
+) -> None:
+    """
+    The launcher imports omnigent inside the wrap; an installed package is readable already.
+
+    The grant is the canonical package dir, never the home or a dir above it, and never a dir
+    that is not a package; with no grant the launcher cannot import, so the CLI never starts.
+    """
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+    from omnigent.inner.sandbox import _default_sandbox_for_platform
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    package = Path(claude_sdk_harness.__file__).parent.parent.resolve()
+    module, prefix, granted = _package_layout(layout, tmp_path, package)
+    monkeypatch.setattr(claude_sdk_harness, "__file__", str(module))
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    backend = _default_sandbox_for_platform().type
+    if layout == "no-backend":
+
+        def _no_backend() -> OSEnvSandboxSpec:
+            raise OSError("No sandbox backend is available on this platform.")
+
+        monkeypatch.setattr(claude_sdk_harness, "_default_sandbox_for_platform", _no_backend)
+        backend = "none"  # S13 then refuses the turn
+
+    stance = claude_sdk_harness._resolve_os_env({_READ_ONLY_FLAG: "1"})
+
+    assert stance == OSEnvSpec(
+        type="caller_process",
+        cwd=".",
+        sandbox=OSEnvSandboxSpec(
+            type=backend,
+            read_paths=None if granted is None else [str(granted)],
+            write_paths=[],
+        ),
+    )
+    assert stance.sandbox is not None
+    grants = stance.sandbox.read_paths or []
+    assert not any(home.resolve().is_relative_to(grant) for grant in grants)
 
 
 # CORAL(S124): the harness takes its config, and for Coral its CLI's credentials, out of
@@ -713,6 +858,7 @@ def test_every_build_kwarg_comes_from_the_taken_config(
         "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL": "1",
         "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK": "1",
         "HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG": "1",
+        "HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX": "1",  # CORAL(S129)
     }
 
     def digests(build: dict[str, Any]) -> dict[str, str]:

@@ -83,6 +83,11 @@ Env vars read at startup:
   stable plugin name (so bundled skills show as
   ``<agent>:<skill>`` rather than the bundle's tmpdir
   basename).
+- ``HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX``: CORAL(S129): ``"1"`` for Coral specs; the
+  executor refuses every turn whose CLI is not wrapped in an OS sandbox.
+- ``HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX``: CORAL(S129): ``"1"`` for the Coral
+  orchestrator, whose spec has no ``os_env``. With no ``HARNESS_CLAUDE_SDK_OS_ENV`` payload,
+  its CLI gets the platform's sandbox over the workspace, read-only, with the network on.
 """
 
 from __future__ import annotations
@@ -90,6 +95,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys  # CORAL(S129)
 from collections.abc import Mapping, MutableMapping  # CORAL(S124)
 from pathlib import Path
 
@@ -104,6 +110,12 @@ from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import Executor
 from omnigent.inner.os_env_serialization import decode_sandbox_spec
+from omnigent.inner.sandbox import (  # CORAL(S129)
+    _LAUNCHER_LAUNCH_TMPDIR_ENV,
+    _LAUNCHER_PRIVATE_TMPDIR_ENV,
+    _LAUNCHER_WRAPPED_ENV,
+    _default_sandbox_for_platform,
+)
 from omnigent.runner.launch_secrets import (  # CORAL(S124)
     CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
     HARNESS_LAUNCH_FD_ENV_VAR,
@@ -146,6 +158,10 @@ _ENV_REQUIRE_API_CREDENTIAL = "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL"
 _ENV_TOOL_CALL_POLICY_HOOK = "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK"
 # CORAL(S113): set for Coral specs; the CLI keeps its Claude config in a private dir
 _ENV_ISOLATE_CLAUDE_CONFIG = "HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG"
+# CORAL(S129): set for Coral specs; the CLI runs in an OS sandbox or not at all
+_ENV_REQUIRE_CLI_SANDBOX = "HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX"
+# CORAL(S129): set for the orchestrator, whose spec has no os_env; its CLI gets a read-only one
+_ENV_READ_ONLY_CLI_SANDBOX = "HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX"
 # CORAL(S124): every name above starts with this; create_app() takes them all as config
 _ENV_PREFIX = "HARNESS_CLAUDE_SDK_"
 # CORAL(S124): switches that route a CLI around the credential it is given (the pinned CLI
@@ -192,10 +208,44 @@ _CORAL_PROTECTED_NAMES: frozenset[str] = frozenset(
 _CORAL_PROXY_NAMES: frozenset[str] = frozenset(
     {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"}
 )
+# CORAL(S129): a CLI launcher that inherits these skips its wrap or adopts another launch's
+# dirs; a launcher sets them only in its own process, so a Coral harness never needs them
+_CORAL_LAUNCHER_MARKERS: frozenset[str] = frozenset(
+    {_LAUNCHER_WRAPPED_ENV, _LAUNCHER_PRIVATE_TMPDIR_ENV, _LAUNCHER_LAUNCH_TMPDIR_ENV}
+)
 # Default permission mode for the Claude SDK. ``"auto"`` auto-approves
 # tool calls with background safety checks that verify actions align
 # with the request.
 _DEFAULT_PERMISSION_MODE = "auto"
+
+
+def _read_only_cli_os_env() -> OSEnvSpec:
+    """
+    CORAL(S129): the platform's sandbox over the workspace, read-only, network on.
+
+    The launcher imports omnigent inside the wrap, so a checkout outside the interpreter's
+    prefix grants its package directory, found as Coral finds a step's. A directory that is
+    not a package, or is the home or above it, is never granted: the launcher then cannot
+    import omnigent and the CLI does not start.
+    """
+    package = Path(__file__).parent.parent.resolve()
+    outside = not package.is_relative_to(Path(sys.prefix).resolve())
+    grant = (
+        outside
+        and (package / "__init__.py").is_file()
+        and not Path.home().resolve().is_relative_to(package)  # the root is above the home
+    )
+    try:
+        backend = _default_sandbox_for_platform().type
+    except OSError:
+        backend = "none"  # S13 then refuses the turn
+    return OSEnvSpec(
+        type="caller_process",
+        cwd=".",
+        sandbox=OSEnvSandboxSpec(
+            type=backend, read_paths=[str(package)] if grant else None, write_paths=[]
+        ),
+    )
 
 
 def _resolve_os_env(config: Mapping[str, str] | None = None) -> OSEnvSpec:  # CORAL(S124)
@@ -209,7 +259,8 @@ def _resolve_os_env(config: Mapping[str, str] | None = None) -> OSEnvSpec:  # CO
     so the SDK still exposes the natives — leaving them off by
     default would surprise users migrating from the legacy
     non-AP path, where the natives are visible without
-    any explicit opt-in.
+    any explicit opt-in. CORAL(S129): a missing payload under
+    :data:`_ENV_READ_ONLY_CLI_SANDBOX` gives :func:`_read_only_cli_os_env` instead.
 
     :param config: The harness config, e.g. from :func:`_take_harness_config`;
         ``os.environ`` when ``None``.
@@ -239,6 +290,9 @@ def _resolve_os_env(config: Mapping[str, str] | None = None) -> OSEnvSpec:  # CO
                 sandbox=sandbox,
                 fork=bool(payload.get("fork", False)),
             )
+    # CORAL(S129): the orchestrator's CLI gets a read-only sandbox; a malformed payload does not
+    if not raw and harness_config.get(_ENV_READ_ONLY_CLI_SANDBOX) == "1":
+        return _read_only_cli_os_env()
     # Default: enable natives, no sandbox. Matches the simplest
     # working config; operators who want real sandbox enforcement
     # configure ``os_env.sandbox`` explicitly in the spec.
@@ -347,7 +401,7 @@ def _scrub_coral_environ(
     never to restore: every forwarded credential, every name listed for passthrough or as
     forwarded by the host, the provider and gateway switches, every name whose value holds
     the configured static key, and proxy settings that carry userinfo. The protected
-    process and network essentials stay.
+    process and network essentials stay. CORAL(S129): the CLI launcher's markers go too.
 
     :param config: The harness config from :func:`_take_harness_config`.
     :param environ: The environment to scrub; ``os.environ`` when ``None``.
@@ -371,6 +425,7 @@ def _scrub_coral_environ(
         | env_name_list(source.get(RUNNER_ENV_PASSTHROUGH_ENV_VAR, ""))
         | env_name_list(source.get(RUNNER_FORWARDED_NAMES_ENV_VAR, ""))
         | _CORAL_DROPPED_SWITCHES
+        | _CORAL_LAUNCHER_MARKERS  # CORAL(S129)
     )
     literals = [
         literal
@@ -451,6 +506,7 @@ def _build_claude_sdk_executor(
         require_api_credential=harness_config.get(_ENV_REQUIRE_API_CREDENTIAL) == "1",
         tool_call_policy_hook=harness_config.get(_ENV_TOOL_CALL_POLICY_HOOK) == "1",
         isolate_claude_config=harness_config.get(_ENV_ISOLATE_CLAUDE_CONFIG) == "1",  # CORAL(S113)
+        require_cli_sandbox=harness_config.get(_ENV_REQUIRE_CLI_SANDBOX) == "1",  # CORAL(S129)
         credential_env=credential_env,  # CORAL(S124)
     )
 

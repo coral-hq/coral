@@ -2384,6 +2384,149 @@ def test_claude_cli_wrap_keeps_the_claude_config_out_of_the_home(
     assert Path(inside_dir).name == "claude_config_dir" and not Path(inside_dir).exists()
 
 
+# CORAL(S129): runs the home probe from the scratch, then reads and writes from the workspace;
+# prints only verdicts and digests
+_READ_ONLY_CLI_PROBE = """
+import hashlib, os, runpy, sys
+workspace, home, probe_home = sys.argv[1:4]
+
+def digest(path):
+    try:
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        return "no"
+
+def written(path):
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except OSError:
+        return "no"
+    os.unlink(path)
+    return "yes"
+
+# The scratch is writable, so the probe's links and renames can make their names.
+os.chdir(os.environ["TMPDIR"])
+print("scratch_write", written("scratch-probe"))
+report = os.path.join(os.environ["TMPDIR"], "home-probe.txt")
+runpy.run_path(os.path.join(workspace, "probe.py"))["main"](report, probe_home)
+with open(report) as handle:
+    print(handle.read(), end="")
+os.chdir(workspace)
+for name in ("marker.txt", ".env", ".git/config", "home-link"):
+    print(name, digest(name))
+print("write", written("planted"))
+for name in ("notes.txt", "Documents/notes.txt", ".ssh/id_ed25519"):
+    print("~/" + name, digest(os.path.join(home, name)))
+"""
+
+
+# CORAL(S129): the orchestrator's CLI, whose spec has no os_env, runs read-only in the sandbox
+def test_a_coral_cli_without_os_env_runs_read_only_in_its_sandbox(
+    tmp_path: Path, active_sandbox_type: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The stance the claude-sdk harness gives a Coral CLI whose spec has no ``os_env``, wrapped
+    as an isolated Coral CLI is, with nothing granted beyond it. From its scratch the home
+    probe reaches none of a throwaway home's Claude config, and its own config dir is
+    private. From the workspace it reads a plain file but writes nothing, and reads no fake
+    value in a top-level ``.env`` or ``.git/config``, through a symlink to a home file, or in a
+    home file or ``~/.ssh`` key. An unwrapped run reads each of those files and, from a
+    scratch made where the launcher makes its own, passes every home check on a second home.
+    The home and workspace are unchanged. Covers the editable layout only, where the stance
+    grants the omnigent package because it lies outside ``sys.prefix``.
+    """
+    import tests.e2e.coral._claude_config_probe as probe
+    from omnigent.inner import claude_sdk_harness
+    from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+
+    home, outside_home, workspace = (tmp_path / name for name in ("home", "outside", "work"))
+    for seeded_home in (home, outside_home):
+        probe.seed_claude_home(seeded_home)
+    files = {
+        "marker.txt": (workspace / "marker.txt", "a workspace file\n"),
+        ".env": (workspace / ".env", f"API_KEY=fake-{uuid.uuid4().hex}\n"),
+        ".git/config": (
+            workspace / ".git" / "config",
+            f"[x]\n\ttoken = fake-{uuid.uuid4().hex}\n",
+        ),
+        "~/notes.txt": (home / "notes.txt", f"fake-{uuid.uuid4().hex}\n"),
+        "~/Documents/notes.txt": (home / "Documents" / "notes.txt", f"fake-{uuid.uuid4().hex}\n"),
+        "~/.ssh/id_ed25519": (home / ".ssh" / "id_ed25519", f"fake-{uuid.uuid4().hex}\n"),
+    }
+    for path, text in files.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    (workspace / "home-link").symlink_to(home / "notes.txt")
+    shutil.copy(probe.__file__, workspace / "probe.py")
+    digests = {name: _digest(path) for name, (path, _text) in files.items()}
+    digests["home-link"] = digests["~/notes.txt"]
+    with contextlib.ExitStack() as cleanup:
+        harness_root = Path(tempfile.mkdtemp(prefix="sbx-h-", dir="/tmp"))
+        cleanup.callback(shutil.rmtree, harness_root, ignore_errors=True)
+        monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", str(harness_root))
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
+        flag = {"HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX": "1"}
+        stance = claude_sdk_harness._resolve_os_env(flag)
+        # The stance's rule: the package is granted only when it lies outside the prefix.
+        package = Path(claude_sdk_harness.__file__).parent.parent.resolve()
+        installed = package.is_relative_to(Path(sys.prefix).resolve())
+        assert stance.sandbox is not None and stance.sandbox.type == active_sandbox_type
+        granted = None if installed else [str(package)]
+        assert (stance.cwd, stance.sandbox.read_paths) == (".", granted)
+        prepared = prepare_claude_cli_path(sys.executable, stance, isolate_config=True)
+        assert prepared.config_isolated and prepared.cli_path is not None
+        assert prepared.cli_path != sys.executable, "the stance did not wrap"
+        cleanup.callback(Path(prepared.cli_path).unlink, missing_ok=True)
+        before = probe.tree(home), probe.tree(workspace)
+
+        def run(command: str, probe_home: Path, tmpdir: str) -> dict[str, str]:
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "TMPDIR": tmpdir,
+                "HOME": str(probe_home),
+                # Stand in for user values the host forwards.
+                "CLAUDE_CONFIG_DIR": str(probe_home / ".claude"),
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(probe_home),
+            }
+            argv = [command, "-c", _READ_ONLY_CLI_PROBE, *map(str, (workspace, home, probe_home))]
+            done = subprocess.run(
+                argv, cwd=workspace, env=env, capture_output=True, text=True, timeout=60
+            )
+            assert done.returncode == 0, done.stderr
+            return dict(line.split(" ", 1) for line in done.stdout.splitlines())
+
+        # Beside the launcher's own scratch, so the probe's hard links and renames cross the
+        # same filesystems outside as inside.
+        scratch = tempfile.mkdtemp(prefix="sbx-o-")
+        cleanup.callback(shutil.rmtree, scratch, ignore_errors=True)
+        outside = run(sys.executable, outside_home, scratch)
+        inside = run(prepared.cli_path, home, tempfile.gettempdir())
+        after = probe.tree(home), probe.tree(workspace)
+    outside_dir, config_dir = outside.pop("config_dir"), Path(inside.pop("config_dir"))
+    reads = {name: name in inside and inside[name] == digest for name, digest in digests.items()}
+    own = ["scratch_write", "config_private", "config_writable", "projects", "config_seeded"]
+    own += ["seed_source_write", "securestorage_own"]
+    outside_own = dict(zip(own, ("yes", "no", "yes", "yes", "no", "no", "no"), strict=True))
+    inside_own = dict(zip(own, ("yes", "yes", "yes", "no", "no", "no", "yes"), strict=True))
+    assert outside == {
+        **dict.fromkeys(probe.HOME_CHECKS, "yes"),
+        **outside_own,
+        **digests,
+        "write": "yes",
+    }, f"failed outside: {outside}"
+    assert outside_dir == str(outside_home / ".claude")
+    assert {name: inside[name] for name in [*probe.HOME_CHECKS, *own]} == {
+        **dict.fromkeys(probe.HOME_CHECKS, "no"),
+        **inside_own,
+    }, f"reached inside: {inside}"
+    assert reads == {name: name == "marker.txt" for name in digests}, reads
+    assert inside["write"] == "no", "the wrap wrote the workspace"
+    assert after == before, "the wrap changed the home or the workspace"
+    assert config_dir.name == "claude_config_dir" and not config_dir.exists()
+
+
 # CORAL(S115): the Agent SDK's version check kills the wrapped CLI before the launcher cleans up
 # CORAL(S116): as does the executor's signal to the whole tree, which this stand-in ignores
 @pytest.mark.timeout(120)

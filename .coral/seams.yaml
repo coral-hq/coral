@@ -3570,15 +3570,18 @@ seams:
       (os_env and the Linux tight wrap) then grant only ~/.npm/_logs of the
       home, point CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR at
       that dir with projects as a file, and remove both names from the CLI's
-      inherited and settings environment. A Coral CLI that runs unwrapped gets
-      an executor-owned mkdtemp dir instead, removed on close. When a step's
-      os_env asks for a wrap (caller_process, a sandbox type other than none,
-      network on, no operator opt-out) and its CLI was not wrapped, the
-      executor refuses its turns with coral_sandbox_unavailable before any CLI
-      starts. No rule grants ~/Library and S5 denies it, so the keychain file
-      cannot be opened from the wrap (measured on 27.2.1 with a stand-in
-      file). Main residuals and owners: other agents' sandboxed claude-sdk
-      wraps (closed by S115 on bwrap and seatbelt), unwrapped Coral CLIs (CRL-180), leftover scratch and
+      inherited and settings environment. An isolated CLI that runs unwrapped
+      gets an executor-owned mkdtemp dir instead, removed on close. That dir
+      remains for direct library callers: since S129 harness-built Coral CLIs
+      are sandboxed or refused. When a step's os_env asks for a wrap
+      (caller_process, a sandbox type other than none, network on, no operator
+      opt-out) and its CLI was not wrapped, the executor refuses its turns with
+      coral_sandbox_unavailable before any CLI starts. No rule grants ~/Library
+      and S5 denies it, so the keychain file cannot be opened from the wrap
+      (measured on 27.2.1 with a stand-in file). Main residuals and owners:
+      other agents' sandboxed claude-sdk wraps (closed by S115 on bwrap and
+      seatbelt), unwrapped Coral CLIs (refused, or run in a sandbox, since
+      S129), leftover scratch and
       private dirs (CRL-179; removed by S116 once their owner has exited, at
       a claude-sdk executor's next connect, client teardown or close, or,
       after a killed harness, when the next claude-sdk executor with the same
@@ -5197,6 +5200,115 @@ seams:
         per-user temp dir, its clone-support probe and its failure names. The
         other files are within budget: omnigent/host/connect.py 8,
         docs/AGENT_YAML_SPEC.md 6, tests/host/test_connect.py 4.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S129
+    title: Every Coral claude CLI runs in an OS sandbox or not at all
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Before this seam a Coral spec without os_env (the orchestrator and the
+      anchor) got sandbox none from the claude-sdk harness, and S13 refused
+      every turn ("'none' does not isolate files"), so no orchestrator CLI
+      ever started; and a step's CLI under the operator's
+      OMNIGENT_CLAUDE_SDK_NO_SANDBOX, or with a network-denying sandbox, ran
+      unwrapped as the user (measured with a stand-in and a throwaway home on
+      macOS 27.2). workflow.py sets HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX
+      and an empty HARNESS_CLAUDE_SDK_OS_ENV for every params.coral spec, so
+      a payload the runner's own environment carries never reaches a Coral
+      harness (a spec with os_env then sets its own), and
+      HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX to "1" only for a spec with no
+      os_env whose params.coral.generated.stance is "orchestrator", each
+      level read defensively, and to "" for every other, so a flag the
+      runner's environment carries never gives the anchor the stance. With
+      that flag and no payload the harness turns the missing os_env into the
+      platform's sandbox with cwd ".", no write paths and network on,
+      granting the omnigent package dir, found canonically as Coral finds a
+      step's, when it lies outside sys.prefix so the launcher can import it;
+      a dir without __init__.py, the home or a dir above it is never
+      granted, and the launcher then cannot import and the CLI does not
+      start. A malformed payload keeps sandbox none. The runner still sees no
+      os_env, so the model gets no sys_os_* tools. The anchor, and any other
+      Coral spec without os_env, keeps sandbox none, which S13 refuses. With
+      the require flag the executor refuses every turn with
+      coral_sandbox_unavailable before any CLI starts whenever its CLI is not
+      a launcher, naming one reason, the opt-out first: the opt-out, no
+      system claude, a degraded tight wrap (os_env None), an os_env that is
+      not caller_process, network off, or a failed or inactive wrap. The
+      message is "This session's Claude CLI cannot run in its OS sandbox:
+      <reason>.", which S113's refusal, before "This step's", now uses too.
+      sandbox none and Windows' job object stay S13's refusals, which run
+      first. Direct library callers without the flag keep S113's rule. In
+      S124's scrub a Coral harness on POSIX also drops the CLI launcher's
+      markers (OMNIGENT_LAUNCHER_SPAWN_WRAPPED,
+      OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR, OMNIGENT_LAUNCHER_LAUNCH_TMPDIR),
+      so its CLI's launcher never inherits "already wrapped"; the harness
+      itself is not started by a launcher, and the host forwards them only
+      when its passthrough list names them. Coral's run preflight (a Coral
+      file) counts the orchestrator's claude-sdk plan as needing an OS
+      sandbox and a system claude when the workflow has a decision, the only
+      node that starts it. The macOS sandbox lane (S119) also runs the
+      skeleton's decision stack test, whose orchestrator CLI runs in its
+      seatbelt wrap, and runs on changes to that test file and its fixture;
+      tests/coral/test_ci_lane.py pins both. Not covered: non-Coral agents
+      (CRL-183, CRL-197), claude-native steps (CRL-138, CRL-197), egress
+      limits (CRL-209), a per-launch launcher nonce and other inherited
+      harness names (CRL-210). Mechanism and evidence: ADR-05, "Addendum:
+      CRL-180 every Coral CLI in a sandbox".
+    files:
+      - .github/workflows/macos-sandbox.yml
+      - omnigent/runtime/workflow.py
+      - omnigent/inner/claude_sdk_harness.py
+      - omnigent/inner/claude_sdk_executor.py
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/runner/test_background_session_title.py
+    tests:
+      - tests/runtime/test_claude_sdk_spawn_env.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/runner/test_background_session_title.py
+      - tests/coral/omni/test_bundles.py
+      - tests/coral/omni/test_preflight_facts.py
+      - tests/e2e/coral/test_skeleton.py
+      - tests/coral/test_ci_lane.py
+    budget_lines: 80
+    budget_exception:
+      lines: 148
+      reason: >-
+        Counted with git diff --numstat origin/development, added plus
+        removed. tests/inner/test_claude_sdk_harness.py (148 changed lines):
+        the resolver's eight config rows (stance, cleared payload, payload,
+        malformed and non-dict payloads, a flag other than "1", the require
+        flag alone, no flag) and the stance's nine layout rows (checkout,
+        installed, no backend, a symlinked checkout, prefix or subpackage, the
+        home, a dir above it, a dir that is not a package) with the helper
+        that builds them, plus the flag-thread row and the taken-config row.
+        tests/inner/sandbox/test_sandbox_behavior.py (143 changed lines): the
+        read-only stance's behaviour test, a probe program that runs the home
+        probe from the wrap's scratch and reads and writes the workspace,
+        printing only verdicts and digests, with an unwrapped control that
+        runs the same probe on a second seeded home from a scratch beside the
+        launcher's, and digest comparisons on the host.
+        tests/inner/test_claude_sdk_executor.py (105 changed lines): the
+        fifteen-row table that pins, with the flag, each wrapped case running
+        through _break_wrap's launcher and each unwrapped one refused with its
+        exact message before the credential proxy starts (S129's six reasons
+        and S13's three refusals, the orchestrator's stance with and without
+        the opt-out and the anchor's none built by the harness's resolver),
+        and the launcher-marker row of the forwarded name test. The other
+        files are within budget: omnigent/inner/claude_sdk_harness.py 60,
+        omnigent/inner/claude_sdk_executor.py 32, omnigent/runtime/workflow.py
+        22, tests/runtime/test_claude_sdk_spawn_env.py 66,
+        tests/runner/test_background_session_title.py 64,
+        .github/workflows/macos-sandbox.yml 8.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false

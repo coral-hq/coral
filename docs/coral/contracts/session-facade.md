@@ -1098,8 +1098,12 @@ native and connector tools) and the relay tool-call and approval paths.
 - Every other bound session gets `__coral_run_guard` first, then its role
   guard:
   - **Orchestrator** (slot role `orchestrator`): `__coral_orchestrator_guard`
-    allows only `coral_choose_arrow` (bare or `mcp__omnigent__`) and exactly
-    `ToolSearch`.
+    allows only the orchestrator's engine tools (`coral_choose_arrow`,
+    `coral_message_agent`, `coral_assign_agents`, `coral_assign_task`; bare
+    or `mcp__omnigent__`) and exactly `ToolSearch`. It denies every other
+    call with a text that starts `[orchestrator]`, among them Omnigent's
+    `sys_session_*`, `sys_cancel_task`, `load_skill` and `ui_open_file` and
+    the CLI's `AskUserQuestion` and `Skill`, which the model is also offered.
   - **Other steps:** `__coral_step_roster` denies `sys_session_*`,
     `search_conversations`, `Agent`, `Task` and `*spawn_agent` tools.
 
@@ -1498,12 +1502,16 @@ test until someone classifies it.
   switched on, and proxy and CA-file settings that hold no credential; the
   block's endpoint and network settings feed the proxy, and the rest is
   dropped (ADR-05, "Addendum: CRL-167 secrets out of exec-time
-  environments"). A step whose sandbox cannot wrap its
-  CLI does not start, so Coral steps need a system `claude` CLI: the SDK's
-  bundled one cannot be wrapped in the sandbox. Coral CLIs that run outside
-  the sandbox get a private config directory but are not confined (CRL-180):
-  the orchestrator and anchor on every platform, whose specs have no
-  `os_env`, and any CLI under the operator's `OMNIGENT_CLAUDE_SDK_NO_SANDBOX`.
+  environments"). Coral CLIs never run outside the sandbox. The orchestrator,
+  whose spec has no `os_env`, runs its CLI in a read-only sandbox over the
+  run's worktree, with the network on. The anchor's CLI is refused. A CLI that
+  cannot be wrapped does not start, for whatever reason, the operator's
+  `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` included, so Coral steps and the
+  orchestrator need a system `claude` CLI: the SDK's bundled one cannot be
+  wrapped in the sandbox. Before S129 the orchestrator's CLI was refused too,
+  so a workflow with a decision paused at its first decision, and a step's
+  CLI under the opt-out ran unconfined (ADR-05, "Addendum: CRL-180 every
+  Coral CLI in a sandbox").
   Other Omnigent agents whose claude-sdk CLI runs in a bwrap or seatbelt
   sandbox also get a private config directory for each launch. When the agent
   loads user settings, it is seeded with a copy of the user's MCP server
@@ -1530,8 +1538,9 @@ test until someone classifies it.
   "Addendum: CRL-166 harness sockets on macOS", "Addendum: CRL-176 Claude
   config isolation", "Addendum: CRL-178 Claude config isolation for every
   sandboxed agent", "Addendum: CRL-167 secrets out of exec-time
-  environments", "Addendum: CRL-174 other programs' Unix sockets" and
-  "Addendum: CRL-204 masked files and moved directories". Whether
+  environments", "Addendum: CRL-174 other programs' Unix sockets",
+  "Addendum: CRL-204 masked files and moved directories" and "Addendum:
+  CRL-180 every Coral CLI in a sandbox". Whether
   to run Coral steps on untrusted content on macOS while CRL-207 is open
   (what CRL-171, closed, left), and on either platform while CRL-181,
   CRL-201, CRL-202 and CRL-203 are open, is an open owner decision, recorded

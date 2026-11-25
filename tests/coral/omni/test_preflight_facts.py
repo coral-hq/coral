@@ -235,3 +235,58 @@ def test_a_profile_ref_plans_with_its_base_stance() -> None:
     plans = plan_preflight_steps(graph, "demo")
 
     assert [plan.step_ref for plan in plans] == ["orchestrator", "review:0"]
+
+
+# Only a decision starts the orchestrator, whose claude-sdk CLI runs in a read-only OS sandbox.
+_ORCHESTRATOR_WORKFLOWS = {
+    "decision": (
+        [("orchestrator", "claude-sdk", True)],
+        ["auth", "host_online", "sandbox", "system_claude"],
+    ),
+    "step-without-decision": (
+        [("orchestrator", "claude-sdk", False), ("middle:0", "claude-sdk", True)],
+        ["auth", "host_online", "sandbox", "system_claude"],
+    ),
+    "gate": ([("orchestrator", "claude-sdk", False)], ["auth", "host_online"]),
+}
+
+
+@pytest.mark.usefixtures("coral_policy_registry")
+@pytest.mark.parametrize("workflow", list(_ORCHESTRATOR_WORKFLOWS))
+async def test_the_orchestrator_needs_a_sandbox_and_claude_only_for_a_decision(
+    config_home: Path, workflow: str
+) -> None:
+    from coral.omni.server.preflight import plan_preflight_steps
+    from tests.coral.workflow_builders import (
+        arrow,
+        compile_text,
+        decision,
+        end,
+        gate,
+        start,
+        step,
+        workflow_text,
+    )
+
+    expected_needs, expected_checks = _ORCHESTRATOR_WORKFLOWS[workflow]
+    middle, outgoing = {
+        "decision": (decision("middle"), [{"label": "approved"}, {"label": "rejected"}]),
+        "step-without-decision": (step("middle", ["reviewer"]), [{}]),
+        "gate": (gate("middle", outcomes=["approve"]), [{"label": "approve"}]),
+    }[workflow]
+    arrows = [
+        arrow(f"a{index}", "middle", "end", **fields)
+        for index, fields in enumerate(outgoing, start=2)
+    ]
+    graph, _source_map = compile_text(
+        workflow_text([start(), middle, end()], [arrow("a1", "start", "middle"), *arrows])
+    )
+    steps = plan_preflight_steps(graph, "demo")
+
+    facts = await gather_preflight_facts(
+        _online_registry(["os_sandbox:darwin_seatbelt"]), host_id=HOST_ID, steps=steps
+    )
+
+    needs = [(plan.step_ref, plan.harness, plan.needs_fs_sandbox) for plan in facts.steps]
+    assert needs == expected_needs
+    assert [item.check for item in run_preflight(facts).items] == expected_checks

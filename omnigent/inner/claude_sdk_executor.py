@@ -990,11 +990,29 @@ def _claude_cli_sandbox_requested(spec: OSEnvSpec | None) -> bool:
 
     The operator's bypass, ``sandbox.type: none`` and a network-denying sandbox leave the CLI
     unwrapped by design. Keep in step with :func:`prepare_claude_cli_path`'s early returns.
+    CORAL(S129): a CLI that requires a sandbox is refused whenever it is unwrapped; see
+    :func:`_unwrapped_cli_reason`.
     """
     if spec is None or spec.type != "caller_process" or os.environ.get(_NO_SANDBOX_ENV):
         return False
     sandbox_spec = spec.sandbox or OSEnvSandboxSpec()
     return sandbox_spec.type != "none" and sandbox_spec.allow_network
+
+
+def _unwrapped_cli_reason(spec: OSEnvSpec | None, cli_path: str | None) -> str:
+    """CORAL(S129): why a CLI that must run in an OS sandbox was not wrapped, the opt-out first."""
+    if os.environ.get(_NO_SANDBOX_ENV):
+        return f"{_NO_SANDBOX_ENV} is set on its host; unset it there and restart the host"
+    if cli_path is None:
+        return "no system claude CLI is installed, and the SDK's bundled one cannot be wrapped"
+    if spec is None:
+        return "the tight wrap could not be applied"
+    sandbox = spec.sandbox or OSEnvSandboxSpec()  # as prepare_claude_cli_path reads it
+    if spec.type != "caller_process" or sandbox.type == "none":
+        return "its agent configures no OS sandbox"
+    if not sandbox.allow_network:
+        return "its sandbox denies the network, which the CLI needs to reach its model"
+    return "the sandbox could not wrap it; the runner log has the cause"
 
 
 def _terminate_process_tree(process: _Process | None) -> None:
@@ -2505,6 +2523,7 @@ class ClaudeSDKExecutor(Executor):
         require_api_credential: bool = False,
         tool_call_policy_hook: bool = False,
         isolate_claude_config: bool = False,  # CORAL(S113)
+        require_cli_sandbox: bool = False,  # CORAL(S129)
         credential_env: Mapping[str, str] | None = None,  # CORAL(S124)
     ) -> None:
         """Create a ClaudeSDKExecutor.
@@ -2591,6 +2610,11 @@ class ClaudeSDKExecutor(Executor):
                 private directory instead of the user's: per launch inside a sandbox
                 wrap, else this executor's own. Refuse turns when *os_env* configures a
                 sandbox that could not wrap the CLI.
+            require_cli_sandbox: CORAL(S129): refuse turns whenever the CLI does not run
+                through a sandbox launcher, whatever the reason, the operator's
+                ``OMNIGENT_CLAUDE_SDK_NO_SANDBOX`` included (set for Coral specs). The
+                backends that confine no files are refused by the earlier Coral sandbox
+                check of *require_api_credential*.
             credential_env: CORAL(S124): a Coral harness's environment from before it
                 dropped the credentials its CLI must not inherit, for running the
                 credential command; ``None`` outside a Coral harness on POSIX.
@@ -2745,8 +2769,11 @@ class ClaudeSDKExecutor(Executor):
                 cli_invocation(),
             )
         # CORAL(S113): a sandbox the spec configures that did not wrap the CLI is a fault
+        # CORAL(S129): a CLI that must run in a sandbox is refused whenever it is unwrapped
         self._claude_wrap_failure: str | None = None
-        if (
+        if require_cli_sandbox and self._cli_wrapper_path is None:
+            self._claude_wrap_failure = _unwrapped_cli_reason(self._os_env_spec, self._cli_path)
+        elif (
             isolate_claude_config
             and not self._claude_config_isolated
             and _claude_cli_sandbox_requested(self._os_env_spec)
@@ -4311,7 +4338,8 @@ class ClaudeSDKExecutor(Executor):
         # CORAL(S113): a CLI its configured sandbox could not wrap never starts unwrapped
         if self._claude_wrap_failure is not None:
             yield ExecutorError(
-                message=f"This step's Claude CLI cannot run in its OS sandbox: "
+                # CORAL(S129): "session", not "step": the orchestrator's CLI is refused here too
+                message=f"This session's Claude CLI cannot run in its OS sandbox: "
                 f"{self._claude_wrap_failure}.",
                 code=CORAL_SANDBOX_UNAVAILABLE_CODE,
                 retryable=False,

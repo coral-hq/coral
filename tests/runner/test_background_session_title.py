@@ -1525,3 +1525,67 @@ async def test_background_title_timeout_releases_process(
     assert response.json()["error"] == "title_harness_timeout"
     [process_key] = process_manager.released
     assert uuid.UUID(process_key).hex == process_key
+
+
+# CORAL(S129): what a Coral session's spawn env adds: the orchestrator's read-only stance with
+# an empty payload, or a step's own payload, beside the require flag and the three older flags
+_CORAL_SANDBOX_ENVS = {
+    "orchestrator": {
+        "HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX": "1",
+        "HARNESS_CLAUDE_SDK_OS_ENV": "",
+    },
+    "step": {
+        "HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX": "",
+        "HARNESS_CLAUDE_SDK_OS_ENV": json.dumps(
+            {"type": "caller_process", "cwd": ".", "sandbox": {"write_paths": ["."]}}
+        ),
+    },
+}
+# The names that carry a session's sandbox stance, which the runner's env must not override.
+_CORAL_STANCE_NAMES = ("HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX", "HARNESS_CLAUDE_SDK_OS_ENV")
+
+
+# CORAL(S129): a Coral session's title CLI keeps its session's sandbox flags and stance
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session", sorted(_CORAL_SANDBOX_ENVS))
+async def test_a_coral_claude_sdk_title_keeps_its_session_sandbox(
+    monkeypatch: pytest.MonkeyPatch, session: str
+) -> None:
+    coral = {
+        "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL": "1",
+        "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK": "1",
+        "HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG": "1",
+        "HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX": "1",
+        **_CORAL_SANDBOX_ENVS[session],
+    }
+    # What the runner's own env could carry: the read-only flag and a payload granting the home.
+    home_wide = {"type": "caller_process", "cwd": "~", "sandbox": {"write_paths": ["~"]}}
+    monkeypatch.setenv("HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX", "1")
+    monkeypatch.setenv("HARNESS_CLAUDE_SDK_OS_ENV", json.dumps(home_wide))
+    process_manager = _FakeProcessManager(_FakeHarnessClient())
+
+    async def resolve_harness_config(**_kwargs: Any) -> tuple[str, dict[str, str]]:
+        return "claude-sdk", dict(coral)
+
+    monkeypatch.setattr("omnigent.runner.app._resolve_harness_config", resolve_harness_config)
+    app = create_runner_app(
+        process_manager=process_manager,  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+
+    async with _runner_client(app) as client:
+        response = await client.post(
+            "/v1/sessions/conv_test/background-title",
+            json={"prompt": "please investigate the authentication timeout"},
+        )
+
+    assert response.status_code == 200, response.text
+    [(_process_key, harness, env)] = process_manager.get_client_calls
+    assert harness == "claude-sdk" and env is not None
+    assert {name: env.get(name) for name in coral} == coral
+    # The harness as the process manager spawns it: the session's flag and payload, even empty
+    # ones, outweigh the runner's.
+    spawned = _build_harness_spawn_env(env)
+    assert [spawned[name] for name in _CORAL_STANCE_NAMES] == [
+        coral[name] for name in _CORAL_STANCE_NAMES
+    ]

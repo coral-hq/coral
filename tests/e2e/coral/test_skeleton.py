@@ -70,6 +70,15 @@ LIVE_FLAG = "CORAL_E2E_LIVE"
 LIVE_KEY = "ANTHROPIC_API_KEY"
 LIVE_MODEL = "CORAL_E2E_LIVE_MODEL"
 LEASE_KEYS = {"coral_worker_lease_seconds", "coral_runner_reconnect_grace_s"}
+# Where a Coral CLI keeps its Claude config: a private dir in its scratch, not its home.
+PRIVATE_CLAUDE_CONFIG = {
+    "name": "claude_config_dir",
+    "in_scratch": True,
+    "in_home": False,
+    "has_config": True,
+}
+# Offered to the orchestrator but denied by its guard: it would list the user's other sessions.
+SESSION_LIST_TOOL = "mcp__omnigent__sys_session_list"
 
 
 def _anchor_prompt(client: httpx.Client, run_id: str) -> tuple[str, dict[str, Any]] | None:
@@ -130,9 +139,8 @@ def _plant_claude_canaries(home: Path) -> tuple[str, list[str]]:
     return _claude_canaries(home)
 
 
-def _step_claude_config(stack: sk.Skeleton, run_id: str) -> dict[str, Any]:
-    """Where the implement step's live CLI keeps its Claude config."""
-    session_id = sk.step_session(stack.client, run_id, "implement")
+def _cli_claude_config(stack: sk.Skeleton, session_id: str) -> dict[str, Any]:
+    """Where the session's live CLI keeps its Claude config."""
     runner = sk.runner_pid(stack, session_id)
     environ = sk.step_processes(runner, sk.session_cli(stack, runner, session_id))["cli"].environ()
     config_dir = Path(environ.get("CLAUDE_CONFIG_DIR", ""))
@@ -193,7 +201,7 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
             (env.get("DISABLE_AUTOUPDATER"), env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             for env in sk.cli_environs(stack.root)
         }
-        step_config = _step_claude_config(stack, run_id)
+        step_config = _cli_claude_config(stack, sk.step_session(client, run_id, "implement"))
         sk.queue(
             mock,
             impl_token,
@@ -272,13 +280,7 @@ def test_the_review_loop_runs_end_to_end_on_a_real_stack(
     # The step's CLI ran with its self-update and non-essential traffic off.
     assert cli_switches == {("1", "1")}, cli_switches
     # Its Claude config was a private dir in its scratch, and the home's canaries held.
-    private = {
-        "name": "claude_config_dir",
-        "in_scratch": True,
-        "in_home": False,
-        "has_config": True,
-    }
-    assert step_config == private, step_config
+    assert step_config == PRIVATE_CLAUDE_CONFIG, step_config
     assert canaries_after == canaries, canaries_after
     # One evidence rejection, then the same activation's handoff is accepted.
     [rejected] = sk.result_texts(mock, early)
@@ -656,6 +658,109 @@ def test_a_stack_without_log_tails_reports_start_failures_without_log_text(
     assert str(restarted.value) == (
         "The server's restart failed; its logs are under the stack root"
     )
+
+
+@pytest.mark.timeout(300, method="signal")
+@pytest.mark.parametrize("deferred", [True, False], ids=["direct-key", "gateway"])
+def test_a_decision_runs_through_a_real_orchestrator_cli(
+    tmp_path: Path, isolated_mock_llm_server_url: str, deferred: bool
+) -> None:
+    """
+    A run whose only node is a decision: the engine asks the orchestrator, whose real CLI the
+    host launches in its read-only sandbox, and the mock model chooses the second of two
+    labelled arrows. The run ends on that arrow's own end node.
+
+    ``direct-key``: the host's credential is a key with no endpoint of its own, so the CLI
+    reaches the mock through its executor's credential proxy and defers its MCP tools; the
+    model loads ``coral_choose_arrow`` with ToolSearch first. ``gateway``: the host's
+    credential names the mock, the CLI lists its MCP tools directly, and the model first calls
+    one that the orchestrator's guard denies. The stack's keychain stand-ins are checked at
+    its teardown.
+    """
+    sk.require_claude_cli()
+    mock = isolated_mock_llm_server_url
+    uid = uuid.uuid4().hex[:12]
+    token = f"decide-{uid}"
+    chose, denied = f"choose-{uid}", f"denied-{uid}"
+    if deferred:
+        offering = sk.TOOL_SEARCH
+        host_config: dict[str, Any] = {"auth": {"type": "api_key", "api_key": "mock-key"}}
+        host_env = {"ANTHROPIC_BASE_URL": mock}
+        search = {"query": f"select:{sk.CHOOSE_TOOL}", "max_results": 1}
+        first = sk.tool_call(sk.TOOL_SEARCH, search, call_id=f"search-{uid}")
+    else:
+        offering, host_config, host_env = sk.CHOOSE_TOOL, sk.mock_auth(mock), {}
+        first = sk.tool_call(SESSION_LIST_TOOL, {}, call_id=denied)
+    # Held while the CLI is read and the decision id is taken from the request.
+    sk.queue(mock, token, [sk.held(first)], offering=offering)
+    deadline = time.monotonic() + SCENARIO_S
+
+    with sk.skeleton_stack(
+        tmp_path / "stack",
+        mock_url=mock,
+        host_config=host_config,
+        host_env=host_env,
+        lease_s=SHORT_LEASE_S,
+    ) as stack:
+        client = stack.client
+        workflow = (sk.FIXTURES / "decision.yaml").read_text().replace("{token}", token)
+        run_id = sk.start_run(
+            client,
+            workflow_id=sk.save_workflow(client, workflow),
+            host_id=stack.host.host_id,
+            repo=stack.repo,
+            start_key=f"decision-{uid}",
+        )["run_id"]
+        wait = sk.waiter(stack, run_id, deadline)
+        decision = sk.held_decision(wait, mock, token, offering=offering)
+        # Read while the orchestrator's CLI is held on its first call.
+        orchestrator = sk.detail(client, run_id)["orchestrator_session_id"]
+        runner = sk.runner_pid(stack, orchestrator)
+        processes = sk.step_processes(runner, sk.session_cli(stack, runner, orchestrator))
+        outside = sk.keychain_bypasses(
+            stack.stubs, stack.root, processes.values(), unread_fails=True
+        )
+        # Set only by the CLI's own launcher before its wrap: a Coral harness drops it.
+        wrapped = processes["cli"].environ().get("OMNIGENT_LAUNCHER_SPAWN_WRAPPED")
+        launched = (processes["launcher"].pid != processes["cli"].pid, wrapped)
+        config = _cli_claude_config(stack, orchestrator)
+        # The second-declared label, so walking the first labelled arrow cannot pass.
+        choice = {"decision_id": decision, "label": "hold", "reason": "It is not ready."}
+        sk.queue(
+            mock,
+            token,
+            [sk.tool_call(sk.CHOOSE_TOOL, choice, call_id=chose), {"text": "Chose hold."}],
+            offering=offering,
+        )
+        release_mock_gate(mock)
+        run = wait(lambda: sk.finished(client, run_id), "the run to finish")
+        sessions = sk.coral_sessions(client, run_id)
+        log = sk.log_entries(client, run_id)
+
+    assert (run["status"], run["causes"]) == ("completed", []), run
+    # One choice, accepted and recorded with its label, and the run went down that arrow only.
+    [accepted] = sk.result_texts(mock, chose)
+    assert '"accepted": true' in accepted, accepted
+    entries = [(row["kind"], row["rejected"], row["body"]["input"].get("label")) for row in log]
+    assert entries == [
+        ("engine.start_run", None, None),
+        ("engine.choose_arrow", None, "hold"),
+    ], entries
+    reached = [activation["id"].split("|")[0] for activation in run["view"]["activations"]]
+    assert reached == ["start", "decide", "held_back"], reached
+    if not deferred:
+        # The guard denied the earlier call before the runner ran it, and the turn went on.
+        [refused] = sk.result_texts(mock, denied)
+        assert "[orchestrator]" in refused, refused[:500]
+    # One orchestrator session beside the anchor, and the CLI that served it was launched
+    # through a sandbox wrap.
+    roles = {session["id"]: session["labels"]["coral.role"] for session in sessions}
+    assert sorted(roles.values()) == ["orchestrator", "run"], roles
+    assert roles.get(orchestrator) == "orchestrator", (orchestrator, roles)
+    assert launched == (True, "1"), (launched, sk.process_names(processes.values()))
+    # Its HOME was the stack's, with the stand-ins first on PATH; its config dir was private.
+    assert not outside, f"orchestrator processes outside the keychain barrier: {outside}"
+    assert config == PRIVATE_CLAUDE_CONFIG, config
 
 
 def _files_holding(root: Path, secret: Secret) -> int:

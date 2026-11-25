@@ -12,6 +12,7 @@ This is a unit test — no subprocess spawn, no real claude CLI.
 
 from __future__ import annotations
 
+import json  # CORAL(S129)
 from pathlib import Path
 
 import pytest
@@ -299,6 +300,15 @@ def test_coral_spec_requires_an_api_credential(
     assert env["HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL"] == "1"
     assert env["HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK"] == "1"
     assert env["HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG"] == "1"  # CORAL(S113)
+    assert env["HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX"] == "1"  # CORAL(S129)
+
+
+# CORAL(S129): the names the spawn env sets for a Coral CLI's sandbox.
+_CLI_SANDBOX_NAMES = (
+    "HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX",
+    "HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX",
+    "HARNESS_CLAUDE_SDK_OS_ENV",
+)
 
 
 def test_non_coral_spec_leaves_the_api_credential_optional(
@@ -316,3 +326,59 @@ def test_non_coral_spec_leaves_the_api_credential_optional(
     assert "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL" not in env
     assert "HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK" not in env
     assert "HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG" not in env  # CORAL(S113)
+    # CORAL(S129): no sandbox flag, and no payload for a spec without os_env
+    assert sorted(set(_CLI_SANDBOX_NAMES) & set(env)) == []
+
+
+# CORAL(S129): only the orchestrator, by its recorded stance and with no os_env, gets the
+# read-only CLI sandbox, and a Coral spec takes no sandbox name from the runner's env.
+_STANCE_PARAMS: dict[str, object] = {
+    "orchestrator": {"generated": {"stance": "orchestrator"}},
+    "anchor": {"generated": {"stance": "anchor"}},
+    "stance-not-a-string": {"generated": {"stance": ["orchestrator"]}},
+    "generated-not-a-mapping": {"generated": "orchestrator"},
+    "coral-not-a-mapping": "orchestrator",
+}
+
+
+@pytest.mark.parametrize("case", [*_STANCE_PARAMS, "orchestrator-with-os-env"])
+def test_only_the_orchestrator_without_os_env_gets_a_read_only_cli_sandbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
+) -> None:
+    from omnigent.inner import claude_sdk_harness
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+    from omnigent.inner.sandbox import _default_sandbox_for_platform
+    from omnigent.runtime.harnesses.process_manager import _build_harness_spawn_env
+    from tests._helpers.providers import isolate_provider_resolution
+
+    isolate_provider_resolution(monkeypatch, tmp_path / "config")
+    # What the runner's own env could carry: a payload granting the whole home, the
+    # read-only flag and a cleared require flag.
+    home_wide = {"type": "caller_process", "cwd": "~", "sandbox": {"write_paths": ["~"]}}
+    monkeypatch.setenv("HARNESS_CLAUDE_SDK_OS_ENV", json.dumps(home_wide))
+    monkeypatch.setenv("HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX", "1")
+    monkeypatch.setenv("HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX", "0")
+    spec = _make_spec(model="claude-sonnet-4-6")
+    spec.params["coral"] = _STANCE_PARAMS[case.removesuffix("-with-os-env")]
+    own_os_env = case.endswith("-with-os-env")
+    if own_os_env:
+        spec.os_env = OSEnvSpec(cwd=".", sandbox=OSEnvSandboxSpec(type="linux_bwrap"))
+
+    env = _build_claude_sdk_spawn_env(spec, workdir=None)
+    # The harness as the runner spawns it: the runner's env under the spawn env.
+    config = claude_sdk_harness._take_harness_config(_build_harness_spawn_env(env))
+    os_env = claude_sdk_harness._resolve_os_env(config)
+
+    read_only = case == "orchestrator"
+    assert os_env.sandbox is not None
+    resolved = (os_env.cwd, os_env.sandbox.type, os_env.sandbox.write_paths)
+    if read_only:
+        assert resolved == (".", _default_sandbox_for_platform().type, [])
+    elif own_os_env:
+        assert resolved == (".", "linux_bwrap", None)
+    else:
+        assert resolved == (None, "none", None)
+    for taken in (env, config):
+        flags = [taken.get(name) for name in _CLI_SANDBOX_NAMES[:2]]
+        assert flags == ["1", "1" if read_only else ""]
+    assert (env["HARNESS_CLAUDE_SDK_OS_ENV"] == "") is not own_os_env
