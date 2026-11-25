@@ -3572,3 +3572,111 @@ def test_a_profile_dir_claim_refuses_a_planted_link(
 
     assert seatbelt_sandbox._ensure_profile_tempdir() == str(planted)
     assert outside.read_text() == "untouched" and os.path.islink(planted / ".launch-owner")
+
+
+# CORAL(S131)
+_CONFIG_NAMES = r"[.][Gg][Ii][Tt]|[.][Cc][Ll][Aa][Uu][Dd][Ee]|[.][Mm][Cc][Pp][.][Jj][Ss][Oo][Nn]"
+
+
+# CORAL(S131)
+def _config_denies(lines: list[str]) -> list[str]:
+    return [line for line in lines if line.startswith("(deny file-write* (regex")]
+
+
+# CORAL(S131)
+def _config_deny(root: Path, depth: str, names: str = _CONFIG_NAMES) -> str:
+    spelled = seatbelt_sandbox._regex_text(str(root), any_case=False)
+    return f'(deny file-write* (regex #"^{spelled}/{depth}({names})(/|$)"))'
+
+
+# CORAL(S131)
+@pytest.mark.parametrize("mode", ["allow_network", "no_network"])
+def test_profile_refuses_git_dirs_and_claude_config_in_every_write_root(
+    tmp_path: Path, mode: str
+) -> None:
+    base = tmp_path.resolve(strict=False)
+    cwd, extra = base / "work", base / "extra"
+    cwd.mkdir()
+    extra.mkdir()
+    policy = _make_policy(cwd, allow_network=mode == "allow_network", write_roots=[cwd, extra])
+
+    lines = _build_profile(policy, cwd).splitlines()
+
+    assert _config_denies(lines) == [
+        _config_deny(root, depth) for root in (cwd, extra) for depth in (".+/", "")
+    ]
+    for root in (cwd, extra):
+        assert lines.count(f'(deny file-write-unlink file-clone (literal "{root}"))') == 1
+    file_allows = [at for at, line in enumerate(lines) if line.startswith("(allow file-")]
+    assert min(map(lines.index, _config_denies(lines))) > max(file_allows)
+
+
+# CORAL(S131)
+def test_profile_leaves_a_read_only_cwd_and_the_scratch_dirs_without_the_config_deny(
+    tmp_path: Path,
+) -> None:
+    import dataclasses
+
+    base = tmp_path.resolve(strict=False)
+    cwd, scratch, launches = base / "work", base / "scratch", base / "launches"
+    for made in (cwd, scratch, launches / "c1"):
+        made.mkdir(parents=True)
+    policy = _make_policy(cwd, write_roots=[scratch, launches / "c1"])
+    policy = dataclasses.replace(policy, private_tmpdir=scratch, launch_tmpdir_parent=launches)
+
+    lines = _build_profile(policy, cwd).splitlines()
+
+    assert _config_denies(lines) == []
+
+
+# CORAL(S131)
+@pytest.mark.parametrize(
+    ("allow_hidden", "top"),
+    [
+        ([".git"], r"[.][Cc][Ll][Aa][Uu][Dd][Ee]|[.][Mm][Cc][Pp][.][Jj][Ss][Oo][Nn]"),
+        ([".claude", ".mcp.json", ".venv"], r"[.][Gg][Ii][Tt]"),
+        (["*"], None),
+    ],
+)
+def test_profile_lets_cwd_allow_hidden_open_only_the_top_level_names_it_lists(
+    tmp_path: Path, allow_hidden: list[str], top: str | None
+) -> None:
+    base = tmp_path.resolve(strict=False)
+    cwd, extra = base / "work", base / "extra"
+    cwd.mkdir()
+    extra.mkdir()
+    policy = _make_policy(cwd, allow_hidden=allow_hidden, write_roots=[cwd, extra])
+
+    denies = _config_denies(_build_profile(policy, cwd).splitlines())
+
+    expected = [_config_deny(cwd, ".+/")]
+    if top is not None:
+        expected.append(_config_deny(cwd, "", top))
+    expected += [_config_deny(extra, depth) for depth in (".+/", "")]
+    assert denies == expected
+
+
+# CORAL(S131)
+def test_regex_text_spells_a_root_literally_and_refuses_quotes_and_controls() -> None:
+    assert seatbelt_sandbox._regex_text("/a b/x-y.z^(]$*+é", any_case=False) == (
+        "/a[ ]b/x[-]y[.]z\\^[(][]][$][*][+]é"
+    )
+    assert seatbelt_sandbox._regex_text(".mcp", any_case=True) == "[.][Mm][Cc][Pp]"
+    for bad in ('/a"b', "/a\\b", "/a\nb", "/a\x7fb"):
+        with pytest.raises(ValueError):
+            seatbelt_sandbox._regex_text(bad, any_case=False)
+
+
+# CORAL(S131)
+def test_profile_leaves_git_dirs_to_a_sandbox_granted_git_over_ssh(tmp_path: Path) -> None:
+    import dataclasses
+
+    cwd = tmp_path.resolve(strict=False) / "work"
+    cwd.mkdir()
+    policy = _make_policy(cwd, write_roots=[cwd])
+    policy = dataclasses.replace(policy, git_ssh_socket_path="/crl-git/ssh.sock")
+    claude = r"[.][Cc][Ll][Aa][Uu][Dd][Ee]|[.][Mm][Cc][Pp][.][Jj][Ss][Oo][Nn]"
+
+    denies = _config_denies(_build_profile(policy, cwd).splitlines())
+
+    assert denies == [_config_deny(cwd, depth, claude) for depth in (".+/", "")]

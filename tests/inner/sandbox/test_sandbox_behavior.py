@@ -1969,6 +1969,9 @@ def test_sandbox_keeps_masked_entries_unread_after_moves_and_clones(
     reached = [f"{name} yes" for name in [*leaks, *ordinary, *last]]
     kept = [f"{name} no" for name in leaks] + [f"{name} yes" for name in ordinary]
     kept += ["parent_replaced no", f"planted_at_masked_path {'yes' if planted else 'no'}"]
+    # CORAL(S131)
+    in_root_repo = f"git_repo {'no' if seatbelt else 'yes'}"
+    kept = [in_root_repo if line == "git_repo yes" else line for line in kept]
     observed_outside, observed_inside = outside.stdout.splitlines(), inside.splitlines()
     assert observed_outside == reached, f"failed outside: {outside.stdout}; {outside.stderr}"
     assert left_as_found, "the outside run did not undo its moves or remove its copies"
@@ -2798,3 +2801,110 @@ def test_sandbox_start_in_scratch_workspace_remains_readable(
         "cwd bound for reads even when --chdir points elsewhere."
     )
     assert absolute_read["stdout"] == "hello-from-workspace"
+
+
+# CORAL(S131)
+_PROJECT_CONFIG_PROBE = """
+import os, subprocess, sys, tempfile
+scratch = tempfile.mkdtemp()
+
+def write(path, text="planted"):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as handle:
+        handle.write(text)
+
+def moved(source, target):
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    os.rename(source, target)
+
+def linked():
+    os.mkdir("linked")
+    os.symlink(scratch, "linked/.mcp.json")
+
+def built(name):
+    write(os.path.join(scratch, name, ".git", "config"))
+    return os.path.join(scratch, name)
+
+home = {**os.environ, "HOME": scratch, "GIT_CONFIG_NOSYSTEM": "1"}
+routes = {
+    "top_git": lambda: write(".git/config", "[core]\\n\\tfsmonitor = ./hook\\n"),
+    "top_claude_settings": lambda: write(".claude/settings.json"),
+    "top_claude_local": lambda: write(".claude/settings.local.json"),
+    "top_mcp": lambda: write(".mcp.json"),
+    "nested_git_config": lambda: write("a/.git/config"),
+    "nested_git_hook": lambda: write("b/.git/hooks/pre-commit"),
+    "nested_gitfile": lambda: write("c/.git", "gitdir: ../agent"),
+    "nested_claude": lambda: write("d/e/.claude/settings.json"),
+    "nested_mcp": lambda: write("f/.mcp.json"),
+    "upper_case": lambda: write("g/.GIT/config"),
+    "renamed_onto": lambda: moved(built("h"), "h/.claude"),
+    "linked": linked,
+    "moved_in": lambda: moved(built("i"), "moved"),
+    "ordinary": lambda: [
+        write(path)
+        for path in ("CLAUDE.md", ".envrc", ".gitignore", ".github/x", "j.git/x", "k/.mcp.jsonx")
+    ],
+    "scratch_repo": lambda: subprocess.run(
+        [sys.argv[1], "init", "-q", os.path.join(scratch, "repo")], check=True, env=home
+    ),
+}
+for name, route in routes.items():
+    try:
+        route()
+        print(name, "yes")
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(name, "no")
+        print(name, repr(error), file=sys.stderr)
+"""
+
+
+# CORAL(S131)
+@pytest.mark.parametrize("launch_path", ["helper", "launcher"])
+def test_sandbox_refuses_git_dirs_and_claude_project_config_in_a_write_root(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    launch_path: str,
+) -> None:
+    """
+    Every route plants outside. Seatbelt refuses each one inside but a repository built under
+    ``$TMPDIR`` and moved in; ordinary files and a repository under ``$TMPDIR`` still work.
+    Bwrap's mounts cannot name a path that does not exist yet: every route is pinned open.
+    """
+    seatbelt = active_sandbox_type == "darwin_seatbelt"
+    base = tmp_path.resolve()
+    argv = [sys.executable, "probe.py", _sandbox_git()]
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": os.environ["PYTHONPATH"]}
+    run = functools.partial(subprocess.run, env=env, capture_output=True, text=True, timeout=60)
+    for directory in (base / "outside", base / "work"):
+        directory.mkdir()
+        (directory / "probe.py").write_text(_PROJECT_CONFIG_PROBE)
+    outside = run(argv, cwd=base / "outside")
+    spec = OSEnvSpec(
+        type="caller_process",
+        cwd=str(base / "work"),
+        sandbox=active_sandbox_spec_factory(write_paths=["."]),
+    )
+    with contextlib.ExitStack() as cleanup:
+        if launch_path == "helper":
+            os_env = create_os_environment(spec)
+            cleanup.callback(os_env.close)
+            result = run_async(os_env.shell(shlex.join(argv)))
+            inside, detail = str(result.get("stdout", "")), result
+        else:
+            launcher = create_exec_launcher(sys.executable, resolve_sandbox(spec, base / "work"))
+            cleanup.callback(Path(launcher).unlink, missing_ok=True)
+            completed = run([launcher, *argv[1:]], cwd=base / "work")
+            inside, detail = completed.stdout, completed.stderr
+
+    reached = dict(line.split() for line in outside.stdout.splitlines())
+    observed = dict(line.split() for line in inside.splitlines())
+    assert set(reached.values()) == {"yes"}, outside.stderr
+    plants = set(reached) - {"moved_in", "ordinary", "scratch_repo"}
+    refused = dict.fromkeys(plants, "no" if seatbelt else "yes")
+    assert observed == {**reached, **refused}, detail
+    if seatbelt:
+        names = {".git", ".claude", ".mcp.json"}
+        left = [path for path in (base / "work").rglob("*") if path.name.casefold() in names]
+        assert [str(path.relative_to(base / "work")) for path in left] == ["moved/.git"]

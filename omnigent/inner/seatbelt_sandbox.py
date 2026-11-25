@@ -332,6 +332,8 @@ _OMNIGENT_TMUX_SOCKET_PATTERNS = (
 _RESOLVER_SOCKET = "/private/var/run/mDNSResponder"
 # CORAL(S127): confstr's name for the per-user temp dir, which Python does not list
 _CS_DARWIN_USER_TEMP_DIR = 65537
+# CORAL(S131)
+_PROJECT_CONFIG_NAMES = (".git", ".claude", ".mcp.json")
 
 # Profile-size cap. ``sandbox-exec`` parses the profile with a
 # finite-size scratch buffer; exceeding it fails the spawn with an
@@ -1097,10 +1099,28 @@ def _build_profile(
         for denial in sensitive_denials:
             lines.append(f"(deny file-read* file-write* (subpath {_quote(str(denial))}))")
 
+    # CORAL(S131)
+    config_roots = [*([cwd] if cwd_writable else []), *extra_write_roots]
+    scratch_dirs = [path for path in (policy.private_tmpdir, policy.launch_tmpdir_parent) if path]
+    config_roots = [root for root in config_roots if not _is_under_any(root, scratch_dirs)]
+    if config_roots:
+        lines.append("")
+        lines.append(";; Git dirs and Claude project config: not made or changed in a write root")
+    clones = bool(policy.git_ssh or policy.git_ssh_socket_path)
+    guarded = [name for name in _PROJECT_CONFIG_NAMES if not (clones and name == ".git")]
+    for root in config_roots:
+        lines.append(_project_config_deny(root, ".+/", guarded))
+        open_names = set(policy.cwd_allow_hidden or ()) if root is cwd else set()
+        top = [name for name in guarded if not open_names & {name, "*"}]
+        if top:
+            lines.append(_project_config_deny(root, "", top))
+
     # CORAL(S128): a deny names a path. A dir above a denied entry that is moved or cloned
     # takes the entry to a path no deny names, so each one stays put and is not cloned.
     credential_sources = [path.resolve() for path in policy.credential_source_paths or []]
     denied = [*(entry.path for entry in mask_entries), *sensitive_denials, *credential_sources]
+    # CORAL(S131)
+    denied += [root / _PROJECT_CONFIG_NAMES[0] for root in config_roots]
     kept_in_place = _dirs_above(denied)
     if kept_in_place:
         lines.append("")
@@ -2222,6 +2242,30 @@ def _dirs_above(paths: Sequence[Path]) -> list[Path]:
     for path in paths:
         above.update(dict.fromkeys(path.parents))
     return list(above)
+
+
+def _project_config_deny(root: Path, depth: str, names: Sequence[str]) -> str:
+    """CORAL(S131): a write deny on *names* at *depth* below *root*, in any letter case."""
+    spelled = "|".join(_regex_text(name, any_case=True) for name in names)
+    pattern = f"^{_regex_text(str(root), any_case=False)}/{depth}({spelled})(/|$)"
+    return f'(deny file-write* (regex #"{pattern}"))'
+
+
+def _regex_text(text: str, *, any_case: bool) -> str:
+    """CORAL(S131): *text* as an SBPL regex that matches it alone."""
+    spelled = []
+    for char in text:
+        if char in '"\\' or ord(char) < 0x20 or ord(char) == 0x7F:
+            raise ValueError(f"SBPL regex text holds {char!r}; refusing to emit. Text: {text!r}")
+        if any_case and char.isascii() and char.isalpha():
+            spelled.append(f"[{char.upper()}{char.lower()}]")
+        elif char == "^":
+            spelled.append("\\^")
+        elif char == "/" or not char.isascii() or char.isalnum():
+            spelled.append(char)
+        else:
+            spelled.append(f"[{char}]")
+    return "".join(spelled)
 
 
 def _shared_socket_dirs() -> list[Path]:

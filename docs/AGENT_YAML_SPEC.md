@@ -491,6 +491,14 @@ that is above a masked entry, such as its working directory when that holds a
 dotfile. Files and directories inside it are unaffected. Spell `mask_paths`
 entries by their real paths, not through a symlink the agent can change.
 
+<!-- CORAL(S131): git dirs and Claude project config in write paths on macOS -->
+With a sandbox on macOS, an agent cannot create or change a `.git`, `.claude`
+or `.mcp.json` entry, in any letter case, anywhere in its write paths, so it
+cannot leave git config, git hooks, Claude Code hooks or MCP servers that your
+own git or Claude Code would run there. Its temp dir is not affected. Name an
+entry in `cwd_allow_hidden` to allow it at the top of the working directory.
+With `git_ssh`, `.git` entries are allowed so the agent can clone.
+
 On Linux, the `openai-agents` harness supports disposable copy-on-write mounts:
 
 ```yaml

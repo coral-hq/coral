@@ -5201,3 +5201,50 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+  - id: S131
+    title: A macOS sandbox makes no git dir and no Claude hooks or MCP config in its write roots
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 27.2.1 from the real os_env helper with an
+      implementer's write grant (write_paths ["."]): a sandboxed shell could
+      create .claude/settings.json and .claude/settings.local.json (hooks)
+      when .claude did not exist at start, .mcp.json, a top-level .git where
+      the cwd had none, and a nested sub/.git with core.fsmonitor or hooks;
+      masks name only entries present at start, at the top level. The owner's
+      git status inside sub/ then ran that fsmonitor outside any sandbox.
+      Every seatbelt profile (the os_env step shell, every spawn-time CLI
+      wrap, sandboxed terminal panes; Coral or not) now emits, for each write
+      root but the scratch and launch temp dirs, (deny file-write* (regex
+      "^<root>/.+/(names)(/|$)")) and the same at the top level, names being
+      .git, .claude and .mcp.json in any ASCII letter case, the root spelled
+      character by character (a quote, backslash or control character is
+      refused). A name cwd_allow_hidden lists, or "*", stays writable at the
+      top of the cwd; under a git_ssh grant .git is left out so the agent can
+      clone. Each write root joins S128's denied paths, so it and every dir
+      above it stay in place (a root moved away would leave the rule's path).
+      Measured refused: mkdir, a file write, an upper-case name, a rename onto
+      the name, a symlink, a hard link and clonefile(2) at the name; and the
+      APFS long-s spelling of .mcp.json. Measured unchanged: CLAUDE.md, .envrc,
+      .gitignore, .github/, names that only look alike, and a repository under
+      $TMPDIR. A sandboxed agent can no longer git init or clone into a write
+      root without git_ssh. Not covered: a dir that already holds one of
+      these entries, moved in from outside the write roots (the scratch dir);
+      a directory shaped as a bare repository; CLAUDE.md (instructions, no
+      code) and .envrc (direnv runs nothing before direnv allow). Coral's
+      host WRITE ops remove what is left for a Coral step on both platforms.
+      bwrap is unchanged: a mount cannot name a path that does not exist yet.
+    files:
+      - docs/AGENT_YAML_SPEC.md
+      - omnigent/inner/seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_seatbelt_sandbox.py
+    tests:
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 120
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
