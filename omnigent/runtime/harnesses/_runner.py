@@ -63,6 +63,7 @@ from omnigent._platform import IS_WINDOWS
 from omnigent.inner import _proc
 from omnigent.process_logging import env_truthy
 from omnigent.runner._zygote import ZYGOTE_HARNESS_FORKED_ENV_VAR
+from omnigent.runner.launch_secrets import HARNESS_BEARER_FD_ENV_VAR, adopt_launch_secrets
 
 # uvicorn log level for harness subprocesses. ``"warning"`` keeps
 # the per-process noise low (AP and the harness wrap both emit
@@ -180,7 +181,7 @@ def _load_harness_app(harness: str, module_path: str, conversation_id: str) -> F
 _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
 _MAX_STDIN_TOKEN_BYTES = 4096
 _NO_TOKEN_MESSAGE = (
-    "runner: harness got no bearer token on stdin; the runner that spawned it "
+    "runner: harness got no bearer token; the runner that spawned it "
     "predates this build, so restart the session"
 )
 _UNAUTHORIZED_BODY = b'{"detail":"unauthorized"}'
@@ -499,7 +500,15 @@ def main(argv: list[str] | None = None, auth_token: str | None = None) -> None:
     """
     # CORAL(S129)
     os.environ.pop(_HARNESS_AUTH_TOKEN_ENV, None)
-    token = (auth_token if auth_token is not None else _read_stdin_token()).strip()
+    if auth_token is None:
+        launched: dict[str, str] = {}
+        adopt_launch_secrets(
+            launched, fd_env_var=HARNESS_BEARER_FD_ENV_VAR, allowed=(_HARNESS_AUTH_TOKEN_ENV,)
+        )
+        auth_token = launched.get(_HARNESS_AUTH_TOKEN_ENV) or (
+            _read_stdin_token() if IS_WINDOWS else ""
+        )
+    token = auth_token.strip()
     if not token:
         print(_NO_TOKEN_MESSAGE, file=sys.stderr)
         raise SystemExit(2)

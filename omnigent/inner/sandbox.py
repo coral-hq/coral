@@ -174,6 +174,19 @@ class SandboxPolicy:
         CLI's launch dir sits under the harness root). bwrap ignores it: its
         ``--tmpfs /tmp`` hides the default root. ``None`` is the same as an
         empty list.
+    :param allow_unix_socket_paths: CORAL(S127): AF_UNIX sockets outside the process's
+        own dirs that it may still ``connect(2)`` to, such as a terminal pane's own
+        ``clip.sock``. Stored resolved. Seatbelt only, and only where ``(allow network*)``
+        applies: there every Unix-domain socket is refused except the resolver's, these,
+        and those under the scratch and the write roots. Each is allowed before the
+        harness-root, tmux, deny-listed and credential-source denies, so naming one of
+        those reopens nothing. Only code sets it, and a server named here must never open
+        or proxy a socket for its client. bwrap ignores it: its mounts decide which
+        sockets exist. ``None`` is the same as an empty list.
+    :param allow_unix_socket_roots: CORAL(S127): directories counted with the write roots
+        as the process's own for AF_UNIX connects, under the same guards, without a file
+        grant of their own: a forked pane's working tree, writable only through the pane
+        dir. Stored resolved. Seatbelt only; bwrap ignores it.
     :param scratch_dir_env: CORAL(S113): the name of an environment variable that the
         launcher's in-wrap pass sets to a fresh 0700 directory inside the target's private
         scratch, named after the variable, lowercased (``claude_config_dir``). It is removed
@@ -230,6 +243,10 @@ class SandboxPolicy:
     deny_unix_socket_paths: list[Path] | None = None
     # CORAL(S112): directories whose AF_UNIX sockets stay unreachable, the harness socket roots
     deny_unix_socket_roots: list[Path] | None = None
+    # CORAL(S127): AF_UNIX sockets outside the process's own dirs that it may connect to
+    allow_unix_socket_paths: list[Path] | None = None
+    # CORAL(S127): directories whose AF_UNIX sockets are the process's own, as a write root's
+    allow_unix_socket_roots: list[Path] | None = None
     credential_source_paths: list[Path] | None = None
     # CORAL(S109): per launch, a spawn-time-wrap launcher makes a private dir under this
     # parent, grants it, sets the target's env var to it, and removes it when the target exits.
@@ -317,6 +334,17 @@ class SandboxPolicy:
                 if self.deny_unix_socket_roots is not None
                 else None
             ),
+            # CORAL(S127)
+            "allow_unix_socket_paths": (
+                _json_string_list(self.allow_unix_socket_paths)
+                if self.allow_unix_socket_paths is not None
+                else None
+            ),
+            "allow_unix_socket_roots": (
+                _json_string_list(self.allow_unix_socket_roots)
+                if self.allow_unix_socket_roots is not None
+                else None
+            ),
             "credential_source_paths": (
                 _json_string_list(self.credential_source_paths)
                 if self.credential_source_paths is not None
@@ -402,6 +430,19 @@ class SandboxPolicy:
             if isinstance(deny_unix_socket_roots_data, list)
             else None
         )
+        # CORAL(S127): an old payload names no sockets and no socket roots
+        allow_unix_socket_paths_data = data.get("allow_unix_socket_paths")
+        allow_unix_socket_paths = (
+            [Path(str(path)) for path in allow_unix_socket_paths_data]
+            if isinstance(allow_unix_socket_paths_data, list)
+            else None
+        )
+        allow_unix_socket_roots_data = data.get("allow_unix_socket_roots")
+        allow_unix_socket_roots = (
+            [Path(str(path)) for path in allow_unix_socket_roots_data]
+            if isinstance(allow_unix_socket_roots_data, list)
+            else None
+        )
         credential_source_paths_data = data.get("credential_source_paths")
         credential_source_paths = (
             [Path(str(path)) for path in credential_source_paths_data]
@@ -456,6 +497,8 @@ class SandboxPolicy:
             git_ssh_socket_path=git_ssh_socket_path,
             deny_unix_socket_paths=deny_unix_socket_paths,
             deny_unix_socket_roots=deny_unix_socket_roots,  # CORAL(S112)
+            allow_unix_socket_paths=allow_unix_socket_paths,  # CORAL(S127)
+            allow_unix_socket_roots=allow_unix_socket_roots,  # CORAL(S127)
             credential_source_paths=credential_source_paths,
             launch_tmpdir_env=launch_env_raw if isinstance(launch_env_raw, str) else None,
             launch_tmpdir_parent=(
@@ -1011,6 +1054,17 @@ def _clone_policy_with(
             if policy.deny_unix_socket_roots is not None
             else None
         ),
+        # CORAL(S127)
+        allow_unix_socket_paths=(
+            list(policy.allow_unix_socket_paths)
+            if policy.allow_unix_socket_paths is not None
+            else None
+        ),
+        allow_unix_socket_roots=(
+            list(policy.allow_unix_socket_roots)
+            if policy.allow_unix_socket_roots is not None
+            else None
+        ),
         credential_source_paths=(
             list(policy.credential_source_paths)
             if policy.credential_source_paths is not None
@@ -1205,6 +1259,24 @@ def with_denied_unix_socket_roots(policy: SandboxPolicy, roots: Sequence[Path]) 
     """
     return replace(
         policy, deny_unix_socket_roots=_merged_resolved(policy.deny_unix_socket_roots, roots)
+    )
+
+
+# CORAL(S127): the allow form of with_denied_unix_sockets
+def with_allowed_unix_sockets(
+    policy: SandboxPolicy, sockets: Sequence[Path], *, roots: Sequence[Path] = ()
+) -> SandboxPolicy:
+    """
+    Return *policy* extended with AF_UNIX sockets outside its own dirs that it may connect to.
+
+    See :attr:`SandboxPolicy.allow_unix_socket_paths` and, for *roots*,
+    :attr:`SandboxPolicy.allow_unix_socket_roots`. Paths are resolved (non-strict; a socket
+    may not exist yet) and de-duplicated; *policy* is not mutated.
+    """
+    return replace(
+        policy,
+        allow_unix_socket_paths=_merged_resolved(policy.allow_unix_socket_paths, sockets),
+        allow_unix_socket_roots=_merged_resolved(policy.allow_unix_socket_roots, roots) or None,
     )
 
 

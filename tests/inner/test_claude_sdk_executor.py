@@ -3,9 +3,13 @@
 
 import asyncio
 import base64
+import hashlib  # CORAL(S124)
 import json
 import logging
 import os
+import re  # CORAL(S124)
+import secrets  # CORAL(S124)
+import shlex  # CORAL(S124)
 import shutil  # CORAL(S116)
 import subprocess  # CORAL(S116)
 import sys
@@ -16,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx  # CORAL(S124)
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -32,6 +37,12 @@ from omnigent.inner.executor import (
     ToolCallRequest,
     ToolCallStatus,
     TurnComplete,
+)
+
+# CORAL(S124): the shim tests' autouse guard applies here too: any shim upstream must be loopback
+from tests.inner.test_claude_gateway_shim import (
+    _loopback_upstreams_only,  # noqa: F401
+    _RecordingUpstream,
 )
 
 
@@ -6867,15 +6878,34 @@ async def _turn_with_recording_sdk(executor):
     return events, fake_sdk, spawn_envs
 
 
-async def test_coral_spec_without_api_credential_is_refused_before_the_cli(monkeypatch):
+@pytest.mark.parametrize(
+    "no_credential",
+    [
+        {},
+        {"api_key_helper": ""},
+        # CORAL(S124): an endpoint and a key in the harness's snapshot are no credential command
+        {
+            "credential_env": {
+                "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                "ANTHROPIC_API_KEY": "sk-ant-test-not-a-helper",
+            }
+        },
+    ],
+    ids=["none", "empty-helper", "snapshot-key"],
+)
+async def test_coral_spec_without_api_credential_is_refused_before_the_cli(
+    monkeypatch, no_credential
+):
     from omnigent.inner.claude_sdk_executor import (
         CORAL_SUBSCRIPTION_AUTH_REFUSED_CODE,
         CORAL_SUBSCRIPTION_AUTH_REFUSED_MESSAGE,
     )
 
-    executor = _coral_executor(monkeypatch, require_api_credential=True)
+    executor = _coral_executor(monkeypatch, require_api_credential=True, **no_credential)
 
     events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    # CORAL(S124): with no command to run there is no credential proxy to start either
+    assert (executor._upstream_credential, executor._gateway_shim) == (None, None)
 
     errors = [e for e in events if isinstance(e, ExecutorError)]
     assert len(errors) == 1 and len(events) == 1
@@ -6906,7 +6936,8 @@ async def test_coral_spec_with_api_credential_reaches_the_cli(monkeypatch, crede
         monkeypatch.setattr(
             executor, "_apply_gateway_model_vocabulary", AsyncMock(return_value={})
         )
-        monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
+    # CORAL(S124): either way the CLI would go through a credential proxy, not started here
+    monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
 
     events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
 
@@ -6938,6 +6969,8 @@ async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral,
         api_key_helper="printf %s sk-ant-test",
         skills_filter="none",
     )
+    # CORAL(S124): the Coral CLI's credential proxy is not this test's subject
+    monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
 
     events, _, spawn_envs = await _turn_with_recording_sdk(executor)
 
@@ -6946,6 +6979,2794 @@ async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral,
     assert ("CLAUDE_CODE_OAUTH_TOKEN" in spawn_envs[0]) is token_seen
     assert ("ANTHROPIC_AUTH_TOKEN" in spawn_envs[0]) is token_seen
     assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "inherited-oauth"
+
+
+# CORAL(S124): the host forwards these to a harness; a Coral harness's CLI gets none of them.
+@pytest.mark.parametrize(
+    "host_env",
+    [
+        {"MY_KEY": "<key>"},
+        {"OMNIGENT_ANTHROPIC_API_KEY": "<host secret>"},
+        {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_BEARER_TOKEN_BEDROCK": "<host secret>"},
+    ],
+    ids=["env-ref-key", "omnigent-prefixed-key", "bedrock-host-env"],
+)
+async def test_coral_harness_cli_env_holds_no_forwarded_credential(
+    monkeypatch, tmp_path, host_env
+):
+    import secrets
+    import shlex
+
+    key = f"sk-ant-test-{secrets.token_hex(16)}"
+    host_secret = f"sk-ant-test-{secrets.token_hex(16)}"
+    values = {"<key>": key, "<host secret>": host_secret}
+    host_env = {name: values.get(value, value) for name, value in host_env.items()}
+    environ = {
+        "PATH": os.defpath,
+        "HOME": str(tmp_path),
+        "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL": "1",
+        "HARNESS_CLAUDE_SDK_API_KEY_HELPER": f"printf %s {shlex.quote(key)}",
+        **host_env,
+    }
+    factory = _coral_harness_factory(monkeypatch, environ)
+
+    # The first build and a rebuild from the same factory.
+    for executor in (factory(), factory()):
+        try:
+            events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        finally:
+            await executor.close()  # each build has a credential proxy of its own
+
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        (client,) = fake_sdk.created_clients
+        for env in (spawn_envs[0], client.options.env):
+            assert sorted(set(host_env) & set(env)) == []
+            assert sorted(name for name in env if name.startswith("HARNESS_CLAUDE_SDK_")) == []
+            assert sorted(name for name, v in env.items() if key in v or host_secret in v) == []
+
+
+def _coral_harness_factory(monkeypatch, environ: dict[str, str]):
+    """The executor factory of a claude-sdk harness started with *environ* as its environment."""
+    from omnigent.inner import claude_sdk_harness
+
+    monkeypatch.setattr(os, "environ", environ)
+    monkeypatch.setattr(claude_sdk_harness, "IS_POSIX", True)
+    # The subject is the CLI's environment, so this turn needs no OS sandbox.
+    monkeypatch.setattr(claude_sdk_harness, "_resolve_os_env", lambda config: None)
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor._find_system_claude", lambda: None)
+    factories = []
+    real_adapter = claude_sdk_harness.ExecutorAdapter
+
+    def recording_adapter(*, executor_factory, **kwargs):
+        factories.append(executor_factory)
+        return real_adapter(executor_factory=executor_factory, **kwargs)
+
+    monkeypatch.setattr(claude_sdk_harness, "ExecutorAdapter", recording_adapter)
+    claude_sdk_harness.create_app()
+    return factories[0]
+
+
+# CORAL(S124): what the scrub takes from a Coral CLI still serves its step: the host's endpoint
+# is the proxy's upstream, and a key helper that reads a forwarded variable runs with it.
+@pytest.mark.posix_only
+async def test_a_coral_harness_on_a_key_keeps_the_hosts_endpoint_and_helper_env_in_its_proxy(
+    monkeypatch, tmp_path
+):
+    from omnigent.host.connect import RUNNER_ENV_PASSTHROUGH_ENV_VAR
+
+    key = _fake_key()
+    upstream = _RecordingUpstream()
+    base_url = await upstream.start()
+    environ = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL": "1",
+        "HARNESS_CLAUDE_SDK_API_KEY_HELPER": 'printf %s "$MY_FORWARDED_KEY"',
+        RUNNER_ENV_PASSTHROUGH_ENV_VAR: "MY_FORWARDED_KEY",
+        "MY_FORWARDED_KEY": key,
+        "ANTHROPIC_BASE_URL": base_url,
+    }
+    executor = _coral_harness_factory(monkeypatch, environ)()
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        statuses = await _through_the_proxy(client.options.env, key)
+        shim = executor._gateway_shim
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+    finally:
+        await executor.close()
+        await upstream.stop()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    # The CLI lost both names to the scrub: it holds the proxy's URL and no key.
+    for env in (spawn_envs[0], client.options.env):
+        assert "MY_FORWARDED_KEY" not in env and env["ANTHROPIC_BASE_URL"] == shim_url
+        assert sorted(name for name, value in env.items() if key in value) == []
+    assert shim_url != base_url and upstream_url == base_url
+    # The helper printed the forwarded key in the proxy, which sent it where the host pointed.
+    assert statuses == (200, 401)
+    (proxied,) = upstream.requests
+    assert (proxied.method, proxied.path) == ("POST", "/v1/messages")
+    assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
+
+
+# CORAL(S124): a Coral gateway CLI holds a session token; its executor's proxy holds the key.
+_GATEWAY_URL = "https://gateway.example/anthropic"
+
+
+def _fake_key() -> str:
+    return f"sk-ant-test-{secrets.token_hex(16)}"
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _gateway_executor(monkeypatch, command: str, *, coral: bool = True, **kwargs):
+    """A generic-provider gateway executor, as the workflow builds one for a key and base URL."""
+    options = {"base_url_override": _GATEWAY_URL, **kwargs}
+    return _coral_executor(
+        monkeypatch,
+        require_api_credential=coral,
+        gateway=True,
+        gateway_auth_command=command,
+        api_key_helper=command,
+        **options,
+    )
+
+
+def _list_models_for_real(monkeypatch) -> None:
+    """Undo the directory's listing stub: this turn lists its loopback gateway's models."""
+    from omnigent.models import model_catalog
+
+    monkeypatch.setattr(
+        model_catalog,
+        "listing_for_provider",
+        lambda provider: model_catalog._listing_for_provider(provider, transport=None),
+    )
+
+
+async def _through_the_proxy(env: dict, key: str) -> tuple[int, int]:
+    """One model request with the CLI's session token and one with the key itself."""
+    async with httpx.AsyncClient(trust_env=False) as cli:
+        url = f"{env['ANTHROPIC_BASE_URL']}/v1/messages"
+        token = {"x-api-key": env["OMNIGENT_CLAUDE_PROXY_TOKEN"]}
+        with_token = await cli.post(url, headers=token, content=b"{}")
+        with_key = await cli.post(url, headers={"x-api-key": key}, content=b"{}")
+    return with_token.status_code, with_key.status_code
+
+
+@pytest.mark.posix_only
+async def test_a_coral_gateway_cli_holds_a_session_token_and_its_proxy_the_key(
+    monkeypatch, tmp_path
+):
+    from omnigent.inner import claude_gateway_shim, claude_sdk_executor
+
+    key = _fake_key()
+    command = f"printf %s {shlex.quote(key)}"
+    upstream = _RecordingUpstream()
+    base_url = await upstream.start()
+    snapshot = {"PATH": os.defpath, "HOME": str(tmp_path), "FORWARDED_BY_THE_HOST": "1"}
+    monkeypatch.setenv("NO_PROXY", "corp.example")
+    monkeypatch.delenv("no_proxy", raising=False)
+    # A static key is a value: neither the model listing nor the proxy starts a process for it.
+    started = Mock(side_effect=AssertionError("a process started for a static key"))
+    monkeypatch.setattr("omnigent.models.model_catalog.subprocess.run", started)
+    monkeypatch.setattr(claude_gateway_shim, "_run_credential_command", started)
+    _list_models_for_real(monkeypatch)
+    executor = _gateway_executor(
+        monkeypatch, command, base_url_override=base_url, credential_env=snapshot
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        options, shim = client.options, executor._gateway_shim
+        statuses = await _through_the_proxy(options.env, key)
+        held = shim._credential
+        held_command, held_value = _sha256(held._command), _sha256(await held.get())
+        held_names = sorted(held._env)
+        token_is_the_shims = options.env["OMNIGENT_CLAUDE_PROXY_TOKEN"] == shim.session_token
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+    finally:
+        await executor.close()
+        await upstream.stop()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert not started.called
+    settings = json.loads(options.settings)
+    assert settings["apiKeyHelper"] == claude_sdk_executor._PROXY_TOKEN_HELPER
+    assert settings["apiKeyHelper"] == 'printf %s "$OMNIGENT_CLAUDE_PROXY_TOKEN"'
+    for env in (spawn_envs[0], options.env):
+        assert sorted(name for name, value in env.items() if key in value) == []
+    in_argv = key in options.settings or key in json.dumps(options.extra_args)
+    assert not in_argv, "the key is in the CLI's settings or arguments"
+    assert options.env["ANTHROPIC_BASE_URL"] == shim_url
+    assert re.fullmatch(r"http://127\.0\.0\.1:\d+", shim_url)
+    assert token_is_the_shims
+    # Loopback is appended to what the CLI would inherit, under both spellings.
+    for name in ("NO_PROXY", "no_proxy"):
+        assert options.env[name].split(",") == ["corp.example", "127.0.0.1", "localhost"]
+    assert upstream_url == base_url
+    # The proxy holds the real command, and runs it with the harness's snapshot only.
+    assert (held_command, held_value) == (_sha256(command), _sha256(key))
+    assert held_names == sorted(snapshot)
+    # The model listing and the CLI's own request both carried the key; the key itself is no
+    # token, so a request presenting it is refused and never forwarded.
+    assert statuses == (200, 401)
+    seen = [(r.method, r.path) for r in upstream.requests]
+    assert seen == [("GET", "/v1/models"), ("POST", "/v1/messages")], seen
+    listing, proxied = upstream.requests
+    assert _sha256(listing.headers["authorization"]) == _sha256(f"Bearer {key}")
+    assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
+
+
+@pytest.mark.posix_only
+async def test_a_coral_gateway_command_runs_once_in_the_proxy_for_the_listing_and_the_cli(
+    monkeypatch, tmp_path
+):
+    key = _fake_key()
+    counter = tmp_path / "credential-runs"
+    command = 'printf x >> "$RUN_COUNTER"; printf %s "$FAKE_UPSTREAM_KEY"'
+    upstream = _RecordingUpstream()
+    base_url = await upstream.start()
+    # Only the snapshot can print the key: the harness's own environment lost it in the scrub.
+    snapshot = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "RUN_COUNTER": str(counter),
+        "FAKE_UPSTREAM_KEY": key,
+        "OMNIGENT_CLAUDE_PROXY_TOKEN": "stale",
+    }
+    monkeypatch.setattr(
+        "omnigent.models.model_catalog.subprocess.run",
+        Mock(side_effect=AssertionError("the model listing ran the command itself")),
+    )
+    _list_models_for_real(monkeypatch)
+    executor = _gateway_executor(
+        monkeypatch,
+        command,
+        base_url_override=base_url,
+        credential_env=snapshot,
+        gateway_auth_refresh_interval_ms="60000",
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        options = client.options
+        statuses = await _through_the_proxy(options.env, key)
+        credential = executor._gateway_shim._credential
+        ttl_s, held_names = credential._ttl_s, sorted(credential._env)
+    finally:
+        await executor.close()
+        await upstream.stop()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert statuses == (200, 401)
+    assert counter.read_text() == "x", "the command ran more than once"
+    assert ttl_s == 60.0
+    assert held_names == sorted(set(snapshot) - {"OMNIGENT_CLAUDE_PROXY_TOKEN"})
+    listing, proxied = upstream.requests
+    assert _sha256(listing.headers["authorization"]) == _sha256(f"Bearer {key}")
+    assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
+    # The command stays with the proxy: it is in no CLI env value, setting or argument.
+    carried = [*spawn_envs[0].values(), options.settings, json.dumps(options.extra_args)]
+    assert not any(command in text or key in text for text in carried)
+
+
+_FIRST_PARTY_FLAG = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"
+_UNCHANGED_CASES = [
+    "non-coral-gateway",
+    "coral-gateway-off-posix",
+    "non-coral-key",
+    "coral-key-off-posix",
+]
+
+
+@pytest.mark.parametrize("case", _UNCHANGED_CASES)
+async def test_only_a_coral_cli_on_posix_goes_through_the_credential_proxy(monkeypatch, case):
+    from omnigent.inner import claude_sdk_executor
+
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    # An endpoint the harness inherits is the CLI's own business off the proxy.
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setattr(claude_sdk_executor, "IS_POSIX", not case.endswith("-off-posix"))
+    if "-key" in case:
+        executor = _coral_executor(
+            monkeypatch, require_api_credential=case.startswith("coral"), api_key_helper=command
+        )
+    else:
+        executor = _gateway_executor(monkeypatch, command, coral=case != "non-coral-gateway")
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        shim = executor._gateway_shim
+        # (no token, no credential, its URL), told by presence so a failure prints no value
+        proxied = shim and (shim.session_token is None, shim._credential is None, shim.base_url)
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    # As before: the CLI runs the real command itself, and no session token exists.
+    assert _sha256(json.loads(client.options.settings)["apiKeyHelper"]) == _sha256(command)
+    added = {_PROXY_TOKEN, "NO_PROXY", "no_proxy", _FIRST_PARTY_FLAG} & set(client.options.env)
+    assert sorted(added) == []
+    assert executor._upstream_credential is None
+    if "-key" in case:
+        assert proxied is None and "ANTHROPIC_BASE_URL" not in client.options.env
+    else:
+        assert proxied == (True, True, client.options.env["ANTHROPIC_BASE_URL"])
+
+
+# CORAL(S124): a Coral CLI on a plain API key goes through the same proxy. Its upstream is the
+# endpoint the harness had before the scrub, else the Anthropic API.
+def _direct_key_executor(monkeypatch, command: str, **kwargs):
+    """A Coral executor on an API key with no endpoint of its own, as the workflow builds one."""
+    return _coral_executor(
+        monkeypatch, require_api_credential=True, api_key_helper=command, **kwargs
+    )
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize("credential", ["static-key", "command"])
+async def test_a_coral_direct_key_cli_holds_a_session_token_and_its_proxy_the_key(
+    monkeypatch, tmp_path, credential
+):
+    from omnigent.inner import claude_gateway_shim, claude_sdk_executor
+
+    key = _fake_key()
+    upstream = _RecordingUpstream()
+    base_url = await upstream.start()
+    # The scrub took the host's endpoint out of the harness's environment; the snapshot has it.
+    snapshot = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "ANTHROPIC_BASE_URL": base_url}
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("NO_PROXY", "corp.example")
+    monkeypatch.delenv("no_proxy", raising=False)
+    if credential == "static-key":
+        command = f"printf %s {shlex.quote(key)}"
+        started = Mock(side_effect=AssertionError("a process started for a static key"))
+        monkeypatch.setattr(claude_gateway_shim, "_run_credential_command", started)
+        ttl_s = 300.0  # the pinned CLI's own default for a key helper
+    else:
+        # A helper that reads a variable the host forwards: only the snapshot still has it.
+        command = 'printf %s "$FAKE_FORWARDED_KEY"'
+        monkeypatch.delenv("FAKE_FORWARDED_KEY", raising=False)
+        snapshot |= {"FAKE_FORWARDED_KEY": key, "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "60000"}
+        ttl_s = 60.0
+    executor = _direct_key_executor(monkeypatch, command, credential_env=snapshot)
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        options, shim = client.options, executor._gateway_shim
+        statuses = await _through_the_proxy(options.env, key)
+        held = shim._credential
+        held_command, held_value = _sha256(held._command), _sha256(await held.get())
+        held_names, held_ttl_s = sorted(held._env), held._ttl_s
+        token_is_the_shims = options.env[_PROXY_TOKEN] == shim.session_token
+        # The pinned CLI's own pattern for an Anthropic key, which it keeps for Anthropic hosts.
+        key_shaped = re.match(r"^(sk-ant-|sk-[\w-]{86}$)", shim.session_token) is not None
+        token_prefixed = shim.session_token.startswith("session-")
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+    finally:
+        await executor.close()
+        await upstream.stop()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    settings = json.loads(options.settings)
+    assert settings["apiKeyHelper"] == claude_sdk_executor._PROXY_TOKEN_HELPER
+    for env in (spawn_envs[0], options.env):
+        assert sorted(name for name, value in env.items() if key in value) == []
+    carried = f"{options.settings}{json.dumps(options.extra_args)}"
+    assert key not in carried and "FAKE_FORWARDED_KEY" not in carried
+    assert options.env["ANTHROPIC_BASE_URL"] == shim_url
+    assert re.fullmatch(r"http://127\.0\.0\.1:\d+", shim_url)
+    assert token_is_the_shims and token_prefixed and not key_shaped
+    for name in ("NO_PROXY", "no_proxy"):
+        assert options.env[name].split(",") == ["corp.example", "127.0.0.1", "localhost"]
+    # The host's endpoint is the proxy's upstream; a loopback one is not the Anthropic API.
+    assert upstream_url == base_url
+    gateway_only = {"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "CLAUDE_CODE_USE_GATEWAY"}
+    assert sorted((gateway_only | {_FIRST_PARTY_FLAG}) & set(options.env)) == []
+    assert (held_command, held_value) == (_sha256(command), _sha256(key))
+    assert held_names == sorted(snapshot) and held_ttl_s == ttl_s
+    # Only the CLI's own request went upstream (no gateway, so no model listing), with the key.
+    assert statuses == (200, 401)
+    (proxied,) = upstream.requests
+    assert (proxied.method, proxied.path) == ("POST", "/v1/messages")
+    assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
+
+
+_ANTHROPIC_API = "https://api.anthropic.com"
+_OTHER_ENDPOINT = "https://gateway.example/anthropic"
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("snapshot_url", "inherited_url", "upstream", "first_party"),
+    [
+        (None, None, _ANTHROPIC_API, True),
+        ("", None, _ANTHROPIC_API, True),
+        (f"{_ANTHROPIC_API}/", None, _ANTHROPIC_API, True),
+        ("https://API.Anthropic.com:443", None, "https://API.Anthropic.com:443", True),
+        (_OTHER_ENDPOINT, None, _OTHER_ENDPOINT, False),
+        (f"{_ANTHROPIC_API}:8443", None, f"{_ANTHROPIC_API}:8443", False),
+        # A path stays in the upstream, less its trailing slash, and does not change the answer.
+        (f"{_ANTHROPIC_API}/v1/", None, f"{_ANTHROPIC_API}/v1", True),
+        (f"{_OTHER_ENDPOINT}/", None, _OTHER_ENDPOINT, False),
+        (f"{_ANTHROPIC_API}.example", None, f"{_ANTHROPIC_API}.example", False),
+        ("http://127.0.0.1:9/anthropic", None, "http://127.0.0.1:9/anthropic", False),
+        # The snapshot is the harness's environment from before the scrub: it alone decides.
+        (None, _OTHER_ENDPOINT, _ANTHROPIC_API, True),
+        # An executor built with no snapshot reads its own environment.
+        (
+            "no-snapshot",
+            _OTHER_ENDPOINT,
+            _OTHER_ENDPOINT,
+            False,
+        ),
+        ("no-snapshot", None, _ANTHROPIC_API, True),
+    ],
+    ids=[
+        "unset",
+        "empty",
+        "anthropic",
+        "anthropic-default-port",
+        "gateway",
+        "anthropic-other-port",
+        "anthropic-path",
+        "gateway-trailing-slash",
+        "look-alike-host",
+        "loopback-http",
+        "snapshot-over-environment",
+        "no-snapshot-environment",
+        "no-snapshot-unset",
+    ],
+)
+async def test_a_coral_direct_key_proxy_goes_where_the_harness_was_pointed(
+    monkeypatch, tmp_path, snapshot_url, inherited_url, upstream, first_party
+):
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    snapshot = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    if snapshot_url is not None:
+        snapshot["ANTHROPIC_BASE_URL"] = snapshot_url
+    if inherited_url is None:
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", inherited_url)
+    monkeypatch.delenv(_FIRST_PARTY_FLAG, raising=False)
+    fake_sdk = _make_recovery_fake_sdk()
+    # Nothing is sent: the autouse guard fails this test on any contact outside loopback.
+    executor = _direct_key_executor(
+        monkeypatch, command, credential_env=None if snapshot_url == "no-snapshot" else snapshot
+    )
+    try:
+        for session in ("first", "second"):
+            events = await _session_turn(executor, fake_sdk, session)
+            assert any(isinstance(e, TurnComplete) for e in events), events
+        shim = executor._gateway_shim
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+    finally:
+        await executor.close()
+
+    assert upstream_url == upstream
+    first, second = (client.options.env for client in fake_sdk.created_clients)
+    # Both CLIs are on the one loopback proxy; each treats it as the Anthropic API only when
+    # the proxy's upstream is that API by the CLI's own rule.
+    for env in (first, second):
+        assert env["ANTHROPIC_BASE_URL"] == shim_url
+        assert env.get(_FIRST_PARTY_FLAG) == ("1" if first_party else None)
+    assert _sha256(first[_PROXY_TOKEN]) == _sha256(second[_PROXY_TOKEN])
+
+
+@pytest.mark.parametrize(
+    ("url", "first_party"),
+    [
+        ("https://api.anthropic.com", True),
+        ("https://api.anthropic.com/", True),
+        ("https://api.anthropic.com/v1?beta=true", True),
+        ("https://API.ANTHROPIC.COM", True),
+        ("https://api.anthropic.com:443", True),
+        # The CLI compares hosts only, so the scheme does not change its answer.
+        ("http://api.anthropic.com", True),
+        ("http://api.anthropic.com:80", True),
+        ("https://api.anthropic.com:8443", False),
+        ("https://api.anthropic.com:80", False),
+        ("https://api.anthropic.com.", False),
+        ("https://api.anthropic.com.evil.example", False),
+        ("https://evil.example/api.anthropic.com", False),
+        ("https://eu.api.anthropic.com", False),
+        ("https://anthropic.com", False),
+        ("http://127.0.0.1:8080", False),
+        ("ftp://api.anthropic.com", False),
+        ("api.anthropic.com", False),
+        ("", False),
+        ("https://api.anthropic.com:port", False),
+        # Never first-party here: URLs two parsers could read as different hosts.
+        ("https://user@api.anthropic.com", False),
+        ("https://api.anthropic.com\\@evil.example", False),
+        ("https://evil.example\\@api.anthropic.com", False),
+        ("https://api.anthropic.com/a\\b", False),
+        ("https://api.anthropic.com /", False),
+        ("https://api.anthropic.com\t", False),
+        ("https://evil.example/?next=@api.anthropic.com", False),
+        ("https://api.anthropic.com:443/v1/", True),
+        ("https://api.anthropic.com#fragment", True),
+        ("https://api.anthropic.com.example", False),
+        ("https://xapi.anthropic.com", False),
+        ("https://api.anthropic.com:65536", False),
+        ("//api.anthropic.com", False),
+        ("https:api.anthropic.com", False),
+        ("https://api.anthropic.com#@evil.example", False),
+        # Spellings another parser folds into the API's host are not first-party here either.
+        ("https://api%2eanthropic.com", False),
+        ("https://api.anthropic．com", False),
+        ("https://аpi.anthropic.com", False),
+    ],
+)
+def test_the_first_party_rule_is_the_clis_host_match_and_never_looser(url, first_party):
+    from omnigent.inner.claude_sdk_executor import _is_first_party_url
+
+    assert _is_first_party_url(url) is first_party
+    if first_party:
+        # The proxy's own client reads the same host, so the key goes where the CLI is told.
+        assert httpx.URL(url).host == "api.anthropic.com"
+
+
+@pytest.mark.posix_only
+async def test_a_coral_gateway_cli_is_never_told_its_gateway_is_the_anthropic_api(monkeypatch):
+    # A gateway CLI was on the shim's loopback URL before the credential proxy too.
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    executor = _gateway_executor(monkeypatch, command, base_url_override=_ANTHROPIC_API)
+    monkeypatch.setattr(executor, "_apply_gateway_model_vocabulary", AsyncMock(return_value={}))
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        upstream_url = executor._gateway_shim._upstream_base_url
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    assert upstream_url == _ANTHROPIC_API and _FIRST_PARTY_FLAG not in client.options.env
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("upstream", "inherited", "set_for_the_cli", "cli_reads"),
+    [
+        (_ANTHROPIC_API, "0", "1", "1"),
+        (_ANTHROPIC_API, None, "1", "1"),
+        # Behind any other endpoint the executor neither sets, clears nor overrides it.
+        (_OTHER_ENDPOINT, "1", None, "1"),
+        (_OTHER_ENDPOINT, "0", None, "0"),
+        (_OTHER_ENDPOINT, None, None, None),
+    ],
+)
+async def test_an_inherited_first_party_switch_is_overridden_only_for_the_anthropic_api(
+    monkeypatch, upstream, inherited, set_for_the_cli, cli_reads
+):
+    snapshot = {"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": upstream}
+    if inherited is None:
+        monkeypatch.delenv(_FIRST_PARTY_FLAG, raising=False)
+    else:
+        monkeypatch.setenv(_FIRST_PARTY_FLAG, inherited)
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    executor = _direct_key_executor(monkeypatch, command, credential_env=snapshot)
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    assert client.options.env.get(_FIRST_PARTY_FLAG) == set_for_the_cli
+    assert spawn_envs[0].get(_FIRST_PARTY_FLAG) == cli_reads
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("snapshot_ttl_ms", "inherited_ttl_ms", "ttl_s"),
+    [
+        ("60000", None, 60.0),
+        (None, None, 300.0),
+        # Not a time the CLI accepts either: its own default stands.
+        ("soon", None, 300.0),
+        ("-5", None, 300.0),
+        # Zero is a time the CLI accepts: the helper's value is never reused.
+        ("0", None, 0.0),
+        # The snapshot is the harness's environment from before the scrub: it alone decides.
+        (None, "60000", 300.0),
+        ("no-snapshot", "120000", 120.0),
+        ("no-snapshot", None, 300.0),
+    ],
+)
+def test_a_coral_direct_key_helper_is_cached_for_as_long_as_the_cli_cached_it(
+    monkeypatch, snapshot_ttl_ms, inherited_ttl_ms, ttl_s
+):
+    name = "CLAUDE_CODE_API_KEY_HELPER_TTL_MS"
+    snapshot = {"PATH": "/usr/bin:/bin"}
+    if snapshot_ttl_ms is not None:
+        snapshot[name] = snapshot_ttl_ms
+    if inherited_ttl_ms is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, inherited_ttl_ms)
+    credential_env = None if snapshot_ttl_ms == "no-snapshot" else snapshot
+    command = 'printf %s "$FAKE_FORWARDED_KEY"'
+
+    direct = _direct_key_executor(monkeypatch, command, credential_env=credential_env)
+    gateway = _gateway_executor(monkeypatch, command, credential_env=credential_env)
+
+    assert direct._upstream_credential._ttl_s == ttl_s
+    # A gateway's cache time is its own refresh interval, never the harness's variable.
+    assert gateway._upstream_credential._ttl_s == 900.0
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("upstream", "in_snapshot", "names"),
+    [
+        ("http://gateway.example/anthropic", True, "https"),
+        # Plain http is refused for the API's own host too, and for a look-alike of loopback.
+        ("http://api.anthropic.com", True, "https"),
+        ("http://localhost.gateway.example:8080", True, "https"),
+        ("gateway.example/anthropic", True, "https"),
+        # An executor built with no snapshot is held to its own environment's endpoint.
+        ("http://gateway.example/anthropic", False, "https"),
+        # A URL the proxy cannot join a path to, on https or loopback or not.
+        ("https://gateway.example/\x00anthropic", True, "control character"),
+        ("https://api.anthropic.com?beta=true", True, "query"),
+        ("https://api.anthropic.com/#v1", True, "fragment"),
+        # CORAL(S125): the same check refuses userinfo and a port that is no number
+        ("https://user:pw-beta@gateway.example/anthropic", True, "user name"),
+        ("https://gateway.example:v1", True, "numeric port"),
+    ],
+    ids=[
+        "gateway",
+        "anthropic-host",
+        "loopback-look-alike",
+        "no-scheme",
+        "no-snapshot",
+        "control-character",
+        "query",
+        "fragment",
+        "userinfo",
+        "port",
+    ],
+)
+async def test_a_coral_direct_key_upstream_the_key_may_not_go_to_is_refused_before_any_cli(
+    monkeypatch, tmp_path, upstream, in_snapshot, names
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE
+
+    key = _fake_key()
+    snapshot = {"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": upstream}
+    if in_snapshot:
+        # The harness's own environment lost the endpoint in the scrub; an https one there
+        # would not make the snapshot's acceptable.
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", _OTHER_ENDPOINT)
+    else:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", upstream)
+    executor = _direct_key_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(key)}",
+        credential_env=snapshot if in_snapshot else None,
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        proxy_built = executor._gateway_shim is not None
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in events] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    assert names in events[0].message
+    named = (key, "gateway.example", "api.anthropic.com", "127.0.0.1", "beta", "v1")
+    assert not [text for text in named if text in events[0].message]
+    assert not proxy_built and fake_sdk.created_clients == [] and spawn_envs == []
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "configured",
+    ["https://gateway.example/anthropic\n", "\thttps://gateway.example/anthropic "],
+    ids=["trailing-newline", "tab-and-space"],
+)
+async def test_whitespace_around_a_configured_upstream_is_dropped(monkeypatch, configured):
+    executor = _direct_key_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(_fake_key())}",
+        credential_env={"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": configured},
+    )
+    try:
+        # A URL that worked with a stray space before the proxy keeps working behind it.
+        assert executor._proxy_upstream({}) == "https://gateway.example/anthropic"
+    finally:
+        await executor.close()
+
+
+@pytest.mark.posix_only
+async def test_a_coral_direct_key_turn_is_refused_when_its_cli_would_still_hold_the_key(
+    monkeypatch, tmp_path
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_EXPOSED_CODE
+
+    key = _fake_key()
+    monkeypatch.setenv("UNLISTED_COPY", f"Bearer {key}")
+    executor = _direct_key_executor(
+        monkeypatch, f"printf %s {shlex.quote(key)}", credential_env={"PATH": "/usr/bin:/bin"}
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in events] == [(CORAL_CREDENTIAL_EXPOSED_CODE, False)]
+    assert key not in events[0].message and "UNLISTED_COPY" in events[0].message
+    assert fake_sdk.created_clients == [] and spawn_envs == []
+
+
+def test_a_static_key_lists_gateway_models_as_a_value_never_as_a_command(caplog):
+    from omnigent.inner.claude_sdk_executor import _gateway_model_vocabulary
+    from omnigent.models.model_catalog import ModelEntry, ModelListing
+
+    key = _fake_key()
+    listing = ModelListing(
+        source="openai-compatible",
+        verified=True,
+        models=(ModelEntry(id="gw-claude-opus-4-8", family="claude"),),
+        note="",
+    )
+    target = "omnigent.models.model_catalog.listing_for_provider"
+    with patch(target, return_value=listing) as lister:
+        literal = _gateway_model_vocabulary(_GATEWAY_URL, f"printf %s {shlex.quote(key)}")
+        resolved = _gateway_model_vocabulary(_GATEWAY_URL, None, key)
+    for call in lister.call_args_list:
+        provider = call.args[0]
+        assert provider.auth_command is None
+        assert _sha256(provider.api_key) == _sha256(key)
+    assert literal == resolved
+    assert literal.model_overrides == {"claude-opus-4-8": "gw-claude-opus-4-8"}
+    # A failed listing is logged by its exception type alone.
+    failure = RuntimeError(f"listing failed with {key}")
+    with patch(target, side_effect=failure), caplog.at_level(logging.WARNING):
+        _gateway_model_vocabulary(_GATEWAY_URL, "databricks auth token")
+    (record,) = [r for r in caplog.records if "could not list" in r.getMessage()]
+    assert "RuntimeError" in record.getMessage() and record.exc_info is None
+    assert key not in caplog.text
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "planted", ["os-environ", "options-env", "settings", "nowhere", "short-key"]
+)
+async def test_a_coral_turn_is_refused_when_its_cli_would_still_hold_the_key(monkeypatch, planted):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_EXPOSED_CODE
+
+    # Shorter than the scan floor, a key is not told apart from ordinary values.
+    key = "sk-ant-test-0123456" if planted == "short-key" else _fake_key()
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(key)}")
+    if planted in ("os-environ", "short-key"):
+        monkeypatch.setenv("UNLISTED_COPY", f"Bearer {key}")
+    elif planted == "options-env":
+        executor._extra_env["UNLISTED_COPY"] = key
+    elif planted == "settings":
+        rewrites = AsyncMock(return_value={"claude-opus-4-8": f"gw-{key}"})
+        monkeypatch.setattr(executor, "_apply_gateway_model_vocabulary", rewrites)
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    finally:
+        await executor.close()
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    if planted in ("nowhere", "short-key"):
+        assert errors == [] and len(spawn_envs) == 1
+        return
+    assert [(e.code, e.retryable) for e in errors] == [(CORAL_CREDENTIAL_EXPOSED_CODE, False)]
+    assert len(events) == 1 and key not in errors[0].message
+    where = "its settings or arguments" if planted == "settings" else "UNLISTED_COPY"
+    assert where in errors[0].message
+    assert fake_sdk.created_clients == [] and spawn_envs == []
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("proxies", "taken_from"),
+    [
+        ({"HTTPS_PROXY": "http://user:<password>@proxy.example:3128"}, "HTTPS_PROXY"),
+        (
+            {"https_proxy": "http://lower.example:1", "HTTPS_PROXY": "http://upper.example:1"},
+            "https_proxy",
+        ),
+        ({"ALL_PROXY": "http://all.example:1"}, "ALL_PROXY"),
+        ({"HTTP_PROXY": "http://plain.example:1"}, None),
+        ({"HTTPS_PROXY": "http://proxy.example:1", "NO_PROXY": "x.test,gateway.example"}, None),
+        ({"HTTPS_PROXY": "http://proxy.example:1", "no_proxy": "*"}, None),
+        ({}, None),
+    ],
+    ids=["userinfo", "lower-case-wins", "all", "other-scheme", "no-proxy", "no-proxy-all", "none"],
+)
+async def test_the_proxys_upstream_hop_takes_its_proxy_from_the_harness_snapshot(
+    monkeypatch, tmp_path, proxies, taken_from
+):
+    password = f"pw-{secrets.token_hex(8)}"
+    proxies = {name: value.replace("<password>", password) for name, value in proxies.items()}
+    wanted = proxies.get(taken_from) if taken_from else None
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    snapshot = {"PATH": os.defpath, "HOME": str(tmp_path), **proxies}
+    executor = _gateway_executor(
+        monkeypatch, f"printf %s {shlex.quote(_fake_key())}", credential_env=snapshot
+    )
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        chosen = executor._gateway_shim._upstream_proxy
+        cli_env = fake_sdk.created_clients[0].options.env
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert (chosen is None, _sha256(chosen or "")) == (wanted is None, _sha256(wanted or ""))
+    assert sorted(name for name, value in cli_env.items() if password in value) == []
+
+
+# CORAL(S124): a CLI evicted on cancel is gone before the proxy's port is free for another bind
+async def test_close_waits_for_a_cancel_eviction_before_it_stops_the_proxy(monkeypatch):
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(_fake_key())}")
+    order: list[str] = []
+    release = asyncio.Event()
+
+    async def _slow_teardown(_client) -> None:
+        await release.wait()
+        order.append("evicted")
+
+    async def _stop_proxy() -> None:
+        order.append("proxy stopped")
+
+    monkeypatch.setattr(executor, "_force_close_client", _slow_teardown)
+    executor._gateway_shim = SimpleNamespace(aclose=_stop_proxy)
+    executor._clients["evicted"] = SimpleNamespace(client=object())
+    executor._evict_client_on_cancel("evicted")
+    closing = asyncio.create_task(executor.close())
+    done, _ = await asyncio.wait({closing}, timeout=0.2)
+    assert not done, "close() returned while a cancel eviction was still closing"
+    assert order == [], "the proxy stopped while a CLI was still closing"
+    release.set()
+    await closing
+
+    assert order == ["evicted", "proxy stopped"]
+
+
+_PROXY_TOKEN = "OMNIGENT_CLAUDE_PROXY_TOKEN"
+
+
+async def _session_turn(executor, fake_sdk, session_id: str) -> list:
+    """One turn of *session_id* on *fake_sdk*, which keeps every client the executor builds."""
+    messages = [{"role": "user", "content": "hi", "session_id": session_id}]
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        return [event async for event in executor.run_turn(messages, [], "")]
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(("path", "ttl_s"), [("gateway", 900.0), ("direct-key", 300.0)])
+async def test_every_client_of_a_coral_executor_shares_one_proxy_and_token(
+    monkeypatch, path, ttl_s
+):
+    from omnigent.inner import claude_sdk_executor
+
+    built = []
+    real_shim = claude_sdk_executor.ClaudeGatewayShim
+
+    def recording_shim(**kwargs):
+        built.append(real_shim(**kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(claude_sdk_executor, "ClaudeGatewayShim", recording_shim)
+    # No snapshot: the command gets the harness's own environment, less the proxy's name,
+    # and the upstream hop keeps the client's environment proxies.
+    monkeypatch.setenv("OMNIGENT_CLAUDE_PROXY_TOKEN", "stale")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    # With no endpoint of its own, a CLI on a plain key is behind a proxy for the Anthropic API.
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv(_FIRST_PARTY_FLAG, raising=False)
+    command = f"printf %s {shlex.quote(_fake_key())}"
+    fake_sdk = _make_recovery_fake_sdk()
+    build = _gateway_executor if path == "gateway" else _direct_key_executor
+    executor = build(monkeypatch, command)
+    rebuilt = build(monkeypatch, command)
+    try:
+        # A second session, then the first one reconnecting after its client closed.
+        for session in ("first", "second", "first"):
+            events = await _session_turn(executor, fake_sdk, session)
+            assert any(isinstance(e, TurnComplete) for e in events), events
+            await executor.close_session("first")
+        shim, credential = executor._gateway_shim, executor._upstream_credential
+        await _session_turn(rebuilt, fake_sdk, "first")
+        proxies = [(each.base_url, each.session_token) for each in built]
+        held_names, harness_names = sorted(credential._env), sorted(os.environ)
+    finally:
+        await executor.close()
+        await rebuilt.close()
+
+    held = [
+        (client.options.env["ANTHROPIC_BASE_URL"], client.options.env[_PROXY_TOKEN])
+        for client in fake_sdk.created_clients
+    ]
+    assert len(held) == 4 and len(set(held[:3])) == 1
+    # The token reaches a CLI in its environment only, never spelled on its command line.
+    for (_, token), client in zip(held, fake_sdk.created_clients, strict=True):
+        assert token not in f"{client.options.settings}{client.options.extra_args}"
+    assert built[0] is shim and shim._credential is credential
+    # An executor rebuilt from the same config has a proxy and a token of its own.
+    assert len(built) == 2 and [held[0], held[3]] == proxies
+    assert _sha256(held[3][1]) != _sha256(held[0][1])
+    assert held_names == [name for name in harness_names if name != _PROXY_TOKEN]
+    assert (credential._ttl_s, shim._upstream_proxy) == (ttl_s, None)
+    # Each CLI of the plain-key executor is told its proxy is the Anthropic API; none of a
+    # gateway's is.
+    told = [client.options.env.get(_FIRST_PARTY_FLAG) for client in fake_sdk.created_clients]
+    assert told == ["1" if path == "direct-key" else None] * 4
+
+
+@pytest.mark.parametrize(
+    ("inherited", "options_env", "upper", "lower"),
+    [
+        ({"no_proxy": "corp.example"}, {}, "corp.example,", "corp.example,"),
+        ({"NO_PROXY": "a.example", "no_proxy": "b.example"}, {}, "a.example,", "b.example,"),
+        ({"NO_PROXY": "a.example"}, {"NO_PROXY": "own.example"}, "own.example,", "own.example,"),
+        ({"NO_PROXY": "a.example"}, {"no_proxy": "b.example"}, "a.example,", "b.example,"),
+        ({"NO_PROXY": "*"}, {}, "*,", "*,"),
+        ({}, {}, "", ""),
+        # Hosts already listed keep their place and are not repeated; blanks are dropped.
+        ({"NO_PROXY": " localhost , x.example,,127.0.0.1"}, {}, None, None),
+    ],
+    ids=["lower-only", "each-its-own", "options-env-wins", "one-of-each", "all", "none", "listed"],
+)
+@pytest.mark.posix_only
+def test_loopback_joins_the_no_proxy_a_cli_would_inherit_under_either_spelling(
+    monkeypatch, inherited, options_env, upper, lower
+):
+    from omnigent.inner.claude_sdk_executor import _keep_loopback_unproxied
+
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in inherited.items():
+        monkeypatch.setenv(name, value)
+    env = dict(options_env)
+    _keep_loopback_unproxied(env)
+    listed = "localhost,x.example,127.0.0.1"
+    assert env == {
+        "NO_PROXY": listed if upper is None else f"{upper}127.0.0.1,localhost",
+        "no_proxy": listed if lower is None else f"{lower}127.0.0.1,localhost",
+    }
+
+
+def test_the_snapshots_proxy_follows_the_schemes_own_name_and_the_upstreams_port():
+    from omnigent.inner.claude_sdk_executor import _proxy_for_upstream
+
+    own, every = "http://own.example:1", "http://all.example:1"
+    both = {"ALL_PROXY": every, "HTTPS_PROXY": own}
+    named = ("HTTPS_PROXY", own)  # CORAL(S125): with the variable it was read from
+    assert _proxy_for_upstream("https://gateway.example/anthropic", both) == named
+    ported = {"HTTPS_PROXY": own, "NO_PROXY": "gateway.example:8443"}
+    assert _proxy_for_upstream("https://gateway.example:8443/anthropic", ported) is None
+    assert _proxy_for_upstream("https://gateway.example:9443/anthropic", ported) == named
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "key",
+    ['sk-ant-test-0123456789abcdef"\\', "sk-ant-test-01234567", "sk-ant-test-0123456"],
+    ids=["json-escaped", "at-the-floor", "short"],
+)
+def test_the_exposure_check_reads_settings_and_arguments_as_the_cli_gets_them(monkeypatch, key):
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(key)}")
+    clean = {"env": {"PATH": os.defpath}, "settings": None, "extra_args": {"flag": None}}
+    holding = {
+        "settings": {"settings": json.dumps({"modelOverrides": {"m": f"gw-{key}"}})},
+        "arguments": {"extra_args": {"flag": None, "append-system-prompt": f"x {key}"}},
+        "environment": {"env": {"B_COPY": key, "A_COPY": f"Bearer {key}"}},
+    }
+    found = {
+        where: executor._credential_exposure(SimpleNamespace(**{**clean, **held}))
+        for where, held in holding.items()
+    }
+
+    assert executor._credential_exposure(SimpleNamespace(**clean)) is None
+    assert executor._credential_exposure(SimpleNamespace()) is None
+    expected = {
+        "settings": "its settings or arguments",
+        "arguments": "its settings or arguments",
+        "environment": "environment variable(s) A_COPY, B_COPY",
+    }
+    # Under the scan floor a key is not told apart from ordinary values, wherever it sits.
+    assert found == (expected if len(key) >= 20 else dict.fromkeys(expected))
+
+
+@pytest.mark.posix_only
+async def test_the_exposure_check_runs_before_every_connect_not_only_the_first(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_EXPOSED_CODE
+
+    key = _fake_key()
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(key)}")
+    fake_sdk = _make_recovery_fake_sdk()
+    try:
+        first = await _session_turn(executor, fake_sdk, "first")
+        monkeypatch.setenv("LATE_COPY", key)
+        refused = await _session_turn(executor, fake_sdk, "second")
+        monkeypatch.delenv("LATE_COPY")
+        retried = await _session_turn(executor, fake_sdk, "second")
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in refused] == [(CORAL_CREDENTIAL_EXPOSED_CODE, False)]
+    assert "LATE_COPY" in refused[0].message and key not in refused[0].message
+    # The refusal built no client and left the session able to connect once the copy is gone.
+    for events in (first, retried):
+        assert any(isinstance(e, TurnComplete) for e in events), events
+    assert len(fake_sdk.created_clients) == 2
+
+
+@pytest.mark.posix_only
+async def test_a_failing_coral_gateway_command_lists_no_models_and_logs_its_type_only(
+    monkeypatch, tmp_path, caplog
+):
+    marker = f"helper-text-{secrets.token_hex(8)}"
+    counter = tmp_path / "credential-runs"
+    command = f'printf x >> "$RUN_COUNTER"; echo {marker}; exit 3'
+    snapshot = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "RUN_COUNTER": str(counter)}
+    lister = Mock(side_effect=AssertionError("models were listed without a credential"))
+    monkeypatch.setattr("omnigent.models.model_catalog.listing_for_provider", lister)
+    executor = _gateway_executor(monkeypatch, command, credential_env=snapshot)
+    fake_sdk = _make_recovery_fake_sdk()
+    caplog.set_level(logging.DEBUG)
+    try:
+        # The second session's turn finds the empty vocabulary kept, and no second run.
+        for session in ("first", "second"):
+            events = await _session_turn(executor, fake_sdk, session)
+            assert any(isinstance(e, TurnComplete) for e in events), events
+    finally:
+        await executor.close()
+
+    assert counter.read_text() == "x" and not lister.called
+    for client in fake_sdk.created_clients:
+        settings = json.loads(client.options.settings)
+        assert sorted(settings) == ["apiKeyHelper"]
+        pins = [name for name in client.options.env if name.startswith("ANTHROPIC_DEFAULT_")]
+        assert pins == []
+    (record,) = [r for r in caplog.records if "no credential to list" in r.getMessage()]
+    assert "UpstreamCredentialError" in record.getMessage() and record.exc_info is None
+    assert marker not in caplog.text
+
+
+# CORAL(S124): the adapter reaps an abandoned executor under a short bound, which cancels a
+# close() still waiting for an eviction; the shim holds the credential, so it stops anyway.
+def _executor_with_a_slow_eviction(monkeypatch, coral: bool, ran: list[str]):
+    """A gateway executor mid-eviction, its shim stop and dir removals recorded in *ran*."""
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(_fake_key())}", coral=coral)
+    evicted = asyncio.Event()
+
+    async def _slow_teardown(_client) -> None:
+        await evicted.wait()
+
+    async def _stop_proxy() -> None:
+        ran.append("proxy stopped")
+
+    monkeypatch.setattr(executor, "_force_close_client", _slow_teardown)
+    monkeypatch.setattr(
+        executor, "_remove_unwrapped_claude_config_dir", lambda: ran.append("config dir")
+    )
+    monkeypatch.setattr(executor, "_remove_claude_config_seed", lambda: ran.append("seed"))
+    executor._gateway_shim = SimpleNamespace(aclose=_stop_proxy)
+    executor._clients["evicted"] = SimpleNamespace(client=object())
+    executor._evict_client_on_cancel("evicted")
+    return executor, evicted
+
+
+@pytest.mark.parametrize("coral", [True, False], ids=["coral", "non-coral"])
+@pytest.mark.parametrize("cut_short", ["bounded", "failed"])
+async def test_a_close_cut_short_still_stops_the_proxy_and_removes_the_private_dirs(
+    monkeypatch, coral, cut_short
+):
+    ran: list[str] = []
+    executor, evicted = _executor_with_a_slow_eviction(monkeypatch, coral, ran)
+    if cut_short == "bounded":
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(executor.close(), timeout=0.05)
+    else:
+        executor._clients["live"] = SimpleNamespace(client=object())
+        failure = RuntimeError("a session would not close")
+        monkeypatch.setattr(executor, "close_session", AsyncMock(side_effect=failure))
+        with pytest.raises(RuntimeError):
+            await executor.close()
+    stopped_while_evicting = (list(ran), executor._gateway_shim is None)
+    evicted.set()
+    await asyncio.gather(*executor._cancel_close_tasks)
+
+    assert stopped_while_evicting == (["proxy stopped", "config dir", "seed"], True)
+
+
+async def test_a_second_cancel_cannot_interrupt_the_proxys_stop(monkeypatch):
+    ran: list[str] = []
+    executor, evicted = _executor_with_a_slow_eviction(monkeypatch, True, ran)
+    stopping, release, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def _slow_stop() -> None:
+        stopping.set()
+        await release.wait()
+        ran.append("proxy stopped")
+        stopped.set()
+
+    executor._gateway_shim = SimpleNamespace(aclose=_slow_stop)
+    closing = asyncio.create_task(executor.close())
+    await asyncio.sleep(0)  # close() is now waiting for the eviction
+    closing.cancel()
+    await asyncio.wait_for(stopping.wait(), timeout=5)
+    closing.cancel()
+    await asyncio.wait({closing})
+    # The stop goes on by itself; the dirs did not wait for it.
+    left_behind = (closing.cancelled(), list(ran))
+    release.set()
+    await asyncio.wait_for(stopped.wait(), timeout=5)
+    evicted.set()
+    await asyncio.gather(*executor._cancel_close_tasks)
+
+    assert left_behind == (True, ["config dir", "seed"])
+    assert ran == ["config dir", "seed", "proxy stopped"] and executor._gateway_shim is None
+
+
+@pytest.mark.posix_only
+async def test_close_stops_a_credential_command_started_before_any_proxy(monkeypatch):
+    executor = _gateway_executor(monkeypatch, "databricks auth token --host https://x.example")
+    stopped = AsyncMock()
+    monkeypatch.setattr(executor._upstream_credential, "aclose", stopped)
+
+    await executor.close()
+
+    assert executor._gateway_shim is None and stopped.await_count == 1
+
+
+# CORAL(S124): one form of a static key everywhere: stripped, as the proxy sends it.
+@pytest.mark.posix_only
+async def test_a_key_configured_with_a_trailing_newline_is_found_without_it(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_EXPOSED_CODE
+
+    key = _fake_key()
+    executor = _gateway_executor(monkeypatch, f"printf %s {shlex.quote(key + chr(10))}")
+    monkeypatch.setenv("UNLISTED_COPY", f"Bearer {key}")
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        sent = _sha256(await executor._upstream_credential.get())
+    finally:
+        await executor.close()
+
+    assert sent == _sha256(key)
+    assert [(e.code, e.retryable) for e in events] == [(CORAL_CREDENTIAL_EXPOSED_CODE, False)]
+    assert "UNLISTED_COPY" in events[0].message and key not in events[0].message
+    assert fake_sdk.created_clients == [] and spawn_envs == []
+
+
+@pytest.mark.parametrize("configured", ["trailing-newline", "two-lines", "refused-by-the-client"])
+def test_a_static_key_reaches_no_log_however_its_listing_goes(monkeypatch, caplog, configured):
+    from omnigent.inner.claude_sdk_executor import _gateway_model_vocabulary
+    from omnigent.models import model_catalog
+
+    key = _fake_key()
+    written = {"trailing-newline": f"{key}\n", "two-lines": f"{key}\nmore"}.get(configured, key)
+    listed: list[str] = []
+
+    def _refuse(request: httpx.Request) -> httpx.Response:
+        # As a client library does when it will not send a header: its text quotes the value.
+        raise httpx.LocalProtocolError(f"Illegal header value {request.headers['authorization']}")
+
+    def _lister(provider):
+        listed.append(_sha256(provider.api_key or ""))
+        return model_catalog._listing_for_provider(
+            provider, transport=httpx.MockTransport(_refuse)
+        )
+
+    monkeypatch.setattr(model_catalog, "listing_for_provider", _lister)
+    caplog.set_level(logging.DEBUG)
+    # Another test in the session may have left this logger above DEBUG.
+    caplog.set_level(logging.DEBUG, logger="omnigent")
+    vocabulary = _gateway_model_vocabulary(_GATEWAY_URL, f"printf %s {shlex.quote(written)}")
+
+    assert vocabulary.alias_pins == {} and vocabulary.model_overrides == {}
+    # Two lines are no key at all, so nothing is listed; otherwise the stripped key is.
+    assert listed == ([] if configured == "two-lines" else [_sha256(key)])
+    assert key not in caplog.text
+    assert [record for record in caplog.records if record.exc_info] == []
+    logged = "not one printable token" if configured == "two-lines" else "LocalProtocolError"
+    assert logged in caplog.text
+
+
+# CORAL(S124): the credential leaves the machine over https only, the model listing included.
+@pytest.mark.posix_only
+@pytest.mark.parametrize("coral", [True, False], ids=["coral", "non-coral"])
+@pytest.mark.parametrize(
+    ("gateway_url", "names"),
+    [
+        ("http://gateway.example/anthropic", "https"),
+        # CORAL(S125): nor to a URL whose userinfo the client would send in its place
+        ("https://user:pw-fake@gateway.example/anthropic", "user name"),
+    ],
+    ids=["plain-http", "userinfo"],
+)
+async def test_a_coral_gateway_on_plain_http_elsewhere_is_refused_before_any_request(
+    monkeypatch, coral, gateway_url, names
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE
+    from omnigent.models import model_catalog
+
+    key = _fake_key()
+    listed = Mock(wraps=model_catalog.listing_for_provider)
+    monkeypatch.setattr(model_catalog, "listing_for_provider", listed)
+    # Never contacted: the autouse guard fails this test if anything tries.
+    executor = _gateway_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(key)}",
+        coral=coral,
+        base_url_override=gateway_url,
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        proxy_built = executor._gateway_shim is not None
+    finally:
+        await executor.close()
+
+    if not coral:  # as before: a plain shim, and the CLI holds the command itself
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        assert listed.call_count == 1 and proxy_built
+        return
+    assert [(e.code, e.retryable) for e in events] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    assert names in events[0].message
+    assert not [text for text in (key, "gateway.example", "pw-fake") if text in events[0].message]
+    assert not listed.called and not proxy_built
+    assert fake_sdk.created_clients == [] and spawn_envs == []
+
+
+@pytest.mark.parametrize(
+    ("upstream", "environ", "taken_from"),
+    [
+        # As urllib reads it: a lower-case name set to nothing means no proxy.
+        (_GATEWAY_URL, {"https_proxy": "", "HTTPS_PROXY": "http://upper.example:1"}, None),
+        (_GATEWAY_URL, {"https_proxy": "", "ALL_PROXY": "http://all.example:1"}, "ALL_PROXY"),
+        (_GATEWAY_URL, {"all_proxy": "", "ALL_PROXY": "http://all.example:1"}, None),
+        (
+            _GATEWAY_URL,
+            {"HTTPS_PROXY": "http://p.example:1", "no_proxy": "", "NO_PROXY": "gateway.example"},
+            "HTTPS_PROXY",
+        ),
+        # A loopback upstream is never reached through a forward proxy.
+        ("http://127.0.0.1:8080/anthropic", {"HTTP_PROXY": "http://p.example:1"}, None),
+        ("https://localhost:8443", {"https_proxy": "http://p.example:1"}, None),
+        ("http://[::1]:8080", {"ALL_PROXY": "http://p.example:1"}, None),
+    ],
+    ids=["empty-lower", "empty-lower-all", "empty-all", "empty-no-proxy", "v4", "name", "v6"],
+)
+def test_the_snapshots_proxy_is_read_as_urllib_reads_it_and_never_for_loopback(
+    upstream, environ, taken_from
+):
+    from omnigent.inner.claude_sdk_executor import _proxy_for_upstream
+
+    wanted = (taken_from, environ[taken_from]) if taken_from else None
+    assert _proxy_for_upstream(upstream, environ) == wanted
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize("snapshot_given", [True, False], ids=["snapshot", "harness-environ"])
+async def test_a_loopback_upstream_is_reached_directly_whatever_proxy_is_named(
+    monkeypatch, tmp_path, snapshot_given
+):
+    key = _fake_key()
+    upstream, forward_proxy = _RecordingUpstream(), _RecordingUpstream()
+    base_url = await upstream.start()
+    proxy_url = await forward_proxy.start()
+    for name in ("NO_PROXY", "no_proxy", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", proxy_url)
+    snapshot = {"PATH": os.defpath, "HOME": str(tmp_path), "HTTP_PROXY": proxy_url}
+    _list_models_for_real(monkeypatch)  # the model listing carries the key too
+    executor = _gateway_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(key)}",
+        base_url_override=base_url,
+        credential_env=snapshot if snapshot_given else None,
+    )
+    try:
+        _, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        statuses = await _through_the_proxy(fake_sdk.created_clients[0].options.env, key)
+    finally:
+        await executor.close()
+        await upstream.stop()
+        await forward_proxy.stop()
+
+    assert statuses == (200, 401)
+    seen = [(r.method, r.path) for r in upstream.requests]
+    assert seen == [("GET", "/v1/models"), ("POST", "/v1/messages")]
+    assert forward_proxy.requests == []
+
+
+async def test_the_model_listing_waits_a_bounded_time_for_a_credential_command(
+    monkeypatch, caplog
+):
+    from omnigent.inner import claude_sdk_executor
+
+    lister = Mock(side_effect=AssertionError("models were listed without a credential"))
+    monkeypatch.setattr("omnigent.models.model_catalog.listing_for_provider", lister)
+    monkeypatch.setattr(claude_sdk_executor, "_LISTING_CREDENTIAL_WAIT_S", 0.01)
+    executor = _gateway_executor(monkeypatch, "databricks auth token --host https://x.example")
+    never = asyncio.Event()
+    waiting = SimpleNamespace(get=never.wait)
+    caplog.set_level(logging.WARNING)
+
+    overrides = await executor._apply_gateway_model_vocabulary(
+        {"ANTHROPIC_BASE_URL": _GATEWAY_URL}, None, waiting
+    )
+
+    assert overrides == {} and not lister.called
+    (record,) = [r for r in caplog.records if "no credential to list" in r.getMessage()]
+    assert "TimeoutError" in record.getMessage() and record.exc_info is None
+
+
+# CORAL(S125): a Coral CLI behind the credential proxy takes only allow-listed names from the
+# user's settings env. The proxy's upstream hop takes the endpoint and network names, and only
+# from a settings file a step can neither place nor write.
+_SETTINGS_MODEL_NAMES = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+)
+_SETTINGS_OPT_OUTS = ("DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING", "DISABLE_AUTOUPDATER")
+_SETTINGS_UPSTREAM = "https://settings-gateway.example/anthropic"
+_SETTINGS_NETWORK_NAMES = (
+    "ANTHROPIC_BASE_URL",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+)
+
+
+def _settings_block(secret: str, **entries: str) -> dict[str, str]:
+    """A user settings env with every kind of name: for the CLI, for the proxy, for neither."""
+    return {
+        **{name: f"claude-test-{index}" for index, name in enumerate(_SETTINGS_MODEL_NAMES)},
+        "DISABLE_TELEMETRY": "1",
+        "DISABLE_ERROR_REPORTING": "TRUE",
+        "DISABLE_AUTOUPDATER": "true",
+        # Not a switch value: an opt-out's name carries nothing else to the CLI.
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": f"1 {secret}",
+        "ANTHROPIC_BASE_URL": _SETTINGS_UPSTREAM,
+        "HTTPS_PROXY": f"http://proxy-user:{secret}@proxy.example:3128",
+        "HTTP_PROXY": "http://plain-proxy.example:3128",
+        "NO_PROXY": "corp.example",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "ANTHROPIC_BEDROCK_BASE_URL": "https://bedrock.example",
+        "ANTHROPIC_AUTH_TOKEN": secret,
+        "ANTHROPIC_API_KEY": secret,
+        "ANTHROPIC_CUSTOM_HEADERS": f"x-api-key: {secret}",
+        "GITHUB_TOKEN": secret,
+        "AWS_SECRET_ACCESS_KEY": secret,
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
+        "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "1",
+        _FIRST_PARTY_FLAG: "1",
+        **entries,
+    }
+
+
+def _place_settings(monkeypatch, tmp_path: Path, place: str, block: dict[str, str]) -> Path:
+    """Write a throwaway user ``settings.json`` holding *block* at *place*; return the cwd."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = workspace / "home" if place == "home-under-cwd" else tmp_path / "home"
+    in_workspace = workspace / "claude-config"
+    configured, directory = {
+        "outside": (str(tmp_path / "claude-config"), tmp_path / "claude-config"),
+        "default-home": (None, home / ".claude"),
+        "home-under-cwd": (None, home / ".claude"),
+        "relative": ("claude-config", in_workspace),
+        "tilde": ("~/claude-config", workspace / "~" / "claude-config"),
+        "under-cwd": (str(in_workspace), in_workspace),
+        "linked-into-cwd": (str(tmp_path / "linked"), in_workspace),
+    }[place]
+    directory.mkdir(parents=True)
+    (directory / "settings.json").write_text(json.dumps({"env": block}))
+    if place == "linked-into-cwd":
+        (tmp_path / "linked").symlink_to(in_workspace, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(home))
+    if configured is None:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", configured)
+    # Whatever reaches the CLI under these names comes from the block, not this process.
+    for name in block:
+        for spelling in (name, name.lower()):
+            monkeypatch.delenv(spelling, raising=False)
+    return workspace
+
+
+def _settings_executor(monkeypatch, workspace: Path, key: str, snapshot: dict[str, str]):
+    """A Coral executor on a key, isolated and without setting sources, as the workflow builds.
+
+    Its harness environment is fake-only from here on, so a CLI's recorded spawn env holds
+    nothing of this process's, and its snapshot says where :func:`_place_settings` put the file.
+    """
+    placed = {
+        name: os.environ[name] for name in ("HOME", "CLAUDE_CONFIG_DIR") if name in os.environ
+    }
+    host = {"PATH": "/usr/bin:/bin", **placed}
+    monkeypatch.setattr(os, "environ", dict(host))
+    monkeypatch.setattr(tempfile, "tempdir", str(workspace.parent))  # the CLI's config dir
+    return _direct_key_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(key)}",
+        isolate_claude_config=True,
+        skills_filter="none",
+        cwd=str(workspace),
+        credential_env={**host, **snapshot},
+    )
+
+
+def _differing(names, env: dict[str, str], block: dict[str, str]) -> list[str]:
+    """The *names* whose value in *env* is not the block's, told by name only."""
+    return sorted(name for name in names if _sha256(env.get(name, "")) != _sha256(block[name]))
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize("place", ["outside", "default-home"])
+@pytest.mark.parametrize("no_proxy_covers", [False, True], ids=["proxied", "no-proxy-covers"])
+async def test_a_coral_cli_takes_allowed_settings_names_and_its_proxy_the_network_ones(
+    monkeypatch, tmp_path, place, no_proxy_covers
+):
+    from omnigent.inner.egress.ca import ensure_ca
+
+    key, secret = _fake_key(), _fake_key()
+    ca_file, _ = ensure_ca(cache_dir=tmp_path / "tls")
+    no_proxy = "corp.example,settings-gateway.example" if no_proxy_covers else "corp.example"
+    block = _settings_block(secret, NO_PROXY=no_proxy, NODE_EXTRA_CA_CERTS=str(ca_file))
+    workspace = _place_settings(monkeypatch, tmp_path, place, block)
+    # The harness's own endpoint and proxy come after the settings block's, as in the CLI.
+    snapshot = {
+        "ANTHROPIC_BASE_URL": "https://snapshot.example/anthropic",
+        "HTTPS_PROXY": "http://snapshot-proxy.example:3128",
+    }
+    # Nothing is sent: the autouse guard fails this test on any contact outside loopback.
+    executor = _settings_executor(monkeypatch, workspace, key, snapshot)
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        shim = executor._gateway_shim
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+        proxy, ca, reads_environment = (
+            shim._upstream_proxy,
+            shim._upstream_ca_file,
+            shim._upstream_env_proxies,
+        )
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    # Model routing, opt-outs with a switch value, a proxy without userinfo, and the CA file.
+    as_written = {*_SETTINGS_MODEL_NAMES, *_SETTINGS_OPT_OUTS, "HTTP_PROXY", "NODE_EXTRA_CA_CERTS"}
+    # Under these two names the CLI holds its own values: the proxy's URL, loopback unproxied.
+    own = {"ANTHROPIC_BASE_URL", "NO_PROXY"}
+    for cli_env in (client.options.env, spawn_envs[0]):
+        assert sorted(set(block) & set(cli_env)) == sorted(as_written | own)
+        assert _differing(as_written, cli_env, block) == []
+        assert sorted(name for name, value in cli_env.items() if secret in value) == []
+        assert cli_env["ANTHROPIC_BASE_URL"] == shim_url
+        assert cli_env["NO_PROXY"].split(",") == [*no_proxy.split(","), "127.0.0.1", "localhost"]
+    assert secret not in f"{client.options.settings}{json.dumps(client.options.extra_args)}"
+    # The proxy forwards to the settings endpoint, through the settings proxy with its
+    # userinfo unless the settings NO_PROXY covers that endpoint, trusting the settings CA.
+    assert upstream_url == _SETTINGS_UPSTREAM
+    wanted = None if no_proxy_covers else block["HTTPS_PROXY"]
+    assert (proxy is None, _sha256(proxy or "")) == (wanted is None, _sha256(wanted or ""))
+    assert ca == str(ca_file) and reads_environment is False
+
+
+# CORAL(S125): through the real harness factory, the user's settings endpoint gets the key and
+# the CLI gets none of the settings block's credentials or provider switches.
+@pytest.mark.posix_only
+async def test_a_coral_harness_sends_its_key_to_the_settings_endpoint_and_its_cli_no_secret(
+    monkeypatch, tmp_path
+):
+    key, secret = _fake_key(), _fake_key()
+    upstream = _RecordingUpstream()
+    base_url = await upstream.start()
+    block = _settings_block(secret, ANTHROPIC_BASE_URL=base_url)
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    environ = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-config"),
+        "HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL": "1",
+        "HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG": "1",
+        "HARNESS_CLAUDE_SDK_SKILLS_FILTER": json.dumps("none"),
+        "HARNESS_CLAUDE_SDK_CWD": str(workspace),
+        "HARNESS_CLAUDE_SDK_API_KEY_HELPER": f"printf %s {shlex.quote(key)}",
+        # The host's endpoint comes after the user's settings, as it did in the CLI.
+        "ANTHROPIC_BASE_URL": "https://host-endpoint.example/anthropic",
+    }
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))  # the CLI's private config dir
+    executor = _coral_harness_factory(monkeypatch, environ)()
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        (client,) = fake_sdk.created_clients
+        statuses = await _through_the_proxy(client.options.env, key)
+        shim = executor._gateway_shim
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+    finally:
+        await executor.close()
+        await upstream.stop()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    as_written = {*_SETTINGS_MODEL_NAMES, *_SETTINGS_OPT_OUTS, "HTTP_PROXY"}
+    for cli_env in (client.options.env, spawn_envs[0]):
+        assert sorted(set(block) & set(cli_env)) == sorted(
+            as_written | {"ANTHROPIC_BASE_URL", "NO_PROXY"}
+        )
+        assert _differing(as_written, cli_env, block) == []
+        assert sorted(name for name, value in cli_env.items() if secret in value) == []
+        assert sorted(name for name, value in cli_env.items() if key in value) == []
+        assert cli_env["ANTHROPIC_BASE_URL"] == shim_url
+    assert shim_url != base_url and upstream_url == base_url
+    # The settings endpoint received the key, on the CLI's own request only.
+    assert statuses == (200, 401)
+    (proxied,) = upstream.requests
+    assert (proxied.method, proxied.path) == ("POST", "/v1/messages")
+    assert _sha256(proxied.headers["x-api-key"]) == _sha256(key)
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "place", ["relative", "tilde", "under-cwd", "linked-into-cwd", "home-under-cwd"]
+)
+async def test_a_settings_file_a_step_could_place_or_write_cannot_steer_the_proxy(
+    monkeypatch, tmp_path, caplog, place
+):
+    from omnigent.inner.egress.ca import ensure_ca
+
+    key, secret = _fake_key(), _fake_key()
+    ca_file, _ = ensure_ca(cache_dir=tmp_path / "tls")
+    block = _settings_block(secret, NODE_EXTRA_CA_CERTS=str(ca_file))
+    del block["ANTHROPIC_BASE_URL"]  # an endpoint there refuses the turn: the next test
+    workspace = _place_settings(monkeypatch, tmp_path, place, block)
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor")
+    fake_sdk = _make_recovery_fake_sdk()
+    executor = _settings_executor(
+        monkeypatch, workspace, key, {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT}
+    )
+    try:
+        for session in ("first", "second"):
+            events = await _session_turn(executor, fake_sdk, session)
+            assert any(isinstance(e, TurnComplete) for e in events), events
+        shim = executor._gateway_shim
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+        proxy, ca = shim._upstream_proxy, shim._upstream_ca_file
+    finally:
+        await executor.close()
+
+    # Model routing and opt-outs still reach the CLI; the network names reach neither the
+    # CLI nor its proxy, which keeps the harness's own endpoint.
+    as_written = {*_SETTINGS_MODEL_NAMES, *_SETTINGS_OPT_OUTS}
+    for client in fake_sdk.created_clients:
+        cli_env = client.options.env
+        assert sorted(set(block) & set(cli_env)) == sorted(as_written | {"NO_PROXY"})
+        assert _differing(as_written, cli_env, block) == []
+        assert cli_env["ANTHROPIC_BASE_URL"] == shim_url
+        assert cli_env["NO_PROXY"].split(",") == ["127.0.0.1", "localhost"]
+    assert (upstream_url, proxy, ca) == (_OTHER_ENDPOINT, None, None)
+    # One warning per ignored name for the executor's life, naming the variable only.
+    warnings = [r.getMessage() for r in caplog.records if "Claude settings" in r.getMessage()]
+    ignored = sorted(set(_SETTINGS_NETWORK_NAMES) - {"ANTHROPIC_BASE_URL"})
+    assert sorted(name for name in ignored for w in warnings if f" {name} " in w) == ignored
+    shown = (secret, "proxy.example", "corp.example", "ca.pem")
+    assert not [text for text in (*shown, str(tmp_path)) if text in "\n".join(warnings)]
+    assert secret not in caplog.text
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "ca_path",
+    # The last cannot be resolved, so it cannot be shown to be outside the cwd.
+    ["certs/ca.pem", "~/ca.pem", "<cwd>/certs/ca.pem", "", "/elsewhere/\x00/ca.pem"],
+)
+async def test_a_settings_ca_file_must_be_absolute_and_outside_the_steps_directory(
+    monkeypatch, tmp_path, caplog, ca_path
+):
+    key = _fake_key()
+    block = {"ANTHROPIC_BASE_URL": _SETTINGS_UPSTREAM, "ANTHROPIC_MODEL": "claude-test-main"}
+    workspace = tmp_path / "workspace"
+    block["NODE_EXTRA_CA_CERTS"] = ca_path.replace("<cwd>", str(workspace))
+    assert _place_settings(monkeypatch, tmp_path, "outside", block) == workspace
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor")
+    executor = _settings_executor(monkeypatch, workspace, key, {})
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        shim = executor._gateway_shim
+        upstream_url, ca = shim._upstream_base_url, shim._upstream_ca_file
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    # Only the CA file is ignored: the trusted file's endpoint and model name are taken.
+    assert "NODE_EXTRA_CA_CERTS" not in client.options.env and ca is None
+    assert upstream_url == _SETTINGS_UPSTREAM
+    assert _differing(["ANTHROPIC_MODEL"], client.options.env, block) == []
+    warnings = [r.getMessage() for r in caplog.records if "Claude settings" in r.getMessage()]
+    assert len(warnings) == 1 and " NODE_EXTRA_CA_CERTS " in warnings[0]
+    assert not [text for text in ("ca.pem", "certs", str(tmp_path)) if text in warnings[0]]
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("configured", "names", "proxy"),
+    [
+        ("http://settings-gateway.example/anthropic", "https", None),
+        ("settings-gateway.example/anthropic", "https", None),
+        ("https://settings-gateway.example/v1?beta=true", "query", None),
+        # The client would send userinfo in the credential's place.
+        ("https://user:<secret>@settings-gateway.example/anthropic", "user name", None),
+        ("https://<secret>@settings-gateway.example", "user name", None),
+        # Two parsers read two hosts here: this one loopback, the CLI's the other.
+        ("http://<secret>.example\\@localhost:8080", "backslash", None),
+        ("https:///anthropic", "a host", None),
+        # A port that is no number, also when a proxy would be chosen for the upstream.
+        ("https://settings-gateway.example:notaport", "numeric port", None),
+        ("https://settings-gateway.example:notaport", "numeric port", "http://proxy.example:1"),
+        ("https://settings-gateway:<secret>", "numeric port", "http://proxy.example:1"),
+    ],
+    ids=[
+        "plain-http",
+        "no-scheme",
+        "query",
+        "userinfo",
+        "password-only",
+        "backslash",
+        "no-host",
+        "port",
+        "port-with-proxy",
+        "secret-as-port",
+    ],
+)
+async def test_a_settings_upstream_the_key_may_not_go_to_refuses_the_turn(
+    monkeypatch, tmp_path, caplog, configured, names, proxy
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE
+
+    key, secret = _fake_key(), f"pw-{secrets.token_hex(8)}"
+    block = {"ANTHROPIC_BASE_URL": configured.replace("<secret>", secret)}
+    if proxy is not None:
+        block["HTTPS_PROXY"] = proxy
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    caplog.set_level(logging.DEBUG)
+    # The harness's own endpoint would pass: the settings one decides, so it is the one checked.
+    executor = _settings_executor(
+        monkeypatch, workspace, key, {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT}
+    )
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        proxy_built = executor._gateway_shim is not None
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in events] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    assert names in events[0].message
+    shown = (key, secret, "settings-gateway", "beta", "notaport", "proxy.example")
+    assert not [text for text in shown if text in f"{events[0].message}{caplog.text}"]
+    assert not proxy_built and fake_sdk.created_clients == [] and spawn_envs == []
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("settings_url", "snapshot_url", "upstream", "first_party"),
+    [
+        (_OTHER_ENDPOINT, _ANTHROPIC_API, _OTHER_ENDPOINT, False),
+        (_ANTHROPIC_API, _OTHER_ENDPOINT, _ANTHROPIC_API, True),
+        # Set to nothing counts as unset, as in the CLI: the next source decides.
+        ("", _OTHER_ENDPOINT, _OTHER_ENDPOINT, False),
+        ("  ", None, _ANTHROPIC_API, True),
+        (None, _OTHER_ENDPOINT, _OTHER_ENDPOINT, False),
+        (f" {_OTHER_ENDPOINT}/\n", None, _OTHER_ENDPOINT, False),
+    ],
+    ids=["settings-first", "first-party", "empty", "blank", "unset", "whitespace"],
+)
+async def test_the_settings_endpoint_comes_before_the_harnesss_and_then_the_anthropic_api(
+    monkeypatch, tmp_path, settings_url, snapshot_url, upstream, first_party
+):
+    block = {} if settings_url is None else {"ANTHROPIC_BASE_URL": settings_url}
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv(_FIRST_PARTY_FLAG, raising=False)
+    snapshot = {} if snapshot_url is None else {"ANTHROPIC_BASE_URL": snapshot_url}
+    # Nothing is sent: the autouse guard fails this test on any contact outside loopback.
+    executor = _settings_executor(monkeypatch, workspace, _fake_key(), snapshot)
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        upstream_url = executor._gateway_shim._upstream_base_url
+        reads_environment = executor._gateway_shim._upstream_env_proxies
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    # The first-party rule reads whichever endpoint won.
+    assert upstream_url == upstream
+    # An endpoint alone names no proxy: the hop's proxy is still the harness environment's.
+    assert reads_environment is True
+    assert client.options.env.get(_FIRST_PARTY_FLAG) == ("1" if first_party else None)
+
+
+@pytest.mark.posix_only
+async def test_a_settings_change_after_the_proxy_started_neither_moves_nor_refuses_it(
+    monkeypatch, tmp_path
+):
+    block = {"ANTHROPIC_BASE_URL": _SETTINGS_UPSTREAM, "ANTHROPIC_MODEL": "claude-test-first"}
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    settings_file = tmp_path / "claude-config" / "settings.json"
+    fake_sdk = _make_recovery_fake_sdk()
+    executor = _settings_executor(monkeypatch, workspace, _fake_key(), {})
+    try:
+        first = await _session_turn(executor, fake_sdk, "first")
+        # An endpoint that would refuse a first turn; the running proxy keeps the one it has.
+        changed = {"ANTHROPIC_BASE_URL": "http://elsewhere.example", "ANTHROPIC_MODEL": "next"}
+        settings_file.write_text(json.dumps({"env": changed}))
+        second = await _session_turn(executor, fake_sdk, "second")
+        upstream_url = executor._gateway_shim._upstream_base_url
+    finally:
+        await executor.close()
+
+    for events in (first, second):
+        assert any(isinstance(e, TurnComplete) for e in events), events
+    assert upstream_url == _SETTINGS_UPSTREAM
+    # The names for the CLI are read at each turn, as the whole block was.
+    models = [client.options.env["ANTHROPIC_MODEL"] for client in fake_sdk.created_clients]
+    assert models == ["claude-test-first", "next"]
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("snapshot_proxies", "settings_proxies", "taken_from"),
+    [
+        (
+            {"HTTPS_PROXY": "http://snapshot.example:1"},
+            {"HTTPS_PROXY": "http://settings.example:1"},
+            "HTTPS_PROXY",
+        ),
+        # A settings name replaces the harness's under either spelling.
+        (
+            {"https_proxy": "http://snapshot.example:1"},
+            {"HTTPS_PROXY": "http://settings.example:1"},
+            "HTTPS_PROXY",
+        ),
+        ({"HTTPS_PROXY": "http://snapshot.example:1"}, {"ALL_PROXY": "http://all.example:1"}, ""),
+        ({}, {"all_proxy": "http://user:<password>@all.example:1"}, "all_proxy"),
+        # As urllib reads it: a lower-case name set to nothing means no proxy.
+        ({"HTTPS_PROXY": "http://snapshot.example:1"}, {"https_proxy": ""}, None),
+        # The settings NO_PROXY decides for the harness's proxy too, and replaces its NO_PROXY.
+        ({"HTTPS_PROXY": "http://snapshot.example:1"}, {"NO_PROXY": "gateway.example"}, None),
+        (
+            {"HTTPS_PROXY": "http://snapshot.example:1", "no_proxy": "gateway.example"},
+            {"NO_PROXY": "other.example"},
+            "",
+        ),
+        ({"HTTPS_PROXY": "http://snapshot.example:1"}, {}, ""),
+    ],
+    ids=[
+        "settings-first",
+        "either-spelling",
+        "scheme-before-all",
+        "all-with-userinfo",
+        "empty-lower-case",
+        "settings-no-proxy",
+        "settings-no-proxy-replaces",
+        "no-settings-names",
+    ],
+)
+async def test_the_proxys_upstream_hop_takes_settings_proxies_before_the_harnesss(
+    monkeypatch, tmp_path, snapshot_proxies, settings_proxies, taken_from
+):
+    password = f"pw-{secrets.token_hex(8)}"
+    settings_proxies = {
+        name: value.replace("<password>", password) for name, value in settings_proxies.items()
+    }
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", settings_proxies)
+    for name in ("HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+        for spelling in (name, name.lower()):
+            monkeypatch.delenv(spelling, raising=False)
+    # "" names the harness's own proxy; None means the upstream is reached with no proxy.
+    wanted = settings_proxies.get(taken_from) if taken_from else None
+    if taken_from == "":
+        wanted = snapshot_proxies["HTTPS_PROXY"]
+    snapshot = {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT, **snapshot_proxies}
+    executor = _settings_executor(monkeypatch, workspace, _fake_key(), snapshot)
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        shim = executor._gateway_shim
+        chosen, reads_environment = shim._upstream_proxy, shim._upstream_env_proxies
+        cli_env = fake_sdk.created_clients[0].options.env
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert (chosen is None, _sha256(chosen or "")) == (wanted is None, _sha256(wanted or ""))
+    # Once settings names took part, the environment's proxies are not read a second time.
+    assert reads_environment is (not settings_proxies)
+    # The CLI gets the settings proxy names without userinfo, and no password.
+    to_cli = {name for name, value in settings_proxies.items() if "@" not in value}
+    assert sorted(set(settings_proxies) & set(cli_env)) == sorted(
+        to_cli | ({"NO_PROXY"} & set(settings_proxies))
+    )
+    assert _differing(to_cli - {"NO_PROXY", "no_proxy"}, cli_env, settings_proxies) == []
+    assert sorted(name for name, value in cli_env.items() if password in value) == []
+
+
+# CORAL(S125): where nothing was merged before, nothing is merged or used now: on a gateway, and
+# for a CLI that loads user settings itself (from its own private config dir).
+@pytest.mark.posix_only
+@pytest.mark.parametrize("case", ["gateway", "cli-loads-user-settings"])
+async def test_a_coral_cli_that_never_got_the_settings_block_still_gets_and_uses_none_of_it(
+    monkeypatch, tmp_path, case
+):
+    from omnigent.inner.egress.ca import ensure_ca
+
+    key, secret = _fake_key(), _fake_key()
+    ca_file, _ = ensure_ca(cache_dir=tmp_path / "tls")
+    block = _settings_block(secret, NODE_EXTRA_CA_CERTS=str(ca_file))
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    build = _gateway_executor if case == "gateway" else _direct_key_executor
+    executor = build(
+        monkeypatch,
+        f"printf %s {shlex.quote(key)}",
+        isolate_claude_config=True,
+        skills_filter="none" if case == "gateway" else "all",
+        cwd=str(workspace),
+        credential_env={
+            "PATH": "/usr/bin:/bin",
+            "ANTHROPIC_BASE_URL": _OTHER_ENDPOINT,
+            "NODE_EXTRA_CA_CERTS": str(ca_file),
+        },
+    )
+    monkeypatch.setattr(executor, "_apply_gateway_model_vocabulary", AsyncMock(return_value={}))
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        shim = executor._gateway_shim
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+        options = (shim._upstream_proxy, shim._upstream_ca_file, shim._upstream_env_proxies)
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    # Its own names only, none with the block's value: the shim's URL, loopback kept off any
+    # proxy, and a gateway's own helper cache time.
+    own = ["ANTHROPIC_BASE_URL", "NO_PROXY"]
+    if case == "gateway":
+        own.insert(1, "CLAUDE_CODE_API_KEY_HELPER_TTL_MS")
+    assert sorted(set(block) & set(client.options.env)) == own
+    assert _differing(own, client.options.env, block) == own
+    assert client.options.env["ANTHROPIC_BASE_URL"] == shim_url
+    assert client.options.env["NO_PROXY"].split(",") == ["127.0.0.1", "localhost"]
+    assert upstream_url == (_GATEWAY_URL if case == "gateway" else _OTHER_ENDPOINT)
+    # The host's CA file is for a direct-key proxy; a gateway's shim never took one.
+    assert options == (None, None if case == "gateway" else str(ca_file), True)
+
+
+# CORAL(S125): off POSIX no credential proxy runs, so a Coral CLI keeps the whole block, the
+# endpoint it names included.
+async def test_a_coral_cli_with_no_credential_proxy_keeps_the_whole_settings_block(
+    monkeypatch, tmp_path
+):
+    from omnigent.inner import claude_sdk_executor
+
+    key, secret = _fake_key(), _fake_key()
+    block = _settings_block(secret)
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    monkeypatch.setattr(claude_sdk_executor, "IS_POSIX", False)
+    executor = _settings_executor(monkeypatch, workspace, key, {})
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        proxy_built = executor._gateway_shim is not None
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    # All but the subscription token a Coral CLI never gets.
+    kept = set(block) - {"ANTHROPIC_AUTH_TOKEN"}
+    assert sorted(set(block) & set(client.options.env)) == sorted(kept)
+    assert _differing(kept, client.options.env, block) == [] and not proxy_built
+
+
+@pytest.mark.parametrize(
+    ("configured", "steers"),
+    [
+        ("<outside>", True),
+        ("", True),  # unset or empty: the default dir in the user's home
+        ("claude-config", False),
+        ("./claude-config", False),
+        # Relative is enough, wherever it leads: the CLI's directory decides what it names.
+        ("../claude-config", False),
+        ("~/claude-config", False),
+        ("<cwd>/claude-config", False),
+        ("<cwd>/../workspace/claude-config", False),
+        # Under the cwd as written is enough, wherever the segments lead.
+        ("<cwd>/../claude-config", False),
+        ("<outside>/", True),
+        (" <outside>", False),  # not absolute as written
+    ],
+)
+@pytest.mark.parametrize("cwd_given", [True, False], ids=["cwd", "process-cwd"])
+def test_only_an_absolute_config_dir_outside_the_cwd_may_steer_the_proxy(
+    monkeypatch, tmp_path, configured, steers, cwd_given
+):
+    from omnigent.inner.claude_sdk_executor import _settings_file_steers_upstream
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    places = {"<outside>": str(tmp_path / "claude-config"), "<cwd>": str(workspace)}
+    for marker, place in places.items():
+        configured = configured.replace(marker, place)
+    where = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": configured}
+
+    assert _settings_file_steers_upstream(str(workspace) if cwd_given else None, where) is steers
+
+
+@pytest.mark.parametrize(
+    ("value", "kept"),
+    [
+        ("1", True),
+        ("true", True),
+        ("TRUE", True),
+        # A settings file never switches an opt-out of the host's off.
+        ("0", False),
+        ("false", False),
+        ("False", False),
+        ("yes", False),
+        ("on", False),
+        ("2", False),
+        ("", False),
+        (" 1", False),
+        ("1\n", False),
+        ("1;echo", False),
+        ("tRuE", True),
+        ("FALSE", False),
+        ("1 ", False),
+        ("\t1", False),
+        (" true ", False),
+        ("true\r\n", False),
+        ("\uff11", False),  # a full-width 1
+        ("01", False),
+        ("true,false", False),
+    ],
+)
+def test_a_settings_opt_out_reaches_the_cli_only_with_a_switch_value(value, kept):
+    from omnigent.inner.claude_sdk_executor import _allowed_settings_env
+
+    names = (*_SETTINGS_OPT_OUTS, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+    block = dict.fromkeys(names, value)
+    for trusted in (True, False):
+        taken = _allowed_settings_env(block, trusted=trusted, cwd=None)
+        assert sorted(taken.cli) == (sorted(names) if kept else [])
+        assert set(taken.cli.values()) <= {value}  # as written, whatever its case
+        assert (taken.upstream, taken.ignored) == ({}, ())
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "to_cli"),
+    [
+        ("HTTPS_PROXY", "http://proxy.example:3128", True),
+        ("https_proxy", "http://proxy.example:3128", True),
+        ("http_proxy", "proxy.example:3128", True),
+        ("ALL_PROXY", "socks5://proxy.example:1080", True),
+        ("no_proxy", "corp.example,.internal", True),
+        ("NO_PROXY", "", True),
+        # An @ is userinfo with or without a scheme, and under any of the names.
+        ("HTTPS_PROXY", "http://user:<password>@proxy.example:3128", False),
+        ("http_proxy", "user:<password>@proxy.example:3128", False),
+        ("all_proxy", "http://<password>@proxy.example", False),
+        ("NO_PROXY", "<password>@corp.example", False),
+        ("HTTPS_PROXY", "http://user:<password>@[2001:db8::1]:3128", False),
+        ("https_proxy", "//user:<password>@proxy.example", False),
+        ("HTTP_PROXY", " http://user:<password>@proxy.example ", False),
+        ("ALL_PROXY", "socks5h://user:<password>@proxy.example:1080", False),
+        ("HTTPS_PROXY", "http://user%40corp:<password>@proxy.example", False),
+        ("HTTPS_PROXY", "http://us@er:<password>@proxy.example", False),
+        # Any @ keeps the value from the CLI, also where no parser would read userinfo.
+        ("HTTPS_PROXY", "http://proxy.example:3128/<password>@", False),
+        ("HTTPS_PROXY", "http://[2001:db8::1]:3128", True),
+        ("HTTPS_PROXY", "http://proxy.example:3128/", True),
+        # A path beyond /, a query or a fragment can hold a credential as userinfo does.
+        ("HTTPS_PROXY", "http://proxy.example:3128/<password>/", False),
+        ("https_proxy", "http://proxy.example:3128/?token=<password>", False),
+        ("ALL_PROXY", "proxy.example:3128?<password>", False),
+        ("HTTP_PROXY", "http://proxy.example:3128#<password>", False),
+        ("NO_PROXY", "*", True),
+        ("no_proxy", "10.0.0.0/8,.corp.example,host.example:8443", True),
+    ],
+)
+def test_a_settings_proxy_with_userinfo_goes_to_the_upstream_hop_only(name, value, to_cli):
+    from omnigent.inner.claude_sdk_executor import _allowed_settings_env
+
+    password = f"pw-{secrets.token_hex(8)}"
+    block = {name: value.replace("<password>", password), "PROXY_PASSWORD": password}
+
+    taken = _allowed_settings_env(block, trusted=True, cwd=None)
+    assert sorted(taken.cli) == ([name] if to_cli else [])
+    assert sorted(taken.upstream) == [name] and taken.ignored == ()
+    assert _differing([name], taken.upstream, block) == []
+    # From a file a step could write, the name goes nowhere and is reported by name.
+    untrusted = _allowed_settings_env(block, trusted=False, cwd=None)
+    assert (untrusted.cli, untrusted.upstream, untrusted.ignored) == ({}, {}, (name,))
+    # A spelling no client reads is no proxy name: it is dropped like any other.
+    for trusted in (True, False):
+        mixed = _allowed_settings_env({name.title(): block[name]}, trusted=trusted, cwd=None)
+        assert (mixed.cli, mixed.upstream, mixed.ignored) == ({}, {}, ())
+
+
+# CORAL(S125): a settings file that holds no usable env block gives a Coral CLI and its proxy
+# nothing, and stops no turn.
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "settings_text",
+    [
+        None,
+        "",
+        "{not json",
+        "[]",
+        "{}",
+        '{"env": null}',
+        '{"env": ["ANTHROPIC_MODEL=claude-test-list"]}',
+        '{"env": "ANTHROPIC_BASE_URL=https://settings-gateway.example"}',
+    ],
+    ids=["missing", "empty", "malformed", "list", "no-env", "null", "env-list", "env-text"],
+)
+async def test_a_settings_file_with_no_env_block_gives_a_coral_cli_and_its_proxy_nothing(
+    monkeypatch, tmp_path, caplog, settings_text
+):
+    block = _settings_block(_fake_key())
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    settings_file = tmp_path / "claude-config" / "settings.json"
+    settings_file.unlink()
+    if settings_text is not None:
+        settings_file.write_text(settings_text)
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor")
+    executor = _settings_executor(
+        monkeypatch, workspace, _fake_key(), {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT}
+    )
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        shim = executor._gateway_shim
+        shim_url, upstream_url = shim.base_url, shim._upstream_base_url
+        options = (shim._upstream_proxy, shim._upstream_ca_file, shim._upstream_env_proxies)
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    # Under the block's names the CLI holds only its own two values.
+    assert sorted(set(block) & set(client.options.env)) == ["ANTHROPIC_BASE_URL", "NO_PROXY"]
+    assert client.options.env["ANTHROPIC_BASE_URL"] == shim_url
+    assert client.options.env["NO_PROXY"].split(",") == ["127.0.0.1", "localhost"]
+    assert upstream_url == _OTHER_ENDPOINT and options == (None, None, True)
+    assert not [r for r in caplog.records if "Claude settings" in r.getMessage()]
+
+
+# CORAL(S125): only string values are settings: a number, a switch or a list under an allowed
+# name reaches neither the CLI nor the proxy.
+@pytest.mark.posix_only
+async def test_a_settings_value_that_is_not_text_reaches_neither_the_cli_nor_the_proxy(
+    monkeypatch, tmp_path
+):
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", {})
+    env_block = {
+        "ANTHROPIC_MODEL": 7,
+        "ANTHROPIC_SMALL_FAST_MODEL": "claude-test-kept",
+        "DISABLE_TELEMETRY": True,
+        "DISABLE_AUTOUPDATER": 1,
+        "ANTHROPIC_BASE_URL": [_SETTINGS_UPSTREAM],
+        "HTTPS_PROXY": {"url": "http://proxy.example:3128"},
+        "NODE_EXTRA_CA_CERTS": None,
+    }
+    for name in env_block:
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "claude-config" / "settings.json").write_text(json.dumps({"env": env_block}))
+    executor = _settings_executor(
+        monkeypatch, workspace, _fake_key(), {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT}
+    )
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        shim = executor._gateway_shim
+        upstream_url = shim._upstream_base_url
+        options = (shim._upstream_proxy, shim._upstream_ca_file, shim._upstream_env_proxies)
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    taken = sorted(set(env_block) & set(client.options.env))
+    assert taken == ["ANTHROPIC_BASE_URL", "ANTHROPIC_SMALL_FAST_MODEL"]
+    assert client.options.env["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-test-kept"
+    assert upstream_url == _OTHER_ENDPOINT and options == (None, None, True)
+
+
+# CORAL(S125): until the proxy starts, each turn reads the settings endpoint again, so a turn
+# refused for it succeeds once the user has fixed the file.
+@pytest.mark.posix_only
+async def test_a_refused_settings_endpoint_is_read_again_until_the_proxy_starts(
+    monkeypatch, tmp_path
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE
+
+    block = {"ANTHROPIC_BASE_URL": "http://settings-gateway.example/anthropic"}
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    settings_file = tmp_path / "claude-config" / "settings.json"
+    fake_sdk = _make_recovery_fake_sdk()
+    executor = _settings_executor(
+        monkeypatch, workspace, _fake_key(), {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT}
+    )
+    try:
+        refused = await _session_turn(executor, fake_sdk, "first")
+        proxy_built = executor._gateway_shim is not None
+        settings_file.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": _SETTINGS_UPSTREAM}}))
+        fixed = await _session_turn(executor, fake_sdk, "second")
+        upstream_url = executor._gateway_shim._upstream_base_url
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in refused] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    assert not proxy_built
+    assert any(isinstance(e, TurnComplete) for e in fixed), fixed
+    assert upstream_url == _SETTINGS_UPSTREAM and len(fake_sdk.created_clients) == 1
+
+
+# CORAL(S125): the user named an endpoint for the key in a settings file a step could place or
+# write. The turn is refused, rather than the key going to the harness's endpoint in its place.
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    "place", ["relative", "tilde", "under-cwd", "linked-into-cwd", "home-under-cwd"]
+)
+async def test_an_endpoint_in_a_settings_file_a_step_could_write_refuses_the_turn(
+    monkeypatch, tmp_path, caplog, place
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE
+
+    key = _fake_key()
+    block = {"ANTHROPIC_BASE_URL": "https://planted.example/anthropic", "HTTPS_PROXY": "p:1"}
+    workspace = _place_settings(monkeypatch, tmp_path, place, block)
+    caplog.set_level(logging.DEBUG)
+    executor = _settings_executor(
+        monkeypatch, workspace, key, {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT}
+    )
+    listing = AsyncMock(return_value={})
+    monkeypatch.setattr(executor, "_apply_gateway_model_vocabulary", listing)
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        proxy_built = executor._gateway_shim is not None
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in events] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    # Names the variable and the rule, and no value: no endpoint, no path, no key.
+    message = events[0].message
+    assert "ANTHROPIC_BASE_URL" in message and "not trusted" in message
+    shown = (key, "planted", "gateway.example", str(tmp_path), "claude-config")
+    assert not [text for text in shown if text in f"{message}{caplog.text}"]
+    # Before the proxy, the model listing and any CLI.
+    assert not proxy_built and not listing.called
+    assert fake_sdk.created_clients == [] and spawn_envs == []
+
+
+# CORAL(S125): an endpoint set to nothing there names none, so nothing is refused; and once
+# the proxy runs, where the key goes is settled, so a file a step writes later stops no turn.
+@pytest.mark.posix_only
+async def test_a_blank_or_late_untrusted_settings_endpoint_refuses_no_turn(
+    monkeypatch, tmp_path, caplog
+):
+    workspace = _place_settings(monkeypatch, tmp_path, "under-cwd", {"ANTHROPIC_BASE_URL": " "})
+    settings_file = workspace / "claude-config" / "settings.json"
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor")
+    fake_sdk = _make_recovery_fake_sdk()
+    # Nothing is sent: the autouse guard fails this test on any contact outside loopback.
+    executor = _settings_executor(monkeypatch, workspace, _fake_key(), {})
+    try:
+        blank = await _session_turn(executor, fake_sdk, "first")
+        planted = {"ANTHROPIC_BASE_URL": "http://planted.example/anthropic"}
+        settings_file.write_text(json.dumps({"env": planted}))
+        late = await _session_turn(executor, fake_sdk, "second")
+        upstream_url = executor._gateway_shim._upstream_base_url
+    finally:
+        await executor.close()
+
+    for events in (blank, late):
+        assert any(isinstance(e, TurnComplete) for e in events), events
+    assert upstream_url == _ANTHROPIC_API
+    assert [c.options.env[_FIRST_PARTY_FLAG] for c in fake_sdk.created_clients] == ["1", "1"]
+    (warning,) = [r.getMessage() for r in caplog.records if "Claude settings" in r.getMessage()]
+    assert " ANTHROPIC_BASE_URL " in warning and "planted" not in caplog.text
+
+
+# CORAL(S125): with both spellings of a proxy name in the settings, each goes its own way: the
+# upstream hop reads them as urllib does, and the CLI gets whichever holds no userinfo.
+@pytest.mark.posix_only
+async def test_both_spellings_of_a_settings_proxy_name_each_go_their_own_way(
+    monkeypatch, tmp_path
+):
+    password = f"pw-{secrets.token_hex(8)}"
+    block = {
+        "HTTPS_PROXY": "http://upper.example:3128",
+        "https_proxy": f"http://user:{password}@lower.example:3128",
+        "NO_PROXY": "upper.example",
+        "no_proxy": "lower.example",
+    }
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    # The harness's own lower-case names are replaced with their upper-case twins.
+    snapshot = {
+        "ANTHROPIC_BASE_URL": "https://gateway.upper.example/anthropic",
+        "https_proxy": "http://snapshot.example:1",
+        "no_proxy": "gateway.upper.example",
+    }
+    executor = _settings_executor(monkeypatch, workspace, _fake_key(), snapshot)
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+        chosen = executor._gateway_shim._upstream_proxy
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    # The lower-case names decide the hop: its NO_PROXY does not cover the endpoint, the
+    # upper-case one would have.
+    assert _sha256(chosen or "") == _sha256(block["https_proxy"])
+    for cli_env in (client.options.env, spawn_envs[0]):
+        assert sorted(set(block) & set(cli_env)) == ["HTTPS_PROXY", "NO_PROXY", "no_proxy"]
+        assert cli_env["HTTPS_PROXY"] == block["HTTPS_PROXY"]
+        assert cli_env["NO_PROXY"] == "upper.example,127.0.0.1,localhost"
+        assert cli_env["no_proxy"] == "lower.example,127.0.0.1,localhost"
+        assert sorted(name for name, value in cli_env.items() if password in value) == []
+
+
+# CORAL(S125): the settings NO_PROXY is read as urllib reads it, whatever the CLI itself
+# would have made of an entry.
+@pytest.mark.parametrize(
+    ("upstream", "no_proxy", "bypassed"),
+    [
+        ("https://gateway.example/anthropic", "*", True),
+        ("https://gateway.example/anthropic", "example", True),
+        ("https://gateway.example/anthropic", ".example", True),
+        ("https://gateway.example/anthropic", ".gateway.example", True),
+        ("https://gateway.example/anthropic", "GATEWAY.Example", True),
+        ("https://gateway.example/anthropic", "corp.example , gateway.example", True),
+        ("https://gateway.example:8443/anthropic", "gateway.example", True),
+        ("https://[2001:db8::1]/anthropic", "2001:db8::1", True),
+        ("https://10.1.2.3/anthropic", "10.1.2.3", True),
+        # Not understood, so the proxy is used: a glob, a CIDR block, another separator, a
+        # bare suffix, a bracketed address, and a port the URL does not spell out.
+        ("https://gateway.example/anthropic", "*.example", False),
+        ("https://10.1.2.3/anthropic", "10.0.0.0/8", False),
+        ("https://10.1.2.3/anthropic", "10.1.2.3/32", False),
+        ("https://gateway.example/anthropic", "corp.example;gateway.example", False),
+        ("https://gateway.example/anthropic", "ateway.example", False),
+        ("https://[2001:db8::1]/anthropic", "[2001:db8::1]", False),
+        ("https://gateway.example/anthropic", "gateway.example:443", False),
+        ("https://gateway.example:9443/anthropic", "gateway.example:8443", False),
+        ("https://gateway.example/anthropic", ",", False),
+    ],
+)
+def test_a_no_proxy_entry_covers_the_upstream_as_urllib_reads_it(upstream, no_proxy, bypassed):
+    from omnigent.inner.claude_sdk_executor import _proxy_for_upstream
+
+    proxy = "http://proxy.example:3128"
+    for name in ("NO_PROXY", "no_proxy"):
+        chosen = _proxy_for_upstream(upstream, {"HTTPS_PROXY": proxy, name: no_proxy})
+        assert chosen == (None if bypassed else ("HTTPS_PROXY", proxy))
+
+
+# CORAL(S125): the trust rule follows links on both sides, and asks only whether the file is
+# under the CLI's directory.
+@pytest.mark.parametrize(
+    ("case", "steers"),
+    [
+        ("settings-file-linked-into-cwd", False),
+        ("dangling-link-into-cwd", False),
+        ("config-dir-linked-out-of-cwd", False),
+        ("cwd-given-through-a-link", False),
+        ("config-dir-given-through-a-link-to-the-cwd", False),
+        ("config-dir-is-the-cwd", False),
+        ("dot-dot-into-cwd", False),
+        ("dot-dot-staying-outside", True),
+        ("cwd-inside-the-config-dir", True),
+        ("sibling-with-the-cwd-as-prefix", True),
+        # A link that leads through the cwd is the step's to re-point, wherever it ends now.
+        ("config-dir-linked-through-the-cwd", False),
+        ("home-linked-through-the-cwd", False),
+    ],
+)
+@pytest.mark.posix_only
+def test_the_settings_trust_rule_follows_links_and_dot_dot_segments(
+    monkeypatch, tmp_path, case, steers
+):
+    from omnigent.inner.claude_sdk_executor import _settings_file_steers_upstream
+
+    workspace, outside = tmp_path / "workspace", tmp_path / "claude-config"
+    for directory in (workspace / "claude-config", outside / "projects" / "step"):
+        directory.mkdir(parents=True)
+    (workspace / "planted.json").write_text("{}")
+    cwd, configured = workspace, outside
+    if case == "settings-file-linked-into-cwd":
+        (outside / "settings.json").symlink_to(workspace / "planted.json")
+    elif case == "dangling-link-into-cwd":
+        (outside / "settings.json").symlink_to(workspace / "not-there-yet.json")
+    elif case == "config-dir-linked-out-of-cwd":
+        configured = workspace / "linked-out"
+        configured.symlink_to(outside, target_is_directory=True)
+    elif case == "cwd-given-through-a-link":
+        cwd = tmp_path / "workspace-link"
+        cwd.symlink_to(workspace, target_is_directory=True)
+        configured = workspace / "claude-config"
+    elif case == "config-dir-given-through-a-link-to-the-cwd":
+        (tmp_path / "workspace-link").symlink_to(workspace, target_is_directory=True)
+        configured = tmp_path / "workspace-link" / "claude-config"
+    elif case == "config-dir-is-the-cwd":
+        configured = workspace
+    elif case == "dot-dot-into-cwd":
+        configured = tmp_path / "elsewhere" / ".." / "workspace" / "claude-config"
+    elif case == "dot-dot-staying-outside":
+        configured = tmp_path / "elsewhere" / ".." / "claude-config"
+    elif case == "cwd-inside-the-config-dir":
+        cwd = outside / "projects" / "step"
+    elif case == "sibling-with-the-cwd-as-prefix":
+        configured = tmp_path / "workspace-config"
+    elif case.endswith("-linked-through-the-cwd"):
+        (workspace / "re-pointed").symlink_to(outside, target_is_directory=True)
+        configured = tmp_path / "linked"
+        configured.symlink_to(workspace / "re-pointed", target_is_directory=True)
+    where = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(configured)}
+    if case == "home-linked-through-the-cwd":
+        where = {"HOME": str(configured)}
+
+    assert _settings_file_steers_upstream(str(cwd), where) is steers
+    monkeypatch.chdir(cwd)
+    assert _settings_file_steers_upstream(None, where) is steers
+
+
+# CORAL(S125): macOS volumes ignore case by default, so there a path under the cwd in another
+# spelling is under it; elsewhere it is another directory.
+@pytest.mark.parametrize("ignores_case", [True, False], ids=["macos", "elsewhere"])
+def test_the_settings_trust_rule_compares_paths_as_the_platform_does(
+    monkeypatch, tmp_path, ignores_case
+):
+    from omnigent._platform import IS_DARWIN
+    from omnigent.inner import claude_sdk_executor
+
+    assert claude_sdk_executor._PATHS_IGNORE_CASE is IS_DARWIN
+    monkeypatch.setattr(claude_sdk_executor, "_PATHS_IGNORE_CASE", ignores_case)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    respelled = tmp_path / "WorkSpace"
+    where = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(respelled / "claude-config")}
+
+    steers = claude_sdk_executor._settings_file_steers_upstream(str(workspace), where)
+    assert steers is (not ignores_case)
+    # The CA path rule is the same rule.
+    block = {"NODE_EXTRA_CA_CERTS": str(respelled / "ca.pem")}
+    taken = claude_sdk_executor._allowed_settings_env(block, trusted=True, cwd=str(workspace))
+    assert (sorted(taken.upstream), taken.ignored) == (
+        ([], ("NODE_EXTRA_CA_CERTS",)) if ignores_case else (["NODE_EXTRA_CA_CERTS"], ())
+    )
+
+
+# CORAL(S125): the default config dir is trusted for being in the user's home, so a home that
+# is itself relative, and so under the CLI's directory, is not.
+@pytest.mark.posix_only
+@pytest.mark.parametrize("cwd_given", [True, False], ids=["cwd", "process-cwd"])
+def test_a_relative_home_makes_the_default_config_dir_untrusted(monkeypatch, tmp_path, cwd_given):
+    from omnigent.inner.claude_sdk_executor import _settings_file_steers_upstream
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # A cwd that is given decides, wherever this process is.
+    monkeypatch.chdir(tmp_path if cwd_given else workspace)
+    where = {"HOME": "home"}
+
+    assert _settings_file_steers_upstream(str(workspace) if cwd_given else None, where) is False
+
+
+# CORAL(S125): a CLI that is not Coral's still gets the user's settings env whole, every name
+# a Coral CLI would lose included.
+@pytest.mark.parametrize("credential", ["none", "key-helper"])
+async def test_a_cli_that_is_not_corals_still_gets_the_whole_settings_block(
+    monkeypatch, tmp_path, credential
+):
+    key, secret = _fake_key(), _fake_key()
+    block = _settings_block(secret, NODE_EXTRA_CA_CERTS="certs/ca.pem", no_proxy="lower.example")
+    workspace = _place_settings(monkeypatch, tmp_path, "under-cwd", block)
+    kwargs = {} if credential == "none" else {"api_key_helper": f"printf %s {key}"}
+    executor = _default_executor(skills_filter="none", cwd=str(workspace), **kwargs)
+
+    options = await _turn_options(executor)
+
+    assert sorted(set(block) - set(options.env)) == []
+    assert _differing(block, options.env, block) == []
+    assert executor._gateway_shim is None and executor._settings_upstream_env == {}
+
+
+# CORAL(S124): only a loopback endpoint is listed directly. A listing for any other endpoint
+# still goes through the proxy the environment names, as before.
+async def test_a_model_listing_off_the_machine_still_takes_the_environments_proxy(monkeypatch):
+    from omnigent.models import model_catalog
+    from omnigent.models.model_catalog import ResolvedModelProvider
+
+    forward_proxy = _RecordingUpstream(http="h11")  # keeps the absolute-form target
+    proxy_url = await forward_proxy.start()
+    for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", proxy_url)
+    provider = ResolvedModelProvider(
+        kind="key", family="openai", base_url="http://listing.example/v1", api_key=_fake_key()
+    )
+    try:
+        # Never contacted: the request for it stops at the loopback proxy.
+        await asyncio.to_thread(
+            model_catalog._fetch_openai_compatible_listing, provider, transport=None
+        )
+    finally:
+        await forward_proxy.stop()
+
+    assert [(r.method, r.raw_path) for r in forward_proxy.requests] == [
+        ("GET", b"http://listing.example/v1/models")
+    ]
+
+
+# CORAL(S125): the endpoint is the proxy's alone. The CLI's part of the split never holds it,
+# whatever the executor later writes under that name.
+@pytest.mark.parametrize("url", [_SETTINGS_UPSTREAM, "", "http://127.0.0.1:8080"])
+def test_the_settings_endpoint_is_never_in_the_clis_part_of_the_split(url):
+    from omnigent.inner.claude_sdk_executor import _allowed_settings_env
+
+    block = {"ANTHROPIC_BASE_URL": url}
+    taken = _allowed_settings_env(block, trusted=True, cwd=None)
+    assert (taken.cli, taken.upstream, taken.ignored) == ({}, block, ())
+    untrusted = _allowed_settings_env(block, trusted=False, cwd=None)
+    assert (untrusted.cli, untrusted.upstream, untrusted.ignored) == (
+        {},
+        {},
+        ("ANTHROPIC_BASE_URL",),
+    )
+
+
+# CORAL(S124): a loopback listing is direct, and a local endpoint's own CA still comes from
+# the environment's trust settings.
+def test_a_loopback_model_listing_still_trusts_the_environments_ca_file(monkeypatch, tmp_path):
+    from http.server import ThreadingHTTPServer
+
+    from omnigent.models import model_catalog
+    from omnigent.models.model_catalog import ResolvedModelProvider
+    from tests._helpers.https_server import enable_https
+    from tests.inner.test_claude_gateway_shim import _ModelsHandler
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelsHandler)
+    monkeypatch.setenv("SSL_CERT_FILE", enable_https(server, tmp_path / "tls")["SSL_CERT_FILE"])
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")  # nothing listens: never used
+    for name in ("https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    provider = ResolvedModelProvider(
+        kind="key",
+        family="openai",
+        base_url=f"https://localhost:{server.server_address[1]}/v1",
+        api_key=_fake_key(),
+    )
+    try:
+        listing = model_catalog._fetch_openai_compatible_listing(provider, transport=None)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert (listing.source, list(listing.models)) == ("openai-compatible", [])
+
+
+# CORAL(S125): the filter is for an isolated CLI. A proxied Coral CLI that is not isolated
+# keeps the whole block, as before, and its proxy takes nothing from it.
+@pytest.mark.posix_only
+async def test_a_proxied_coral_cli_that_is_not_isolated_keeps_the_whole_settings_block(
+    monkeypatch, tmp_path
+):
+    key, secret = _fake_key(), _fake_key()
+    block = _settings_block(secret)
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    executor = _direct_key_executor(
+        monkeypatch,
+        f"printf %s {shlex.quote(key)}",
+        skills_filter="none",
+        cwd=str(workspace),
+        credential_env={"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": _OTHER_ENDPOINT},
+    )
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        shim = executor._gateway_shim
+        upstream_url = shim._upstream_base_url
+        options = (shim._upstream_proxy, shim._upstream_ca_file, shim._upstream_env_proxies)
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    # All but the subscription token a Coral CLI never gets.
+    kept = set(block) - {"ANTHROPIC_AUTH_TOKEN"}
+    assert sorted(set(block) & set(client.options.env)) == sorted(kept)
+    # Its own values under two names: the proxy's URL, and loopback kept off any proxy.
+    assert _differing(kept, client.options.env, block) == ["ANTHROPIC_BASE_URL", "NO_PROXY"]
+    assert upstream_url == _OTHER_ENDPOINT and options == (None, None, True)
+
+
+# CORAL(S125): with no CA file in the settings, the proxy's upstream hop trusts the one the
+# host's environment names, as the CLI's own model connection did, under the same path rule.
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("host_ca", "settings_ca", "taken", "warned"),
+    [
+        ("<host>", None, "<host>", 0),
+        ("<host>", "<settings>", "<settings>", 0),
+        ("<host>", "certs/ca.pem", "<host>", 1),  # the settings one is ignored
+        ("certs/ca.pem", None, None, 1),
+        ("<cwd>/ca.pem", None, None, 1),
+        ("", None, None, 0),
+    ],
+    ids=["host", "settings-first", "settings-ignored", "relative", "under-cwd", "empty"],
+)
+async def test_the_proxys_upstream_hop_trusts_the_hosts_ca_file_after_the_settings_one(
+    monkeypatch, tmp_path, caplog, host_ca, settings_ca, taken, warned
+):
+    from omnigent.inner.egress.ca import ensure_ca
+
+    workspace = tmp_path / "workspace"
+    settings_file, _ = ensure_ca(cache_dir=tmp_path / "tls")
+    host_file = shutil.copy(settings_file, tmp_path / "host-ca.pem")
+    places = {"<host>": str(host_file), "<settings>": str(settings_file), "<cwd>": str(workspace)}
+
+    def placed(path: str | None) -> str | None:
+        for marker, place in places.items():
+            path = path and path.replace(marker, place)
+        return path
+
+    block = {} if settings_ca is None else {"NODE_EXTRA_CA_CERTS": placed(settings_ca)}
+    assert _place_settings(monkeypatch, tmp_path, "outside", block) == workspace
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor")
+    snapshot = {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT, "NODE_EXTRA_CA_CERTS": placed(host_ca)}
+    executor = _settings_executor(monkeypatch, workspace, _fake_key(), snapshot)
+    try:
+        events, _, _ = await _turn_with_recording_sdk(executor)
+        ca = executor._gateway_shim._upstream_ca_file
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert ca == placed(taken)
+    warnings = [
+        r.getMessage() for r in caplog.records if " NODE_EXTRA_CA_CERTS " in r.getMessage()
+    ]
+    assert len(warnings) == warned
+    assert not [text for text in ("ca.pem", "certs", str(tmp_path)) if text in "".join(warnings)]
+
+
+# CORAL(S125): the settings file is where the host's environment said when the executor was
+# built. A connect of another session takes CLAUDE_CONFIG_DIR out of os.environ for a moment;
+# a turn in that moment reads the same file, not the default one in the user's home.
+@pytest.mark.posix_only
+async def test_the_settings_file_is_located_by_the_snapshot_not_the_live_environment(
+    monkeypatch, tmp_path
+):
+    block = {"ANTHROPIC_BASE_URL": _SETTINGS_UPSTREAM, "ANTHROPIC_MODEL": "claude-test-configured"}
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    default_dir = tmp_path / "home" / ".claude"
+    default_dir.mkdir(parents=True)
+    other = {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT, "ANTHROPIC_MODEL": "claude-test-default"}
+    (default_dir / "settings.json").write_text(json.dumps({"env": other}))
+    executor = _settings_executor(monkeypatch, workspace, _fake_key(), {})
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        upstream_url = executor._gateway_shim._upstream_base_url
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    assert upstream_url == _SETTINGS_UPSTREAM
+    assert client.options.env["ANTHROPIC_MODEL"] == "claude-test-configured"
+
+
+# CORAL(S125): a proxy that cannot start is not kept. Its turn is refused by error type only,
+# and the next turn builds a proxy from the settings as the user has fixed them.
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("fault", "error"),
+    [
+        ("missing-ca", "FileNotFoundError"),
+        ("not-a-certificate", "SSLError"),
+        # The system's own error text can name a path, so only its type is told.
+        ("system-error", "PermissionError"),
+    ],
+)
+async def test_a_proxy_that_fails_to_start_is_rebuilt_from_the_fixed_settings(
+    monkeypatch, tmp_path, caplog, fault, error
+):
+    from omnigent.inner.claude_sdk_executor import (
+        CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE,
+        ClaudeGatewayShim,
+    )
+    from omnigent.inner.egress.ca import ensure_ca
+
+    good_ca, _ = ensure_ca(cache_dir=tmp_path / "tls")
+    unusable_ca = tmp_path / "unusable-ca.pem"
+    if fault == "not-a-certificate":
+        unusable_ca.write_text("not a certificate")
+    if fault == "system-error":
+        unusable_ca, starts = good_ca, []
+        real_start = ClaudeGatewayShim.start
+
+        async def start(shim) -> None:
+            starts.append(shim)
+            if len(starts) == 1:
+                raise PermissionError(13, "Permission denied", str(tmp_path / "unusable-ca.pem"))
+            await real_start(shim)
+
+        monkeypatch.setattr(ClaudeGatewayShim, "start", start)
+    block = {"ANTHROPIC_BASE_URL": _SETTINGS_UPSTREAM, "NODE_EXTRA_CA_CERTS": str(unusable_ca)}
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    settings_file = tmp_path / "claude-config" / "settings.json"
+    caplog.set_level(logging.DEBUG)
+    fake_sdk = _make_recovery_fake_sdk()
+    executor = _settings_executor(monkeypatch, workspace, _fake_key(), {})
+    try:
+        failed = await _session_turn(executor, fake_sdk, "first")
+        kept, clients = executor._gateway_shim, len(fake_sdk.created_clients)
+        settings_file.write_text(
+            json.dumps({"env": {**block, "NODE_EXTRA_CA_CERTS": str(good_ca)}})
+        )
+        fixed = await _session_turn(executor, fake_sdk, "second")
+        ca = executor._gateway_shim._upstream_ca_file
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in failed] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    told = "Claude gateway shim could not configure its upstream client"
+    if fault == "system-error":
+        told = "its credential proxy could not start"
+    assert failed[0].message == f"This step's Claude CLI was not started: {told} ({error})."
+    assert "unusable-ca" not in caplog.text
+    assert kept is None and clients == 0
+    assert any(isinstance(e, TurnComplete) for e in fixed), fixed
+    assert ca == str(good_ca) and len(fake_sdk.created_clients) == 1
+
+
+# CORAL(S125): a turn of another session can read a changed settings file between this turn's
+# check and its proxy's build. The build checks again, so this turn is refused like that one
+# and no parser error leaves it.
+@pytest.mark.posix_only
+async def test_an_upstream_changed_before_the_proxy_is_built_refuses_the_turn(
+    monkeypatch, tmp_path
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE
+
+    block = {"ANTHROPIC_BASE_URL": _SETTINGS_UPSTREAM, "HTTPS_PROXY": "http://proxy.example:1"}
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    executor = _settings_executor(monkeypatch, workspace, _fake_key(), {})
+
+    async def another_turn_reads_the_file(*_: object) -> dict[str, str]:
+        changed = {"ANTHROPIC_BASE_URL": "https://settings-gateway.example:notaport"}
+        executor._settings_upstream_env = {**block, **changed}
+        return {}
+
+    # Awaited between the turn's check and its client, where another turn can run.
+    monkeypatch.setattr(executor, "_apply_gateway_model_vocabulary", another_turn_reads_the_file)
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        proxy_built = executor._gateway_shim is not None
+    finally:
+        await executor.close()
+
+    assert [(e.code, e.retryable) for e in events] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    assert "numeric port" in events[0].message and "notaport" not in events[0].message
+    assert not proxy_built and fake_sdk.created_clients == []
+
+
+# CORAL(S125): the upstream client reaches the endpoint through an http or https proxy only.
+# Another kind, in the settings or the harness's environment, refuses the turn by variable
+# name; it is never skipped, which would send the key around the user's proxy.
+@pytest.mark.posix_only
+@pytest.mark.parametrize(
+    ("settings", "snapshot", "named"),
+    [
+        ({"ALL_PROXY": "socks5://user:<password>@proxy.example:1080"}, {}, "ALL_PROXY"),
+        ({"https_proxy": "proxy.example:3128"}, {}, "https_proxy"),
+        ({}, {"HTTPS_PROXY": "socks5h://proxy.example:1080"}, "HTTPS_PROXY"),
+        # Not the proxy for this upstream, so nothing is refused.
+        ({"ALL_PROXY": "socks5://proxy.example:1080", "NO_PROXY": "gateway.example"}, {}, None),
+        ({"HTTP_PROXY": "socks5://proxy.example:1080"}, {}, None),
+        # Padding is dropped, as for the endpoint.
+        ({"HTTPS_PROXY": " http://proxy.example:3128 "}, {}, None),
+    ],
+    ids=["settings-socks", "settings-no-scheme", "snapshot-socks", "bypassed", "other", "padded"],
+)
+async def test_a_proxy_the_upstream_client_cannot_use_refuses_the_turn(
+    monkeypatch, tmp_path, caplog, settings, snapshot, named
+):
+    from omnigent.inner.claude_sdk_executor import CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE
+
+    password = f"pw-{secrets.token_hex(8)}"
+    settings = {name: value.replace("<password>", password) for name, value in settings.items()}
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", settings)
+    caplog.set_level(logging.DEBUG)
+    executor = _settings_executor(
+        monkeypatch, workspace, _fake_key(), {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT, **snapshot}
+    )
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+        shim = executor._gateway_shim
+        proxy = None if shim is None else shim._upstream_proxy
+    finally:
+        await executor.close()
+
+    if named is None:
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        assert proxy == ("http://proxy.example:3128" if "HTTPS_PROXY" in settings else None)
+        return
+    assert [(e.code, e.retryable) for e in events] == [
+        (CORAL_CREDENTIAL_UPSTREAM_REFUSED_CODE, False)
+    ]
+    assert f" {named} names a proxy" in events[0].message
+    shown = (password, "proxy.example", "socks", "1080", "3128")
+    assert not [text for text in shown if text in f"{events[0].message}{caplog.text}"]
+    assert shim is None and fake_sdk.created_clients == []
+
+
+# CORAL(S125): a settings proxy name replaces the harness's under either spelling in the CLI
+# too, as it does for the proxy's own hop, so the CLI never reads two proxies under one name.
+@pytest.mark.posix_only
+async def test_a_settings_proxy_name_reaches_the_cli_under_both_spellings(monkeypatch, tmp_path):
+    block = {"HTTPS_PROXY": "http://settings.example:3128", "no_proxy": "settings.example"}
+    workspace = _place_settings(monkeypatch, tmp_path, "outside", block)
+    executor = _settings_executor(
+        monkeypatch, workspace, _fake_key(), {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT}
+    )
+    # What the CLI would inherit from the harness under the other spelling.
+    monkeypatch.setenv("https_proxy", "http://inherited.example:1")
+    monkeypatch.setenv("NO_PROXY", "inherited.example")
+    try:
+        events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)
+    finally:
+        await executor.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    (client,) = fake_sdk.created_clients
+    for cli_env in (client.options.env, spawn_envs[0]):
+        assert cli_env["HTTPS_PROXY"] == cli_env["https_proxy"] == block["HTTPS_PROXY"]
+        assert cli_env["NO_PROXY"] == cli_env["no_proxy"] == "settings.example,127.0.0.1,localhost"
 
 
 @pytest.mark.parametrize(
@@ -6990,6 +9811,8 @@ async def test_coral_spec_with_os_sandbox_reaches_the_cli(monkeypatch, sandbox_t
     monkeypatch.setattr(
         "omnigent.inner.claude_sdk_executor.shutil.which", lambda name: f"/usr/bin/{name}"
     )
+    # CORAL(S124): the Coral CLI's credential proxy is not this test's subject
+    monkeypatch.setattr(executor, "_route_options_through_gateway_shim", AsyncMock())
 
     events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
 
@@ -7105,8 +9928,9 @@ async def test_an_isolated_cli_its_sandbox_cannot_wrap_never_starts(
     from omnigent.inner.claude_sdk_executor import CORAL_SANDBOX_UNAVAILABLE_CODE
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 
+    # CORAL(S125): the settings read is also told where the file is
     monkeypatch.setattr(  # never read the caller's real Claude settings
-        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda cwd=None: {}
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda *where: {}
     )
     if fault != "no-system-claude":
         _break_wrap(monkeypatch, fault)

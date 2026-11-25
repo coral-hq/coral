@@ -27,6 +27,12 @@ from coral.gates.integrity import (
 
 SEATBELT = HostSandboxPolicy("seatbelt", "1")
 BWRAP = HostSandboxPolicy("bwrap", "1")
+SEATBELT_2 = HostSandboxPolicy("seatbelt", "2")
+BWRAP_2 = HostSandboxPolicy("bwrap", "2")
+SEATBELT_3 = HostSandboxPolicy("seatbelt", "3")
+BWRAP_3 = HostSandboxPolicy("bwrap", "3")
+# The revision after the table's newest, which no row has yet.
+LATER_REVISION = str(max(int(policy.revision) for policy in GATE_BLOCKERS) + 1)
 VERIFIED_CONFIG = ServerConfigFacts(
     runner_token_allow_listed=False,
     machine_client=False,
@@ -57,7 +63,14 @@ CONFIG_VALUES = (False, True, None)
 HOSTS = (
     SEATBELT,
     BWRAP,
-    HostSandboxPolicy("seatbelt", "2"),
+    SEATBELT_2,
+    BWRAP_2,
+    SEATBELT_3,
+    BWRAP_3,
+    # A revision no table has a row for.
+    HostSandboxPolicy("seatbelt", "0"),
+    HostSandboxPolicy("seatbelt", LATER_REVISION),
+    HostSandboxPolicy("bwrap", ""),
     HostSandboxPolicy("none", "1"),
     HostSandboxPolicy("jail", "1"),
     None,
@@ -212,7 +225,7 @@ def test_today_no_sandbox_is_verified_even_with_every_other_fact(
 
 def test_the_table_has_both_parts_for_each_measured_policy() -> None:
     assert set(GATE_BLOCKERS) == set(IDENTITY_PROBE_OPEN) == set(UNPROBED_BLOCKERS)
-    assert set(GATE_BLOCKERS) == {SEATBELT, BWRAP}
+    assert set(GATE_BLOCKERS) == {SEATBELT, BWRAP, SEATBELT_2, BWRAP_2, SEATBELT_3, BWRAP_3}
     for policy, blockers in GATE_BLOCKERS.items():
         assert blockers == SandboxBlockers(IDENTITY_PROBE_OPEN[policy], UNPROBED_BLOCKERS[policy])
         tickets = (*blockers.probed, *blockers.unprobed)
@@ -226,6 +239,10 @@ def test_the_declared_blockers_are_the_open_paths_no_probe_measures() -> None:
     assert UNPROBED_BLOCKERS == {
         SEATBELT: ("CRL-170", "CRL-171", "CRL-181", "CRL-193", "CRL-195"),
         BWRAP: ("CRL-181", "CRL-193", "CRL-195"),
+        SEATBELT_2: ("CRL-170", "CRL-171", "CRL-181", "CRL-193", "CRL-195", "CRL-204"),
+        BWRAP_2: ("CRL-181", "CRL-193", "CRL-195", "CRL-204"),
+        SEATBELT_3: ("CRL-208", "CRL-207", "CRL-181", "CRL-193", "CRL-195", "CRL-205", "CRL-206"),
+        BWRAP_3: ("CRL-181", "CRL-193", "CRL-195", "CRL-206"),
     }
 
 
@@ -239,11 +256,66 @@ RECORDED_ROWS = {
     HostSandboxPolicy("bwrap", "1"): SandboxBlockers(
         probed=("CRL-174", "CRL-181"), unprobed=("CRL-181", "CRL-193", "CRL-195")
     ),
+    HostSandboxPolicy("seatbelt", "2"): SandboxBlockers(
+        probed=("CRL-201", "CRL-203", "CRL-181"),
+        unprobed=("CRL-170", "CRL-171", "CRL-181", "CRL-193", "CRL-195", "CRL-204"),
+    ),
+    HostSandboxPolicy("bwrap", "2"): SandboxBlockers(
+        probed=("CRL-201", "CRL-202", "CRL-203", "CRL-181"),
+        unprobed=("CRL-181", "CRL-193", "CRL-195", "CRL-204"),
+    ),
+    HostSandboxPolicy("seatbelt", "3"): SandboxBlockers(
+        probed=("CRL-201", "CRL-203", "CRL-181"),
+        unprobed=("CRL-208", "CRL-207", "CRL-181", "CRL-193", "CRL-195", "CRL-205", "CRL-206"),
+    ),
+    HostSandboxPolicy("bwrap", "3"): SandboxBlockers(
+        probed=("CRL-201", "CRL-202", "CRL-203", "CRL-181"),
+        unprobed=("CRL-181", "CRL-193", "CRL-195", "CRL-206"),
+    ),
 }
 
 
 def test_every_recorded_row_stays_as_it_was_recorded() -> None:
     assert dict(GATE_BLOCKERS) == RECORDED_ROWS
+    # Recorded in the order the revisions were added: a new one never moves an older row.
+    assert list(GATE_BLOCKERS) == list(RECORDED_ROWS)
+
+
+# A server on code older than revision 2 or 3 holds only the rows recorded before that revision.
+REVISION_1_ROWS = {policy: row for policy, row in RECORDED_ROWS.items() if policy.revision == "1"}
+REVISION_2_ROWS = {
+    policy: row for policy, row in RECORDED_ROWS.items() if policy.revision in {"1", "2"}
+}
+
+
+@pytest.mark.parametrize("backend", ["seatbelt", "bwrap"])
+@pytest.mark.parametrize(
+    ("host_revision", "server_rows", "reason"),
+    [
+        pytest.param("1", REVISION_1_ROWS, "host_sandbox_open", id="host-1-server-1"),
+        pytest.param("1", REVISION_2_ROWS, "host_sandbox_open", id="host-1-server-2"),
+        pytest.param("1", GATE_BLOCKERS, "host_sandbox_open", id="host-1-server-3"),
+        pytest.param("2", REVISION_1_ROWS, "host_sandbox_unknown", id="host-2-server-1"),
+        pytest.param("2", REVISION_2_ROWS, "host_sandbox_open", id="host-2-server-2"),
+        pytest.param("2", GATE_BLOCKERS, "host_sandbox_open", id="host-2-server-3"),
+        pytest.param("3", REVISION_1_ROWS, "host_sandbox_unknown", id="host-3-server-1"),
+        pytest.param("3", REVISION_2_ROWS, "host_sandbox_unknown", id="host-3-server-2"),
+        pytest.param("3", GATE_BLOCKERS, "host_sandbox_open", id="host-3-server-3"),
+        pytest.param(LATER_REVISION, GATE_BLOCKERS, "host_sandbox_unknown", id="later-host"),
+        pytest.param("", GATE_BLOCKERS, "host_sandbox_unknown", id="empty-revision"),
+    ],
+)
+def test_every_mix_of_old_and_new_hosts_and_servers_is_not_enforced(
+    backend: str,
+    host_revision: str,
+    server_rows: Mapping[HostSandboxPolicy, SandboxBlockers],
+    reason: GateIntegrityReason,
+) -> None:
+    host = HostSandboxPolicy(backend, host_revision)
+
+    result = gate_integrity(dataclasses.replace(VERIFIED, host_sandbox=host), server_rows)
+
+    assert result == GateIntegrity(label="not_enforced", reasons=(reason,))
 
 
 def test_a_policy_missing_either_part_has_no_row_and_reads_unknown() -> None:
@@ -253,7 +325,7 @@ def test_a_policy_missing_either_part_has_no_row_and_reads_unknown() -> None:
         (IDENTITY_PROBE_OPEN, {**UNPROBED_BLOCKERS, lone: ()}),
     ):
         table = blocker_table(probed, unprobed)
-        assert set(table) == {SEATBELT, BWRAP}
+        assert set(table) == set(GATE_BLOCKERS)
         result = gate_integrity(dataclasses.replace(VERIFIED, host_sandbox=lone), table)
         assert result.reasons == ("host_sandbox_unknown",)
 

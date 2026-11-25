@@ -3498,10 +3498,11 @@ seams:
       root (a root created as a symlink after the profile is built is now
       refused by S130's process manager check), a Linux
       root under a path bwrap binds and processes outside the sandbox
-      (CRL-173), socket paths found through fsgetpath and other programs'
-      sockets, a tmux server on a custom -S path among them (CRL-174), the
-      codex-native app-server socket and loopback TCP listeners (CRL-177), and
-      other terminals' clip.sock (CRL-171). No CI lane runs macOS (CRL-170).
+      (CRL-173), and the codex-native app-server socket and loopback TCP
+      listeners (CRL-177). Closed since by S127: other programs' sockets
+      outside the process's own dirs, a tmux server on a custom -S path and
+      other terminals' clip.sock among them, whether or not their paths are
+      found through fsgetpath. No CI lane runs macOS (CRL-170).
     files:
       - omnigent/inner/os_env.py
       - omnigent/inner/sandbox.py
@@ -3588,9 +3589,11 @@ seams:
       after a killed harness, when the next claude-sdk executor with the same
       temp dir connects or closes; dirs from before S116 and the other
       residuals in the CRL-179 addendum stay), the settings env merge
-      (CRL-167), env construction races and a relative config dir (CRL-182),
+      (closed by S125 on POSIX, where a Coral CLI now gets only model names,
+      switched-on opt-outs and credential-free network settings; Windows is
+      CRL-197), env construction races and a relative config dir (CRL-182),
       project config a step writes in its worktree (CRL-181), and the inbox
-      sockets (CRL-174).
+      sockets (closed on macOS by S127).
       No CI lane runs macOS (CRL-170). Mechanism, evidence and the full
       residual list: ADR-05, "Addendum: CRL-176 Claude config isolation".
     files:
@@ -3681,7 +3684,7 @@ seams:
       sandbox (CRL-173), a configured app-server wrapper that runs a
       different codex than codex_path, the old codex-native unix socket that
       no current code starts, unknown loopback listeners, other programs'
-      loopback services (CRL-174) and UDP. Linux was not measured, and no CI
+      loopback services (CRL-201) and UDP. Linux was not measured, and no CI
       lane runs macOS (CRL-170).
     files:
       - omnigent/harnesses/codex_native/app_server.py
@@ -3762,7 +3765,7 @@ seams:
       the auth note. Main residuals: CLIs that run unwrapped by design (no
       ticket) or because their sandbox could not be applied (CRL-183); the
       seed copy's secrets and CLAUDE_CODE_OAUTH_TOKEN, both readable in the
-      sandbox (CRL-167); a seed copy left in a launch scratch after a kill,
+      sandbox (CRL-197); a seed copy left in a launch scratch after a kill,
       and a scratch without one at each connect from the SDK's -v check
       (CRL-179; removed by S116 once the launch has exited, at a claude-sdk
       executor's next connect, client teardown or close, or, after a killed
@@ -3770,10 +3773,10 @@ seams:
       connects or closes; copies from before S116 and the other residuals in
       the CRL-179 addendum stay); a working dir or path grant above the home,
       which the top-level dotfile mask does not cover (CRL-184); project
-      config in the working dir (CRL-181); and the inbox sockets (CRL-174). No
-      CI lane runs macOS (CRL-170). Mechanism, evidence and the full residual
-      list: ADR-05, "Addendum: CRL-178 Claude config isolation for every
-      sandboxed agent".
+      config in the working dir (CRL-181); and the inbox sockets (closed on
+      macOS by S127). No CI lane runs macOS (CRL-170). Mechanism, evidence
+      and the full residual list: ADR-05, "Addendum: CRL-178 Claude config
+      isolation for every sandboxed agent".
     files:
       - omnigent/inner/sandbox.py
       - omnigent/inner/claude_sdk_executor.py
@@ -3923,7 +3926,7 @@ seams:
       until the executor's __del__; other agents whose grants cover the temp
       dir can read and write live seeds and scratches and change their claims
       (ADR-05's accepted residual); a seed copy stays readable in the sandbox
-      while its executor runs (CRL-167); Windows is unchanged; no CI lane runs
+      while its executor runs (CRL-197); Windows is unchanged; no CI lane runs
       macOS (CRL-170), so the seatbelt rows run locally. Mechanism, evidence
       and the full residual list: ADR-05, "Addendum: CRL-179 launch temp dir
       cleanup".
@@ -4140,7 +4143,9 @@ seams:
       version; other runners launch as before. The hello's capabilities are
       built off the event loop. Not checked: `launchctl print` and the other
       S111 reads (the CI lane covers them). The gate label's CRL-170 blocker
-      row is unchanged. Measured on macOS 26.3.1: about 0.15 s.
+      row is unchanged. Measured on macOS 26.3.1: about 0.15 s. S128 adds
+      its clone and rename checks and has the function return the names of
+      the failed checks, which the refusal names.
     files:
       - omnigent/inner/seatbelt_sandbox.py
       - omnigent/host/frames.py
@@ -4229,6 +4234,979 @@ seams:
     upstream_first: false
     upstream_candidate: false
 
+  - id: S123
+    title: A zygote-forked runner's exec-time environment holds no credential-shaped name (the zygote starts from the allow-listed runner environment); a direct-spawned runner takes its auth tokens from an inherited socket and holds them in memory
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      A forked child's readable environment (/proc/<pid>/environ on Linux,
+      KERN_PROCARGS2 on macOS) is its parent's exec-time block, whatever it
+      later does to os.environ. The host exec'd the runner zygote with the
+      daemon's whole environment, so the zygote, every runner it forked and
+      every harness those runners forked exposed every host secret to
+      same-user readers outside the sandbox, past the runner env allow-list.
+      HostProcess now builds its ZygoteManager with base_env, a callable read
+      at each zygote spawn, so a respawn sees the daemon's environment then;
+      ZygoteManager() without it keeps os.environ (tests only), and a
+      base_env that raises leaves no control socket open.
+      _zygote_base_env keeps the names _runner_allowlisted_env admits (the
+      runner allow-list by exact name and by the LC_, MLFLOW_, OTEL_ and
+      OMNIGENT_OTEL_ prefixes; _build_runner_env uses the same filter and its
+      output is unchanged) minus credential-shaped names (any case: TOKEN,
+      SECRET, PASSWORD, PASSWD, CREDENTIAL, BEARER, API_KEY, PRIVATE_KEY or
+      COOKIE in the name, the probe 15 set, a HARNESS_CLAUDE_SDK_ prefix, a
+      _HEADERS, _PAT, _CRED or _CREDS suffix, and
+      OMNIGENT_DEBUG_LOG_CLIENT_SECRET,
+      OMNIGENT_DEBUG_LOG_CLIENT_SECRET_COMMAND and
+      OMNIGENT_DATABRICKS_EXTRA_HEADERS by name) and minus any name whose
+      value holds URL userinfo (scheme://user@host), plus MALLOC_ARENA_MAX,
+      MALLOC_TRIM_THRESHOLD_, LD_LIBRARY_PATH and PYTHONHOME when the daemon
+      has them, since glibc, the loader and the interpreter read them once at
+      exec. LD_LIBRARY_PATH and PYTHONPATH keep only their absolute entries,
+      and are dropped when none remains, because an empty or relative entry
+      searches the working directory, for a fork a step-writable checkout.
+      The malloc defaults are still added by setdefault. Runners get every
+      allow-listed and forwarded name through the fork payload, which lives
+      in heap memory only. Names outside the allow-list that the zygote read
+      at its exec or import now behave as on direct spawn, where they were
+      never passed; for example OMNIGENT_HARNESS_SHUTDOWN_TIMEOUT_S,
+      OMNIGENT_HARNESS_HARD_EXIT_TIMEOUT_S, WEBSOCKETS_*,
+      PYDANTIC_DISABLE_PLUGINS, PSUTIL_DEBUG, PYTHONUSERBASE, PYTHONTZPATH,
+      the interpreter's startup variables (PYTHONDONTWRITEBYTECODE,
+      PYTHONPYCACHEPREFIX, PYTHONWARNINGS, PYTHONUNBUFFERED,
+      PYTHONFAULTHANDLER and the like), OPENSSL_CONF, and in the deferred
+      graph PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION,
+      GOOGLE_API_USE_CLIENT_CERTIFICATE and DATABRICKS_SDK_UPSTREAM*. Names
+      listed in OMNIGENT_RUNNER_ENV_PASSTHROUGH are the exception: direct
+      spawn passes them at exec, but the zygote's own env does not hold them,
+      so a zygote-forked runner gets them only through the payload, after
+      the zygote's exec and imports have read their environment. Measured on
+      macOS with the real zygote and fake host secrets: the zygote, a forked
+      runner and the harness it forked expose only allow-listed names, the
+      control fd and the platform's __CF_USER_TEXT_ENCODING and
+      __PYVENV_LAUNCHER__. A direct-spawned runner (zygote off or failed)
+      no longer gets any name of RUNNER_AUTH_SECRET_ENV_VARS in env= on
+      POSIX: OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN,
+      OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN and, since S118 added it to that
+      list, the allow-listed OMNIGENT_RUNNER_TUNNEL_TOKEN when the runner's
+      env holds it. _spawn_runner_proc moves them through
+      launch_secrets_in_socket into an AF_UNIX stream
+      socket pair (launch_secrets_socket: one JSON object of at most 16 KiB,
+      room for a bearer JWT with group claims, sent through a non-blocking
+      end whose send buffer is first grown to 32 KiB where the default is
+      smaller, as on macOS (8 KiB), and that is shut down and closed
+      before the spawn; a child's end that a closed standard stream left at
+      fd 0-2 moves above 2, where the child's own stdio cannot replace it),
+      names the child's end in OMNIGENT_RUNNER_LAUNCH_FD (no credential word,
+      so probe 15 and _credential_shaped_env_name do not flag it), adds it to
+      the terminal mirror's pass_fds and closes it once Popen returns or
+      raises. Unlike a pipe, a socket cannot be reopened through
+      /proc/<pid>/fd, so on Linux a same-user reader cannot take or replace
+      the payload while the runner boots. A send failure, the size cap
+      included, is an OSError that fails the launch through _launch_failed,
+      with no env fallback; Windows keeps env delivery. The runner's main()
+      sets its boot signal disposition, then _hold_runner_auth_secrets:
+      adopt_launch_secrets reads the socket (a socket only, non-blocking
+      under 5 s, a non-empty JSON object of strings naming only names of
+      that list, each once, otherwise one stderr line that names no value and
+      exit 2; one str as the allowed names is a TypeError), and
+      take_runner_auth_secrets moves every name of the list out of
+      os.environ (a zygote
+      fork's payload or a CLI-local runner's environment) and the sent values
+      into a holder in omnigent/runner/identity.py. _make_auth_token_factory
+      and _runner_tunnel_binding_token_from_env (the pi-native launch reads
+      through it) read the holder, falling back to os.environ, and the
+      initial bearer is still consumed on use, so no child of the runner
+      inherits any of them whatever environment it is given, the env=None
+      gh and git spawns included. _runner_allowlisted_env and
+      _build_runner_env never carry OMNIGENT_RUNNER_LAUNCH_FD, not even when
+      passthrough names it, so a stale fd number in the daemon's env reaches
+      neither a runner nor the zygote. adopt_launch_secrets takes the target
+      mapping, the fd variable and the allowed names, so a harness can reuse
+      it. _build_runner_env also names the credentials it forwards
+      (HARNESS_CREDENTIAL_ENV_VARS, passthrough and provider config refs
+      present in the daemon's env), sorted and comma-separated, names only,
+      in OMNIGENT_RUNNER_FORWARDED_NAMES (no credential word, so probe 15 and
+      _credential_shaped_env_name do not flag it; never a stale or
+      passthrough-listed copy; absent when nothing is forwarded), so a Coral
+      claude-sdk harness can keep each of them out of its CLI's environment;
+      env_name_list parses the passthrough list for the host and that
+      harness. Measured on macOS: outside the sandbox the identity stack reads the
+      direct-spawned runner's environment and finds neither token
+      (own_runner_mint and own_runner_bearer not_present) and no
+      credential-like name (own_runner_environ.names none). Residuals: a
+      direct-spawned runner's env= still carries the
+      credential-shaped allow-listed names and the forwarded credentials
+      (CRL-197); a CLI-local runner still gets its binding token at exec
+      (CRL-197) and a Windows runner its auth tokens (accepted); a credential in
+      the value of a name that is not credential-shaped, outside URL
+      userinfo (such as a signed query string), still reaches the zygote.
+      The macOS sandbox lane (S119) also runs on changes to
+      omnigent/host/runner_zygote.py, omnigent/runner/identity.py and
+      omnigent/runner/launch_secrets.py, which probe 15's darwin pins now
+      depend on; tests/coral/test_ci_lane.py pins those paths.
+    files:
+      - .github/workflows/macos-sandbox.yml
+      - omnigent/host/connect.py
+      - omnigent/host/runner_zygote.py
+      - omnigent/runner/_entry.py
+      - omnigent/runner/identity.py
+      - omnigent/runner/launch_secrets.py
+      - tests/host/test_connect.py
+      - tests/host/test_runner_zygote.py
+      - tests/runner/test_identity.py
+      - tests/runner/test_launch_secrets.py
+      - tests/runner/test_runner_entry.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/host/test_runner_zygote.py
+      - tests/runner/test_identity.py
+      - tests/runner/test_launch_secrets.py
+      - tests/runner/test_runner_entry.py
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 120
+    budget_exception:
+      lines: 446
+      reason: >-
+        Counted with git diff --numstat origin/development (added plus
+        removed lines; a new file counts every line), so a file shared with
+        S124 counts both seams' lines. tests/runner/test_launch_secrets.py
+        (446, new): the round trip at and under the cap, every refused
+        payload (empty, duplicate-name and one byte over the cap included)
+        and descriptor kind (a pipe and a file among them), one name as the
+        allowed names, the writer's one-byte-over-the-cap and full-socket
+        cases, the socket context, a real runner sent a 12 KiB payload
+        whose readable environment and env=None child lack the tokens,
+        concurrent launches that never cross sockets, and a daemon without
+        stdin or stdout whose child still reads its socket.
+        tests/host/test_connect.py (410, S123 and S124: 18 for S124): the
+        zygote base env, search path and HostProcess wiring tests, then the
+        rewritten direct-spawn launch test, the Windows env-delivery test
+        and the fail-closed launch cases (all three keep names, digests and
+        the socket's fd, never the spawn's env), the passthrough fd-variable
+        and name checks, the direct fallback with the terminal mirror, and the
+        forwarded-names list with a config-ref key and with nothing
+        forwarded. omnigent/runner/launch_secrets.py (230, new, 7 for S124):
+        the socket writer with its send buffer, the spawn context and the
+        bounded, validating reader. omnigent/host/connect.py (144, S123 and
+        S124: 6 for S124):
+        the zygote's base env and its filters, the direct-spawn socket, the
+        fd variables never forwarded, and the forwarded-names list with its
+        shared parser. tests/runner/test_runner_entry.py (130): the boot
+        order test and the after-boot test for both deliveries, with the
+        delegated mint path; a failed boot there is reported by exit code
+        alone. The other files are within budget:
+        omnigent/host/runner_zygote.py 15, omnigent/runner/_entry.py 30,
+        omnigent/runner/identity.py 34, tests/host/test_runner_zygote.py 119,
+        tests/runner/test_identity.py 31, .github/workflows/macos-sandbox.yml
+        16 (S123 and S124: the added path filters).
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+  - id: S124
+    title: A Coral step's Claude CLI never holds the model credential (per-session token at the executor's loopback proxy); harness config never reaches any CLI
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      The SDK copies the harness's whole os.environ into every Claude CLI it
+      starts, so the HARNESS_CLAUDE_SDK_* config, the printf %s '<key>'
+      helper among it, reached every claude-sdk CLI's environment. Now
+      create_app() moves every HARNESS_CLAUDE_SDK_* name out of os.environ
+      once (_take_harness_config) and every executor build, rebuilds
+      included, reads that config; only OMNIGENT_RUNNER_WORKSPACE still comes
+      from os.environ, and the resolvers read os.environ when called with no
+      config. This holds for every agent and on every platform. For
+      a Coral harness (HARNESS_CLAUDE_SDK_REQUIRE_API_CREDENTIAL=1) on POSIX,
+      _scrub_coral_environ then pops, never to restore, every name in the
+      host's HARNESS_CREDENTIAL_ENV_VARS, every name
+      OMNIGENT_RUNNER_ENV_PASSTHROUGH or the host's
+      OMNIGENT_RUNNER_FORWARDED_NAMES lists (so a second provider's config-ref
+      key goes too; that variable reaches the harness through the runner's
+      env on both the fork and the exec path), CLAUDE_CODE_USE_ and
+      CLAUDE_CODE_SKIP_*_AUTH for
+      Bedrock, Vertex, Foundry, Mantle, Anthropic AWS and Anthropic Google
+      Cloud (every provider switch the pinned CLI 2.1.325 reads),
+      CLAUDE_CODE_USE_GATEWAY, every name whose value holds the configured
+      static key when that key has at least 20 characters (a shorter one also
+      occurs in ordinary values such as /usr/local/bin), and any proxy setting
+      (HTTP_PROXY, HTTPS_PROXY, NO_PROXY or ALL_PROXY in any case) whose value
+      holds an @. It never pops PATH, HOME, TMPDIR, TMP, TEMP, USER, LOGNAME,
+      SHELL, LANG, LC_*, TERM, ANTHROPIC_MODEL and its OMNIGENT_ alias,
+      userinfo-free proxy settings, SSL_CERT_FILE, SSL_CERT_DIR,
+      REQUESTS_CA_BUNDLE or NODE_EXTRA_CA_CERTS. static_printf_value (in
+      claude_gateway_shim.py, for the credential proxy to reuse) reads that
+      key back only from the exact "printf %s " + shlex.quote(key) form; an
+      empty literal is ignored. static_credential_literal gives the one form
+      of that key used everywhere, stripped as the proxy sends it (None when
+      it is not one printable token), so the scrub, the fail-closed check and
+      the model listing find and send a key configured with a trailing
+      newline without it. The environment from before the scrub goes
+      to the executor as credential_env, for running the credential command,
+      never the CLI. A direct-exec harness (zygote off or failed) on POSIX no
+      longer gets HARNESS_CLAUDE_SDK_API_KEY_HELPER or
+      HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND in its exec-time environment:
+      the process manager sends them through launch_secrets_in_socket and
+      pass_fds, named by OMNIGENT_HARNESS_LAUNCH_FD, and create_app() reads
+      that socket (adopt_launch_secrets, only those two names) straight into
+      the config it took, never into os.environ; a refused socket exits 2
+      with one line naming no value, and a socket that cannot be sent fails
+      the spawn as a RuntimeError naming the error type only. Only the claude-sdk harness module uses the socket; other
+      harness modules, zygote forks (whose payload reaches only the forked
+      harness's memory, where the config is then taken) and Windows keep env
+      delivery, and no harness spawn env or env the host builds carries
+      OMNIGENT_HARNESS_LAUNCH_FD. Measured on macOS: a direct-exec harness's
+      readable environment lacks both names while its executor config has
+      them, and the Coral stack tests run a step through a zygote-forked and
+      a direct-exec harness. A browser test that found the CLI by
+      HARNESS_CLAUDE_SDK_AGENT_NAME in its environment now finds it by the
+      session's harness among its parents, skipping ancestors whose command
+      line it cannot read and stopping at the runner. ClaudeGatewayShim gains
+      a credential mode (credential=UpstreamCredential): the CLI holds only
+      session_token ("session-" and token_urlsafe(32), so it never has the
+      shape of an Anthropic key). Before reading the body the shim
+      requires every presented x-api-key and authorization Bearer to equal it
+      (as bytes, hmac.compare_digest; at least one, none repeated), else 401.
+      It forwards only POST /v1/messages, POST /v1/messages/count_tokens, GET
+      /v1/models and GET /v1/models/<id> (else 404, logged by method and
+      segment count); it builds the upstream path from raw_path and answers
+      400 to a path that is not origin-form or has an empty, . or .. segment,
+      @, a backslash or an encoded dot, slash, backslash, @, ? or #, and to a
+      joined URL that leaves the upstream's scheme, host, port or base path,
+      or to a model id outside [A-Za-z0-9][A-Za-z0-9._:-]{0,127}; a body over
+      32 MiB gets 413. Its uvicorn runs the h11 parser (a request head is
+      capped at 16 KiB) with no connection limit, which amends R1 item 4:
+      idle unauthenticated sockets would fill a limit and refuse the CLI.
+      It refuses to start on a plain http upstream that is not loopback
+      (OSError naming the scheme only; S125 widens this check), drops
+      X-Original-URL, X-Rewrite-URL,
+      X-HTTP-Method-Override, X-HTTP-Method, X-Method-Override, Forwarded and
+      every X-Forwarded-* header, forwards nothing for a CLI that leaves
+      mid-upload, closes the upstream response when the CLI leaves
+      mid-answer, and aclose() cancels exchanges still running, so a
+      credential command loses its process group.
+      The real credential replaces the token in the header form(s) the CLI
+      used; an upstream 401 refreshes a command credential and resends once
+      per request and at most once per 30 s. UpstreamCredential holds a
+      printf %s literal without a shell; any other command runs as /bin/sh -c
+      in its own session from Path.home() with the env snapshot its caller
+      passes, stdout capped at 64 KiB, stderr discarded, killed with its
+      process group after 600 s or on cancellation, one run at a time, cached
+      for its TTL (900 s by default) and a failure for 30 s; a value must
+      strip to one printable ASCII token of at most 4 KiB. In credential mode
+      every error answer and log line names exception types only (a failed
+      credential gets a fixed 401, anything else a 502 naming the type), and
+      the upstream client's httpx and httpcore records below WARNING are
+      dropped while a credential request runs. upstream_proxy and
+      upstream_ca_file configure the upstream client (redirects not followed,
+      the CA added to httpx's default trust); a client that cannot be built
+      fails start() with an OSError naming the type. Without a credential,
+      proxy or CA the shim's client, limits and forwarding are unchanged; the
+      listening log line names the upstream without userinfo, query or
+      fragment in both modes. Measured under the httptools and h11 parsers:
+      traversal, @, absolute-form and percent-encoded targets reach no
+      upstream and run no command; under httptools, which the credential
+      mode no longer runs, an absolute-form target naming an allowed route
+      reaches only the configured upstream. A Coral (require_api_credential)
+      gateway executor on POSIX now uses that mode. It builds one
+      UpstreamCredential from the real command, the CLI's helper TTL and the
+      pre-scrub environment, and its shim holds it: the CLI's settings carry
+      apiKeyHelper printf %s "$OMNIGENT_CLAUDE_PROXY_TOKEN", and its options
+      env the loopback base URL, the shim's session token and
+      127.0.0.1,localhost appended to the NO_PROXY and no_proxy it would
+      inherit, so the real command is in none of its settings, environment
+      or arguments, and there is no fallback that puts the token on argv.
+      The shim's upstream hop takes the proxy the pre-scrub environment names
+      for the upstream (the scheme's own name, then ALL_PROXY, read as urllib
+      reads them: a lower-case name that is set, even to nothing, hides its
+      upper-case twin; none when NO_PROXY covers the host), so a proxy with
+      userinfo reaches the upstream client and never the CLI. A loopback
+      upstream gets no proxy, and with none named the shim's client for it
+      ignores the environment's proxies (trust_env off, SSL_CERT_FILE and
+      SSL_CERT_DIR still read). The gateway model
+      listing takes its bearer from the same credential, waiting at most 15 s
+      for a command as its own run did, and for every
+      executor a static printf %s key goes to the listing as a value, in its
+      stripped form, so no shell starts; a key that is not one printable
+      token lists nothing. A listing or credential failure is logged by
+      exception type only, in the executor and in
+      omnigent/models/model_catalog.py's DEBUG line, which no longer carries
+      the traceback (a client's error text can quote the header it refused).
+      A proxied executor whose gateway URL is plain http to another machine
+      refuses the turn (coral_credential_upstream_refused, naming the scheme
+      at most) before the listing sends the credential anywhere. Before
+      every connect of a proxied CLI, a static key of at
+      least 20 characters found in any value of os.environ plus the options
+      env, or in the settings or extra arguments, refuses the turn
+      (coral_credential_exposed) naming variable names only; the check is a
+      substring search for the stripped key and its JSON-escaped spelling, so
+      it does not see an encoded or split copy, a key under 20 characters, a
+      command credential's value, or other options such as the system
+      prompt. close() awaits
+      clients evicted on cancel before it stops the shim, so no CLI outlives
+      the port it calls; a close() that is cancelled (the adapter bounds it
+      at 3 s) or fails still stops the shim, shielded from a second cancel,
+      and removes the private config dir and seed, for every gateway
+      executor, and a credential command still running with no shim is
+      stopped too. Measured on macOS 27.2 with claude 2.1.325: probe 15
+      run outside the sandbox reads the reviewer's runner and CLI, the host
+      and the step's own CLI and finds the API key in none of their
+      environments or command lines (before this, on both CLIs' command
+      lines), each CLI's environment names OMNIGENT_CLAUDE_PROXY_TOKEN and no
+      HARNESS_CLAUDE_SDK_* name, and from the step's shell the step's own
+      proxy refuses a model request with no key, with a wrong key and on a
+      path that climbs to the model route (credential_proxy pinned refused,
+      closed, in the single-user and identity probes; the Linux pins are set
+      by reasoning until the coral-e2e lane runs), the mock's ledger holding
+      none of those requests and the session token in no request body (it
+      records no headers; the unit tests cover those). The pinned CLI needed no
+      route beyond the four the shim forwards. A Coral executor on an API
+      key with no gateway now uses the same proxy (activation is
+      require_api_credential, a credential command and POSIX). Its upstream
+      is the ANTHROPIC_BASE_URL of the pre-scrub environment (the executor's
+      own environment when it was given none), else
+      https://api.anthropic.com, so the host's endpoint, which the scrub
+      takes from the CLI, still decides where the key goes, and a helper
+      command that reads a forwarded variable runs with that environment.
+      Its credential is cached for that environment's
+      CLAUDE_CODE_API_KEY_HELPER_TTL_MS (0 included: the value is never reused,
+      as in the CLI), else the pinned CLI's own 300 s. The transport refusal
+      and the fail-closed check apply to it, and a proxied CLI's upstream URL
+      with whitespace around it, a control character, a query or a fragment
+      refuses the turn under the same code, naming no part of the URL, where
+      the proxy would have failed every request after a CLI started. It gets no
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS or CLAUDE_CODE_USE_GATEWAY. Its
+      CLI gets _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1 exactly when that
+      upstream is the Anthropic API by the CLI's own rule, which is a host
+      match on api.anthropic.com with no non-default port; the executor never
+      says yes for a URL with userinfo, a backslash or whitespace. The CLI
+      reads that private switch at every site of its effective first-party
+      check, so behind the loopback URL it keeps the betas, attribution
+      fields and model handling it had on the Anthropic API; a gateway CLI
+      never gets it. The next three statements are read from one build
+      (2.1.325), not measured. First, the switch does not reach the sites
+      that test the raw
+      URL: the side-query beta on hook-agent and named model calls, the
+      cc_project attribution tag, the resume cache warm-up, a server-flagged
+      reminder experiment, and one resend without thinking.display after an
+      upstream 400 or 422. Second, a CLI whose only credential is a key helper
+      is not eligible for Console-managed settings or policy limits on any base
+      URL (both checks ask for a key with the helper skipped), and a Coral
+      step's key has always been a helper's, so neither applied before this
+      seam and nothing is lost. Third, while its base URL is not an Anthropic
+      host the CLI withholds a key that is not Anthropic-shaped (sk-ant-, or
+      sk- and 86 characters) from Anthropic's own hosts, so the session token
+      stays on loopback; Coral does not rely on that, since the token is
+      accepted only by the loopback proxy while the executor lives. What does
+      change for a CLI that held an Anthropic key on the default endpoint: its
+      bootstrap call, its fast-mode status prefetch and the key on its
+      telemetry requests are now skipped, none of them on a turn's path.
+      Measured on macOS 27.2 with claude 2.1.325 against the mock: a Coral
+      CLI on a key sends the same anthropic-beta header and thinking field
+      through the proxy as it did on the endpoint itself (eight betas,
+      thinking adaptive with display updates), with the switch forced it adds
+      cache-diagnosis-2026-04-07, prompt-caching-scope-2026-01-05 and
+      thinking-binding-controls-2026-08-01 and the same thinking field, and
+      the proxy refuses none of its requests in either mode; the stack test on
+      the allow-listed runner token runs its steps on a key with the host's
+      ANTHROPIC_BASE_URL naming the mock, each CLI on its own loopback proxy
+      with no CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, the mock receiving betas
+      beyond the three a gateway launch sends, and every proxy setting of the
+      host naming a recorder that refuses and sees no request (with an
+      unresolvable https endpoint in the mock's place the recorder saw the
+      proxy's CONNECT and the mock nothing). Off a gateway the CLI defers MCP
+      tools behind ToolSearch, so that test's script loads them first. A test
+      in the same file fails when the installed CLI's build no longer names the
+      switch; the coral-e2e lane runs it against its pinned CLI (2.1.295, in
+      .github/actions/setup-harness-cli/locks/claude), and whether that build
+      names the switch is not known until the lane runs. The switch's added
+      betas are measured only by the local Tier B test: a stack sets the switch
+      only for an upstream that is the Anthropic API, which no test may reach.
+      A real Anthropic upstream is not measured (no test holds a real key).
+      Residuals: on the Anthropic API a token holder can use the model routes
+      with any server-side tools that API offers; non-Coral CLIs keep
+      their key or command on --settings argv (CRL-197); a direct-exec
+      harness's exec-time environment still holds the forwarded credentials
+      (CRL-197); Windows keeps every name in the environment and the key on
+      argv (CRL-197). The user's settings env block is S125's: its endpoint, proxy and
+      CA file feed this proxy and the rest no longer reaches a Coral CLI
+      whole. The model listing for a loopback endpoint (the OpenAI-compatible
+      fetch in omnigent/models/model_catalog.py, which a gateway's listing
+      uses) is made with trust_env off and httpx's default trust, so its
+      bearer never goes through a forward proxy the environment names; this
+      holds for every caller of that fetch, and a listing for any other
+      endpoint is unchanged. Measured: with HTTP_PROXY naming a recording
+      server, a loopback gateway received the listing and the proxied request
+      and the recording server nothing (before, it received the listing with
+      the key). The macOS sandbox lane (S119) also runs on changes to
+      omnigent/inner/claude_sdk_executor.py,
+      omnigent/inner/claude_gateway_shim.py,
+      omnigent/inner/claude_sdk_harness.py and
+      omnigent/runtime/harnesses/process_manager.py, which probe 15's darwin
+      pins now depend on; tests/coral/test_ci_lane.py pins those paths.
+    files:
+      - .github/workflows/macos-sandbox.yml
+      - omnigent/host/connect.py
+      - omnigent/inner/claude_gateway_shim.py
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/inner/claude_sdk_harness.py
+      - omnigent/models/model_catalog.py
+      - omnigent/runner/launch_secrets.py
+      - omnigent/runtime/harnesses/process_manager.py
+      - tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py
+      - tests/host/test_connect.py
+      - tests/inner/test_claude_gateway_shim.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/runtime/harnesses/_claude_sdk_config_harness.py
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/test_model_catalog.py
+    tests:
+      - tests/host/test_connect.py
+      - tests/inner/test_claude_gateway_shim.py
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_claude_sdk_harness.py
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py
+      - tests/e2e/coral/test_sandbox_probe.py
+      - tests/e2e/coral/test_tier_b_executor.py
+      - tests/e2e/coral/test_tier_b_tool_gate.py
+      - tests/test_model_catalog.py
+    budget_lines: 120
+    budget_exception:
+      lines: 3060
+      reason: >-
+        Counted with git diff --numstat origin/development (added plus
+        removed lines; a new file counts every line), so a file shared with
+        S123 or S125 counts both seams' lines.
+        tests/inner/test_claude_gateway_shim.py (1557, S124 and S125: 1450
+        here): real loopback shims and upstreams for the credential mode's
+        header forms, dropped override headers, static key without a shell,
+        token refusals and the header-first check, the route allow-list and
+        model ids, unsafe targets under both HTTP parsers, the joined-URL
+        check, plain http upstreams on loopback only, the body cap, the h11
+        head bound and no connection limit, a CLI leaving mid-upload or
+        mid-answer, the SSE relay and thinking.display restore, command
+        caching, refresh and negative-cache bounds, the runner's shell, group,
+        home, env, timeout, cancellation, aclose() kill and output cap, value
+        checks, no value in responses or DEBUG logs (malformed and failing
+        upstreams included), redirects not followed, the quiet upstream
+        client, the proxy and CA options, the listening log line, and a
+        loopback-only guard. tests/inner/test_claude_sdk_executor.py (3060,
+        the largest file; 2832 with --minimal, since the command's default
+        pairing now sets 114 unchanged lines of older tests against new
+        ones; S124 and S125: 1357 here):
+        the Coral gateway turn against a real loopback shim and recording
+        upstream (token helper, session token, loopback URL and NO_PROXY in
+        the CLI's options; the real command and snapshot in the shim; the key
+        upstream from the listing and the proxied request), a command
+        credential run once, one shim and token per executor, the unchanged
+        non-Coral, off-POSIX and direct-key turns, the static-key listing
+        and its failure logs with no value at DEBUG, a failing or slow
+        credential command, the fail-closed check for each place a copy can
+        sit, before every connect, for a key configured with a trailing
+        newline and at the scan floor, the plain-http gateway refused before
+        any request, NO_PROXY under either spelling, the snapshot's proxy
+        names read as urllib reads them, a loopback upstream reached
+        directly, close(): the order, a close cut short or failed, a
+        second cancel, and a credential with no shim; and the Coral
+        direct-key turn: the same holdings with a static key and with a
+        helper command reading a forwarded variable, the upstream's
+        precedence and the first-party switch for each, an inherited switch
+        overridden only for the Anthropic API, the first-party rule case by
+        case, the helper's cache time (the snapshot's, 0 included, else the
+        CLI's own), the token never Anthropic-key-shaped, one proxy and token
+        across sessions, reconnects and rebuilds, the transport refusal, the
+        refusal of an upstream URL the proxy cannot join a path to, and the
+        fail-closed check on that path, the real harness factory keeping the
+        host's endpoint and helper environment in the proxy, and the unchanged
+        non-Coral, off-POSIX and gateway turns.
+        omnigent/inner/claude_gateway_shim.py (785, S124 and S125: 762
+        here): the
+        credential mode (R1, R3, with the security review's hardening), its
+        own credential runner (R7), the one stripped form of a static key and
+        the upstream client options (R17), a loopback upstream reached
+        directly among them; the
+        plain shim's header building and response relay moved into helpers
+        both modes share.
+        tests/inner/test_claude_sdk_harness.py
+        (621): config taken once and reused by every build, every build
+        kwarg from that config, the Coral scrub (forwarded credentials, the
+        host's forwarded-names list, every provider switch, renamed copies of
+        either literal, the protected essentials and userinfo-free proxies,
+        the 20-character scan floor) and its snapshot, the platform and
+        non-Coral cases, the launch socket adopted into the config and
+        refused when untrusted, and the SDK's version check and CLI spawn
+        seeing no config. tests/host/test_connect.py (410, S123 and S124: 18
+        here, the harness fd variable in the passthrough test).
+        omnigent/runner/launch_secrets.py (230, S123 and S124: 7 here, the
+        harness fd variable and its two names).
+        .github/workflows/macos-sandbox.yml (16, S123 and S124: the added
+        path filters).
+        tests/runtime/harnesses/test_process_manager.py (236): the real
+        direct-exec harness and a refusing one, the other-harness case (each
+        real spawn from a fake-only runner environment), the fork, off-POSIX
+        and POSIX exec paths with the forwarded-names list, and the
+        unsendable socket. omnigent/inner/claude_sdk_executor.py
+        (792, S124 and S125: 395 here): the executor's credential and its TTL
+        and environment, the
+        token helper and options env, the snapshot's upstream proxy with
+        NO_PROXY, the one-source model listing with its bounded wait (R2),
+        the transport refusal before it, the fail-closed check (R4 item 2),
+        close(): the order (R17) and the shim stop and dir removals that
+        survive a cancelled or failed close; and the direct-key path (R5):
+        the upstream from the pre-scrub environment, the CLI's own helper
+        cache time, the first-party rule and switch, and the refusal of an
+        upstream URL the proxy cannot join a path to.
+        omnigent/inner/claude_sdk_harness.py
+        (208): the config take, the Coral scrub with its protected names and
+        scan floor, the resolvers reading the config and the socket read.
+        omnigent/host/connect.py (144, S123 and S124: 6
+        here, the harness fd variable never forwarded). The other files are
+        within budget: omnigent/runtime/harnesses/process_manager.py 63,
+        omnigent/models/model_catalog.py 17, tests/test_model_catalog.py
+        37 (the loopback listing's test at its own layer),
+        tests/e2e_ui/chat/test_claude_sdk_terminated_cli_recovery.py 61,
+        tests/runtime/harnesses/_claude_sdk_config_harness.py 53.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+  - id: S125
+    title: A Coral CLI takes only model routing from the user's settings env; its endpoint and network settings feed the proxy
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      The claude-sdk executor merged the whole env block of the user's
+      settings.json (minus the subscription tokens and the config-dir names)
+      into a hermetic CLI's options env, so a Coral step's CLI got any secret,
+      provider switch or header kept there, and behind the credential proxy
+      (S124) the block's ANTHROPIC_BASE_URL was overwritten by the loopback URL
+      and so ignored. Now, for an isolated Coral CLI behind the credential proxy
+      (isolate_claude_config with the proxy active, so Coral on POSIX), run_turn
+      reads the block once per turn through _allowed_settings_env. The CLI's
+      options env takes from it only: ANTHROPIC_MODEL,
+      ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL and the
+      ANTHROPIC_DEFAULT_*_MODEL aliases; DISABLE_TELEMETRY,
+      DISABLE_ERROR_REPORTING, DISABLE_AUTOUPDATER and
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC when the value is 1 or true in
+      any case, so a settings file can switch an opt-out on and never switch
+      the host's off; HTTPS_PROXY, HTTP_PROXY, NO_PROXY and ALL_PROXY (upper
+      or lower case, the two spellings a client reads) when the value is bare:
+      no @, which is userinfo with or without a scheme, and for a proxy URL no
+      path beyond /, query or fragment, where a credential can sit too; and
+      NODE_EXTRA_CA_CERTS. A proxy name the CLI gets is set under its other
+      spelling too unless the settings name that one, so the CLI reads the
+      proxy its credential proxy uses, whatever twin it would have inherited.
+      Loopback is still appended to the CLI's NO_PROXY under both spellings.
+      Every other name is dropped: CLAUDE_CODE_USE_BEDROCK and the other
+      provider switches with their endpoints, ANTHROPIC_API_KEY,
+      ANTHROPIC_AUTH_TOKEN, ANTHROPIC_CUSTOM_HEADERS, AWS_*, GITHUB_TOKEN,
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS, CLAUDE_CODE_API_KEY_HELPER_TTL_MS and the
+      first-party switch among them. The proxy's upstream hop takes the block's
+      ANTHROPIC_BASE_URL, which comes before the pre-scrub environment's and
+      then https://api.anthropic.com (set to nothing counts as unset; the
+      upstream check below and S124's whitespace stripping and first-party
+      rule read whichever wins); the block's proxy names, where a settings
+      name replaces the harness's under either spelling and the rules of S124
+      then apply to the merged names (the scheme's own name before ALL_PROXY,
+      an empty lower-case name means no proxy, none when NO_PROXY covers the
+      endpoint, never one for a loopback endpoint), a proxy with userinfo, a
+      path or a query reaching only this hop; and NODE_EXTRA_CA_CERTS as the
+      shim's upstream_ca_file, else, on the direct-key path, the pre-scrub
+      environment's NODE_EXTRA_CA_CERTS: a direct-key CLI made the model
+      connection itself and Node added that CA there, so a host behind TLS
+      interception keeps working (a gateway's shim never took one). When
+      settings proxy names took part the shim is built with
+      upstream_env_proxies=False, so its client does not read the harness's
+      environment proxies a second time and overrule a settings NO_PROXY or an
+      empty name. One check, check_upstream_url in claude_gateway_shim.py,
+      replaces S124's transport and URL-text checks for every credential
+      upstream (the settings', the pre-scrub environment's or a gateway's), in
+      run_turn before the model listing and again where the shim is built and
+      where it starts: https, or plain http to loopback, with a host, a
+      numeric port if it names one, and no userinfo (read from the authority;
+      the client would send it as Basic auth in the credential's place),
+      backslash, control character, query or fragment. Each refusal is
+      coral_credential_upstream_refused and names no part of the URL. A proxy
+      chosen for the upstream whose scheme is not http or https (SOCKS, or no
+      scheme) refuses the turn under that code by variable name: the upstream
+      client cannot use one, and skipping it would send the key around the
+      user's proxy. Trust rule: the endpoint, proxy and CA names are taken
+      only when CLAUDE_CONFIG_DIR is absolute or unset (the default dir in the
+      user's home) and the settings path never enters the CLI's working
+      directory while it is resolved one link at a time, so a link that leads
+      through that directory is refused whatever it points at later; on macOS
+      names are compared without case, as its default volumes compare them,
+      which is stricter than needed on a case-sensitive volume. A relative
+      value, a leading ~ included, is read from that directory, which a step
+      can write. The file is located by the CLAUDE_CONFIG_DIR and HOME of the
+      pre-scrub environment (the executor's own at construction when it was
+      given none), never the live ones, which a connect of any session empties
+      of CLAUDE_CONFIG_DIR for a moment. A CA file, the settings' or the
+      host's, must itself be absolute and outside that directory by the same
+      rule. From a file that is not trusted the proxy and CA names reach
+      neither the CLI nor the proxy, each warned about once per executor by
+      name only (no value, no path), and a non-empty ANTHROPIC_BASE_URL
+      refuses the turn before the proxy starts and before the model listing,
+      naming the variable only, rather than the key going to another endpoint
+      than the user named. Once the proxy runs, where the key goes is settled,
+      so an endpoint written there later is only warned about and a step
+      cannot stop its own later turns. Model names and opt-outs are taken from
+      any settings file. The names for the upstream hop are fixed once the
+      proxy starts; the CLI's names are read at each turn, as the block was. A
+      proxy that fails to start (a CA file that cannot be loaded, a proxy URL
+      the client rejects) is not kept: its turn is refused under the same code
+      by error type, and the next turn builds a proxy from the settings as
+      they are then, one turn at a time.
+      omnigent/onboarding/ambient.py gains claude_user_settings_path, the path
+      read_claude_user_settings reads (which now calls it), so the trust rule
+      checks the very path that is read; both take an optional environ for the
+      file's location, and with none what is read is unchanged. Unchanged:
+      a gateway CLI and a CLI that loads user settings itself neither get nor
+      use the block (nothing was merged for them before); a Coral executor
+      with no credential proxy (Windows) and every non-Coral executor keep the
+      whole-block merge. Not done here: the block's model names are not added
+      to the credential command's environment (DESIGN R7, dropped as
+      unnecessary). Residuals: a settings file from a relative
+      CLAUDE_CONFIG_DIR still chooses model names and can switch opt-outs on
+      (CRL-182), and an endpoint a step plants there makes later executors in
+      that worktree refuse until it is removed; the trust rule knows the CLI's
+      working directory only, so a settings or CA file under another path the
+      sandbox may write (a broad write grant) is still trusted; a CA file that
+      cannot be loaded refuses the turn, where Node only warned; a SOCKS or
+      scheme-less proxy refuses a Coral step; a settings proxy with userinfo,
+      a path or a query is not given to the CLI, whose other traffic then uses
+      the proxy it inherits; the harness's own scrub (S124) still leaves the
+      CLI a userinfo-free proxy that has a path or a query; provider switches
+      in the settings block no longer apply to Coral steps (a step runs on its
+      configured key or provider); a helper command no longer sees the
+      settings block's variables, only the harness's pre-scrub environment.
+    files:
+      - omnigent/inner/claude_gateway_shim.py
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/onboarding/ambient.py
+      - tests/inner/test_claude_gateway_shim.py
+      - tests/inner/test_claude_sdk_executor.py
+    tests:
+      - tests/inner/test_claude_gateway_shim.py
+      - tests/inner/test_claude_sdk_executor.py
+    budget_lines: 120
+    budget_exception:
+      lines: 3060
+      reason: >-
+        Counted with git diff --numstat origin/development (added plus removed
+        lines), so a file shared with S124 counts both seams' lines.
+        tests/inner/test_claude_sdk_executor.py (3060; 2832 with --minimal,
+        since the command's default pairing now sets 114 unchanged lines of
+        older tests against new ones; S124 and S125: 1475 here by the
+        --minimal count): a throwaway settings.json at a trusted and at each
+        untrusted place under a fake-only harness environment, the names a
+        Coral CLI gets by name and digest and the endpoint, proxy and CA its
+        proxy gets, the real harness factory sending the key to the settings
+        endpoint, the name-only warnings, the untrusted endpoint's refusal and
+        the blank and late ones that refuse nothing, the CA path rule and the
+        host's CA file after the settings', every refused form of settings
+        endpoint, the endpoint's precedence, settings proxies before the
+        harness's and under both spellings in the CLI, the refused proxy
+        kinds, a settings change after the proxy started, a failed proxy start
+        and its recovery, the file located by the snapshot, the gateway,
+        settings-loading and off-POSIX cases, and the opt-out, bare-proxy and
+        trust rules case by case, links through the cwd and macOS case
+        included; QA's rows on malformed settings files, non-text values,
+        NO_PROXY as urllib reads it and the unchanged non-Coral merge.
+        omnigent/inner/claude_sdk_executor.py (792, S124 and S125: 397
+        here): the allow-list and its split, the trust rule's link walk, the
+        settings names kept for the upstream hop, the host's CA file, the
+        refusals (untrusted endpoint, proxy kind, failed start) and the
+        filtered merge. omnigent/inner/claude_gateway_shim.py (785, S124 and
+        S125: 23 here, the upstream_env_proxies option and the one
+        upstream check). tests/inner/test_claude_gateway_shim.py (1557, S124
+        and S125: 107 here, that option's test and the check's cases).
+        Within budget: omnigent/onboarding/ambient.py 29.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S126
+    title: The harness CLI gate probes claude in a throwaway home with keychain stand-ins
+    owner: WS-OPS
+    status: landed
+    category: coral-specific
+    note: >-
+      `cli_unavailable_reason` in `tests/e2e/_harness_probes.py` ran
+      `claude --version` with the caller's environment, once per pytest
+      process: under `just coral test-e2e` that is the developer's own HOME,
+      Claude config dir and `PATH`, where the CLI's keychain lookups by name
+      reach `/usr/bin/security`. Coral's in-process Tier B tests skip by this
+      gate. Now the `claude` probe gets the caller's environment with a
+      throwaway `HOME` and `CLAUDE_CONFIG_DIR` and with `security` and `gh`
+      stand-ins first on `PATH` (`throwaway_cli_env` in
+      `tests/e2e/coral/_claude_sdk_kit.py`), all removed after the one start.
+      The probe's result and its messages are unchanged, and every other
+      CLI (`codex`, `pi`, `node`, `qwen`) is probed as before. The kit is
+      imported inside the helper, since it imports `tests/e2e/conftest.py`,
+      which imports this module. Residuals: the caller's other variables
+      still reach `claude --version`; a failing probe's message still quotes
+      the CLI's first output line; the other vendors' probes still start
+      with the caller's home.
+    files:
+      - tests/e2e/_harness_probes.py
+    tests:
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S127
+    title: A networked macOS sandbox connects only to its own Unix-domain sockets, the resolver's and those its caller names
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 27.2.1 only: with allow_network true the seatbelt
+      profile's (allow network*) admitted an AF_UNIX connect to any same-user
+      pathname socket S112 did not name, so a sandboxed process reached
+      throwaway listeners at the path shapes of a tmux -S server, Docker
+      Desktop, OrbStack, both ssh-agent forms and Claude Code's inbox and
+      daemon, stream and datagram. Every profile that emits (allow network*)
+      (the os_env step shell, every spawn-time CLI wrap, sandboxed terminal
+      panes) now emits (deny network-outbound (remote unix-socket)) right
+      after it and then allows, in this order: the resolver's socket
+      (/private/var/run/mDNSResponder, without which getaddrinfo fails); each
+      socket on the policy's new allow_unix_socket_paths, spelled by its real
+      dir so a link planted at its name matches nothing; each write root
+      and each socket root on the new allow_unix_socket_roots (a dir counted
+      as the process's own for connects, with no file grant: a forked pane's
+      working tree, writable only through the pane dir); then S112's root and
+      tmux denies; then the scratch and each write root inside a denied root,
+      as S112 allowed them; then one deny per masked entry the profile
+      already lists (a dot-directory, a dotfile or a mask_paths entry) under
+      any of those dirs, since a connect needs no file access; then
+      S112's literal denies and the credential-source denies. This seam
+      first also emitted, for each such entry, a file-write-unlink deny on
+      every dir from its parent up to the outermost write root holding it,
+      because a process could otherwise rename one of those dirs into
+      another own dir, where no deny names the entry (measured: the write
+      root moved into the scratch). Those lines moved to S128, which emits
+      them with file-clone for every dir above every denied path, up to /,
+      in every network mode, ahead of the network rules; this seam no
+      longer emits any file rule for them. Between
+      filtered rules the later one wins, so a write root's allow stands
+      before S112's denies: a direct connect to a tmux- or harness-shaped
+      socket inside a write root stays refused, and naming a harness, tmux,
+      deny-listed or credential socket reopens nothing. No dir is allowed
+      that is or holds the temp dir, the per-user temp dir (confstr 65537,
+      another dir when TMPDIR is set), /private/var/run, $HOME, the account's
+      home from the password database, a denied root or a deny-listed
+      socket, compared without letter case or Unicode normal form because
+      the sandbox matches paths that way on the default volume; the scratch
+      below the per-user temp dir and literally named sockets stay allowed.
+      The fields travel the launcher wire and clones;
+      with_allowed_unix_sockets fills them, and its one production caller is
+      a terminal pane naming its own clip.sock and, when forked, its tree.
+      Egress, git-ssh and no-network profiles are unchanged, and bwrap
+      ignores the fields. A descriptor inherited or passed by a peer still
+      works: only connect is refused. Not covered: a write root the guards
+      keep off the allow list does not protect the sockets inside it, since
+      a process that can write a dir can rename a socket, or its parent dir,
+      into a dir of its own (Coral's bundle hygiene now refuses a step whose
+      cwd, write_paths or write_files leave the workspace, read from the
+      spelling only, and does not check a bundle's terminals; the rest is
+      CRL-203); a tmux- or terminal-shaped socket inside a write root once
+      the process renames it (CRL-203); a socket another program keeps at a
+      plain name inside a write root (CRL-203); a socket under an entry the
+      profile does not list as masked: a dot-directory below the top level
+      with the default scan, in an allow-listed hidden dir, in a
+      framework-added root, or made after the profile was built (CRL-203);
+      other programs' loopback TCP and UDP services (CRL-201); Linux abstract
+      sockets and sockets under a bound root (CRL-202); Mach services
+      (CRL-171); other macOS releases (CRL-170). docs/AGENT_YAML_SPEC.md says
+      in one sentence that a macOS sandbox refuses Unix-domain socket connects
+      outside the agent's own directories. Mechanism, evidence and the full
+      residual list: ADR-05, "Addendum: CRL-174 other programs' Unix
+      sockets".
+    files:
+      - docs/AGENT_YAML_SPEC.md
+      - omnigent/inner/sandbox.py
+      - omnigent/inner/seatbelt_sandbox.py
+      - omnigent/inner/terminal.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_credential_refresh.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/test_terminal.py
+    tests:
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/test_terminal.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_credential_refresh.py
+      - tests/coral/omni/test_bundles.py
+    budget_lines: 120
+    budget_exception:
+      lines: 382
+      reason: >-
+        Counted with git diff --numstat origin/development, added plus
+        removed. tests/inner/sandbox/test_sandbox_behavior.py (382 changed
+        lines): the probe script that connects to each throwaway socket by
+        stream and datagram, through a symlink and a hard link it makes,
+        binds and connects its own, reads a passed and an inherited
+        descriptor, and tries to move a write root and a dir above a masked
+        entry; the rename and edit helpers it now shares with the
+        control-socket probe; the throwaway descriptor-passing peer; and the
+        test that binds a listener at each path shape under throwaway dirs,
+        a throwaway home and a stand-in per-user temp dir and runs the probe
+        outside and inside, through the os_env helper and the CLI wrap.
+        tests/inner/test_seatbelt_sandbox.py (366 changed lines): the
+        placement test in four network modes, the named-socket order and
+        spelling tests, the write-root order test, the eleven guard cases
+        with their fixed fake dirs, the shared-system-dir and socket-root
+        tests, and the masked-entry and kept-in-place cases.
+        omnigent/inner/seatbelt_sandbox.py (148 changed lines): the deny and
+        its allows in the shared-network branch, the two-list own-dir
+        classification with its guards, the home and shared-dir lookups, the
+        letter-case and normal-form helpers, and the masked-entry denies with
+        their file-write-unlink denies. Those counts are as this seam
+        landed. S128 has since taken over the file-write-unlink denies: it
+        removed 8 of these lines from omnigent/inner/seatbelt_sandbox.py
+        (140 left) and removed or rewrote 23 in
+        tests/inner/test_seatbelt_sandbox.py (343 left), where the
+        kept-in-place cases are now S128's. The other files are within budget:
+        omnigent/inner/sandbox.py 72, tests/inner/test_sandbox.py 63,
+        tests/inner/test_terminal.py 39, omnigent/inner/terminal.py 13,
+        tests/inner/test_credential_refresh.py 10, docs/AGENT_YAML_SPEC.md 5.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S128
+    title: A macOS sandbox keeps every directory above a denied path in place and uncloned
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 27.2.1 only: a seatbelt deny names a path, and a
+      sandboxed process could change the path of a masked entry without
+      touching the entry. Renaming or swapping a dir above it (the write
+      root into the scratch or a second write root, or a parent dir inside
+      the root) read and wrote masked files in the no-network, egress and
+      git-ssh modes and wherever S127 did not count the root as an own dir.
+      clonefile(2) of a dir above it read them in every mode, S127's denies
+      included, and from a read-only cwd or a read root, since a clone needs
+      only a readable source and a writable place for the copy. Every
+      seatbelt profile (the os_env step shell, every spawn-time CLI wrap,
+      sandboxed terminal panes; Coral or not) now emits, after the mask and
+      home denials and so after every file allow, before the network rules,
+      one (deny file-write-unlink file-clone (literal "<dir>")) for each dir
+      above each path it denies file access to, up to /, each dir once
+      however many entries it is above: the mask entries (dot entries and
+      escaping symlinks of every scanned root, and mask_paths), the
+      $HOME/Library denial and each credential source path, spelled as their
+      own denies spell them. file-write-unlink refuses the dir as a rename
+      source, a swap side and a replaced target, and its removal; file-clone
+      refuses it as a clone source. They replace the file-write-unlink
+      denies S127 emitted in network-on profiles up to the outermost write
+      root; S127's socket denies are unchanged. So a sandboxed process can
+      no longer rename, replace or directory-clone a dir that is above a
+      denied path: with the default scan each scanned root that holds a
+      top-level dot entry, the dirs above a mask_paths entry, the home dir
+      and the parents of each; with the recursive scan every dir with a
+      masked dotfile below it. Measured unchanged: files and dirs made,
+      renamed and removed in such a dir and beside a masked file, atomic
+      saves there, renames of a dir that holds nothing masked, clones of
+      such a dir and of a file, and git (init, add, commit, mv of a dir,
+      branch switches) in a repository below one. A generated Coral step's
+      profile gains one line per dir from its worktree up to / and, where
+      they are not among those, the home dir and its parents (9 lines,
+      about 700 bytes, for a worktree seven dirs deep; no measurable launch
+      cost). process_read_canary_open() (S120),
+      run once per host process (about 0.08 s), now builds its throwaway
+      tree in the per-user temp dir (confstr 65537, on the boot volume
+      wherever TMPDIR points): a writable cwd holding a dir with a
+      mask_paths entry, and a plain dir. Its sandboxed reader also clones
+      that dir and the cwd above it and renames that dir, each of which must
+      be refused, and clones and renames the plain dir, which must work. It
+      returns the names of the checks that failed (empty when all hold); the
+      host logs them and the Coral step refusal names them. So on a macOS
+      release that does not know file-clone (the profile does not load) or
+      does not enforce either half of the rule, the host reports
+      os_sandbox:darwin_seatbelt_canary_open and runs no Coral step, as for
+      the process-read rules. Where even that volume cannot clone a dir (a
+      plain clone outside the sandbox fails with ENOTSUP), only the clone
+      checks are skipped, with a warning: the profile must still load and
+      the rename must still be refused.
+      bwrap is unchanged: its mask is a mount on the entry. The behaviour
+      test's bwrap rows are written from that code and pass in the Linux
+      lane: a masked entry and the write root are mount points (a rename is
+      refused), a second write root is another mount, and a dir above a
+      nested masked entry can be renamed, the mount going with it, so that
+      launch still cannot read the file and leaves it unchanged. But on
+      Linux, once the dir above a mask_paths file is replaced, the real file
+      is unmasked at its new path for every later launch, which masks only
+      the old path (the row pins the replace as open; owner CRL-206). Not
+      covered: a
+      rename that changes only the letter case or Unicode form of a masked
+      entry's or a guarded dir's name, which the sandbox does not check
+      (CRL-205); names that do not exist when the profile is built, a dot
+      name a process makes first as a link, a mask_paths entry spelled
+      through a symlink the process can re-point, and the bwrap replace
+      above (CRL-206); a dir that carries only a Unix-socket deny inside a
+      write root, which can still be moved (CRL-203); entries the profile
+      does not list (a dot entry below the top level with the default scan,
+      or in an allow-listed hidden dir); a masked entry's name, size and
+      times; other macOS releases (CRL-208).
+    files:
+      - docs/AGENT_YAML_SPEC.md
+      - omnigent/host/connect.py
+      - omnigent/inner/seatbelt_sandbox.py
+      - tests/host/test_connect.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_seatbelt_sandbox.py
+    tests:
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/host/test_connect.py
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 120
+    budget_exception:
+      lines: 358
+      reason: >-
+        Counted with git diff --numstat origin/development, added plus
+        removed. tests/inner/sandbox/test_sandbox_behavior.py (358 changed
+        lines): the probe script that reads each masked throwaway file by
+        digest directly and after a rename, a swap, a link, a copy, a
+        replace and a directory clone by path and by descriptor, tries to
+        change each, and does a worktree's ordinary edits, atomic saves,
+        renames, clones and git commands; the throwaway tree that returns
+        paths and digests but no bytes; and the test that runs the probe
+        outside and inside on both backends, by the os_env helper and the
+        CLI wrap, with the network on and off and with a read-only cwd, then
+        compares digests on the host before the last move is undone.
+        tests/inner/test_seatbelt_sandbox.py (271 changed lines): the rule's
+        text in four network modes for a writable and a read-only cwd, the
+        once-per-dir case under the recursive scan, the three S127 tests
+        that listed file-write-unlink lines, and the host check's cases by
+        name: the process-read rules, each route a weakened rule leaves open,
+        an operation the release does not know, a deny of every clone, and a
+        volume that cannot clone. omnigent/inner/seatbelt_sandbox.py (185
+        changed lines): the rule block, the dirs-above helper, S127's removed
+        unlink loop, the credential sources resolved once, and the host
+        check's named checks, its clone and rename routes, its tree in the
+        per-user temp dir, its clone-support probe and its failure names. The
+        other files are within budget: omnigent/host/connect.py 8,
+        docs/AGENT_YAML_SPEC.md 6, tests/host/test_connect.py 4.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
   - id: S129
     title: Every harness socket requires a per-spawn bearer that never travels in the environment
     owner: WS-INTEGRATION
@@ -4243,12 +5221,17 @@ seams:
       parsing, and /health, /docs and test routes were open.
       HarnessProcessManager now mints secrets.token_urlsafe(32) for every
       spawn on every platform and never puts it in the env (the spawn env also
-      drops an inherited OMNIGENT_HARNESS_AUTH_TOKEN) or argv. Direct exec
-      runs the harness with stdin=PIPE and writes the token plus a newline and
-      closes stdin synchronously inside the spawn owner guard; the zygote path sends it
+      drops an inherited OMNIGENT_HARNESS_AUTH_TOKEN) or argv. A POSIX direct
+      exec sends it in its own launch socket (S123's launch_secrets_in_socket,
+      named by OMNIGENT_HARNESS_BEARER_FD, beside S124's claude-sdk key
+      socket), never a pipe a same-user process could reopen through /proc; a
+      Windows direct exec, which has no pass_fds, runs the harness with
+      stdin=PIPE and writes the token and closes stdin synchronously inside the
+      spawn owner guard; the zygote path sends it
       as a separate auth_token field of the fork_harness request, which
       _run_harness_child passes to _runner.main. main pops the env name first,
-      refuses a terminal stdin, reads at most 4096 bytes to EOF, points fd 0 at
+      adopts the bearer socket (S123's adopt_launch_secrets, exit 2 on any
+      refusal) and only on Windows reads stdin, where it refuses a terminal, reads at most 4096 bytes to EOF, points fd 0 at
       /dev/null, and exits 2 with a message that the spawning runner predates
       this build and the session must restart when no token arrives (a runner
       started before an in-place upgrade therefore cannot spawn harnesses).
@@ -4261,6 +5244,7 @@ seams:
       tokens surviving in the zygote heap (same-user memory read only).
     files:
       - omnigent/runner/_zygote.py
+      - omnigent/runner/launch_secrets.py
       - omnigent/runtime/harnesses/_harness_zygote_client.py
       - omnigent/runtime/harnesses/_runner.py
       - omnigent/runtime/harnesses/process_manager.py

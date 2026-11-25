@@ -31,7 +31,7 @@ import pytest
 from omnigent.errors import OmnigentError
 from omnigent.native import _native_forwarder_health as native_forwarder_health
 from omnigent.native import native_terminal
-from omnigent.runner import subagent_work
+from omnigent.runner import identity, subagent_work  # CORAL(S123)
 from omnigent.runner._entry import (
     _DEFAULT_RUNNER_IDLE_TIMEOUT_S,
     _DEFAULT_RUNNER_THREADPOOL_MAX_WORKERS,
@@ -68,7 +68,13 @@ from omnigent.runner.identity import (
     RUNNER_AUTH_REJECTED_EXIT_CODE,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_INTERACTIVE_SHELLS_ENV_VAR,
+    RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,  # CORAL(S123)
     RUNNER_TUNNEL_TOKEN_HEADER,
+    runner_auth_secret,  # CORAL(S123)
+)
+from omnigent.runner.launch_secrets import (  # CORAL(S123)
+    LAUNCH_SECRETS_FD_ENV_VAR,
+    launch_secrets_socket,
 )
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
 from omnigent.runner.transports.ws_tunnel.frames import (
@@ -4022,6 +4028,128 @@ def test_main_preserves_unexpected_runtime_errors(
         main()
 
     assert capsys.readouterr().err == ""
+
+
+# CORAL(S123): a runner holds its tokens in memory from the start of main().
+@pytest.fixture
+def held_runner_auth_secrets(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """This test's own empty in-memory holder of the runner's tokens."""
+    held: dict[str, str] = {}
+    monkeypatch.setattr(identity, "_held_runner_auth_secrets", held)
+    return held
+
+
+def test_main_holds_the_runner_tokens_right_after_the_boot_signal_disposition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def _tunnel() -> None:
+        calls.append("tunnel")
+
+    monkeypatch.setattr(
+        "omnigent.runner._entry._ignore_finish_work_signal_until_handled",
+        lambda: calls.append("signal"),
+    )
+    monkeypatch.setattr(
+        "omnigent.runner.launch_secrets.adopt_launch_secrets", lambda _to: calls.append("adopt")
+    )
+    monkeypatch.setattr(
+        "omnigent.runner.identity.take_runner_auth_secrets",
+        lambda source=None: calls.append(
+            "take from the environment" if source is None else "take"
+        ),
+    )
+    monkeypatch.setattr(
+        "omnigent.process_logging.configure_process_logging",
+        lambda *_args, **_kwargs: calls.append("logging"),
+    )
+    monkeypatch.setattr("omnigent.runner._entry._run_tunnel_from_env", _tunnel)
+
+    main()
+
+    assert calls == ["signal", "adopt", "take from the environment", "take", "logging", "tunnel"]
+
+
+@pytest.mark.parametrize("delivery", ["environment", "socket"])
+def test_after_boot_the_runner_reads_its_tokens_from_memory_and_no_child_inherits_them(
+    delivery: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    held_runner_auth_secrets: dict[str, str],
+) -> None:
+    """A zygote fork or CLI-local runner gets its tokens in its env, a direct spawn in a socket."""
+    from omnigent.runner.github_resource import _run
+
+    values = {
+        RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: f"fake-binding-{os.urandom(8).hex()}",
+        RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR: f"fake-bearer-{os.urandom(8).hex()}",
+    }
+    watched = sorted([*values, LAUNCH_SECRETS_FD_ENV_VAR])
+    for name in watched:
+        monkeypatch.delenv(name, raising=False)
+    if delivery == "environment":
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+    else:
+        monkeypatch.setenv(LAUNCH_SECRETS_FD_ENV_VAR, str(launch_secrets_socket(values)))
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://runner.test")
+    monkeypatch.setattr("omnigent.runner._entry._runner_auth_factory", None)
+    monkeypatch.setattr(
+        "omnigent.process_logging.configure_process_logging", lambda *_a, **_k: None
+    )
+    seen: dict[str, object] = {}
+
+    def _digest(value: str | None) -> str | None:
+        return None if value is None else hashlib.sha256(value.encode()).hexdigest()
+
+    # As the host sets it: the runner mints with its binding token and skips user auth.
+    monkeypatch.setenv("OMNIGENT_RUNNER_DELEGATED_AUTH", "1")
+    minted_with: list[str | None] = []
+    monkeypatch.setattr(
+        "omnigent.runner._entry._make_managed_mint_factory",
+        lambda _url, binding, **_kw: minted_with.append(_digest(binding)) or (lambda: None),
+    )
+    user_lookups: list[str] = []
+    monkeypatch.setattr(
+        "omnigent.cli_auth.load_token", lambda *_a, **_k: user_lookups.append("load_token")
+    )
+
+    async def _tunnel() -> None:
+        seen["environ"] = [name for name in watched if name in os.environ]
+        seen["binding"] = _digest(_runner_tunnel_binding_token_from_env())
+        factory = _make_auth_token_factory()
+        seen["bearer"] = _digest(factory() if factory is not None else None)
+        seen["bearer held after use"] = runner_auth_secret(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR)
+        # With the bearer spent, the next factory mints from the held binding token.
+        _make_auth_token_factory()
+        seen["delegated mint"] = (minted_with, user_lookups)
+        probe = (
+            "import os, sys; print(','.join(n for n in sys.argv[1:] if n in os.environ) or 'none')"
+        )
+        # The GitHub panel's gh runs with env=None, inheriting the runner's environment.
+        _code, out, _err = _run(
+            [sys.executable, "-c", probe, *watched], cwd=str(tmp_path), timeout=60
+        )
+        seen["inherited"] = out.strip()
+
+    monkeypatch.setattr("omnigent.runner._entry._run_tunnel_from_env", _tunnel)
+
+    try:
+        main()
+    except SystemExit as exc:
+        # By code only: the boot's frames hold this process's whole environment.
+        pytest.fail(f"the runner's boot exited {exc.code}", pytrace=False)
+
+    assert seen == {
+        "environ": [],
+        "binding": _digest(values[RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR]),
+        "bearer": _digest(values[RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR]),
+        "bearer held after use": None,
+        "delegated mint": ([_digest(values[RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR])], []),
+        "inherited": "none",
+    }
+    assert sorted(held_runner_auth_secrets) == [RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR]
 
 
 def test_make_auth_token_factory_resolves_sdk_auth_once(

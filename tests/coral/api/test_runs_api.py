@@ -76,7 +76,12 @@ from coral.engine.types import (
     RunnerHoldEnded,
     RunnerLost,
 )
-from coral.gates.integrity import GateIntegrityFacts, HostSandboxPolicy, ServerConfigFacts
+from coral.gates.integrity import (
+    GATE_BLOCKERS,
+    GateIntegrityFacts,
+    HostSandboxPolicy,
+    ServerConfigFacts,
+)
 from coral.gates.prompt import gate_params
 from coral.gates.verdict import GateAnswers
 from coral.model.ids import anchor_session_id, derived_id
@@ -1029,12 +1034,30 @@ async def test_the_detail_labels_its_gates_for_the_owner_alone_and_names_no_host
         assert detail not in response.text
 
 
+# The revision after the table's newest, which no row has yet.
+LATER_REVISION = str(max(int(policy.revision) for policy in GATE_BLOCKERS) + 1)
+
+
 @pytest.mark.parametrize(
     ("policy", "undecodable", "reasons"),
     [
         pytest.param(HostSandboxPolicy("bwrap", "1"), False, ["host_sandbox_open"], id="bwrap"),
         pytest.param(
+            HostSandboxPolicy("seatbelt", "2"), False, ["host_sandbox_open"], id="seatbelt-2"
+        ),
+        pytest.param(HostSandboxPolicy("bwrap", "2"), False, ["host_sandbox_open"], id="bwrap-2"),
+        pytest.param(
+            HostSandboxPolicy("seatbelt", "3"), False, ["host_sandbox_open"], id="seatbelt-3"
+        ),
+        pytest.param(HostSandboxPolicy("bwrap", "3"), False, ["host_sandbox_open"], id="bwrap-3"),
+        pytest.param(
             HostSandboxPolicy("seatbelt", "0"), False, ["host_sandbox_unknown"], id="old-revision"
+        ),
+        pytest.param(
+            HostSandboxPolicy("seatbelt", LATER_REVISION),
+            False,
+            ["host_sandbox_unknown"],
+            id="new-revision",
         ),
         pytest.param(
             HostSandboxPolicy("none", "1"), False, ["host_sandbox_unknown"], id="no-sandbox"

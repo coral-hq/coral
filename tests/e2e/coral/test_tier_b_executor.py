@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import sys
@@ -21,15 +22,19 @@ import coral
 import omnigent
 import tests.e2e.coral._claude_config_probe as probe
 from coral.omni.server.step_agents import checkout_read_paths
+from omnigent.inner import claude_sdk_executor
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import ExecutorError, TurnComplete
 from omnigent.inner.sandbox import _default_sandbox_for_platform
 from tests.e2e._harness_probes import skip_if_harness_cli_missing
 from tests.e2e.conftest import configure_mock_llm, get_mock_message_requests
 from tests.e2e.coral._claude_sdk_kit import (
+    MOCK_API_KEY_HELPER,
     PROBE_MCP_SERVER,
     EgressRecorder,
+    KeychainStubs,
     collect_turn,
+    install_keychain_stubs,
     make_executor,
     mock_only_env,
     probe_tool,
@@ -87,6 +92,7 @@ async def test_scripted_mcp_tool_turn_completes_with_no_proxied_egress(
             base_url=isolated_mock_llm_server_url,
             proxy_url=recorder.url,
             inherited=os.environ,
+            stubs=install_keychain_stubs(tmp_path / "keychain-stubs" / "bin"),
         )
         _set_env(monkeypatch, env)
         events = await _one_turn(workspace, f"Call the tool. {token}", session_id=token)
@@ -117,6 +123,7 @@ async def test_egress_recorder_sees_model_traffic_aimed_off_the_machine(
             base_url="https://api.example.invalid",
             proxy_url=recorder.url,
             inherited=os.environ,
+            stubs=install_keychain_stubs(tmp_path / "keychain-stubs" / "bin"),
         )
         _set_env(monkeypatch, env)
         events = await _one_turn(workspace, "Reply.", session_id=uuid.uuid4().hex[:8])
@@ -126,17 +133,105 @@ async def test_egress_recorder_sees_model_traffic_aimed_off_the_machine(
     assert "CONNECT api.example.invalid:443 HTTP/1.1" in egress
 
 
-# Logs the keychain item each lookup names, then answers "not found", so no lookup reaches a
-# real keychain; the CLI runs ``security`` by its bare name.
-_SECURITY_STUB = """#!/bin/sh
-service=""
-while [ $# -gt 0 ]; do
-  if [ "$1" = "-s" ]; then service="$2"; fi
-  shift
-done
-printf '%s\\n' "$service" >> "{log}"
-exit 44
-"""
+def _request_shapes(mock_url: str, token: str) -> set[tuple[tuple[str, ...], str]]:
+    """Each Messages request of the turn with ``token``: its sorted betas and ``thinking``."""
+    return {
+        (tuple(sorted(entry["betas"])), json.dumps(entry["body"].get("thinking"), sort_keys=True))
+        for entry in get_mock_message_requests(mock_url)
+        if token in json.dumps(entry["body"])
+    }
+
+
+# A real CLI on the direct-key path, where no gateway switch turns its betas off.
+@pytest.mark.timeout(300)
+async def test_a_coral_direct_key_cli_sends_the_same_requests_through_its_proxy(
+    isolated_mock_llm_server_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    The ``anthropic-beta`` header and the ``thinking`` field of every model request a Coral
+    step's real CLI makes on an API key, as the mock upstream records them, in three launches:
+    as before the credential proxy (the CLI on the endpoint itself), through the proxy, and
+    through the proxy with the CLI told its base URL is the Anthropic API, which the executor
+    does only for an upstream that is. The proxy changes neither; the switch only adds betas;
+    and the proxy refuses none of the CLI's requests in either mode.
+    """
+    skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)
+    mock = isolated_mock_llm_server_url
+    home = write_claude_home(tmp_path, marker=tmp_path / "marker.txt")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_gateway_shim")
+    launches = {
+        "unproxied": {"IS_POSIX": False},
+        "proxied": {},
+        "assumed_first_party": {"_is_first_party_url": lambda url: True},
+    }
+    shapes: dict[str, set[tuple[tuple[str, ...], str]]] = {}
+    proxied: dict[str, bool] = {}
+    with EgressRecorder() as recorder:
+        _set_env(
+            monkeypatch,
+            mock_only_env(
+                home=home,
+                base_url=mock,
+                proxy_url=recorder.url,
+                inherited=os.environ,
+                stubs=install_keychain_stubs(tmp_path / "keychain-stubs" / "bin"),
+            ),
+        )
+        for launch, patches in launches.items():
+            token = f"TIERB-{uuid.uuid4().hex[:8]}"
+            configure_mock_llm(mock, [{"text": f"done {token}"}] * 4, match=token)
+            with monkeypatch.context() as patched:
+                for name, value in patches.items():
+                    patched.setattr(claude_sdk_executor, name, value)
+                executor = make_executor(
+                    workspace, model=_MODEL, permission_mode="bypassPermissions", coral=True
+                )
+                executor._policy_evaluator = _allow_every_tool  # type: ignore[attr-defined]
+                try:
+                    async with asyncio.timeout(_TURN_BOUND_SECONDS):
+                        events = await collect_turn(executor, f"Reply. {token}", session_id=token)
+                except TimeoutError:
+                    pytest.fail(f"the {launch} turn was still running after 60s")
+                finally:
+                    proxied[launch] = executor._gateway_shim is not None
+                    await executor.close()
+            assert [e.message for e in events if isinstance(e, ExecutorError)] == [], launch
+            completed = [event for event in events if isinstance(event, TurnComplete)]
+            assert completed and f"done {token}" in (completed[-1].response or ""), launch
+            shapes[launch] = _request_shapes(mock, token)
+        egress = recorder.request_lines
+
+    print("request shapes:", json.dumps({k: sorted(v) for k, v in shapes.items()}))
+    assert proxied == {"unproxied": False, "proxied": True, "assumed_first_party": True}
+    assert egress == []
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "omnigent.inner.claude_gateway_shim"
+    ]
+    assert refusals == [], refusals
+    assert shapes["unproxied"] and shapes["proxied"] == shapes["unproxied"]
+    betas = {
+        launch: {beta for flags, _ in seen for beta in flags} for launch, seen in shapes.items()
+    }
+    thinking = {launch: {field for _, field in seen} for launch, seen in shapes.items()}
+    # No gateway switch here, so the CLI keeps its experimental betas and says how it thinks.
+    assert "claude-code-20250219" in betas["proxied"]
+    assert thinking["proxied"] != {"null"}, thinking
+    # Told it is on the Anthropic API, the CLI sends the same thinking field and more betas.
+    # Measured on 2.1.325: cache-diagnosis-2026-04-07, prompt-caching-scope-2026-01-05 and
+    # thinking-binding-controls-2026-08-01, betas that CLI adds only on a first-party URL.
+    assert thinking["assumed_first_party"] == thinking["proxied"]
+    restored = betas["assumed_first_party"] - betas["proxied"]
+    assert betas["assumed_first_party"] > betas["proxied"], sorted(restored)
+    assert "prompt-caching-scope-2026-01-05" in restored, sorted(restored)
+
+
 # Past the CLI's MCP output limit, so it tries to keep the result under its config dir.
 _OVERSIZED_RESULT = "\n".join(f"line {i:06d} " + "x" * 40 for i in range(3000))
 
@@ -149,13 +244,9 @@ async def _oversized_tool(name: str, arguments: dict) -> dict:
     return {"result": _OVERSIZED_RESULT}
 
 
-def _security_stub(workspace: Path) -> tuple[Path, Path]:
-    """A ``security`` stub dir in the workspace, which the wrap reads, and the log it writes."""
-    stubs, log = workspace / "stubbin", workspace / "security.log"
-    stubs.mkdir(parents=True)
-    (stubs / "security").write_text(_SECURITY_STUB.format(log=log))
-    (stubs / "security").chmod(0o755)
-    return stubs, log
+def _workspace_stubs(workspace: Path) -> KeychainStubs:
+    """Keychain stand-ins and their log in the workspace, which the wrap reads and writes."""
+    return install_keychain_stubs(workspace / "stubbin", log=workspace / "security.log")
 
 
 def _step_sandbox() -> OSEnvSandboxSpec:
@@ -168,12 +259,13 @@ def _step_sandbox() -> OSEnvSandboxSpec:
     )
 
 
-def _hashed_lookups(log: Path) -> list[str]:
-    """The keychain items the stub was asked for; none may be the default, unhashed ones."""
-    services = log.read_text().splitlines() if log.exists() else []
-    assert services or sys.platform != "darwin", "the security stub saw no lookup"
-    assert all(re.fullmatch(r"Claude Code.*-[0-9a-f]{8}", name) for name in services), services
-    return services
+def _hashed_lookups(stubs: KeychainStubs) -> list[str]:
+    """What the stand-ins were asked: keychain reads of per-dir items, never the default ones."""
+    calls = stubs.calls()
+    assert calls or sys.platform != "darwin", "the security stub saw no lookup"
+    hashed = r"security find-generic-password Claude Code.*-[0-9a-f]{8}"
+    assert all(re.fullmatch(hashed, call) for call in calls), calls
+    return calls
 
 
 # A real CLI in its sandbox wrap, with code it runs there trying the user's Claude config.
@@ -182,14 +274,17 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     isolated_mock_llm_server_url: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
     A Coral step's real CLI, wrapped in its OS sandbox with a private config dir, completes a
-    turn on API-key auth against the mock. Its API key helper, which the CLI runs inside the
-    wrap, cannot write the throwaway home's plugins, sessions, session-env, backups or
-    .claude.json, or read its session key, credentials or keychain stand-in, and the home is
-    unchanged. Every keychain lookup names a per-dir item. An oversized tool result is
-    reported unsaved, with the pagination advice, since the dir has no ``projects/``.
+    turn on API-key auth against the mock, through its executor's credential proxy. Its API
+    key helper, which the CLI runs inside the wrap, cannot write the throwaway home's plugins,
+    sessions, session-env, backups or .claude.json, or read its session key, credentials or
+    keychain stand-in, and the home is unchanged. That helper's environment holds the proxy's
+    session token and nowhere the model key, and the proxy refuses none of the CLI's requests.
+    Every keychain lookup names a per-dir item. An oversized tool result is reported unsaved,
+    with the pagination advice, since the dir has no ``projects/``.
     """
     skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)
     token = f"TIERB-{uuid.uuid4().hex[:8]}"
@@ -200,12 +295,22 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     )
     home, workspace, scratch = (tmp_path / name for name in ("home", "workspace", "tmp"))
     probe.seed_claude_home(home)
-    stubs, log = _security_stub(workspace)
+    stubs = _workspace_stubs(workspace)
     scratch.mkdir()
     shutil.copy(probe.__file__, workspace / "probe.py")
     report = workspace / "report.txt"
-    helper = shlex.join([sys.executable, str(workspace / "probe.py"), str(report), str(home)])
+    model_key = f"sk-ant-test-{secrets.token_hex(16)}"
+    # The probe gets the key's length and digest, and looks for it in its own environment.
+    probe_argv = [sys.executable, str(workspace / "probe.py"), str(report), str(home), ""]
+    helper = shlex.join([*probe_argv, probe.secret_spec(model_key)])
+    # The CLI's helper only prints its session token, so the probe runs in front of that.
+    monkeypatch.setattr(
+        claude_sdk_executor,
+        "_PROXY_TOKEN_HELPER",
+        f"{helper}; {claude_sdk_executor._PROXY_TOKEN_HELPER}",
+    )
     harness_root = Path(tempfile.mkdtemp(prefix="crl-", dir="/tmp"))
+    caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_gateway_shim")
     try:
         with EgressRecorder() as recorder:
             env = mock_only_env(
@@ -213,6 +318,7 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
                 base_url=isolated_mock_llm_server_url,
                 proxy_url=recorder.url,
                 inherited=os.environ,
+                stubs=stubs,
             )
             # The kit's throwaway config dir stands in for a user value the host forwards.
             env.update(
@@ -221,7 +327,6 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
                     "OMNIGENT_CLAUDE_SDK_NO_SANDBOX": None,
                     "OMNIGENT_HARNESS_TMP_PARENT": str(harness_root),
                     "TMPDIR": str(scratch),
-                    "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
                 }
             )
             _set_env(monkeypatch, env)
@@ -234,7 +339,8 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
                 coral=True,
                 os_env=OSEnvSpec(type="caller_process", cwd=str(workspace), sandbox=sandbox),
                 isolate_claude_config=True,
-                api_key_helper=f"{helper}; printf %s mock-key",
+                api_key_helper=f"printf %s {model_key}",
+                gateway_base_url=isolated_mock_llm_server_url,
             )
             executor._policy_evaluator = _allow_every_tool  # type: ignore[attr-defined]
             # After the wrap made the only home dir it grants, ~/.npm/_logs.
@@ -263,13 +369,20 @@ async def test_a_coral_cli_keeps_its_claude_config_out_of_the_home(
     assert completed and f"done {token}" in (completed[-1].response or "")
     *verdicts, named = report.read_text().splitlines()
     own = ["config_private yes", "config_writable yes", "projects no", "config_seeded no"]
-    own += ["seed_source_write no", "securestorage_own yes"]
+    own += ["seed_source_write no", "securestorage_own yes", "proxy_token yes", "model_key no"]
     assert verdicts == [f"{name} no" for name in probe.HOME_CHECKS] + own, verdicts
     config_dir = Path(named.removeprefix("config_dir "))
     assert config_dir.name == "claude_config_dir" and scratch.resolve() in config_dir.parents
     assert not list(scratch.glob("omnigent-osenv-*")), "close left a launch scratch"
     assert probe.tree(home) == before, "the step changed the home"
-    _hashed_lookups(log)
+    # The pinned CLI needs no route the proxy does not forward, and always sent its token.
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "omnigent.inner.claude_gateway_shim"
+    ]
+    assert refusals == [], refusals
+    _hashed_lookups(stubs)
     [*_, result] = tool_results(
         get_mock_message_requests(isolated_mock_llm_server_url), call_id=call_id
     )
@@ -309,7 +422,7 @@ async def test_a_sandboxed_agent_loads_its_mcp_servers_without_the_home(
     )
     home, workspace, scratch = (tmp_path / name for name in ("home", "workspace", "tmp"))
     probe.seed_claude_home(home)
-    stubs, log = _security_stub(workspace)
+    stubs = _workspace_stubs(workspace)
     scratch.mkdir()
     for script in (probe.__file__, PROBE_MCP_SERVER):
         shutil.copy(script, workspace / Path(script).name)
@@ -322,6 +435,7 @@ async def test_a_sandboxed_agent_loads_its_mcp_servers_without_the_home(
                 base_url=isolated_mock_llm_server_url,
                 proxy_url=recorder.url,
                 inherited=os.environ,
+                stubs=stubs,
             )
             # The kit's throwaway config dir stands in for one the host forwards, so even an
             # unwrapped CLI would ask only for hashed keychain items.
@@ -330,7 +444,6 @@ async def test_a_sandboxed_agent_loads_its_mcp_servers_without_the_home(
                     "OMNIGENT_CLAUDE_SDK_NO_SANDBOX": None,
                     "OMNIGENT_HARNESS_TMP_PARENT": str(harness_root),
                     "TMPDIR": str(scratch),
-                    "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
                 }
             )
             _set_env(monkeypatch, env)
@@ -409,5 +522,93 @@ async def test_a_sandboxed_agent_loads_its_mcp_servers_without_the_home(
     assert statuses.get("disabled-probe") in (None, "disabled"), statuses
     assert probe.tree(home) == before, "the agent changed the home"
     assert not seed.parent.exists(), "close left the seed behind"
-    _hashed_lookups(log)
+    _hashed_lookups(stubs)
+    assert egress == []
+
+
+# A real CLI in its sandbox wrap, as a test stack's step has it: stand-ins it cannot read first.
+@pytest.mark.timeout(240)
+async def test_a_wrapped_cli_stops_at_a_keychain_stub_it_cannot_read(
+    isolated_mock_llm_server_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A test stack's stand-ins sit outside every step's wrap. Here a wrapped CLI's ``PATH``
+    starts at such stand-ins and readable ones, in the workspace, come second. The turn
+    completes and the second ones record neither a ``security`` nor a ``gh`` call: a lookup
+    by name ends at the entry the wrap cannot run and goes no further down ``PATH``, where
+    the real programs are.
+
+    The CLI's own lookups are of ``security`` only (the test above is the control: the
+    same launch with readable stand-ins first records them). So under seatbelt the CLI's
+    key helper also asks for each program by name inside the wrap: its shell finds both at
+    the first entry and can run neither.
+    """
+    skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)
+    token = f"TIERB-{uuid.uuid4().hex[:8]}"
+    configure_mock_llm(isolated_mock_llm_server_url, [{"text": f"done {token}"}] * 4, match=token)
+    home, workspace, scratch = (tmp_path / name for name in ("home", "workspace", "tmp"))
+    for made in (home, workspace, scratch):
+        made.mkdir()
+    outside = install_keychain_stubs(tmp_path / "outside" / "bin")
+    inside = _workspace_stubs(workspace)
+    first = outside.directory / "security"
+    in_wrap = workspace / "in-wrap.txt"
+    asked = f"test -r {shlex.quote(str(first))}; echo read=$?"
+    if sys.platform == "darwin":
+        # Under bwrap the first entry does not exist, so a lookup there goes on to the second.
+        asked += "; security fake-marker; echo security=$?; gh fake marker; echo gh=$?"
+    helper = f"{{ {asked}; }} > {shlex.quote(str(in_wrap))} 2>/dev/null"
+    harness_root = Path(tempfile.mkdtemp(prefix="crl-", dir="/tmp"))
+    try:
+        with EgressRecorder() as recorder:
+            env = mock_only_env(
+                home=home,
+                base_url=isolated_mock_llm_server_url,
+                proxy_url=recorder.url,
+                inherited=os.environ,
+                stubs=inside,
+            )
+            env.update(
+                {
+                    "OMNIGENT_CLAUDE_SDK_NO_SANDBOX": None,
+                    "OMNIGENT_HARNESS_TMP_PARENT": str(harness_root),
+                    "TMPDIR": str(scratch),
+                    "PATH": outside.first_on({"PATH": env["PATH"] or ""})["PATH"],
+                }
+            )
+            _set_env(monkeypatch, env)
+            monkeypatch.setattr(tempfile, "tempdir", None)
+            executor = make_executor(
+                workspace,
+                model=_MODEL,
+                permission_mode="bypassPermissions",
+                os_env=OSEnvSpec(
+                    type="caller_process", cwd=str(workspace), sandbox=_step_sandbox()
+                ),
+                api_key_helper=f"{helper}; {MOCK_API_KEY_HELPER}",
+            )
+            try:
+                async with asyncio.timeout(_TURN_BOUND_SECONDS * 2):
+                    events = await collect_turn(executor, f"Reply. {token}", session_id=token)
+            except TimeoutError:
+                pytest.fail(f"turn was still running after {_TURN_BOUND_SECONDS * 2}s")
+            finally:
+                await executor.close()
+            egress = recorder.request_lines
+    finally:
+        shutil.rmtree(harness_root, ignore_errors=True)
+
+    assert [event.message for event in events if isinstance(event, ExecutorError)] == []
+    completed = [event for event in events if isinstance(event, TurnComplete)]
+    assert completed and f"done {token}" in (completed[-1].response or "")
+    # The pytest process can run the first stand-ins; the wrap cannot read them, and there a
+    # shell finds each program at that entry and cannot run it (126).
+    assert outside.bypassed(os.environ["PATH"]) == [] and os.access(first, os.X_OK)
+    found = ["security=126", "gh=126"] if sys.platform == "darwin" else []
+    assert in_wrap.read_text().split() == ["read=1", *found]
+    # No lookup went on to the next entry, and nothing outside the wrap asked either.
+    assert inside.calls() == [], inside.calls()
+    assert outside.calls() == [], outside.calls()
     assert egress == []

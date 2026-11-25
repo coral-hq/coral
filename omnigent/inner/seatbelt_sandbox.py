@@ -71,7 +71,9 @@ Default view inside the sandbox:
   - egress inactive, ``allow_network=false`` → ``network*`` denied
     by the default-deny rule (no allow rules emitted).
   - egress inactive, ``allow_network=true`` → ``(allow network*)``
-    emitted so the helper sees the host's full network stack.
+    emitted so the helper sees the host's full network stack, except
+    (CORAL(S127)) other programs' AF_UNIX sockets: only the resolver's,
+    caller-named ones and those in its scratch and write roots connect.
 
 Known deltas from ``linux_bwrap`` (documented intentionally — see
 :doc:`/designs/SANDBOXED_TOOL_EXECUTION` for the full rationale):
@@ -115,6 +117,8 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import ctypes  # CORAL(S128)
+import errno  # CORAL(S128)
 import functools  # CORAL(S120)
 import logging
 import os
@@ -124,6 +128,7 @@ import shutil
 import subprocess  # CORAL(S120)
 import sys
 import tempfile
+import unicodedata  # CORAL(S127)
 import uuid  # CORAL(S120)
 from collections.abc import Sequence
 from pathlib import Path
@@ -134,6 +139,7 @@ from .sandbox import (
     _LAUNCH_TMPDIR_OWNER,  # CORAL(S116)
     SandboxBackend,
     SandboxPolicy,
+    _resolved_path,  # CORAL(S127)
     claim_temp_dir,  # CORAL(S116)
     register_backend,
 )
@@ -320,6 +326,12 @@ _OMNIGENT_TMUX_SOCKET_PATTERNS = (
     r"/omnigent-terminal-[^/]+/tmux\.sock$",
     r"/omnigent-tmux-replies-[^/]+/s$",
 )
+
+# CORAL(S127): the one system AF_UNIX socket a networked process needs, getaddrinfo's resolver,
+# as the kernel resolves it: a /var/run spelling matches nothing.
+_RESOLVER_SOCKET = "/private/var/run/mDNSResponder"
+# CORAL(S127): confstr's name for the per-user temp dir, which Python does not list
+_CS_DARWIN_USER_TEMP_DIR = 65537
 
 # Profile-size cap. ``sandbox-exec`` parses the profile with a
 # finite-size scratch buffer; exceeding it fails the spawn with an
@@ -680,7 +692,9 @@ def _build_profile(
     7. Extra read roots, write roots, write files.
     8. Dotfile / escaping-symlink mask — per-path denies that win
        over the cwd allow exactly because deny beats allow in SBPL.
-    9. Network rules.
+    9. CORAL(S128): each dir above a denied path, not renamed,
+       removed or cloned.
+    10. Network rules.
 
     :param policy: The resolved :class:`SandboxPolicy`. Provides cwd
         writability, scratch tmpdir, read/write roots, dotfile
@@ -1083,6 +1097,17 @@ def _build_profile(
         for denial in sensitive_denials:
             lines.append(f"(deny file-read* file-write* (subpath {_quote(str(denial))}))")
 
+    # CORAL(S128): a deny names a path. A dir above a denied entry that is moved or cloned
+    # takes the entry to a path no deny names, so each one stays put and is not cloned.
+    credential_sources = [path.resolve() for path in policy.credential_source_paths or []]
+    denied = [*(entry.path for entry in mask_entries), *sensitive_denials, *credential_sources]
+    kept_in_place = _dirs_above(denied)
+    if kept_in_place:
+        lines.append("")
+        lines.append(";; Dirs above a denied entry: not renamed, removed or cloned")
+        for held in kept_in_place:
+            lines.append(f"(deny file-write-unlink file-clone (literal {_quote(str(held))}))")
+
     # ----------------------------------------------------------------
     # Network rules
     # ----------------------------------------------------------------
@@ -1091,6 +1116,13 @@ def _build_profile(
     socket_path = policy.egress_socket_path
     relay_port = policy.egress_relay_port
     shares_host_network = False  # CORAL(S112)
+    # CORAL(S112): resolved here, since the shared-network branch (S127) places allows by them
+    deny_roots: list[Path] = []
+    for root in [*(policy.deny_unix_socket_roots or []), _per_user_harness_root()]:
+        if root is not None and Path(os.path.realpath(root)) not in deny_roots:
+            deny_roots.append(Path(os.path.realpath(root)))
+    own_dirs: list[str] = []  # CORAL(S127)
+    own_dirs_in_denied_roots: list[str] = []
     if socket_path is not None and relay_port is not None:
         # Hard enforcement: deny all network (already covered by
         # (deny default)) except loopback to the relay and the
@@ -1148,6 +1180,20 @@ def _build_profile(
         lines.append(";; allow_network=true — host network shared")
         lines.append("(allow network*)")
         shares_host_network = True  # CORAL(S112)
+        # CORAL(S127): but no other program's AF_UNIX socket. This filtered deny beats the allow
+        # above; only a filtered allow after it reopens a path. A named socket is spelled by
+        # its real dir, so a link planted at its name matches nothing.
+        lines.append("(deny network-outbound (remote unix-socket))")
+        named = [
+            str(_resolved_path(sock.parent) / sock.name)
+            for sock in policy.allow_unix_socket_paths or []
+        ]
+        targets = [f"path-literal {_quote(sock)}" for sock in (_RESOLVER_SOCKET, *named)]
+        # Write roots come before the control-socket denies below, which then still win.
+        own_dirs, own_dirs_in_denied_roots = _own_socket_dirs(policy, deny_roots)
+        targets += [f"subpath {_quote(own)}" for own in own_dirs]
+        for target in targets:
+            lines.append(f"(allow network-outbound (remote unix-socket ({target})))")
     else:
         lines.append(";; allow_network=false — covered by (deny default); no allow rules emitted")
 
@@ -1161,19 +1207,24 @@ def _build_profile(
     # (allow network*) either way, but a later filtered allow would reopen it.
     lines.append("")
     lines.append(";; Omnigent harness and tmux control sockets")
-    deny_roots: list[Path] = []
-    for root in [*(policy.deny_unix_socket_roots or []), _per_user_harness_root()]:
-        if root is not None and Path(os.path.realpath(root)) not in deny_roots:
-            deny_roots.append(Path(os.path.realpath(root)))
     targets = [f"subpath {_quote(str(root))}" for root in deny_roots]
     targets += [f'path-regex #"{pattern}"' for pattern in _tmux_socket_patterns()]
     for target in targets:
         lines.append(f"(deny network-outbound (remote unix-socket ({target})))")
-    # Then the process's own dirs, which (allow network*) admitted before; the literal
-    # denies below still override them.
+    # Then the scratch and the process's own dirs inside a denied root, which those denies
+    # would shut; the literal denies below still override them.
     if shares_host_network:
-        for own in _own_socket_dirs(policy, deny_roots):
+        for own in own_dirs_in_denied_roots:
             lines.append(f"(allow network-outbound (remote unix-socket (subpath {_quote(own)})))")
+        # CORAL(S127): an own dir's allow covers its masked entries too, and a connect needs
+        # no file access, so a socket under one would connect unread. CORAL(S128): the dirs
+        # above each entry are kept in place by the file rules above, in every network mode.
+        socket_dirs = [*own_dirs, *own_dirs_in_denied_roots]
+        for entry in mask_entries:
+            if _is_under_any(entry.path, socket_dirs):
+                target = "subpath" if entry.kind == "dir" else "path-literal"
+                quoted = _quote(str(entry.path))
+                lines.append(f"(deny network-outbound (remote unix-socket ({target} {quoted})))")
 
     # ----------------------------------------------------------------
     # AF_UNIX control-socket denials.
@@ -1200,8 +1251,8 @@ def _build_profile(
             lines.append(f"(deny file-write* (literal {_quote(canonical)}))")
             lines.append(f"(deny file-write* (literal {_quote(str(Path(canonical).parent))}))")
 
-    for source_path in policy.credential_source_paths or []:
-        quoted = _quote(str(source_path.resolve()))
+    for source_path in credential_sources:  # CORAL(S128): resolved once, above
+        quoted = _quote(str(source_path))
         lines.append(f"(deny file-read* file-write* (literal {quoted}))")
         lines.append(f"(deny network-outbound (remote unix-socket (path-literal {quoted})))")
 
@@ -2154,28 +2205,87 @@ def _per_user_harness_root() -> Path | None:
     return Path(f"/tmp/omnigent-{os.getuid()}") if hasattr(os, "getuid") else None
 
 
-def _own_socket_dirs(policy: SandboxPolicy, deny_roots: list[Path]) -> list[str]:
-    """
-    CORAL(S112): the policy's own dirs whose sockets stay reachable after the S112 denies.
+def _folded(path: Path | str) -> Path:
+    """CORAL(S127): *path* as the default macOS volume compares it: no letter case, one form."""
+    decomposed = unicodedata.normalize("NFD", str(path)).casefold()
+    return Path(unicodedata.normalize("NFD", decomposed))
 
-    The scratch the child gets as ``$TMPDIR`` (a nested Omnigent's terminals live there),
-    and each write root strictly inside a denied root, such as the CLI's launch dir under
-    the harness root. None that is or holds the temp dir, or holds a denied root or a
-    deny-listed socket, so other sessions' dirs and a pane's own tmux dir stay denied.
+
+def _is_under_any(path: Path | str, dirs: Sequence[Path | str]) -> bool:
+    """CORAL(S127): whether *path* is one of *dirs* or inside one, as the volume compares."""
+    return any(_folded(path).is_relative_to(_folded(directory)) for directory in dirs)
+
+
+def _dirs_above(paths: Sequence[Path]) -> list[Path]:
+    """CORAL(S128): every dir above each of *paths*, up to the root, once, nearest first."""
+    above: dict[Path, None] = {}
+    for path in paths:
+        above.update(dict.fromkeys(path.parents))
+    return list(above)
+
+
+def _shared_socket_dirs() -> list[Path]:
     """
-    temp_dir = Path(tempfile.gettempdir()).resolve(strict=False)
-    sockets = [Path(sock).resolve(strict=False) for sock in policy.deny_unix_socket_paths or []]
-    candidates = [policy.private_tmpdir] if policy.private_tmpdir is not None else []
-    for write_root in policy.write_roots:
-        path = write_root.resolve(strict=False)
-        if any(path != root and path.is_relative_to(root) for root in deny_roots):
-            candidates.append(path)
-    own: list[Path] = []
-    for path in (candidate.resolve(strict=False) for candidate in candidates):
-        holds_denied = any(denied.is_relative_to(path) for denied in [*deny_roots, *sockets])
-        if not temp_dir.is_relative_to(path) and not holds_denied and path not in own:
-            own.append(path)
-    return [str(path) for path in own]
+    CORAL(S127): system dirs every program keeps sockets in, never a process's own.
+
+    ``/var/run`` and the per-user temp dir, which is not the temp dir when ``$TMPDIR`` is set.
+    """
+    shared = ["/private/var/run"]
+    with contextlib.suppress(AttributeError, OSError, ValueError):  # no such name off macOS
+        shared.append(os.confstr(_CS_DARWIN_USER_TEMP_DIR) or shared[0])
+    return [Path(path) for path in shared]
+
+
+def _home_dirs() -> list[Path]:
+    """
+    CORAL(S127): ``$HOME`` and the account's home, resolved.
+
+    Other programs keep sockets under the home (Docker's, OrbStack's, Claude Code's). Both
+    are read, since a spawner's environment can point ``$HOME`` elsewhere.
+    """
+    candidates = [os.path.expanduser("~")]
+    try:
+        import pwd
+
+        candidates.append(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError, AttributeError):  # no password database entry
+        pass
+    homes = [_resolved_path(Path(home)) for home in candidates if os.path.isabs(home)]
+    return [home for home in homes if str(home) != "/"]
+
+
+def _own_socket_dirs(policy: SandboxPolicy, deny_roots: list[Path]) -> tuple[list[str], list[str]]:
+    """
+    CORAL(S112), CORAL(S127): the policy's own dirs, whose sockets stay reachable.
+
+    Two lists, by where their allows stand. First, those allowed before the S112 denies, so
+    a harness- or tmux-shaped socket inside stays denied: every write root not named next.
+    Second, those allowed after them: the scratch the child gets as ``$TMPDIR`` (a nested
+    Omnigent's terminals live there), and each write root strictly inside a denied root,
+    such as the CLI's launch dir under the harness root. ``allow_unix_socket_roots`` are
+    sorted like write roots. Neither list holds a dir that is or holds the temp dir, a
+    shared system dir, a home dir, a denied root or a deny-listed socket, so other
+    sessions' dirs, other programs' sockets and a pane's own tmux dir are not reopened.
+    That only withholds the allow: a process that can write such a dir can still move a
+    socket out of it. Paths compare without letter case or Unicode normal form, as the
+    sandbox matches them on the default macOS volume.
+    """
+    guarded = [Path(tempfile.gettempdir()), *_shared_socket_dirs(), *_home_dirs(), *deny_roots]
+    guarded = [_resolved_path(path) for path in [*guarded, *(policy.deny_unix_socket_paths or [])]]
+    scratch = [policy.private_tmpdir] if policy.private_tmpdir is not None else []
+    before: list[str] = []
+    after: list[str] = []
+    for candidate in [*scratch, *policy.write_roots, *(policy.allow_unix_socket_roots or [])]:
+        path = _resolved_path(candidate)
+        holds_guarded = any(_is_under_any(held, [path]) for held in guarded)
+        if holds_guarded or str(path) in [*before, *after]:
+            continue
+        # A root that is a denied root was skipped above, so "under" is "strictly inside".
+        if candidate in scratch or _is_under_any(path, deny_roots):
+            after.append(str(path))
+        else:
+            before.append(str(path))
+    return before, after
 
 
 def _quote(s: str) -> str:
@@ -2330,42 +2440,73 @@ def _cleanup_profile_files() -> None:
 atexit.register(_cleanup_profile_files)
 
 
+# CORAL(S120), CORAL(S128): the canary's checks in its reader's print order, each with whether
+# the sandbox must let it through (the controls); the masked entry is ``box/.masked``.
+_CANARY_CHECKS = (
+    ("another process's arguments by sysctl", False),
+    ("another process's arguments by pgrep", False),
+    ("its own arguments", True),
+    ("clone of a masked entry's dir", False),
+    ("clone of the dir above it", False),
+    ("clone of a plain dir", True),
+    ("rename of a masked entry's dir", False),
+    ("rename of a plain dir", True),
+)
+
 # CORAL(S120): reads the marker from stdin, so no reader's command line holds it, and prints
-# 1/0 for: the target's KERN_PROCARGS2 (arguments and environment) holds it, ``pgrep -lf``
-# (sysmond) finds it, and the reader reads its own arguments (the control).
+# 1 or 0 for each check above. CORAL(S128): it clones into the write root named last.
 _CANARY_READ = """
-import ctypes, os, subprocess, sys
+import ctypes, os, shutil, subprocess, sys
 marker = sys.stdin.read().encode()
+libc = ctypes.CDLL(None)
 
 def args(pid):
     size = ctypes.c_size_t(1 << 20)
     data = ctypes.create_string_buffer(size.value)
     mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
-    if ctypes.CDLL(None).sysctl(mib, 3, data, ctypes.byref(size), None, 0) != 0:
+    if libc.sysctl(mib, 3, data, ctypes.byref(size), None, 0) != 0:
         return b''
     return data.raw[: size.value]
 
+def cloned(source):
+    target = os.path.join(sys.argv[2], 'clone')
+    made = libc.clonefile(os.fsencode(source), os.fsencode(target), 0) == 0
+    shutil.rmtree(target, ignore_errors=True)
+    return made
+
+def renamed(source):
+    try:
+        os.rename(source, source + '.moved')
+    except OSError:
+        return False
+    os.rename(source + '.moved', source)
+    return True
+
 pgrep = subprocess.run(['/usr/bin/pgrep', '-lf', marker], capture_output=True, timeout=10)
 target = args(int(sys.argv[1]))
-print(int(marker in target), int(marker in pgrep.stdout), int(bool(args(os.getpid()))))
+print(int(marker in target), int(marker in pgrep.stdout), int(bool(args(os.getpid()))),
+      int(cloned('box')), int(cloned(os.getcwd())), int(cloned('plain')),
+      int(renamed('box')), int(renamed('plain')))
 """
 
 
 # CORAL(S120): the step profile's process-read rules, checked once per host process.
+# CORAL(S128): and that the rule keeping the dirs above a masked entry in place loads and holds.
 @functools.cache
-def process_read_canary_open() -> bool:
+def process_read_canary_open() -> tuple[str, ...]:
     """
-    Whether a step-profile sandbox on this host read a throwaway process's arguments.
+    The names of the checks a step-profile sandbox failed on this host; empty if none did.
 
-    Outside the sandbox the reader must find the marker both ways; inside it must find it
-    neither way while still reading its own arguments. Anything else, an error included,
-    counts as open, so a host that cannot show the rules hold runs no Coral step.
-    ``launchctl print`` is not checked. ``False`` off macOS, where the rules do not apply.
+    A reader runs outside the sandbox and then inside it, against a throwaway process's
+    marker and a throwaway tree. Outside, every check in ``_CANARY_CHECKS`` must succeed;
+    inside, only the controls. Anything else, an error or a profile that does not load
+    included, is a failure, so a host that cannot show the rules hold runs no Coral step.
+    The tree is on the per-user temp dir's volume; where even that cannot clone a dir, the
+    clone checks are skipped. ``launchctl print`` is not checked. Empty off macOS.
     """
     if sys.platform != "darwin":
-        return False
+        return ()
     marker = f"coral-canary-{uuid.uuid4().hex}"
-    seen: list[str] = []
     try:
         target = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)", marker],
@@ -2374,31 +2515,87 @@ def process_read_canary_open() -> bool:
             stderr=subprocess.DEVNULL,
         )
         try:
-            with tempfile.TemporaryDirectory() as scratch:
-                cwd = Path(scratch).resolve()
+            # CORAL(S128): on the boot volume, which clones dirs wherever ``$TMPDIR`` points.
+            user_temp = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
+            with tempfile.TemporaryDirectory(
+                prefix="omnigent-sandbox-check-", dir=user_temp
+            ) as scratch:
+                base = Path(scratch).resolve()
+                cwd, spare = base / "work", base / "spare"
+                for made in (cwd / "box", cwd / "plain", spare):
+                    made.mkdir(parents=True)
+                (cwd / "box" / ".masked").touch()
+                clones = _clones_dirs(cwd / "plain", spare / "clone")
                 backend = SeatbeltSandboxBackend()
-                policy = backend.resolve(OSEnvSpec(type="caller_process", cwd=str(cwd)), cwd)
-                read = [sys.executable, "-I", "-c", _CANARY_READ, str(target.pid)]
-                for argv in (read, backend.wrap_launcher_argv(read, policy, cwd)):
-                    done = subprocess.run(
+                grant = OSEnvSandboxSpec(
+                    type=backend.type_name,
+                    write_paths=[".", str(spare)],
+                    mask_paths=["box/.masked"],
+                )
+                policy = backend.resolve(
+                    OSEnvSpec(type="caller_process", cwd=str(cwd), sandbox=grant), cwd
+                )
+                read = [sys.executable, "-I", "-c", _CANARY_READ, str(target.pid), str(spare)]
+                runs = [
+                    subprocess.run(
                         argv, cwd=cwd, input=marker, capture_output=True, text=True, timeout=20
                     )
-                    seen.append(f"{done.returncode}: {done.stdout.strip()}")
+                    for argv in (read, backend.wrap_launcher_argv(read, policy, cwd))
+                ]
         finally:
             target.kill()
             target.wait()
     except Exception as exc:  # noqa: BLE001 -- any failure fails closed
-        _LOGGER.error("The sandbox process-read check could not run: %r", exc)
-        return True
-    if seen != ["0: 1 1 1", "0: 0 0 1"]:
+        _LOGGER.error("The sandbox check could not run: %r", exc)
+        return ("check run",)
+    failed = _canary_failures(runs, clones=clones)
+    if failed:
         _LOGGER.error(
-            "The sandbox process-read check failed on macOS %s (outside %r, inside %r; "
-            "want '0: 1 1 1' and '0: 0 0 1'); this host runs no Coral step.",
+            "The sandbox check failed on macOS %s: %s; this host runs no Coral step.",
             platform.mac_ver()[0],
-            *seen,
+            ", ".join(failed),
         )
-        return True
-    return False
+    return failed
+
+
+def _canary_failures(
+    runs: Sequence[subprocess.CompletedProcess[str]], *, clones: bool
+) -> tuple[str, ...]:
+    """CORAL(S128): each check the reader's runs, outside and then inside, did not pass."""
+    failed: list[str] = []
+    for where, run in zip(("outside", "inside"), runs, strict=True):
+        results = run.stdout.split()
+        if run.returncode != 0 or len(results) != len(_CANARY_CHECKS):
+            failed.append("step profile load" if where == "inside" else "reader run (outside)")
+            continue
+        for (name, allowed), result in zip(_CANARY_CHECKS, results, strict=True):
+            wanted = str(int(where == "outside" or allowed))
+            if result != wanted and (clones or not name.startswith("clone ")):
+                failed.append(f"{name} ({where})")
+    return tuple(failed)
+
+
+def _clones_dirs(source: Path, target: Path) -> bool:
+    """CORAL(S128): whether *source*'s volume clones a dir; HFS+, exFAT and network ones do not."""
+    try:
+        _clone_dir(source, target)
+    except OSError as exc:
+        if exc.errno != errno.ENOTSUP:
+            raise
+        _LOGGER.warning(
+            "The sandbox check's volume cannot clone a dir; its clone checks are skipped."
+        )
+        return False
+    shutil.rmtree(target)
+    return True
+
+
+def _clone_dir(source: Path, target: Path) -> None:
+    """CORAL(S128): ``clonefile(2)`` of *source* to *target*, outside any sandbox."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.clonefile(os.fsencode(source), os.fsencode(target), 0) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(source))
 
 
 register_backend(SeatbeltSandboxBackend())

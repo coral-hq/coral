@@ -12,11 +12,14 @@ by its size, whose content the test never reads.
 Pins are change detectors per platform. A pinned verdict outside its kind's closed set
 (:data:`CLOSED`) is open and names its owner; a closed one names none. Without a pin for
 the platform the test writes its verdicts to ``artifacts/`` (when that directory exists,
-as in CI) and fails as not pinned. The second test runs one step on a server that keeps
+as in CI) and fails as not pinned. The first test also runs the probe outside the sandbox,
+where each process must be read and hold no API key, and both stack probes try the step's
+own credential proxy with no session token. The second test runs one step on a server that keeps
 the allow-listed runner token, with the host exporting it. The third runs one step on a
 server that requires identity, after the same probe ran outside the sandbox and reached
 every owner path it tries. The plain tests at the end run the probe on synthetic
-targets, with no stack.
+targets, with no stack; the last of them check the keychain stand-ins every stack puts
+first on its processes' ``PATH``, and the guards that name a process started past them.
 
 Canaries, the allow-listed token and the identity stack's secrets are held in
 :class:`Secret` and the probe's output is reduced to its verdicts where it is read. Only
@@ -26,16 +29,22 @@ in the stack's start or teardown prints that throwaway value.
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import contextlib
+import functools
 import hashlib
 import http.server
+import inspect
 import json
+import mmap
 import os
 import platform
 import re
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -43,12 +52,14 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
+import urllib.parse
 import uuid
 from collections import Counter
 from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import httpx
@@ -66,18 +77,33 @@ from coral.gates.integrity import (
 from coral.omni.process_map import SANDBOX_POLICY_REVISION
 from coral.omni.server.step_agents import checkout_read_paths
 from omnigent._platform import stable_user_id
+from omnigent.inner import seatbelt_sandbox
+from omnigent.inner.claude_gateway_shim import ClaudeGatewayShim, UpstreamCredential
+from omnigent.inner.claude_sdk_executor import _ASSUME_FIRST_PARTY_ENV, _find_system_claude
+from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import _DEFAULT_ENV_PASSTHROUGH
+from omnigent.inner.sandbox import with_private_tmpdir
 from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
-from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from tests._helpers.live_server import find_free_port, terminate_process
+from tests._helpers.polling import poll_until
+from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.e2e.conftest import get_mock_message_requests, release_mock_gate
 from tests.e2e.coral import _skeleton as sk
+from tests.e2e.coral._claude_sdk_kit import (
+    KEYCHAIN_PROGRAMS,
+    LOCAL_HOSTS,
+    EgressRecorder,
+    KeychainStubs,
+    install_keychain_stubs,
+)
 from tests.e2e.coral._live_proxy import Secret
 
 # Absolute deadline for a scenario, below the marker's limit.
 SCENARIO_S = 200
 SHORT_LEASE_S = 10
 PROBE = Path(__file__).with_name("probe15.sh")
+# A top-level dot entry of the step's worktree, so its profile masks it.
+MASKED_FILE = ".crl-masked"
 REPO = Path(__file__).resolve().parents[3]
 ARTIFACTS = REPO / "artifacts"
 FIXTURE = "probe.yaml"
@@ -92,6 +118,7 @@ VERDICTS = {
     "mismatch",
     "refused",
     "minted",
+    "unsupported",
     "unclassified",
 }
 # What the probe reports beside a target's own verdict: the names it read, whether the API
@@ -114,9 +141,23 @@ _SENSITIVE_NAME = re.compile(
     re.ASCII | re.IGNORECASE,
 )
 _TOKEN_NAME = re.compile(r"^OMNIGENT_RUNNER_.*TOKEN.*$")
-# What a direct-spawn runner's exec-time environment holds: a binding token that mints an
-# owner JWT, and the host's bearer.
+# The only model credential a Coral step's CLI holds: its session token at its executor's
+# loopback credential proxy, which swaps it for the real key.
+PROXY_TOKEN_NAME = "OMNIGENT_CLAUDE_PROXY_TOKEN"
+FIRST_PARTY_FLAG_NAME = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"
+# Every beta a gateway launch sends, its experimental betas being switched off (measured on
+# claude 2.1.325); a CLI on a key with no gateway sends more.
+GATEWAY_PATH_BETAS = frozenset(
+    {"claude-code-20250219", "effort-2025-11-24", "interleaved-thinking-2025-05-14"}
+)
+_PROXY_NAMES = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+# The model the probe's own requests to that proxy name: none may reach the mock's ledger.
+PROXY_PROBE_MODEL = "crl-credential-proxy-probe"
+# The runner tokens the probe looks for in an exec-time environment: a binding token that
+# mints an owner JWT, and the host's bearer. A host-launched POSIX runner's holds neither.
 RUNNER_CREDENTIALS = ("OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN", "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN")
+# The call a stack host's readiness probe makes on every platform: its copilot row asks gh.
+HOST_GH_PROBE = "gh auth token"
 
 
 @dataclass(frozen=True)
@@ -129,8 +170,12 @@ class Pin:
 
 # Owners, by the exposure an open pin shows.
 ACCEPTED_SINGLE_USER = "accepted: single-user servers are never Enforced (gates-and-inbox.md)"
-OTHER_PROGRAMS = "CRL-174"  # other programs' same-user sockets and loopback services
+LOOPBACK_SERVICES = "CRL-201"  # other programs' loopback TCP services
+LINUX_SOCKETS = "CRL-202"  # Linux: abstract sockets, and a socket under another bound root
+WORKTREE_SOCKETS = "CRL-203"  # a socket another program keeps in a step's write root
 PLANTED_CONFIG = "CRL-181"  # files a step leaves that the owner's tools run unsandboxed
+# Done tickets: none owns a pin, and no gate table row at the current revision names one.
+CLOSED_TICKETS = frozenset({"CRL-159", "CRL-170", "CRL-171", "CRL-174", "CRL-204"})
 
 _READ_CLOSED = frozenset({"denied", "hidden"})
 # Per probe kind, the verdicts that show the step reaching nothing. Any other verdict is
@@ -142,7 +187,9 @@ CLOSED: Mapping[str, frozenset[str]] = MappingProxyType(
             _READ_CLOSED,
         ),
         "plant": _READ_CLOSED,
+        "masked": _READ_CLOSED,
         "owner_http": frozenset({"refused", "denied", "hidden"}),
+        "credential_proxy": frozenset({"refused", "denied", "hidden"}),
         "shell": frozenset({"not_present"}),
     }
 )
@@ -181,18 +228,26 @@ PIN_KINDS: Mapping[str, str] = MappingProxyType(
             "file",
         ),
         **dict.fromkeys(
-            ("harness_socket", "other_unix_socket", "other_abstract_socket"), "socket"
+            (
+                "harness_socket",
+                "other_unix_socket",
+                "other_abstract_socket",
+                "worktree_unix_socket",
+            ),
+            "socket",
         ),
         **dict.fromkeys(("server_loopback", "server_localhost"), "http"),
         **dict.fromkeys(("owner_bare", "owner_bare_localhost"), "owner_http"),
         **dict.fromkeys(("own_runner_bearer", "host_bearer"), "bearer"),
         **dict.fromkeys(("step_runs", "runner", "harness", "launcher", "cli"), OUTSIDE),
         "config_api_key": "token",
+        "credential_proxy": "credential_proxy",
         "shell_env_names": "shell",
         "own_runner_mint": "mint",
         "stored_credentials": "stored",
         "other_loopback_tcp": "tcp",
         "worktree_exec_config": "plant",
+        "worktree_masked_file": "masked",
     }
 )
 
@@ -224,6 +279,8 @@ EXPECTED: dict[str, dict[str, Pin]] = {
         "owner_bare_localhost": Pin("reachable", ACCEPTED_SINGLE_USER),
         "shell_env_names": Pin("not_present"),
         "shell_env_names.names": Pin("none"),
+        # The step reaches its own credential proxy and is refused without the session token.
+        "credential_proxy": Pin("refused"),
     },
     # Pinned from lane run 44980984569 on Ubuntu 24.04.5 LTS, claude 2.1.295 (bwrap); the
     # two owner_bare pins measured in lane run 45187294423 (a shared network namespace).
@@ -252,8 +309,29 @@ EXPECTED: dict[str, dict[str, Pin]] = {
         "owner_bare_localhost": Pin("reachable", ACCEPTED_SINGLE_USER),
         "shell_env_names": Pin("not_present"),
         "shell_env_names.names": Pin("none"),
+        # Not measured in a lane yet: set from the shared network namespace (server_loopback
+        # is reachable there) and the proxy's own refusal, which no sandbox changes.
+        "credential_proxy": Pin("refused"),
     },
 }
+# What the same probe must find outside any sandbox right before the step runs it: each
+# process read, its environment and command line without the API key, and the proxy refusing
+# a caller that has no session token.
+OUTSIDE_PROCESSES = ("runner_environ", "cli_environ", "host_environ", "own_cli_environ")
+OUTSIDE_PROBE15: Mapping[str, str] = MappingProxyType(
+    {
+        **{
+            f"{check}{suffix}": verdict
+            for check in OUTSIDE_PROCESSES
+            for suffix, verdict in (
+                ("", "reachable"),
+                (".api_key", "not_present"),
+                (".argv_api_key", "not_present"),
+            )
+        },
+        "credential_proxy": "refused",
+    }
+)
 # What the pins hold for. Harness sockets sit under the stack's /tmp/crl-* (production:
 # /tmp/omnigent-<uid>); bridge canaries under the stack's TMPDIR (production: the
 # per-user $TMPDIR). The checkout read grant is on: the checkout is an editable install.
@@ -497,21 +575,6 @@ def _release_oldest(wait: sk.Wait, mock: str, tokens: tuple[str, ...]) -> str:
     return wait(advanced, "the released session's next call")
 
 
-def _one_cli(runner: int) -> int:
-    """The pid of the step's one ``claude`` CLI below its runner."""
-    tree = sk.group_tree(runner)
-    clis = sk.claude_clis(tree)
-    assert len(clis) == 1, f"{len(clis)} claude CLIs in {sk.process_names(tree)}"
-    return clis[0].pid
-
-
-def _harness_socket(stack: sk.Skeleton, session_id: str) -> Path:
-    """The session's harness socket, under the stack's root or the default one."""
-    roots = dict.fromkeys((stack.harness_tmp, resolve_harness_tmp_parent({})))
-    [found] = [path for root in roots for path in root.glob(f"ap-*/conv-{session_id}.sock")]
-    return found
-
-
 def _socket_root(stack: sk.Skeleton, harness_socket: Path) -> str:
     """The root the runner put the socket under, as recorded beside the pins."""
     root = harness_socket.parent.parent
@@ -539,6 +602,84 @@ def _token_names(proc: psutil.Process) -> str:
     names = set(proc.environ())
     assert {"PATH", "HOME"} & names, f"{proc.pid}'s environment is unreadable outside the sandbox"
     return ",".join(sorted(name for name in names if _TOKEN_NAME.match(name))) or "none"
+
+
+def _cli_proxy(cli: int) -> tuple[Target, Secret]:
+    """
+    The credential proxy a step's CLI is pointed at, as a probe target by its loopback port,
+    and the session token that CLI holds, redacted; both read outside the sandbox from the
+    CLI's environment, none of which is kept.
+    """
+    environ = psutil.Process(cli).environ
+    url = urllib.parse.urlsplit(environ().get("ANTHROPIC_BASE_URL", ""))
+    assert url.hostname == "127.0.0.1" and url.port, f"CLI {cli} names no loopback proxy"
+    token = Secret(environ().get(PROXY_TOKEN_NAME, ""))
+    assert token.reveal(), f"CLI {cli} holds no {PROXY_TOKEN_NAME}"
+    live = _listening(socket.AF_INET, ("127.0.0.1", url.port), "the credential proxy")
+    return Target("credential_proxy", "credential_proxy", str(url.port), live=live), token
+
+
+def _fenced(recorder_url: str) -> dict[str, str]:
+    """
+    Host environment that sends every request of the host, its runners and their CLIs to
+    another machine through ``recorder_url`` instead; the host forwards the names it lists.
+    """
+    return {
+        **dict.fromkeys(_PROXY_NAMES, recorder_url),
+        "NO_PROXY": LOCAL_HOSTS,
+        "OMNIGENT_RUNNER_ENV_PASSTHROUGH": ",".join((*_PROXY_NAMES, "NO_PROXY")),
+    }
+
+
+def _betas_sent(mock: str, token: str) -> set[str]:
+    """Every ``anthropic-beta`` flag on the model requests that carry ``token``."""
+    return {
+        beta
+        for entry in get_mock_message_requests(mock)
+        if token in json.dumps(entry["body"])
+        for beta in entry["betas"]
+    }
+
+
+def _cli_build_files(launcher: Path) -> list[Path]:
+    """
+    The files that may hold the CLI's code: the launcher, and for an npm install's small
+    launcher every file of 1 MiB or more in its package and the platform packages beside it.
+    """
+    if launcher.stat().st_size >= 1 << 20:
+        return [launcher]
+    package = next((d for d in launcher.parents if (d / "package.json").is_file()), None)
+    roots = [] if package is None else [package, *package.parent.glob("claude-code-*")]
+    return [
+        launcher,
+        *(
+            path
+            for root in roots
+            for path in root.rglob("*")
+            if path.is_file() and not path.is_symlink() and path.stat().st_size >= 1 << 20
+        ),
+    ]
+
+
+def _key_exposed_outside(verdicts: Mapping[str, str]) -> list[str]:
+    """
+    How the run outside the sandbox departs from :data:`OUTSIDE_PROBE15`, as tokens and names:
+    a process it could not read, an API key it found, harness config in a CLI's environment,
+    or a CLI without its session token.
+    """
+    problems = [
+        f"{key} is {verdicts.get(key, '-')}"
+        for key, verdict in OUTSIDE_PROBE15.items()
+        if verdicts.get(key) != verdict
+    ]
+    for check in ("cli_environ", "own_cli_environ"):
+        names = verdicts.get(f"{check}.names", "").split(",")
+        config = sorted(name for name in names if name.startswith("HARNESS_CLAUDE_SDK_"))
+        if config:
+            problems.append(f"{check} holds {config}")
+        if PROXY_TOKEN_NAME not in names:
+            problems.append(f"{check} holds no {PROXY_TOKEN_NAME}")
+    return problems
 
 
 def _probe_command(targets: list[Target]) -> dict[str, str]:
@@ -804,9 +945,10 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
         implement = sk.held_activation(wait, mock, impl_token, 1)
         review = sk.held_activation(wait, mock, review_token, 1)
         reviewer = sk.step_session(client, run_id, "review")
+        implementer = sk.step_session(client, run_id, "implement")
         runner = sk.runner_pid(stack, reviewer)
-        own_runner = sk.runner_pid(stack, sk.step_session(client, run_id, "implement"))
-        harness_socket = _harness_socket(stack, reviewer)
+        own_runner = sk.runner_pid(stack, implementer)
+        harness_socket = sk.harness_socket(stack, reviewer)
         recorded = _recorded(stack, harness_socket)
         worktree = Path(sk.detail(client, run_id)["target"]["worktree_path"])
         probe_digest = _sha256(PROBE.read_bytes())
@@ -816,10 +958,11 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
         # key's digest: the reviewer's runner and CLI, the host daemon and the step's own CLI.
         processes = {
             "runner_environ": runner,
-            "cli_environ": _one_cli(runner),
+            "cli_environ": sk.session_cli(stack, runner, reviewer),
             "host_environ": stack.host.proc.pid,
-            "own_cli_environ": _one_cli(own_runner),
+            "own_cli_environ": sk.session_cli(stack, own_runner, implementer),
         }
+        proxy, proxy_token = _cli_proxy(processes["own_cli_environ"])
         targets = [
             Target(
                 "control_file",
@@ -875,12 +1018,18 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
                 for check, url in _owner_urls(stack).items()
             ),
             Target("shell_env_names", "shell", ""),
+            proxy,
         ]
         unproven = _unproven(targets)
         assert not unproven, f"targets without a host-side control: {unproven}"
         misjudged = _misjudged(targets)
         assert not misjudged, f"targets of another kind than their pins: {misjudged}"
         checks = {target.check for target in targets}
+        outside_targets = [
+            target
+            for target in targets
+            if target.check.startswith("control_") or target.check in OUTSIDE_PROBE15
+        ]
         sk.queue(
             mock,
             impl_token,
@@ -901,6 +1050,10 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
 
         before = _failed_controls(targets)
         assert not before, f"failed control before the probe: {before}"
+        # The same probe outside any sandbox, as the step's user, in the step's worktree:
+        # there every process is read, and none holds the API key.
+        outside = _run_probe(outside_targets, _probe_env(home), worktree)
+        between = _failed_controls(targets)
         release_mock_gate(mock)
         reading = wait(lambda: _read_probe(mock, probe_call, checks), "the probe's result")
         after = _failed_controls(targets)
@@ -914,21 +1067,35 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
         release_mock_gate(mock)
         release_mock_gate(mock)
         run = wait(lambda: sk.finished(client, run_id), "the run to finish")
-        leaked = _ledger_holds(mock, {**values, "config_api_key": api_key})
+        held = {**values, "config_api_key": api_key, "proxy_session_token": proxy_token}
+        leaked = _ledger_holds(mock, held)
+        forwarded = len(get_mock_message_requests(mock, key=PROXY_PROBE_MODEL))
 
     # The verdicts first, so a failing run still leaves them: they are tokens and names only.
     observed = _without_controls(reading.verdicts)
-    report = {"verdicts": observed, "recorded": recorded}
+    report = {
+        "verdicts": observed,
+        "outside": _without_controls(outside.verdicts),
+        "recorded": recorded,
+    }
     written = _write_artifact("probe15", report)
     print(
         f"Probe 15 on {sys.platform}, checkout read grant {recorded['checkout_read_grant']}:",
         json.dumps(report),
     )
+    assert not between, f"failed control after the probe ran outside: {between}"
     assert not after, f"failed control after the probe: {after}"
+    outside_verdicts = _assert_reading(outside, outside_targets)
+    _controls_held(outside_verdicts, "outside the sandbox")
+    exposed = _key_exposed_outside(outside_verdicts)
+    assert not exposed, f"outside the sandbox: {exposed}"
     verdicts = _assert_reading(reading, targets)
     _controls_held(verdicts)
-    # The ledger holds the probe's tokens, never a canary.
+    # The ledger holds the probe's tokens, never a canary or the CLI's session token, and
+    # none of the probe's own requests to the proxy. It records request bodies, not headers:
+    # that the token is in no upstream header is the shim's and the executor's unit tests.
     assert not leaked, f"the mock's ledger holds {leaked}"
+    assert not forwarded, f"the proxy forwarded {forwarded} request(s) of the probe"
     assert (run["status"], run["causes"]) == ("completed", []), run
     _assert_recorded(recorded)
     _assert_pinned("probe 15", EXPECTED.get(sys.platform, {}), observed, written)
@@ -936,8 +1103,8 @@ def test_probe_15_from_a_step_shell(tmp_path: Path, isolated_mock_llm_server_url
 
 # The server no longer takes this token as runner proof for a Coral session's /mcp calls or
 # tunnel, and runners strip it from their children. ``runner.names`` and ``harness.names``
-# stay pinned to it until the host spawns its runner zygote without its own environment:
-# a zygote-forked runner and harness still inherit the host's.
+# are ``none``: the host starts its runner zygote from the allow-listed runner environment,
+# so a zygote-forked runner and harness never inherit the host's copy.
 EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
     # Pinned from one local run on macOS 27.2.1 with claude 2.1.325 (seatbelt).
     "darwin": {
@@ -945,8 +1112,9 @@ EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
         "runner_environ": Pin("denied"),
         "shell_env_names": Pin("not_present"),
         "shell_env_names.names": Pin("none"),
-        "runner.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
-        "harness.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
+        # The zygote starts from the allow-listed runner env, so its forks lack the token.
+        "runner.names": Pin("none"),
+        "harness.names": Pin("none"),
         "launcher.names": Pin("none"),
         "cli.names": Pin("none"),
     },
@@ -956,8 +1124,9 @@ EXPECTED_TOKEN: dict[str, dict[str, Pin]] = {
         "runner_environ": Pin("hidden"),
         "shell_env_names": Pin("not_present"),
         "shell_env_names.names": Pin("none"),
-        "runner.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
-        "harness.names": Pin("OMNIGENT_RUNNER_TUNNEL_TOKEN"),
+        # As on macOS; the same zygote env on both platforms.
+        "runner.names": Pin("none"),
+        "harness.names": Pin("none"),
         "launcher.names": Pin("none"),
         "cli.names": Pin("none"),
     },
@@ -971,11 +1140,18 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
     """
     Whether a step runs on a server that keeps the allow-listed runner token, and which
     token names reach its shell, and its runner, harness, launcher and CLI as read from
-    outside, where a zygote-forked runner's or harness's environment is the host's own.
+    outside. A zygote-forked runner's or harness's readable environment is the zygote's,
+    which starts from the allow-listed runner environment, so the host's token is not in it.
 
     Recorded with it: a host ``unknown`` counts as dead, so a relaunch can start while the
     old runner lives on. The server takes the allow-listed token as runner proof only for a
     session that is not Coral's (``mcp_identity.py``).
+
+    The host's credential here is an API key with no endpoint of its own; the host's
+    ``ANTHROPIC_BASE_URL`` names the mock. So each step's CLI runs on the direct-key path:
+    through its executor's credential proxy, whose upstream is that inherited endpoint.
+    Were that endpoint ever lost on the way, the proxy would forward to the Anthropic API:
+    every proxy setting of the host names a recorder that refuses, and it must see nothing.
     """
     sk.require_claude_cli()
     mock = isolated_mock_llm_server_url
@@ -987,21 +1163,32 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
     # Per run and held redacted: the server keeps it and the host exports it. Only the
     # stack helpers' frames hold it, so only a start or teardown failure prints it.
     allowlisted = Secret(secrets.token_urlsafe(32))
-    sk.queue(mock, impl_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, NOTHING, call_id=f"n-{uid}"))])
-    sk.queue(
-        mock, review_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, README, call_id=f"r-{uid}"))]
-    )
+    # On a key with no gateway the CLI defers its MCP tools, so each step loads them first.
+    queue = functools.partial(sk.queue, offering=sk.TOOL_SEARCH)
+    first_calls = {
+        impl_token: sk.tool_call(sk.SHELL_TOOL, NOTHING, call_id=f"n-{uid}"),
+        review_token: sk.tool_call(sk.SHELL_TOOL, README, call_id=f"r-{uid}"),
+    }
+    for token, call in first_calls.items():
+        queue(mock, token, [*sk.load_step_tools(f"s-{token}"), sk.held(call)])
     deadline = time.monotonic() + SCENARIO_S
 
-    with sk.skeleton_stack(
-        tmp_path / "stack",
-        mock_url=mock,
-        host_config=sk.mock_auth(mock),
-        host_env={"OMNIGENT_RUNNER_TUNNEL_TOKEN": allowlisted.reveal()},
-        lease_s=SHORT_LEASE_S,
-        allowlisted_token=allowlisted.reveal(),
-        repo_files={PROBE.name: PROBE.read_bytes()},
-    ) as stack:
+    with (
+        EgressRecorder() as fence,
+        sk.skeleton_stack(
+            tmp_path / "stack",
+            mock_url=mock,
+            host_config={"auth": {"type": "api_key", "api_key": "mock-key"}},
+            host_env={
+                "OMNIGENT_RUNNER_TUNNEL_TOKEN": allowlisted.reveal(),
+                "ANTHROPIC_BASE_URL": mock,
+                **_fenced(fence.url),
+            },
+            lease_s=SHORT_LEASE_S,
+            allowlisted_token=allowlisted.reveal(),
+            repo_files={PROBE.name: PROBE.read_bytes()},
+        ) as stack,
+    ):
         client = stack.client
         run_id = sk.start_review_loop(
             stack,
@@ -1014,10 +1201,31 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         implement = sk.held_activation(wait, mock, impl_token, 1)
         review = sk.held_activation(wait, mock, review_token, 1)
         implementer = sk.step_session(client, run_id, "implement")
-        step = sk.step_processes(sk.runner_pid(stack, implementer))
-        recorded = _recorded(stack, _harness_socket(stack, implementer))
+        runner = sk.runner_pid(stack, implementer)
+        step = sk.step_processes(runner, sk.session_cli(stack, runner, implementer))
+        # Each was exec'd, or forked from a zygote that was, inside the stack's keychain barrier.
+        outside = sk.keychain_bypasses(stack.stubs, stack.root, step.values(), unread_fails=True)
+        assert not outside, f"step processes started outside the keychain barrier: {outside}"
+        # The stubs' log works: the host's readiness probe asks gh for a token on every platform.
+        wait(
+            lambda: True if HOST_GH_PROBE in stack.stubs.calls() else None,
+            "the host's gh probe to reach the stack's stub",
+        )
+        recorded = _recorded(stack, sk.harness_socket(stack, implementer))
         names = {f"{role}.names": _token_names(proc) for role, proc in step.items()}
-        runner = step["runner"].pid
+        # The CLI holds a session token for a loopback proxy of its own, never the mock's URL.
+        # Only a launch with no gateway leaves the CLI's experimental betas on (a gateway
+        # launch switches them off or names the gateway); a mock upstream is not the
+        # Anthropic API, so the CLI is not told to assume it is.
+        proxy, _session_token = _cli_proxy(step["cli"].pid)
+        cli_names = set(step["cli"].environ())
+        direct_key_path = {
+            "proxy_is_not_the_mock": proxy.target != str(urllib.parse.urlsplit(mock).port),
+            "betas_left_on": "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" not in cli_names,
+            "no_gateway_switch": "CLAUDE_CODE_USE_GATEWAY" not in cli_names,
+            "not_assumed_first_party": FIRST_PARTY_FLAG_NAME not in cli_names,
+            "fenced": set(_PROXY_NAMES) <= cli_names,
+        }
         # The shell's own runner, as the step tries to read it: where the allow-listed token sits.
         targets = [
             Target("control_file", "file", PROBE.name, f"sha256:{_sha256(PROBE.read_bytes())}"),
@@ -1031,7 +1239,7 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         misjudged = _misjudged(targets)
         assert not misjudged, f"targets of another kind than their pins: {misjudged}"
         checks = {target.check for target in targets}
-        sk.queue(
+        queue(
             mock,
             impl_token,
             [
@@ -1045,7 +1253,7 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
                 DONE,
             ],
         )
-        sk.queue(
+        queue(
             mock,
             review_token,
             [sk.handoff_call(review, call_id=f"ok-{uid}", report="README.md is unchanged."), DONE],
@@ -1061,11 +1269,22 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         run = wait(lambda: sk.finished(client, run_id), "the run to finish")
         accepted = sk.result_texts(mock, handed)
         leaked = _ledger_holds(mock, {"allowlisted_token": allowlisted})
+        # What the proxy forwarded: the requests as the mock received them.
+        betas = {token: _betas_sent(mock, token) for token in (impl_token, review_token)}
+        egress = fence.request_lines
 
     assert not after, f"failed control after the probe: {after}"
     verdicts = _assert_reading(reading, targets)
     _controls_held(verdicts)
     assert not leaked, f"the mock's ledger holds {leaked}"
+    assert all(direct_key_path.values()), f"not the direct-key proxy path: {direct_key_path}"
+    assert egress == [], f"the stack reached for another machine: {egress}"
+    print(
+        "anthropic-beta through the proxy:", json.dumps({k: sorted(v) for k, v in betas.items()})
+    )
+    # Each step's model calls reached the mock, with betas only a launch with no gateway sends.
+    beyond_a_gateway = {token: sorted(sent - GATEWAY_PATH_BETAS) for token, sent in betas.items()}
+    assert all(beyond_a_gateway.values()), f"no experimental beta reached the mock: {betas}"
     runs = (run["status"], run["causes"]) == ("completed", []) and any(
         '"accepted": true' in text for text in accepted
     )
@@ -1074,7 +1293,9 @@ def test_a_step_on_a_server_with_the_allow_listed_runner_token(
         **{check: token for check, token in verdicts.items() if not check.startswith("control_")},
         **names,
     }
-    report = {"verdicts": observed, "recorded": recorded}
+    # Names and counts only: what the stack's processes asked a keychain program for.
+    stub_calls = dict(sorted(Counter(stack.stubs.calls()).items()))
+    report = {"verdicts": observed, "recorded": recorded, "keychain_stub_calls": stub_calls}
     written = _write_artifact("probe15-token", report)
     print(f"Allow-listed token on {sys.platform}:", json.dumps(report))
     _assert_recorded(recorded)
@@ -1101,9 +1322,15 @@ EXPECTED_IDENTITY: dict[str, dict[str, Pin]] = {
         "stored_credentials.read": Pin("denied"),
         "stored_credentials": Pin("denied"),
         "credential_files.cookie_secret": Pin("denied"),
-        "other_unix_socket": Pin("reachable", OTHER_PROGRAMS),
-        "other_loopback_tcp": Pin("reachable", OTHER_PROGRAMS),
+        # Another program's socket is refused wherever it is, but for one inside the step's
+        # own worktree: a write root's sockets count as the step's own.
+        "other_unix_socket": Pin("denied"),
+        "worktree_unix_socket": Pin("reachable", WORKTREE_SOCKETS),
+        "other_loopback_tcp": Pin("reachable", LOOPBACK_SERVICES),
         "worktree_exec_config": Pin("reachable", PLANTED_CONFIG),
+        # Read neither directly nor after renaming or clonefile(2)-ing the worktree above it.
+        "worktree_masked_file": Pin("denied"),
+        "credential_proxy": Pin("refused"),
     },
     # Measured in lane run 45187294423: bwrap's pid namespace and mounts hide
     # the processes, the homes and /tmp; the network namespace and the worktree are shared.
@@ -1124,9 +1351,18 @@ EXPECTED_IDENTITY: dict[str, dict[str, Pin]] = {
         "stored_credentials": Pin("hidden"),
         "credential_files.cookie_secret": Pin("hidden"),
         "other_unix_socket": Pin("hidden"),
-        "other_abstract_socket": Pin("reachable", OTHER_PROGRAMS),
-        "other_loopback_tcp": Pin("reachable", OTHER_PROGRAMS),
+        "other_abstract_socket": Pin("reachable", LINUX_SOCKETS),
+        # Not measured in a lane yet: set from the worktree's read-write bind, which shows the
+        # step every file in it, sockets included (worktree_exec_config writes there).
+        "worktree_unix_socket": Pin("reachable", WORKTREE_SOCKETS),
+        "other_loopback_tcp": Pin("reachable", LOOPBACK_SERVICES),
         "worktree_exec_config": Pin("reachable", PLANTED_CONFIG),
+        # The direct read only (the probe moves and clones on macOS alone). Measured in the
+        # lane: bwrap binds /dev/null over a masked file, and the read is refused, not empty.
+        "worktree_masked_file": Pin("denied"),
+        # Not measured in a lane yet: set from other_loopback_tcp, reachable in that run, and
+        # the proxy's own refusal.
+        "credential_proxy": Pin("refused"),
     },
 }
 # What the run's detail says of its gates on that server: the sandbox still has open paths.
@@ -1136,16 +1372,17 @@ RECORDED_IDENTITY: dict[str, dict[str, Any]] = {
         **RECORDED["darwin"],
         "server_mode": "accounts",
         "runner_spawn": "direct",
-        "sandbox_policy": "1",
+        "sandbox_policy": "3",
         "gate_integrity": OPEN_SANDBOX_LABEL,
     },
     # Measured in lane run 45187294423; its artifact records the OS and CLI versions it ran.
+    # The policy revision is this checkout's: no bwrap rule changed since that run.
     "linux": {
         "harness_socket_root": "/tmp/crl-*",
         "checkout_read_grant": True,
         "server_mode": "accounts",
         "runner_spawn": "direct",
-        "sandbox_policy": "1",
+        "sandbox_policy": "3",
         "gate_integrity": OPEN_SANDBOX_LABEL,
     },
 }
@@ -1158,10 +1395,12 @@ OUTSIDE_IDENTITY: Mapping[str, str] = MappingProxyType(
         "owner_bare": "refused",
         "owner_bare_localhost": "refused",
         "own_runner_environ": "reachable",
+        # The direct-spawned runner's environment is read and holds neither token: they came
+        # through its launch socket.
         "own_runner_mint.read": "reachable",
-        "own_runner_mint": "minted",
+        "own_runner_mint": "not_present",
         "own_runner_bearer.read": "reachable",
-        "own_runner_bearer": "reachable",
+        "own_runner_bearer": "not_present",
         # The host daemon's environment is read and holds no bearer: a negative control.
         "host_bearer.read": "reachable",
         "host_bearer": "not_present",
@@ -1171,8 +1410,13 @@ OUTSIDE_IDENTITY: Mapping[str, str] = MappingProxyType(
         "credential_files.cookie_secret": "reachable",
         "other_unix_socket": "reachable",
         "other_abstract_socket": "reachable",
+        "worktree_unix_socket": "reachable",
         "other_loopback_tcp": "reachable",
         "worktree_exec_config": "reachable",
+        # Read directly, so nothing is moved or cloned.
+        "worktree_masked_file": "reachable",
+        # The proxy refuses whoever lacks its session token, sandboxed or not.
+        "credential_proxy": "refused",
     }
 )
 _USED_CREDENTIAL = ("mint", "bearer", "stored")
@@ -1212,6 +1456,27 @@ def _other_programs() -> Iterator[list[Target]]:
         yield targets
 
 
+@contextlib.contextmanager
+def _worktree_socket(worktree: Path) -> Iterator[Target]:
+    """
+    A throwaway listener at a plain name directly inside a step's own worktree, as a dev
+    server another program keeps there would be; closed and removed on exit. The host binds
+    and checks it through a short link to the worktree and the probe connects by its name
+    from there, so neither address outgrows an AF_UNIX path.
+    """
+    name = f"crl-w-{secrets.token_hex(4)}.sock"
+    short = Path(tempfile.mkdtemp(dir="/tmp", prefix="crl-w-"))
+    with contextlib.ExitStack() as cleanup:
+        cleanup.callback(shutil.rmtree, short, ignore_errors=True)
+        link = short / "w"
+        link.symlink_to(worktree, target_is_directory=True)
+        cleanup.callback((worktree / name).unlink, missing_ok=True)
+        listener = cleanup.enter_context(socket.socket(socket.AF_UNIX))
+        listener.bind(str(link / name))
+        listener.listen()
+        yield Target("worktree_unix_socket", "socket", name, live=_socket_live(link / name))
+
+
 def _broken_outside(verdicts: Mapping[str, str], targets: list[Target]) -> list[str]:
     """Each owner path the run outside the sandbox did not open, as tokens only."""
     keys = [
@@ -1238,10 +1503,14 @@ def test_probe_15_on_a_server_that_requires_identity(
     """
     Whether a step on an accounts server can act as its owner: mint an owner JWT with its
     runner's binding token, use the host's bearer or the CLI's stored credentials, call an
-    owner route bare, read the server's secrets, reach other programs' services, or plant a
-    repository config the owner's git would run. The runner is spawned directly, so its
-    exec-time environment holds both tokens. The same probe runs first outside any sandbox
-    and must open every one of those paths, or the probe is broken rather than the step held.
+    owner route bare, read the server's secrets, reach other programs' services (a Unix
+    socket outside its worktree and one inside it, a loopback port), use its own credential
+    proxy without the session token, plant a repository config the owner's git would
+    run, or read a masked file of its worktree, directly or after renaming or cloning the
+    worktree above it. The runner is spawned directly by the host
+    daemon, which hands it both tokens through an inherited socket, so its exec-time
+    environment holds neither. The same probe runs first outside any sandbox and must open
+    every other one of those paths, or the probe is broken rather than the step held.
     """
     sk.require_claude_cli()
     mock = isolated_mock_llm_server_url
@@ -1251,6 +1520,7 @@ def test_probe_15_on_a_server_that_requires_identity(
     probe_call = f"probe-{uid}"
     handed = f"done-{uid}"
     cookie_value = _canary()
+    masked_value = _canary()
     sk.queue(mock, impl_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, NOTHING, call_id=f"n-{uid}"))])
     sk.queue(
         mock, review_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, README, call_id=f"r-{uid}"))]
@@ -1262,13 +1532,18 @@ def test_probe_15_on_a_server_that_requires_identity(
             tmp_path / "stack",
             mock_url=mock,
             host_config=sk.mock_auth(mock),
-            # Direct spawn: the runner's exec-time environment holds its binding token.
+            # Direct spawn: the runner takes its tokens from a socket, not its exec-time env.
             host_env={"OMNIGENT_RUNNER_ZYGOTE": "0"},
             lease_s=SHORT_LEASE_S,
-            repo_files={PROBE.name: PROBE.read_bytes()},
+            # Committed, so the masked file is in the worktree before the step's profile is built.
+            repo_files={
+                PROBE.name: PROBE.read_bytes(),
+                MASKED_FILE: masked_value.reveal().encode(),
+            },
             identity=True,
         ) as stack,
         _other_programs() as other_programs,
+        contextlib.ExitStack() as listeners,
     ):
         client = stack.client
         server = stack.server.server
@@ -1292,13 +1567,14 @@ def test_probe_15_on_a_server_that_requires_identity(
         review = sk.held_activation(wait, mock, review_token, 1)
         implementer = sk.step_session(client, run_id, "implement")
         runner = sk.runner_pid(stack, implementer)
-        runner_tokens = _token_names(psutil.Process(runner))
-        spawn = "direct" if set(RUNNER_CREDENTIALS) <= set(runner_tokens.split(",")) else "zygote"
-        assert spawn == "direct", f"failed control: the runner's environment holds {runner_tokens}"
+        # A directly spawned runner is the daemon's child; a zygote-forked one the zygote's.
+        parent = psutil.Process(runner).ppid()
+        spawn = "direct" if parent == stack.host.proc.pid else "zygote"
+        assert spawn == "direct", f"failed control: the runner's parent {parent} is not the host"
         # Read while the step holds its host: the label the owner's run shows on this server.
         detail = sk.detail(client, run_id)
         recorded = {
-            **_recorded(stack, _harness_socket(stack, implementer)),
+            **_recorded(stack, sk.harness_socket(stack, implementer)),
             "server_mode": "accounts",
             "runner_spawn": spawn,
             # The host runs this checkout, so it reports this revision.
@@ -1306,10 +1582,13 @@ def test_probe_15_on_a_server_that_requires_identity(
             "gate_integrity": detail["gate_integrity"],
         }
         worktree = Path(detail["target"]["worktree_path"])
+        worktree_socket = listeners.enter_context(_worktree_socket(worktree))
         probe_digest = _sha256(PROBE.read_bytes())
+        masked_digest = _sha256(masked_value.reveal().encode())
         # Every credential is tried on this server's owner route, and only there.
         on_server = f"{stack.server.base_url} {stack.server.base_url}{sk.RUNS}"
         runner_live = _process_live(runner)
+        proxy, proxy_token = _cli_proxy(sk.session_cli(stack, runner, implementer))
         plant = f"crl-plant-{uid}"
         targets = [
             Target(
@@ -1347,7 +1626,17 @@ def test_probe_15_on_a_server_that_requires_identity(
                 _file_live(cookie, cookie_digest),
             ),
             Target("worktree_exec_config", "plant", plant, live=_absent(worktree / plant)),
+            # Its digest checked before and after also shows the step left it as it was.
+            Target(
+                "worktree_masked_file",
+                "masked",
+                MASKED_FILE,
+                f"sha256:{masked_digest}",
+                _file_live(worktree / MASKED_FILE, masked_digest),
+            ),
             *other_programs,
+            worktree_socket,
+            proxy,
         ]
         unproven = _unproven(targets)
         assert not unproven, f"targets without a host-side control: {unproven}"
@@ -1384,8 +1673,14 @@ def test_probe_15_on_a_server_that_requires_identity(
         run = wait(lambda: sk.finished(client, run_id), "the run to finish")
         leaked = _ledger_holds(
             mock,
-            {"owner_token": stack.owner_token, "credential_files.cookie_secret": cookie_value},
+            {
+                "owner_token": stack.owner_token,
+                "credential_files.cookie_secret": cookie_value,
+                "worktree_masked_file": masked_value,
+                "proxy_session_token": proxy_token,
+            },
         )
+        forwarded = len(get_mock_message_requests(mock, key=PROXY_PROBE_MODEL))
 
     # The verdicts before any assertion, so a failing run still leaves them for re-pinning or
     # escalation: _parse admits verdict tokens and names only.
@@ -1403,8 +1698,11 @@ def test_probe_15_on_a_server_that_requires_identity(
     _controls_held(outside_verdicts, "outside the sandbox")
     verdicts = _assert_reading(reading, targets)
     _controls_held(verdicts)
-    # The ledger holds the probe's tokens, never the owner's JWT or a canary.
+    # The ledger holds the probe's tokens, never the owner's JWT, a canary or the CLI's
+    # session token, and none of the probe's own requests to the proxy (request bodies only,
+    # as above).
     assert not leaked, f"the mock's ledger holds {leaked}"
+    assert not forwarded, f"the proxy forwarded {forwarded} request(s) of the probe"
     broken = _broken_outside(outside_verdicts, targets)
     assert not broken, f"broken probe: {broken}"
     assert (run["status"], run["causes"]) == ("completed", []), run
@@ -1417,8 +1715,8 @@ def _probe_env(home: Path, **extra: str) -> dict[str, str]:
     return {**sk.minimal_env(), "HOME": str(home), **extra}
 
 
-def _run_probe(targets: list[Target], env: Mapping[str, str], cwd: Path) -> Reading:
-    """Run the probe outside any sandbox, its output reduced here as the ledger's is."""
+def _probe_output(targets: list[Target], env: Mapping[str, str], cwd: Path) -> tuple[Secret, int]:
+    """The probe's output from a run outside any sandbox, redacted, and its stderr's length."""
     done = subprocess.run(
         ["/bin/sh", str(PROBE), *(target.argument() for target in targets)],
         capture_output=True,
@@ -1429,15 +1727,33 @@ def _run_probe(targets: list[Target], env: Mapping[str, str], cwd: Path) -> Read
         timeout=120,
         check=False,
     )
-    verdicts, strays = _parse(done.stdout, {target.check for target in targets})
-    return Reading(verdicts, strays, stderr_chars=len(done.stderr))
+    return Secret(done.stdout), len(done.stderr)
+
+
+def _run_probe(targets: list[Target], env: Mapping[str, str], cwd: Path) -> Reading:
+    """
+    Run the probe outside any sandbox, its output reduced here as the ledger's is. Outside,
+    the probe reads real environments, so its raw output is held redacted in this frame.
+    """
+    output, stderr_chars = _probe_output(targets, env, cwd)
+    verdicts, strays = _parse(output.reveal(), {target.check for target in targets})
+    return Reading(verdicts, strays, stderr_chars=stderr_chars)
 
 
 @contextlib.contextmanager
-def _sleeper(env: Mapping[str, str], *argv: str) -> Iterator[int]:
-    """A Python child that waits with ``env`` and ``argv``; ended on exit."""
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *argv], env=env)
+def _sleeper(env: Mapping[str, str], *argv: str, ready: Path | None = None) -> Iterator[int]:
+    """
+    A Python child that waits with ``env`` and ``argv``; ended on exit. With ``ready``, it is
+    yielded once it has made that file: macOS execs a venv's interpreter twice, and between
+    the two the child's environment reads empty.
+    """
+    code = "import time; time.sleep(60)"
+    if ready is not None:
+        code = f"import pathlib; pathlib.Path({str(ready)!r}).touch(); {code}"
+    child = subprocess.Popen([sys.executable, "-c", code, *argv], env=env)
     try:
+        if ready is not None:
+            poll_until(ready.exists, interval_s=0.05)
         yield child.pid
     finally:
         terminate_process(child)
@@ -1532,9 +1848,9 @@ def _owner_server(
 
 def _runner_env(home: Path, server: str | None, binding: Secret | None) -> dict[str, str]:
     """
-    A runner's exec-time environment as a host builds it on the direct-spawn path, with
-    ``binding`` as both its binding token and its bearer; without one it holds neither,
-    and without ``server`` it names no server.
+    A runner's exec-time environment holding its tokens, as a CLI-local or Windows runner's
+    does, with ``binding`` as both its binding token and its bearer; without one it holds
+    neither, and without ``server`` it names no server.
     """
     tokens = {} if binding is None else dict.fromkeys(RUNNER_CREDENTIALS, binding.reveal())
     named = {} if server is None else {"RUNNER_SERVER_URL": server}
@@ -1546,6 +1862,30 @@ def _stored_file(path: Path, server: str, token: Secret | None) -> Path:
     entry = {"user_id": "probe-test"} if token is None else {"token": token.reveal()}
     path.write_text(json.dumps({server: entry}))
     return path
+
+
+def test_the_installed_cli_knows_the_first_party_switch() -> None:
+    """
+    Behind its proxy a Coral step's CLI on an Anthropic API key keeps its first-party
+    behaviour through a private switch of the CLI, so the installed build must name it.
+    Here, not beside the executor's unit tests, because this lane installs the pinned CLI.
+    """
+    sk.require_claude_cli()
+    cli = _find_system_claude()
+    assert cli is not None, "the executor finds no claude CLI where the stack tests run one"
+    assert FIRST_PARTY_FLAG_NAME == _ASSUME_FIRST_PARTY_ENV
+    name = FIRST_PARTY_FLAG_NAME.encode()
+
+    def names_it(path: Path) -> bool:
+        with path.open("rb") as build, mmap.mmap(build.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            return m.find(name) != -1
+
+    files = [path for path in _cli_build_files(Path(cli).resolve()) if path.stat().st_size]
+    assert any(names_it(path) for path in files), (
+        f"{FIRST_PARTY_FLAG_NAME} is not in the installed claude CLI "
+        f"({sorted({path.name for path in files})}): a Coral step on an Anthropic API key "
+        "would lose the CLI's first-party behaviour behind its proxy"
+    )
 
 
 def test_the_probe_classifies_files_and_tokens(tmp_path: Path) -> None:
@@ -1634,6 +1974,125 @@ def test_the_probe_classifies_sockets_and_urls(tmp_path: Path) -> None:
         "tcp_closed": "hidden",
         **({"abstract_live": "reachable"} if sys.platform == "linux" else {}),
     }
+
+
+def test_a_worktree_socket_is_bound_and_probed_however_long_the_worktree_path(
+    tmp_path: Path,
+) -> None:
+    # Longer than any AF_UNIX address, as a stack's worktree is under pytest's basetemp.
+    worktree = tmp_path / ("w" * 60) / ("t" * 60)
+    worktree.mkdir(parents=True)
+    with _worktree_socket(worktree) as target:
+        sockets = [path for path in worktree.iterdir() if stat.S_ISSOCK(path.lstat().st_mode)]
+        # A plain name directly in the worktree: no dot entry, nothing shaped like tmux's.
+        assert [path.name for path in sockets] == [target.target]
+        assert re.fullmatch(r"crl-w-[0-9a-f]{8}\.sock", target.target)
+        assert _failed_controls([target]) == []
+        reading = _run_probe([target], _probe_env(tmp_path), worktree)
+        elsewhere = _run_probe([target], _probe_env(tmp_path), tmp_path)
+    assert _assert_reading(reading, [target]) == {"worktree_unix_socket": "reachable"}
+    # The name is relative: only a probe run in the worktree finds it.
+    assert _assert_reading(elsewhere, [target]) == {"worktree_unix_socket": "hidden"}
+    # Closed and removed on exit, so a later check of it fails as a failed control.
+    assert list(worktree.iterdir()) == []
+    assert _failed_controls([target]) == [
+        f"worktree_unix_socket: {target.target}: FileNotFoundError"
+    ]
+
+
+@contextlib.contextmanager
+def _model_upstream(admitted: Collection[str] | None = None) -> Iterator[tuple[int, list[Any]]]:
+    """
+    A loopback stand-in for a model endpoint: answers 200 to a POST on an ``admitted`` path
+    (any path when ``None``), else 401. Yields its port and, per request, the path, whether a
+    key came with it, and the model it named.
+    """
+    received: list[Any] = []
+
+    class Upstream(_Quiet):
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            keyed = self.headers.get("x-api-key") is not None
+            received.append((self.path, keyed, body.get("model")))
+            self.send_response(200 if admitted is None or self.path in admitted else 401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    with _serving(Upstream) as base:
+        yield urllib.parse.urlsplit(base).port or 0, received
+
+
+def test_the_probe_reads_a_proxy_as_refused_only_when_every_request_is(tmp_path: Path) -> None:
+    climbing = "/v1/models/../messages"
+    with (
+        _model_upstream(()) as (shut, seen),
+        _model_upstream((climbing,)) as (climbed, _),
+        _model_upstream() as (admitting, _),
+        _served_url() as other,
+    ):
+        targets = [
+            Target("shut", "credential_proxy", str(shut)),
+            Target("climbed", "credential_proxy", str(climbed)),
+            Target("admitting", "credential_proxy", str(admitting)),
+            Target("another_server", "credential_proxy", str(urllib.parse.urlsplit(other).port)),
+            Target("closed_port", "credential_proxy", str(find_free_port())),
+        ]
+        reading = _run_probe(targets, _probe_env(tmp_path), tmp_path)
+
+    assert _assert_reading(reading, targets) == {
+        "shut": "refused",
+        "climbed": "reachable",
+        "admitting": "reachable",
+        "another_server": "unclassified",
+        "closed_port": "hidden",
+    }
+    # No key, a wrong key, and a path that climbs to the model route with it.
+    assert seen == [
+        ("/v1/messages", False, PROXY_PROBE_MODEL),
+        ("/v1/messages", True, PROXY_PROBE_MODEL),
+        (climbing, True, PROXY_PROBE_MODEL),
+    ]
+
+
+async def test_a_credential_proxy_refuses_the_probe_and_forwards_none_of_it(
+    tmp_path: Path,
+) -> None:
+    """
+    The executor's real proxy in front of a stand-in upstream: holding a credential it
+    refuses all three of the probe's requests and the upstream sees none; the same shim
+    without one forwards them, so the refusal is the proxy's.
+    """
+    credential = UpstreamCredential(
+        f"printf %s sk-ant-test-{secrets.token_hex(16)}", ttl_s=None, env={}
+    )
+    with _model_upstream() as (port, seen):
+        upstream = f"http://127.0.0.1:{port}"
+        proxy, plain = (
+            ClaudeGatewayShim(upstream, credential=credential),
+            ClaudeGatewayShim(upstream),
+        )
+        try:
+            await proxy.start()
+            await plain.start()
+            ports = {
+                name: str(urllib.parse.urlsplit(shim.base_url).port)
+                for name, shim in (("proxy", proxy), ("plain", plain))
+            }
+            guarded = [Target("credential_proxy", "credential_proxy", ports["proxy"])]
+            reading = await asyncio.to_thread(_run_probe, guarded, _probe_env(tmp_path), tmp_path)
+            forwarded = len(seen)
+            unguarded = [Target("credential_proxy", "credential_proxy", ports["plain"])]
+            control = await asyncio.to_thread(
+                _run_probe, unguarded, _probe_env(tmp_path), tmp_path
+            )
+        finally:
+            await proxy.aclose()
+            await plain.aclose()
+
+    assert _assert_reading(reading, guarded) == {"credential_proxy": "refused"}
+    assert forwarded == 0
+    assert _assert_reading(control, unguarded) == {"credential_proxy": "reachable"}
+    assert [model for _, _, model in seen] == [PROXY_PROBE_MODEL] * 3
 
 
 def test_the_probe_acts_as_the_owner_only_with_a_credential(tmp_path: Path) -> None:
@@ -1789,6 +2248,168 @@ def test_the_probe_plants_a_repository_config_and_removes_it(tmp_path: Path) -> 
     }
     assert sorted(path.name for path in tmp_path.iterdir()) == ["locked", "taken"]
     assert not any(taken.iterdir())
+
+
+def _listing(root: Path) -> list[str]:
+    """Every path under ``root``, relative to it: names only."""
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def test_the_probe_reads_a_masked_file_by_its_digest_and_leaves_its_dir_in_place(
+    tmp_path: Path,
+) -> None:
+    value = _canary()
+    scratch = tmp_path / "scratch"
+    names = ("readable", "refused", "missing", "empty", "changed")
+    files = {name: tmp_path / name / MASKED_FILE for name in names}
+    for directory in (scratch, *(path.parent for path in files.values())):
+        directory.mkdir()
+    for name in ("readable", "refused"):
+        files[name].write_bytes(value.reveal().encode())
+    files["refused"].chmod(0)
+    files["empty"].touch()
+    files["changed"].write_text("changed")
+    targets = [Target(name, "masked", str(path), _digest(value)) for name, path in files.items()]
+    before = _listing(tmp_path)
+
+    reading = _run_probe(targets, _probe_env(tmp_path, TMPDIR=str(scratch)), tmp_path)
+
+    # On macOS a refused, missing or empty read is tried again after moving and after cloning
+    # the dir above into $TMPDIR, which outside a sandbox finds the same. But a clone of a dir
+    # with an unreadable file fails with EACCES, not the sandbox's EPERM, so it reads open.
+    assert _assert_reading(reading, targets) == {
+        "readable": "reachable",
+        "refused": "unclassified" if sys.platform == "darwin" else "denied",
+        "missing": "hidden",
+        # How bwrap masks a file: /dev/null bound over it.
+        "empty": "hidden",
+        "changed": "mismatch",
+    }
+    # Every move undone and every clone removed.
+    assert _listing(tmp_path) == before
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the probe moves and clones on macOS only")
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_the_masked_file_check_is_open_where_no_sandbox_refuses_its_routes(
+    tmp_path: Path,
+) -> None:
+    value = _canary()
+    refused = tmp_path / "refused" / MASKED_FILE
+    refused.parent.mkdir()
+    refused.write_bytes(value.reveal().encode())
+    refused.chmod(0)
+    # Empty, so every route that runs reads it hidden: only a refused rename reads otherwise.
+    empty = tmp_path / "held" / "empty" / MASKED_FILE
+    empty.parent.mkdir(parents=True)
+    empty.touch()
+    locked, scratch = tmp_path / "locked", tmp_path / "scratch"
+    locked.mkdir(mode=0o500)
+    scratch.mkdir()
+    targets = [Target("worktree_masked_file", "masked", str(refused), _digest(value))]
+    beneath = [Target("worktree_masked_file", "masked", str(empty), _digest(value))]
+
+    # devfs is another file system on every Mac: a move or a clone into it fails with EXDEV.
+    elsewhere = _run_probe(targets, _probe_env(tmp_path, TMPDIR="/dev"), tmp_path)
+    shut = _run_probe(targets, _probe_env(tmp_path, TMPDIR=str(locked)), tmp_path)
+    # A parent the user cannot write refuses the rename with EACCES; the clone still works.
+    empty.parent.parent.chmod(0o500)
+    try:
+        unwritable = _run_probe(beneath, _probe_env(tmp_path, TMPDIR=str(scratch)), tmp_path)
+    finally:
+        empty.parent.parent.chmod(0o700)
+
+    # None shows the sandbox refusing a route, so none reads as closed.
+    assert _assert_reading(elsewhere, targets) == {"worktree_masked_file": "unsupported"}
+    assert _assert_reading(shut, targets) == {"worktree_masked_file": "unclassified"}
+    assert _assert_reading(unwritable, beneath) == {"worktree_masked_file": "unclassified"}
+    assert all(_open("worktree_masked_file", token) for token in ("unsupported", "unclassified"))
+    held = ["held", "held/empty", f"held/empty/{MASKED_FILE}", "refused", f"refused/{MASKED_FILE}"]
+    assert _listing(tmp_path) == sorted([*held, "locked", "scratch"])
+
+
+# The rule that keeps each dir above a masked entry in place, and edits that leave a route open.
+_KEPT_IN_PLACE_RULE = "(deny file-write-unlink file-clone (literal "
+_RULE_EDITS: Mapping[str, Callable[[str], str | None]] = MappingProxyType(
+    {
+        "present": lambda line: line,
+        "absent": lambda line: None,
+        "rename_only": lambda line: line.replace(" file-clone", ""),
+        "clone_only": lambda line: line.replace("file-write-unlink ", ""),
+        # A dir may move out, but nothing may be made at its path: the cwd cannot move back.
+        "undo_refused": lambda line: line.replace("file-write-unlink", "file-write-create"),
+    }
+)
+# As argv[0] the interpreter the probe's python3 finds is granted, as a step helper's is.
+_EXEC_SH = "import os, sys; os.execv('/bin/sh', ['sh', *sys.argv[1:]])"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt profiles are macOS's")
+@pytest.mark.parametrize(
+    ("rule_is", "verdict"),
+    [
+        ("present", "denied"),
+        ("absent", "reachable"),
+        ("rename_only", "reachable"),
+        ("clone_only", "reachable"),
+        ("undo_refused", "reachable"),
+    ],
+)
+def test_the_masked_file_check_is_closed_only_where_the_profile_keeps_its_dir_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rule_is: str, verdict: str
+) -> None:
+    """
+    The check as a step runs it, in a seatbelt profile of a step's shape (the cwd its write
+    root, the network on, a scratch beside it as ``$TMPDIR``) with the rule that keeps each dir
+    above a masked entry in place and uncloned edited. The real profile refuses every route;
+    without the rule, or with either half alone, the probe reads the file, so its closed pin
+    is not vacuous. The rename half alone is revision 2's shape, which a clone got through.
+    Where the cwd moves out but cannot move back, the read made there still counts.
+    """
+    base = tmp_path.resolve()
+    work, scratch = base / "work", base / "scratch"
+    for directory in (work, scratch):
+        directory.mkdir()
+    value = _canary()
+    masked = work / MASKED_FILE
+    masked.write_bytes(value.reveal().encode())
+    shutil.copyfile(PROBE, work / PROBE.name)
+    backend = seatbelt_sandbox.SeatbeltSandboxBackend()
+    grant = OSEnvSandboxSpec(type=backend.type_name, write_paths=["."], allow_network=True)
+    spec = OSEnvSpec(type="caller_process", cwd=str(work), sandbox=grant)
+    policy = with_private_tmpdir(backend.resolve(spec, work), scratch)
+    real, edit, held = seatbelt_sandbox._build_profile, _RULE_EDITS[rule_is], []
+
+    def edited(*args: Any, **kwargs: Any) -> str:
+        lines = real(*args, **kwargs).splitlines()
+        held.extend(line for line in lines if line.startswith(_KEPT_IN_PLACE_RULE))
+        kept = (edit(line) if line.startswith(_KEPT_IN_PLACE_RULE) else line for line in lines)
+        return "\n".join(line for line in kept if line is not None) + "\n"
+
+    monkeypatch.setattr(seatbelt_sandbox, "_build_profile", edited)
+    target = Target("worktree_masked_file", "masked", MASKED_FILE, _digest(value))
+    argv = [sys.executable, "-I", "-c", _EXEC_SH, PROBE.name, target.argument()]
+    before = _listing(base)
+    done = subprocess.run(
+        backend.wrap_launcher_argv(argv, policy, work),
+        cwd=work,
+        env=_probe_env(base, TMPDIR=str(scratch)),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    # Before the edit the profile named the dir above the masked file: the probe's cwd.
+    assert f"{_KEPT_IN_PLACE_RULE}{seatbelt_sandbox._quote(str(work))}))" in held
+    verdicts, strays = _parse(done.stdout, {target.check})
+    assert (verdicts, strays) == ({target.check: verdict}, 0), (done.returncode, len(done.stderr))
+    if rule_is == "undo_refused":
+        # The cwd is left in the scratch; it is moved back here, outside the sandbox.
+        (left,) = scratch.iterdir()
+        left.rename(work)
+    assert _listing(base) == before, "the probe did not undo its moves or remove its clones"
+    assert _sha256(masked.read_bytes()) == _sha256(value.reveal().encode())
 
 
 def test_git_takes_the_planted_directory_as_a_repository_that_names_its_hook(
@@ -1964,9 +2585,9 @@ def test_lines_that_are_not_verdict_tokens_count_only_as_strays() -> None:
 def test_the_pin_comparator_names_owners_and_directions() -> None:
     kinds = {"socket": "socket", "file": "file", "env": "environ", "mint": "mint", "new": "file"}
     pins = {
-        "socket": Pin("reachable", OTHER_PROGRAMS),
+        "socket": Pin("reachable", WORKTREE_SOCKETS),
         "file": Pin("denied"),
-        "env.names": Pin("A_API_KEY,B_API_KEY", OTHER_PROGRAMS),
+        "env.names": Pin("A_API_KEY,B_API_KEY", LOOPBACK_SERVICES),
         "mint.read": Pin("denied"),
         "mint": Pin("denied"),
     }
@@ -2054,7 +2675,7 @@ def test_every_pin_names_an_owner_exactly_when_it_is_open() -> None:
     problems = {where: _owner_problems(pins) for where, pins in every}
     assert not {where: found for where, found in problems.items() if found}
     owners = {pin.owner for _, pins in every for pin in pins.values()}
-    assert "CRL-159" not in owners
+    assert not CLOSED_TICKETS & owners
     for system, pins in EXPECTED_IDENTITY.items():
         # Nothing mints, no owner route answers a bare request, and no residual is accepted.
         assert "minted" not in {pin.verdict for pin in pins.values()}, system
@@ -2100,6 +2721,14 @@ def test_the_gate_label_table_holds_every_open_pin_owner_and_the_declared_blocke
         HostSandboxPolicy(backend, SANDBOX_POLICY_REVISION) for backend in PINNED_BACKENDS.values()
     }
     assert current == pinned
+    # The current rows name live tickets only; older rows keep theirs, being append-only.
+    named = {
+        ticket
+        for policy in current
+        for ticket in (*GATE_BLOCKERS[policy].probed, *GATE_BLOCKERS[policy].unprobed)
+    }
+    closed = sorted(named & CLOSED_TICKETS)
+    assert not closed, f"a row at the current revision names closed tickets: {closed}"
     for system, backend in PINNED_BACKENDS.items():
         identity = EXPECTED_IDENTITY[system]
         # A single-user residual is a server-mode fact: it never excuses an identity pin.
@@ -2115,26 +2744,26 @@ def test_the_gate_label_table_holds_every_open_pin_owner_and_the_declared_blocke
 
 
 def test_the_table_binding_fails_when_the_table_and_the_pins_part() -> None:
-    owners = {OTHER_PROGRAMS, PLANTED_CONFIG}
+    owners = {LOOPBACK_SERVICES, PLANTED_CONFIG}
     declared = ("CRL-170", PLANTED_CONFIG)
-    bound = SandboxBlockers(probed=(OTHER_PROGRAMS, PLANTED_CONFIG), unprobed=declared)
+    bound = SandboxBlockers(probed=(LOOPBACK_SERVICES, PLANTED_CONFIG), unprobed=declared)
     assert _unbound(owners, bound, declared) == []
     # The table emptied while a pin is still open.
     emptied = SandboxBlockers(probed=(PLANTED_CONFIG,), unprobed=declared)
     assert _unbound(owners, emptied, declared) == [
-        f"no table entry for open pins of {OTHER_PROGRAMS}"
+        f"no table entry for open pins of {LOOPBACK_SERVICES}"
     ]
     assert _unbound(owners, SandboxBlockers((), ()), declared) == [
-        f"no table entry for open pins of {OTHER_PROGRAMS}",
         f"no table entry for open pins of {PLANTED_CONFIG}",
+        f"no table entry for open pins of {LOOPBACK_SERVICES}",
         "after the pins' owners the table holds []",
     ]
     # A pin re-pinned closed while the table still names its owner.
     assert _unbound({PLANTED_CONFIG}, bound, declared) == [
-        "after the pins' owners the table holds ['CRL-170', 'CRL-174', 'CRL-181']"
+        "after the pins' owners the table holds ['CRL-170', 'CRL-181', 'CRL-201']"
     ]
     # A declared blocker dropped from the table, though its pin is open too.
-    dropped = SandboxBlockers(probed=(OTHER_PROGRAMS, PLANTED_CONFIG), unprobed=("CRL-170",))
+    dropped = SandboxBlockers(probed=(LOOPBACK_SERVICES, PLANTED_CONFIG), unprobed=("CRL-170",))
     assert _unbound(owners, dropped, declared) == [
         "after the pins' owners the table holds ['CRL-170']"
     ]
@@ -2143,16 +2772,19 @@ def test_the_table_binding_fails_when_the_table_and_the_pins_part() -> None:
 
 
 def test_only_a_reach_that_failed_reads_as_closed() -> None:
-    # What the probe read, minted, found for another value or could not classify is open.
-    opened = ("reachable", "minted", "mismatch", "unclassified")
+    # What the probe read, minted, found for another value, could not try or could not
+    # classify is open.
+    opened = ("reachable", "minted", "mismatch", "unsupported", "unclassified")
     for kind in CLOSED:
         assert all(_open("check", verdict, {"check": kind}) for verdict in opened), kind
     # A sub-check that read something is open whatever it found there.
     read = (*opened, "not_present", "refused")
     for suffix in (".read", ".api_key", ".argv_api_key"):
         assert all(_open(f"check{suffix}", verdict, {"check": "mint"}) for verdict in read), suffix
-    # Refused is closed only for a bare owner request; not_present only for the shell's names.
-    for verdict, kinds in (("refused", ["owner_http"]), ("not_present", ["shell"])):
+    # Refused is closed only for a request with no credential, to an owner route or to the
+    # credential proxy; not_present only for the shell's names.
+    refusing = ["owner_http", "credential_proxy"]
+    for verdict, kinds in (("refused", refusing), ("not_present", ["shell"])):
         assert [kind for kind in CLOSED if not _open("check", verdict, {"check": kind})] == kinds
     # A check of no known kind is open, its sub-checks included.
     assert all(_open(check, "denied", {}) for check in ("check", "check.read", "check.names"))
@@ -2166,7 +2798,9 @@ def test_the_outside_run_must_open_every_owner_path_it_is_given() -> None:
         Target("stored_credentials", "stored", "auth_tokens.json"),
         Target("owner_bare", "owner_http", "http://127.0.0.1:1/v1/coral/runs"),
         Target("other_unix_socket", "socket", "agent.sock"),
+        Target("worktree_unix_socket", "socket", "crl-w.sock"),
         Target("worktree_exec_config", "plant", "crl-plant"),
+        Target("worktree_masked_file", "masked", MASKED_FILE),
     ]
     keys = (
         "own_runner_mint.read",
@@ -2175,7 +2809,9 @@ def test_the_outside_run_must_open_every_owner_path_it_is_given() -> None:
         "stored_credentials",
         "owner_bare",
         "other_unix_socket",
+        "worktree_unix_socket",
         "worktree_exec_config",
+        "worktree_masked_file",
     )
     required = {key: OUTSIDE_IDENTITY[key] for key in keys}
     assert _broken_outside({**required, "control_file": "denied"}, targets) == []
@@ -2185,9 +2821,29 @@ def test_the_outside_run_must_open_every_owner_path_it_is_given() -> None:
             f"outside control: {key} is denied"
         ]
     assert _broken_outside({}, targets) == [f"outside control: {key} is -" for key in keys]
-    # Outside, every owner path is open but the bare owner routes, which must be refused.
+    # Outside, every owner path is open but the bare owner routes and the credential proxy,
+    # which must refuse a caller with no credential.
     shut = {key for key, verdict in OUTSIDE_IDENTITY.items() if not _open(key, verdict)}
-    assert shut == {"owner_bare", "owner_bare_localhost"}
+    assert shut == {"owner_bare", "owner_bare_localhost", "credential_proxy"}
+
+
+def test_the_outside_run_of_probe_15_must_read_every_process_and_find_no_key() -> None:
+    names = f"CLAUDE_CODE_API_KEY_HELPER_TTL_MS,{PROXY_TOKEN_NAME}"
+    held = {**OUTSIDE_PROBE15, "cli_environ.names": names, "own_cli_environ.names": names}
+    assert _key_exposed_outside(held) == []
+    assert set(OUTSIDE_PROBE15) == {
+        *(f"{check}{suffix}" for check in OUTSIDE_PROCESSES for suffix in ("", *SUB_CHECKS[1:3])),
+        "credential_proxy",
+    }
+    # A process the probe could not read outside proves nothing about its key.
+    for key in OUTSIDE_PROBE15:
+        moved = "reachable" if OUTSIDE_PROBE15[key] != "reachable" else "denied"
+        assert _key_exposed_outside({**held, key: moved}) == [f"{key} is {moved}"]
+    with_config = {**held, "cli_environ.names": f"HARNESS_CLAUDE_SDK_MODEL,{names}"}
+    assert _key_exposed_outside(with_config) == ["cli_environ holds ['HARNESS_CLAUDE_SDK_MODEL']"]
+    assert _key_exposed_outside({**held, "own_cli_environ.names": "none"}) == [
+        f"own_cli_environ holds no {PROXY_TOKEN_NAME}"
+    ]
 
 
 # A child pytest run: an identity stack fails to start at each point after its secrets
@@ -2324,3 +2980,490 @@ def test_a_stack_that_fails_to_start_shows_none_of_its_secrets(tmp_path: Path) -
         r"Host never came online",
     ):
         assert re.search(failure, report), failure
+
+
+def _stub_call(stubs: KeychainStubs, program: str, *argv: str) -> tuple[int, str]:
+    """
+    Run a stub by its own path; its status and all it printed. A fake value waits on its
+    input, a pipe that stays open: a stub that read to the end would not return, and one
+    that read a line would leave less than was written.
+    """
+    waiting = f"fake-stdin-{uuid.uuid4().hex}\n".encode()
+    reads, writes = os.pipe()
+    try:
+        os.write(writes, waiting)
+        done = subprocess.run(
+            [str(stubs.directory / program), *argv],
+            stdin=reads,
+            capture_output=True,
+            text=True,
+            env={},
+            timeout=30,
+            check=False,
+        )
+    finally:
+        os.close(writes)
+        with os.fdopen(reads, "rb") as unread:
+            left = unread.read()
+    assert left == waiting, "the stub read its input"
+    if stubs.log.is_file():
+        assert waiting.decode().strip() not in stubs.log.read_text(errors="replace")
+    return done.returncode, done.stdout + done.stderr
+
+
+def test_the_keychain_stubs_record_bounded_names_and_answer_as_no_login(tmp_path: Path) -> None:
+    stubs = install_keychain_stubs(tmp_path / "keychain-stubs" / "bin")
+    account, secret, long = "fake-account", f"sk-ant-test-{uuid.uuid4().hex}", "a" * 5000
+    asked = {
+        (
+            "security",
+            "find-generic-password",
+            "-a",
+            account,
+            "-w",
+            "-s",
+            "Claude Code-credentials",
+        ): ("security\tfind-generic-password\tClaude Code-credentials"),
+        ("security", "add-generic-password", "-a", account, "-s", "Fake Item", "-w", secret): (
+            "security\tadd-generic-password\tFake Item"
+        ),
+        ("security", "-i"): "security\t-i\t",
+        ("security", "show-keychain-info"): "security\tshow-keychain-info\t",
+        ("security", "Find-Generic-Password", "-s", "a tab\tand a\nnewline"): (
+            "security\tother\tother"
+        ),
+        ("security", long, "-s", long): "security\tother\tother",
+        ("security", "find-generic-password", "-s", f"{account}@fake/path", "-s"): (
+            "security\tfind-generic-password\tother"
+        ),
+        ("security",): "security\tother\t",
+        ("gh", "auth", "token", "--hostname", "fake.example.invalid"): "gh\tauth token\t",
+        (
+            "gh",
+            "secret",
+            "set",
+            "FAKE_NAME",
+            "--body",
+            secret,
+            "-s",
+            "ignored",
+        ): "gh\tsecret set\t",
+        ("gh", "api", f"repos/{account}/private"): "gh\tapi other\t",
+        ("gh",): "gh\tother other\t",
+    }
+    status = {"security": 44, "gh": 1}
+
+    answers = {call: _stub_call(stubs, *call) for call in asked}
+
+    # The real tools' "item not found" and "logged out", with nothing printed.
+    assert answers == {call: (status[call[0]], "") for call in asked}
+    # One line of bounded names per call: no account, secret, later argument or input.
+    assert stubs.log.read_text() == "".join(f"{line}\n" for line in asked.values())
+    assert stubs.calls()[:2] == [
+        "security find-generic-password Claude Code-credentials",
+        "security add-generic-password Fake Item",
+    ]
+    modes = {
+        path.relative_to(tmp_path).as_posix(): stat.S_IMODE(path.stat().st_mode)
+        for path in (
+            stubs.directory.parent,
+            stubs.directory,
+            stubs.log,
+            *stubs.directory.iterdir(),
+        )
+    }
+    assert modes == {
+        "keychain-stubs": 0o700,
+        "keychain-stubs/bin": 0o700,
+        "keychain-stubs/bin/security": 0o700,
+        "keychain-stubs/bin/gh": 0o700,
+        "keychain-stubs/calls.log": 0o600,
+    }
+    # A log that cannot be written changes neither the answer nor the silence.
+    stubs.log.unlink()
+    stubs.log.mkdir()
+    assert [_stub_call(stubs, program, "auth", "token") for program in KEYCHAIN_PROGRAMS] == [
+        (44, ""),
+        (1, ""),
+    ]
+    assert stubs.calls() == []
+
+
+def test_only_the_expected_keychain_calls_pass_and_any_other_is_named(tmp_path: Path) -> None:
+    stubs = install_keychain_stubs(tmp_path / "bin")
+    # The CLI's keychain reads and lock-state query, and the login checks through gh.
+    expected = [
+        "security\tfind-generic-password\tClaude Code",
+        "security\tfind-generic-password\tClaude Code-credentials",
+        "security\tfind-generic-password\tClaude Code-0a1b2c3d",
+        "security\tfind-generic-password\tClaude Code-credentials-0a1b2c3d",
+        "security\tfind-generic-password\tClaude Code-device-keys",
+        "security\tfind-generic-password\tClaude Code-doctor-probe",
+        "security\tshow-keychain-info\t",
+        "gh\tauth token\t",
+        "gh\tauth status\t",
+        "gh\tpr view\t",
+        "gh\trepo view\t",
+    ]
+    # A write, another item, a name the stub bounded to ``other``, any other gh call, another
+    # ``gh auth`` one among them; then two lines no stub writes.
+    others = [
+        ("security", "-i", ""),
+        ("security", "delete-generic-password", "Claude Code"),
+        ("security", "add-generic-password", "Claude Code-doctor-probe"),
+        ("security", "find-generic-password", "gh:github.com"),
+        ("security", "find-generic-password", "Claude Code-0A1B2C3D"),
+        ("security", "find-generic-password", "other"),
+        ("security", "find-generic-password", ""),
+        ("security", "show-keychain-info", "Claude Code"),
+        ("security", "other", ""),
+        ("gh", "api other", ""),
+        ("gh", "auth login", ""),
+        ("gh", "auth refresh", ""),
+        ("gh", "pr merge", ""),
+        ("gh", "repo delete", ""),
+        ("gh", "auth token", "Claude Code"),
+    ]
+    malformed = ["not a line a stub writes", "security\tfind-generic-password\tfake/path@host"]
+    unlisted = [*("\t".join(names) for names in others), *malformed]
+    guards = sk.KeychainGuards(tmp_path, stubs)
+
+    stubs.log.write_text("".join(f"{line}\n" for line in expected))
+    assert stubs.unexpected() == []
+    assert stubs.calls()[-4:] == [HOST_GH_PROBE, "gh auth status", "gh pr view", "gh repo view"]
+    stubs.log.write_text("".join(f"{line}\n" for line in (*expected, *unlisted, expected[0])))
+    # Each is named by its subcommand and its item, apart, as the stub bounded them.
+    named = [f"{program} subcommand {call!r} item {item!r}" for program, call, item in others]
+    assert stubs.unexpected() == [*named, "malformed", "malformed"]
+    # What a stack's teardown reports: each unexpected name with its count, nothing else.
+    stubs.log.write_text("security\t-i\t\n" * 3 + "gh\tapi other\t\n" + "gh\tauth token\t\n")
+    problems = ["gh subcommand 'api other' item '' (x1)", "security subcommand '-i' item '' (x3)"]
+    assert sk.keychain_problems(tmp_path, stubs) == problems
+    # And what it shows on any outcome: every call's name and count, in one warning.
+    calls = "['security -i (x3)', 'gh api other (x1)', 'gh auth token (x1)'], 5 in all"
+    with (
+        pytest.warns(sk.KeychainStubCalls) as shown,
+        pytest.raises(AssertionError, match=re.escape(f"left a login: {problems}. A call names")),
+    ):
+        guards.ended()
+    assert [str(warning.message) for warning in shown] == [f"keychain stand-in calls: {calls}"]
+    # A passing stack warns too, and a long log's summary stays a bounded list of names.
+    stubs.log.write_text("gh\tauth token\t\n")
+    with pytest.warns(sk.KeychainStubCalls, match=r": \['gh auth token \(x1\)'\], 1 in all$"):
+        guards.ended()
+    stubs.log.write_text("".join(f"gh\tauth token\t\ngh\tapi {'x' * n}\t\n" for n in range(1, 31)))
+    summary = sk.keychain_calls_summary(stubs)
+    assert summary.startswith("['gh auth token (x30)', 'gh api x (x1)', 'gh api xx (x1)', ")
+    assert summary.endswith("'] and 11 more names, 60 in all") and summary.count(" (x") == 20
+
+
+def test_a_stack_environment_resolves_the_keychain_programs_to_its_stubs(tmp_path: Path) -> None:
+    root = tmp_path / "stack"
+    stubs = install_keychain_stubs(root / "keychain-stubs" / "bin")
+    everything = list(KEYCHAIN_PROGRAMS)
+    plain = sk.minimal_env()["PATH"]
+
+    path = sk.stack_env(root, stubs, tmp_path / "t")["PATH"]
+
+    # By resolution only: nothing on either PATH is executed.
+    assert stubs.bypassed(path) == []
+    assert path.split(os.pathsep)[0] == str(stubs.directory)
+    # Without the stubs, macOS finds /usr/bin/security; a program found nowhere counts too.
+    assert stubs.bypassed(plain) == everything
+    shadow = install_keychain_stubs(tmp_path / "shadow" / "bin")
+    assert stubs.bypassed(shadow.first_on({"PATH": path})["PATH"]) == everything
+    (shadow.directory / "security").unlink()
+    assert stubs.bypassed(shadow.first_on({"PATH": path})["PATH"]) == ["gh"]
+    # An empty or relative entry ahead of the stubs searches the process's own directory.
+    for ahead in ("", "bin", "."):
+        assert stubs.bypassed(f"{ahead}{os.pathsep}{path}") == everything, ahead
+    assert stubs.bypassed(f"{path}{os.pathsep}") == []
+    assert stubs.bypassed("") == stubs.bypassed(None) == everything
+    # In front of an empty PATH the stubs stand alone, with no entry for the working directory.
+    alone = {"PATH": str(stubs.directory)}
+    assert stubs.first_on({}) == stubs.first_on({"PATH": ""}) == alone
+    given = {"PATH": "/usr/bin", "LANG": "C"}
+    assert stubs.first_on(given) == {**given, "PATH": f"{stubs.directory}{os.pathsep}/usr/bin"}
+    assert given == {"PATH": "/usr/bin", "LANG": "C"}
+
+
+def test_a_stack_base_environment_holds_only_reviewed_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "stack"
+    stubs = install_keychain_stubs(root / "keychain-stubs" / "bin")
+    # What a developer's shell may hold: none of it may reach a stack daemon.
+    ambient = (
+        *("SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL"),
+        *("XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "CLAUDE_CONFIG_DIR"),
+        *("ANTHROPIC_API_KEY", "KUBECONFIG", "GOOGLE_APPLICATION_CREDENTIALS", "USER"),
+    )
+    for name in ambient:
+        monkeypatch.setenv(name, f"/ambient/{name}")
+    for name in ("LANG", "LC_ALL", "LC_CTYPE"):
+        monkeypatch.setenv(name, "C")
+
+    env = sk.stack_env(root, stubs, tmp_path / "t")
+
+    assert set(env) == {
+        *("LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "PATH"),
+        *("DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+        *("GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT"),
+    }
+    assert set(env) == sk.BASE_ENV_NAMES
+    assert not [name for name, value in env.items() if "/ambient/" in value]
+    assert (env["TMPDIR"], env["GIT_TERMINAL_PROMPT"]) == (str(tmp_path / "t"), "0")
+    # gh and git read their login and global config under the stack's root, where none is.
+    for name in ("GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL"):
+        assert Path(env[name]).is_relative_to(root) and not Path(env[name]).exists(), name
+    # A name kept without a review here fails by name, before any daemon starts.
+    monkeypatch.setattr(sk, "_KEPT_ENV", (*sk._KEPT_ENV, "SSH_AUTH_SOCK"))
+    with pytest.raises(AssertionError, match=r"unreviewed names.*\['SSH_AUTH_SOCK'\]") as failed:
+        sk.stack_env(root, stubs, tmp_path / "t")
+    # Names only, in the message and in the locals a report would print for the failing frame.
+    [guard] = [frame for frame, _line in traceback.walk_tb(failed.tb)][1:]
+    assert guard.f_code.co_name == "stack_env" and "unreviewed" in guard.f_locals
+    assert "/ambient/" not in f"{failed.value}{guard.f_locals}"
+
+
+@pytest.mark.parametrize(
+    ("left", "failure"),
+    [
+        (None, r"^the fake host stops the start$"),
+        ("call", r"\[\"security subcommand 'fake-marker' item '' \(x1\)\"\]"),
+        ("login", r"\['host/home/\.config/gh/hosts\.yml'\]"),
+    ],
+    ids=["clean", "unexpected-call", "gh-login"],
+)
+def test_every_stack_daemon_starts_with_the_keychain_stubs_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, left: str | None, failure: str
+) -> None:
+    """
+    The server and the host get one base environment, whose ``PATH`` resolves the keychain
+    programs to the stack's own stubs; and a stack that leaves an unexpected stub call, or
+    a ``gh`` login in a home of its own, fails at exit by that name.
+    """
+    root = tmp_path / "stack"
+    stubs = KeychainStubs(root / "keychain-stubs" / "bin", root / "keychain-stubs" / "calls.log")
+    started: dict[str, dict[str, str]] = {}
+
+    @contextlib.contextmanager
+    def server(_root: Path, *, base_env: Mapping[str, str], **_kwargs: Any) -> Iterator[Any]:
+        started["server"] = dict(base_env)
+        yield SimpleNamespace(base_url="http://127.0.0.1:1", server=None)
+
+    def host(host_root: Path, _url: str, *, base_env: Mapping[str, str], **_kwargs: Any) -> None:
+        started["host"] = dict(base_env)
+        if left == "call":
+            # By its own path: the stack's stub, asked for what no mock stack expects.
+            _stub_call(stubs, "security", "fake-marker")
+        if left == "login":
+            hosts = host_root / "home" / ".config" / "gh" / "hosts.yml"
+            hosts.parent.mkdir(parents=True)
+            hosts.write_text("")
+        raise AssertionError("the fake host stops the start")
+
+    monkeypatch.setattr(sk, "server_runner", server)
+    monkeypatch.setattr(sk, "isolated_host", host)
+    with (
+        pytest.raises(AssertionError, match=failure),
+        sk.skeleton_stack(root, mock_url=None, host_config={}),
+    ):
+        pass
+
+    assert started["server"] == started["host"]
+    assert stubs.bypassed(started["host"]["PATH"]) == []
+
+
+def test_a_stack_installs_each_keychain_guard_as_a_step_of_its_own() -> None:
+    """
+    A guard dropped from ``skeleton_stack`` fails no stack run, so the three hooks are pinned
+    where they are installed; what each one catches is tested on :class:`sk.KeychainGuards`.
+    """
+    stack = ast.parse(inspect.getsource(sk.skeleton_stack))
+    at = {ast.unparse(node): node.lineno for node in ast.walk(stack) if isinstance(node, ast.Call)}
+    callbacks = {call: line for call, line in at.items() if call.startswith("resources.callback(")}
+
+    # Registered last, so it runs first at exit and its failure skips no other teardown step.
+    exiting = callbacks["resources.callback(lambda: guards.exiting(live_daemons()))"]
+    assert exiting == max(callbacks.values())
+    # Both daemons, once they are started.
+    assert at["guards.started(host.proc.pid, server.server.pid)"] > exiting
+    # Registered before the reap, so the log is read after every process has ended.
+    reap = callbacks["resources.callback(processes.reap)"]
+    assert callbacks["resources.callback(guards.ended)"] < reap
+
+
+def test_a_process_started_outside_the_keychain_barrier_is_named(tmp_path: Path) -> None:
+    root = tmp_path / "stack"
+    stubs = install_keychain_stubs(root / "keychain-stubs" / "bin")
+    inside = {**stubs.first_on(sk.minimal_env()), "HOME": str(root / "host" / "home")}
+
+    def named(children: list[psutil.Process], **how: bool) -> list[int]:
+        # Labels are ``pid:name`` and nothing else: no PATH, no HOME.
+        labels = sk.keychain_bypasses(stubs, root, children, **how)
+        assert all(re.fullmatch(r"\d+:[^/:]+", label) for label in labels), labels
+        return [int(label.partition(":")[0]) for label in labels]
+
+    started = (
+        inside,
+        {**inside, "PATH": sk.minimal_env()["PATH"]},
+        {**inside, "HOME": str(tmp_path / "elsewhere")},
+        # Neither PATH nor HOME: the environment counts as not read.
+        {"PROBE_TEST": "1"},
+    )
+    guards = sk.KeychainGuards(root, stubs)
+    with contextlib.ExitStack() as running:
+        children = [
+            psutil.Process(running.enter_context(_sleeper(env, ready=tmp_path / f"ready-{at}")))
+            for at, env in enumerate(started)
+        ]
+        kept, past_the_stubs, another_home, unread = (child.pid for child in children)
+
+        assert named(children) == [past_the_stubs, another_home]
+        # Where every process is known to be live, one that was not read is named too.
+        assert named(children, unread_fails=True) == [past_the_stubs, another_home, unread]
+        # A stack's start is such a place: its guard passes the first child and names the last.
+        guards.started(kept)
+        with pytest.raises(AssertionError, match=rf"keychain barrier .*\['{unread}:[^/:']+'\]$"):
+            guards.started(kept, unread)
+
+    assert named(children) == []
+    assert sk.keychain_bypasses(stubs, root, children[:1], unread_fails=True) == [f"{kept}:gone"]
+
+
+# A stand-in daemon: its children wait past the stubs, each once it has written its pid. One
+# is a CLI, one runs an Omnigent module, and one only names paths that hold the word.
+_DAEMON = """
+import os, subprocess, sys, time
+past = {**os.environ, "PATH": os.environ["PAST_THE_STUBS"]}
+waits = "import os, sys, time; open(sys.argv[-1], 'w').write(str(os.getpid())); time.sleep(60)"
+cli = sys.argv[1]
+subprocess.Popen([sys.executable, cli, "claude"], env=past)
+subprocess.Popen([sys.executable, "-c", waits, "-m", "omnigent.fake", "omnigent"], env=past)
+subprocess.Popen([sys.executable, "-c", waits, "-C", "/fake/omnigent/.omnigent", "git"], env=past)
+time.sleep(60)
+"""
+
+
+def test_the_exit_guard_checks_a_daemon_and_its_omnigent_and_claude_descendants(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "stack"
+    stubs = install_keychain_stubs(root / "keychain-stubs" / "bin")
+    cli = tmp_path / "claude"
+    cli.write_text(
+        "import os, sys, time\nopen(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)\n"
+    )
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    env = {
+        **stubs.first_on(sk.minimal_env()),
+        "HOME": str(root / "host" / "home"),
+        "PAST_THE_STUBS": sk.minimal_env()["PATH"],
+    }
+    daemon = subprocess.Popen(
+        [sys.executable, "-c", _DAEMON, str(cli)], env=env, cwd=marks, start_new_session=True
+    )
+    try:
+        poll_until(lambda: len(list(marks.iterdir())) == 3, interval_s=0.05)
+        poll_until(lambda: all(mark.read_text() for mark in marks.iterdir()), interval_s=0.05)
+        below = {mark.name: int(mark.read_text()) for mark in marks.iterdir()}
+
+        checked = sk._checked_at_exit([daemon.pid])
+
+        # The daemon itself started inside; a child that is neither Omnigent's nor a CLI,
+        # as a git child whose PATH production builds, is not checked whatever paths it names.
+        assert {proc.pid for proc in checked} == {daemon.pid, below["claude"], below["omnigent"]}
+        with pytest.raises(AssertionError, match="outside the keychain barrier") as failed:
+            sk.KeychainGuards(root, stubs).exiting([daemon.pid])
+        # By pid and name only: no PATH, no HOME.
+        message = str(failed.value)
+        named = {int(pid) for pid in re.findall(r"'(\d+):", message)}
+        assert named == {below["claude"], below["omnigent"]} and os.sep not in message
+    finally:
+        os.killpg(daemon.pid, signal.SIGKILL)
+        daemon.wait(timeout=10)
+    assert sk._checked_at_exit([daemon.pid]) == []
+
+
+def _recording_cli(fake: Path, seen: Path) -> Path:
+    """A stand-in CLI that records the home, config dir and keychain programs it starts with."""
+    fake.parent.mkdir(exist_ok=True)
+    fake.write_text(
+        "#!/bin/sh\n"
+        '{ echo "$HOME"; echo "$CLAUDE_CONFIG_DIR"; command -v security; command -v gh;'
+        f' echo "${{GH_TOKEN-unset}}"; }} >> {shlex.quote(str(seen))}\n'
+        'echo "9.9.9 (stand-in)"\n'
+    )
+    fake.chmod(0o755)
+    return fake
+
+
+def test_the_cli_probe_runs_claude_only_under_a_throwaway_home_with_the_stubs_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The pytest process asks the ``claude`` CLI for its version once, and never with its own
+    environment. The stand-in CLI here records where it was started.
+    """
+    seen = tmp_path / "seen"
+    fake = _recording_cli(tmp_path / "bin" / "claude", seen)
+    monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(tmp_path / "callers-home"))
+    monkeypatch.setenv("GH_TOKEN", "fake-token")
+    monkeypatch.delenv(sk.REQUIRE_CLI_ENV, raising=False)
+    sk._claude_cli.cache_clear()
+    try:
+        sk.require_claude_cli()
+        assert sk.claude_version() == "9.9.9 (stand-in)"
+        home, config, security, gh, token = seen.read_text().splitlines()
+        # A CLI that installed but does not run fails where the lane requires it, else skips.
+        fake.write_text("#!/bin/sh\necho broken >&2\nexit 3\n")
+        sk._claude_cli.cache_clear()
+        for required, outcome in (("0", pytest.skip.Exception), ("1", AssertionError)):
+            monkeypatch.setenv(sk.REQUIRE_CLI_ENV, required)
+            with pytest.raises(outcome, match="exits 3: broken"):
+                sk.require_claude_cli()
+    finally:
+        sk._claude_cli.cache_clear()
+
+    # One run for both callers, in a home made for it and removed with it.
+    assert home != os.environ["HOME"] and not Path(home).exists()
+    assert Path(config).is_relative_to(home)
+    stub_dir = Path(security).parent
+    assert stub_dir == Path(gh).parent and Path(home).parent in stub_dir.parents
+    assert token == "unset"
+
+
+def test_the_harness_gate_probes_claude_under_a_throwaway_home_with_the_stubs_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The gate the in-process Tier B tests skip by asks ``claude`` whether it runs in a home
+    and config dir made for that one start, with keychain stand-ins first on its ``PATH``.
+    Another vendor's CLI is still probed with the caller's environment.
+    """
+    seen = tmp_path / "seen"
+    for name in ("claude", "codex"):
+        fake = _recording_cli(tmp_path / "bin" / name, seen)
+    monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(tmp_path / "callers-home"))
+    # A fake one, so the recording holds nothing of the caller's and shows it is dropped.
+    monkeypatch.setenv("GH_TOKEN", "fake-gh-token")
+    cli_unavailable_reason.cache_clear()
+    try:
+        assert cli_unavailable_reason("claude") is None
+        home, config, security, gh, token = seen.read_text().splitlines()
+        seen.unlink()
+        assert cli_unavailable_reason("codex") is None
+        other_home, *_ = seen.read_text().splitlines()
+    finally:
+        cli_unavailable_reason.cache_clear()
+
+    assert home != os.environ["HOME"] and not Path(home).exists()
+    assert Path(config).is_relative_to(home)
+    stub_dir = Path(security).parent
+    assert stub_dir == Path(gh).parent and Path(home).parent in stub_dir.parents
+    assert token == "unset", "the caller's credentials must not reach the probed CLI"
+    assert other_home == os.environ["HOME"]

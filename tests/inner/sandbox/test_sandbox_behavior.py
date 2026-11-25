@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio  # CORAL(S116)
 import contextlib
 import functools
+import hashlib  # CORAL(S128)
 import json
 import os
 import plistlib
@@ -1049,6 +1050,32 @@ def test_sandbox_shell_signals_its_own_children_only(
 # Control sockets
 # ---------------------------------------------------------------------------
 
+# CORAL(S112): probe helpers that move a path and connect at its new place, and edit a dir
+_RENAME_PROBE_HELPERS = """
+def renamed(source, target, sock):
+    try:
+        os.rename(source, target)
+    except OSError:
+        return False
+    try:
+        return reaches(sock)
+    finally:
+        os.rename(target, source)
+
+def edits(directory):
+    try:
+        with open(os.path.join(directory, 'f'), 'w') as handle:
+            handle.write('x')
+        os.rename(os.path.join(directory, 'f'), os.path.join(directory, 'g'))
+        os.unlink(os.path.join(directory, 'g'))
+        os.mkdir(os.path.join(directory, 'root'))
+        os.rename(os.path.join(directory, 'root'), os.path.join(directory, 'kept'))
+        os.rmdir(os.path.join(directory, 'kept'))
+        return True
+    except OSError:
+        return False
+"""
+
 # CORAL(S112): connects to each named throwaway socket, binds and connects its own, and renames
 # a deny-listed one and its dir; prints yes/no only. The paths come from a file.
 _CONTROL_SOCKET_PROBE = """
@@ -1078,28 +1105,7 @@ def owns(path):
             if os.path.lexists(path):
                 os.unlink(path)
 
-def renamed(source, target, sock):
-    try:
-        os.rename(source, target)
-    except OSError:
-        return False
-    try:
-        return reaches(sock)
-    finally:
-        os.rename(target, source)
-
-def edits(directory):
-    try:
-        with open(os.path.join(directory, 'f'), 'w') as handle:
-            handle.write('x')
-        os.rename(os.path.join(directory, 'f'), os.path.join(directory, 'g'))
-        os.unlink(os.path.join(directory, 'g'))
-        os.mkdir(os.path.join(directory, 'root'))
-        os.rmdir(os.path.join(directory, 'root'))
-        return True
-    except OSError:
-        return False
-
+__RENAME_PROBE_HELPERS__
 def say(name, value):
     print(name, 'yes' if value else 'no')
 
@@ -1120,7 +1126,7 @@ say('pane_files', edits(pane))
 if sys.platform == 'darwin':
     table = subprocess.run(['/usr/sbin/netstat', '-an', '-f', 'unix'], capture_output=True)
     say('listed', os.path.basename(paths['conv']).encode() in table.stdout)
-"""
+""".replace("__RENAME_PROBE_HELPERS__", _RENAME_PROBE_HELPERS)
 
 
 @contextlib.contextmanager
@@ -1198,10 +1204,11 @@ def test_sandbox_cannot_connect_to_omnigent_control_sockets(
     Omnigent's terminal and tmux-replies shapes and at the user's tmux shape answer outside
     and are refused inside. The process's own sockets in its scratch and in write roots
     under the harness root (a grant, and on the launcher path the CLI's launch dir) still
-    work, another terminal's ``clip.sock`` stays reachable, neither a deny-listed socket nor
-    its dir can be renamed out of its deny while files in that dir stay editable, and
-    ``netstat`` lists nothing. The pane dir sits in the launcher's ``$TMPDIR``, ahead of its
-    scratch, as a terminal pane's does. bwrap's private ``/tmp`` hides every one of them.
+    work, neither a deny-listed socket nor its dir can be renamed out of its deny while files
+    in that dir stay editable, and ``netstat`` lists nothing. The pane dir sits in the
+    launcher's ``$TMPDIR``, ahead of its scratch, as a terminal pane's does. bwrap's private
+    ``/tmp`` hides every one of them. CORAL(S127): another terminal's ``clip.sock`` is
+    refused on seatbelt too, as every socket that is not the process's own now is.
     """
     from omnigent.inner.sandbox import (
         with_additional_write_roots,
@@ -1279,10 +1286,7 @@ def test_sandbox_cannot_connect_to_omnigent_control_sockets(
             completed = run_reader([launcher, "probe.py"])
             inside, inside_detail = completed.stdout, completed.stderr
         alive = _reaches(conv)
-    seatbelt = active_sandbox_type == "darwin_seatbelt"
-    kept = {"own", "nested", "under_root", "launch_dir", "pane_files"} | (
-        {"clip"} if seatbelt else set()
-    )
+    kept = {"own", "nested", "under_root", "launch_dir", "pane_files"}  # CORAL(S127): no clip
     order = ["conv", "mcp", "default", "tmux", "replies", "user_tmux", "clip", "own", "nested"]
     tail = [
         "rename",
@@ -1301,6 +1305,680 @@ def test_sandbox_cannot_connect_to_omnigent_control_sockets(
     assert observed_outside == reached, f"failed outside: {outside.stdout}; {outside.stderr}"
     assert observed_inside == refused, f"inside: {observed_inside}; {inside_detail}"
     assert alive, "a listener died during the run, so a refused connect proves nothing"
+
+
+# CORAL(S127): connects to each named throwaway socket (stream and datagram, through a symlink
+# and a hard link it makes), binds and connects its own, reads descriptors it was handed, and
+# moves a dir above a masked socket; prints yes/no only. The paths come from a file.
+_OTHER_PROGRAMS_PROBE = """
+import json, os, socket, sys
+paths = json.load(open('sockets.json'))
+
+def reaches(path, answers=True):
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(10)
+        try:
+            sock.connect(path)
+            return not answers or sock.recv(2) == b'ok'
+        except OSError:
+            return False
+
+def datagram(path, connect):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        try:
+            if connect:
+                sock.connect(path)
+            else:
+                sock.sendto(b'x', path)
+            return True
+        except OSError:
+            return False
+
+def owns(path):
+    with socket.socket(socket.AF_UNIX) as server, socket.socket(socket.AF_UNIX) as client:
+        try:
+            server.bind(path)
+            server.listen()
+            client.connect(path)
+            return True
+        except OSError:
+            return False
+        finally:
+            if os.path.lexists(path):
+                os.unlink(path)
+
+def linked(link, target, name):
+    try:
+        link(target, name)
+    except OSError:
+        return False
+    try:
+        return reaches(name)
+    finally:
+        os.unlink(name)
+
+def handed(path):
+    fds = []
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(10)
+        try:
+            sock.connect(path)
+            fds = socket.recv_fds(sock, 1, 1)[1]
+            return bool(fds) and os.read(fds[0], 2) == b'ok'
+        except OSError:
+            return False
+        finally:
+            for fd in fds:
+                os.close(fd)
+__RENAME_PROBE_HELPERS__
+def say(name, value):
+    print(name, 'yes' if value else 'no')
+
+for name in paths['others']:
+    say(name, reaches(paths[name]))
+say('datagram_connect', datagram(paths['datagram'], True))
+say('datagram_sendto', datagram(paths['datagram'], False))
+# By relative names, so the paths fit sun_path wherever the cwd is.
+say('symlink', linked(os.symlink, paths['docker'], 'l'))
+say('own_scratch', owns(os.path.join(os.environ['TMPDIR'], 'o.sock')))
+say('own_cwd', owns('o.sock'))
+say('pane_clip', reaches(paths['pane_clip']))
+if sys.platform == 'darwin':
+    say('resolver', reaches('/var/run/mDNSResponder', answers=False))
+    for name in paths['in_root']:
+        say(name, reaches(paths[name]))
+    say('hard_link', linked(os.link, paths['tmux'], os.path.join(paths['root'], 'h')))
+    say('planted_link', reaches(paths['planted_link']))
+    say('passed_fd', handed(paths['passer']))
+    if 'SANDBOX_TEST_INHERITED_SOCKET' in os.environ:
+        say('inherited_fd', os.read(0, 2) == b'ok')
+    say('root_files', edits(paths['root']))
+    say('root_own', owns(os.path.join(paths['root'], 'o.sock')))
+    say('fork_root', owns(os.path.join(paths['fork_root'], 'o.sock')))
+    for name, source, target, sock in paths['moves']:
+        say(name, renamed(source, target, sock))
+    say('masked_after', reaches(paths['masked']) or reaches(paths['masked_nested']))
+""".replace("__RENAME_PROBE_HELPERS__", _RENAME_PROBE_HELPERS)
+
+
+# CORAL(S127): confstr's number for the macOS per-user temp dir; Python has no name for it
+_CS_DARWIN_USER_TEMP_DIR = 65537
+
+
+@contextlib.contextmanager
+def _passing_descriptors(path: Path, target: Path) -> Iterator[None]:
+    """CORAL(S127): hand each client of *path* a descriptor already connected to *target*."""
+    import socket
+    import threading
+
+    stop = threading.Event()
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(str(path))
+        server.listen()
+        server.settimeout(0.1)
+
+        def serve() -> None:
+            while not stop.is_set():
+                with contextlib.suppress(OSError), contextlib.ExitStack() as opened:
+                    connection = opened.enter_context(server.accept()[0])
+                    peer = opened.enter_context(socket.socket(socket.AF_UNIX))
+                    peer.connect(str(target))
+                    socket.send_fds(connection, [b"f"], [peer.fileno()])
+                    # macOS drops a descriptor in flight when its sender closes first.
+                    connection.settimeout(10)
+                    connection.recv(1)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=10)
+            path.unlink(missing_ok=True)
+
+
+# CORAL(S127): a networked sandbox reaches its own Unix-domain sockets and no other program's
+@pytest.mark.parametrize("launch_path", ["helper", "launcher"])
+def test_sandbox_cannot_connect_to_other_programs_sockets(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_path: str,
+) -> None:
+    """
+    Throwaway listeners at the path shapes of a ``tmux -S`` server, Docker Desktop, OrbStack,
+    both ssh-agent forms, Claude Code's inbox and daemon and another terminal's clipboard
+    bridge, and a datagram socket, answer outside and are refused inside, also through a
+    symlink in the cwd. The process's own sockets in its scratch and in its writable cwd,
+    and a pane's own named ``clip.sock``, still connect. bwrap's private ``/tmp`` hides every
+    other program's socket.
+
+    On seatbelt also: the resolver's socket connects. Inside a write root a plain socket
+    connects, while a direct connect to a tmux-shaped or a terminal-shaped one, to one under
+    a masked entry, and to a hard link to another program's socket (made inside, or planted
+    from outside) is refused. Neither the write root nor a dir above a masked entry can be
+    moved into another own dir to shed that deny, while files, dirs and the process's own
+    sockets in the root are still made, renamed and removed. The home dir granted as a write
+    root in another letter case reopens nothing in it, nor does a dir standing in for the
+    per-user temp dir (helper path, where this process builds the profile). A forked pane's
+    tree, named as a socket root, keeps its own sockets. A descriptor a peer passes, or one
+    inherited as stdin, still works: only ``connect`` is refused. Every listener sits under
+    a throwaway dir, the Docker, OrbStack and Claude Code shapes under a throwaway home.
+    """
+    import dataclasses
+    import pwd
+    import socket
+
+    from omnigent.inner.sandbox import (
+        with_additional_write_roots,
+        with_allowed_unix_sockets,
+        with_denied_unix_sockets,
+    )
+
+    seatbelt = active_sandbox_type == "darwin_seatbelt"
+    real_homes = {Path.home().resolve(), Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()}
+    with contextlib.ExitStack() as cleanup:
+
+        def throwaway_dir(prefix: str, parent: Path = Path("/tmp")) -> Path:
+            path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+            cleanup.callback(shutil.rmtree, path, ignore_errors=True)
+            return path
+
+        def subdir(parent: Path, *names: str) -> Path:
+            parent.joinpath(*names).mkdir(mode=0o700, parents=True)
+            return parent.joinpath(*names)
+
+        home, agents, root, spare = (throwaway_dir(f"sbx-{kind}-") for kind in "mawx")
+        reader_tmp = throwaway_dir("sbx-o-")
+        pane = throwaway_dir("omnigent-terminal-sbx-", reader_tmp)
+        fork_root = subdir(pane, "root")
+        # The helper path builds the profile in this process, so only it can be shown a
+        # stand-in for the per-user temp dir.
+        user_temp = throwaway_dir("sbx-s-") if seatbelt and launch_path == "helper" else None
+        others = {
+            "tmux": throwaway_dir("sbx-t-") / "custom.sock",
+            "docker": subdir(home, ".docker", "run") / "docker.sock",
+            "orbstack": subdir(home, ".orbstack", "run") / "docker.sock",
+            "ssh_agent": subdir(agents, "ssh-AbCdEfGhIjKl") / "agent.12345",
+            "launchd_agent": subdir(agents, "com.apple.launchd.AbCdEfGhIj") / "Listeners",
+            "claude_inbox": subdir(home, ".claude", "cc-socks") / "12345.sock",
+            "claude_daemon": subdir(agents, f"cc-daemon-{os.getuid()}", "x") / "control.sock",
+            "other_clip": throwaway_dir("omnigent-terminal-sbx-") / "clip.sock",
+        }
+        in_root = {
+            "root_socket": root / "svc.sock",
+            "root_tmux": subdir(root, f"tmux-{os.getuid()}") / "default",
+            "root_terminal": subdir(root, "sub", "omnigent-terminal-zz") / "tmux.sock",
+            "masked": subdir(root, ".devenv", "state") / "pc.sock",
+            "masked_nested": subdir(root, "sub", "keys") / "k.sock",
+            "home_socket": subdir(home, "run") / "app.sock",
+            **({"user_temp_socket": user_temp / "ipc.sock"} if user_temp else {}),
+        }
+        moves = [
+            ("root_moved", root, spare / "w", spare / "w" / ".devenv" / "state" / "pc.sock"),
+            ("parent_moved", root / "sub", spare / "s", spare / "s" / "keys" / "k.sock"),
+        ]
+        own = {"pane_clip": pane / "clip.sock", "pane": pane / "tmux.sock"}
+        datagram, passer, planted = agents / "log", root / "fd.sock", root / "p"
+        sockets = others | in_root | own | {"datagram": datagram, "passer": passer}
+        assert not [
+            path
+            for path in sockets.values()
+            if any(path.resolve().is_relative_to(real_home) for real_home in real_homes)
+        ], "a test socket sits under the real home"
+        paths = {name: str(path) for name, path in sockets.items()} | {
+            "others": list(others),
+            "in_root": list(in_root),
+            "root": str(root),
+            "planted_link": str(planted),
+            "fork_root": str(fork_root),
+            "moves": [[name, *map(str, move)] for name, *move in moves],
+        }
+        (tmp_path / "sockets.json").write_text(json.dumps(paths))
+        (tmp_path / "probe.py").write_text(_OTHER_PROGRAMS_PROBE)
+        reader_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONPATH": os.environ["PYTHONPATH"],
+            "TMPDIR": str(reader_tmp),
+        }
+        write_paths = ["."]
+        if seatbelt:
+            # The profile builder reads the home from its environment on both launch paths.
+            monkeypatch.setenv("HOME", str(home))
+            reader_env["HOME"] = str(home)
+            write_paths += [str(root), str(spare), str(home.parent / home.name.upper())]
+        if user_temp is not None:
+            write_paths.append(str(user_temp))
+            real_confstr = os.confstr
+            monkeypatch.setattr(
+                os,
+                "confstr",
+                lambda name: (
+                    f"{user_temp}/" if name == _CS_DARWIN_USER_TEMP_DIR else real_confstr(name)
+                ),
+            )
+        spec = OSEnvSpec(
+            type="caller_process",
+            cwd=str(tmp_path),
+            sandbox=active_sandbox_spec_factory(write_paths=write_paths),
+        )
+        policy = with_additional_write_roots(resolve_sandbox(spec, tmp_path), [pane])
+        policy = with_denied_unix_sockets(policy, [own["pane"]])
+        policy = with_allowed_unix_sockets(policy, [own["pane_clip"]], roots=[fork_root])
+        if seatbelt:
+            masked_dir = in_root["masked_nested"].parent.resolve()
+            policy = dataclasses.replace(policy, mask_paths=[masked_dir])
+        cleanup.enter_context(_listening(*others.values(), *in_root.values(), *own.values()))
+        cleanup.enter_context(_passing_descriptors(passer, others["tmux"]))
+        receiver = cleanup.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM))
+        receiver.bind(str(datagram))
+        if seatbelt:
+            os.link(others["tmux"], planted)
+        inherits = seatbelt and launch_path == "launcher"
+        if inherits:
+            reader_env["SANDBOX_TEST_INHERITED_SOCKET"] = "1"
+
+        def run_reader(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            with socket.socket(socket.AF_UNIX) as connected:
+                if inherits:
+                    connected.connect(str(others["tmux"]))
+                return subprocess.run(
+                    argv,
+                    cwd=tmp_path,
+                    env=reader_env,
+                    stdin=connected if inherits else subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+
+        outside = run_reader([sys.executable, "probe.py"])
+        if launch_path == "helper":
+            os_env = create_os_environment(spec, sandbox_policy=policy)
+            cleanup.callback(os_env.close)
+            result = run_async(os_env.shell(shlex.join([sys.executable, "probe.py"])))
+            inside, inside_detail = str(result.get("stdout", "")), result
+        else:
+            launcher = create_exec_launcher(sys.executable, policy)
+            cleanup.callback(Path(launcher).unlink, missing_ok=True)
+            completed = run_reader([launcher, "probe.py"])
+            inside, inside_detail = completed.stdout, completed.stderr
+        alive = _reaches(others["tmux"]) and _reaches(own["pane_clip"])
+    lines = [(name, False) for name in (*others, "datagram_connect", "datagram_sendto", "symlink")]
+    lines += [(name, True) for name in ("own_scratch", "own_cwd", "pane_clip")]
+    if seatbelt:
+        refused = [name for name in in_root if name != "root_socket"]
+        lines += [("resolver", True), ("root_socket", True)]
+        lines += [(name, False) for name in (*refused, "hard_link", "planted_link")]
+        lines += [("passed_fd", True), *([("inherited_fd", True)] if inherits else [])]
+        lines += [(name, True) for name in ("root_files", "root_own", "fork_root")]
+        lines += [(name, False) for name in ("root_moved", "parent_moved", "masked_after")]
+    reached = [f"{name} yes" for name, _ in lines]
+    kept = [f"{name} {'yes' if keeps else 'no'}" for name, keeps in lines]
+    observed_outside, observed_inside = outside.stdout.splitlines(), inside.splitlines()
+    assert observed_outside == reached, f"failed outside: {outside.stdout}; {outside.stderr}"
+    assert observed_inside == kept, f"inside: {observed_inside}; {inside_detail}"
+    assert alive, "a listener died during the run, so a refused connect proves nothing"
+
+
+# CORAL(S128): reads each masked throwaway file (path and digest from a file) directly and after
+# moving, swapping, linking, copying or cloning it or a dir above it, then does ordinary edits;
+# prints yes, no or some. ``inside``, it also tries writes and leaves its last move in place.
+_MASKED_ENTRY_PROBE = """
+import contextlib, ctypes, hashlib, json, os, shutil, subprocess, sys
+paths = json.load(open('paths.json'))
+libc = ctypes.CDLL(None, use_errno=True)
+join, darwin, inside = os.path.join, sys.platform == 'darwin', sys.argv[1:] == ['inside']
+work, spare = paths['work'], paths['spare']
+
+def reads(path, name):
+    found = False
+    with contextlib.suppress(OSError), open(path, 'rb') as handle:
+        found = hashlib.sha256(handle.read()).hexdigest() == paths['digests'][name]
+    if inside and name in paths['masked']:
+        with contextlib.suppress(OSError):
+            os.close(os.open(path, os.O_WRONLY | os.O_TRUNC))
+    return found
+
+def reaches(found):
+    hits = [reads(path, name) for path, name in found]
+    return all(hits) or (any(hits) and 'some')
+
+def discard(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.lexists(path):
+        os.unlink(path)
+
+def swapped(first, second, found):
+    os.mkdir(second)
+    if darwin:  # RENAME_SWAP; elsewhere RENAME_EXCHANGE from AT_FDCWD
+        swap, args = libc.renamex_np, (first.encode(), second.encode(), 2)
+    else:
+        swap, args = libc.renameat2, (-100, first.encode(), -100, second.encode(), 2)
+    try:
+        if swap(*args) != 0:
+            return False
+        try:
+            return reaches(found)
+        finally:
+            swap(*args)
+    finally:
+        os.rmdir(second)
+
+def linked(link, entry, name, found):
+    try:
+        link(entry, name)
+    except OSError:
+        return False
+    try:
+        return reaches(found)
+    finally:
+        os.unlink(name)
+
+def copied(source, target, found):
+    try:
+        shutil.copytree(source, target, symlinks=True)
+    except OSError:
+        pass
+    try:
+        return reaches(found)
+    finally:
+        discard(target)
+
+def cloned(source, target, found, by_fd=False):
+    try:
+        if by_fd:
+            fd = os.open(source, os.O_RDONLY)
+            made = libc.fclonefileat(fd, -2, target.encode(), 0) == 0  # into AT_FDCWD
+            os.close(fd)
+        else:
+            made = libc.clonefile(source.encode(), target.encode(), 0) == 0
+        return made and reaches(found)
+    except OSError:
+        return False
+    finally:
+        discard(target)
+
+def saved(directory):
+    target = join(directory, 'saved.txt')
+    try:
+        for text in ('one', 'two'):
+            with open(target + '.tmp', 'w') as handle:
+                handle.write(text)
+            os.replace(target + '.tmp', target)
+        os.unlink(target)
+        return True
+    except OSError:
+        return False
+
+def moves(source, target):
+    try:
+        os.rename(source, target)
+        os.rename(target, source)
+        return True
+    except OSError:
+        return False
+
+def git_works(repo):
+    quiet = ['-c', 'user.name=probe', '-c', 'user.email=probe@example.invalid', '-c', 'gc.auto=0']
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+    steps = ['init -q -b main', 'add -A', 'commit -qm one', 'mv pkg lib', 'commit -qm two',
+             'checkout -q -b side', 'rm -rq lib', 'commit -qm three', 'checkout -q main']
+    try:
+        os.makedirs(join(repo, 'pkg'))
+        with open(join(repo, 'pkg', 'a.txt'), 'w') as handle:
+            handle.write('a')
+        return all(
+            subprocess.run([paths['git'], *quiet, *step.split()], cwd=repo, env=env,
+                           capture_output=True, timeout=60).returncode == 0
+            for step in steps
+        )
+    except OSError:
+        return False
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+__RENAME_PROBE_HELPERS__
+def under(root):
+    return [(join(root, inner), name) for name, inner in paths['in_work'].items()]
+
+def say(name, value):
+    print(name, {True: 'yes', False: 'no'}.get(value, 'some'))
+
+sub, moved, clone = join(work, 'sub'), join(spare, 'w'), join(spare, 'c')
+say('direct', reaches([(path, name) for name, path in paths['masked'].items()]))
+say('root_moved', renamed(work, moved, under(moved)))
+say('root_swapped', swapped(work, moved, under(moved)))
+for name, target in (('parent_moved', sub + '.moved'), ('parent_moved_out', join(spare, 's'))):
+    say(name, renamed(sub, target, [(join(target, 'keys', 'key.txt'), 'key')]))
+for name, entry, inner in paths['entries']:
+    aside = join(os.path.dirname(entry), 'aside-' + name)
+    found = [(join(aside, inner) if inner else aside, name)]
+    say('moved_' + name, renamed(entry, aside, found))
+    say('linked_' + name, linked(os.symlink if inner else os.link, entry, aside, found))
+say('copied', copied(sub, clone, [(join(clone, 'keys', 'key.txt'), 'key')]))
+if darwin:
+    say('root_cloned', cloned(work, clone, under(clone)))
+    say('root_cloned_by_fd', cloned(work, clone, under(clone), by_fd=True))
+    say('parent_cloned', cloned(sub, clone, [(join(clone, 'keys', 'key.txt'), 'key')]))
+    for name, source, held in paths['clones']:
+        say(name, cloned(source, clone, [(join(clone, inner), kind) for inner, kind in held]))
+say('spare_files', edits(spare))
+if paths['cwd_writable']:
+    say('root_files', edits(work))
+    say('parent_files', edits(sub) and edits(join(sub, 'keys')))
+    say('atomic_save', saved(work) and saved(join(sub, 'keys')))
+    say('plain_dir_renamed', moves(join(work, 'plain'), join(work, 'plain.moved')))
+    say('sibling_dir_renamed', moves(join(sub, 'free'), join(sub, 'free.moved')))
+    say('git_repo', git_works(join(work, 'repo')))
+if darwin:
+    plain = join(work, 'plain')
+    say('plain_dir_cloned', cloned(plain, clone, [(join(clone, 'note.txt'), 'note')]))
+    say('file_cloned', cloned(join(plain, 'note.txt'), clone, [(clone, 'note')]))
+# Last: the dir above the nested masked file is moved aside and its path given a new file.
+aside, key = sub + '.aside', join(sub, 'keys', 'key.txt')
+replaced = planted = False
+try:
+    os.rename(sub, aside)
+    replaced = True
+    os.makedirs(os.path.dirname(key))
+    with open(key, 'w') as handle:
+        handle.write('planted')
+    planted = True
+except OSError:
+    pass
+say('parent_replaced', replaced and reads(join(aside, 'keys', 'key.txt'), 'key'))
+say('planted_at_masked_path', planted)
+if replaced and not inside:
+    shutil.rmtree(sub, ignore_errors=True)
+    os.rename(aside, sub)
+""".replace("__RENAME_PROBE_HELPERS__", _RENAME_PROBE_HELPERS)
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _masked_tree(base: Path) -> tuple[dict[str, Path], dict[str, str]]:
+    """
+    CORAL(S128): a throwaway tree of fake values under *base*; each file's path and digest.
+
+    The bytes are not returned, so no assertion message or local holds one.
+    """
+    work, home = base / "wide" / "work", base / "home"
+    files = {
+        "env": work / ".env",
+        "cred": work / ".secrets" / "cred",
+        "key": work / "sub" / "keys" / "key.txt",
+        "wide": work.parent / ".wide-secret",
+        "tool": base / "tools" / ".tool-secret",
+        "library": home / "Library" / "secret",
+        "token": home / "creds" / "token.json",
+        "note": work / "plain" / "note.txt",
+    }
+    for path in files.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"fake-{uuid.uuid4().hex}")
+    for plain in (work / "sub" / "free", base / "spare"):
+        plain.mkdir()
+    return files, {name: _digest(path) for name, path in files.items()}
+
+
+def _sandbox_git() -> str:
+    """CORAL(S128): a git that runs inside a sandbox; macOS's ``/usr/bin/git`` asks xcrun."""
+    tools_git = "/Library/Developer/CommandLineTools/usr/bin/git"
+    found = tools_git if os.path.exists(tools_git) else shutil.which("git")
+    assert found, "git is not installed"
+    return found
+
+
+# CORAL(S128): a masked entry is neither read nor changed by moving or cloning a dir above it
+@pytest.mark.parametrize(
+    ("launch_path", "network", "cwd_is"),
+    [
+        ("helper", "network_on", "writable"),
+        ("helper", "network_off", "writable"),
+        ("launcher", "network_on", "writable"),
+        ("launcher", "network_off", "writable"),
+        ("helper", "network_on", "read_only"),
+    ],
+)
+def test_sandbox_keeps_masked_entries_unread_after_moves_and_clones(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_path: str,
+    network: str,
+    cwd_is: str,
+) -> None:
+    """
+    Fake values sit in a dotfile and a dot-directory of the cwd, in a ``mask_paths`` file two
+    dirs down, in a dotfile of a read root and of a read root above the cwd, and on seatbelt
+    under the home's ``Library`` and in a credential source. A probe run outside reads every
+    one, directly and by each route. Inside it reads none: not directly, not after renaming
+    or swapping the write root, renaming the dir above the nested file inside the root or
+    into a second write root, renaming, linking or copying the entry, nor (seatbelt) after
+    ``clonefile(2)`` of the root, of a dir above the nested file, of either read root, of the
+    home or of the credential source's dir. Its attempts to change them leave every file's
+    bytes as they were. Ordinary work still passes inside: files and dirs made, renamed and
+    removed in the root and beside a masked file, atomic saves, renames of dirs that hold
+    nothing masked, git in a throwaway repository, and clones of a plain dir and file.
+
+    Last, the probe moves the dir above the nested file aside and plants a file at its path,
+    and leaves that for the host to check. Seatbelt refuses the move. On Linux bwrap masks by
+    a mount on the entry, which moves with the dir, so this launch still cannot read the
+    file and leaves it unchanged. But once the dir above a ``mask_paths`` file is replaced, the
+    real file is unmasked at its new path for every later launch, which masks only the old
+    path. The row pins that as open.
+    """
+    import dataclasses
+
+    seatbelt, writable = active_sandbox_type == "darwin_seatbelt", cwd_is == "writable"
+    base = tmp_path.resolve()
+    files, digests = _masked_tree(base)
+    work, spare, home = files["env"].parent, base / "spare", base / "home"
+    masked = ["env", "cred", "key", "wide", "tool", *(["library", "token"] if seatbelt else [])]
+    clones = [
+        ["read_root_cloned", files["tool"].parent, [[".tool-secret", "tool"]]],
+        ["above_cwd_cloned", work.parent, [[".wide-secret", "wide"], ["work/.env", "env"]]],
+        ["home_cloned", home, [["Library/secret", "library"]]],
+        ["credential_dir_cloned", files["token"].parent, [["token.json", "token"]]],
+    ]
+    paths = {
+        "work": str(work),
+        "spare": str(spare),
+        "cwd_writable": writable,
+        "git": _sandbox_git(),
+        "digests": digests,
+        "masked": {name: str(files[name]) for name in masked},
+        "in_work": {name: str(files[name].relative_to(work)) for name in ("env", "cred", "key")},
+        "entries": [
+            ["env", str(files["env"]), ""],
+            ["cred", str(files["cred"].parent), "cred"],
+            ["key", str(files["key"]), ""],
+        ],
+        "clones": [[name, str(source), held] for name, source, held in clones],
+    }
+    (work / "paths.json").write_text(json.dumps(paths))
+    (work / "probe.py").write_text(_MASKED_ENTRY_PROBE)
+    reader_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONPATH": os.environ["PYTHONPATH"],
+        "TMPDIR": tempfile.gettempdir(),
+    }
+    read_paths = [str(work.parent), str(files["tool"].parent)]
+    if seatbelt:
+        # The profile builder reads the home from its environment on both launch paths.
+        monkeypatch.setenv("HOME", str(home))
+        reader_env["HOME"] = str(home)
+        read_paths.append(str(home))
+    spec = OSEnvSpec(
+        type="caller_process",
+        cwd=str(work),
+        sandbox=active_sandbox_spec_factory(
+            write_paths=[*(["."] if writable else []), str(spare)],
+            allow_network=network == "network_on",
+            extra_read_paths=read_paths,
+        ),
+    )
+    policy = dataclasses.replace(resolve_sandbox(spec, work), mask_paths=[files["key"]])
+    if seatbelt:  # bwrap has no home denial, and refuses a credential source it would mount
+        policy = dataclasses.replace(policy, credential_source_paths=[files["token"]])
+    run_reader = functools.partial(
+        subprocess.run, cwd=work, env=reader_env, capture_output=True, text=True, timeout=120
+    )
+
+    def listing() -> list[str]:
+        return sorted(str(path.relative_to(base)) for path in base.rglob("*"))
+
+    before = listing()
+    outside = run_reader([sys.executable, "probe.py"])
+    left_as_found = listing() == before
+    with contextlib.ExitStack() as cleanup:
+        if launch_path == "helper":
+            os_env = create_os_environment(spec, sandbox_policy=policy)
+            cleanup.callback(os_env.close)
+            result = run_async(os_env.shell(shlex.join([sys.executable, "probe.py", "inside"])))
+            inside, inside_detail = str(result.get("stdout", "")), result
+        else:
+            launcher = create_exec_launcher(sys.executable, policy)
+            cleanup.callback(Path(launcher).unlink, missing_ok=True)
+            completed = run_reader([launcher, "probe.py", "inside"])
+            inside, inside_detail = completed.stdout, completed.stderr
+
+    leaks = ["direct", "root_moved", "root_swapped", "parent_moved", "parent_moved_out"]
+    leaks += [f"{how}_{name}" for name in paths["in_work"] for how in ("moved", "linked")]
+    leaks += ["copied"]
+    ordinary = ["spare_files"]
+    if seatbelt:
+        leaks += ["root_cloned", "root_cloned_by_fd", "parent_cloned"]
+        leaks += [str(name) for name, *_ in clones]
+    if writable:
+        ordinary += ["root_files", "parent_files", "atomic_save", "plain_dir_renamed"]
+        ordinary += ["sibling_dir_renamed", "git_repo"]
+    if seatbelt:
+        ordinary += ["plain_dir_cloned", "file_cloned"]
+    # Open on bwrap: its mask moves with the entry, and later launches mask only the old path.
+    planted = writable and not seatbelt
+    last = ["parent_replaced", "planted_at_masked_path"]
+    reached = [f"{name} yes" for name in [*leaks, *ordinary, *last]]
+    kept = [f"{name} no" for name in leaks] + [f"{name} yes" for name in ordinary]
+    kept += ["parent_replaced no", f"planted_at_masked_path {'yes' if planted else 'no'}"]
+    observed_outside, observed_inside = outside.stdout.splitlines(), inside.splitlines()
+    assert observed_outside == reached, f"failed outside: {outside.stdout}; {outside.stderr}"
+    assert left_as_found, "the outside run did not undo its moves or remove its copies"
+    assert observed_inside == kept, f"inside: {observed_inside}; {inside_detail}"
+    # Checked as the probe left it: the nested file is under the dir bwrap let it move aside.
+    moved_aside = work / "sub.aside"
+    assert moved_aside.exists() == planted
+    now_at = files | ({"key": moved_aside / "keys" / "key.txt"} if planted else {})
+    changed = [name for name in files if _digest(now_at[name]) != digests[name]]
+    assert not changed, f"changed from inside the sandbox: {changed}"
 
 
 # CORAL(S114): reaches each loopback harness listener, calls it without its secret, reads the

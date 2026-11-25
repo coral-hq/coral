@@ -1433,13 +1433,18 @@ test until someone classifies it.
   siblings and as the owner: it can drive a sibling's turn, handoff included,
   through that sibling's harness socket if it can read that harness's bearer
   from its memory (S129), and it can read other processes'
-  environments and command lines. On the zygote path a runner's or harness's
-  environment, as another process reads it, is the host daemon's whole
-  environment; on the direct-spawn fallback it holds the runner's tunnel
-  binding token and the host's initial bearer. A binding token proves the
-  runner on `/mcp` and, on a server whose authentication can mint tokens
-  (accounts or OIDC), mints an owner JWT (`POST /v1/runners/{runner_id}/token`),
-  so the reader can call the server as the run owner on any route. Handoff and
+  environments and command lines. Before S123, on the zygote path a runner's
+  or harness's environment, as another process reads it, was the host
+  daemon's whole environment, and on the direct-spawn fallback it held the
+  runner's tunnel binding token and the host's initial bearer. Since S123, on
+  POSIX, the zygote starts from the allow-listed runner environment without
+  credential-shaped names, and a direct-spawned runner takes its auth tokens
+  over an inherited socket and keeps them in memory. A direct-spawned runner's
+  environment still holds the credentials the host forwards (CRL-197). A
+  binding token proves the runner on `/mcp` and, on a server whose
+  authentication can mint tokens (accounts or OIDC), mints an owner JWT
+  (`POST /v1/runners/{runner_id}/token`), so a reader that gets one can call
+  the server as the run owner on any route. Handoff and
   gate integrity therefore hold against other users and on the server's own
   path, not against such a step, and an owner-authenticated gate answer,
   resume or cancel does not prove a person took it. ADR-05's probe 15 measured
@@ -1456,28 +1461,46 @@ test until someone classifies it.
   `gate_integrity` label, [`gates-and-inbox.md`](gates-and-inbox.md),
   "Enforced gates"). The macOS sandbox keeps other processes'
   environments and command lines unreadable, measured on macOS 27.2.1 only
-  (CRL-170). It also denies connecting to other sessions' harness sockets under
+  (CRL-208). It also denies connecting to other sessions' harness sockets under
   the host's socket root and the per-user default, and to other terminals' tmux
   servers and the user's default tmux socket (`tmux-<uid>`, with `-L` labels
-  and `TMUX_TMPDIR`), measured on macOS 27.2.1 only. A sandboxed step can still
-  reach other programs' local sockets, a tmux server on a custom `-S` path
-  among them (CRL-174). A step with network on can still connect to loopback
-  TCP listeners. Omnigent's known ones each refuse a caller without its
-  secret, the codex-native app-server WebSocket since S114 (measured on macOS
-  26.3.1 only). The exception is one started by a Codex without `--ws-auth`,
+  and `TMUX_TMPDIR`), measured on macOS 27.2.1 only. Since sandbox policy
+  revision 2 the macOS sandbox also refuses a step's connects to other
+  programs' Unix-domain sockets outside the step's own directories: Docker's,
+  an ssh-agent's, a tmux server on a custom `-S` path and a Claude Code
+  session's inbox among them, measured on macOS 27.2.1 only. A socket in the
+  step's scratch directory, or in a worktree the step may write, still
+  connects, one that another program keeps there included (CRL-203). Since
+  revision 3 the macOS sandbox also keeps every directory above a masked
+  entry in place and uncloned, so a step cannot read or change a masked file
+  of its worktree, such as `.env`, by renaming or cloning the worktree,
+  measured on macOS 27.2.1 only. Masks are still tied to paths (CRL-205,
+  CRL-206). A step
+  with network on can still connect to loopback TCP listeners. Omnigent's
+  known ones each refuse a caller without its secret, the codex-native
+  app-server WebSocket since S114 (measured on macOS 26.3.1 only). The
+  exception is one started by a Codex without `--ws-auth`,
   which runs with no token and logs a warning (noted on CRL-177). Other
-  programs' loopback services (CRL-174) and UDP are not covered. On Linux a
-  step reaches other programs' abstract sockets (CRL-174), measured in
-  `coral-e2e` lane run 45187294423. Processes outside the sandbox can still
-  connect to a harness socket, but since S129 it refuses a caller without its
-  per-spawn bearer (ADR-05, "Addendum: CRL-173 harness bearer and private
-  socket root"). A Coral step's
+  programs' loopback services (CRL-201) and UDP are not covered, on either
+  platform. On Linux a step reaches other programs' abstract sockets,
+  measured in `coral-e2e` lane run 45187294423, and, by the code, a socket
+  under any directory its sandbox binds (CRL-202). Processes outside the
+  sandbox can still connect to a harness socket, but since S129 it refuses a
+  caller without its per-spawn bearer (ADR-05, "Addendum: CRL-173 harness
+  bearer and private socket root"). A Coral step's
   sandboxed Claude CLI keeps its Claude Code state in a private directory for
   each launch. Its sandbox grants nothing of the user's `~/.claude` or
   `~/.claude.json`, so neither it nor anything it starts can read or write
   them. That was measured on macOS 27.2.1 and is checked on Linux by a bwrap
-  test in CI. The CLI still receives the `env` block of the user's
-  `~/.claude/settings.json` (CRL-167). A step whose sandbox cannot wrap its
+  test in CI. Since S124, on POSIX, the CLI holds no model credential: it
+  holds a per-session token for a loopback proxy in its harness, which holds
+  the credential, and the credentials the host forwards are removed from a
+  Coral harness's environment. Since S125 the CLI takes from the `env` block
+  of the user's `~/.claude/settings.json` only model names, opt-outs that are
+  switched on, and proxy and CA-file settings that hold no credential; the
+  block's endpoint and network settings feed the proxy, and the rest is
+  dropped (ADR-05, "Addendum: CRL-167 secrets out of exec-time
+  environments"). A step whose sandbox cannot wrap its
   CLI does not start, so Coral steps need a system `claude` CLI: the SDK's
   bundled one cannot be wrapped in the sandbox. Coral CLIs that run outside
   the sandbox get a private config directory but are not confined (CRL-180):
@@ -1496,7 +1519,7 @@ test until someone classifies it.
   included. A stored subscription login does not reach these agents, nor on
   Linux do the MCP OAuth sign-ins the CLI stored. So they need an API key, a
   gateway or `CLAUDE_CODE_OAUTH_TOKEN`, which the host passes to every runner
-  and which code in the sandbox may be able to read (CRL-167). Agents whose
+  and which code in the sandbox may be able to read (CRL-197). Agents whose
   CLI runs outside a sandbox use the user's `~/.claude`, including one whose
   configured sandbox cannot be applied, which only the runner log reports
   (CRL-183). On Windows, whose sandbox confines no files, the CLI uses the
@@ -1507,10 +1530,14 @@ test until someone classifies it.
   their owners are in
   [`../decisions/ADR-05-topology.md`](../decisions/ADR-05-topology.md),
   "Addendum: CRL-166 harness sockets on macOS", "Addendum: CRL-176 Claude
-  config isolation" and "Addendum: CRL-178 Claude config isolation for every
-  sandboxed agent". Whether to run Coral steps on untrusted content on macOS
-  while CRL-171 is open, and on either platform while CRL-174 and CRL-181 are
-  open, is an open owner decision, recorded in the first.
+  config isolation", "Addendum: CRL-178 Claude config isolation for every
+  sandboxed agent", "Addendum: CRL-167 secrets out of exec-time
+  environments", "Addendum: CRL-174 other programs' Unix sockets" and
+  "Addendum: CRL-204 masked files and moved directories". Whether
+  to run Coral steps on untrusted content on macOS while CRL-207 is open
+  (what CRL-171, closed, left), and on either platform while CRL-181,
+  CRL-201, CRL-202 and CRL-203 are open, is an open owner decision, recorded
+  in the first.
 - **Servers that require no identity.** On a server with authentication off,
   or a single-user header server, every request without credentials is the
   owner. Any process of the owner's OS user that reaches the server, a
@@ -1590,8 +1617,8 @@ drift (CRL-161).
 | A runner's first start in a repo probes git's untracked cache for about 6 s; a turn that ends inside it looks like a drift (`pending_input`). The E2E presets `core.untrackedCache=true` | CRL-161 |
 | Omnigent's own launch paths reach a step's runner without Coral's checks ("One relaunch path", Residuals) | CRL-162 |
 | A relaunch or a fence that meets another stop of the same runner in progress ("A stop in progress reads as stopped", Residuals) | CRL-163 |
-| Probe 15's exposures: secrets in exec-time environments and argv, the model API key among them (CRL-167); the allow-listed runner token on Coral-bound sessions (CRL-168) | CRL-167, CRL-168 |
-| What keeps every gate's `gate_integrity` at `not_enforced` ([`gates-and-inbox.md`](gates-and-inbox.md), "Enforced gates"): other programs' sockets and loopback services; files a step leaves that the owner's tools run; macOS CI and Mach services; the owner's other and earlier runs; password guessing at `/auth/login`. OIDC servers wait on a consented native sign-in | CRL-174, CRL-181, CRL-170, CRL-171, CRL-193, CRL-195; OIDC CRL-194 |
+| Probe 15's exposures. Secrets in exec-time environments and argv are closed for Coral steps on POSIX by S123, S124 and S125 (CRL-167; ADR-05, "Addendum: CRL-167 secrets out of exec-time environments"). Still open: other agents' CLIs, direct-spawned and CLI-local runners, claude-native steps and Windows (CRL-197); the allow-listed runner token on Coral-bound sessions (CRL-168) | CRL-197, CRL-168 |
+| What keeps every gate's `gate_integrity` at `not_enforced` ([`gates-and-inbox.md`](gates-and-inbox.md), "Enforced gates"), at sandbox policy revision 3: other programs' loopback services; Linux abstract sockets and sockets under a bound directory; a socket another program keeps in a step's worktree; files a step leaves that the owner's tools run; on macOS a rename that changes only a masked name's letter case or Unicode form; masks tied to paths (names made later, links a step makes first, a `mask_paths` link re-pointed, Linux nested masks whose directory is replaced); macOS releases other than the two measured, a host-start check that covers only two rule families and a macOS lane that is not a required check; Mach services that still act for a sandboxed step; the owner's other and earlier runs; password guessing at `/auth/login`. Masked files read by renaming or cloning a directory above them closed at revision 3 (CRL-204). OIDC servers wait on a consented native sign-in | CRL-201, CRL-202, CRL-203, CRL-181, CRL-205, CRL-206, CRL-208, CRL-207, CRL-193, CRL-195; OIDC CRL-194 |
 | A force-deleted `coral__` agent leaves the live steps that run it unable to hand off, with only `/mcp` failing closed, until the nudge cap pauses the run: consult the required-policy provider on the no-agent branch keyed on the binding, or stop the run's sessions on a forced delete | CRL-154 |
 | Showing the salvage ref in the web, and the retention and cleanup of `refs/coral/salvage/*` ([`workspace-ops.md`](workspace-ops.md), "Restart ladder") | CRL-158 |
 | Separate worktrees per agent, and parallel writers (ADR-05 probe (a), separate-worktrees half) | CRL-140 |

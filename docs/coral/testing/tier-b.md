@@ -11,7 +11,18 @@ with:
 uv run --no-sync pytest tests/e2e/coral --reruns 0 -rs -n 2 --dist=loadscope
 ```
 
-Each test that starts the CLI skips when `claude` is not on `PATH`;
+You need not prepare your shell for that command. Each stack, and each test
+that drives the executor in process, puts its own `security` and `gh`
+stand-ins first on the `PATH` of the processes it starts and gives them a
+throwaway `HOME` ("Keychain and GitHub stand-ins" below). A stub on your own
+`PATH` is not what protects a stack run: a stack builds its `PATH` itself, so
+a stub directory on yours never reaches its processes. The one exception is the stack
+sample, which runs with your real `HOME` and stays opt-in for clean machines
+("Check for proxied HTTP(S) egress" below).
+
+Each test that starts the CLI skips when `claude` is not on `PATH`, or does
+not run: the check starts `claude --version` once per pytest process, in a
+throwaway home with stand-ins first on its `PATH`.
 `test_live_proxy.py` and `test_claude_sdk_kit.py` need no CLI. The walking-skeleton tests
 (`test_skeleton.py`, `test_runner_loss.py`, `test_sandbox_probe.py`) fail
 instead when `CORAL_E2E_REQUIRE_CLI=1` is set, as the lane sets it. The stack
@@ -31,8 +42,9 @@ the live variant unless `CORAL_E2E_LIVE=1` and `ANTHROPIC_API_KEY` are set.
 - `tests/e2e/coral/test_runner_loss.py`: a lost runner, a lost host and a step
   retry;
 - `tests/e2e/coral/test_sandbox_probe.py`: ADR-05's probe 15 on a single-user,
-  an allow-listed-token and an accounts server, and the test that binds the gate
-  label's table to the probe's pins.
+  an allow-listed-token and an accounts server, the test that binds the gate
+  label's table to the probe's pins, and the test that the installed CLI's
+  build still names the first-party switch (below).
 
 Explicit paths override `addopts`'s `--ignore=tests/e2e` (`pyproject.toml`). The proxy's file comes
 first so that `--dist=load` spreads the stack tests over both workers; the
@@ -83,11 +95,16 @@ inputs from the caller; faults and assertions stay in the tests.
   `mkdtemp(dir="/tmp", prefix="crl-")` (`OMNIGENT_HARNESS_TMP_PARENT`, under the
   AF_UNIX path limit), and its own `TMPDIR` (`prefix="crl-t-"`), both removed
   with the stack. No recipe sets `OMNIGENT_HARNESS_TMP_PARENT` by hand.
-- `minimal_env()` is the base environment, with no credential: `PATH` with
+- `minimal_env()` is an environment with no credential: `PATH` with
   python, git, `claude` and `node` and the system directories, the locale
-  names and `TMPDIR` (the stack then gives its own), and
+  names and `TMPDIR`, and
   `DISABLE_AUTOUPDATER=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. The
-  happy path asserts both switches reach the step's live CLI.
+  happy path asserts both switches reach the step's live CLI. The test's own
+  `git`, `sh` and probe children start from it.
+- `stack_env()` is the base environment of the stack's server and host:
+  `minimal_env()` with the stack's keychain stand-ins first on `PATH`, the
+  stack's own `TMPDIR`, and `gh`'s and git's config pointed under the stack's
+  root ("Keychain and GitHub stand-ins" below).
 - At exit, a SIGTERM included, no process the stack started may survive: the
   stack fails if a server, host, runner, CLI or tool process of it is left.
 - `start_server(skeleton)` restarts the server after a test's
@@ -140,7 +157,7 @@ their process trees.
 | `test_runner_loss.py::test_a_killed_step_runner_is_relaunched_in_the_same_session` | `killpg` of the step runner | one loss, one wake `relaunched`, the same session and generation, a new runner id; the run never pauses |
 | `test_runner_loss.py::test_an_offline_host_holds_the_step_and_its_return_relaunches_it` | host daemon SIGKILL; 30 s grace | the hold (`infra` / `infra.host_offline`, Cancel only, `:resume` and `:retry` 409), then `respawn_host`, the hold ends and the same session is relaunched as one loss |
 | `test_runner_loss.py::test_retrying_a_blocked_step_fences_salvages_resets_and_briefs_a_new_session` | a blocked handoff, then `:retry` | paused `recovery.restarting` until the restart finished; the old session closed and its tree gone; one salvage ref holding the old attempt's file; a reset worktree; generation 2 in a new session whose brief names the ref |
-| `test_sandbox_probe.py` (three stack tests) | none | ADR-05's probe 15 verdicts, pinned per platform: on a single-user server, on one that keeps the allow-listed runner token, and on an accounts server, where the same probe first runs outside the sandbox and must open every owner path |
+| `test_sandbox_probe.py` (three stack tests) | none | ADR-05's probe 15 verdicts, pinned per platform: on a single-user server, on one that keeps the allow-listed runner token (its steps on a plain API key, through the credential proxy), and on an accounts server. On the single-user and accounts servers the same probe first runs outside the sandbox: it must read each process and find no API key and no runner token, be refused by the step's credential proxy, and open every other owner path |
 
 The review loop is a test fixture, `tests/e2e/coral/fixtures/review_loop.yaml`
 ("Implement with review loop": implement, review with a `changes_requested`
@@ -150,7 +167,8 @@ CRL-157.
 **Probe 15's choreography.** The implementer's first call and the reviewer's
 calls are held, and the mock releases only the oldest held call, so the test
 releases one call at a time and orders the holds until the implementer's probe
-call is the oldest. The host-side controls then run, the probe call is
+call is the oldest. The host-side controls then run, the same probe runs
+outside any sandbox (next paragraph), the probe call is
 released, its result is read from the mock's ledger, the controls run again
 with the reviewer still held, and only then is the reviewer let go. Every
 target needs a host-side control; a target that went missing fails as a failed
@@ -161,21 +179,96 @@ writes `artifacts/probe15-<platform>.json` (and
 those files, with every open verdict given its owner ticket. They hold verdict
 tokens and the recorded versions only.
 
+**Probe 15 outside the sandbox.** Right before the step's probe call is
+released, `test_probe_15_from_a_step_shell` runs the same probe outside any
+sandbox, as the step's user, in the step's worktree, on the four process
+targets and the credential proxy. It expects (`OUTSIDE_PROBE15`):
+
+- each process is read (`reachable`): the reviewer's runner and CLI, the host
+  daemon and the step's own CLI;
+- the model API key is in none of their environments or command lines
+  (`.api_key` and `.argv_api_key` `not_present`);
+- each CLI's environment names `OMNIGENT_CLAUDE_PROXY_TOKEN`, its session
+  token, and no `HARNESS_CLAUDE_SDK_*` name;
+- `credential_proxy` is `refused`.
+
+The outside verdicts go into the artifact with the step's. Inside the sandbox
+the same reads stay `denied` on macOS and `hidden` on Linux, as pinned.
+
+**The `credential_proxy` check.** A Coral step's CLI talks to a credential
+proxy on loopback in its own harness, which holds the model key and admits
+only the CLI's session token (ADR-05, "Addendum: CRL-167 secrets out of
+exec-time environments"). The test reads the proxy's port and the token,
+redacted, from the step's own CLI's environment outside the sandbox, and gives
+the probe the port only. The probe posts a model request three times: with no
+key, with a wrong key, and on a path that climbs to the model route
+(`/v1/models/../messages`). It prints `refused` only when all three get 401
+or 403, and `reachable` when any is answered 2xx. The single-user and the
+identity test both run it, in the step and outside, and pin it `refused` with
+no owner. The mock's ledger must hold none of the three requests (they name
+the model `crl-credential-proxy-probe`) and must not hold the session token.
+The ledger records request bodies, not headers; that the token is in no
+upstream header is the shim's and the executor's unit tests. On Linux the pin
+is set by reasoning until the lane runs on that change.
+
+**The `worktree_masked_file` check.** The identity test's fixture repository
+commits a dotfile, `.crl-masked`, holding a fresh canary, so the step's
+profile masks it as a top-level dot entry of the worktree. The probe gets the
+canary's digest only. It reads the file directly and, on macOS only, again
+after renaming the worktree into `$TMPDIR` and after `clonefile(2)` of the
+worktree there, undoing each. It first moves and clones a plain directory the
+same way; if that fails, the check reads `unsupported` (another volume, or one
+that cannot clone) or `unclassified`, both open. Outside the sandbox it must
+read `reachable` with nothing moved; in the step it is pinned `denied` on
+both platforms, with no owner. The host checks the file's digest
+before the probe, between the runs and after the step's. A macOS test runs
+the same probe in a step-shaped seatbelt profile with the S128 rule edited:
+without the rule, or with either half alone, it must read `reachable` (ADR-05,
+"Addendum: CRL-204 masked files and moved directories").
+
 **The identity probe's choreography.**
 `test_probe_15_on_a_server_that_requires_identity` starts the stack with
 `skeleton_stack(identity=True)`: an accounts server with a throwaway cookie
 secret and first admin, the owner's JWT from `POST /auth/login` stored in the
 host's `~/.omnigent/auth_tokens.json` before the host starts, and the stack's
 client sending that JWT. The host spawns runners directly
-(`OMNIGENT_RUNNER_ZYGOTE=0`), so the test first checks, by name only, that the
-implementer's runner holds its binding token and the host's bearer. It plants
+(`OMNIGENT_RUNNER_ZYGOTE=0`) and hands each its binding token and the host's
+bearer over an inherited socket, so neither is in the runner's environment.
+The test proves the spawn path by the runner's parent, which must be the host
+daemon (a zygote-forked runner's is the zygote), or it fails as a failed
+control. It plants
 a cookie-secret canary in the host's home and opens throwaway listeners for
 other programs' services. With both steps' first calls held, it reads the run's
 `gate_integrity` and runs the same probe outside any sandbox in the step's
-worktree; that run must open every owner path, or the test fails as a broken
-probe. Then the step runs the probe, its controls run again, and the run must
+worktree. That run must read the runner's environment and find no token there
+(`own_runner_mint` and `own_runner_bearer` `not_present`, each `.read`
+`reachable`), be refused by the credential proxy and the bare owner route, and
+open every other owner path, or the test fails as a broken probe. Then the step
+runs the probe, its controls run again, and the run must
 complete. The verdicts, the outside verdicts and the recorded versions are
 written before any assertion, so a failing lane run still leaves them.
+
+**The plain-key stack test.**
+`test_a_step_on_a_server_with_the_allow_listed_runner_token` gives its host an
+API key with no endpoint of its own and names the mock in the host's
+`ANTHROPIC_BASE_URL`. So each step's CLI runs through its credential proxy on
+the path with no gateway. On that path the CLI defers its MCP tools behind
+`ToolSearch`, so each step's script loads them first (`load_step_tools`) and
+its queues are keyed on `ToolSearch` being offered. The test asserts, by name
+only, that the step's CLI names a loopback proxy that is not the mock, holds a
+session token, and has none of `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`,
+`CLAUDE_CODE_USE_GATEWAY` and `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`; and
+that the mock received betas beyond the three a gateway launch sends. Every
+proxy setting of the host names an `EgressRecorder`, which must see nothing:
+were the host's endpoint lost on the way, the proxy would forward to the
+Anthropic API.
+
+**The first-party switch.**
+`test_the_installed_cli_knows_the_first_party_switch` searches the installed
+CLI's build for `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` without running
+it. It skips only when no CLI is installed, and fails instead when
+`CORAL_E2E_REQUIRE_CLI=1` is set. Whether the lane's CLI (2.1.295) names the
+switch is not known until the lane runs it.
 
 **Pinning probe 15.** The macOS pins come from local runs; the Linux pins come
 from the `coral-e2e` lane's artifacts (`pytest-coral-e2e-<run id>`). The lane
@@ -187,12 +280,38 @@ release branch. For each failure in `test_sandbox_probe.py`:
 - "Moved from its pins": re-pin only a move between closed verdicts (such as
   `hidden` and `denied`), the socket, TCP and plant checks with their owners,
   and the single-user `owner_bare` checks with the accepted residual.
+- The socket and TCP checks of the identity test, from sandbox policy revision
+  2 (ADR-05, "Addendum: CRL-174 other programs' Unix sockets"):
+  - `other_unix_socket`, another program's socket under `/tmp`, is closed on
+    both platforms: `denied` on macOS since S127, `hidden` on Linux. On macOS
+    a `reachable` there means the sandbox rule did not hold on that OS. Treat
+    it as a finding: re-pinning it open needs an owner and a new policy
+    revision.
+  - `worktree_unix_socket`, a throwaway listener at a plain name inside the
+    step's own worktree, is pinned `reachable` with owner CRL-203. On Linux it
+    is set by reasoning until the lane runs.
+  - `other_abstract_socket` (Linux only) is `reachable`, owner CRL-202.
+  - `other_loopback_tcp` is `reachable` on both platforms, owner CRL-201.
+- The masked-file check of the identity test, from sandbox policy revision 3
+  (ADR-05, "Addendum: CRL-204 masked files and moved directories"):
+  `worktree_masked_file` is closed with no owner. It is `denied` on macOS,
+  measured locally and in the macOS lane, and `denied` on Linux, measured in
+  the `coral-e2e` lane, where it is the direct read only. A `reachable` or `mismatch` there
+  is a finding, not a re-pin: on macOS it means the S128 rule did not hold on
+  that OS, and re-pinning it open needs an owner and a new policy revision.
+  `unsupported` means the plain-directory control could not move or clone
+  into `$TMPDIR` (another volume, or one that cannot clone), and
+  `unclassified` an error the probe does not classify: rerun on a layout where
+  the control passes, never re-pin.
 - Any open verdict on a credential path is escalated to a person and a ticket,
   never re-pinned: a `.read` other than `denied` or `hidden`; `minted`,
   `mismatch`, `refused` or `not_present` on `mint`, `bearer` or `stored`;
   `reachable` on an environment or the cookie secret; a bare owner request on
-  the accounts server other than `refused`; or any `shell_env_names.names`
-  other than `none`.
+  the accounts server other than `refused`; `credential_proxy` other than
+  `refused`, `denied` or `hidden`; or any `shell_env_names.names`
+  other than `none`. An outside run that finds an API key or a runner token,
+  or a CLI without its session token, is escalated too, even where it reads
+  as a broken probe: the outside maps are never loosened to pass.
 - A person checks every pin copied from the lane, and the comment above the
   pins names the lane run. A move that changes a released policy row's open
   owners also needs a new sandbox policy revision and rows, and a server-side
@@ -200,6 +319,175 @@ release branch. For each failure in `test_sandbox_probe.py`:
   (ADR-05, "Addendum: CRL-159 probe 15 on identity-requiring servers"); the
   binding test fails until they exist. A row still unreleased on the pull
   request that adds it is corrected in place, with the pins, instead.
+
+## Keychain and GitHub stand-ins
+
+A test that starts real CLIs must not reach your keychain or your `gh` login.
+On macOS the Claude CLI reads its login by running `security`, found by name
+through `PATH`. `gh` is the second program that matters: the installed `gh`
+binary names `/usr/bin/security` by its full path (read from the binary, not
+run), which no `security` stand-in on `PATH` can intercept. So the real `gh`
+must not run at all.
+
+`install_keychain_stubs(directory)` in `tests/e2e/coral/_claude_sdk_kit.py`
+writes a `security` and a `gh` stand-in into a directory, the same two shell
+scripts on every platform:
+
+- `security` exits 44, the real tool's "item not found". `gh` exits 1, as
+  `gh auth token` does when logged out. Neither prints or reads anything.
+- Each call adds one line to a log, `calls.log` beside the directory unless
+  the caller names another: the program, the subcommand (for `gh`, its first
+  two words) and, for `security`, the service after `-s`.
+- A subcommand is written only when it is 1 to 40 lower-case letters and
+  hyphens, and a service only when it is 1 to 64 letters, digits, spaces and
+  `._:-`. Anything else is written as `other`. The account, every other
+  argument and any input are never written.
+- The scripts and their directory are owner-only, and so is the log.
+
+**A stack brings its own.** `skeleton_stack` does this for every stack, with
+nothing for the test to pass:
+
+- It installs the stand-ins in `<root>/keychain-stubs/bin`; their log is
+  `<root>/keychain-stubs/calls.log`.
+- It starts the server and the host from `stack_env()`: `minimal_env()` with
+  the stand-ins' directory first on `PATH`. Omnigent passes `PATH` on to the
+  runners, harnesses and CLIs the host starts, so they find the stand-ins
+  first too.
+- `stack_env()` also sets `GH_CONFIG_DIR` to `<root>/gh` and
+  `GIT_CONFIG_GLOBAL` to `<root>/gitconfig`, neither of which exists, and
+  `GIT_TERMINAL_PROMPT=0`. Every name in it must be in `BASE_ENV_NAMES`, a
+  reviewed list in which no name carries a credential or points a tool at your
+  own. An unreviewed name fails the stack before any process starts.
+- Every stack process runs under a throwaway `HOME` below the stack's root.
+  The shared helpers give the server `server-home` and the host `host/home`,
+  and the processes those two start keep it.
+
+**A stub on your own `PATH` is not the protection.** A stack builds its `PATH`
+itself: the directories of python, `git`, `claude` and `node`, then the system
+directories. A stub directory on the `PATH` of the shell that started pytest
+is not among them.
+Before the stack had its own stand-ins (CRL-199), a `security` stub on the
+caller's `PATH` never reached a stack process: every stack process on macOS
+resolved `security` to `/usr/bin/security`, and the stub's empty log said
+nothing about them.
+
+**The guards.** psutil shows the environment a process was exec'd with.
+`keychain_bypasses` in `_skeleton.py` takes that `PATH` and `HOME` and names a
+process, as `pid:name` only, when its `PATH` would find `security` or `gh`
+anywhere but at the stack's stand-ins, or when its `HOME` is not under the
+stack's root. It resolves names and runs nothing. `KeychainGuards` applies it
+at every stack's start and exit, and one test applies it to a held step:
+
+| Guard | Where | Processes |
+|---|---|---|
+| At start | every stack, once the host is online | the host daemon and the server; one whose environment cannot be read fails |
+| At exit | every stack, as the first teardown step | the live server and hosts, and those of their live descendants that run an Omnigent module (`-m omnigent...`) or are `claude` CLIs. A `git` child is left out, because production builds its `PATH`. One that is gone or unread is skipped |
+| On a held step | `test_a_step_on_a_server_with_the_allow_listed_runner_token` | the step's runner, harness, launcher and CLI; one that is unread fails |
+
+The held-step test also waits until `gh auth token` is in the log. That shows
+the log works: the host's readiness probe asks `gh` for a token on every
+platform.
+
+What the guards check is the exec-time `PATH` and `HOME` of the server, the
+host, the runner zygote, a runner or harness that was exec'd directly, and
+each CLI. A zygote-forked runner or harness shows its zygote's environment.
+What they do not prove:
+
+- **A caller that skips `PATH`.** A program that runs `/usr/bin/security` by
+  its full path, or asks the keychain through the system API in its own
+  process, meets no stand-in. Only the throwaway `HOME` stands in its way.
+  Whether a throwaway `HOME` hides the login keychain from
+  `/usr/bin/security` is not measured. The System keychain and the
+  data-protection keychain do not depend on `HOME`.
+- **A process that is not there to read.** A child that lives for
+  milliseconds, such as the readiness probe's `gh`, is seen only through the
+  stand-ins' log. A process that changes its own `PATH` after it starts still
+  shows the one it started with.
+- **An empty log.** It says only that nothing unexpected was recorded. A
+  sandboxed CLI cannot write to the stack's log (below).
+
+A guard failure reads `Stack processes started outside the keychain barrier`
+and lists `pid:name`. It means a stack process could have found the real
+programs. Find out why before you run a stack again.
+
+**The teardown check.** Once every stack process has ended, the stack:
+
+- emits a `KeychainStubCalls` warning with what the stand-ins were asked, by
+  name and count, the 20 most frequent names at most. pytest lists it in its
+  warnings summary whether the test passed or failed, for example
+  `keychain stand-in calls: ['gh auth token (x3)'], 3 in all`;
+- fails on a call outside the expected ones, naming the program, the
+  subcommand, the item and a count;
+- fails when a stack home holds `Library/Keychains` or `gh`'s `hosts.yml`, or
+  `<root>/gh/hosts.yml` exists: something signed in.
+
+The expected calls (`_EXPECTED_CALLS` in `_claude_sdk_kit.py`) are reads and
+status queries only:
+
+| Call | Who makes it |
+|---|---|
+| `security find-generic-password` on `Claude Code` or `Claude Code-credentials`, each with or without `-<8 hex>` | the Claude CLI reading its login. The plain names come from a CLI started with no config dir variable, as the host's readiness probe starts it (`claude auth status`). The `-<8 hex>` names come from a CLI with a config dir of its own, such as a Coral step's or an in-process test's |
+| `security find-generic-password` on `Claude Code-device-keys` or `Claude Code-doctor-probe`; `security show-keychain-info` | the Claude CLI: reads of two more items the CLI 2.1.325 build names, and its lock-state query |
+| `gh auth token` | the host's readiness probe: its Copilot row asks `gh` for a token |
+| `gh pr view`, `gh repo view` | the runner's GitHub panel, which reads the branch's pull request and its repository whenever a `gh` is on `PATH`. In a stack the stand-in is that `gh` |
+| `gh auth status` | the same panel, when it reached neither; and the Claude CLI's own check after `gh auth token` gives it nothing (named in the CLI 2.1.325 build) |
+
+A keychain write (`security -i`, `add-generic-password`,
+`delete-generic-password`), another item, any other `gh` call (`gh api`,
+`gh auth login`) and any `other` fail the stack. When a CLI or Omnigent
+upgrade adds a call, the failure names it. Add a read or a status query to the
+list on purpose; never add a write. The list was built from the CLI 2.1.325
+build; the lanes install 2.1.295, whose build was not searched.
+
+**Sandboxed CLIs.** A step's CLI runs in a sandbox that, by its rules, cannot
+read the stack's stand-ins. On macOS seatbelt with CLI 2.1.325 this was
+measured in process: the CLI finds `security` at the first `PATH` entry,
+cannot run it, takes that as "no login", completes its turn and does not look
+further down `PATH`. No log line is written.
+`test_a_wrapped_cli_stops_at_a_keychain_stub_it_cannot_read` in
+`test_tier_b_executor.py` (local only) pins it: unreadable stand-ins come
+first, readable ones in the workspace second, and the second ones must record
+nothing. For `security` that is the CLI's own lookup. For `gh` it is a shell's
+lookup inside the sandbox, since no Tier B turn made the CLI call `gh`. Not
+measured: CLI 2.1.295, and Linux. Under bwrap the stand-ins' directory does
+not exist inside the sandbox, so by the code a lookup by name goes on to the
+next `PATH` entry: Linux has no `security`, and a `gh` found there is the
+machine's real one.
+
+**In-process tests.** `mock_only_env(..., stubs=...)` requires the caller's
+own stand-ins and puts them first on the `PATH` it returns, in front of the
+inherited one. Each test installs them in its temp dir. A test whose CLI runs
+in the sandbox installs them in the workspace
+(`install_keychain_stubs(workspace / "stubbin", log=workspace / "security.log")`),
+the one place the sandbox can both run them and write their log. The two
+sandboxed tests then assert that every recorded call reads a `-<8 hex>` item,
+and on macOS that there was at least one.
+
+**The CLI check.** `sk.require_claude_cli()` and
+`skip_if_harness_cli_missing("claude-sdk")` each start `claude --version` once
+per pytest process, with a throwaway `HOME` and `CLAUDE_CONFIG_DIR` and
+stand-ins first on `PATH`, all removed afterwards (`throwaway_cli_env`). The
+first starts from `minimal_env()`. The second keeps the caller's other
+variables (seam S126 in `tests/e2e/_harness_probes.py`).
+
+**Where it runs.** The `coral-e2e` lane (Ubuntu) runs every stack test, so
+every guard and teardown check. The macOS sandbox lane
+(`.github/workflows/macos-sandbox.yml`, not a required check) runs
+`test_sandbox_probe.py`: its three stack tests and the stand-ins' unit tests.
+
+**Not covered.**
+
+- The stack sample (`test_tier_b_sample.py`, `test_tier_b_reviewer_stack.py`)
+  uses the shared `live_server` fixture: your real `HOME`, your `PATH`, no
+  stand-ins. Run it only on a clean machine (below).
+- Other vendors' CLIs. The host's readiness probe starts each one it finds
+  with `--version`, on the stack's `PATH` or, whatever `PATH` says, in
+  `/usr/local/bin` or `/opt/homebrew/bin`. They run under the stack's
+  throwaway `HOME` and meet no stand-in (CRL-200).
+- Omnigent's other E2E tests outside `tests/e2e/coral/`. Their helpers copy
+  the caller's `PATH` (read from a sample of them). No lane of this fork runs
+  them: the inherited `E2E Tests` workflow is disabled. Run locally, they get
+  what your shell holds.
 
 ## The live variant
 
@@ -241,21 +529,30 @@ failing live run's report, with `-l --tb=long`, never shows a fake key. Live
 failures carry no log tails. At teardown the test asserts that no file under
 its basetemp holds the key, reporting a count only, then deletes the basetemp.
 
-**What the token does not fence.** The token reaches the CLI's command line
-(its `--settings` key helper), which any local account can read, and the
-stack's server serves unauthenticated local requests. So while a live run
-lasts, another account on the machine could read the token and spend through
-the proxy. There is no spend cap. No process the test starts is given the key,
-but the key is not confined to the test process: removing it from the test's
-environment does not scrub the initial environment block of pytest, or of the
-shell and tools that started it, which another process of the same user outside
-the sandbox can read (CRL-167). A step's shell cannot read it directly: on macOS
-27.2.1 since CRL-165 (S111, probe 15; no CI lane runs macOS, CRL-170), and on
+**What the token does not fence.** Since CRL-167 the per-run token reaches no
+command line. Each step's harness holds it in its credential proxy, and the
+step's CLI holds only that proxy's session token, in its environment; its
+`--settings` key helper prints that variable. So another account on the
+machine can no longer read a token from a step CLI's command line. A process
+of the same user outside the sandbox can still read the session token from a
+CLI's environment and spend through the two proxies while the run lasts, and
+the stack's server serves unauthenticated local requests. There is no spend
+cap. No process the test starts is given the key, but the key is not confined
+to the test process: removing it from the test's environment does not scrub
+the initial environment block of pytest, or of the shell and tools that
+started it, which another process of the same user outside the sandbox can
+read. Those are your own processes, not ones Coral starts. A step's shell
+cannot read it directly: on macOS
+27.2.1 since CRL-165 (S111, probe 15; the macOS sandbox lane,
+`.github/workflows/macos-sandbox.yml`, runs probe 15 on changes to the files
+it depends on and weekly, and is not a required check), and on
 Linux because of pid namespaces. On a single-user server, though, a step can
 act as the owner, an accepted residual (ADR-05, "Addendum: CRL-159 probe 15 on
 identity-requiring servers"). The proxy path is the claude-sdk gateway path (it
 sets a base URL), so a host with only `ANTHROPIC_API_KEY` and no base URL is not
-exercised.
+exercised against the real API; the plain-key stack test and
+`test_a_coral_direct_key_cli_sends_the_same_requests_through_its_proxy` cover
+that path against the mock.
 
 ## The harness is claude-sdk
 
@@ -283,6 +580,10 @@ inherited environment and returns changes that:
 - Set `HOME` and `CLAUDE_CONFIG_DIR` to a fresh directory from
   `write_claude_home`, whose `.claude.json` declares the stdio probe MCP server
   `probe`.
+- Put the caller's own keychain stand-ins (`stubs=`, required) first on
+  `PATH`, in front of the inherited one, so a lookup of `security` or `gh` by
+  name does not depend on what your shell prepared ("Keychain and GitHub
+  stand-ins" above).
 - Set `ANTHROPIC_BASE_URL` to the mock root URL, and
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. The executor gets its key from
   `api_key_helper="printf %s mock-key"`.
@@ -292,6 +593,30 @@ inherited environment and returns changes that:
 
 `test_claude_sdk_kit.py` checks that result against an environment full of
 credentials and proxy overrides.
+
+**Coral executors and the credential proxy.** A Coral executor
+(`make_executor(..., coral=True)`) sends its CLI through a credential proxy on
+loopback, which holds the key; the CLI's key helper only prints its session
+token (`claude_sdk_executor._PROXY_TOKEN_HELPER`). Two tests rely on that:
+
+- `test_a_coral_cli_keeps_its_claude_config_out_of_the_home` (the S113 test)
+  used to run its probe as the API key helper, inside the CLI's sandbox. It
+  now patches `_PROXY_TOKEN_HELPER` to run the probe in front of the token
+  helper, so the probe still runs inside the sandbox. The executor is built on
+  a gateway (`make_executor(..., gateway_base_url=<mock>)`) with a fake model
+  key. The probe gets that key as a length and a digest
+  (`_claude_config_probe.secret_spec`), never the key itself, and also reports
+  `proxy_token yes` and `model_key no`: its environment holds the session
+  token and nowhere the key. The test asserts that the proxy logged no refusal
+  during the turn, so the pinned CLI needs no route the proxy does not
+  forward.
+- `test_a_coral_direct_key_cli_sends_the_same_requests_through_its_proxy`
+  launches a real CLI on a plain key three times: on the endpoint itself,
+  through the proxy, and through the proxy with the first-party answer
+  forced. It compares the `anthropic-beta` header and the `thinking` field
+  the mock records. The proxy changes neither, and the first-party switch
+  only adds betas. It runs locally only: the forced answer patches the
+  executor in process, which a stack's separate harness process cannot take.
 
 `EgressRecorder` is a local proxy that answers every request with `403` and
 records its request line. The main test asserts that the recorder saw nothing
@@ -308,7 +633,8 @@ recorder could also mean the CLI ignores proxy settings.
 shared session-scoped `live_server` fixture in `tests/e2e/conftest.py` starts
 the runner with this process's environment and real `HOME`. The runner's CLI
 can therefore read your `~/.claude` settings, hooks, MCP servers and login, and
-the test cannot install the recorder. The sample skips unless you opt in. Run
+the test cannot install the recorder or the keychain stand-ins. The sample
+skips unless you opt in. Run
 it only where no Claude login or provider credential exists, such as a clean CI
 runner or container:
 
@@ -372,7 +698,8 @@ hello; the Tier B gate does not check it yet.
 
 Every model call is scripted, so Tier B does not show real model behaviour
 (following a brief, choosing tools and handoff labels, how often a reviewer
-loops), the direct API-key path without a gateway, real error texts and
+loops), the plain API-key path against the Anthropic API itself (the mock is
+not a first-party endpoint), real error texts and
 retries for 401, 429, 529 and overloaded answers (CRL-156), real streaming
 latency against the CLI's own watchdogs, or real spend. The kills land only
 while the CLI waits for a model answer: none lands while an MCP call to the
@@ -397,13 +724,18 @@ leader change between live replicas is covered in process only
 
 ## Add a Tier B test
 
+One rule first: a test helper that starts real CLIs builds its own
+environment, with its own keychain stand-ins and a throwaway home. It must not
+rely on the caller's `PATH`.
+
 1. Put the test in `tests/e2e/coral/`. The version gate applies by itself.
 2. Call `skip_if_harness_cli_missing(CORAL_TIER_B_HARNESS)` first.
 3. For an executor-level test, use `isolated_mock_llm_server_url`,
    `write_claude_home`, `mock_only_env` with an `EgressRecorder`, and
    `make_executor(..., permission_mode="bypassPermissions")`. Pass
-   `inherited=os.environ` to `mock_only_env`. Assert that
-   `recorder.request_lines` is empty.
+   `inherited=os.environ` and
+   `stubs=install_keychain_stubs(tmp_path / "keychain-stubs" / "bin")` to
+   `mock_only_env`. Assert that `recorder.request_lines` is empty.
 4. For a stack-level test, use `http_client`, `live_runner_id` and
    `mock_llm_server_url` with the queue guards above.
 5. Assert on what the turn produced: the final text, the marker file, or the
