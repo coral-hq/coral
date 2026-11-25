@@ -3532,7 +3532,7 @@ seams:
         (a symlink loop at either root, ~nosuchuser, a deleted cwd, a relative
         root, a broad root, a path swapped while it resolves) and the
         scratch-recording test. The looping configured root kept by its
-        spelling added 14 lines to omnigent/inner/sandbox.py and 3 to
+        spelling changed 7 lines of omnigent/inner/sandbox.py and 3 to
         tests/inner/test_sandbox.py. tests/inner/test_seatbelt_sandbox.py (193
         changed lines): the placement test in four network modes, the guard
         cases, the pane-shaped test, the always-denied default root and its
@@ -4253,7 +4253,7 @@ seams:
       this build and the session must restart when no token arrives (a runner
       started before an in-place upgrade therefore cannot spawn harnesses).
       uvicorn serves a raw ASGI gate around the app: only lifespan passes
-      unauthenticated, any other non-http scope is dropped, and an http or websocket scope without "Bearer <token>" (scheme case
+      unauthenticated, any scope other than http or websocket is dropped, and an http or websocket scope without "Bearer <token>" (scheme case
       insensitive, hmac.compare_digest) gets a 401 JSON or websocket.close
       without the app or receive() being called, so a malformed body gets
       401, not 422. The client always sends the header; the scaffold's
@@ -4329,7 +4329,7 @@ seams:
         the sweep test over a symlinked root and a symlinked ap-* entry, and
         three sweep race tests moved from Path.exists / Path.is_dir / chmod
         0333 to the lstat and listing the sweep now does. The other files are
-        within budget: omnigent/runtime/harnesses/paths.py 60,
+        within budget: omnigent/runtime/harnesses/paths.py 48,
         omnigent/runtime/harnesses/process_manager.py 24.
       approver: pending
     anchor_exempt: []

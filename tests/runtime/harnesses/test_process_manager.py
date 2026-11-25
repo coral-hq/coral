@@ -332,7 +332,6 @@ async def test_start_refuses_an_unsafe_root(
     if plant == "symlink":
         root = short_tmp_parent / "link"
         root.symlink_to(real, target_is_directory=True)
-    # CORAL(S124)
     elif plant == "dangling-symlink":
         root = short_tmp_parent / "link"
         root.symlink_to(real / "planted", target_is_directory=True)
