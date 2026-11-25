@@ -6988,8 +6988,14 @@ async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral,
         {"MY_KEY": "<key>"},
         {"OMNIGENT_ANTHROPIC_API_KEY": "<host secret>"},
         {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_BEARER_TOKEN_BEDROCK": "<host secret>"},
+        # CORAL(S129): a launcher that inherits these skips its wrap or adopts planted dirs
+        {
+            "OMNIGENT_LAUNCHER_SPAWN_WRAPPED": "1",
+            "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR": "/tmp/omnigent-osenv-planted",
+            "OMNIGENT_LAUNCHER_LAUNCH_TMPDIR": "/tmp/omnigent-launch-planted",
+        },
     ],
-    ids=["env-ref-key", "omnigent-prefixed-key", "bedrock-host-env"],
+    ids=["env-ref-key", "omnigent-prefixed-key", "bedrock-host-env", "launcher-markers"],
 )
 async def test_coral_harness_cli_env_holds_no_forwarded_credential(
     monkeypatch, tmp_path, host_env
@@ -9955,6 +9961,103 @@ async def test_an_isolated_cli_its_sandbox_cannot_wrap_never_starts(
     else:
         assert errors == [] and len(spawn_envs) == 1
         assert spawn_envs[0]["CLAUDE_CONFIG_DIR"].startswith(tempfile.gettempdir())
+
+
+# CORAL(S129): a CLI that must run in an OS sandbox starts only wrapped. Each case gives its
+# full refusal, or None when the CLI runs; S13 refuses its own cases first.
+_UNWRAPPED_REFUSAL = "This session's Claude CLI cannot run in its OS sandbox: {}."
+_NO_BACKEND_REFUSAL = "Steps that read or change files need an OS sandbox: {}."
+_NO_CLAUDE = "no system claude CLI is installed, and the SDK's bundled one cannot be wrapped"
+_WRAP_FAULT = "the sandbox could not wrap it; the runner log has the cause"
+_OPT_OUT = "OMNIGENT_CLAUDE_SDK_NO_SANDBOX is set on its host; unset it there and restart the host"
+_NEEDS_A_SANDBOX = {
+    "wraps": None,
+    "orchestrator": None,
+    "orchestrator-opt-out": _UNWRAPPED_REFUSAL.format(_OPT_OUT),
+    "no-system-claude": _UNWRAPPED_REFUSAL.format(_NO_CLAUDE),
+    "resolve-fails": _UNWRAPPED_REFUSAL.format(_WRAP_FAULT),
+    "inactive": _UNWRAPPED_REFUSAL.format(_WRAP_FAULT),
+    "probe-fails": _UNWRAPPED_REFUSAL.format(_WRAP_FAULT),
+    "operator-opt-out": _UNWRAPPED_REFUSAL.format(_OPT_OUT),
+    "operator-opt-out-and-no-claude": _UNWRAPPED_REFUSAL.format(_OPT_OUT),
+    "network-off": _UNWRAPPED_REFUSAL.format(
+        "its sandbox denies the network, which the CLI needs to reach its model"
+    ),
+    "not-caller-process": _UNWRAPPED_REFUSAL.format("its agent configures no OS sandbox"),
+    "no-os-env": _UNWRAPPED_REFUSAL.format("the tight wrap could not be applied"),
+    "sandbox-none": _NO_BACKEND_REFUSAL.format("'none' does not isolate files"),
+    "anchor": _NO_BACKEND_REFUSAL.format("'none' does not isolate files"),
+    "windows-jobobject": _NO_BACKEND_REFUSAL.format("'windows_jobobject' does not isolate files"),
+}
+
+
+@pytest.mark.parametrize("case", list(_NEEDS_A_SANDBOX))
+async def test_a_cli_that_needs_a_sandbox_runs_wrapped_or_not_at_all(monkeypatch, tmp_path, case):
+    """With the flag an unwrapped CLI is refused, by design or by a fault; one wrapped runs."""
+    from omnigent.inner import claude_sdk_harness
+    from omnigent.inner.claude_sdk_executor import CORAL_SANDBOX_UNAVAILABLE_CODE
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    monkeypatch.setattr(  # never read the caller's real Claude settings
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda *where: {}
+    )
+    _break_wrap(monkeypatch, "operator-opt-out" if "opt-out" in case else case)
+    sandbox_type = {"sandbox-none": "none", "windows-jobobject": "windows_jobobject"}
+    os_env: OSEnvSpec | None = OSEnvSpec(
+        type="remote" if case == "not-caller-process" else "caller_process",
+        cwd=str(tmp_path),
+        sandbox=OSEnvSandboxSpec(
+            type=sandbox_type.get(case, "linux_bwrap"), allow_network=case != "network-off"
+        ),
+    )
+    if case.startswith("orchestrator"):
+        # A POSIX backend on every host; _break_wrap fakes its wrap.
+        monkeypatch.setattr(
+            claude_sdk_harness,
+            "_default_sandbox_for_platform",
+            lambda: OSEnvSandboxSpec(type="linux_bwrap"),
+        )
+        os_env = claude_sdk_harness._resolve_os_env(
+            {"HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX": "1"}
+        )
+    elif case == "anchor":
+        # Every Coral spec gets the require flag; only the orchestrator gets the stance.
+        os_env = claude_sdk_harness._resolve_os_env(
+            {"HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX": "1"}
+        )
+    elif case == "no-os-env":  # a tight wrap that cannot resolve bwrap returns the CLI as it is
+        os_env = None
+        monkeypatch.setattr(
+            "omnigent.inner.claude_sdk_executor.prepare_tight_cli_process_path",
+            lambda cli, **options: cli,
+        )
+    executor = _isolation_executor(
+        monkeypatch,
+        tmp_path,
+        cli=None if case.endswith(("no-system-claude", "no-claude")) else "/usr/bin/claude",
+        os_env=os_env,
+        require_api_credential=True,
+        isolate_claude_config=True,
+        require_cli_sandbox=True,
+    )
+    # CORAL(S124): the Coral CLI's credential proxy is not this test's subject
+    gateway_shim = AsyncMock()
+    monkeypatch.setattr(executor, "_route_options_through_gateway_shim", gateway_shim)
+
+    events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+    await executor.close()
+
+    errors = [(e.code, e.retryable, e.message) for e in events if isinstance(e, ExecutorError)]
+    refusal = _NEEDS_A_SANDBOX[case]
+    if refusal is None:
+        assert errors == [], errors
+        (client,) = fake_sdk.created_clients
+        assert client.options.cli_path == "/l"  # _break_wrap's launcher
+        gateway_shim.assert_awaited_once()
+    else:
+        assert errors == [(CORAL_SANDBOX_UNAVAILABLE_CODE, False, refusal)]
+        assert fake_sdk.created_clients == []
+        gateway_shim.assert_not_awaited()  # refused before the credential proxy starts
 
 
 async def test_a_concurrent_connect_cannot_hand_a_cli_the_hosts_config_names(

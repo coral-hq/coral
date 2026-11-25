@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from coral.omni._upstream import _build_claude_sdk_spawn_env
 from coral.omni.server.bundles import StepBundleRejected, check_hygiene, materialize, pack_bundle
 from coral.profiles.bundle_spec import (
     STANCE_GUARDS,
@@ -21,7 +22,9 @@ from coral.profiles.bundle_spec import (
 )
 from coral.profiles.spec import ProfileSpec, RuleInstance, RuleStrength
 from coral.rules.catalog import CATALOG
+from omnigent.inner import claude_sdk_harness
 from omnigent.inner.datamodel import TerminalEnvSpec
+from omnigent.inner.sandbox import _default_sandbox_for_platform
 from omnigent.server.bundles import validate_agent_bundle
 from omnigent.spec.types import (
     AgentSpec,
@@ -37,6 +40,7 @@ from omnigent.spec.types import (
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.tools.manager import ToolManager
+from tests._helpers.providers import isolate_provider_resolution
 
 OWNER = "alice@example.com"
 REVIEW = StepRef(workflow_id="demo.flow", node_id="review", roster_index=0)
@@ -116,6 +120,34 @@ def test_every_seed_and_step_bundle_passes_hygiene(
         materialize(
             agent_store, artifact_store, owner=OWNER, config_yaml=config_yaml, stance=stance
         )
+
+
+@pytest.mark.parametrize("stance", list(Stance))
+def test_every_coral_cli_gets_its_sandbox_with_network_on_and_only_the_anchor_none(
+    stance: Stance, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Each seed and step bundle, through the claude-sdk spawn env and the harness's resolver."""
+    isolate_provider_resolution(monkeypatch, tmp_path / "config")
+    platform = _default_sandbox_for_platform().type
+    # (cwd, sandbox type, write paths); S13 refuses every turn of a spec whose type is none.
+    expected = {
+        Stance.ORCHESTRATOR: (".", platform, []),
+        Stance.ANCHOR: (None, "none", None),
+        Stance.IMPLEMENTER: (".", platform, ["."]),
+        Stance.REVIEWER: (".", platform, []),
+    }[stance]
+
+    for config_yaml in (
+        build_seed_bundle_yaml(stance),
+        build_step_bundle_yaml(REVIEW, stance, model=None, provider=None),
+    ):
+        env = _build_claude_sdk_spawn_env(validate_agent_bundle(pack_bundle(config_yaml)))
+        os_env = claude_sdk_harness._resolve_os_env(env)
+
+        assert env["HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX"] == "1"
+        assert "HARNESS_CLAUDE_SDK_OS_ENV" in env
+        assert os_env.sandbox is not None and os_env.sandbox.allow_network is True
+        assert (os_env.cwd, os_env.sandbox.type, os_env.sandbox.write_paths) == expected
 
 
 @pytest.mark.parametrize(

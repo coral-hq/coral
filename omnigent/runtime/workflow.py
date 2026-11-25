@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import shlex
+from collections.abc import Mapping  # CORAL(S129)
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -1321,6 +1322,19 @@ def _add_claude_sdk_skills_env(
         env["HARNESS_CLAUDE_SDK_BUNDLE_DIR"] = str(workdir)
 
 
+def _coral_stance(params: object) -> str | None:
+    """
+    CORAL(S129): the stance a generated Coral bundle records in ``params.coral.generated``.
+
+    Read as Coral's ``generated_stance`` reads it, which Omnigent cannot import: ``None`` when
+    any level is missing or not the expected type.
+    """
+    coral = params.get("coral") if isinstance(params, Mapping) else None
+    generated = coral.get("generated") if isinstance(coral, Mapping) else None
+    stance = generated.get("stance") if isinstance(generated, Mapping) else None
+    return stance if isinstance(stance, str) else None
+
+
 def _build_claude_sdk_spawn_env(
     spec: AgentSpec,
     *,
@@ -1410,6 +1424,14 @@ def _build_claude_sdk_spawn_env(
         env["HARNESS_CLAUDE_SDK_TOOL_CALL_POLICY_HOOK"] = "1"
         # CORAL(S113): a Coral CLI never shares the user's Claude config
         env["HARNESS_CLAUDE_SDK_ISOLATE_CLAUDE_CONFIG"] = "1"
+        # CORAL(S129): a Coral CLI runs in an OS sandbox or not at all, and its sandbox comes
+        # only from its spec: an empty payload outweighs one the runner's env carries
+        env["HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX"] = "1"
+        env["HARNESS_CLAUDE_SDK_OS_ENV"] = ""
+        # CORAL(S129): of the specs without os_env, only the orchestrator's CLI gets a sandbox;
+        # the flag is always written, so one the runner's env carries never reaches the harness
+        read_only = spec.os_env is None and _coral_stance(spec.params) == "orchestrator"
+        env["HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX"] = "1" if read_only else ""
     _add_claude_sdk_skills_env(env, spec, workdir)
     # OS env: enabling this in the inner ClaudeSDKExecutor is
     # what gates the SDK-native ``Bash/Read/Edit/Write/Glob/Grep``

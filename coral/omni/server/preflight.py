@@ -35,6 +35,9 @@ _SYSTEM_CLAUDE_HARNESS_KEYS = ("claude-native", "claude")
 class StepPlan:
     step_ref: str
     spec: AgentSpec
+    # The orchestrator of a workflow with a decision: its claude-sdk CLI has no os_env, but
+    # the harness runs it in a read-only OS sandbox of its own.
+    read_only_cli_sandbox: bool = False
 
 
 _CREDENTIAL_SEVERITY: dict[CredentialKind, int] = {
@@ -117,8 +120,16 @@ def plan_preflight_steps(
     orch_yaml, orch_stance, _name = step_bundle_yaml(
         ORCHESTRATOR_STANCE, None, None, None, claude_native_steps=False
     )
+    orch_spec = parse_step_spec(orch_yaml, orch_stance)
+    # Only a decision starts the orchestrator's CLI.
+    has_decision = any(node.kind == "decision" for node in graph.nodes)
     plans.append(
-        StepPlan(step_ref=ORCHESTRATOR_STANCE, spec=parse_step_spec(orch_yaml, orch_stance))
+        StepPlan(
+            step_ref=ORCHESTRATOR_STANCE,
+            spec=orch_spec,
+            read_only_cli_sandbox=has_decision
+            and is_claude_sdk_harness_name(orch_spec.executor.harness_kind),
+        )
     )
     for node in graph.nodes:
         if node.kind != "step":
@@ -170,7 +181,7 @@ async def gather_preflight_facts(
                 step_ref=plan.step_ref,
                 harness=canonicalize_harness(plan.spec.executor.harness_kind)
                 or plan.spec.executor.harness_kind,
-                needs_fs_sandbox=plan.spec.os_env is not None,
+                needs_fs_sandbox=plan.spec.os_env is not None or plan.read_only_cli_sandbox,
             )
             for plan in steps
         ),
