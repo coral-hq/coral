@@ -54,6 +54,21 @@ def _no_shared_temp_dir_sweep(monkeypatch):
     )
 
 
+# CORAL(S130): a connect withholds these from this process for good
+_BETAS_SWITCH = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"
+_WITHHELD_FROM_EVERY_CLI = ("CLAUDECODE", "ANTHROPIC_API_KEY")
+_SUBSCRIPTION_TOKENS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
+_WITHHELD_NAMES = (*_WITHHELD_FROM_EVERY_CLI, *_SUBSCRIPTION_TOKENS, _BETAS_SWITCH)
+
+
+# CORAL(S130): each test starts without them, as on CI, whatever the shell running pytest has
+# set; monkeypatch puts the shell's own values back after the test.
+@pytest.fixture(autouse=True)
+def _no_withheld_name_when_a_test_starts(monkeypatch):
+    for name in _WITHHELD_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
 class _SDKClient:
     """Quiet SDK lifecycle; scenarios override the interactions they exercise."""
 
@@ -3570,40 +3585,21 @@ class TestStreamEventStreaming(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests: _unset_env_var context manager
+# Tests: _withhold_from_cli_env
 # ---------------------------------------------------------------------------
 
 
-def test_unset_env_var_removes_and_restores(monkeypatch):
-    """Env var present before ``with`` is absent during, restored after."""
-    from omnigent.inner.claude_sdk_executor import _unset_env_var
+# CORAL(S130): a withheld name leaves this process's environment and never comes back.
+def test_withholding_removes_present_names_ignores_absent_ones_and_never_restores(monkeypatch):
+    from omnigent.inner.claude_sdk_executor import _withhold_from_cli_env
 
-    monkeypatch.setenv("CLAUDECODE", "parent-value")
-    with _unset_env_var("CLAUDECODE"):
-        assert "CLAUDECODE" not in os.environ
-    assert os.environ["CLAUDECODE"] == "parent-value"
+    environ = {"CLAUDECODE": "1", "ANTHROPIC_API_KEY": _fake_key(), "PATH": "/usr/bin"}
+    monkeypatch.setattr(os, "environ", environ)  # a fake-only one, undone after the test
 
+    _withhold_from_cli_env(("CLAUDECODE", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"))
+    _withhold_from_cli_env(("CLAUDECODE",))
 
-def test_unset_env_var_noop_when_unset(monkeypatch):
-    """When env var is not set before ``with``, block runs cleanly and key stays unset."""
-    from omnigent.inner.claude_sdk_executor import _unset_env_var
-
-    monkeypatch.delenv("CLAUDECODE", raising=False)
-    with _unset_env_var("CLAUDECODE"):
-        assert "CLAUDECODE" not in os.environ
-    assert "CLAUDECODE" not in os.environ
-
-
-def test_unset_env_var_restores_on_exception(monkeypatch):
-    """Restoration must still happen when the block raises."""
-    from omnigent.inner.claude_sdk_executor import _unset_env_var
-
-    monkeypatch.setenv("CLAUDECODE", "original")
-    with pytest.raises(RuntimeError, match="boom"):
-        with _unset_env_var("CLAUDECODE"):
-            assert "CLAUDECODE" not in os.environ
-            raise RuntimeError("boom")
-    assert os.environ["CLAUDECODE"] == "original"
+    assert sorted(environ) == ["PATH"]
 
 
 def test_databricks_model_without_routing_raises() -> None:
@@ -3651,12 +3647,14 @@ async def test_anthropic_api_key_stripped_during_connect(monkeypatch):
     This test drives ``_get_or_create_client`` with a stub SDK and
     captures ``os.environ`` at the moment ``connect()`` is invoked,
     ensuring both ``CLAUDECODE`` and ``ANTHROPIC_API_KEY`` are absent.
+    CORAL(S130): already when the SDK client is built, and for good after.
     """
     from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
 
     # Env snapshot captured inside connect() -- proves the real code
-    # path strips the keys, not just a standalone _unset_env_var call.
+    # path strips the keys, not just a standalone helper call.
     connect_env: dict[str, str] = {}
+    built_env: dict[str, str] = {}  # CORAL(S130)
 
     class _StubClient:
         """Minimal client whose connect() captures os.environ."""
@@ -3669,6 +3667,7 @@ async def test_anthropic_api_key_stripped_during_connect(monkeypatch):
             self.options = options
             self._query = None
             self._transport = None
+            built_env.update(os.environ)  # CORAL(S130)
 
         async def connect(self) -> None:
             """Record env state at the moment the real code calls connect."""
@@ -3701,9 +3700,9 @@ async def test_anthropic_api_key_stripped_during_connect(monkeypatch):
     assert "CLAUDECODE" not in connect_env, (
         "CLAUDECODE leaked into connect() -- nested-session error risk"
     )
-    # Both are restored after _get_or_create_client returns.
-    assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-test-secret"
-    assert os.environ["CLAUDECODE"] == "parent-value"
+    # CORAL(S130): gone before the client exists and never restored, so no other connect's
+    # CLI can get them back; monkeypatch puts this process's own values back after the test.
+    assert sorted({"ANTHROPIC_API_KEY", "CLAUDECODE"} & {*built_env, *os.environ}) == []
 
 
 @pytest.mark.asyncio
@@ -6978,7 +6977,8 @@ async def test_coral_spec_cli_never_sees_subscription_tokens(monkeypatch, coral,
     assert len(spawn_envs) == 1
     assert ("CLAUDE_CODE_OAUTH_TOKEN" in spawn_envs[0]) is token_seen
     assert ("ANTHROPIC_AUTH_TOKEN" in spawn_envs[0]) is token_seen
-    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "inherited-oauth"
+    # CORAL(S130): a Coral connect withholds the token for good; monkeypatch restores it after
+    assert os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") == ("inherited-oauth" if token_seen else None)
 
 
 # CORAL(S124): the host forwards these to a harness; a Coral harness's CLI gets none of them.
@@ -8399,11 +8399,12 @@ def _place_settings(monkeypatch, tmp_path: Path, place: str, block: dict[str, st
     return workspace
 
 
-def _settings_executor(monkeypatch, workspace: Path, key: str, snapshot: dict[str, str]):
+def _settings_executor(monkeypatch, workspace: Path, key: str, snapshot: dict[str, str], **kwargs):
     """A Coral executor on a key, isolated and without setting sources, as the workflow builds.
 
     Its harness environment is fake-only from here on, so a CLI's recorded spawn env holds
     nothing of this process's, and its snapshot says where :func:`_place_settings` put the file.
+    CORAL(S130): *kwargs* go to the executor, e.g. a gateway's, or a ``cwd`` given otherwise.
     """
     placed = {
         name: os.environ[name] for name in ("HOME", "CLAUDE_CONFIG_DIR") if name in os.environ
@@ -8416,9 +8417,18 @@ def _settings_executor(monkeypatch, workspace: Path, key: str, snapshot: dict[st
         f"printf %s {shlex.quote(key)}",
         isolate_claude_config=True,
         skills_filter="none",
-        cwd=str(workspace),
         credential_env={**host, **snapshot},
+        **{"cwd": str(workspace), **kwargs},  # CORAL(S130)
     )
+
+
+def _past_the_location_refusals(monkeypatch) -> None:
+    """CORAL(S130): a Coral turn refuses an untrusted settings location before it reads the
+    file; S125's handling of such a file stays behind that as defence in depth, reached here."""
+    from omnigent.inner import claude_sdk_executor
+
+    monkeypatch.setattr(claude_sdk_executor, "_relative_config_location", lambda environ: None)
+    monkeypatch.setattr(claude_sdk_executor, "_config_location_in_workdir", lambda *where: None)
 
 
 def _differing(names, env: dict[str, str], block: dict[str, str]) -> list[str]:
@@ -8546,6 +8556,7 @@ async def test_a_settings_file_a_step_could_place_or_write_cannot_steer_the_prox
     block = _settings_block(secret, NODE_EXTRA_CA_CERTS=str(ca_file))
     del block["ANTHROPIC_BASE_URL"]  # an endpoint there refuses the turn: the next test
     workspace = _place_settings(monkeypatch, tmp_path, place, block)
+    _past_the_location_refusals(monkeypatch)  # CORAL(S130)
     caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor")
     fake_sdk = _make_recovery_fake_sdk()
     executor = _settings_executor(
@@ -9155,6 +9166,7 @@ async def test_an_endpoint_in_a_settings_file_a_step_could_write_refuses_the_tur
     key = _fake_key()
     block = {"ANTHROPIC_BASE_URL": "https://planted.example/anthropic", "HTTPS_PROXY": "p:1"}
     workspace = _place_settings(monkeypatch, tmp_path, place, block)
+    _past_the_location_refusals(monkeypatch)  # CORAL(S130)
     caplog.set_level(logging.DEBUG)
     executor = _settings_executor(
         monkeypatch, workspace, key, {"ANTHROPIC_BASE_URL": _OTHER_ENDPOINT}
@@ -9187,6 +9199,7 @@ async def test_a_blank_or_late_untrusted_settings_endpoint_refuses_no_turn(
     monkeypatch, tmp_path, caplog
 ):
     workspace = _place_settings(monkeypatch, tmp_path, "under-cwd", {"ANTHROPIC_BASE_URL": " "})
+    _past_the_location_refusals(monkeypatch)  # CORAL(S130)
     settings_file = workspace / "claude-config" / "settings.json"
     caplog.set_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor")
     fake_sdk = _make_recovery_fake_sdk()
@@ -9207,6 +9220,182 @@ async def test_a_blank_or_late_untrusted_settings_endpoint_refuses_no_turn(
     assert [c.options.env[_FIRST_PARTY_FLAG] for c in fake_sdk.created_clients] == ["1", "1"]
     (warning,) = [r.getMessage() for r in caplog.records if "Claude settings" in r.getMessage()]
     assert " ANTHROPIC_BASE_URL " in warning and "planted" not in caplog.text
+
+
+# CORAL(S130): the exact refusals; none names a value, which could name a user.
+_NOT_STARTED = "This session's Claude CLI was not started: "
+_PROFILE_REFUSAL = (
+    f"{_NOT_STARTED}{{0}} on its host is not an absolute path, so the CLI's Anthropic profile "
+    "settings would be read from inside the session's working directory. Set {0} to an "
+    "absolute path, or unset it, and restart the host."
+)
+_RELATIVE_LOCATION_REFUSALS = {
+    "CLAUDE_CONFIG_DIR": f"{_NOT_STARTED}CLAUDE_CONFIG_DIR on its host is not an absolute path, "
+    "so its Claude settings would be read from inside the session's working directory. Set "
+    "CLAUDE_CONFIG_DIR to an absolute path, or unset it, and restart the host.",
+    "HOME": f"{_NOT_STARTED}HOME on its host is not an absolute path, so Claude and Anthropic "
+    "settings under it would be read from inside the session's working directory. Set HOME to "
+    "an absolute path and restart the host.",
+    "XDG_CONFIG_HOME": _PROFILE_REFUSAL.format("XDG_CONFIG_HOME"),
+    "ANTHROPIC_CONFIG_DIR": _PROFILE_REFUSAL.format("ANTHROPIC_CONFIG_DIR"),
+}
+_IN_WORKDIR_REFUSAL = (
+    f"{_NOT_STARTED}{{0}} on its host points inside the session's working directory, where a "
+    "step could change what is read from it. Point {0} outside the working directory and "
+    "restart the host."
+)
+_LOCATION_NAMES = ("CLAUDE_CONFIG_DIR", "HOME", "XDG_CONFIG_HOME", "ANTHROPIC_CONFIG_DIR")
+# CORAL(S130): what the host says, and the name refused as relative, or None when the turn runs.
+# <t> is a token no log may show; <cwd> is the step's working directory, <tmp> lies outside it.
+_RELATIVE_CONFIG_LOCATIONS = {
+    "config-dir-bare": ({"CLAUDE_CONFIG_DIR": "claude-config-<t>"}, "CLAUDE_CONFIG_DIR"),
+    "config-dir-dot-slash": ({"CLAUDE_CONFIG_DIR": "./claude-config-<t>"}, "CLAUDE_CONFIG_DIR"),
+    "config-dir-dot-dot": ({"CLAUDE_CONFIG_DIR": "../workspace/c-<t>"}, "CLAUDE_CONFIG_DIR"),
+    "config-dir-tilde": ({"CLAUDE_CONFIG_DIR": "~/claude-config-<t>"}, "CLAUDE_CONFIG_DIR"),
+    "config-dir-unexpanded": ({"CLAUDE_CONFIG_DIR": "$HOME/c-<t>"}, "CLAUDE_CONFIG_DIR"),
+    "config-dir-dot": ({"CLAUDE_CONFIG_DIR": "."}, "CLAUDE_CONFIG_DIR"),
+    "config-dir-leading-blank": ({"CLAUDE_CONFIG_DIR": " <tmp>/c-<t>"}, "CLAUDE_CONFIG_DIR"),
+    "home": ({"HOME": "home-<t>"}, "HOME"),
+    # The CLI derives more than its config dir from the home.
+    "home-beside-an-absolute-config-dir": (
+        {"CLAUDE_CONFIG_DIR": "<tmp>/claude-config", "HOME": "home-<t>"},
+        "HOME",
+    ),
+    "xdg-config-home": ({"XDG_CONFIG_HOME": "config-<t>"}, "XDG_CONFIG_HOME"),
+    "anthropic-config-dir": ({"ANTHROPIC_CONFIG_DIR": "~/anthropic-<t>"}, "ANTHROPIC_CONFIG_DIR"),
+    # The first relative name in this order is the one named, before any name inside the cwd.
+    "all-four": (dict.fromkeys(_LOCATION_NAMES, "r-<t>"), "CLAUDE_CONFIG_DIR"),
+    "all-but-config-dir": (dict.fromkeys(_LOCATION_NAMES[1:], "r-<t>"), "HOME"),
+    "both-profile-dirs": (dict.fromkeys(_LOCATION_NAMES[2:], "r-<t>"), "XDG_CONFIG_HOME"),
+    "under-cwd-and-a-relative-profile-dir": (
+        {"CLAUDE_CONFIG_DIR": "<cwd>/claude-config", "XDG_CONFIG_HOME": "config-<t>"},
+        "XDG_CONFIG_HOME",
+    ),
+    # Unset or empty is the default (an empty home is /); absolute and outside is the owner's.
+    "unset": ({}, None),
+    "empty": (dict.fromkeys(_LOCATION_NAMES, ""), None),
+    "absolute-outside": (
+        {name: f"<tmp>/{name.lower()}" for name in _LOCATION_NAMES if name != "HOME"},
+        None,
+    ),
+}
+# CORAL(S130): absolute, but where a step can write: the cwd itself, under it, or reached through
+# a link into it; a path that cannot be resolved counts as inside. The name refused, or None.
+_CONFIG_LOCATIONS_IN_THE_CWD = {
+    "under-cwd": ({"CLAUDE_CONFIG_DIR": "<cwd>/claude-config"}, "CLAUDE_CONFIG_DIR"),
+    "linked-into-cwd": ({"CLAUDE_CONFIG_DIR": "<tmp>/linked"}, "CLAUDE_CONFIG_DIR"),
+    "home-under-cwd": ({"HOME": "<cwd>/home"}, "HOME"),
+    "xdg-config-home-under-cwd": ({"XDG_CONFIG_HOME": "<cwd>/config"}, "XDG_CONFIG_HOME"),
+    "anthropic-config-dir-under-cwd": (
+        {"ANTHROPIC_CONFIG_DIR": "<cwd>/a"},
+        "ANTHROPIC_CONFIG_DIR",
+    ),
+    "home-is-the-cwd": ({"HOME": "<cwd>"}, "HOME"),
+    "xdg-config-home-is-the-cwd": ({"XDG_CONFIG_HOME": "<cwd>"}, "XDG_CONFIG_HOME"),
+    "home-under-cwd-beside-a-config-dir-outside": (
+        {"CLAUDE_CONFIG_DIR": "<tmp>/claude-config", "HOME": "<cwd>/home"},
+        "HOME",
+    ),
+    # The first name inside, in the same order, is the one named.
+    "all-four-under-cwd": (
+        {name: f"<cwd>/{name.lower()}" for name in _LOCATION_NAMES},
+        "CLAUDE_CONFIG_DIR",
+    ),
+    "both-profile-dirs-under-cwd": (
+        {name: f"<cwd>/{name.lower()}" for name in _LOCATION_NAMES[2:]},
+        "XDG_CONFIG_HOME",
+    ),
+    # Only the settings file is reached through a link: the name it was located by.
+    "settings-file-linked-into-cwd": (
+        {"CLAUDE_CONFIG_DIR": "<tmp>/linked-file"},
+        "CLAUDE_CONFIG_DIR",
+    ),
+    "default-dir-linked-into-cwd": ({"HOME": "<tmp>/linked-home"}, "HOME"),
+    # A path through more than 40 links cannot be resolved; "." is this process's directory.
+    "config-dir-through-a-link-loop": ({"CLAUDE_CONFIG_DIR": "<tmp>/loop/c"}, "CLAUDE_CONFIG_DIR"),
+    "cwd-given-as-dot": ({"HOME": "<cwd>/home"}, "HOME"),
+    # A worktree under the user's home is the usual layout.
+    "cwd-under-the-home": ({"HOME": "<tmp>/home"}, None),
+}
+# CORAL(S130): rows whose CLI is given a working directory other than <cwd>; "." is <cwd>.
+_GIVEN_CWDS = {"cwd-given-as-dot": ".", "cwd-under-the-home": "<tmp>/home/worktrees/step"}
+
+
+# CORAL(S130): a Coral executor, on a key or a gateway, refuses a settings location a step could
+# write before any settings read, credential proxy, model listing or CLI.
+@pytest.mark.posix_only
+@pytest.mark.parametrize("gateway", [False, True], ids=["key", "gateway"])
+@pytest.mark.parametrize("case", [*_RELATIVE_CONFIG_LOCATIONS, *_CONFIG_LOCATIONS_IN_THE_CWD])
+async def test_a_coral_executor_refuses_a_config_location_a_step_could_write(
+    monkeypatch, tmp_path, caplog, case, gateway
+):
+    from omnigent.inner import claude_sdk_executor
+
+    token = secrets.token_hex(8)
+    workspace = tmp_path / "workspace"
+    (workspace / "claude-config").mkdir(parents=True)
+    links = {
+        "linked": workspace / "claude-config",
+        "linked-file/settings.json": workspace / "claude-config" / "settings.json",
+        "linked-home/.claude": workspace / "claude-config",
+        "loop": tmp_path / "loop-back",
+        "loop-back": tmp_path / "loop",
+    }
+    for link, target in links.items():
+        (tmp_path / link).parent.mkdir(exist_ok=True)
+        (tmp_path / link).symlink_to(target)
+    places = {"<t>": token, "<cwd>": str(workspace), "<tmp>": str(tmp_path)}
+
+    def placed(value: str) -> str:
+        for marker, place in places.items():
+            value = value.replace(marker, place)
+        return value
+
+    inside = case in _CONFIG_LOCATIONS_IN_THE_CWD
+    rows = _CONFIG_LOCATIONS_IN_THE_CWD if inside else _RELATIVE_CONFIG_LOCATIONS
+    written, refused = rows[case]
+    location = {name: placed(value) for name, value in written.items()}
+    cwd = placed(_GIVEN_CWDS.get(case, "<cwd>"))
+    Path(cwd).mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workspace)  # where a cwd given as "." is
+    # The location is in the harness's snapshot only; the live environment has an absolute home.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    key = _fake_key()
+    command = f"printf %s {shlex.quote(key)}"
+    kind = {"gateway": True, "gateway_auth_command": command, "base_url_override": _GATEWAY_URL}
+    executor = _settings_executor(
+        monkeypatch, workspace, key, location, cwd=cwd, **(kind if gateway else {})
+    )
+    read = AssertionError("the settings were read") if refused else None
+    reader = Mock(return_value={}, side_effect=read)
+    monkeypatch.setattr(claude_sdk_executor, "_claude_user_settings_env", reader)
+    listing, proxy = AsyncMock(return_value={}), AsyncMock()
+    monkeypatch.setattr(executor, "_apply_gateway_model_vocabulary", listing)
+    monkeypatch.setattr(executor, "_route_options_through_gateway_shim", proxy)
+    caplog.set_level(logging.DEBUG)
+    try:
+        events, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+    finally:
+        await executor.close()
+
+    if refused is None:
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        assert reader.called is not gateway and len(fake_sdk.created_clients) == 1
+        return
+    if inside:
+        code, message = "coral_config_location_in_workdir", _IN_WORKDIR_REFUSAL.format(refused)
+        title = "Claude config location is inside the working directory"
+    else:
+        code, message = "coral_config_location_relative", _RELATIVE_LOCATION_REFUSALS[refused]
+        title = "Claude config location must be absolute"
+    refusals = [(e.code, e.message, e.retryable) for e in events if isinstance(e, ExecutorError)]
+    assert refusals == [(code, message, False)] and len(events) == 1, events
+    assert events[0].title == title
+    assert not proxy.called and not listing.called and fake_sdk.created_clients == []
+    # No value in the message or any log record: a path could name a user.
+    shown = [value for value in location.values() if token in value or str(tmp_path) in value]
+    assert not [value for value in shown if value in f"{events[0].message}{caplog.text}"]
 
 
 # CORAL(S125): with both spellings of a proxy name in the settings, each goes its own way: the
@@ -9303,6 +9492,8 @@ def test_a_no_proxy_entry_covers_the_upstream_as_urllib_reads_it(upstream, no_pr
         # A link that leads through the cwd is the step's to re-point, wherever it ends now.
         ("config-dir-linked-through-the-cwd", False),
         ("home-linked-through-the-cwd", False),
+        # CORAL(S130): a worktree under the user's home is the usual layout.
+        ("home-above-the-cwd", True),
     ],
 )
 @pytest.mark.posix_only
@@ -9344,8 +9535,12 @@ def test_the_settings_trust_rule_follows_links_and_dot_dot_segments(
         (workspace / "re-pointed").symlink_to(outside, target_is_directory=True)
         configured = tmp_path / "linked"
         configured.symlink_to(workspace / "re-pointed", target_is_directory=True)
+    elif case == "home-above-the-cwd":  # CORAL(S130)
+        configured = tmp_path / "home"
+        cwd = configured / "worktrees" / "step"
+        cwd.mkdir(parents=True)
     where = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(configured)}
-    if case == "home-linked-through-the-cwd":
+    if case in ("home-linked-through-the-cwd", "home-above-the-cwd"):  # CORAL(S130)
         where = {"HOME": str(configured)}
 
     assert _settings_file_steers_upstream(str(cwd), where) is steers
@@ -9393,6 +9588,20 @@ def test_a_relative_home_makes_the_default_config_dir_untrusted(monkeypatch, tmp
     where = {"HOME": "home"}
 
     assert _settings_file_steers_upstream(str(workspace) if cwd_given else None, where) is False
+
+
+# CORAL(S130): a cwd given as "." is made absolute before the settings path is joined to it, so a
+# home under it still counts as inside, also one only the live environment names.
+@pytest.mark.posix_only
+def test_a_cwd_given_as_dot_finds_a_relative_live_home_inside_it(monkeypatch, tmp_path):
+    from omnigent.inner.claude_sdk_executor import _settings_file_steers_upstream
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("HOME", "home")  # the snapshot names no home, so this one is used
+
+    assert _settings_file_steers_upstream(".", {}) is False
 
 
 # CORAL(S125): a CLI that is not Coral's still gets the user's settings env whole, every name
@@ -9576,8 +9785,8 @@ async def test_the_proxys_upstream_hop_trusts_the_hosts_ca_file_after_the_settin
 
 
 # CORAL(S125): the settings file is where the host's environment said when the executor was
-# built. A connect of another session takes CLAUDE_CONFIG_DIR out of os.environ for a moment;
-# a turn in that moment reads the same file, not the default one in the user's home.
+# built. CORAL(S130): a live environment that has since lost CLAUDE_CONFIG_DIR still reads the
+# same file, not the default one in the user's home.
 @pytest.mark.posix_only
 async def test_the_settings_file_is_located_by_the_snapshot_not_the_live_environment(
     monkeypatch, tmp_path
@@ -9888,7 +10097,7 @@ async def test_an_isolated_cli_gets_only_its_own_claude_config_dir(monkeypatch, 
         isolate_claude_config=not off,
     )
 
-    events, _, spawn_envs = await _turn_with_recording_sdk(executor)
+    events, fake_sdk, spawn_envs = await _turn_with_recording_sdk(executor)  # CORAL(S130)
     [spawn_env] = spawn_envs
     own = spawn_env.get("CLAUDE_CONFIG_DIR")
     own_dir = Path(own) if own and mode in ("unwrapped", "tight-unwrapped") else None
@@ -9904,8 +10113,10 @@ async def test_an_isolated_cli_gets_only_its_own_claude_config_dir(monkeypatch, 
         return
     store = spawn_env.get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
     if wrapped:
-        # The launcher sets both in the wrap.
-        assert (own, store) == (None, None)
+        # CORAL(S130): the options name neither; the launcher overwrites both in the wrap, as
+        # test_sandbox.py's private-scratch-dir test and the sandbox behaviour tests pin.
+        (client,) = fake_sdk.created_clients
+        assert sorted(set(_CONFIG_NAMES) & set(client.options.env)) == []
     else:
         assert private, f"the unwrapped CLI's config dir is not its own private dir: {own}"
         assert store == own and own_dir is not None and not own_dir.exists()
@@ -9945,7 +10156,8 @@ async def test_an_isolated_cli_its_sandbox_cannot_wrap_never_starts(
         monkeypatch,
         tmp_path,
         cli=None if fault == "no-system-claude" else "/usr/bin/claude",
-        os_env=OSEnvSpec(cwd=str(tmp_path), sandbox=sandbox),
+        # CORAL(S130): a step's worktree, which the user's home is not in
+        os_env=OSEnvSpec(cwd=str(tmp_path / "workspace"), sandbox=sandbox),
         require_api_credential=True,
         isolate_claude_config=True,
     )
@@ -10005,7 +10217,7 @@ async def test_a_cli_that_needs_a_sandbox_runs_wrapped_or_not_at_all(monkeypatch
     sandbox_type = {"sandbox-none": "none", "windows-jobobject": "windows_jobobject"}
     os_env: OSEnvSpec | None = OSEnvSpec(
         type="remote" if case == "not-caller-process" else "caller_process",
-        cwd=str(tmp_path),
+        cwd=str(tmp_path / "workspace"),  # CORAL(S130): a worktree, which the home is not in
         sandbox=OSEnvSandboxSpec(
             type=sandbox_type.get(case, "linux_bwrap"), allow_network=case != "network-off"
         ),
@@ -10060,56 +10272,172 @@ async def test_a_cli_that_needs_a_sandbox_runs_wrapped_or_not_at_all(monkeypatch
         gateway_shim.assert_not_awaited()  # refused before the credential proxy starts
 
 
-async def test_a_concurrent_connect_cannot_hand_a_cli_the_hosts_config_names(
-    monkeypatch, tmp_path
-):
-    """
-    One connect restores the host's values while another is still connecting. The second
-    CLI still gets only the private dir, because the options name it under both names.
-    """
-    user_dir = str(tmp_path / "user-claude")
-    for name in _CONFIG_NAMES:
-        monkeypatch.setenv(name, user_dir)
+# CORAL(S130): the names a CLI is kept from, by executor kind; the SDK copies the rest of
+# os.environ into every CLI it starts
+_WITHHELD_BY_ROW = {
+    "coral": (*_WITHHELD_FROM_EVERY_CLI, *_SUBSCRIPTION_TOKENS),
+    "non-coral": _WITHHELD_FROM_EVERY_CLI,
+    "gateway-negotiating": (*_WITHHELD_FROM_EVERY_CLI, _BETAS_SWITCH),
+    "two-executors": _WITHHELD_FROM_EVERY_CLI,
+}
+
+
+def _racing_host_env(tmp_path: Path) -> dict[str, str]:
+    """CORAL(S130): a fake-only host environment with every withheld name and both config names."""
+    return {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "user-claude"),
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(tmp_path / "user-keychain"),
+        "CLAUDECODE": "1",
+        "ANTHROPIC_API_KEY": _fake_key(),
+        "CLAUDE_CODE_OAUTH_TOKEN": _fake_key(),
+        "ANTHROPIC_AUTH_TOKEN": _fake_key(),
+        _BETAS_SWITCH: "1",
+    }
+
+
+def _digests(env, names) -> dict[str, str | None]:
+    """*names* in *env* by digest, ``None`` when absent, so a failure prints no value."""
+    return {name: _sha256(env[name]) if name in env else None for name in names}
+
+
+# CORAL(S130): one turn is still connecting when the next connects, on one executor (an
+# interrupted turn) or on two in one process; the second merges where a restore used to land.
+@pytest.mark.parametrize("row", list(_WITHHELD_BY_ROW))
+async def test_concurrent_connects_hand_no_cli_a_withheld_name(monkeypatch, tmp_path, row):
+    """Neither CLI gets a withheld name; the process keeps none, and keeps its config names."""
+    host = _racing_host_env(tmp_path)
+    monkeypatch.setattr(os, "environ", dict(host))  # a fake-only copy, undone after the test
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))  # the unwrapped CLI's own dir
+    # Settings that name the gateway switch put it in the CLI's options, as a gateway does.
+    settings = {"CLAUDE_CODE_USE_GATEWAY": "1"} if row == "gateway-negotiating" else {}
     monkeypatch.setattr(
-        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda cwd=None: {}
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda *where: settings
     )
-    executor = _isolation_executor(monkeypatch, tmp_path, cli=None, isolate_claude_config=True)
+    coral = row == "coral"
+    # A Coral CLI works in a step's worktree, outside the host's config dir and home.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    flags = {
+        "require_api_credential": True,
+        "api_key_helper": f"printf %s {_fake_key()}",
+        "cwd": str(workspace),
+    }
+    first = _isolation_executor(
+        monkeypatch, tmp_path, cli=None, isolate_claude_config=coral, **(flags if coral else {})
+    )
+    second = (
+        first if row != "two-executors" else _isolation_executor(monkeypatch, tmp_path, cli=None)
+    )
+    # CORAL(S124): the Coral CLI's credential proxy is not this test's subject
+    monkeypatch.setattr(first, "_route_options_through_gateway_shim", AsyncMock())
     fake_sdk = _make_recovery_fake_sdk()
-    second_connecting, first_returning = asyncio.Event(), asyncio.Event()
-    seen: dict[str, tuple[str | None, dict[str, str]]] = {}
+    second_connecting, first_returned = asyncio.Event(), asyncio.Event()
+    order: list[str] = []
+    clients: list[object] = []
+    merged: dict[str, dict[str, str]] = {}
 
     class _RacingClient(fake_sdk.ClaudeSDKClient):
         async def connect(self):
-            role = "second" if second_connecting.is_set() or "first" in seen else "first"
-            seen.setdefault(role, (None, {}))
+            role = "second" if clients else "first"
+            clients.append(self)
+            order.append(f"{role} connects")
             if role == "first":
                 await second_connecting.wait()
             else:
                 second_connecting.set()
-                # The first connect returns, and restores the host's values, before this resumes.
-                await first_returning.wait()
-            spawn_env = {**os.environ, **(self.options.env or {})}
-            seen[role] = (os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"), spawn_env)
+                await first_returned.wait()
+                # The first connect has returned and its client is registered.
+                states = [*first._clients.values(), *second._clients.values()]
+                if any(state.client is clients[0] for state in states):
+                    order.append("first returned")
+            merged[role] = {**os.environ, **(self.options.env or {})}  # the SDK's merge
+            order.append(f"{role} merges")
             if role == "first":
-                first_returning.set()
+                first_returned.set()
 
-    async def _turn(session_id: str) -> list:
+    async def _turn(executor, session_id: str) -> list:
         messages = [{"role": "user", "content": "hi", "session_id": session_id}]
         return [event async for event in executor.run_turn(messages, [], "")]
 
     fake_sdk.ClaudeSDKClient = _RacingClient
     with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
-        turns = await asyncio.gather(_turn("first"), _turn("second"))
-    private = str(executor._unwrapped_claude_config_dir)
-    await executor.close()
+        turns = await asyncio.gather(_turn(first, "first"), _turn(second, "second"))
+    private = str(first._unwrapped_claude_config_dir)
+    for executor in dict.fromkeys((first, second)):
+        await executor.close()
 
     assert all(any(isinstance(e, TurnComplete) for e in events) for events in turns), turns
-    (first_host_value, first_env), (second_host_value, second_env) = seen["first"], seen["second"]
-    # The first CLI spawned inside its unset window; the second after the first's restore.
-    assert (first_host_value, second_host_value) == (None, user_dir), "the race did not happen"
-    for env in (first_env, second_env):
-        assert [env.get(name) for name in _CONFIG_NAMES] == [private, private]
-    assert [os.environ[name] for name in _CONFIG_NAMES] == [user_dir, user_dir]
+    overlapped = ["first connects", "second connects", "first merges", "first returned"]
+    assert order == [*overlapped, "second merges"], "the connects did not overlap"
+    withheld = _WITHHELD_BY_ROW[row]
+    kept = [name for name in _WITHHELD_NAMES if name not in withheld]
+    own_config = dict.fromkeys(_CONFIG_NAMES, private) if coral else host
+    for role, env in merged.items():
+        assert sorted(set(withheld) & set(env)) == [], role
+        assert _digests(env, kept) == _digests(host, kept), role
+        assert _digests(env, _CONFIG_NAMES) == _digests(own_config, _CONFIG_NAMES), role
+    # Withheld for good; the host's config names are never touched.
+    assert sorted(set(withheld) & set(os.environ)) == []
+    assert _digests(os.environ, [*kept, *_CONFIG_NAMES]) == _digests(host, [*kept, *_CONFIG_NAMES])
+
+
+# CORAL(S130): the same overlap through the SDK's real transport, which copies os.environ after
+# awaiting its version check; a canary for that merge. No process ever starts.
+async def test_the_sdks_own_merge_hands_no_overlapping_cli_a_withheld_name(monkeypatch, tmp_path):
+    import types
+
+    import claude_agent_sdk
+    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk._internal.transport import subprocess_cli
+
+    monkeypatch.setattr(os, "environ", _racing_host_env(tmp_path))  # fake-only, undone after
+    executor = _isolation_executor(monkeypatch, tmp_path, cli=None)
+    reached = {role: asyncio.Event() for role in ("first", "second")}
+    release = {role: asyncio.Event() for role in ("first", "second")}
+    spawned: dict[str, set[str]] = {}
+
+    async def gated_version_check(transport) -> None:
+        role = transport._options.env["CONNECT_ROLE"]
+        reached[role].set()
+        await release[role].wait()
+
+    async def recorded_spawn(cmd, *, env, **kwargs):
+        spawned[env["CONNECT_ROLE"]] = set(env)
+        raise OSError("no CLI starts in this test")
+
+    # Only the transport module's reference to anyio changes, and every spawn stays recorded.
+    anyio_view = types.ModuleType(subprocess_cli.anyio.__name__)
+    anyio_view.__dict__.update(vars(subprocess_cli.anyio), open_process=recorded_spawn)
+    monkeypatch.setattr(subprocess_cli, "anyio", anyio_view)
+    monkeypatch.setattr(
+        subprocess_cli.SubprocessCLITransport, "_check_claude_version", gated_version_check
+    )
+
+    def connect(role: str):
+        options = ClaudeAgentOptions(env={"CONNECT_ROLE": role}, cli_path=str(tmp_path / "none"))
+        return executor._get_or_create_client(
+            claude_agent_sdk, session_key=role, options=options, model=None
+        )
+
+    first = asyncio.create_task(connect("first"))
+    await reached["first"].wait()
+    second = asyncio.create_task(connect("second"))
+    await reached["second"].wait()
+    release["first"].set()
+    with pytest.raises(RuntimeError, match="no CLI starts"):
+        await first
+    release["second"].set()
+    with pytest.raises(RuntimeError, match="no CLI starts"):
+        await second
+    await executor.close()
+
+    withheld = _WITHHELD_BY_ROW["non-coral"]
+    assert sorted(spawned) == ["first", "second"]
+    for role, names in spawned.items():
+        assert sorted(set(withheld) & names) == [], role
+    assert sorted(set(withheld) & set(os.environ)) == []
 
 
 # CORAL(S115): a wrapped non-Coral CLI's private dir starts from a filtered copy of the user's

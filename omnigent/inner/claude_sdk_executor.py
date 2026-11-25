@@ -43,8 +43,8 @@ import tempfile  # CORAL(S113)
 import threading  # CORAL(S116)
 import time
 import urllib.request  # CORAL(S124)
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager, suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence  # CORAL(S130)
+from contextlib import suppress  # CORAL(S130)
 from dataclasses import dataclass, field
 from functools import partial
 from types import ModuleType
@@ -217,6 +217,34 @@ _PATHS_IGNORE_CASE = IS_DARWIN
 _MAX_FOLLOWED_LINKS = 40
 # CORAL(S125): where the user's Claude settings file is, read from the host's environment once
 _SETTINGS_LOCATION_ENV = ("CLAUDE_CONFIG_DIR", "HOME")
+# CORAL(S130): those and where the CLI reads its Anthropic profile, in the order a refusal
+# names the first relative one
+_CONFIG_LOCATION_ENV = (*_SETTINGS_LOCATION_ENV, "XDG_CONFIG_HOME", "ANTHROPIC_CONFIG_DIR")
+# CORAL(S130): a Coral CLI's settings location is absolute and outside its working directory.
+# The messages name the variable, never its value, which could name a user.
+CORAL_CONFIG_LOCATION_RELATIVE_CODE = "coral_config_location_relative"
+CORAL_CONFIG_LOCATION_IN_WORKDIR_CODE = "coral_config_location_in_workdir"
+_CLI_NOT_STARTED = "This session's Claude CLI was not started: "
+_PROFILE_LOCATION_MESSAGE = (
+    _CLI_NOT_STARTED + "{0} on its host is not an absolute path, so the CLI's Anthropic profile "
+    "settings would be read from inside the session's working directory. Set {0} to an "
+    "absolute path, or unset it, and restart the host."
+)
+_RELATIVE_CONFIG_LOCATION_MESSAGES = {
+    "CLAUDE_CONFIG_DIR": _CLI_NOT_STARTED + "CLAUDE_CONFIG_DIR on its host is not an absolute "
+    "path, so its Claude settings would be read from inside the session's working directory. "
+    "Set CLAUDE_CONFIG_DIR to an absolute path, or unset it, and restart the host.",
+    "HOME": _CLI_NOT_STARTED + "HOME on its host is not an absolute path, so Claude and "
+    "Anthropic settings under it would be read from inside the session's working directory. "
+    "Set HOME to an absolute path and restart the host.",
+    "XDG_CONFIG_HOME": _PROFILE_LOCATION_MESSAGE.format("XDG_CONFIG_HOME"),
+    "ANTHROPIC_CONFIG_DIR": _PROFILE_LOCATION_MESSAGE.format("ANTHROPIC_CONFIG_DIR"),
+}
+_CONFIG_LOCATION_IN_WORKDIR_MESSAGE = (
+    _CLI_NOT_STARTED + "{0} on its host points inside the session's working directory, where a "
+    "step could change what is read from it. Point {0} outside the working directory and "
+    "restart the host."
+)
 _CORAL_SANDBOX_BINARIES = {"linux_bwrap": "bwrap", "darwin_seatbelt": "sandbox-exec"}
 _SUBSCRIPTION_TOKEN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
 # CORAL(S113): an isolated CLI's Claude config is a private dir, never the user's
@@ -1023,29 +1051,20 @@ def _kill_process_tree(process: _Process | None) -> None:
     _proc.kill_tree(process)
 
 
-@contextmanager
-def _unset_env_var(name: str) -> Iterator[None]:
+def _withhold_from_cli_env(names: Sequence[str]) -> None:
     """
-    Temporarily remove an env var from ``os.environ`` for the duration of
-    the ``with`` block, then restore it (or leave it absent if it was not
-    set before).
+    CORAL(S130): take *names* out of this process's environment for good.
 
-    Used around the claude-cli subprocess spawn to strip ``CLAUDECODE``
-    when our own Python process is itself running under Claude Code — the
-    child cli otherwise reports a "nested session" error. The SDK builds
-    the child env as ``{**os.environ, **options.env, ...}``, so the only
-    way to *remove* (not just override with ``""``) a key is to unset it
-    in ``os.environ`` during the spawn.
+    The SDK builds a CLI's environment as ``{**os.environ, **options.env}``, so a name is kept
+    from a CLI only by its absence (an empty override is not "unset" for every name), and a
+    restore would hand it to a CLI another connect is starting. The removal is process-wide
+    and permanent: a process that embeds the executor loses these names for its other
+    children too.
 
-    :param name: Env var name to remove for the block, e.g. ``"CLAUDECODE"``.
-    :yields: Nothing; restores ``os.environ[name]`` on exit if it was set.
+    :param names: Variable names, e.g. ``("CLAUDECODE", "ANTHROPIC_API_KEY")``.
     """
-    previous = os.environ.pop(name, None)
-    try:
-        yield
-    finally:
-        if previous is not None:
-            os.environ[name] = previous
+    for name in names:
+        os.environ.pop(name, None)
 
 
 _CLOSE_ATTR: str = "close"
@@ -1716,10 +1735,52 @@ def _settings_file_steers_upstream(cwd: str | None, environ: Mapping[str, str]) 
     configured = environ.get("CLAUDE_CONFIG_DIR")
     if configured and not os.path.isabs(configured):
         return False
-    workdir = cwd or os.getcwd()
+    # CORAL(S130): absolute, so a cwd given as "." leaves no relative path to compare
+    workdir = os.path.abspath(cwd or os.getcwd())
     # Joined to the cwd, as the CLI would read a default dir under a relative home.
     settings_path = os.path.join(workdir, claude_user_settings_path(cwd, environ))
     return _is_outside(settings_path, workdir)
+
+
+def _relative_config_location(environ: Mapping[str, str]) -> str | None:
+    """CORAL(S130): the first settings location name that the CLI's working directory decides.
+
+    :param environ: The host's location names, e.g. ``{"CLAUDE_CONFIG_DIR": "claude-config"}``.
+    :returns: The first name of :data:`_CONFIG_LOCATION_ENV` that is set and not absolute,
+        a leading ``~`` or blank included, which no reader expands; ``None`` when none is.
+    """
+    relative = (
+        name
+        for name in _CONFIG_LOCATION_ENV
+        if (value := environ.get(name)) and not os.path.isabs(value)
+    )
+    return next(relative, None)
+
+
+def _config_location_in_workdir(cwd: str | None, environ: Mapping[str, str]) -> str | None:
+    """CORAL(S130): the first settings location name that points into the CLI's working directory.
+
+    A name points there when its path, links and ``..`` resolved, is that directory or under it,
+    or cannot be resolved; a home above it, the usual layout, does not. When no name does but
+    S125's rule finds the settings file there, ``CLAUDE_CONFIG_DIR`` is named if set, else
+    ``HOME``.
+
+    :param cwd: The CLI's working directory, e.g. ``"/home/user/worktrees/step"``; ``None``
+        means this process's.
+    :param environ: The host's location names, e.g. ``{"HOME": "/home/user"}``.
+    :returns: The name of :data:`_CONFIG_LOCATION_ENV` to report, or ``None``.
+    """
+    workdir = os.path.abspath(cwd or os.getcwd())
+    inside = (
+        name
+        for name in _CONFIG_LOCATION_ENV
+        if (value := environ.get(name)) and not _is_outside(os.path.join(workdir, value), workdir)
+    )
+    if (name := next(inside, None)) is not None:
+        return name
+    if _settings_file_steers_upstream(cwd, environ):
+        return None
+    return "CLAUDE_CONFIG_DIR" if environ.get("CLAUDE_CONFIG_DIR") else "HOME"
 
 
 def _is_bare_proxy_setting(name: str, value: str) -> bool:
@@ -2603,6 +2664,7 @@ class ClaudeSDKExecutor(Executor):
             require_api_credential: Refuse turns unless *api_key_helper* or
                 *gateway* is set and any *os_env* has a bwrap or seatbelt
                 sandbox; strip inherited subscription tokens from the CLI.
+                CORAL(S130): also refuse a relative settings location, or one in *cwd*.
             tool_call_policy_hook: Check every non-Omnigent tool call against
                 TOOL_CALL policy from a PreToolUse hook, which the CLI runs in
                 every permission mode, unlike ``can_use_tool``.
@@ -2651,10 +2713,11 @@ class ClaudeSDKExecutor(Executor):
         self._settings_upstream_env: dict[str, str] = {}
         self._settings_env_warned: set[tuple[str, str]] = set()
         # CORAL(S125): where the user's settings file is, as the host's environment said when
-        # this executor was built: a connect of any session takes the name out of os.environ
+        # this executor was built. CORAL(S130): a Coral harness's from before its scrub, and
+        # with the CLI's Anthropic profile locations, which a Coral turn checks too
         host_env = os.environ if credential_env is None else credential_env
         self._settings_location_env = {
-            name: host_env[name] for name in _SETTINGS_LOCATION_ENV if name in host_env
+            name: host_env[name] for name in _CONFIG_LOCATION_ENV if name in host_env
         }
         # CORAL(S125): one turn at a time builds, starts or drops the shim
         self._gateway_shim_lock = asyncio.Lock()
@@ -2835,8 +2898,8 @@ class ClaudeSDKExecutor(Executor):
         # api_key_helper: shell command the Claude CLI invokes to retrieve a
         # bearer token (``executor.auth: {type: api_key, …}`` path).  Must
         # be injected here (not read from os.environ) because
-        # ``_get_or_create_client`` strips ``ANTHROPIC_API_KEY`` from
-        # os.environ before connecting, and the executor reads
+        # CORAL(S130): ``_get_or_create_client`` withholds ``ANTHROPIC_API_KEY``
+        # from os.environ for good before connecting, and the executor reads
         # ``_CLAUDE_API_KEY_HELPER_ENV_KEY`` from ``_extra_env`` only.
         if api_key_helper:
             self._extra_env[_CLAUDE_API_KEY_HELPER_ENV_KEY] = api_key_helper
@@ -3235,6 +3298,29 @@ class ClaudeSDKExecutor(Executor):
         if self._proxy_is_first_party:
             env[_ASSUME_FIRST_PARTY_ENV] = "1"
 
+    def _cli_withheld_env(self, options_env: Mapping[str, str]) -> tuple[str, ...]:
+        """
+        CORAL(S130): the inherited names this executor's CLIs never get, for *options_env*.
+
+        The config dir names are not among them: the options or the launcher name the CLI's
+        own dir, so a direct caller keeps its own in this process.
+
+        :param options_env: The CLI's ``options.env``.
+        :returns: The names, e.g. ``("CLAUDECODE", "ANTHROPIC_API_KEY")``.
+        """
+        # CLAUDECODE would make the CLI report a nested session; ANTHROPIC_API_KEY would make it
+        # bill a developer key instead of its subscription, key helper or gateway.
+        names = ["CLAUDECODE", "ANTHROPIC_API_KEY"]
+        # CORAL(S13): no subscription token reaches a Coral spec's CLI
+        if self._require_api_credential:
+            names.extend(_SUBSCRIPTION_TOKEN_ENV)
+        # DATABRICKS-PATCH(claude-sdk-gateway-betas): a launch that negotiates betas must not
+        # inherit the switch that disables them (Databricks runners export it); omitting it
+        # from options.env does not beat an inherited one, and the gateway then answers 400.
+        if "CLAUDE_CODE_USE_GATEWAY" in options_env:
+            names.append("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+        return tuple(names)
+
     async def _get_or_create_client(
         self,
         sdk: _ClaudeSDK,
@@ -3255,6 +3341,11 @@ class ClaudeSDKExecutor(Executor):
                     "This step's Claude CLI would hold the model API key, which only its "
                     f"credential proxy may hold; it is in {held_in}. The CLI was not started."
                 )
+            # CORAL(S130): before the SDK client exists, and never restored, so no connect can
+            # hand a CLI a name another withheld
+            sdk_env = getattr(options, "env", None)
+            withheld = self._cli_withheld_env(sdk_env if isinstance(sdk_env, dict) else {})
+            _withhold_from_cli_env(withheld)
             # Tee CLI stderr so the connect timeout error carries the
             # tail; ``_on_stderr`` alone only logs at DEBUG.
             connect_stderr: list[str] = []
@@ -3268,47 +3359,8 @@ class ClaudeSDKExecutor(Executor):
             options.stderr = _tee_stderr
             client = sdk.ClaudeSDKClient(options)
             try:
-                # CLAUDECODE must be absent (not just empty) in the child
-                # env — otherwise the claude cli reports a nested-session
-                # error. The SDK merges ``os.environ`` with ``options.env``,
-                # so we unset in ``os.environ`` for the spawn window.
-                #
-                # ANTHROPIC_API_KEY is also stripped so the CLI uses its
-                # subscription auth rather than a developer API key that
-                # would charge separately. Safe even in Databricks mode:
-                # ``options.settings`` explicitly sets apiKeyHelper and
-                # ``options.env`` sets the Databricks base URL, so the
-                # Claude CLI does not need an inherited Anthropic key.
-                #
-                # DATABRICKS-PATCH(claude-sdk-gateway-betas): on the Databricks
-                # gateway we negotiate betas rather than disabling them, but
-                # *omitting* CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS from
-                # ``options.env`` does not beat an INHERITED one — Databricks
-                # runners export it (devtools/ai/databricks_auth/gateway_env.py
-                # and the arca/isaac runners), and the merge puts os.environ
-                # under options.env. Without this the child still strips
-                # interleaved-thinking and the gateway still answers 400. Scoped
-                # to launches that negotiate (CLAUDE_CODE_USE_GATEWAY): the
-                # non-gateway branch re-adds the key through ``options.env``,
-                # which wins over os.environ, and a non-gateway session keeps
-                # whatever it inherited.
-                sdk_env = getattr(options, "env", None)
-                with ExitStack() as env_stack:
-                    env_stack.enter_context(_unset_env_var("CLAUDECODE"))
-                    env_stack.enter_context(_unset_env_var("ANTHROPIC_API_KEY"))
-                    # CORAL(S13): no subscription token reaches a Coral spec's CLI
-                    if self._require_api_credential:
-                        for name in _SUBSCRIPTION_TOKEN_ENV:
-                            env_stack.enter_context(_unset_env_var(name))
-                    # CORAL(S113): nor a config dir the host forwards
-                    if self._isolate_claude_config:
-                        for name in _CLAUDE_CONFIG_ENV:
-                            env_stack.enter_context(_unset_env_var(name))
-                    if isinstance(sdk_env, dict) and "CLAUDE_CODE_USE_GATEWAY" in sdk_env:
-                        env_stack.enter_context(
-                            _unset_env_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
-                        )
-                    await asyncio.wait_for(client.connect(), timeout=_CONNECT_TIMEOUT_SECONDS)
+                # CORAL(S130): nothing withheld above comes back when this returns
+                await asyncio.wait_for(client.connect(), timeout=_CONNECT_TIMEOUT_SECONDS)
             except TimeoutError as exc:
                 await self._force_close_client(client)
                 tail = "\n".join(line.rstrip() for line in connect_stderr[-40:])
@@ -4182,6 +4234,23 @@ class ClaudeSDKExecutor(Executor):
                 title="Anthropic API key needed",
                 retryable=False,
             )
+        # CORAL(S130): a settings location a step could write, before anything reads it
+        if (name := _relative_config_location(self._settings_location_env)) is not None:
+            return ExecutorError(
+                message=_RELATIVE_CONFIG_LOCATION_MESSAGES[name],
+                code=CORAL_CONFIG_LOCATION_RELATIVE_CODE,
+                title="Claude config location must be absolute",
+                retryable=False,
+            )
+        if (
+            name := _config_location_in_workdir(self._cwd, self._settings_location_env)
+        ) is not None:
+            return ExecutorError(
+                message=_CONFIG_LOCATION_IN_WORKDIR_MESSAGE.format(name),
+                code=CORAL_CONFIG_LOCATION_IN_WORKDIR_CODE,
+                title="Claude config location is inside the working directory",
+                retryable=False,
+            )
         if self._os_env_spec is None:
             return None
         sandbox = self._os_env_spec.sandbox
@@ -4324,9 +4393,9 @@ class ClaudeSDKExecutor(Executor):
             model = self._resolved_default_model
 
         # Build env: Databricks gateway settings derived from profile-backed
-        # creds. CLAUDECODE removal happens around the subprocess spawn in
-        # ``_get_or_create_client`` via ``_unset_env_var`` — setting it to
-        # ``""`` here would still leave an empty key in the child env.
+        # creds. CORAL(S130): ``_get_or_create_client`` withholds CLAUDECODE
+        # from os.environ — setting it to ``""`` here would still leave an
+        # empty key in the child env.
         env = dict(self._extra_env)
         env["CLAUDE_AGENT_SDK_CLIENT_APP"] = "omnigent"
         api_key_helper = env.pop(_CLAUDE_API_KEY_HELPER_ENV_KEY, None)
@@ -4440,7 +4509,7 @@ class ClaudeSDKExecutor(Executor):
             for name in _CLAUDE_CONFIG_ENV:
                 env.pop(name, None)
             if not self._claude_config_isolated:
-                # Set, not only unset: a concurrent connect can restore the host's values.
+                # CORAL(S130): the CLI's own dir, named here; the launcher names it in a wrap.
                 dir_path = str(self._claude_config_dir_for_unwrapped_cli())
                 env.update(dict.fromkeys(_CLAUDE_CONFIG_ENV, dir_path))
         max_output_tokens = cfg.extra.get("max_tokens")

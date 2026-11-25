@@ -3589,9 +3589,9 @@ seams:
       residuals in the CRL-179 addendum stay), the settings env merge
       (closed by S125 on POSIX, where a Coral CLI now gets only model names,
       switched-on opt-outs and credential-free network settings; Windows is
-      CRL-197), env construction races and a relative config dir (CRL-182),
-      project config a step writes in its worktree (CRL-181), and the inbox
-      sockets (closed on macOS by S127).
+      CRL-197), env construction races and a relative config dir (closed by
+      S130), project config a step writes in its worktree (CRL-181), and the
+      inbox sockets (closed on macOS by S127).
       No CI lane runs macOS (CRL-170). Mechanism, evidence and the full
       residual list: ADR-05, "Addendum: CRL-176 Claude config isolation".
     files:
@@ -4869,11 +4869,11 @@ seams:
       with no credential proxy (Windows) and every non-Coral executor keep the
       whole-block merge. Not done here: the block's model names are not added
       to the credential command's environment (DESIGN R7, dropped as
-      unnecessary). Residuals: a settings file from a relative
-      CLAUDE_CONFIG_DIR still chooses model names and can switch opt-outs on
-      (CRL-182), and an endpoint a step plants there makes later executors in
-      that worktree refuse until it is removed; the trust rule knows the CLI's
-      working directory only, so a settings or CA file under another path the
+      unnecessary). Residuals: a relative location, or one inside the
+      working directory, now refuses a Coral step before its settings are
+      read (S130), so the untrusted-file rule here is defence in depth; the
+      trust rule knows the CLI's working directory only, so a settings or CA
+      file under another path the
       sandbox may write (a broad write grant) is still trusted; a CA file that
       cannot be loaded refuses the turn, where Node only warned; a SOCKS or
       scheme-less proxy refuses a Coral step; a settings proxy with userinfo,
@@ -5309,6 +5309,102 @@ seams:
         22, tests/runtime/test_claude_sdk_spawn_env.py 66,
         tests/runner/test_background_session_title.py 64,
         .github/workflows/macos-sandbox.yml 8.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+  - id: S130
+    title: claude-sdk CLIs never get a withheld name back, and Coral refuses a settings location a step could write
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Before this seam each connect popped CLAUDECODE, ANTHROPIC_API_KEY, a
+      Coral spec's subscription tokens (CLAUDE_CODE_OAUTH_TOKEN,
+      ANTHROPIC_AUTH_TOKEN), an isolated CLI's two config dir names and, when
+      the options negotiate betas (CLAUDE_CODE_USE_GATEWAY), the betas switch
+      out of os.environ, and restored them when its connect returned. The SDK
+      copies os.environ into a CLI's environment only after awaiting its
+      version check, so one connect's restore could land in another's window:
+      measured, a second overlapping CLI got the host's ANTHROPIC_API_KEY on a
+      non-Coral executor, the betas switch on a negotiating one, and the S13
+      tokens on a Coral-flagged executor built without the harness scrub.
+      Now _get_or_create_client withholds those names for good, after S124's
+      exposure check and before the SDK client is built, and never restores
+      them; the two config dir names are no longer touched in os.environ,
+      because the options (unwrapped) or the launcher (wrapped) name the CLI's
+      own dir. What a CLI receives is unchanged. The removal is process-wide:
+      a harness process (one agent, one config) and a direct caller's process
+      lose the names at their first connect, so in a process with a Coral and
+      a non-Coral executor the non-Coral CLI loses the subscription tokens,
+      and the betas switch is gone after any connect that negotiates betas;
+      an unwrapped -v child of a direct caller now inherits the host's config
+      names (it reads no config). The ticket's explicit CLI environment dict
+      is not built: the SDK merges os.environ under options.env and an empty
+      override is not "unset", so that needs a custom transport or a
+      child-side filter (a recorded deviation; CRL-197). A Coral executor
+      (require_api_credential) also refuses every turn, in _coral_refusal
+      after the subscription refusal and before the sandbox checks, any
+      settings read, the credential proxy, the model listing and any CLI:
+      with coral_config_location_relative when CLAUDE_CONFIG_DIR, HOME,
+      XDG_CONFIG_HOME or ANTHROPIC_CONFIG_DIR, checked in that order and the
+      first named, is set and not absolute in the host's snapshot (a Coral
+      harness's pre-scrub environment, else os.environ at construction; an
+      empty value means unset); and with coral_config_location_in_workdir
+      when one of those names is the CLI's working directory or a path
+      inside it (links and .. segments resolved, the working directory made
+      absolute first, a path that cannot be resolved counted as inside), or
+      S125's trust rule finds the settings file there; it names the first
+      such name, else CLAUDE_CONFIG_DIR when set, else HOME. A home above the
+      working directory, the usual layout, runs; a session whose working
+      directory is the home or above it is refused, which Coral runs, in
+      worktrees, never are. A name the scrub would drop before the CLI
+      (ANTHROPIC_CONFIG_DIR, or one a passthrough list names) is still
+      checked, which fails closed. Each message names the variable, never
+      its value. S125's untrusted-file rule, whose tests stub these refusals
+      out to reach it, and S115's seed refusal stay as defence in depth;
+      non-Coral executors keep Omnigent's relative merge. Residuals:
+      non-Coral relative and in-workspace settings, the title CLI's
+      credential and a planted endpoint, and forwarded credentials in a
+      non-Coral CLI (CRL-197); settings under other paths a broad write grant
+      opens (CRL-184); overlapping connects that orphan a client (CRL-213);
+      accepted: the process-wide removal and the -v child above, and a
+      direct caller whose snapshot and live environment disagree (the check
+      reads the snapshot, the CLI inherits the live names); Windows path
+      semantics (none while S13 refuses every Coral CLI on Windows).
+      Mechanism and evidence: ADR-05, "Addendum: CRL-182 the CLI's
+      environment and its config location".
+    files:
+      - omnigent/inner/claude_sdk_executor.py
+      - tests/inner/test_claude_sdk_executor.py
+    tests:
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/e2e/coral/test_skeleton.py
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 80
+    budget_exception:
+      lines: 476
+      reason: >-
+        Counted with git diff --numstat origin/development, added plus
+        removed. tests/inner/test_claude_sdk_executor.py (476 changed lines,
+        402 added, 74 removed): the two-connect race test extended into four
+        rows (Coral, non-Coral, gateway-negotiating, two executors) with its
+        fake host environment and digest helper, the real-transport canary,
+        the withholding unit test, the refusal table (18 relative or running
+        locations and 15 in or around the working directory, each on a key
+        and on a gateway) with its exact messages, links and given working
+        directories, two trust-rule cases, the autouse fixture that starts
+        each test without the withheld names, the stub that lets S125's
+        untrusted-file tests reach their handling, and the updated strip,
+        token and config dir tests; most removed lines are the strip helper's
+        three tests and the old race test. omnigent/inner/claude_sdk_executor.py
+        (215 changed lines, 142 added, 73 removed): the withhold helper and the
+        per-executor list replacing the strip helper and its 41-line connect
+        block, the location snapshot, the two refusals with their five
+        messages and the in-workdir name check, the absolute working directory
+        in S125's trust rule, and the comments the change made false.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
