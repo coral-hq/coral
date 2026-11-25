@@ -320,7 +320,7 @@ def test_resolve_harness_tmp_parent_makes_relative_path_absolute(
     assert resolved == tmp_path / "harness-sockets"
 
 
-# CORAL(S124)
+# CORAL(S130)
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
 @pytest.mark.parametrize("plant", ["symlink", "dangling-symlink", "mode-0777", "foreign-owner"])
 async def test_start_refuses_an_unsafe_root(
@@ -346,7 +346,7 @@ async def test_start_refuses_an_unsafe_root(
     assert list(real.iterdir()) == []
 
 
-# CORAL(S124)
+# CORAL(S130)
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
 @pytest.mark.parametrize(("mode", "accepted"), [(0o300, True), (0o355, False)])
 def test_ensure_private_dir_on_an_unreadable_root(
@@ -366,7 +366,7 @@ def test_ensure_private_dir_on_an_unreadable_root(
         root.chmod(0o700)
 
 
-# CORAL(S124)
+# CORAL(S130)
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
 async def test_start_tightens_an_owned_0755_root_and_creates_nested_roots(
     short_tmp_parent: Path,
@@ -385,7 +385,7 @@ async def test_start_tightens_an_owned_0755_root_and_creates_nested_roots(
             await manager.shutdown()
 
 
-# CORAL(S124)
+# CORAL(S130)
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink check.")
 async def test_recreating_the_instance_dir_refuses_a_planted_symlink(
     short_tmp_parent: Path,
@@ -404,7 +404,7 @@ async def test_recreating_the_instance_dir_refuses_a_planted_symlink(
         await manager.shutdown()
 
 
-# CORAL(S124)
+# CORAL(S130)
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink check.")
 async def test_sweep_skips_symlinked_root_and_instance_dirs(
     short_tmp_parent: Path, monkeypatch: pytest.MonkeyPatch
@@ -1653,7 +1653,7 @@ async def test_orphan_sweep_from_another_pid_namespace_keeps_a_live_harness(
         async with httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(uds=str(socket_path)),
             base_url="http://harness.local",
-            # CORAL(S123)
+            # CORAL(S129)
             headers={"Authorization": client.headers["Authorization"]},
         ) as fresh:
             assert (await fresh.get("/pid")).json()["pid"] == harness_pid
@@ -1670,7 +1670,7 @@ async def test_orphan_sweep_survives_unreadable_tmp_parent(
     locked_parent = short_tmp_parent / "fp"
     locked_parent.mkdir(mode=0o700)
     (locked_parent / "ap-unreachable").mkdir(mode=0o700)
-    # CORAL(S124)
+    # CORAL(S130)
     real_iterdir = Path.iterdir
 
     def _locked_iterdir(self: Path) -> Iterator[Path]:
@@ -1701,7 +1701,7 @@ async def test_orphan_sweep_survives_tmp_parent_stat_error(
     real_lstat = os.lstat
     raised = False
 
-    # CORAL(S124)
+    # CORAL(S130)
     def _racy_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
         nonlocal raised
         if Path(str(path)) == short_tmp_parent and not raised:
@@ -1774,7 +1774,7 @@ async def test_orphan_sweep_treats_vanishing_child_as_benign_race(
 
     real_lstat = os.lstat
 
-    # CORAL(S124)
+    # CORAL(S130)
     def _racy_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
         if Path(str(path)).name == "ap-avanishing":
             raise FileNotFoundError(2, "vanished mid-sweep", str(path))
@@ -1933,7 +1933,7 @@ async def test_get_client_env_override_is_per_conversation(
         await manager.shutdown()
 
 
-# CORAL(S123)
+# CORAL(S129)
 
 
 def _bearer(client: httpx.AsyncClient) -> str:

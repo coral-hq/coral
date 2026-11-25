@@ -176,7 +176,7 @@ def _load_harness_app(harness: str, module_path: str, conversation_id: str) -> F
     return app
 
 
-# CORAL(S123)
+# CORAL(S129)
 _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
 _MAX_STDIN_TOKEN_BYTES = 4096
 _NO_TOKEN_MESSAGE = (
@@ -497,7 +497,7 @@ def main(argv: list[str] | None = None, auth_token: str | None = None) -> None:
     :param argv: Override for ``sys.argv[1:]``; defaults to
         the live process arguments. Tests pass an explicit list.
     """
-    # CORAL(S123)
+    # CORAL(S129)
     os.environ.pop(_HARNESS_AUTH_TOKEN_ENV, None)
     token = (auth_token if auth_token is not None else _read_stdin_token()).strip()
     if not token:

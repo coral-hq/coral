@@ -35,7 +35,7 @@ def resolve_harness_tmp_parent(env: Mapping[str, str] | None = None) -> Path:
     return absolute_harness_tmp_parent(harness_tmp_parent(env))
 
 
-# CORAL(S124)
+# CORAL(S130)
 def private_dir_problem(info: os.stat_result) -> str | None:
     if stat.S_ISLNK(info.st_mode):
         return "is a symlink (a symlinked harness socket root is refused; set the real path)"
@@ -48,7 +48,7 @@ def private_dir_problem(info: os.stat_result) -> str | None:
     return None
 
 
-# CORAL(S124)
+# CORAL(S130)
 def ensure_private_dir(path: Path) -> None:
     if IS_WINDOWS:
         path.mkdir(parents=True, exist_ok=True)

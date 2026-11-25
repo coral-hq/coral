@@ -169,7 +169,7 @@ class HarnessZygoteClient:
         :returns: A shim handle for the forked harness.
         :raises ZygoteHarnessUnavailable: If the zygote is down or errored.
         """
-        # CORAL(S123)
+        # CORAL(S129)
         reply = await self._exchange(
             {"cmd": "fork_harness", "argv": argv, "env": env, "auth_token": auth_token}
         )

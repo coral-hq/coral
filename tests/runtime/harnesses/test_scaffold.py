@@ -132,7 +132,7 @@ def _make_side_client(socket_path: str, stream_client: httpx.AsyncClient) -> htt
     :returns: An :class:`httpx.AsyncClient` ready to issue
         side-channel requests.
     """
-    # CORAL(S123)
+    # CORAL(S129)
     return httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(uds=socket_path),
         base_url="http://harness.local",

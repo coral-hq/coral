@@ -1432,7 +1432,7 @@ test until someone classifies it.
   host. A shell the claude-sdk sandbox does not confine can act as its
   siblings and as the owner: it can drive a sibling's turn, handoff included,
   through that sibling's harness socket if it can read that harness's bearer
-  from its memory (S123), and it can read other processes'
+  from its memory (S129), and it can read other processes'
   environments and command lines. On the zygote path a runner's or harness's
   environment, as another process reads it, is the host daemon's whole
   environment; on the direct-spawn fallback it holds the runner's tunnel
@@ -1469,7 +1469,7 @@ test until someone classifies it.
   programs' loopback services (CRL-174) and UDP are not covered. On Linux a
   step reaches other programs' abstract sockets (CRL-174), measured in
   `coral-e2e` lane run 45187294423. Processes outside the sandbox can still
-  connect to a harness socket, but since S123 it refuses a caller without its
+  connect to a harness socket, but since S129 it refuses a caller without its
   per-spawn bearer (ADR-05, "Addendum: CRL-173 harness bearer and private
   socket root"). A Coral step's
   sandboxed Claude CLI keeps its Claude Code state in a private directory for

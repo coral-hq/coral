@@ -334,7 +334,7 @@ def test_main_freezes_gc_and_arms_first_turn_freeze_before_serving(
     assert calls == ["freeze", "serve armed=True"]
 
 
-# CORAL(S123)
+# CORAL(S129)
 _MAIN_ARGV = [
     "--harness",
     "test",

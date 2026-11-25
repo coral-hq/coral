@@ -96,7 +96,7 @@ async def _stream_iter(response: httpx.Response) -> AsyncIterator[_ParsedSSEEven
 
 
 def _make_side_client(socket_path: str, stream_client: httpx.AsyncClient) -> httpx.AsyncClient:
-    # CORAL(S123)
+    # CORAL(S129)
     return httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(uds=socket_path),
         base_url="http://harness.local",

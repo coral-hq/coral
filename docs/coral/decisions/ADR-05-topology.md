@@ -460,7 +460,7 @@ sandbox does not confine.
   accepts. On macOS, since S112, a sandboxed step's connect to a harness
   socket under the configured or the per-user default root is denied,
   measured on 27.2.1 (see "Addendum: CRL-166 harness sockets on macOS").
-  Closed by S123: every harness socket, on every platform, now refuses a
+  Closed by S129: every harness socket, on every platform, now refuses a
   caller without its per-spawn bearer, which is never in an exec-time
   environment (see "Addendum: CRL-173 harness bearer and private socket
   root").
@@ -498,7 +498,7 @@ confine ([`../contracts/session-facade.md`](../contracts/session-facade.md),
 "Residuals and limitations"). A per-spawn harness bearer on POSIX would be an
 Omnigent change, a Coral-owned seam; it is recorded here as an owner decision,
 not planned. Reopened by CRL-166: planned as defence in depth in CRL-173 (see
-"Addendum: CRL-166 harness sockets on macOS"). Built in CRL-173 as S123 (see
+"Addendum: CRL-166 harness sockets on macOS"). Built in CRL-173 as S129 (see
 "Addendum: CRL-173 harness bearer and private socket root").
 
 | Follow-up | Owner |
@@ -728,7 +728,7 @@ itself: the probe only measures exposures that already exist.
 
 CRL-166 reopened the decision in "Addendum: probe 15" that a per-spawn harness
 bearer on POSIX is recorded but not planned; it is now planned in CRL-173 (see
-"Addendum: CRL-166 harness sockets on macOS"). It is built as S123 (see
+"Addendum: CRL-166 harness sockets on macOS"). It is built as S129 (see
 "Addendum: CRL-173 harness bearer and private socket root").
 
 **Open for the owner.** Whether to run Coral steps on untrusted content is the
@@ -944,7 +944,7 @@ residuals below. S111's process-read rules and their evidence are in
   sandboxed shell could not list `/private/tmp`, yet it connected.
 - From code: the harness socket has no bearer on POSIX (residual (a); the
   per-spawn token is minted only on Windows,
-  `omnigent/runtime/harnesses/process_manager.py`; S123 later added a bearer
+  `omnigent/runtime/harnesses/process_manager.py`; S129 later added a bearer
   on every platform). The protocol is HTTP over
   the socket (`omnigent/runtime/harnesses/_scaffold.py`). A `message` event
   during the victim's live turn is injected into that turn, and the victim's
@@ -1115,13 +1115,13 @@ names, on macOS 27.2.1.
 - A root that does not exist when the profile is built, and is later created
   as a symlink to another directory, is not covered: the rule names the path
   as it resolved then. The harness process manager does not refuse a
-  symlinked or foreign root (CRL-173). Closed by S124: the process manager
+  symlinked or foreign root (CRL-173). Closed by S130: the process manager
   now refuses a symlinked or foreign root.
 - On Linux, a configured root under a path bwrap binds is visible (CRL-173).
 - Processes outside the sandbox still connect: the harness socket has no
-  bearer on POSIX (CRL-173). Since S123 they connect but get a 401 without
+  bearer on POSIX (CRL-173). Since S129 they connect but get a 401 without
   the per-spawn bearer, on every platform.
-- Since S123 a step that still connects through the gaps above gets a 401
+- Since S129 a step that still connects through the gaps above gets a 401
   without the bearer. See "Addendum: CRL-173 harness bearer and private
   socket root".
 - Other programs' sockets stay reachable, such as Docker Desktop's and
@@ -1189,7 +1189,7 @@ CRL-165), from driving a harness socket directly; on Linux it does so only
 where ptrace between same-user processes is restricted. It does not stop that
 process from acting as the owner on a single-user server (accepted;
 "Addendum: CRL-159 probe 15 on identity-requiring servers"). Built in CRL-173
-as S123 and S124, with the direct-exec token on the harness's stdin rather
+as S129 and S130, with the direct-exec token on the harness's stdin rather
 than an inherited fd (see "Addendum: CRL-173 harness bearer and private socket
 root").
 
@@ -2601,13 +2601,13 @@ only when the owner accepts it in this ADR.
 
 CRL-173 builds the bearer that "Addendum: CRL-166 harness sockets on macOS"
 reopened ("The bearer decision, reopened"), and closes residual (a) of
-"Addendum: probe 15". Seams S123 and S124 and an amendment to S112
+"Addendum: probe 15". Seams S129 and S130 and an amendment to S112
 (`.coral/seams.yaml`) change `omnigent/runtime/harnesses/process_manager.py`,
 `_runner.py`, `_harness_zygote_client.py`, `paths.py`,
 `omnigent/runner/_zygote.py` and `omnigent/inner/sandbox.py`. Facts here are
 from code and the unit and integration tests in the seams; no probe was rerun.
 
-### S123: a per-spawn bearer on every harness socket
+### S129: a per-spawn bearer on every harness socket
 
 **Decision.** Every harness socket requires a bearer, on every platform.
 
@@ -2631,7 +2631,7 @@ from code and the unit and integration tests in the seams; no probe was rerun.
   was never popped and so reached every agent CLI the harness started. That
   leak is closed.
 
-### S124: a private harness socket root
+### S130: a private harness socket root
 
 **Decision.** The process manager keeps its socket root and each `ap-<uuid>`
 instance dir this user's own private real directories (`ensure_private_dir`
@@ -2658,7 +2658,7 @@ in `paths.py`).
 
 **Decision.** A configured harness root that is a symlink loop is kept in the
 sandbox deny list by its plain spelling, with a warning, instead of being left
-out. A loop holds no socket, so the rule is harmless, and S124 refuses a
+out. A loop holds no socket, so the rule is harmless, and S130 refuses a
 symlinked root anyway. The default root was already kept.
 
 **Residuals.**

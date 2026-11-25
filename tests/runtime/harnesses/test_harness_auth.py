@@ -50,7 +50,7 @@ def test_v1_requires_the_bearer_token_when_configured() -> None:
         assert ok.status_code != 401
 
 
-# CORAL(S123)
+# CORAL(S129)
 
 
 @pytest.mark.parametrize(

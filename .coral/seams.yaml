@@ -3473,7 +3473,7 @@ seams:
       through clones. Resolving them never raises: a configured root that
       cannot be resolved is left out with a warning (once per setting and
       process), a configured root that is a symlink loop is kept by its plain
-      spelling with a warning (a loop holds no socket, and S124 refuses a
+      spelling with a warning (a loop holds no socket, and S130 refuses a
       symlinked root), a path swapped while it resolves keeps its plain
       spelling, and the default is always kept, so a bad or raced setting cannot fail
       resolve_sandbox into an unsandboxed run. Seatbelt denies each root as a
@@ -3496,7 +3496,7 @@ seams:
       already hides the default root. Not covered: AF_UNIX harness sockets
       under another instance's own root, a harness root inside a sandbox write
       root (a root created as a symlink after the profile is built is now
-      refused by S124's process manager check), a Linux
+      refused by S130's process manager check), a Linux
       root under a path bwrap binds and processes outside the sandbox
       (CRL-173), socket paths found through fsgetpath and other programs'
       sockets, a tmux server on a custom -S path among them (CRL-174), the
@@ -4229,7 +4229,7 @@ seams:
     upstream_first: false
     upstream_candidate: false
 
-  - id: S123
+  - id: S129
     title: Every harness socket requires a per-spawn bearer that never travels in the environment
     owner: WS-INTEGRATION
     status: landed
@@ -4282,7 +4282,7 @@ seams:
     upstream_first: false
     upstream_candidate: false
 
-  - id: S124
+  - id: S130
     title: The harness process manager keeps its socket root and instance dirs this user's own private real directories
     owner: WS-INTEGRATION
     status: landed
@@ -4308,7 +4308,7 @@ seams:
       tested). A root the owner cannot open (0300) is kept unchanged only when
       lstat shows it is this user's real, owner-only dir. Windows only
       creates. Not covered: a same-user process racing the check and the
-      socket bind (the bearer, S123, covers it).
+      socket bind (the bearer, S129, covers it).
     files:
       - omnigent/runtime/harnesses/paths.py
       - omnigent/runtime/harnesses/process_manager.py

@@ -101,7 +101,7 @@ class _HarnessHttpClient(httpx.AsyncClient):
 # drive — so use the real (already per-user) temp dir.
 _TMP_PARENT_ENV_VAR = HARNESS_TMP_PARENT_ENV_VAR
 
-# CORAL(S123)
+# CORAL(S129)
 _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
 
 # Sentinel each instance writes into its subdir on boot; the orphan sweep uses it
@@ -546,7 +546,7 @@ def _build_harness_spawn_env(env: dict[str, str] | None) -> dict[str, str]:
     merged = strip_desktop_session_env(os.environ)
     if env:
         merged.update(env)
-    # CORAL(S123)
+    # CORAL(S129)
     merged.pop(_HARNESS_AUTH_TOKEN_ENV, None)
     return strip_runner_auth_secrets(merged)
 
@@ -700,7 +700,7 @@ class HarnessProcessManager:
         if self._started:
             return
         self._shutting_down = False
-        # CORAL(S124)
+        # CORAL(S130)
         ensure_private_dir(self._tmp_parent)
         if sweep_orphans:
             # Sweep BEFORE creating our own dir, so a crashed prior instance
@@ -1264,7 +1264,7 @@ class HarnessProcessManager:
     def _ensure_instance_dir(self) -> None:
         # Temporary-file cleanup may remove either directory after start().
         # Recreated state needs the same private modes and live-owner claim.
-        # CORAL(S124)
+        # CORAL(S130)
         ensure_private_dir(self._tmp_parent)
         ensure_private_dir(self._instance_dir)
         write_owner_claim(self._instance_dir, filename=_AP_PID_FILE)
@@ -1309,7 +1309,7 @@ class HarnessProcessManager:
         # payload running in the harness can't impersonate the runner.
         # See ``_build_harness_spawn_env``.
         effective_env: dict[str, str] = _build_harness_spawn_env(env)
-        # CORAL(S123)
+        # CORAL(S129)
         auth_token = secrets.token_urlsafe(32)
 
         parent_pid = os.getpid()
@@ -1338,7 +1338,7 @@ class HarnessProcessManager:
         spawn_started_at = time.monotonic()
         process = await self._spawn_harness_process(runner_argv, effective_env, auth_token)
         try:
-            # CORAL(S123)
+            # CORAL(S129)
             stdin = getattr(process, "stdin", None)
             if stdin is not None:
                 stdin.write(auth_token.encode("ascii") + b"\n")
@@ -1378,7 +1378,7 @@ class HarnessProcessManager:
             client = _HarnessHttpClient(
                 transport=endpoint.make_transport(),
                 base_url=endpoint.base_url,
-                # CORAL(S123)
+                # CORAL(S129)
                 headers={"Authorization": f"Bearer {auth_token}"},
                 # See the comment above the constant for rationale.
                 # Connect/write/pool keep the 5s default so a vanished
@@ -1456,7 +1456,7 @@ class HarnessProcessManager:
             "-m",
             "omnigent.runtime.harnesses._runner",
             *runner_argv,
-            # CORAL(S123)
+            # CORAL(S129)
             stdin=asyncio.subprocess.PIPE,
             stdout=None,
             stderr=None,
@@ -1633,7 +1633,7 @@ async def sweep_orphaned_harness_processes(*, tmp_parent: Path | None = None) ->
     """
     root = tmp_parent if tmp_parent is not None else _default_tmp_parent()
     try:
-        # CORAL(S124)
+        # CORAL(S130)
         info = os.lstat(root)
     except FileNotFoundError:
         return
@@ -1661,7 +1661,7 @@ async def sweep_orphaned_harness_processes(*, tmp_parent: Path | None = None) ->
         try:
             if not child.name.startswith("ap-"):
                 continue
-            # CORAL(S124)
+            # CORAL(S130)
             if (not child.is_dir()) if IS_WINDOWS else private_dir_problem(os.lstat(child)):
                 continue
             sentinel = child / _AP_PID_FILE
