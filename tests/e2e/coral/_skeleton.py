@@ -60,6 +60,7 @@ from tests.e2e.coral._live_proxy import Secret
 from tests.e2e.coral.conftest import CORAL_TIER_B_HARNESS
 
 HANDOFF_TOOL = "mcp__omnigent__coral_submit_handoff"
+CHOOSE_TOOL = "mcp__omnigent__coral_choose_arrow"
 SHELL_TOOL = "mcp__omnigent__sys_os_shell"
 TOOL_SEARCH = "ToolSearch"
 WRITE_TOOL = "mcp__omnigent__sys_os_write"
@@ -67,6 +68,7 @@ RUNS = "/v1/coral/runs"
 RUN_ID_LABEL = "coral.run_id"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 _ACTIVATION_LINE = re.compile(r"^Activation id: (\S+)$", re.MULTILINE)
+_DECISION_LINE = re.compile(r"^Decision id: (\S+)$", re.MULTILINE)
 # The host's line for each runner it launches.
 _LAUNCHED_RUNNER = re.compile(
     r"Launched runner (\S+) for workspace (.+) \(pid=(\d+)\)$", re.MULTILINE
@@ -1402,6 +1404,29 @@ def held_activation(wait: Wait, mock_url: str, token: str, number: int) -> str:
         return None
 
     return wait(found, f"brief {number} with {token}")
+
+
+def held_decision(wait: Wait, mock_url: str, token: str, *, offering: str) -> str:
+    """
+    The decision id named by the orchestrator's first request that carries ``token`` and
+    offers ``offering``, once that request is held.
+    """
+
+    def found() -> str | None:
+        texts = [
+            text
+            for request in get_mock_message_requests(mock_url)
+            if any(tool.get("name") == offering for tool in request["body"].get("tools") or [])
+            for text in _user_texts(request)
+            if token in text
+        ]
+        if not texts or not mock_holds_a_call(mock_url):
+            return None
+        match = _DECISION_LINE.search(texts[0])
+        assert match is not None, texts[0][:500]
+        return match.group(1)
+
+    return wait(found, f"the decision request with {token}")
 
 
 def result_texts(mock_url: str, call_id: str) -> list[str]:

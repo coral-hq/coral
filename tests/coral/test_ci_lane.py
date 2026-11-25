@@ -36,6 +36,10 @@ SANDBOX_PROBES = {
     "test_probe_15_from_a_step_shell",
     "test_a_step_on_a_server_with_the_allow_listed_runner_token",
 }
+# A decision taken by the orchestrator's real CLI in its read-only sandbox, on both lanes.
+DECISION_PROOF = "test_a_decision_runs_through_a_real_orchestrator_cli"
+# The macOS lane also runs on changes to that test's file and its fixture.
+DECISION_FILES = ["tests/e2e/coral/test_skeleton.py", "tests/e2e/coral/fixtures/decision.yaml"]
 # A stack's own PATH must resolve ``security`` and ``gh`` to its stand-ins on macOS and on
 # Linux, so these stay in the one file both lanes run.
 KEYCHAIN_GUARDS = {
@@ -79,6 +83,7 @@ def test_the_lane_collects_every_coral_e2e_proof_and_the_proxy_unit_test() -> No
     }
 
     assert collected >= SIGKILL_PROOFS | RUNNER_LOSS_PROOFS | SANDBOX_PROBES | KEYCHAIN_GUARDS
+    assert DECISION_PROOF in collected
     assert PROXY_UNIT_TEST in paths
     assert "test_a_failing_live_run_shows_its_key_nowhere_in_the_report" in collected
 
@@ -135,6 +140,7 @@ def test_the_macos_lane_runs_the_seatbelt_tests_on_sandbox_changes() -> None:
         paths = triggers[event]["paths"]
         watched = [
             *MACOS_TESTS,
+            *DECISION_FILES,
             "omnigent/inner/seatbelt_sandbox.py",
             *MACOS_SECRET_PATHS,
             MACOS.relative_to(ROOT),
@@ -145,6 +151,7 @@ def test_the_macos_lane_runs_the_seatbelt_tests_on_sandbox_changes() -> None:
     assert "schedule" in triggers
     # Every test in the files, the identity probe among them, runs with the pinned CLI.
     assert run["run"].split("uv run pytest", 1)[1].split()[: len(MACOS_TESTS)] == MACOS_TESTS
+    assert f"tests/e2e/coral/test_skeleton.py::{DECISION_PROOF}" in run["run"].split()
     probes = (ROOT / SANDBOX_PROBE).read_text()
     assert "test_probe_15_on_a_server_that_requires_identity" in probes
     assert all(f"def {guard}(" in probes for guard in KEYCHAIN_GUARDS)

@@ -1,0 +1,16 @@
+id: decision
+name: Choose an arrow at a decision
+# The orchestrator alone runs: the decision opens at the start and each label ends the run
+# on its own end node, so the run's activations show which arrow was taken.
+nodes:
+  - {id: start, kind: start}
+  - id: decide
+    kind: decision
+    name: Decide
+    question: "Is the change ready to ship? {token}"
+  - {id: shipped, kind: end}
+  - {id: held_back, kind: end}
+arrows:
+  - {id: a1, from: start, to: decide}
+  - {id: a2, from: decide, to: shipped, label: ship}
+  - {id: a3, from: decide, to: held_back, label: hold}
