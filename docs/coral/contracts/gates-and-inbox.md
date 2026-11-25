@@ -479,19 +479,27 @@ Any fact the server cannot read reads `not_enforced`. Enforced is a statement
 about what Coral's sandbox lets a step reach, measured on the platform and
 Claude CLI versions in ADR-05. It does not prove that a person answered.
 
-A host on current code reports policy revision 2. From that revision the
-macOS sandbox refuses a step's connects to other programs' Unix-domain
-sockets outside the step's own directories (ADR-05, "Addendum: CRL-174 other
-programs' Unix sockets"). A host on older code reports revision 1 and keeps
-its own rows. A revision-2 host on a server that has no revision-2 rows reads
-`host_sandbox_unknown`. The rows a current host is read against:
+A host on current code reports policy revision 3. From revision 2 the macOS
+sandbox refuses a step's connects to other programs' Unix-domain sockets
+outside the step's own directories (ADR-05, "Addendum: CRL-174 other
+programs' Unix sockets"). From revision 3 it also keeps every directory above
+a masked entry in place and uncloned, so a step cannot read or change a
+masked file of its worktree by renaming or cloning a directory above it
+(ADR-05, "Addendum: CRL-204 masked files and moved directories"). A host on
+older code reports revision 1 or 2 and keeps its own rows. A host on a server
+that has no rows for its revision reads `host_sandbox_unknown`. The rows:
 
 | Policy | Owners of the open probe pins | Declared blockers no probe measures |
 |---|---|---|
-| seatbelt, revision 2 | CRL-201, CRL-203, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195, CRL-204 |
-| bwrap, revision 2 | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-204 |
+| seatbelt, revision 1 (older hosts) | CRL-174, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195 |
+| bwrap, revision 1 (older hosts) | CRL-174, CRL-181 | CRL-181, CRL-193, CRL-195 |
+| seatbelt, revision 2 (older hosts) | CRL-201, CRL-203, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195, CRL-204 |
+| bwrap, revision 2 (older hosts) | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-204 |
+| seatbelt, revision 3 (current hosts) | CRL-201, CRL-203, CRL-181 | CRL-208, CRL-207, CRL-181, CRL-193, CRL-195, CRL-205, CRL-206 |
+| bwrap, revision 3 (current hosts) | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-206 |
 
-Each of these keeps every gate `not_enforced` until its ticket closes:
+Each of these keeps every gate on a current host `not_enforced` until its
+ticket closes:
 
 - code a step leaves in its worktree that the owner's own tools later run
   outside the sandbox, such as a nested `.git` whose hook `git status` runs
@@ -508,12 +516,22 @@ Each of these keeps every gate `not_enforced` until its ticket closes:
   sockets elsewhere, such as Docker-style and `tmux -S` sockets, ssh-agent and
   the inbox sockets of the owner's own Claude Code sessions, are refused from
   revision 2;
-- masked files that a step can still read by renaming the directory above
-  them, where the sandbox does not hold that directory in place (CRL-204);
-- macOS services reached through Mach lookups, the clipboard and Spotlight
-  (CRL-171);
-- macOS releases or CLI versions other than those pinned: no CI lane runs
-  macOS (CRL-170);
+- on macOS, a rename that changes only the letter case or Unicode form of a
+  masked entry's name or of a directory above one, which the sandbox does not
+  check; nothing is read after it (CRL-205);
+- masks are tied to paths, not files: a dot name a step makes first as a
+  link, names that do not exist when the profile is built, a `mask_paths`
+  entry spelled through a symlink the step can re-point, and on Linux a
+  nested masked entry whose directory is replaced, after which later launches
+  mask only the old path (CRL-206). On macOS, reading a masked file by
+  renaming or cloning a directory above it is refused from revision 3
+  (CRL-204, closed);
+- macOS Mach services that still act for a sandboxed step (CRL-207; CRL-171,
+  which owned them at revisions 1 and 2, is closed);
+- macOS releases other than the two measured, Claude CLI versions other than
+  the lane's, a host-start check that covers only two rule families, and a
+  macOS lane that is not a required check
+  (CRL-208; CRL-170, which owned them at revisions 1 and 2, is closed);
 - guessing the owner's password at `/auth/login`, which the server does not
   rate-limit (CRL-195);
 - an owner credential that a step of another live run, or of an earlier run,
@@ -569,7 +587,7 @@ hosts still on them read `host_sandbox_unknown`
 | Work | Owner |
 |---|---|
 | A request-body size cap in `CoralRoute` for every Coral POST | CRL-150 |
-| The label's other blockers ("Enforced gates") | CRL-170, CRL-171, CRL-181, CRL-201, CRL-202, CRL-203, CRL-204 |
+| The label's other blockers ("Enforced gates") | CRL-181, CRL-201, CRL-202, CRL-203, CRL-205, CRL-206, CRL-207, CRL-208 |
 | The label's owner-wide history (the owner's other live and earlier runs), the checks it does not make yet ("Enforced gates"), and showing it on the gate card and the Inbox | CRL-193 |
 | Consent for OIDC's native sign-in, then probe 15 on an OIDC server | CRL-194 |
 | A rate limit on `/auth/login` | CRL-195 |

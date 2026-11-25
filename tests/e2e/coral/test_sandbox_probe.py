@@ -77,9 +77,12 @@ from coral.gates.integrity import (
 from coral.omni.process_map import SANDBOX_POLICY_REVISION
 from coral.omni.server.step_agents import checkout_read_paths
 from omnigent._platform import stable_user_id
+from omnigent.inner import seatbelt_sandbox
 from omnigent.inner.claude_gateway_shim import ClaudeGatewayShim, UpstreamCredential
 from omnigent.inner.claude_sdk_executor import _ASSUME_FIRST_PARTY_ENV, _find_system_claude
+from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import _DEFAULT_ENV_PASSTHROUGH
+from omnigent.inner.sandbox import with_private_tmpdir
 from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
 from tests._helpers.live_server import find_free_port, terminate_process
 from tests._helpers.polling import poll_until
@@ -99,6 +102,8 @@ from tests.e2e.coral._live_proxy import Secret
 SCENARIO_S = 200
 SHORT_LEASE_S = 10
 PROBE = Path(__file__).with_name("probe15.sh")
+# A top-level dot entry of the step's worktree, so its profile masks it.
+MASKED_FILE = ".crl-masked"
 REPO = Path(__file__).resolve().parents[3]
 ARTIFACTS = REPO / "artifacts"
 FIXTURE = "probe.yaml"
@@ -113,6 +118,7 @@ VERDICTS = {
     "mismatch",
     "refused",
     "minted",
+    "unsupported",
     "unclassified",
 }
 # What the probe reports beside a target's own verdict: the names it read, whether the API
@@ -168,6 +174,8 @@ LOOPBACK_SERVICES = "CRL-201"  # other programs' loopback TCP services
 LINUX_SOCKETS = "CRL-202"  # Linux: abstract sockets, and a socket under another bound root
 WORKTREE_SOCKETS = "CRL-203"  # a socket another program keeps in a step's write root
 PLANTED_CONFIG = "CRL-181"  # files a step leaves that the owner's tools run unsandboxed
+# Done tickets: none owns a pin, and no gate table row at the current revision names one.
+CLOSED_TICKETS = frozenset({"CRL-159", "CRL-170", "CRL-171", "CRL-174", "CRL-204"})
 
 _READ_CLOSED = frozenset({"denied", "hidden"})
 # Per probe kind, the verdicts that show the step reaching nothing. Any other verdict is
@@ -179,6 +187,7 @@ CLOSED: Mapping[str, frozenset[str]] = MappingProxyType(
             _READ_CLOSED,
         ),
         "plant": _READ_CLOSED,
+        "masked": _READ_CLOSED,
         "owner_http": frozenset({"refused", "denied", "hidden"}),
         "credential_proxy": frozenset({"refused", "denied", "hidden"}),
         "shell": frozenset({"not_present"}),
@@ -238,6 +247,7 @@ PIN_KINDS: Mapping[str, str] = MappingProxyType(
         "stored_credentials": "stored",
         "other_loopback_tcp": "tcp",
         "worktree_exec_config": "plant",
+        "worktree_masked_file": "masked",
     }
 )
 
@@ -1318,6 +1328,8 @@ EXPECTED_IDENTITY: dict[str, dict[str, Pin]] = {
         "worktree_unix_socket": Pin("reachable", WORKTREE_SOCKETS),
         "other_loopback_tcp": Pin("reachable", LOOPBACK_SERVICES),
         "worktree_exec_config": Pin("reachable", PLANTED_CONFIG),
+        # Read neither directly nor after renaming or clonefile(2)-ing the worktree above it.
+        "worktree_masked_file": Pin("denied"),
         "credential_proxy": Pin("refused"),
     },
     # Measured in lane run 45187294423: bwrap's pid namespace and mounts hide
@@ -1345,6 +1357,9 @@ EXPECTED_IDENTITY: dict[str, dict[str, Pin]] = {
         "worktree_unix_socket": Pin("reachable", WORKTREE_SOCKETS),
         "other_loopback_tcp": Pin("reachable", LOOPBACK_SERVICES),
         "worktree_exec_config": Pin("reachable", PLANTED_CONFIG),
+        # Not measured in a lane yet, and the direct read only (the probe moves and clones
+        # on macOS alone): set from bwrap binding /dev/null over a masked file, read empty.
+        "worktree_masked_file": Pin("hidden"),
         # Not measured in a lane yet: set from other_loopback_tcp, reachable in that run, and
         # the proxy's own refusal.
         "credential_proxy": Pin("refused"),
@@ -1357,17 +1372,17 @@ RECORDED_IDENTITY: dict[str, dict[str, Any]] = {
         **RECORDED["darwin"],
         "server_mode": "accounts",
         "runner_spawn": "direct",
-        "sandbox_policy": "2",
+        "sandbox_policy": "3",
         "gate_integrity": OPEN_SANDBOX_LABEL,
     },
     # Measured in lane run 45187294423; its artifact records the OS and CLI versions it ran.
-    # The policy revision is this checkout's: no bwrap rule changed between the two.
+    # The policy revision is this checkout's: no bwrap rule changed since that run.
     "linux": {
         "harness_socket_root": "/tmp/crl-*",
         "checkout_read_grant": True,
         "server_mode": "accounts",
         "runner_spawn": "direct",
-        "sandbox_policy": "2",
+        "sandbox_policy": "3",
         "gate_integrity": OPEN_SANDBOX_LABEL,
     },
 }
@@ -1398,6 +1413,8 @@ OUTSIDE_IDENTITY: Mapping[str, str] = MappingProxyType(
         "worktree_unix_socket": "reachable",
         "other_loopback_tcp": "reachable",
         "worktree_exec_config": "reachable",
+        # Read directly, so nothing is moved or cloned.
+        "worktree_masked_file": "reachable",
         # The proxy refuses whoever lacks its session token, sandboxed or not.
         "credential_proxy": "refused",
     }
@@ -1488,8 +1505,9 @@ def test_probe_15_on_a_server_that_requires_identity(
     runner's binding token, use the host's bearer or the CLI's stored credentials, call an
     owner route bare, read the server's secrets, reach other programs' services (a Unix
     socket outside its worktree and one inside it, a loopback port), use its own credential
-    proxy without the session token, or plant a repository config the owner's git would
-    run. The runner is spawned directly by the host
+    proxy without the session token, plant a repository config the owner's git would
+    run, or read a masked file of its worktree, directly or after renaming or cloning the
+    worktree above it. The runner is spawned directly by the host
     daemon, which hands it both tokens through an inherited socket, so its exec-time
     environment holds neither. The same probe runs first outside any sandbox and must open
     every other one of those paths, or the probe is broken rather than the step held.
@@ -1502,6 +1520,7 @@ def test_probe_15_on_a_server_that_requires_identity(
     probe_call = f"probe-{uid}"
     handed = f"done-{uid}"
     cookie_value = _canary()
+    masked_value = _canary()
     sk.queue(mock, impl_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, NOTHING, call_id=f"n-{uid}"))])
     sk.queue(
         mock, review_token, [sk.held(sk.tool_call(sk.SHELL_TOOL, README, call_id=f"r-{uid}"))]
@@ -1516,7 +1535,11 @@ def test_probe_15_on_a_server_that_requires_identity(
             # Direct spawn: the runner takes its tokens from a socket, not its exec-time env.
             host_env={"OMNIGENT_RUNNER_ZYGOTE": "0"},
             lease_s=SHORT_LEASE_S,
-            repo_files={PROBE.name: PROBE.read_bytes()},
+            # Committed, so the masked file is in the worktree before the step's profile is built.
+            repo_files={
+                PROBE.name: PROBE.read_bytes(),
+                MASKED_FILE: masked_value.reveal().encode(),
+            },
             identity=True,
         ) as stack,
         _other_programs() as other_programs,
@@ -1561,6 +1584,7 @@ def test_probe_15_on_a_server_that_requires_identity(
         worktree = Path(detail["target"]["worktree_path"])
         worktree_socket = listeners.enter_context(_worktree_socket(worktree))
         probe_digest = _sha256(PROBE.read_bytes())
+        masked_digest = _sha256(masked_value.reveal().encode())
         # Every credential is tried on this server's owner route, and only there.
         on_server = f"{stack.server.base_url} {stack.server.base_url}{sk.RUNS}"
         runner_live = _process_live(runner)
@@ -1602,6 +1626,14 @@ def test_probe_15_on_a_server_that_requires_identity(
                 _file_live(cookie, cookie_digest),
             ),
             Target("worktree_exec_config", "plant", plant, live=_absent(worktree / plant)),
+            # Its digest checked before and after also shows the step left it as it was.
+            Target(
+                "worktree_masked_file",
+                "masked",
+                MASKED_FILE,
+                f"sha256:{masked_digest}",
+                _file_live(worktree / MASKED_FILE, masked_digest),
+            ),
             *other_programs,
             worktree_socket,
             proxy,
@@ -1644,6 +1676,7 @@ def test_probe_15_on_a_server_that_requires_identity(
             {
                 "owner_token": stack.owner_token,
                 "credential_files.cookie_secret": cookie_value,
+                "worktree_masked_file": masked_value,
                 "proxy_session_token": proxy_token,
             },
         )
@@ -2217,6 +2250,168 @@ def test_the_probe_plants_a_repository_config_and_removes_it(tmp_path: Path) -> 
     assert not any(taken.iterdir())
 
 
+def _listing(root: Path) -> list[str]:
+    """Every path under ``root``, relative to it: names only."""
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def test_the_probe_reads_a_masked_file_by_its_digest_and_leaves_its_dir_in_place(
+    tmp_path: Path,
+) -> None:
+    value = _canary()
+    scratch = tmp_path / "scratch"
+    names = ("readable", "refused", "missing", "empty", "changed")
+    files = {name: tmp_path / name / MASKED_FILE for name in names}
+    for directory in (scratch, *(path.parent for path in files.values())):
+        directory.mkdir()
+    for name in ("readable", "refused"):
+        files[name].write_bytes(value.reveal().encode())
+    files["refused"].chmod(0)
+    files["empty"].touch()
+    files["changed"].write_text("changed")
+    targets = [Target(name, "masked", str(path), _digest(value)) for name, path in files.items()]
+    before = _listing(tmp_path)
+
+    reading = _run_probe(targets, _probe_env(tmp_path, TMPDIR=str(scratch)), tmp_path)
+
+    # On macOS a refused, missing or empty read is tried again after moving and after cloning
+    # the dir above into $TMPDIR, which outside a sandbox finds the same. But a clone of a dir
+    # with an unreadable file fails with EACCES, not the sandbox's EPERM, so it reads open.
+    assert _assert_reading(reading, targets) == {
+        "readable": "reachable",
+        "refused": "unclassified" if sys.platform == "darwin" else "denied",
+        "missing": "hidden",
+        # How bwrap masks a file: /dev/null bound over it.
+        "empty": "hidden",
+        "changed": "mismatch",
+    }
+    # Every move undone and every clone removed.
+    assert _listing(tmp_path) == before
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the probe moves and clones on macOS only")
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_the_masked_file_check_is_open_where_no_sandbox_refuses_its_routes(
+    tmp_path: Path,
+) -> None:
+    value = _canary()
+    refused = tmp_path / "refused" / MASKED_FILE
+    refused.parent.mkdir()
+    refused.write_bytes(value.reveal().encode())
+    refused.chmod(0)
+    # Empty, so every route that runs reads it hidden: only a refused rename reads otherwise.
+    empty = tmp_path / "held" / "empty" / MASKED_FILE
+    empty.parent.mkdir(parents=True)
+    empty.touch()
+    locked, scratch = tmp_path / "locked", tmp_path / "scratch"
+    locked.mkdir(mode=0o500)
+    scratch.mkdir()
+    targets = [Target("worktree_masked_file", "masked", str(refused), _digest(value))]
+    beneath = [Target("worktree_masked_file", "masked", str(empty), _digest(value))]
+
+    # devfs is another file system on every Mac: a move or a clone into it fails with EXDEV.
+    elsewhere = _run_probe(targets, _probe_env(tmp_path, TMPDIR="/dev"), tmp_path)
+    shut = _run_probe(targets, _probe_env(tmp_path, TMPDIR=str(locked)), tmp_path)
+    # A parent the user cannot write refuses the rename with EACCES; the clone still works.
+    empty.parent.parent.chmod(0o500)
+    try:
+        unwritable = _run_probe(beneath, _probe_env(tmp_path, TMPDIR=str(scratch)), tmp_path)
+    finally:
+        empty.parent.parent.chmod(0o700)
+
+    # None shows the sandbox refusing a route, so none reads as closed.
+    assert _assert_reading(elsewhere, targets) == {"worktree_masked_file": "unsupported"}
+    assert _assert_reading(shut, targets) == {"worktree_masked_file": "unclassified"}
+    assert _assert_reading(unwritable, beneath) == {"worktree_masked_file": "unclassified"}
+    assert all(_open("worktree_masked_file", token) for token in ("unsupported", "unclassified"))
+    held = ["held", "held/empty", f"held/empty/{MASKED_FILE}", "refused", f"refused/{MASKED_FILE}"]
+    assert _listing(tmp_path) == sorted([*held, "locked", "scratch"])
+
+
+# The rule that keeps each dir above a masked entry in place, and edits that leave a route open.
+_KEPT_IN_PLACE_RULE = "(deny file-write-unlink file-clone (literal "
+_RULE_EDITS: Mapping[str, Callable[[str], str | None]] = MappingProxyType(
+    {
+        "present": lambda line: line,
+        "absent": lambda line: None,
+        "rename_only": lambda line: line.replace(" file-clone", ""),
+        "clone_only": lambda line: line.replace("file-write-unlink ", ""),
+        # A dir may move out, but nothing may be made at its path: the cwd cannot move back.
+        "undo_refused": lambda line: line.replace("file-write-unlink", "file-write-create"),
+    }
+)
+# As argv[0] the interpreter the probe's python3 finds is granted, as a step helper's is.
+_EXEC_SH = "import os, sys; os.execv('/bin/sh', ['sh', *sys.argv[1:]])"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt profiles are macOS's")
+@pytest.mark.parametrize(
+    ("rule_is", "verdict"),
+    [
+        ("present", "denied"),
+        ("absent", "reachable"),
+        ("rename_only", "reachable"),
+        ("clone_only", "reachable"),
+        ("undo_refused", "reachable"),
+    ],
+)
+def test_the_masked_file_check_is_closed_only_where_the_profile_keeps_its_dir_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rule_is: str, verdict: str
+) -> None:
+    """
+    The check as a step runs it, in a seatbelt profile of a step's shape (the cwd its write
+    root, the network on, a scratch beside it as ``$TMPDIR``) with the rule that keeps each dir
+    above a masked entry in place and uncloned edited. The real profile refuses every route;
+    without the rule, or with either half alone, the probe reads the file, so its closed pin
+    is not vacuous. The rename half alone is revision 2's shape, which a clone got through.
+    Where the cwd moves out but cannot move back, the read made there still counts.
+    """
+    base = tmp_path.resolve()
+    work, scratch = base / "work", base / "scratch"
+    for directory in (work, scratch):
+        directory.mkdir()
+    value = _canary()
+    masked = work / MASKED_FILE
+    masked.write_bytes(value.reveal().encode())
+    shutil.copyfile(PROBE, work / PROBE.name)
+    backend = seatbelt_sandbox.SeatbeltSandboxBackend()
+    grant = OSEnvSandboxSpec(type=backend.type_name, write_paths=["."], allow_network=True)
+    spec = OSEnvSpec(type="caller_process", cwd=str(work), sandbox=grant)
+    policy = with_private_tmpdir(backend.resolve(spec, work), scratch)
+    real, edit, held = seatbelt_sandbox._build_profile, _RULE_EDITS[rule_is], []
+
+    def edited(*args: Any, **kwargs: Any) -> str:
+        lines = real(*args, **kwargs).splitlines()
+        held.extend(line for line in lines if line.startswith(_KEPT_IN_PLACE_RULE))
+        kept = (edit(line) if line.startswith(_KEPT_IN_PLACE_RULE) else line for line in lines)
+        return "\n".join(line for line in kept if line is not None) + "\n"
+
+    monkeypatch.setattr(seatbelt_sandbox, "_build_profile", edited)
+    target = Target("worktree_masked_file", "masked", MASKED_FILE, _digest(value))
+    argv = [sys.executable, "-I", "-c", _EXEC_SH, PROBE.name, target.argument()]
+    before = _listing(base)
+    done = subprocess.run(
+        backend.wrap_launcher_argv(argv, policy, work),
+        cwd=work,
+        env=_probe_env(base, TMPDIR=str(scratch)),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    # Before the edit the profile named the dir above the masked file: the probe's cwd.
+    assert f"{_KEPT_IN_PLACE_RULE}{seatbelt_sandbox._quote(str(work))}))" in held
+    verdicts, strays = _parse(done.stdout, {target.check})
+    assert (verdicts, strays) == ({target.check: verdict}, 0), (done.returncode, len(done.stderr))
+    if rule_is == "undo_refused":
+        # The cwd is left in the scratch; it is moved back here, outside the sandbox.
+        (left,) = scratch.iterdir()
+        left.rename(work)
+    assert _listing(base) == before, "the probe did not undo its moves or remove its clones"
+    assert _sha256(masked.read_bytes()) == _sha256(value.reveal().encode())
+
+
 def test_git_takes_the_planted_directory_as_a_repository_that_names_its_hook(
     tmp_path: Path,
 ) -> None:
@@ -2480,8 +2675,7 @@ def test_every_pin_names_an_owner_exactly_when_it_is_open() -> None:
     problems = {where: _owner_problems(pins) for where, pins in every}
     assert not {where: found for where, found in problems.items() if found}
     owners = {pin.owner for _, pins in every for pin in pins.values()}
-    # Closed tickets own no pin.
-    assert not {"CRL-159", "CRL-174"} & owners
+    assert not CLOSED_TICKETS & owners
     for system, pins in EXPECTED_IDENTITY.items():
         # Nothing mints, no owner route answers a bare request, and no residual is accepted.
         assert "minted" not in {pin.verdict for pin in pins.values()}, system
@@ -2527,6 +2721,14 @@ def test_the_gate_label_table_holds_every_open_pin_owner_and_the_declared_blocke
         HostSandboxPolicy(backend, SANDBOX_POLICY_REVISION) for backend in PINNED_BACKENDS.values()
     }
     assert current == pinned
+    # The current rows name live tickets only; older rows keep theirs, being append-only.
+    named = {
+        ticket
+        for policy in current
+        for ticket in (*GATE_BLOCKERS[policy].probed, *GATE_BLOCKERS[policy].unprobed)
+    }
+    closed = sorted(named & CLOSED_TICKETS)
+    assert not closed, f"a row at the current revision names closed tickets: {closed}"
     for system, backend in PINNED_BACKENDS.items():
         identity = EXPECTED_IDENTITY[system]
         # A single-user residual is a server-mode fact: it never excuses an identity pin.
@@ -2570,8 +2772,9 @@ def test_the_table_binding_fails_when_the_table_and_the_pins_part() -> None:
 
 
 def test_only_a_reach_that_failed_reads_as_closed() -> None:
-    # What the probe read, minted, found for another value or could not classify is open.
-    opened = ("reachable", "minted", "mismatch", "unclassified")
+    # What the probe read, minted, found for another value, could not try or could not
+    # classify is open.
+    opened = ("reachable", "minted", "mismatch", "unsupported", "unclassified")
     for kind in CLOSED:
         assert all(_open("check", verdict, {"check": kind}) for verdict in opened), kind
     # A sub-check that read something is open whatever it found there.
@@ -2597,6 +2800,7 @@ def test_the_outside_run_must_open_every_owner_path_it_is_given() -> None:
         Target("other_unix_socket", "socket", "agent.sock"),
         Target("worktree_unix_socket", "socket", "crl-w.sock"),
         Target("worktree_exec_config", "plant", "crl-plant"),
+        Target("worktree_masked_file", "masked", MASKED_FILE),
     ]
     keys = (
         "own_runner_mint.read",
@@ -2607,6 +2811,7 @@ def test_the_outside_run_must_open_every_owner_path_it_is_given() -> None:
         "other_unix_socket",
         "worktree_unix_socket",
         "worktree_exec_config",
+        "worktree_masked_file",
     )
     required = {key: OUTSIDE_IDENTITY[key] for key in keys}
     assert _broken_outside({**required, "control_file": "denied"}, targets) == []

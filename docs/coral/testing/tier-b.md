@@ -211,6 +211,21 @@ The ledger records request bodies, not headers; that the token is in no
 upstream header is the shim's and the executor's unit tests. On Linux the pin
 is set by reasoning until the lane runs on that change.
 
+**The `worktree_masked_file` check.** The identity test's fixture repository
+commits a dotfile, `.crl-masked`, holding a fresh canary, so the step's
+profile masks it as a top-level dot entry of the worktree. The probe gets the
+canary's digest only. It reads the file directly and, on macOS only, again
+after renaming the worktree into `$TMPDIR` and after `clonefile(2)` of the
+worktree there, undoing each. It first moves and clones a plain directory the
+same way; if that fails, the check reads `unsupported` (another volume, or one
+that cannot clone) or `unclassified`, both open. Outside the sandbox it must
+read `reachable` with nothing moved; in the step it is pinned `denied` on
+macOS and `hidden` on Linux, with no owner. The host checks the file's digest
+before the probe, between the runs and after the step's. A macOS test runs
+the same probe in a step-shaped seatbelt profile with the S128 rule edited:
+without the rule, or with either half alone, it must read `reachable` (ADR-05,
+"Addendum: CRL-204 masked files and moved directories").
+
 **The identity probe's choreography.**
 `test_probe_15_on_a_server_that_requires_identity` starts the stack with
 `skeleton_stack(identity=True)`: an accounts server with a throwaway cookie
@@ -265,8 +280,8 @@ release branch. For each failure in `test_sandbox_probe.py`:
 - "Moved from its pins": re-pin only a move between closed verdicts (such as
   `hidden` and `denied`), the socket, TCP and plant checks with their owners,
   and the single-user `owner_bare` checks with the accepted residual.
-- The socket and TCP checks of the identity test, at sandbox policy revision 2
-  (ADR-05, "Addendum: CRL-174 other programs' Unix sockets"):
+- The socket and TCP checks of the identity test, from sandbox policy revision
+  2 (ADR-05, "Addendum: CRL-174 other programs' Unix sockets"):
   - `other_unix_socket`, another program's socket under `/tmp`, is closed on
     both platforms: `denied` on macOS since S127, `hidden` on Linux. On macOS
     a `reachable` there means the sandbox rule did not hold on that OS. Treat
@@ -277,6 +292,17 @@ release branch. For each failure in `test_sandbox_probe.py`:
     is set by reasoning until the lane runs.
   - `other_abstract_socket` (Linux only) is `reachable`, owner CRL-202.
   - `other_loopback_tcp` is `reachable` on both platforms, owner CRL-201.
+- The masked-file check of the identity test, from sandbox policy revision 3
+  (ADR-05, "Addendum: CRL-204 masked files and moved directories"):
+  `worktree_masked_file` is closed with no owner. It is `denied` on macOS,
+  measured locally, and `hidden` on Linux, where it is the direct read only
+  and set by reasoning until the lane runs. A `reachable` or `mismatch` there
+  is a finding, not a re-pin: on macOS it means the S128 rule did not hold on
+  that OS, and re-pinning it open needs an owner and a new policy revision.
+  `unsupported` means the plain-directory control could not move or clone
+  into `$TMPDIR` (another volume, or one that cannot clone), and
+  `unclassified` an error the probe does not classify: rerun on a layout where
+  the control passes, never re-pin.
 - Any open verdict on a credential path is escalated to a person and a ticket,
   never re-pinned: a `.read` other than `denied` or `hidden`; `minted`,
   `mismatch`, `refused` or `not_present` on `mint`, `bearer` or `stored`;

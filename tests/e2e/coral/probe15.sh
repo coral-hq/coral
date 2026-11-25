@@ -8,7 +8,7 @@ export LC_ALL
 
 # Verdicts: reachable, denied (EACCES/EPERM/EROFS), hidden (ENOENT), not_present, mismatch
 # (read, but not the canary or not this server's), refused (HTTP 401/403), minted (a minted
-# JWT acts as the owner), unclassified.
+# JWT acts as the owner), unsupported (a move or clone fails across volumes), unclassified.
 classify() {
   case $1 in
     *"No such file or directory"*) echo hidden ;;
@@ -349,6 +349,73 @@ plant_repository() {
   if grep -q 'fsmonitor = ' "$1/.git/config"; then echo reachable; else echo unclassified; fi
 }
 
+# A masked file ($1) read by its digest ($2): directly and, on macOS, after renaming the dir
+# above it into $TMPDIR and after clonefile(2) of that dir there; each undone. hidden for an
+# empty read (bwrap's /dev/null). A plain dir there must move and clone first, or the routes
+# show nothing: unsupported (EXDEV, ENOTSUP) or unclassified. reachable if any read finds it.
+MASKED='
+import ctypes, errno, hashlib, os, shutil, sys
+entry, expect = os.path.abspath(sys.argv[1]), sys.argv[2]
+above, name = os.path.split(entry)
+scratch = os.environ.get("TMPDIR") or "/tmp"
+libc = ctypes.CDLL(None, use_errno=True)
+def failed(error):
+    if isinstance(error, PermissionError) or error.errno == errno.EROFS:
+        return "denied"
+    return "hidden" if isinstance(error, FileNotFoundError) else "unclassified"
+def read(path):
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError as error:
+        return failed(error)
+    if not data:
+        return "hidden"
+    return "reachable" if "sha256:" + hashlib.sha256(data).hexdigest() == expect else "mismatch"
+# Reads at the target, then undoes the route; a failed undo never reads closed.
+def routed(target, then, undo):
+    seen = "unclassified"
+    try:
+        seen = then(target)
+    finally:
+        try:
+            undo()
+        except OSError:
+            seen = "reachable" if seen == "reachable" else "unclassified"
+    return seen
+def moved(source, target, then):
+    os.rename(source, target)
+    return routed(target, then, lambda: os.rename(target, source))
+def cloned(source, target, then):
+    if libc.clonefile(os.fsencode(source), os.fsencode(target), 0) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    return routed(target, then, lambda: shutil.rmtree(target))
+verdicts = [read(entry)]
+if verdicts[0] in ("denied", "hidden") and sys.platform == "darwin":
+    tag = "crl-" + str(os.getpid())
+    plain, target = os.path.join(above, tag + "-plain"), os.path.join(scratch, tag)
+    try:
+        os.mkdir(plain)
+        try:
+            for route in (moved, cloned):
+                if route(plain, target, lambda at: None) is not None:
+                    raise OSError(errno.EIO, "not undone")
+        finally:
+            os.rmdir(plain)
+    except OSError as error:
+        print("unsupported" if error.errno in (errno.EXDEV, errno.ENOTSUP) else "unclassified")
+        sys.exit()
+    for route in (moved, cloned):
+        try:
+            verdicts.append(route(above, target, lambda at: read(os.path.join(at, name))))
+        except OSError as error:
+            # Only the sandbox refuses a route with EPERM; Unix permissions give EACCES.
+            verdicts.append("denied" if error.errno == errno.EPERM else "unclassified")
+opened = [verdict for verdict in verdicts if verdict not in ("denied", "hidden")]
+print("reachable" if "reachable" in verdicts else (opened or verdicts)[0])
+'
+
 probe_plant() {
   error=$(mkdir -- "$1" 2>&1) || {
     classify "$error"
@@ -387,6 +454,7 @@ for argument in "$@"; do
       continue
       ;;
     plant) verdict=$(probe_plant "$target") ;;
+    masked) verdict=$(python3 -I -c "$MASKED" "$target" "$expect") ;;
     shell)
       # The shell's own environment counts as read only when PATH is among its names.
       block=$(env -0 | tr '\n\0' ' \n')

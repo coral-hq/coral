@@ -81,6 +81,10 @@ BWRAP_1 = HostSandboxPolicy("bwrap", "1")
 # Revision 2: seatbelt refuses other programs' Unix-domain sockets; bwrap's rules are unchanged.
 SEATBELT_2 = HostSandboxPolicy("seatbelt", "2")
 BWRAP_2 = HostSandboxPolicy("bwrap", "2")
+# Revision 3: seatbelt keeps every dir above a masked entry in place and uncloned; bwrap's rules
+# are unchanged.
+SEATBELT_3 = HostSandboxPolicy("seatbelt", "3")
+BWRAP_3 = HostSandboxPolicy("bwrap", "3")
 # The owners of the open pins in probe 15's tests, per policy they were measured at.
 IDENTITY_PROBE_OPEN: Mapping[HostSandboxPolicy, tuple[str, ...]] = MappingProxyType(
     {
@@ -91,9 +95,14 @@ IDENTITY_PROBE_OPEN: Mapping[HostSandboxPolicy, tuple[str, ...]] = MappingProxyT
         # worktree and, on Linux, abstract ones; a planted repository config.
         SEATBELT_2: ("CRL-201", "CRL-203", "CRL-181"),
         BWRAP_2: ("CRL-201", "CRL-202", "CRL-203", "CRL-181"),
+        # As at revision 2; the masked file check is closed on both (on Linux by reasoning, the
+        # direct read only, until the lane runs).
+        SEATBELT_3: ("CRL-201", "CRL-203", "CRL-181"),
+        BWRAP_3: ("CRL-201", "CRL-202", "CRL-203", "CRL-181"),
     }
 )
 # Open owner paths the probe does not measure; each leaves only when it is closed.
+# An older row keeps its tickets after they close, since rows are append-only.
 UNPROBED_BLOCKERS: Mapping[HostSandboxPolicy, tuple[str, ...]] = MappingProxyType(
     {
         SEATBELT_1: (
@@ -108,6 +117,11 @@ UNPROBED_BLOCKERS: Mapping[HostSandboxPolicy, tuple[str, ...]] = MappingProxyTyp
         # read by renaming their parent directory.
         SEATBELT_2: ("CRL-170", "CRL-171", "CRL-181", "CRL-193", "CRL-195", "CRL-204"),
         BWRAP_2: ("CRL-181", "CRL-193", "CRL-195", "CRL-204"),
+        # CRL-208: unmeasured macOS releases and CLI versions, a host-start check of two rule
+        # families, a lane that is not a required check; CRL-207: Mach services still acting for
+        # a step; CRL-205: case or normal-form renames; CRL-206: masks name paths, not files.
+        SEATBELT_3: ("CRL-208", "CRL-207", "CRL-181", "CRL-193", "CRL-195", "CRL-205", "CRL-206"),
+        BWRAP_3: ("CRL-181", "CRL-193", "CRL-195", "CRL-206"),
     }
 )
 

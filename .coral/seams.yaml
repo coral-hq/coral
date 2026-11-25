@@ -5018,7 +5018,7 @@ seams:
       plain name inside a write root (CRL-203); a socket under an entry the
       profile does not list as masked: a dot-directory below the top level
       with the default scan, in an allow-listed hidden dir, in a
-      framework-added root, or made after the profile was built (CRL-204);
+      framework-added root, or made after the profile was built (CRL-203);
       other programs' loopback TCP and UDP services (CRL-201); Linux abstract
       sockets and sockets under a bound root (CRL-202); Mach services
       (CRL-171); other macOS releases (CRL-170). docs/AGENT_YAML_SPEC.md says
@@ -5150,11 +5150,15 @@ seams:
       rename that changes only the letter case or Unicode form of a masked
       entry's or a guarded dir's name, which the sandbox does not check
       (CRL-205); names that do not exist when the profile is built, a dot
-      name a process makes first as a link, and the bwrap replace above
-      (CRL-206); entries the profile does not list (a dot entry below the
-      top level with the default scan, or in an allow-listed hidden dir); a
-      masked entry's name, size and times; other macOS releases (CRL-170).
+      name a process makes first as a link, a mask_paths entry spelled
+      through a symlink the process can re-point, and the bwrap replace
+      above (CRL-206); a dir that carries only a Unix-socket deny inside a
+      write root, which can still be moved (CRL-203); entries the profile
+      does not list (a dot entry below the top level with the default scan,
+      or in an allow-listed hidden dir); a masked entry's name, size and
+      times; other macOS releases (CRL-208).
     files:
+      - docs/AGENT_YAML_SPEC.md
       - omnigent/host/connect.py
       - omnigent/inner/seatbelt_sandbox.py
       - tests/host/test_connect.py
@@ -5164,6 +5168,7 @@ seams:
       - tests/inner/test_seatbelt_sandbox.py
       - tests/inner/sandbox/test_sandbox_behavior.py
       - tests/host/test_connect.py
+      - tests/e2e/coral/test_sandbox_probe.py
     budget_lines: 120
     budget_exception:
       lines: 358
@@ -5191,7 +5196,7 @@ seams:
         check's named checks, its clone and rename routes, its tree in the
         per-user temp dir, its clone-support probe and its failure names. The
         other files are within budget: omnigent/host/connect.py 8,
-        tests/host/test_connect.py 4.
+        docs/AGENT_YAML_SPEC.md 6, tests/host/test_connect.py 4.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false

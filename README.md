@@ -41,8 +41,9 @@ The workflow engine is designed and is next on the
 [design](docs/coral/roadmap/coral-design.md). There are no releases yet, so
 run Coral from source.
 
-Run Coral steps only on content you trust. On macOS a step's shell can read
-and write your clipboard (CRL-171). Since
+Run Coral steps only on content you trust. Since CRL-171, on macOS a step's shell
+can no longer read or write your clipboard, search Spotlight or send Apple
+Events. Since
 CRL-165 it can no longer read other processes' environments or command lines.
 Since CRL-166 it can no longer connect to the harness sockets of other Omnigent
 sessions under this host's socket root or the default `/tmp/omnigent-<uid>`, to
@@ -58,8 +59,13 @@ sandboxed agent with network on, not only Coral steps: on macOS such an agent
 can no longer use Docker, a key agent or a database over a Unix-domain
 socket. Git over SSH has its own `sandbox.git_ssh` setting; for any other
 such socket the only way through today is `sandbox.type: none`, until a grant
-for one named socket exists (CRL-203). All three were measured on macOS
-27.2.1; a macOS CI lane (CRL-170) now runs the sandbox tests and probe 15 on
+for one named socket exists (CRL-203). Since CRL-204, on macOS a step can no
+longer read or change the files the sandbox hides in its worktree, such as
+`.env` or `.git`, by renaming or cloning the worktree or a directory above
+them. This too applies to every sandboxed agent: on macOS such an agent can no
+longer rename, remove or clone any directory above a file the sandbox hides,
+its working directory included when that holds one. All four were measured on
+macOS 27.2.1; a macOS CI lane (CRL-170) now runs the sandbox tests and probe 15 on
 macOS 26, on changes to the files they depend on and weekly, and is not a
 required check. Since CRL-167, on
 Linux and macOS a Coral step's Claude CLI no longer holds your model API key,
@@ -93,17 +99,19 @@ server, on any platform, a step can act as you, the owner, so neither a human
 gate nor the sandbox is a security control there. That is accepted: such a
 server never labels a gate Enforced. On a server that signs users in with
 accounts, a sandboxed step could not get your sign-in token (measured on macOS
-27.2.1, and on Linux in that lane run). Nine open issues still keep every gate
+27.2.1, and on Linux in that lane run). Ten open issues still keep every gate
 labelled not Enforced: other programs' loopback services (CRL-201), Linux
 abstract sockets and sockets in directories the sandbox binds (CRL-202), a
 socket another program keeps in a step's worktree on macOS (CRL-203), files a
-step leaves for your own tools (CRL-181), masked files that a step can still
-read by renaming the directory above them (CRL-204), macOS Mach services, the
-clipboard and Spotlight
-(CRL-171), macOS and CLI updates that no CI lane checks (CRL-170), an owner
-credential that a step of another or an earlier run obtained (CRL-193), and
-password guessing at sign-in (CRL-195). A run's detail says why in
-`gate_integrity`.
+step leaves for your own tools (CRL-181), renames on macOS that change only a
+hidden file's letter case or Unicode form (CRL-205), hidden files that a step can still reach
+because the sandbox hides them by path, such as through a link it made first
+(CRL-206), macOS Mach services that still act for a step (CRL-207), macOS
+releases other than the two measured, a sandbox check at host start that
+covers only two rule families, and a macOS CI lane that is not a required
+check (CRL-208), an owner credential that a step of another or an earlier run
+obtained (CRL-193), and password guessing at sign-in (CRL-195). A run's detail
+says why in `gate_integrity`.
 
 Since CRL-176 a Coral step's Claude CLI keeps its Claude Code state in a
 private directory, a fresh one for each launch in the sandbox. While the CLI
@@ -182,9 +190,10 @@ refuse to start: the SDK's bundled one cannot be wrapped in the sandbox. See the
 [sandboxed agents' Claude config](docs/coral/decisions/ADR-05-topology.md#addendum-crl-178-claude-config-isolation-for-every-sandboxed-agent-2026-11-22),
 [launch temp dir cleanup](docs/coral/decisions/ADR-05-topology.md#addendum-crl-179-launch-temp-dir-cleanup-2026-11-22),
 [identity-requiring servers and gate labels](docs/coral/decisions/ADR-05-topology.md#addendum-crl-159-probe-15-on-identity-requiring-servers-2026-11-23),
-[secrets out of exec-time environments](docs/coral/decisions/ADR-05-topology.md#addendum-crl-167-secrets-out-of-exec-time-environments-2026-11-24)
+[secrets out of exec-time environments](docs/coral/decisions/ADR-05-topology.md#addendum-crl-167-secrets-out-of-exec-time-environments-2026-11-24),
+[other programs' Unix sockets](docs/coral/decisions/ADR-05-topology.md#addendum-crl-174-other-programs-unix-sockets-2026-11-24)
 and
-[other programs' Unix sockets](docs/coral/decisions/ADR-05-topology.md#addendum-crl-174-other-programs-unix-sockets-2026-11-24).
+[masked files and moved directories](docs/coral/decisions/ADR-05-topology.md#addendum-crl-204-masked-files-and-moved-directories-2026-11-24).
 
 ## Run Coral from source
 
