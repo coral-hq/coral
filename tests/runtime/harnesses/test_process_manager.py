@@ -320,7 +320,7 @@ def test_resolve_harness_tmp_parent_makes_relative_path_absolute(
     assert resolved == tmp_path / "harness-sockets"
 
 
-# CORAL(S124): the harness socket root must be this user's own real, private directory
+# CORAL(S124)
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
 @pytest.mark.parametrize("plant", ["symlink", "dangling-symlink", "mode-0777", "foreign-owner"])
 async def test_start_refuses_an_unsafe_root(
@@ -332,7 +332,8 @@ async def test_start_refuses_an_unsafe_root(
     if plant == "symlink":
         root = short_tmp_parent / "link"
         root.symlink_to(real, target_is_directory=True)
-    elif plant == "dangling-symlink":  # CORAL(S124): mkdir must not create the link target
+    # CORAL(S124)
+    elif plant == "dangling-symlink":
         root = short_tmp_parent / "link"
         root.symlink_to(real / "planted", target_is_directory=True)
     elif plant == "mode-0777":
@@ -346,7 +347,7 @@ async def test_start_refuses_an_unsafe_root(
     assert list(real.iterdir()) == []
 
 
-# CORAL(S124): an owner-only root that cannot be opened is kept as is; a looser one is refused
+# CORAL(S124)
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
 @pytest.mark.parametrize(("mode", "accepted"), [(0o300, True), (0o355, False)])
 def test_ensure_private_dir_on_an_unreadable_root(
@@ -404,7 +405,7 @@ async def test_recreating_the_instance_dir_refuses_a_planted_symlink(
         await manager.shutdown()
 
 
-# CORAL(S124): the sweep never follows a symlinked root or instance dir
+# CORAL(S124)
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink check.")
 async def test_sweep_skips_symlinked_root_and_instance_dirs(
     short_tmp_parent: Path, monkeypatch: pytest.MonkeyPatch
@@ -1668,8 +1669,7 @@ async def test_orphan_sweep_survives_unreadable_tmp_parent(
     locked_parent = short_tmp_parent / "fp"
     locked_parent.mkdir(mode=0o700)
     (locked_parent / "ap-unreachable").mkdir(mode=0o700)
-    # CORAL(S124): an unreadable root is now refused before the sweep (it cannot be
-    # opened to check), so the listing failure is injected instead of made with chmod.
+    # CORAL(S124)
     real_iterdir = Path.iterdir
 
     def _locked_iterdir(self: Path) -> Iterator[Path]:
@@ -1700,7 +1700,7 @@ async def test_orphan_sweep_survives_tmp_parent_stat_error(
     real_lstat = os.lstat
     raised = False
 
-    # CORAL(S124): the sweep lstats the root instead of following it
+    # CORAL(S124)
     def _racy_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
         nonlocal raised
         if Path(str(path)) == short_tmp_parent and not raised:
@@ -1773,7 +1773,7 @@ async def test_orphan_sweep_treats_vanishing_child_as_benign_race(
 
     real_lstat = os.lstat
 
-    # CORAL(S124): the sweep lstats each instance dir instead of following it
+    # CORAL(S124)
     def _racy_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
         if Path(str(path)).name == "ap-avanishing":
             raise FileNotFoundError(2, "vanished mid-sweep", str(path))

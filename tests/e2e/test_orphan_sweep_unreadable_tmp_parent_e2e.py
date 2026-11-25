@@ -141,8 +141,8 @@ def test_server_boot_survives_unlistable_tmp_parent(tmp_path: Path) -> None:
     parent = tmp_path / "shared"
     parent.mkdir(mode=0o700)
     (parent / "ap-foreign").mkdir(mode=0o700)
-    # CORAL(S124): 0333 is refused as other-writable; 0300 is owner-only and kept as is
-    parent.chmod(0o300)  # creatable but not listable
+    # CORAL(S124)
+    parent.chmod(0o300)
     boot = _boot_server_and_wait_health(parent, tmp_path)
     try:
         _proc, outcome, log_path = next(boot)

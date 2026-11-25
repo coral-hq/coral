@@ -115,11 +115,6 @@ _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
 # Holds an owner claim; older builds wrote a bare PID.
 _AP_PID_FILE = "AP_PID"
 
-# Mode bits applied to the per-conversation socket (the directories are
-# made private by ``ensure_private_dir``, CORAL(S124)). Filesystem
-# permissions + the per-AP-uuid scope are the v1 auth boundary. mTLS /
-# bearer tokens are deferred until federation (see §What's deferred in
-# the design doc).
 # Socket files inherit the parent dir permissions; setting 0o600
 # explicitly on the file ensures the same restriction even on
 # umask configurations that would otherwise loosen it.
@@ -709,7 +704,7 @@ class HarnessProcessManager:
         if self._started:
             return
         self._shutting_down = False
-        # CORAL(S124): verify the root before the sweep reads or kills anything under it
+        # CORAL(S124)
         ensure_private_dir(self._tmp_parent)
         if sweep_orphans:
             # Sweep BEFORE creating our own dir, so a crashed prior instance
@@ -1273,7 +1268,7 @@ class HarnessProcessManager:
     def _ensure_instance_dir(self) -> None:
         # Temporary-file cleanup may remove either directory after start().
         # Recreated state needs the same private modes and live-owner claim.
-        # CORAL(S124): a planted symlink would move the sockets out of the sandbox deny
+        # CORAL(S124)
         ensure_private_dir(self._tmp_parent)
         ensure_private_dir(self._instance_dir)
         write_owner_claim(self._instance_dir, filename=_AP_PID_FILE)
@@ -1645,7 +1640,7 @@ async def sweep_orphaned_harness_processes(*, tmp_parent: Path | None = None) ->
     """
     root = tmp_parent if tmp_parent is not None else _default_tmp_parent()
     try:
-        # CORAL(S124): never follow a symlinked root; only this user's private dir is swept
+        # CORAL(S124)
         info = os.lstat(root)
     except FileNotFoundError:
         return
@@ -1673,7 +1668,7 @@ async def sweep_orphaned_harness_processes(*, tmp_parent: Path | None = None) ->
         try:
             if not child.name.startswith("ap-"):
                 continue
-            # CORAL(S124): skip a symlinked, foreign or non-directory instance dir unread
+            # CORAL(S124)
             if (not child.is_dir()) if IS_WINDOWS else private_dir_problem(os.lstat(child)):
                 continue
             sentinel = child / _AP_PID_FILE

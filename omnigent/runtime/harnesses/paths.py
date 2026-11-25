@@ -35,8 +35,8 @@ def resolve_harness_tmp_parent(env: Mapping[str, str] | None = None) -> Path:
     return absolute_harness_tmp_parent(harness_tmp_parent(env))
 
 
+# CORAL(S124)
 def private_dir_problem(info: os.stat_result) -> str | None:
-    """CORAL(S124): why an lstat/fstat result is not this user's own real private directory."""
     if stat.S_ISLNK(info.st_mode):
         return "is a symlink (a symlinked harness socket root is refused; set the real path)"
     if not stat.S_ISDIR(info.st_mode):
@@ -48,18 +48,8 @@ def private_dir_problem(info: os.stat_result) -> str | None:
     return None
 
 
+# CORAL(S124)
 def ensure_private_dir(path: Path) -> None:
-    """
-    CORAL(S124): create *path* 0700, or refuse it unless it is this user's own real directory.
-
-    Parents are created unchecked, so ``/tmp -> /private/tmp`` and nested configured roots
-    work. The leaf is opened without following a symlink, then checked and tightened to 0700
-    through the descriptor; a group- or other-writable leaf is refused, since others could
-    have planted entries in it.
-
-    :raises RuntimeError: When *path* is a symlink, not a directory, owned by another user,
-        or writable by group or other.
-    """
     if IS_WINDOWS:
         path.mkdir(parents=True, exist_ok=True)
         return
@@ -71,8 +61,6 @@ def ensure_private_dir(path: Path) -> None:
         try:
             fd = os.open(path, flags)
         except PermissionError:
-            # An owner-unreadable dir (e.g. 0300) cannot be opened; accept it unchanged
-            # only when lstat shows it is already this user's own real, owner-only dir.
             info = os.lstat(path)
             if private_dir_problem(info) is None and not info.st_mode & 0o077:
                 return

@@ -605,7 +605,7 @@ def test_harness_socket_roots_never_raise_and_keep_the_default(
     if setting == "loop":
         setting = str(tmp_path / "loop")
         pathlib.Path(setting).symlink_to(setting)
-        # CORAL(S112): a looping configured root is kept by its plain spelling
+        # CORAL(S112)
         kept = [_resolved_path(pathlib.Path(setting))]
     elif setting == "deleted_cwd":
         gone = tmp_path / "gone"
