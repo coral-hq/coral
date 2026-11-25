@@ -5662,6 +5662,18 @@
             "description": "Human-readable summary, e.g. `\"Connection timed out after 30s\"`.",
             "title": "Message",
             "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
           }
         },
         "required": [

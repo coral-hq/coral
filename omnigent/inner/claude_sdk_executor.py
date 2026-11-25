@@ -102,6 +102,7 @@ from .executor import (
     ExecutorConfig,
     ExecutorError,
     ExecutorEvent,
+    ExecutorNotice,
     Message,
     ReasoningChunk,
     TextChunk,
@@ -2846,6 +2847,14 @@ class ClaudeSDKExecutor(Executor):
                 if self._cli_path is None
                 else "the sandbox could not wrap it; the runner log has the cause"
             )
+        # CORAL(S132)
+        self._unwrapped_cli_notice: str | None = None
+        if (
+            self._claude_wrap_failure is None
+            and self._cli_wrapper_path is None
+            and _claude_cli_sandbox_requested(self._os_env_spec)
+        ):
+            self._unwrapped_cli_notice = _unwrapped_cli_reason(self._os_env_spec, self._cli_path)
 
         # True when the gateway transport was derived from a ~/.databrickscfg
         # profile (no gateway host or base URL supplied directly). Gates the
@@ -4414,6 +4423,16 @@ class ClaudeSDKExecutor(Executor):
                 retryable=False,
             )
             return
+        # CORAL(S132)
+        if self._unwrapped_cli_notice is not None:
+            yield ExecutorNotice(
+                code="claude_cli_unsandboxed",
+                title="This session's Claude CLI runs outside its OS sandbox",
+                message=f"This session's Claude CLI runs unwrapped because "
+                f"{self._unwrapped_cli_notice}. It and the MCP servers it starts can read and "
+                "change everything your user account can.",
+            )
+            self._unwrapped_cli_notice = None
         # CORAL(S125): an isolated CLI behind the credential proxy gets only allow-listed names
         # from the user's settings env; read here, so the endpoint it names is checked below
         cli_settings_env: dict[str, str] | None = None
