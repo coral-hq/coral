@@ -3595,3 +3595,22 @@ async def test_ask_user_question_roundtrip_real_executor_hook_through_adapter_br
     payload = getattr(params, "ask_user_question", None)
     assert payload is not None
     assert payload["questions"][0]["question"] == "Env?"
+
+
+# CORAL(S132)
+def test_translate_event_notice_emits_a_titled_harness_error_event() -> None:
+    """An ``ExecutorNotice`` reaches the session as a titled ``response.error``."""
+    from omnigent.inner.executor import ExecutorNotice
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+
+    adapter = ExecutorAdapter(executor_factory=lambda: _StubExecutor())
+    ctx = _RecordingTurnContext()
+
+    adapter._translate_event(ExecutorNotice(code="c", title="t", message="m"), ctx)  # type: ignore[arg-type]
+
+    (event,) = ctx.emitted
+    assert json.loads(event.model_dump_json(exclude_none=True)) == {
+        "type": "response.error",
+        "source": "harness",
+        "error": {"code": "c", "message": "m", "title": "t"},
+    }

@@ -5313,3 +5313,50 @@ seams:
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false
+
+  - id: S132
+    title: A sandboxed non-Coral claude CLI its sandbox did not wrap is reported in its session
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Before this seam a non-Coral claude-sdk agent whose os_env asks for a
+      wrap (caller_process, a sandbox type other than none, network on, no
+      operator opt-out) ran its CLI unwrapped as the user, with every MCP
+      server it starts, when no system claude was installed (the SDK's
+      bundled CLI), the sandbox did not resolve, it resolved inactive or its
+      trial wrap failed; only a runner-log warning, and none for the first
+      and third, said so. S113 and S129 refuse this for Coral; S115 keeps it
+      for other agents so hosts that rely on the bundled CLI keep working.
+      The executor now records S129's reason for such a CLI, and the first
+      turn of each executor yields ExecutorNotice (code
+      claude_cli_unsandboxed, title "This session's Claude CLI runs outside
+      its OS sandbox", the reason and what the CLI can reach) right after the
+      S113 refusal check; the turn goes on. The executor adapter emits it as
+      a non-fatal response.error with source harness, which the server
+      persists as an error item and the web UI shows as an error card;
+      RetryErrorDetail gains an optional title (openapi.json regenerated),
+      so the card carries that headline live and after a reload. Wrapped CLIs, the by-design unwrapped
+      cases and Coral refusals are unchanged. Not covered: a rebuilt executor
+      (after an unclean turn) shows the notice again; a first turn that then
+      fails groups its error under the notice in the web UI, and on a cold
+      load the persisted notice stands in for the synthetic last-task error
+      card; the notice
+      counts as turn progress, so a first turn that stalls before any output
+      is not retried by the idle watchdog; claude-native (CRL-197).
+    files:
+      - omnigent/inner/claude_sdk_executor.py
+      - omnigent/inner/executor.py
+      - omnigent/runtime/harnesses/_executor_adapter.py
+      - omnigent/server/schemas.py
+      - openapi.json
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/runtime/harnesses/test_executor_adapter.py
+    tests:
+      - tests/inner/test_claude_sdk_executor.py
+      - tests/runtime/harnesses/test_executor_adapter.py
+      - tests/server/test_openapi_drift.py
+    budget_lines: 80
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false

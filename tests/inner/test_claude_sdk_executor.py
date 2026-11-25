@@ -10060,6 +10060,62 @@ async def test_a_cli_that_needs_a_sandbox_runs_wrapped_or_not_at_all(monkeypatch
         gateway_shim.assert_not_awaited()  # refused before the credential proxy starts
 
 
+# CORAL(S132)
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("no-system-claude", _NO_CLAUDE),
+        ("resolve-fails", _WRAP_FAULT),
+        ("inactive", _WRAP_FAULT),
+        ("probe-fails", _WRAP_FAULT),
+        ("wraps", None),
+        ("operator-opt-out", None),
+        ("network-off", None),
+        ("sandbox-none", None),
+    ],
+)
+async def test_an_unwrapped_sandboxed_cli_is_reported_in_its_session_once(
+    monkeypatch, tmp_path, case, reason
+):
+    """A non-Coral CLI its sandbox did not wrap still runs, and its first turn says so."""
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+    from omnigent.inner.executor import ExecutorNotice
+
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor._claude_user_settings_env", lambda *where: {}
+    )
+    if case != "no-system-claude":
+        _break_wrap(monkeypatch, case)
+    sandbox = OSEnvSandboxSpec(
+        type="none" if case == "sandbox-none" else "linux_bwrap",
+        allow_network=case != "network-off",
+    )
+    executor = _isolation_executor(
+        monkeypatch,
+        tmp_path,
+        cli=None if case == "no-system-claude" else "/usr/bin/claude",
+        os_env=OSEnvSpec(cwd=str(tmp_path), sandbox=sandbox),
+    )
+
+    first, fake_sdk, _ = await _turn_with_recording_sdk(executor)
+    second, _, _ = await _turn_with_recording_sdk(executor)
+    await executor.close()
+
+    assert not [e for e in first + second if isinstance(e, ExecutorError)]
+    assert fake_sdk.created_clients
+    notices = [e for e in first if isinstance(e, ExecutorNotice)]
+    assert not [e for e in second if isinstance(e, ExecutorNotice)]
+    if reason is None:
+        assert notices == []
+        return
+    assert [(n.code, n.title) for n in notices] == [
+        ("claude_cli_unsandboxed", "This session's Claude CLI runs outside its OS sandbox")
+    ]
+    assert notices[0].message.startswith(
+        f"This session's Claude CLI runs unwrapped because {reason}. "
+    )
+
+
 async def test_a_concurrent_connect_cannot_hand_a_cli_the_hosts_config_names(
     monkeypatch, tmp_path
 ):

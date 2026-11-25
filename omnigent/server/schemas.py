@@ -4924,6 +4924,8 @@ class RetryErrorDetail(BaseModel):
     code: str
     message: str
     detail: dict[str, Any] | None = None
+    # CORAL(S132)
+    title: str | None = None
 
     model_config = ConfigDict(extra="ignore")
 
