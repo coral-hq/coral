@@ -21,3 +21,8 @@ export function scriptFromAnswers(answers: readonly SimulationAnswer[]): SimScri
   }
   return { inputs: [...inputs.values()] };
 }
+
+export const answersFromScript = (script: SimScript): SimulationAnswer[] =>
+  (script.inputs ?? []).flatMap(({ node_id, kind, values }) =>
+    values.map((value) => ({ nodeId: node_id, kind, value })),
+  );

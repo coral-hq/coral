@@ -3,7 +3,9 @@ import { apiErrorFromResponse } from "@/lib/sessionsApi";
 import type {
   CoralOperations,
   InvalidResult,
+  SavedCaseOut,
   SavedWorkflowOut,
+  SimCase,
   SimScript,
   SimulatedResult,
   TemplateOut,
@@ -19,11 +21,18 @@ const USE_TEMPLATE_PATH =
   "/v1/coral/templates/{template_id}:use" satisfies Operation<"coral_use_template">["path"];
 const SIMULATE_PATH =
   "/v1/coral/workflows:simulate" satisfies Operation<"coral_simulate_workflow">["path"];
+const CASES_PATH =
+  "/v1/coral/workflows/{workflow_id}/cases" satisfies Operation<"coral_list_workflow_cases">["path"] &
+    Operation<"coral_save_workflow_case">["path"];
+const CASE_PATH =
+  "/v1/coral/workflows/{workflow_id}/cases/{case_id}" satisfies Operation<"coral_delete_workflow_case">["path"];
 const NO_ARGUMENTS: Operation<"coral_use_template">["body"] = {};
 
 export const WORKFLOWS_QUERY_KEY = ["coral-workflows"] as const;
 export const TEMPLATES_QUERY_KEY = ["coral-templates"] as const;
 export const workflowQueryKey = (workflowKey: string) => ["coral-workflow", workflowKey] as const;
+export const workflowCasesQueryKey = (workflowId: string) =>
+  ["coral-workflow-cases", workflowId] as const;
 
 export class WorkflowsApiError extends Error {
   readonly status: number;
@@ -144,4 +153,32 @@ export async function simulateWorkflow(
 ): Promise<SimulatedResult | InvalidResult> {
   const body: Operation<"coral_simulate_workflow">["body"] = { yaml, script };
   return readJson(await postJson(SIMULATE_PATH, body, signal), "simulate workflow");
+}
+
+const casesUrl = (workflowId: string) =>
+  CASES_PATH.replace("{workflow_id}", () => encodeURIComponent(workflowId));
+
+export async function listWorkflowCases(
+  workflowId: string,
+  signal?: AbortSignal,
+): Promise<SavedCaseOut[]> {
+  const payload = await readJson<unknown>(
+    await authenticatedFetch(casesUrl(workflowId), { signal }),
+    "list cases",
+  );
+  if (!Array.isArray(payload)) throw new WorkflowsApiError("Invalid case list response", 502);
+  return payload as SavedCaseOut[];
+}
+
+export async function saveWorkflowCase(workflowId: string, body: SimCase): Promise<SavedCaseOut> {
+  return readJson(await postJson(casesUrl(workflowId), body), "save case");
+}
+
+export async function deleteWorkflowCase(workflowId: string, caseId: string): Promise<void> {
+  const url = CASE_PATH.replace("{workflow_id}", () => encodeURIComponent(workflowId)).replace(
+    "{case_id}",
+    () => encodeURIComponent(caseId),
+  );
+  const response = await authenticatedFetch(url, { method: "DELETE" });
+  if (!response.ok) await readJson(response, "delete case");
 }

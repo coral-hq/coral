@@ -4,11 +4,12 @@ import type {
   CompiledGraph,
   InvalidResult,
   SimResult,
+  SimScript,
   SimulatedResult,
 } from "../api/generated/coralApi";
 import { MAX_RETRY_AFTER_MS } from "../api/runsApi";
 import { runOverlay, type NodeOverlay } from "../canvas/runOverlay";
-import { scriptFromAnswers, type SimulationAnswer } from "./simulationScript";
+import { answersFromScript, scriptFromAnswers, type SimulationAnswer } from "./simulationScript";
 
 // The editor's dry run: it posts the YAML and the answers so far on open and after each
 // answer, undo, reset or re-run, never on typing; a newer request aborts the older one. An
@@ -44,6 +45,7 @@ export interface Simulation {
   reset: () => void;
   /** Post the same answers with the current YAML. */
   rerun: () => void;
+  runScript: (script: SimScript) => void;
 }
 
 interface State {
@@ -87,6 +89,7 @@ export function useSimulation(yaml: string, enabled: boolean): Simulation {
   const stateRef = useRef<State>(IDLE);
   const inFlight = useRef<InFlight | null>(null);
   const yamlRef = useRef(yaml);
+  const pendingScript = useRef<readonly SimulationAnswer[] | null>(null);
 
   const commit = useCallback((update: (previous: State) => State) => {
     stateRef.current = update(stateRef.current);
@@ -160,7 +163,8 @@ export function useSimulation(yaml: string, enabled: boolean): Simulation {
 
   useEffect(() => {
     if (!enabled) return undefined;
-    post([], yamlRef.current);
+    post(pendingScript.current ?? [], yamlRef.current);
+    pendingScript.current = null;
     return () => {
       cancel();
       commit(() => IDLE);
@@ -202,6 +206,10 @@ export function useSimulation(yaml: string, enabled: boolean): Simulation {
     if (inFlight.current !== null && stateRef.current.postedYaml === yaml) return;
     post(stateRef.current.answers, yaml);
   };
+  const runScript = (script: SimScript) => {
+    if (enabled) post(answersFromScript(script), yaml);
+    else pendingScript.current = answersFromScript(script);
+  };
 
   return {
     response,
@@ -218,5 +226,6 @@ export function useSimulation(yaml: string, enabled: boolean): Simulation {
     undo,
     reset,
     rerun,
+    runScript,
   };
 }

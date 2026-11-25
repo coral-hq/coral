@@ -10,13 +10,16 @@ import {
   getWorkflowByKey,
   shouldRetryWorkflows,
   saveWorkflow,
+  workflowCasesQueryKey,
   workflowQueryKey,
 } from "../api/client";
+import type { SimScript } from "../api/generated/coralApi";
 import { CORAL_SUB_FEATURE } from "../api/types";
 import type { WorkflowDetail } from "../api/workflowTypes";
 import { FlowCanvas } from "../canvas/FlowCanvas";
 import { isCoralAvailable, useCoralInfo } from "../gate/useCoralInfo";
 import { ProfilePicker } from "../profiles/ProfilePicker";
+import { SavedCases } from "../simulate/SavedCases";
 import { SimulatePanel } from "../simulate/SimulatePanel";
 import { useSimulation } from "../simulate/useSimulation";
 import { StartRunDialog } from "../start/StartRunDialog";
@@ -102,6 +105,7 @@ function EditorSurface({
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: WORKFLOWS_QUERY_KEY });
       void queryClient.invalidateQueries({ queryKey: workflowQueryKey(workflowKey) });
+      void queryClient.invalidateQueries({ queryKey: workflowCasesQueryKey(workflowId) });
     },
   });
 
@@ -123,6 +127,10 @@ function EditorSurface({
   const closeSimulate = () => {
     setSimulateOpen(false);
     simulateButtonRef.current?.focus();
+  };
+  const runCase = (script: SimScript) => {
+    simulation.runScript(script);
+    setSimulateOpen(true);
   };
 
   return (
@@ -187,8 +195,15 @@ function EditorSurface({
         </div>
       </div>
       {simulateOpen && (
-        <SimulatePanel id={simulatePanelId} simulation={simulation} onClose={closeSimulate} />
+        <SimulatePanel
+          id={simulatePanelId}
+          simulation={simulation}
+          onClose={closeSimulate}
+          workflowId={workflowId}
+          dirty={dirty}
+        />
       )}
+      <SavedCases workflowId={workflowId} onRun={runCase} />
       <ProblemList diagnostics={diagnostics} error={validation.error} saveError={save.error} />
       <StartRunDialog
         workflowId={workflowId}

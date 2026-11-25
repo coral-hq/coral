@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -11,7 +12,7 @@ import { WorkflowsApiError } from "../api/client";
 import { REVIEW_LOOP_COMPILED, REVIEW_LOOP_SIMULATIONS } from "../fixtures";
 import { isolated } from "../shared/pauseCopy";
 
-const api = vi.hoisted(() => ({ simulateWorkflow: vi.fn() }));
+const api = vi.hoisted(() => ({ simulateWorkflow: vi.fn(), saveWorkflowCase: vi.fn() }));
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ClientModule>()),
   ...api,
@@ -62,15 +63,39 @@ function held<T>() {
   return { promise, release };
 }
 
-function Harness({ yaml, onClose }: { yaml: string; onClose: () => void }) {
-  return <SimulatePanel simulation={useSimulation(yaml, true)} onClose={onClose} />;
+interface HarnessProps {
+  yaml: string;
+  onClose: () => void;
+  dirty: boolean;
+  client: QueryClient;
 }
 
-function renderPanel(yaml = "v1") {
+function Harness({ yaml, onClose, dirty, client }: HarnessProps) {
+  return (
+    <QueryClientProvider client={client}>
+      <Panel yaml={yaml} onClose={onClose} dirty={dirty} />
+    </QueryClientProvider>
+  );
+}
+
+function Panel({ yaml, onClose, dirty }: Omit<HarnessProps, "client">) {
+  return (
+    <SimulatePanel
+      simulation={useSimulation(yaml, true)}
+      onClose={onClose}
+      workflowId="w1"
+      dirty={dirty}
+    />
+  );
+}
+
+function renderPanel(yaml = "v1", dirty = false) {
   const onClose = vi.fn();
-  const view = render(<Harness yaml={yaml} onClose={onClose} />);
-  const setYaml = (next: string) => view.rerender(<Harness yaml={next} onClose={onClose} />);
-  return { ...view, onClose, setYaml };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const props = { onClose, dirty, client };
+  const view = render(<Harness yaml={yaml} {...props} />);
+  const setYaml = (next: string) => view.rerender(<Harness yaml={next} {...props} />);
+  return { ...view, onClose, setYaml, client };
 }
 
 const button = (name: string) => screen.getByRole("button", { name });
@@ -81,6 +106,7 @@ const settled = () => waitFor(() => expect(screen.queryByText("Simulating…")).
 beforeEach(() => {
   api.simulateWorkflow.mockReset();
   api.simulateWorkflow.mockResolvedValue(simulated(NEEDS_REVIEW));
+  api.saveWorkflowCase.mockReset();
 });
 afterEach(() => {
   cleanup();
@@ -552,5 +578,94 @@ describe("SimulatePanel", () => {
     await screen.findByText(`Choose a result for ${isolated("Review")}:`);
     fireEvent.click(button("Close"));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  describe("Save as case", () => {
+    const toApproved = async () => {
+      await screen.findByText(`Choose a result for ${isolated("Review")}:`);
+      api.simulateWorkflow.mockResolvedValueOnce(simulated(NEEDS_GATE));
+      fireEvent.click(button("approved"));
+      await settled();
+      api.simulateWorkflow.mockResolvedValueOnce(simulated(REVIEW_LOOP_SIMULATIONS.approved));
+      fireEvent.click(button("approve"));
+      await screen.findByText("The run completes.");
+    };
+    const nameField = () => screen.getByRole("textbox", { name: "Case name" });
+
+    it("saves the answers and the result as a case, then refreshes the case list", async () => {
+      api.saveWorkflowCase.mockResolvedValue({});
+      const { client } = renderPanel();
+      const invalidate = vi.spyOn(client, "invalidateQueries");
+      await toApproved();
+      expect(button("Save as case")).toBeDisabled();
+      fireEvent.change(nameField(), { target: { value: "  Approved first time " } });
+      fireEvent.click(button("Save as case"));
+      expect(await screen.findByText("Saved as a case.")).toBeInTheDocument();
+      expect(api.saveWorkflowCase).toHaveBeenCalledWith("w1", {
+        name: "Approved first time",
+        script: {
+          inputs: [
+            { node_id: "review", kind: "label", values: ["approved"] },
+            { node_id: "approve_change", kind: "gate", values: ["approve"] },
+          ],
+        },
+        expect: {
+          outcome: "completed",
+          steps: ["implement:done", "review:approved", "approve_change:approve"],
+          gates_reached: ["approve_change"],
+          limits_hit: [],
+          sessions: 3,
+        },
+      });
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["coral-workflow-cases", "w1"] });
+      expect(nameField()).toHaveValue("");
+    });
+
+    it.each([
+      ["case_exists", "The workflow already has a case with this name."],
+      ["case_limit_reached", "A workflow holds at most 20 cases. Delete one to save another."],
+      [null, "Couldn't save the case. Try again."],
+    ])("says why the server refused the case (%s)", async (code, message) => {
+      api.saveWorkflowCase.mockRejectedValue(
+        new WorkflowsApiError("Failed to save case (409)", code ? 409 : 500, null, code),
+      );
+      renderPanel();
+      await toApproved();
+      fireEvent.change(nameField(), { target: { value: "Taken" } });
+      fireEvent.click(button("Save as case"));
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    });
+
+    it("is not offered while the run waits for an answer", async () => {
+      renderPanel();
+      await screen.findByText(`Choose a result for ${isolated("Review")}:`);
+      expect(screen.queryByRole("button", { name: "Save as case" })).toBeNull();
+    });
+
+    it("is not offered while the editor has unsaved changes", async () => {
+      api.simulateWorkflow.mockResolvedValue(simulated(REVIEW_LOOP_SIMULATIONS.approved));
+      renderPanel("v1", true);
+      await screen.findByText("The run completes.");
+      expect(screen.queryByRole("button", { name: "Save as case" })).toBeNull();
+    });
+
+    it("is not offered for a stale result", async () => {
+      api.simulateWorkflow.mockResolvedValue(simulated(REVIEW_LOOP_SIMULATIONS.approved));
+      const { setYaml } = renderPanel();
+      await screen.findByText("The run completes.");
+      expect(button("Save as case")).toBeInTheDocument();
+      setYaml("v2");
+      expect(screen.queryByRole("button", { name: "Save as case" })).toBeNull();
+    });
+
+    it("is not offered for a path longer than a case can expect", async () => {
+      const step = REVIEW_LOOP_SIMULATIONS.approved.steps[0];
+      api.simulateWorkflow.mockResolvedValue(
+        simulated(ended({ steps: Array.from({ length: 201 }, () => step) })),
+      );
+      renderPanel();
+      await screen.findByText("The run completes.");
+      expect(screen.queryByRole("button", { name: "Save as case" })).toBeNull();
+    });
   });
 });

@@ -1,15 +1,19 @@
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import { WorkflowsApiError } from "../api/client";
+import { WorkflowsApiError, saveWorkflowCase, workflowCasesQueryKey } from "../api/client";
 import type {
   CompiledGraph,
+  SimCase,
   SimNeedsInput,
   SimRejection,
   SimResult,
 } from "../api/generated/coralApi";
 import { passText } from "../canvas/runOverlay";
 import { UNKNOWN_PAUSE_TEXT, isolated, nodeLabel, pauseCopy } from "../shared/pauseCopy";
+import { scriptFromAnswers, type SimulationAnswer } from "./simulationScript";
 import { isServerBusy, type Simulation } from "./useSimulation";
 
 // The editor's Simulate panel. Everything it shows from the workflow or the script is
@@ -28,6 +32,14 @@ const STOPPED_BY_TEXT: Readonly<Record<StoppedBy, string>> = {
   graph_size: "The workflow cannot be simulated: it has too many nodes or arrows.",
 };
 
+const MAX_CASE_STEPS = 200;
+const MAX_CASE_NAME_CHARS = 120;
+
+const SAVE_CASE_ERROR_TEXT: Readonly<Record<string, string>> = {
+  case_exists: "The workflow already has a case with this name.",
+  case_limit_reached: "A workflow holds at most 20 cases. Delete one to save another.",
+};
+
 const CHECK_RESULT_TEXT: Readonly<Record<string, string>> = {
   pass: "Checks pass",
   fail: "Checks fail",
@@ -36,11 +48,24 @@ const CHECK_RESULT_TEXT: Readonly<Record<string, string>> = {
 export interface SimulatePanelProps {
   simulation: Simulation;
   onClose: () => void;
+  workflowId: string;
+  dirty: boolean;
   id?: string;
 }
 
-export function SimulatePanel({ simulation, onClose, id }: SimulatePanelProps) {
+export function SimulatePanel({ simulation, onClose, workflowId, dirty, id }: SimulatePanelProps) {
   const { response, isPending, stale, answers, busy, error } = simulation;
+  const saveable =
+    !dirty &&
+    !stale &&
+    !isPending &&
+    !error &&
+    response?.valid &&
+    response.simulation &&
+    response.simulation.outcome !== "needs_input" &&
+    response.simulation.steps.length <= MAX_CASE_STEPS
+      ? response.simulation
+      : null;
   const sectionRef = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const undoRef = useRef<HTMLButtonElement>(null);
@@ -153,8 +178,84 @@ export function SimulatePanel({ simulation, onClose, id }: SimulatePanelProps) {
             onAnswer={(value) => act("answer", () => simulation.answer(value))}
           />
         )}
+        {saveable && <SaveCase workflowId={workflowId} result={saveable} answers={answers} />}
       </div>
     </section>
+  );
+}
+
+function SaveCase({
+  workflowId,
+  result,
+  answers,
+}: {
+  workflowId: string;
+  result: SimResult;
+  answers: readonly SimulationAnswer[];
+}) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const save = useMutation({
+    mutationFn: (body: SimCase) => saveWorkflowCase(workflowId, body),
+    onSuccess: () => {
+      setName("");
+      void queryClient.invalidateQueries({ queryKey: workflowCasesQueryKey(workflowId) });
+    },
+  });
+  const trimmed = name.trim();
+  const submit = () =>
+    save.mutate({
+      name: trimmed,
+      script: scriptFromAnswers(answers),
+      expect: {
+        outcome: result.outcome,
+        steps: result.steps.map((step) => `${step.node_id}:${step.result}`),
+        gates_reached: result.gates_reached,
+        limits_hit: result.limits_hit,
+        sessions: result.sessions.total,
+      },
+    });
+  const failure = save.error;
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (trimmed && !save.isPending) submit();
+      }}
+    >
+      <Input
+        aria-label="Case name"
+        placeholder="Case name"
+        className="w-56"
+        maxLength={MAX_CASE_NAME_CHARS}
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+      />
+      <Button
+        type="submit"
+        variant="outline"
+        size="sm"
+        componentId="coral.simulate.save_case"
+        disabled={!trimmed}
+        loading={save.isPending}
+      >
+        Save as case
+      </Button>
+      {save.isSuccess && (
+        <p role="status" className="text-muted-foreground text-xs">
+          Saved as a case.
+        </p>
+      )}
+      {failure && (
+        <p role="alert" className="text-destructive text-xs">
+          {(failure instanceof WorkflowsApiError &&
+            failure.code !== null &&
+            SAVE_CASE_ERROR_TEXT[failure.code]) ||
+            "Couldn't save the case. Try again."}
+        </p>
+      )}
+    </form>
   );
 }
 
