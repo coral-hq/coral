@@ -452,7 +452,8 @@ def _run_harness_child(request: dict[str, Any]) -> None:
 
     from omnigent.runtime.harnesses._runner import main
 
-    main(list(request.get("argv") or []))
+    # CORAL(S123)
+    main(list(request.get("argv") or []), auth_token=request.get("auth_token"))
 
 
 class _ZygoteServer:

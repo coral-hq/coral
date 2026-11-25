@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hmac
 import importlib
 import os
 import signal
@@ -56,6 +57,7 @@ from typing import cast
 
 import uvicorn
 from fastapi import FastAPI
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from omnigent._platform import IS_WINDOWS
 from omnigent.inner import _proc
@@ -171,15 +173,68 @@ def _load_harness_app(harness: str, module_path: str, conversation_id: str) -> F
     # state containers (per §Harness in-memory state) key off this.
     app.state.conversation_id = conversation_id
     app.state.harness = harness
-    # S1 (security): the per-spawn bearer token the parent (process_manager)
-    # presents on every ``/v1`` request, delivered via the private spawn env
-    # (``OMNIGENT_HARNESS_AUTH_TOKEN``); the scaffold's auth check compares
-    # against it. Set only on Windows (where the IPC is a loopback-TCP listener);
-    # ``None`` on POSIX (uid-isolated UDS) and when the app is built outside the
-    # runner (e.g. unit tests calling create_app() directly), which both leave
-    # the gate inert.
-    app.state.harness_auth_token = os.environ.get("OMNIGENT_HARNESS_AUTH_TOKEN")
     return app
+
+
+# CORAL(S123)
+_HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
+_MAX_STDIN_TOKEN_BYTES = 4096
+_NO_TOKEN_MESSAGE = (
+    "runner: harness got no bearer token on stdin; the runner that spawned it "
+    "predates this build, so restart the session"
+)
+_UNAUTHORIZED_BODY = b'{"detail":"unauthorized"}'
+
+
+class _BearerGate:
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self.app = app
+        self._token = token.encode("utf-8")
+
+    def _authorized(self, scope: Scope) -> bool:
+        for name, value in scope.get("headers") or ():
+            if name == b"authorization":
+                scheme, _, presented = value.partition(b" ")
+                return scheme.lower() == b"bearer" and hmac.compare_digest(presented, self._token)
+        return False
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        kind = scope["type"]
+        if kind == "lifespan" or (kind in ("http", "websocket") and self._authorized(scope)):
+            await self.app(scope, receive, send)
+        elif kind == "http":
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(_UNAUTHORIZED_BODY)).encode()),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": _UNAUTHORIZED_BODY})
+        elif kind == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+
+
+def _read_stdin_token() -> str:
+    try:
+        if os.isatty(0):
+            return ""
+        data = b""
+        while len(data) < _MAX_STDIN_TOKEN_BYTES:
+            chunk = os.read(0, _MAX_STDIN_TOKEN_BYTES - len(data))
+            if not chunk:
+                break
+            data += chunk
+        devnull = os.open(os.devnull, os.O_RDONLY)
+        if devnull != 0:
+            os.dup2(devnull, 0)
+            os.close(devnull)
+    except OSError:
+        return ""
+    return data.decode("utf-8", "replace").strip()
 
 
 def _arm_hard_exit(reason: str, sig: int = signal.SIGTERM) -> None:
@@ -368,7 +423,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _create_uvicorn_config(
-    app: FastAPI,
+    app: ASGIApp,
     socket_path: str | None,
     bind: str | None,
 ) -> uvicorn.Config:
@@ -435,13 +490,19 @@ def _configure_logging(harness: str, conversation_id: str) -> None:
         print(f"runner: could not configure harness logging: {exc!r}", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, auth_token: str | None = None) -> None:
     """
     Runner entrypoint.
 
     :param argv: Override for ``sys.argv[1:]``; defaults to
         the live process arguments. Tests pass an explicit list.
     """
+    # CORAL(S123)
+    os.environ.pop(_HARNESS_AUTH_TOKEN_ENV, None)
+    token = (auth_token if auth_token is not None else _read_stdin_token()).strip()
+    if not token:
+        print(_NO_TOKEN_MESSAGE, file=sys.stderr)
+        raise SystemExit(2)
     args = _parse_args(argv if argv is not None else sys.argv[1:])
 
     # Attach a log handler before anything harness-specific runs. Without this
@@ -462,6 +523,7 @@ def main(argv: list[str] | None = None) -> None:
         pass  # tracing init failed; continue without tracing
 
     app = _load_harness_app(args.harness, args.module, args.conversation_id)
+    app.state.harness_auth_token = token
     if args.parent_pid is not None:
         # Skip PR_SET_PDEATHSIG for a zygote-forked harness: it binds death to
         # the OS parent (the zygote), not the runner, so it would fire only when
@@ -470,7 +532,7 @@ def main(argv: list[str] | None = None) -> None:
         if not env_truthy(os.environ.get(ZYGOTE_HARNESS_FORKED_ENV_VAR)):
             _set_pdeathsig()
         _start_parent_watchdog(args.parent_pid)
-    config = _create_uvicorn_config(app, args.socket, args.bind)
+    config = _create_uvicorn_config(_BearerGate(app, token), args.socket, args.bind)
     # Move the now-static import graph out of GC's tracked set, so a full
     # collection mid-session no longer walks it (a ~50 ms pause on a warm turn).
     # The executor's lazily imported SDK is frozen after the first turn.

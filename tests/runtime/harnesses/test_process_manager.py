@@ -1654,6 +1654,8 @@ async def test_orphan_sweep_from_another_pid_namespace_keeps_a_live_harness(
         async with httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(uds=str(socket_path)),
             base_url="http://harness.local",
+            # CORAL(S123)
+            headers={"Authorization": client.headers["Authorization"]},
         ) as fresh:
             assert (await fresh.get("/pid")).json()["pid"] == harness_pid
     finally:
@@ -1930,6 +1932,109 @@ async def test_get_client_env_override_is_per_conversation(
         assert resp_b.json()["value"] == "beta"
     finally:
         await manager.shutdown()
+
+
+# CORAL(S123)
+
+
+def _bearer(client: httpx.AsyncClient) -> str:
+    scheme, _, token = client.headers["Authorization"].partition(" ")
+    assert scheme == "Bearer" and token
+    return token
+
+
+@pytest.mark.posix_only
+async def test_harness_socket_refuses_a_request_without_the_bearer(
+    manager: HarnessProcessManager,
+) -> None:
+    await manager.start()
+    try:
+        client = await manager.get_client("conv_gate", _TEST_HARNESS_NAME)
+        assert (await client.get("/health")).status_code == 200
+        async with httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(uds=str(manager.socket_path("conv_gate"))),
+            base_url="http://harness.local",
+        ) as anonymous:
+            assert (await anonymous.get("/health")).status_code == 401
+            response = await anonymous.post(
+                "/v1/sessions/conv_gate/events",
+                content=b"{not json",
+                headers={"Authorization": "Bearer wrong", "Content-Type": "application/json"},
+            )
+            assert response.status_code == 401
+            assert response.json() == {"detail": "unauthorized"}
+    finally:
+        await manager.shutdown()
+
+
+async def test_direct_exec_passes_the_bearer_on_stdin_only(
+    manager: HarnessProcessManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNIGENT_HARNESS_AUTH_TOKEN", "inherited-token")
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def capturing_exec(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        calls.append((args, kwargs))
+        return await real_exec(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing_exec)
+    await manager.start()
+    try:
+        client = await manager.get_client("conv_stdin", _TEST_HARNESS_NAME)
+        token = _bearer(client)
+        (args, kwargs) = calls[-1]
+        assert kwargs["stdin"] == asyncio.subprocess.PIPE
+        assert not any(token in str(arg) for arg in args)
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert "OMNIGENT_HARNESS_AUTH_TOKEN" not in env
+        assert token not in env.values()
+        resp = await client.get("/env/OMNIGENT_HARNESS_AUTH_TOKEN")
+        assert resp.json() == {"value": None}
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.posix_only
+async def test_zygote_fork_passes_the_bearer_outside_env_and_argv(
+    manager: HarnessProcessManager,
+    tmp_path: Path,
+) -> None:
+    from omnigent.host.runner_zygote import ZygoteManager
+    from omnigent.runtime.harnesses._harness_zygote_client import HarnessZygoteClient
+
+    zygote = ZygoteManager(log_path=tmp_path / "zygote.log")
+    zygote.start()
+    try:
+        assert zygote._sock is not None
+        harness_zygote = HarnessZygoteClient(os.dup(zygote._sock.fileno()))
+        sent: list[tuple[list[str], dict[str, str], str]] = []
+        real_fork = harness_zygote.fork_harness
+
+        async def capturing_fork(argv: list[str], env: dict[str, str], auth_token: str) -> object:
+            sent.append((argv, env, auth_token))
+            return await real_fork(argv, env, auth_token)
+
+        harness_zygote.fork_harness = capturing_fork  # type: ignore[method-assign]
+        manager._harness_zygote = harness_zygote
+        await manager.start()
+        try:
+            client = await manager.get_client("conv_fork", _TEST_HARNESS_NAME)
+            token = _bearer(client)
+            (argv, env, auth_token) = sent[-1]
+            assert auth_token == token
+            assert not any(token in arg for arg in argv)
+            assert "OMNIGENT_HARNESS_AUTH_TOKEN" not in env
+            assert token not in env.values()
+            assert manager._harness_zygote_disabled is False
+            resp = await client.get("/env/OMNIGENT_HARNESS_AUTH_TOKEN")
+            assert resp.json() == {"value": None}
+        finally:
+            await manager.shutdown()
+    finally:
+        zygote.stop()
 
 
 # ── Runner subprocess cleanup ──────────────────────

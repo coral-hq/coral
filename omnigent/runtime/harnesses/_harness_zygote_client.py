@@ -159,7 +159,9 @@ class HarnessZygoteClient:
         except OSError:
             return None
 
-    async def fork_harness(self, argv: list[str], env: dict[str, str]) -> ZygoteHarnessProc:
+    async def fork_harness(
+        self, argv: list[str], env: dict[str, str], auth_token: str
+    ) -> ZygoteHarnessProc:
         """Ask the zygote to fork a harness running ``_runner.main(argv)``.
 
         :param argv: The ``_runner`` CLI flags (incl. ``--parent-pid <runner>``).
@@ -167,7 +169,10 @@ class HarnessZygoteClient:
         :returns: A shim handle for the forked harness.
         :raises ZygoteHarnessUnavailable: If the zygote is down or errored.
         """
-        reply = await self._exchange({"cmd": "fork_harness", "argv": argv, "env": env})
+        # CORAL(S123)
+        reply = await self._exchange(
+            {"cmd": "fork_harness", "argv": argv, "env": env, "auth_token": auth_token}
+        )
         if "error" in reply:
             raise ZygoteHarnessUnavailable(f"zygote harness fork failed: {reply['error']}")
         pid = reply.get("pid")

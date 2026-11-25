@@ -101,13 +101,7 @@ class _HarnessHttpClient(httpx.AsyncClient):
 # drive — so use the real (already per-user) temp dir.
 _TMP_PARENT_ENV_VAR = HARNESS_TMP_PARENT_ENV_VAR
 
-# S1 (security): env var carrying the per-spawn bearer token for the harness
-# control channel. The parent generates a fresh token per subprocess, ships it
-# here (private to the parent/child pair), and presents it on every ``/v1``
-# request; the harness scaffold's auth middleware compares against it. This is
-# the access boundary on Windows, where the IPC is a loopback TCP listener
-# reachable by any local process; on POSIX (uid-isolated UDS) it is defence in
-# depth.
+# CORAL(S123)
 _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
 
 # Sentinel each instance writes into its subdir on boot; the orphan sweep uses it
@@ -552,6 +546,8 @@ def _build_harness_spawn_env(env: dict[str, str] | None) -> dict[str, str]:
     merged = strip_desktop_session_env(os.environ)
     if env:
         merged.update(env)
+    # CORAL(S123)
+    merged.pop(_HARNESS_AUTH_TOKEN_ENV, None)
     return strip_runner_auth_secrets(merged)
 
 
@@ -1313,16 +1309,8 @@ class HarnessProcessManager:
         # payload running in the harness can't impersonate the runner.
         # See ``_build_harness_spawn_env``.
         effective_env: dict[str, str] = _build_harness_spawn_env(env)
-        # S1 (security): on Windows the harness IPC is a loopback-TCP listener
-        # reachable by any local process, so mint a fresh per-spawn bearer token
-        # as the access boundary the uid-isolated UDS provides on POSIX. This is
-        # Windows-only: POSIX keeps the UDS and sets no token, leaving the
-        # scaffold's auth gate inert. The token is delivered via the harness's
-        # private env and presented by our client (below) on every /v1 request.
-        auth_token: str | None = None
-        if IS_WINDOWS:
-            auth_token = secrets.token_urlsafe(32)
-            effective_env[_HARNESS_AUTH_TOKEN_ENV] = auth_token
+        # CORAL(S123)
+        auth_token = secrets.token_urlsafe(32)
 
         parent_pid = os.getpid()
 
@@ -1348,8 +1336,13 @@ class HarnessProcessManager:
             str(parent_pid),
         ]
         spawn_started_at = time.monotonic()
-        process = await self._spawn_harness_process(runner_argv, effective_env)
+        process = await self._spawn_harness_process(runner_argv, effective_env, auth_token)
         try:
+            # CORAL(S123)
+            stdin = getattr(process, "stdin", None)
+            if stdin is not None:
+                stdin.write(auth_token.encode("ascii") + b"\n")
+                stdin.close()
             await _wait_for_bind(process, endpoint, harness, conversation_id)
             # The harness process has bound its socket and is ready to serve —
             # the observable "harness started" edge. Report the spawn->ready
@@ -1385,11 +1378,8 @@ class HarnessProcessManager:
             client = _HarnessHttpClient(
                 transport=endpoint.make_transport(),
                 base_url=endpoint.base_url,
-                # S1 (security): present the per-spawn bearer token (Windows only)
-                # so the harness scaffold accepts this client and rejects any
-                # unauthenticated local peer on the loopback-TCP channel. Empty on
-                # POSIX, where the uid-isolated UDS is the access boundary.
-                headers=({"Authorization": f"Bearer {auth_token}"} if auth_token else {}),
+                # CORAL(S123)
+                headers={"Authorization": f"Bearer {auth_token}"},
                 # See the comment above the constant for rationale.
                 # Connect/write/pool keep the 5s default so a vanished
                 # harness still surfaces quickly; read=None defers
@@ -1433,6 +1423,7 @@ class HarnessProcessManager:
         self,
         runner_argv: list[str],
         effective_env: dict[str, str],
+        auth_token: str,
     ) -> Any:
         """Spawn the harness ``_runner``, via the zygote fork path or direct exec.
 
@@ -1451,7 +1442,7 @@ class HarnessProcessManager:
         zygote = self._harness_zygote
         if zygote is not None and not self._harness_zygote_disabled:
             try:
-                return await zygote.fork_harness(runner_argv, effective_env)
+                return await zygote.fork_harness(runner_argv, effective_env, auth_token)
             except ZygoteHarnessUnavailable as exc:
                 _logger.warning(
                     "Harness zygote unavailable (%s); falling back to direct exec", exc
@@ -1465,6 +1456,8 @@ class HarnessProcessManager:
             "-m",
             "omnigent.runtime.harnesses._runner",
             *runner_argv,
+            # CORAL(S123)
+            stdin=asyncio.subprocess.PIPE,
             stdout=None,
             stderr=None,
             env=effective_env,

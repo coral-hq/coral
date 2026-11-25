@@ -10,6 +10,7 @@ ground here would just duplicate.
 from __future__ import annotations
 
 import logging
+import os
 
 import httpx
 import pytest
@@ -326,7 +327,69 @@ def test_main_freezes_gc_and_arms_first_turn_freeze_before_serving(
             "/tmp/example.sock",
             "--conversation-id",
             "conv_abc",
-        ]
+        ],
+        auth_token="tok",
     )
 
     assert calls == ["freeze", "serve armed=True"]
+
+
+# CORAL(S123)
+_MAIN_ARGV = [
+    "--harness",
+    "test",
+    "--module",
+    "tests.runtime.harnesses._test_harness",
+    "--socket",
+    "/tmp/example.sock",
+    "--conversation-id",
+    "conv_abc",
+]
+
+
+def test_main_pops_the_env_token_and_gates_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = FastAPI()
+    served: list[object] = []
+    monkeypatch.setenv("OMNIGENT_HARNESS_AUTH_TOKEN", "stale")
+    monkeypatch.setattr(_runner, "_configure_logging", lambda *_a: None)
+    monkeypatch.setattr(_runner, "_load_harness_app", lambda *_a: app)
+    monkeypatch.setattr(_runner.gc, "freeze", lambda: None)
+
+    class _Server:
+        def __init__(self, config: object) -> None:
+            served.append(getattr(config, "app", None))
+
+        def run(self) -> None:
+            pass
+
+    monkeypatch.setattr(_runner, "_HardExitServer", _Server)
+    _runner.main(_MAIN_ARGV, auth_token="tok")
+
+    assert "OMNIGENT_HARNESS_AUTH_TOKEN" not in os.environ
+    assert app.state.harness_auth_token == "tok"
+    assert isinstance(served[0], _runner._BearerGate)
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize("stdin", ["empty", "tty"])
+def test_main_exits_2_without_a_stdin_token(stdin: str) -> None:
+    import pty
+    import subprocess
+    import sys
+
+    primary, secondary = pty.openpty() if stdin == "tty" else (None, subprocess.DEVNULL)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-P", "-m", "omnigent.runtime.harnesses._runner", *_MAIN_ARGV],
+            stdin=secondary,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    finally:
+        if primary is not None:
+            os.close(primary)
+            os.close(secondary)
+    assert result.returncode == 2
+    assert "restart the session" in result.stderr

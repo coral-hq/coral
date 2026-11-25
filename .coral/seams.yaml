@@ -4229,6 +4229,59 @@ seams:
     upstream_first: false
     upstream_candidate: false
 
+  - id: S123
+    title: Every harness socket requires a per-spawn bearer that never travels in the environment
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Read in code: on POSIX the harness socket authenticated nothing, so any
+      same-user process that connected could drive a turn, and on Windows the
+      per-spawn token rode the harness's exec-time env (readable by same-user
+      process inspection), was never popped and so reached every agent CLI the
+      harness spawned. The check ran inside the /v1 handler after body
+      parsing, and /health, /docs and test routes were open.
+      HarnessProcessManager now mints secrets.token_urlsafe(32) for every
+      spawn on every platform and never puts it in the env (the spawn env also
+      drops an inherited OMNIGENT_HARNESS_AUTH_TOKEN) or argv. Direct exec
+      runs the harness with stdin=PIPE and writes the token plus a newline and
+      closes stdin synchronously inside the spawn owner guard; the zygote path sends it
+      as a separate auth_token field of the fork_harness request, which
+      _run_harness_child passes to _runner.main. main pops the env name first,
+      refuses a terminal stdin, reads at most 4096 bytes to EOF, points fd 0 at
+      /dev/null, and exits 2 with a message that the spawning runner predates
+      this build and the session must restart when no token arrives (a runner
+      started before an in-place upgrade therefore cannot spawn harnesses).
+      uvicorn serves a raw ASGI gate around the app: only lifespan passes
+      unauthenticated, any other non-http scope is dropped, and an http or websocket scope without "Bearer <token>" (scheme case
+      insensitive, hmac.compare_digest) gets a 401 JSON or websocket.close
+      without the app or receive() being called, so a malformed body gets
+      401, not 422. The client always sends the header; the scaffold's
+      _check_auth stays as a second layer. Not covered: freed bytes of earlier
+      tokens surviving in the zygote heap (same-user memory read only).
+    files:
+      - omnigent/runner/_zygote.py
+      - omnigent/runtime/harnesses/_harness_zygote_client.py
+      - omnigent/runtime/harnesses/_runner.py
+      - omnigent/runtime/harnesses/process_manager.py
+      - tests/runtime/harnesses/test_harness_auth.py
+      - tests/runtime/harnesses/test_harness_zygote_client.py
+      - tests/runtime/harnesses/test_human_wait_survives_idle_watchdog.py
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/runtime/harnesses/test_runner.py
+      - tests/runtime/harnesses/test_scaffold.py
+    tests:
+      - tests/runtime/harnesses/test_harness_auth.py
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/runtime/harnesses/test_runner.py
+      - tests/runtime/harnesses/test_harness_zygote_client.py
+      - tests/runtime/harnesses/test_scaffold.py
+      - tests/host/test_runner_zygote.py
+    budget_lines: 120
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
   - id: S124
     title: The harness process manager keeps its socket root and instance dirs this user's own private real directories
     owner: WS-INTEGRATION
