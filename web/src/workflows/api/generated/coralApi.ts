@@ -102,6 +102,8 @@ export interface CoralError {
     | "not_a_git_repo"
     | "start_key_conflict"
     | "workflow_key_taken"
+    | "case_exists"
+    | "case_limit_reached"
     | "profile_exists"
     | "profile_key_taken"
     | "stale_revision"
@@ -749,6 +751,18 @@ export interface RunView {
   status: "running" | "paused" | "completed" | "failed" | "cancelled" | null;
 }
 
+/** A workflow's saved Simulate case with the result of its last run. */
+export interface SavedCaseOut {
+  created_at: number;
+  expect: SimExpect;
+  id: string;
+  last_result: "passed" | "failed" | "error" | null;
+  last_run_at: number | null;
+  mismatches: string[];
+  name: string;
+  script: SimScript;
+}
+
 /** The definition a save stored, with the validation of what was saved. */
 export interface SavedWorkflowOut {
   compiled: CompiledGraph;
@@ -761,6 +775,34 @@ export interface SavedWorkflowOut {
   updated_at: number;
   valid: true;
   workflow_key: string;
+}
+
+export interface SimCase {
+  expect: SimExpect;
+  name: string;
+  script: SimScript;
+}
+
+/**
+ * What a case expects; only the fields it sets are compared.
+ *
+ * ``steps`` holds ``node_id:result`` per answered step, in order; ``sessions`` the total.
+ */
+export interface SimExpect {
+  gates_reached?: string[] | null;
+  limits_hit?: string[] | null;
+  outcome:
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "paused"
+    | "needs_input"
+    | "rejected"
+    | "stalled"
+    | "step_limit"
+    | "unsupported";
+  sessions?: number | null;
+  steps?: string[] | null;
 }
 
 /** The values one node supplies for one kind of question, consumed in order. */
@@ -959,6 +1001,7 @@ export interface StartRunRequest {
 
 /** A built-in workflow template: its workflow's id, name and description, and its YAML. */
 export interface TemplateOut {
+  cases: SimCase[];
   description: string;
   id: string;
   name: string;
@@ -1492,6 +1535,53 @@ export interface CoralOperations {
     };
     status: 200;
     response: WorkflowDetailOut;
+    errors: 401 | 403 | 404 | 422;
+  };
+  /**
+   * GET /v1/coral/workflows/{workflow_id}/cases
+   *
+   * The saved cases of one of the caller's workflows, with their last results.
+   */
+  coral_list_workflow_cases: {
+    method: "GET";
+    path: "/v1/coral/workflows/{workflow_id}/cases";
+    params: {
+      workflow_id: string;
+    };
+    status: 200;
+    response: SavedCaseOut[];
+    errors: 401 | 403 | 404 | 422;
+  };
+  /**
+   * POST /v1/coral/workflows/{workflow_id}/cases
+   *
+   * Save a case on one of the caller's workflows and run it on the stored definition.
+   */
+  coral_save_workflow_case: {
+    method: "POST";
+    path: "/v1/coral/workflows/{workflow_id}/cases";
+    params: {
+      workflow_id: string;
+    };
+    body: SimCase;
+    status: 201;
+    response: SavedCaseOut;
+    errors: 401 | 403 | 404 | 409 | 413 | 422;
+  };
+  /**
+   * DELETE /v1/coral/workflows/{workflow_id}/cases/{case_id}
+   *
+   * Delete one of the saved cases of one of the caller's workflows.
+   */
+  coral_delete_workflow_case: {
+    method: "DELETE";
+    path: "/v1/coral/workflows/{workflow_id}/cases/{case_id}";
+    params: {
+      case_id: string;
+      workflow_id: string;
+    };
+    status: 204;
+    response: null;
     errors: 401 | 403 | 404 | 422;
   };
   /**

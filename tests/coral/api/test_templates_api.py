@@ -176,12 +176,68 @@ def test_the_list_holds_the_registered_templates_with_their_packaged_text(
             "name": "Implement with review loop",
             "description": _template().description,
             "yaml": packaged.read_text("utf-8"),
+            "cases": [case.model_dump(mode="json") for case in _template().cases],
         }
+    ]
+    assert [case["name"] for case in response.json()[0]["cases"]] == [
+        "approved on the first pass",
+        "changes requested three times reaches the gate",
+        "a rejected change ends the run",
     ]
     assert [item["id"] for item in response.json()] == [item.id for item in builtin_templates()]
 
 
 # ── Use ─────────────────────────────────────────────────────────────────────
+
+
+def _case_names(client: TestClient, definition_id: str) -> dict[str, tuple[str, list[str]]]:
+    response = client.get(f"{WORKFLOWS}/{definition_id}/cases")
+    assert response.status_code == 200, response.text
+    return {item["name"]: (item["last_result"], item["mismatches"]) for item in response.json()}
+
+
+def test_a_use_copies_the_templates_cases_as_passed(store: _RecordingStore) -> None:
+    alice = _client(store)
+
+    used = _use(alice)
+
+    assert _case_names(alice, used["id"]) == {
+        case.name: ("passed", []) for case in _template().cases
+    }
+    assert _case_names(alice, _use(alice)["id"]) == _case_names(alice, used["id"])
+    assert _client(store, BOB).get(f"{WORKFLOWS}/{used['id']}/cases").status_code == 404
+
+
+def test_a_use_runs_the_cases_once_however_many_inserts_it_makes(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _RecordingStore(engine, hidden=frozenset({TEMPLATE_ID}))
+    _hold(store, TEMPLATE_ID, BOB)
+    runs: list[str] = []
+    run_case = templates_api.run_case
+
+    def counted(graph: Any, runnable: bool, case: Any) -> Any:
+        runs.append(case.name)
+        return run_case(graph, runnable, case)
+
+    monkeypatch.setattr(templates_api, "run_case", counted)
+
+    used = _use(_client(store))
+
+    assert len(store.creates) == 2
+    assert runs == [case.name for case in _template().cases]
+    assert set(_case_names(_client(store), used["id"])) == set(runs)
+
+
+def test_a_use_copies_at_most_the_workflow_case_cap(
+    store: _RecordingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(templates_api, "MAX_WORKFLOW_CASES", 2)
+    alice = _client(store)
+
+    used = _use(alice)
+
+    assert set(_case_names(alice, used["id"])) == {case.name for case in _template().cases[:2]}
 
 
 def test_a_first_use_makes_the_callers_workflow_under_the_templates_id(

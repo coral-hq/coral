@@ -446,7 +446,7 @@ def test_an_error_run_reads_back_as_error(store: SqlWorkflowDefinitionStore) -> 
 
 def test_an_oversized_expectation_is_refused(store: SqlWorkflowDefinitionStore) -> None:
     workflow = _save(store)
-    steps = tuple(f"n{index}:{secrets.token_hex(125)}" for index in range(400))
+    steps = tuple(f"n{index}:{secrets.token_hex(150)}" for index in range(200))
     case = SimCase(
         name="huge expect",
         script=SimScript(inputs=()),

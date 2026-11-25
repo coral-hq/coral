@@ -8,6 +8,8 @@ import pytest
 
 from coral.engine.simcase import (
     MAX_CASES,
+    MAX_EXPECTED_ITEM_CHARS,
+    MAX_EXPECTED_ITEMS,
     MAX_EXPECTED_SESSIONS,
     SimCase,
     SimExpect,
@@ -241,3 +243,19 @@ def test_a_case_file_refuses_a_negative_session_count() -> None:
     assert load_cases(ONE_CASE.replace("needs_input}", "needs_input, sessions: 0}")).cases
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         load_cases(ONE_CASE.replace("needs_input}", "needs_input, sessions: -1}"))
+
+
+@pytest.mark.parametrize("field", ["steps", "gates_reached", "limits_hit"])
+def test_an_expected_list_is_bounded_in_length_and_item_size(field: str) -> None:
+    longest = "x" * MAX_EXPECTED_ITEM_CHARS
+    assert SimExpect.model_validate(
+        {"outcome": "completed", field: [longest] * MAX_EXPECTED_ITEMS}
+    )
+    for items in (
+        ["a:done"] * (MAX_EXPECTED_ITEMS + 1),
+        [longest + "x"],
+        [""],
+        ["a\u202e"],
+    ):
+        with pytest.raises(ValueError):
+            SimExpect.model_validate({"outcome": "completed", field: items})

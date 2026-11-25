@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from coral.engine.simcase import SimCase, SimExpect
 from coral.engine.simulate import SimResult, SimScript
 from coral.model import CompiledGraph, LoadError
 from coral.validate.problems import Problem
@@ -92,11 +93,26 @@ class TemplateOut(BaseModel):
     name: str
     description: str
     yaml: str
+    cases: list[SimCase]
+
+
+class SavedCaseOut(BaseModel):
+    """A workflow's saved Simulate case with the result of its last run."""
+
+    id: str
+    name: str
+    script: SimScript
+    expect: SimExpect
+    last_result: Literal["passed", "failed", "error"] | None
+    mismatches: list[str]
+    last_run_at: int | None
+    created_at: int
 
 
 __all__ = [
     "CORAL_API_VERSION",
     "InvalidResult",
+    "SavedCaseOut",
     "SavedWorkflowOut",
     "SimulateRequest",
     "SimulatedResult",
