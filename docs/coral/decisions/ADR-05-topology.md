@@ -1306,12 +1306,15 @@ sandboxed agent").
   exits.
 - **Both config variables.** The launcher sets `CLAUDE_CONFIG_DIR` and
   `CLAUDE_SECURESTORAGE_CONFIG_DIR` to the dir's absolute path, over any
-  inherited value. The executor also removes both names from the CLI's
-  inherited environment and from the user settings `env` block it merges. So
-  a value the host forwards cannot redirect the CLI, and the CLI's credential
-  store and keychain service name follow the private dir. Both names are set,
-  not only removed, so a second connect at the same moment cannot hand the CLI
-  the host's values.
+  inherited value. The executor also removes both names from the user
+  settings `env` block it merges. So a value the host forwards cannot
+  redirect the CLI, and the CLI's credential store and keychain service name
+  follow the private dir. Both names are set, not only removed, so a second
+  connect at the same moment cannot hand the CLI the host's values. S113 also
+  removed both names from the harness's own environment around each connect.
+  Since S130 the executor leaves them there, and the launcher's or the
+  options' value overrides them ("Addendum: CRL-182 the CLI's environment and
+  its config location").
 - **`projects` cannot be created.** The policy lists `projects` in
   `scratch_dir_files`, so it is an empty 0600 file in the private dir. An
   oversized tool result is then reported unsaved, with the CLI's advice to use
@@ -1415,7 +1418,9 @@ where stated.
   environment wrapped and unwrapped
   (`test_an_isolated_cli_gets_only_its_own_claude_config_dir`) and the
   two-connect race
-  (`test_a_concurrent_connect_cannot_hand_a_cli_the_hosts_config_names`).
+  (`test_a_concurrent_connect_cannot_hand_a_cli_the_hosts_config_names`,
+  which S130 extended and renamed
+  `test_concurrent_connects_hand_no_cli_a_withheld_name`).
   `tests/inner/test_sandbox.py` pins the wire fields, 15 malformed payloads
   and the in-wrap dir
   (`test_run_launcher_gives_the_target_a_private_dir_in_its_scratch`).
@@ -1499,12 +1504,16 @@ away from the user's Claude config files.
   credential-free network settings, and the endpoint feeds its credential
   proxy (see "Addendum: CRL-167 secrets out of exec-time environments"). On
   Windows the whole block still merges (CRL-197).
-- A relative `CLAUDE_CONFIG_DIR` forwarded by the host makes that merge read
-  a `settings.json` under the step's worktree, which a step can create. Since
-  S125 such a file can still choose model names and switch opt-outs on, but
-  not the endpoint, a proxy or a CA file. S13's token strips can also be
-  undone by a concurrent connect on one executor. Both are from code and
-  predate S113 (CRL-182).
+- A relative `CLAUDE_CONFIG_DIR` forwarded by the host made that merge read
+  a `settings.json` under the step's worktree, which a step can create. Under
+  S125 such a file could still choose model names and switch opt-outs on, but
+  not the endpoint, a proxy or a CA file. S13's token strips could also be
+  undone by a concurrent connect on one executor, though in a Coral harness
+  S124's scrub had already removed the tokens. Both predate S113. Since S130
+  a relative location, or one inside the working directory, refuses every
+  Coral turn before its settings are read, and no connect restores a name
+  another withheld ("Addendum: CRL-182 the CLI's environment and its config
+  location").
 - A step can create Claude Code project settings in its worktree:
   `.claude/settings.json` hooks and `CLAUDE.md` (measured), or a `.mcp.json`
   that did not exist when its profile was built. The user's own Claude Code
@@ -1923,10 +1932,13 @@ listed here.
   but a seed and its live launches' copies still sit in the shared temp dir
   while their executor runs, and such an agent can also change their claims.
 - A relative or empty forwarded `CLAUDE_CONFIG_DIR` is refused as the seed
-  source, but the settings `env` merge still follows it into the working dir
-  (CRL-182). An absolute one under a sandbox write root is not checked, so
-  code in the sandbox could write a later launch's seed source (from code; an
-  accepted residual with no ticket).
+  source, but the settings `env` merge of other agents still follows a
+  relative one into the working dir (CRL-197). A Coral CLI gets no seed, and
+  since S130 a relative one refuses every Coral turn before its settings are
+  read ("Addendum: CRL-182 the CLI's environment and its config location").
+  An absolute one under a sandbox write root is not checked as the seed
+  source, so code in the sandbox could write a later launch's seed source
+  (from code; an accepted residual with no ticket).
 - A sandboxed agent can create Claude Code project settings, `.envrc`, or a
   `.git` where none existed in its working dir, which the user's own tools
   load later. The project settings and `.envrc` were measured in CRL-176; the
@@ -2951,6 +2963,11 @@ rejects) refuses that turn, and the next turn builds a new one.
 
 A gateway launch never merged the block and still takes none of it.
 
+Since S130 a settings location this rule does not trust, and any config
+location that is relative or inside the working directory, refuses a Coral
+turn before the file is read ("Addendum: CRL-182 the CLI's environment and
+its config location"). The handling above stays as defence in depth.
+
 **What was measured.** With fake keys and a mock model; outside reads are by
 name or digest only.
 
@@ -3007,7 +3024,9 @@ The settings block and its trust rule are covered by unit tests only
   helper reads.
 - **An endpoint in an untrusted settings file stops the step** (the trust
   rule). To fix it, keep the file under an absolute `CLAUDE_CONFIG_DIR`
-  outside the step's working directory, or remove the setting.
+  outside the step's working directory, or remove the setting. Since S130
+  such a location stops a Coral step whatever the file holds, so only the
+  first fix works.
 - **Endpoint and proxy rules.** An endpoint URL with a user name, a password,
   a query or a fragment, or plain `http` to another machine, stops the step,
   on a gateway too. So does a SOCKS or `host:port` proxy for the model
@@ -3062,8 +3081,8 @@ sockets").
 | The CLI-local runner of `omnigent run` gets its binding token at exec and inherits the user's environment; its children no longer inherit the token | CRL-197 |
 | Windows: tokens in the runner's environment, the key on a Coral CLI's command line, the whole settings block | CRL-197 |
 | claude-native steps: the native CLI's own shell inherits its credential. The gate label already reports `native_steps_enabled` | CRL-197 |
-| Other agents' CLIs still get the forwarded credentials and the whole settings block in their environment | CRL-182 (an explicit CLI environment), CRL-197 |
-| A settings file under a relative `CLAUDE_CONFIG_DIR` still chooses model names and switches opt-outs on; an endpoint a step plants there makes later executors in that worktree refuse until it is removed | CRL-182 |
+| Other agents' CLIs still get the forwarded credentials and the whole settings block in their environment | CRL-197 |
+| Other agents' claude-sdk CLIs still follow a relative `CLAUDE_CONFIG_DIR` into the working directory. With `skills: none` and no gateway the executor merges the whole `env` block of a settings file there, or anywhere inside that directory, so an endpoint a step plants gets that CLI's credential, a session's background title CLI's included (the merge measured for a relative one; the title CLI from the code). Since S130 a Coral turn refuses such a location instead ("Addendum: CRL-182 the CLI's environment and its config location") | CRL-197 |
 | The trust rule knows only the CLI's working directory: a settings or CA file under another path that a broad write grant lets a step write is still trusted | CRL-184 |
 | A harness socket has no bearer on POSIX; the launch-socket helper is there for it to reuse | CRL-173 |
 | A static key shorter than 20 characters is not searched for under other variable names: the harness's scrub and the fail-closed check look only for longer keys by value. The drops by name still apply | CRL-198 |
@@ -4170,3 +4189,284 @@ or refuses it, as measured on macOS 27.2.
 
 The anchor's user-chosen workspace, which the reviews raised against giving
 the anchor this sandbox, does not arise: the anchor stays refused.
+
+## Addendum: CRL-182 the CLI's environment and its config location (2026-11-25)
+
+CRL-182 fixes two older issues in how a claude-sdk executor builds its Claude
+CLI's environment. CRL-176's security review found both. Seam S130
+(`.coral/seams.yaml`) changes `omnigent/inner/claude_sdk_executor.py` and its
+tests only. No sandbox rule changes, and the policy stays at revision 3: the
+new refusals run outside the sandbox, before any CLI starts. Measurements
+used fake values in throwaway environments, compared by name or digest, on
+macOS, locally. What the Claude CLI reads was found by a byte search of its
+2.1.325 binary, which was never run for that.
+
+**What was found.**
+
+- **A restore could hand a CLI a withheld name.** Each connect removed some
+  names from the harness process's environment and put them back when its
+  connect returned. The SDK copies that environment into the CLI only after
+  it awaits a version check. So when two connects overlapped, the first
+  one's restore could land before the second CLI's copy. This was reproduced
+  with the SDK's real transport (claude_agent_sdk 0.2.121, the version
+  `uv.lock` pins), its version check held open by events, and no process
+  started:
+
+  | Executor | The second CLI got |
+  |---|---|
+  | Not Coral, one executor or two in one process | the host's `ANTHROPIC_API_KEY` |
+  | Not Coral, with options that negotiate betas (`CLAUDE_CODE_USE_GATEWAY`) | the key and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` |
+  | Coral flags, built directly without the harness's scrub (the local Tier B kit, unit tests) | the key, `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_AUTH_TOKEN` |
+  | Coral flags, after the harness's scrub | no credential |
+
+  Nothing leaked on a Coral harness: S124's scrub removes those three names
+  from its environment before any executor exists ("Addendum: CRL-167
+  secrets out of exec-time environments"). From the code, only the betas
+  switch could come back there, on a gateway that negotiates betas, which
+  breaks requests but holds no secret. `CLAUDECODE` reached no CLI, because
+  the SDK drops it. A step cannot cause the overlap. From the code, it needs
+  the user's timing: a turn interrupted while its CLI connects, then a new
+  message on the same executor.
+- **A relative config location made a step's settings come from its working
+  directory.** The host forwards `CLAUDE_CONFIG_DIR` as the operator set it.
+  A relative value makes the executor read `settings.json` under the
+  session's working directory, which a step can write. Coral bundles use
+  `skills: none`, so S125 reads that file's `env` block on every Coral step
+  without a gateway. Measured with `claude-config`, `./claude-config`,
+  `~/claude-config` and `../workspace/claude-config`:
+  - a Coral executor's turn ran, and a planted model name and opt-out
+    reached its CLI's environment;
+  - a planted endpoint refused the turn (`coral_credential_upstream_refused`),
+    and every later turn in that worktree;
+  - an agent that is not Coral, with `skills: none` and no gateway, took the
+    whole block, endpoint included.
+
+  An empty value read nothing from the working directory. From the code, a
+  relative `HOME` with no `CLAUDE_CONFIG_DIR` does the same. The design's
+  security review measured the same effect for an absolute location inside
+  the working directory: a path in it, a path that climbs into it with `..`,
+  and a link into it. The Coral CLI itself never read the planted file: its
+  config dir is the launcher's private one (measured in that review), and
+  `skills: none` gives it no setting sources.
+- **The same shape for two Anthropic profile variables.** Read from the
+  binary, the CLI keeps its Anthropic profile store at
+  `ANTHROPIC_CONFIG_DIR`, else `$XDG_CONFIG_HOME/anthropic`, else
+  `$HOME/.config/anthropic`, with no check that the path is absolute. It
+  reads the active profile, its settings and a credentials file there. The
+  host forwards `XDG_CONFIG_HOME` unresolved, and S124's scrub keeps both
+  names. The security review measured both reaching a Coral CLI with a
+  relative value. What a planted profile could do was not established: the
+  proxy's `ANTHROPIC_BASE_URL` outranks a profile's base URL, and whether a
+  profile credential outranks the key helper was not traced.
+
+**Withhold, never restore.** Before each new CLI connects, right after S124's
+exposure check and before the SDK client is built, the executor removes the
+names it keeps from its CLIs from the harness process's environment. It
+never puts them back. A name already gone stays gone, so no connect can hand
+a CLI a name another connect withheld.
+
+| Name | Withheld |
+|---|---|
+| `CLAUDECODE` | always: the CLI would report a nested session |
+| `ANTHROPIC_API_KEY` | always: the CLI would bill that key instead of its subscription, key helper or gateway |
+| `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN` | for a Coral executor (S13) |
+| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | when the CLI's options name `CLAUDE_CODE_USE_GATEWAY`, so betas are negotiated |
+
+- **The config dir names are no longer toggled.** `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` stay in the harness's environment. An
+  isolated CLI still gets only its private dir: the options name it for an
+  unwrapped CLI, and the launcher names it in a wrap, over any inherited
+  value. So a direct caller, such as a test or the Tier B kit, keeps its own
+  throwaway dir for every later CLI in its process.
+- **What a CLI receives is unchanged.** The design's adversarial review
+  compared one connect without overlap on the old code and with the new rule
+  emulated on it, Coral and not: the CLI's environment had the same digest.
+
+**Not the ticket's fix direction.** The ticket asked to build the CLI's
+environment once, as an explicit dict passed in `options.env`, and to never
+mutate `os.environ` around a connect. That dict is not built. The SDK copies
+the whole process environment into every CLI and puts the options on top.
+An empty override is not "unset" for the CLI: read from the binary, an empty
+`CLAUDE_CONFIG_DIR` is its working directory, and an empty
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` selects the user's own keychain item. So
+an explicit environment needs a custom transport or a filter in the child.
+This change removes the restore instead, which is the whole race: "never
+mutate `os.environ` around a connect" is met as "never restore a withheld
+name". What that leaves for other agents, such as the forwarded credentials
+in their CLIs, is CRL-197's.
+
+**Process-wide, and for good.** The removal applies to the whole process and
+lasts as long as it runs.
+
+- In production a harness process serves one agent with one config, so the
+  cases below cannot arise there.
+- In a process that runs a Coral and a non-Coral executor, the non-Coral CLI
+  loses the subscription tokens after the Coral executor's first connect,
+  although it is meant to get `CLAUDE_CODE_OAUTH_TOKEN`.
+- The betas switch is gone for good after any connect that negotiates betas,
+  also for later connects that do not.
+- Other children of a process that embeds the executor lose these names too.
+  A `claude` such a process starts later may fall back to its subscription
+  login or the keychain. The design's security review found no caller in
+  this repository that relies on the names afterwards.
+- The version check (`claude -v`) of an isolated CLI that a direct caller
+  runs unwrapped now inherits the host's two config dir names; before, it
+  got neither. Read from the binary, `-v` prints the version and exits
+  before reading any config. A wrapped CLI's version check gets the private
+  dir from the launcher, as before.
+
+**Two refusals for Coral.** A Coral executor, one built with
+`require_api_credential` as every Coral spec's is, refuses every turn whose
+Claude config location a step could write. The check runs after S13's
+credential refusal and before S13's sandbox check and S129's wrap refusal.
+So it comes before any settings read, credential proxy, model listing or
+CLI. It does not come before everything: building the executor, and the
+default-model lookup on a Databricks-profile gateway with no model, run
+first; neither reads the settings or starts the proxy or a CLI. It applies
+on a key and on a gateway, although a gateway reads no settings file. Both
+refusals are not retryable, start nothing and add no log line. Each message
+names a variable, never its value, which could name a user.
+
+| Code | Title | When |
+|---|---|---|
+| `coral_config_location_relative` | Claude config location must be absolute | `CLAUDE_CONFIG_DIR`, `HOME`, `XDG_CONFIG_HOME` or `ANTHROPIC_CONFIG_DIR` is set and not an absolute path. They are checked in that order, and the first is named. `.`, `~/x`, `$HOME/x` and a value with a leading blank count as relative: nothing expands `~` or `$HOME` |
+| `coral_config_location_in_workdir` | Claude config location is inside the working directory | One of the same four names is the CLI's working directory or a path inside it, in the same order, or S125's trust rule puts the Claude settings file there |
+
+The messages, exactly:
+
+- `CLAUDE_CONFIG_DIR`: "This session's Claude CLI was not started:
+  CLAUDE_CONFIG_DIR on its host is not an absolute path, so its Claude
+  settings would be read from inside the session's working directory. Set
+  CLAUDE_CONFIG_DIR to an absolute path, or unset it, and restart the host."
+- `HOME`: "This session's Claude CLI was not started: HOME on its host is not
+  an absolute path, so Claude and Anthropic settings under it would be read
+  from inside the session's working directory. Set HOME to an absolute path
+  and restart the host." A relative `HOME` is refused even beside an absolute
+  `CLAUDE_CONFIG_DIR`, because the CLI derives other paths from it.
+- `XDG_CONFIG_HOME` and `ANTHROPIC_CONFIG_DIR`, with the name in place of
+  `<NAME>`: "This session's Claude CLI was not started: <NAME> on its host is
+  not an absolute path, so the CLI's Anthropic profile settings would be read
+  from inside the session's working directory. Set <NAME> to an absolute
+  path, or unset it, and restart the host."
+- Inside the working directory, with the name in place of `<NAME>`: "This
+  session's Claude CLI was not started: <NAME> on its host points inside the
+  session's working directory, where a step could change what is read from
+  it. Point <NAME> outside the working directory and restart the host."
+
+- **Which values.** The four names are read once, when the executor is
+  built, from the snapshot S125's settings read uses: a Coral harness's
+  environment from before its scrub, else the process environment at that
+  moment. So a relative value refuses every later turn the same way until
+  the host is fixed and restarted. An empty value means unset: Omnigent then
+  reads `<home>/.claude` for an empty `CLAUDE_CONFIG_DIR`, and `/.claude` for
+  an empty `HOME`.
+- **A name the CLI would not get is still checked.** The snapshot is from
+  before S124's scrub. So `ANTHROPIC_CONFIG_DIR`, which reaches a harness
+  only through a passthrough list that also makes the scrub drop it, or any
+  of the four names such a list names, can refuse a turn although the CLI
+  would never see it. This fails closed and is accepted.
+- **The in-workdir check** first takes the four names in the same order. A
+  name is inside when its path, resolved one link at a time, is the working
+  directory or enters it: a path in it, the directory itself, `..` that
+  climbs into it, or a link into it. The working directory is made absolute
+  first, so `.` means the process's own. A path that cannot be resolved (a
+  permission error, a NUL byte, more than 40 links) counts as inside too.
+  The first name inside is the one named. A home above the working
+  directory, the usual layout for worktrees, is not inside and runs.
+- **Then S125's trust rule**, called with the same working directory and
+  snapshot as the settings read. The file is
+  `$CLAUDE_CONFIG_DIR/settings.json`, else `<home>/.claude/settings.json`.
+  It catches what no name shows: a settings file or a `.claude` dir that is
+  itself a link into the working directory, or a home the snapshot does not
+  name. The message then names `CLAUDE_CONFIG_DIR` when it is set, else
+  `HOME`.
+- **A session in the home is refused.** A session whose working directory
+  is the home, or a directory above it, has its home inside the working
+  directory, and every turn refuses with `HOME` named. A Coral step's or
+  orchestrator's working directory is a run worktree, so this does not
+  arise for Coral runs.
+- **S125 and S115 stay.** The same rule now refuses a Coral turn before the
+  settings read would treat its file as untrusted, and no `await` lies
+  between the two. S125's handling of an untrusted file stays as defence in
+  depth. Its tests stub the earlier refusals out to reach it. S115's refusal
+  of a relative or empty seed source, which only other agents use, is
+  unchanged.
+- **Coral only.** Other agents keep Omnigent's behaviour: a relative
+  `CLAUDE_CONFIG_DIR` is read from the CLI's working directory, as
+  `test_hermetic_turn_reads_relative_config_dir_from_cli_cwd` pins (CRL-197).
+- **What a user sees.** The refusal is the turn's error in the session's
+  transcript. From the code, a step's turn fails `agent.failed` and an
+  orchestrator's run pauses `infra`, as for S129's refusal.
+
+**What was measured, and where.** All local runs were on macOS. The unit
+tests and probes used fake values and compared environments by name or
+digest.
+
+| What | Where | Result |
+|---|---|---|
+| The race before the change: the SDK's real transport, its version check held open by events, the process start recorded and refused, an environment of fake values only | macOS, local | 5 passed, with the outcomes in the first table above |
+| The relative location before the change: Coral and other executors with planted settings | macOS, local | 20 passed, with the outcomes above |
+| The design reviews: the new rule emulated on the old code; one connect without overlap compared; the profile variables and the absolute in-workdir paths on a Coral executor | macOS, local | no withheld name reached either CLI and the host's config names stayed; the same CLI environment digest; the outcomes above |
+| `tests/inner/test_claude_sdk_executor.py::test_concurrent_connects_hand_no_cli_a_withheld_name`, which extends S113's race test: two real `run_turn`s whose connects overlap, ordered by events. Rows: Coral, not Coral, gateway-negotiating, two executors | macOS, local; CI's `inner-rest` lane | passed locally: neither CLI's environment holds a name withheld for its row, the process keeps none of them and its two config names are unchanged, and the connects overlapped. On the old code the non-Coral row failed: the second CLI held `ANTHROPIC_API_KEY`, and `CLAUDECODE`, which this test's merge keeps and the SDK's drops |
+| `test_the_sdks_own_merge_hands_no_overlapping_cli_a_withheld_name`: the same overlap through the SDK's real transport, a canary for its merge. Only the transport's own reference to `anyio` is replaced, so no process starts | same | passed locally; on the old code the second CLI got `ANTHROPIC_API_KEY` |
+| `test_a_coral_executor_refuses_a_config_location_a_step_could_write`: 33 host locations, each on a key and on a gateway: each relative name and shape; each name at or under the working directory, through a link into it, a settings file or `.claude` dir that is itself such a link, a link loop, and a working directory given as `.`; the order in both refusals; and controls (unset, empty, absolute outside, a working directory under the home). The location is only in the snapshot, and the settings reader fails the test if called | same | passed locally. Each refused row yields one error with its code, title and message naming the expected variable, not retryable, and starts no client, proxy or model listing; no message or log record holds a value. The control rows run their turn |
+| S125's three untrusted-file tests (model names only, an endpoint refused, a blank or late endpoint), with the two S130 refusals stubbed out so a Coral turn reaches that handling; and trust-rule rows for a home above the working directory and for a working directory given as `.` with a relative home only the live environment names | macOS, local | passed |
+| The new and changed tests on the old code | macOS, local | 44 failed, 14 passed |
+| After the code reviews, the new and changed tests on the first version of the change | macOS, local | 40 failed, 55 passed: 18 in-workdir rows on the old message, 10 rows not refused (the profile names, a home beside an outside `CLAUDE_CONFIG_DIR`), the `.` working directory read as trusted, and 11 S125 tests whose stub needs the new check |
+| Seven mutations of the new code: no in-workdir check, the live environment instead of the snapshot, empty read as relative, the config names withheld too, no S13 names, the betas switch always withheld, withholding after the client is built | macOS, local | each made at least one test fail |
+| Fifteen more after the code reviews, each run over the whole executor test module: no in-workdir refusal; only the trust rule; only the name check; each fallback name fixed; the names in reverse order; `HOME`, `XDG_CONFIG_HOME` or `ANTHROPIC_CONFIG_DIR` left out; the working directory itself counted as outside; a home above the working directory refused; the working directory not made absolute; an unresolvable path counted as outside; S125's untrusted endpoint allowed; an untrusted file read as trusted | macOS, local | each made 1 to 28 tests fail; the reviews' two surviving S125 mutants now fail 5 and 11 |
+| `tests/inner/test_claude_sdk_executor.py`, `tests/inner/test_claude_sdk_harness.py`, `tests/runtime/test_claude_sdk_spawn_env.py`, `tests/runner/test_background_session_title.py` and `tests/inner/test_sandbox.py` | macOS, local, with and without `CLAUDE_CONFIG_DIR` set | 1030 passed, 1 skipped (a bwrap row, Linux only) both ways. The executor's module alone also passed (759) with fake `CLAUDECODE` and `ANTHROPIC_API_KEY` set, as in a Claude Code shell |
+| The seatbelt tests that keep the Claude config out of the home and run a Coral CLI without `os_env` in its sandbox | macOS, local | 3 passed, 3 skipped (bwrap rows, Linux only) |
+| The stack tests `tests/e2e/coral/test_skeleton.py` and `test_sandbox_probe.py`, with both refusals in place. Their orchestrator and step CLIs are real, the home is under the stack root and steps run in worktrees | macOS, local; CI's `coral-e2e` lane (Linux, bwrap) | Before the code reviews: 49 passed, 1 skipped. After them, with the widened in-workdir check: 49 passed, 1 skipped (the live review loop, which needs `CORAL_E2E_LIVE=1` and a key). Both times no file the stacks left names either code, so no legitimate stack setup trips them |
+| `tests/e2e/coral/test_tier_b_executor.py`: a real CLI, the mock model, local only, before the code reviews | macOS, local | 5 passed. `test_egress_recorder_sees_model_traffic_aimed_off_the_machine` failed ("turn was still running after 60s"), and fails the same way on an unchanged checkout of the base |
+| `tests/coral/omni` | macOS, local | 1294 passed, 1 skipped |
+
+The macOS sandbox lane, which a change to the executor starts, also runs
+`test_sandbox_probe.py` and the decision stack test. These lanes run in CI
+on this change; this addendum records no CI result.
+
+**What changes for operators and developers.**
+
+- A host whose `CLAUDE_CONFIG_DIR`, `HOME`, `XDG_CONFIG_HOME` or
+  `ANTHROPIC_CONFIG_DIR` is a relative path now stops every Coral step and
+  orchestrator turn with `coral_config_location_relative`, naming the
+  variable. Before, a step ran, and a file in its worktree could choose its
+  model names and opt-outs. Set the variable to an absolute path, or unset
+  it (`HOME` must be absolute), and restart the host.
+- A host whose `CLAUDE_CONFIG_DIR`, `HOME`, `XDG_CONFIG_HOME` or
+  `ANTHROPIC_CONFIG_DIR` points inside the session's working directory, or
+  whose Claude settings file lies there, now stops every Coral turn with
+  `coral_config_location_in_workdir`, naming the variable. Point it outside
+  the working directory and restart the host. A session started in the home
+  or above it stops the same way. Removing an endpoint from such a file no
+  longer helps, as it did under S125. No skeleton stack setup does this
+  (measured above).
+- Every claude-sdk harness, Coral or not, loses `CLAUDECODE` and
+  `ANTHROPIC_API_KEY` from its own environment at its first connect, and the
+  betas switch where betas are negotiated. Its CLIs get exactly what they got
+  before.
+- Other agents' CLIs no longer get the host's `ANTHROPIC_API_KEY` through an
+  overlapping connect. They are otherwise unchanged, a relative
+  `CLAUDE_CONFIG_DIR` included.
+- A direct caller of the executor, such as a test or the Tier B kit, loses
+  the withheld names from its process after its first connect and keeps its
+  `CLAUDE_CONFIG_DIR`. The executor's test module gives each test the names
+  back; another test that connects on the real environment removes them for
+  the rest of its pytest run.
+
+**Residuals and owners.** S130 closes the restore race for every claude-sdk
+executor. For Coral it refuses every relative config location, every one
+inside the working directory, and every Claude settings file that S125's
+rule finds there.
+
+| Residual | Owner |
+|---|---|
+| Other agents' claude-sdk executors follow a relative `CLAUDE_CONFIG_DIR` into the working directory, and with `skills: none` and no gateway merge the whole `env` block of a settings file there or anywhere inside it. An unwrapped CLI also uses a relative or empty `CLAUDE_CONFIG_DIR` as its own config dir | CRL-197 |
+| A planted endpoint in such a file gets that CLI's credential, a session's background title CLI's included (from the code) | CRL-197 |
+| Other agents' CLIs still get the forwarded credentials: the SDK copies the harness's environment into every CLI, and this change built no explicit CLI environment | CRL-197 |
+| A settings or CA file under another path that a broad write grant lets a step write is still trusted | CRL-184 |
+| Two connects that overlap on one session key leave one client orphaned, and the interrupted turn's cleanup can close the new turn's client (from the code) | CRL-213 |
+| A process that embeds the executor loses the withheld names for good after its first connect, for its other children too. Not reachable in production, where a harness process serves one agent | accepted |
+| The `claude -v` of an isolated CLI that a direct caller runs unwrapped inherits the host's two config dir names; it reads no config | accepted |
+| A direct caller can make the snapshot and its live environment disagree: the refusals check the snapshot, and the CLI inherits the live `HOME`, `XDG_CONFIG_HOME` and `ANTHROPIC_CONFIG_DIR`. In a Coral harness both are the same | accepted |
+| On Windows, Python counts a rooted `\x` or a UNC path as absolute | none while S13 refuses every Coral CLI on Windows |
