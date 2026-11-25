@@ -27,6 +27,8 @@ LAUNCH_SECRETS_FD_ENV_VAR = "OMNIGENT_RUNNER_LAUNCH_FD"
 # CORAL(S124): a direct-exec claude-sdk harness's socket. Its name must not start with the
 # harness's config prefix, which the harness sweeps from its environment as config.
 HARNESS_LAUNCH_FD_ENV_VAR = "OMNIGENT_HARNESS_LAUNCH_FD"
+# CORAL(S129)
+HARNESS_BEARER_FD_ENV_VAR = "OMNIGENT_HARNESS_BEARER_FD"
 # CORAL(S124): the claude-sdk harness config that can carry a key; only these use the socket.
 CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS: frozenset[str] = frozenset(
     {"HARNESS_CLAUDE_SDK_API_KEY_HELPER", "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND"}

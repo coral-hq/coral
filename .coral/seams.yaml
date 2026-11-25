@@ -3472,8 +3472,10 @@ seams:
       per-user default harness root, carried over the launcher wire and
       through clones. Resolving them never raises: a configured root that
       cannot be resolved is left out with a warning (once per setting and
-      process), a path swapped while it resolves keeps its plain spelling, and
-      the default is always kept, so a bad or raced setting cannot fail
+      process), a configured root that is a symlink loop is kept by its plain
+      spelling with a warning (a loop holds no socket, and S130 refuses a
+      symlinked root), a path swapped while it resolves keeps its plain
+      spelling, and the default is always kept, so a bad or raced setting cannot fail
       resolve_sandbox into an unsandboxed run. Seatbelt denies each root as a
       subpath of its real path, and the per-user default root even for a
       policy that carries no roots (an old launcher payload), after every
@@ -3493,7 +3495,8 @@ seams:
       claude-sdk turn are unaffected. bwrap ignores the field: --tmpfs /tmp
       already hides the default root. Not covered: AF_UNIX harness sockets
       under another instance's own root, a harness root inside a sandbox write
-      root, a root created as a symlink after the profile is built, a Linux
+      root (a root created as a symlink after the profile is built is now
+      refused by S130's process manager check), a Linux
       root under a path bwrap binds and processes outside the sandbox
       (CRL-173), and the codex-native app-server socket and loopback TCP
       listeners (CRL-177). Closed since by S127: other programs' sockets
@@ -3529,7 +3532,9 @@ seams:
         tests, the resolve_sandbox test, the never-raise and warn-once cases
         (a symlink loop at either root, ~nosuchuser, a deleted cwd, a relative
         root, a broad root, a path swapped while it resolves) and the
-        scratch-recording test. tests/inner/test_seatbelt_sandbox.py (193
+        scratch-recording test. The looping configured root kept by its
+        spelling changed 7 lines of omnigent/inner/sandbox.py and 3 to
+        tests/inner/test_sandbox.py. tests/inner/test_seatbelt_sandbox.py (193
         changed lines): the placement test in four network modes, the guard
         cases, the pane-shaped test, the always-denied default root and its
         drift test, and the narrowed empty-list test.
@@ -5198,6 +5203,119 @@ seams:
         other files are within budget: omnigent/host/connect.py 8,
         docs/AGENT_YAML_SPEC.md 6, tests/host/test_connect.py 4.
       approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S129
+    title: Every harness socket requires a per-spawn bearer that never travels in the environment
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Read in code: on POSIX the harness socket authenticated nothing, so any
+      same-user process that connected could drive a turn, and on Windows the
+      per-spawn token rode the harness's exec-time env (readable by same-user
+      process inspection), was never popped and so reached every agent CLI the
+      harness spawned. The check ran inside the /v1 handler after body
+      parsing, and /health, /docs and test routes were open.
+      HarnessProcessManager now mints secrets.token_urlsafe(32) for every
+      spawn on every platform and never puts it in the env (the spawn env also
+      drops an inherited OMNIGENT_HARNESS_AUTH_TOKEN) or argv. A POSIX direct
+      exec sends it in its own launch socket (S123's launch_secrets_in_socket,
+      named by OMNIGENT_HARNESS_BEARER_FD, beside S124's claude-sdk key
+      socket), never a pipe a same-user process could reopen through /proc; a
+      Windows direct exec, which has no pass_fds, runs the harness with
+      stdin=PIPE and writes the token and closes stdin synchronously inside the
+      spawn owner guard; the zygote path sends it
+      as a separate auth_token field of the fork_harness request, which
+      _run_harness_child passes to _runner.main. main pops the env name first,
+      adopts the bearer socket (S123's adopt_launch_secrets, exit 2 on any
+      refusal) and only on Windows reads stdin, where it refuses a terminal, reads at most 4096 bytes to EOF, points fd 0 at
+      /dev/null, and exits 2 with a message that the spawning runner predates
+      this build and the session must restart when no token arrives (a runner
+      started before an in-place upgrade therefore cannot spawn harnesses).
+      uvicorn serves a raw ASGI gate around the app: only lifespan passes
+      unauthenticated, any scope other than http or websocket is dropped, and an http or websocket scope without "Bearer <token>" (scheme case
+      insensitive, hmac.compare_digest) gets a 401 JSON or websocket.close
+      without the app or receive() being called, so a malformed body gets
+      401, not 422. The client always sends the header; the scaffold's
+      _check_auth stays as a second layer. Not covered: freed bytes of earlier
+      tokens surviving in the zygote heap (same-user memory read only).
+    files:
+      - omnigent/runner/_zygote.py
+      - omnigent/runner/launch_secrets.py
+      - omnigent/runtime/harnesses/_harness_zygote_client.py
+      - omnigent/runtime/harnesses/_runner.py
+      - omnigent/runtime/harnesses/process_manager.py
+      - tests/runtime/harnesses/test_harness_auth.py
+      - tests/runtime/harnesses/test_harness_zygote_client.py
+      - tests/runtime/harnesses/test_human_wait_survives_idle_watchdog.py
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/runtime/harnesses/test_runner.py
+      - tests/runtime/harnesses/test_scaffold.py
+    tests:
+      - tests/runtime/harnesses/test_harness_auth.py
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/runtime/harnesses/test_runner.py
+      - tests/runtime/harnesses/test_harness_zygote_client.py
+      - tests/runtime/harnesses/test_scaffold.py
+      - tests/host/test_runner_zygote.py
+    budget_lines: 120
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S130
+    title: The harness process manager keeps its socket root and instance dirs this user's own private real directories
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS: HarnessProcessManager created its socket root and
+      each ap-<uuid> instance dir with mkdir(exist_ok=True), which silently
+      follows a symlink planted at either path, so the sockets landed outside
+      S112's sandbox deny; the orphan sweep followed a symlinked root or
+      ap-* entry before reading sentinels and killing socket holders.
+      paths.ensure_private_dir now creates parents unchecked (so /tmp ->
+      /private/tmp and nested configured roots work), creates the leaf 0700,
+      opens it with O_NOFOLLOW|O_DIRECTORY and, through the descriptor,
+      refuses a symlink, a non-directory, another owner (euid) or group or
+      other write bits with a RuntimeError naming the path, else tightens it
+      to 0700 (keeps jcode's 0755 root working). start() checks the root
+      before the sweep, and every spawn re-checks the root and the instance
+      dir. The sweep lstats the root and skips it with a warning unless it
+      passes the same checks (it never creates it), and lstats each ap-*
+      entry, skipping a symlink, non-directory or foreign one before reading
+      or killing anything. A symlinked configured root is refused, reversing
+      the upstream short-alias spelling allowance (only its spelling was
+      tested). A root the owner cannot open (0300) is kept unchanged only when
+      lstat shows it is this user's real, owner-only dir. Windows only
+      creates. Not covered: a same-user process racing the check and the
+      socket bind (the bearer, S129, covers it).
+    files:
+      - omnigent/runtime/harnesses/paths.py
+      - omnigent/runtime/harnesses/process_manager.py
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/e2e/test_orphan_sweep_unreadable_tmp_parent_e2e.py
+    tests:
+      - tests/runtime/harnesses/test_process_manager.py
+      - tests/runtime/test_process_manager.py
+      - tests/host/test_maintenance.py
+      - tests/e2e/test_orphan_sweep_unreadable_tmp_parent_e2e.py
+    budget_lines: 120
+    budget_exception:
+      lines: 137
+      reason: >-
+        tests/runtime/harnesses/test_process_manager.py (137 added lines):
+        the refused-root cases (symlink, mode 0777, foreign owner), the 0755
+        tightening, the unreadable 0300 kept and 0355 refused and nested-root test, the planted instance-dir symlink test,
+        the sweep test over a symlinked root and a symlinked ap-* entry, and
+        three sweep race tests moved from Path.exists / Path.is_dir / chmod
+        0333 to the lstat and listing the sweep now does. The other files are
+        within budget: omnigent/runtime/harnesses/paths.py 48,
+        omnigent/runtime/harnesses/process_manager.py 24.
+      approver: pending
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

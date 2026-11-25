@@ -28,7 +28,7 @@ from omnigent.runtime.harnesses._harness_zygote_client import (
     ZygoteHarnessUnavailable,
 )
 
-# os.fork / AF_UNIX socketpair are POSIX-only.
+# CORAL(S129)
 pytestmark = [pytest.mark.posix_only, pytest.mark.asyncio]
 
 
@@ -98,6 +98,7 @@ async def test_fork_harness_runs_and_reports_exit(zygote: ZygoteManager, tmp_pat
     proc = await client.fork_harness(
         ["--harness", "x", "--conversation-id", "c"],
         _harness_env(0, tmp_path / "h.log"),
+        "tok",
     )
     assert isinstance(proc, ZygoteHarnessProc)
     assert isinstance(proc.pid, int)
@@ -114,6 +115,7 @@ async def test_fork_harness_nonzero_exit(zygote: ZygoteManager, tmp_path) -> Non
     proc = await client.fork_harness(
         ["--harness", "x", "--conversation-id", "c"],
         _harness_env(5, tmp_path / "h.log"),
+        "tok",
     )
     assert await asyncio.wait_for(proc.wait(), timeout=10) == 5
 
@@ -128,6 +130,7 @@ async def test_wait_timeout_preserves_exit_polling(zygote: ZygoteManager, tmp_pa
             "OMNIGENT_RUNNER_ZYGOTE_TEST_CHILD_SLEEP": "30",
             "OMNIGENT_PROCESS_LOG_FILE": str(tmp_path / "h.log"),
         },
+        "tok",
     )
     try:
         with pytest.raises(TimeoutError):
@@ -152,6 +155,7 @@ async def test_cancelling_one_waiter_preserves_other_waiters(
             "OMNIGENT_RUNNER_ZYGOTE_TEST_CHILD_SLEEP": "30",
             "OMNIGENT_PROCESS_LOG_FILE": str(tmp_path / "h.log"),
         },
+        "tok",
     )
     cancelled_waiter = asyncio.create_task(proc.wait())
     surviving_waiter = asyncio.create_task(proc.wait())
@@ -184,7 +188,7 @@ async def test_fork_harness_raises_when_channel_closed(zygote: ZygoteManager, tm
     right.close()
     client = HarnessZygoteClient(left.fileno())
     with pytest.raises(ZygoteHarnessUnavailable):
-        await client.fork_harness(["--harness", "x"], {"PATH": os.environ.get("PATH", "")})
+        await client.fork_harness(["--harness", "x"], {"PATH": os.environ.get("PATH", "")}, "tok")
 
 
 async def test_wait_surfaces_failure_when_zygote_dies_and_harness_gone(
@@ -209,7 +213,7 @@ async def test_wait_surfaces_failure_when_zygote_dies_and_harness_gone(
         "OMNIGENT_RUNNER_ZYGOTE_TEST_CHILD_SLEEP": "30",
         "OMNIGENT_PROCESS_LOG_FILE": str(tmp_path / "h.log"),
     }
-    proc = await client.fork_harness(["--harness", "x"], env)
+    proc = await client.fork_harness(["--harness", "x"], env, "tok")
 
     # Kill the zygote, then the harness: its code is now unrecoverable.
     assert zygote.pid is not None

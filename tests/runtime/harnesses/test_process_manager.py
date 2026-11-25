@@ -44,15 +44,17 @@ import httpx
 import psutil  # CORAL(S124)
 import pytest
 
+from omnigent._platform import IS_POSIX
 from omnigent.host.connect import RUNNER_FORWARDED_NAMES_ENV_VAR  # CORAL(S124)
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
 from omnigent.runner.launch_secrets import (  # CORAL(S124)
     CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
+    HARNESS_BEARER_FD_ENV_VAR,
     HARNESS_LAUNCH_FD_ENV_VAR,
     MAX_LAUNCH_SECRETS_BYTES,
 )
 from omnigent.runtime.harnesses import _HARNESS_MODULES, process_manager  # CORAL(S124)
-from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
+from omnigent.runtime.harnesses.paths import ensure_private_dir, resolve_harness_tmp_parent
 from omnigent.runtime.harnesses.process_manager import (
     _AP_PID_FILE,
     _TMP_PARENT_ENV_VAR,
@@ -329,6 +331,119 @@ def test_resolve_harness_tmp_parent_makes_relative_path_absolute(
     resolved = resolve_harness_tmp_parent()
 
     assert resolved == tmp_path / "harness-sockets"
+
+
+# CORAL(S130)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
+@pytest.mark.parametrize("plant", ["symlink", "dangling-symlink", "mode-0777", "foreign-owner"])
+async def test_start_refuses_an_unsafe_root(
+    short_tmp_parent: Path, monkeypatch: pytest.MonkeyPatch, plant: str
+) -> None:
+    real = short_tmp_parent / "real"
+    real.mkdir(mode=0o700)
+    root = real
+    if plant == "symlink":
+        root = short_tmp_parent / "link"
+        root.symlink_to(real, target_is_directory=True)
+    elif plant == "dangling-symlink":
+        root = short_tmp_parent / "link"
+        root.symlink_to(real / "planted", target_is_directory=True)
+    elif plant == "mode-0777":
+        real.chmod(0o777)
+    else:
+        monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+
+    with pytest.raises(RuntimeError, match=str(root)):
+        await HarnessProcessManager(tmp_parent=root).start()
+
+    assert list(real.iterdir()) == []
+
+
+# CORAL(S130)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
+@pytest.mark.parametrize(("mode", "accepted"), [(0o300, True), (0o355, False)])
+def test_ensure_private_dir_on_an_unreadable_root(
+    short_tmp_parent: Path, mode: int, accepted: bool
+) -> None:
+    root = short_tmp_parent / "unreadable"
+    root.mkdir(mode=0o700)
+    root.chmod(mode)
+    try:
+        if accepted:
+            ensure_private_dir(root)
+        else:
+            with pytest.raises(RuntimeError, match=str(root)):
+                ensure_private_dir(root)
+        assert root.stat().st_mode & 0o777 == mode
+    finally:
+        root.chmod(0o700)
+
+
+# CORAL(S130)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks.")
+async def test_start_tightens_an_owned_0755_root_and_creates_nested_roots(
+    short_tmp_parent: Path,
+) -> None:
+    loose = short_tmp_parent / "loose"
+    loose.mkdir(mode=0o700)
+    loose.chmod(0o755)
+    nested = short_tmp_parent / "a" / "b"
+    for root in (loose, nested):
+        manager = HarnessProcessManager(tmp_parent=root)
+        await manager.start()
+        try:
+            assert root.stat().st_mode & 0o777 == 0o700
+            assert manager.instance_dir.stat().st_mode & 0o777 == 0o700
+        finally:
+            await manager.shutdown()
+
+
+# CORAL(S130)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink check.")
+async def test_recreating_the_instance_dir_refuses_a_planted_symlink(
+    short_tmp_parent: Path,
+) -> None:
+    manager = HarnessProcessManager(tmp_parent=short_tmp_parent)
+    await manager.start()
+    elsewhere = short_tmp_parent / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    try:
+        shutil.rmtree(manager.instance_dir)
+        manager.instance_dir.symlink_to(elsewhere, target_is_directory=True)
+        with pytest.raises(RuntimeError, match="symlink"):
+            manager._ensure_instance_dir()
+        assert list(elsewhere.iterdir()) == []
+    finally:
+        await manager.shutdown()
+
+
+# CORAL(S130)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink check.")
+async def test_sweep_skips_symlinked_root_and_instance_dirs(
+    short_tmp_parent: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    killed: list[Path] = []
+
+    async def record_kill(instance_dir: Path) -> None:
+        killed.append(instance_dir)
+
+    monkeypatch.setattr(
+        "omnigent.runtime.harnesses.process_manager._kill_orphan_runners", record_kill
+    )
+    stale = short_tmp_parent / "real" / "ap-dead"
+    stale.mkdir(mode=0o700, parents=True)
+    (stale / _AP_PID_FILE).write_text("99999999", encoding="utf-8")
+    linked_root = short_tmp_parent / "link"
+    linked_root.symlink_to(stale.parent, target_is_directory=True)
+    root = short_tmp_parent / "root"
+    root.mkdir(mode=0o700)
+    (root / "ap-link").symlink_to(stale, target_is_directory=True)
+
+    await sweep_orphaned_harness_processes(tmp_parent=linked_root)
+    await sweep_orphaned_harness_processes(tmp_parent=root)
+
+    assert killed == []
+    assert (stale / _AP_PID_FILE).exists()
 
 
 async def test_shutdown_without_start_is_noop(
@@ -1551,26 +1666,32 @@ async def test_orphan_sweep_from_another_pid_namespace_keeps_a_live_harness(
         async with httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(uds=str(socket_path)),
             base_url="http://harness.local",
+            # CORAL(S129)
+            headers={"Authorization": client.headers["Authorization"]},
         ) as fresh:
             assert (await fresh.get("/pid")).json()["pid"] == harness_pid
     finally:
         await manager.shutdown()
 
 
-@pytest.mark.posix_only
 async def test_orphan_sweep_survives_unreadable_tmp_parent(
     short_tmp_parent: Path,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Warn and continue startup when the configured parent cannot be listed."""
-    if os.geteuid() == 0:
-        pytest.skip("permission checks do not apply to root")
     locked_parent = short_tmp_parent / "fp"
     locked_parent.mkdir(mode=0o700)
     (locked_parent / "ap-unreachable").mkdir(mode=0o700)
-    # Write+search without read: our own instance dir can be created,
-    # but the sweep cannot enumerate the configured shared parent.
-    locked_parent.chmod(0o333)
+    # CORAL(S130)
+    real_iterdir = Path.iterdir
+
+    def _locked_iterdir(self: Path) -> Iterator[Path]:
+        if self == locked_parent:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _locked_iterdir)
     manager = HarnessProcessManager(tmp_parent=locked_parent)
     try:
         await manager.start()
@@ -1579,7 +1700,7 @@ async def test_orphan_sweep_survives_unreadable_tmp_parent(
             for record in caplog.records
         )
     finally:
-        locked_parent.chmod(0o700)
+        monkeypatch.undo()
         with contextlib.suppress(Exception):
             await manager.shutdown()
 
@@ -1590,17 +1711,18 @@ async def test_orphan_sweep_survives_tmp_parent_stat_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A tmp-parent stat race must not abort manager startup."""
-    real_exists = Path.exists
+    real_lstat = os.lstat
     raised = False
 
-    def _racy_exists(self: Path) -> bool:
+    # CORAL(S130)
+    def _racy_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
         nonlocal raised
-        if self == short_tmp_parent and not raised:
+        if Path(str(path)) == short_tmp_parent and not raised:
             raised = True
             raise OSError("tmp parent changed during sweep")
-        return real_exists(self)
+        return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "exists", _racy_exists)
+    monkeypatch.setattr(os, "lstat", _racy_lstat)
     manager = HarnessProcessManager(tmp_parent=short_tmp_parent)
     try:
         await manager.start()
@@ -1655,7 +1777,7 @@ async def test_orphan_sweep_treats_vanishing_child_as_benign_race(
     short_tmp_parent: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An injected is_dir race must not prevent cleanup of the next dead orphan."""
+    """An injected lstat race must not prevent cleanup of the next dead orphan."""
     vanishing = short_tmp_parent / "ap-avanishing"
     vanishing.mkdir(mode=0o700)
     (vanishing / _AP_PID_FILE).write_text("99999999", encoding="utf-8")
@@ -1663,14 +1785,15 @@ async def test_orphan_sweep_treats_vanishing_child_as_benign_race(
     dead.mkdir(mode=0o700)
     (dead / _AP_PID_FILE).write_text("99999999", encoding="utf-8")
 
-    real_is_dir = Path.is_dir
+    real_lstat = os.lstat
 
-    def _racy_is_dir(self: Path, **kwargs: object) -> bool:
-        if self.name == "ap-avanishing":
-            raise FileNotFoundError(2, "vanished mid-sweep", str(self))
-        return real_is_dir(self, **kwargs)  # type: ignore[arg-type]
+    # CORAL(S130)
+    def _racy_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if Path(str(path)).name == "ap-avanishing":
+            raise FileNotFoundError(2, "vanished mid-sweep", str(path))
+        return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "is_dir", _racy_is_dir)
+    monkeypatch.setattr(os, "lstat", _racy_lstat)
     manager = HarnessProcessManager(tmp_parent=short_tmp_parent)
     try:
         await manager.start()
@@ -1823,6 +1946,113 @@ async def test_get_client_env_override_is_per_conversation(
         await manager.shutdown()
 
 
+# CORAL(S129)
+
+
+def _bearer(client: httpx.AsyncClient) -> str:
+    scheme, _, token = client.headers["Authorization"].partition(" ")
+    assert scheme == "Bearer" and token
+    return token
+
+
+@pytest.mark.posix_only
+async def test_harness_socket_refuses_a_request_without_the_bearer(
+    manager: HarnessProcessManager,
+) -> None:
+    await manager.start()
+    try:
+        client = await manager.get_client("conv_gate", _TEST_HARNESS_NAME)
+        assert (await client.get("/health")).status_code == 200
+        async with httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(uds=str(manager.socket_path("conv_gate"))),
+            base_url="http://harness.local",
+        ) as anonymous:
+            assert (await anonymous.get("/health")).status_code == 401
+            response = await anonymous.post(
+                "/v1/sessions/conv_gate/events",
+                content=b"{not json",
+                headers={"Authorization": "Bearer wrong", "Content-Type": "application/json"},
+            )
+            assert response.status_code == 401
+            assert response.json() == {"detail": "unauthorized"}
+    finally:
+        await manager.shutdown()
+
+
+async def test_direct_exec_passes_the_bearer_outside_env_and_argv(
+    manager: HarnessProcessManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNIGENT_HARNESS_AUTH_TOKEN", "inherited-token")
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def capturing_exec(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        calls.append((args, kwargs))
+        return await real_exec(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing_exec)
+    await manager.start()
+    try:
+        client = await manager.get_client("conv_stdin", _TEST_HARNESS_NAME)
+        token = _bearer(client)
+        (args, kwargs) = calls[-1]
+        if IS_POSIX:
+            assert kwargs["stdin"] is None
+            assert HARNESS_BEARER_FD_ENV_VAR in kwargs["env"]
+        else:
+            assert kwargs["stdin"] == asyncio.subprocess.PIPE
+        assert not any(token in str(arg) for arg in args)
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert "OMNIGENT_HARNESS_AUTH_TOKEN" not in env
+        assert token not in env.values()
+        resp = await client.get("/env/OMNIGENT_HARNESS_AUTH_TOKEN")
+        assert resp.json() == {"value": None}
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.posix_only
+async def test_zygote_fork_passes_the_bearer_outside_env_and_argv(
+    manager: HarnessProcessManager,
+    tmp_path: Path,
+) -> None:
+    from omnigent.host.runner_zygote import ZygoteManager
+    from omnigent.runtime.harnesses._harness_zygote_client import HarnessZygoteClient
+
+    zygote = ZygoteManager(log_path=tmp_path / "zygote.log")
+    zygote.start()
+    try:
+        assert zygote._sock is not None
+        harness_zygote = HarnessZygoteClient(os.dup(zygote._sock.fileno()))
+        sent: list[tuple[list[str], dict[str, str], str]] = []
+        real_fork = harness_zygote.fork_harness
+
+        async def capturing_fork(argv: list[str], env: dict[str, str], auth_token: str) -> object:
+            sent.append((argv, env, auth_token))
+            return await real_fork(argv, env, auth_token)
+
+        harness_zygote.fork_harness = capturing_fork  # type: ignore[method-assign]
+        manager._harness_zygote = harness_zygote
+        await manager.start()
+        try:
+            client = await manager.get_client("conv_fork", _TEST_HARNESS_NAME)
+            token = _bearer(client)
+            (argv, env, auth_token) = sent[-1]
+            assert auth_token == token
+            assert not any(token in arg for arg in argv)
+            assert "OMNIGENT_HARNESS_AUTH_TOKEN" not in env
+            assert token not in env.values()
+            assert manager._harness_zygote_disabled is False
+            resp = await client.get("/env/OMNIGENT_HARNESS_AUTH_TOKEN")
+            assert resp.json() == {"value": None}
+        finally:
+            await manager.shutdown()
+    finally:
+        zygote.stop()
+
+
 # ── CORAL(S124): a claude-sdk harness's key travels in a launch socket on direct exec ──
 
 _CLAUDE_SDK_CONFIG_HARNESS = "claude-sdk-config"
@@ -1954,7 +2184,10 @@ async def test_claude_sdk_key_travels_in_a_socket_only_on_a_posix_direct_exec(
         raise RuntimeError("stop after the spawn request")
 
     class _RecordingZygote:
-        async def fork_harness(self, argv: list[str], env: dict[str, str]) -> None:
+        # CORAL(S129)
+        async def fork_harness(
+            self, argv: list[str], env: dict[str, str], auth_token: str
+        ) -> None:
             record(env)
 
     async def recording_exec(*args: object, env: dict[str, str], **kwargs: Any) -> None:
@@ -1974,7 +2207,8 @@ async def test_claude_sdk_key_travels_in_a_socket_only_on_a_posix_direct_exec(
 
     if spawn_path == "exec-posix":
         # The real claude-sdk module sends its key in one socket, closed here after the spawn.
-        assert spawns == [(None, "passed", [True], "MY_PROVIDER_KEY")]
+        # CORAL(S129)
+        assert spawns == [(None, "passed", [True, True], "MY_PROVIDER_KEY")]
         assert [fd for fd, inode in passed if _still_open(fd, inode)] == []
     else:
         # The key stays in the env, no stale fd number survives, and no socket is passed.

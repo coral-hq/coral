@@ -48,6 +48,7 @@ from omnigent.native.owner_claim import owner_is_gone, read_owner_claim, write_o
 from omnigent.runner.identity import strip_runner_auth_secrets
 from omnigent.runner.launch_secrets import (  # CORAL(S124)
     CLAUDE_SDK_HARNESS_LAUNCH_SECRET_ENV_VARS,
+    HARNESS_BEARER_FD_ENV_VAR,
     HARNESS_LAUNCH_FD_ENV_VAR,
     launch_secrets_in_socket,
 )
@@ -58,7 +59,9 @@ from omnigent.runtime.harnesses._harness_zygote_client import (
 )
 from omnigent.runtime.harnesses.paths import (
     HARNESS_TMP_PARENT_ENV_VAR,
+    ensure_private_dir,
     harness_tmp_parent,
+    private_dir_problem,
 )
 from omnigent.util.json_serialization import json_dumps_transport_safe
 
@@ -104,13 +107,7 @@ class _HarnessHttpClient(httpx.AsyncClient):
 # drive — so use the real (already per-user) temp dir.
 _TMP_PARENT_ENV_VAR = HARNESS_TMP_PARENT_ENV_VAR
 
-# S1 (security): env var carrying the per-spawn bearer token for the harness
-# control channel. The parent generates a fresh token per subprocess, ships it
-# here (private to the parent/child pair), and presents it on every ``/v1``
-# request; the harness scaffold's auth middleware compares against it. This is
-# the access boundary on Windows, where the IPC is a loopback TCP listener
-# reachable by any local process; on POSIX (uid-isolated UDS) it is defence in
-# depth.
+# CORAL(S129)
 _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
 
 # CORAL(S124): the harness modules that read key-bearing config from a launch socket, and
@@ -124,11 +121,6 @@ _LAUNCH_SECRET_ENV_VARS_BY_MODULE: dict[str, frozenset[str]] = {
 # Holds an owner claim; older builds wrote a bare PID.
 _AP_PID_FILE = "AP_PID"
 
-# Mode bits applied to the per-AP subdir and the per-conversation
-# socket. Filesystem permissions + the per-AP-uuid scope are the v1
-# auth boundary. mTLS / bearer tokens are deferred until federation
-# (see §What's deferred in the design doc).
-_DIR_MODE = 0o700
 # Socket files inherit the parent dir permissions; setting 0o600
 # explicitly on the file ensures the same restriction even on
 # umask configurations that would otherwise loosen it.
@@ -566,6 +558,8 @@ def _build_harness_spawn_env(env: dict[str, str] | None) -> dict[str, str]:
     merged = strip_desktop_session_env(os.environ)
     if env:
         merged.update(env)
+    # CORAL(S129)
+    merged.pop(_HARNESS_AUTH_TOKEN_ENV, None)
     merged.pop(HARNESS_LAUNCH_FD_ENV_VAR, None)  # CORAL(S124): only a spawn's own socket sets it
     return strip_runner_auth_secrets(merged)
 
@@ -719,7 +713,8 @@ class HarnessProcessManager:
         if self._started:
             return
         self._shutting_down = False
-        self._tmp_parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        # CORAL(S130)
+        ensure_private_dir(self._tmp_parent)
         if sweep_orphans:
             # Sweep BEFORE creating our own dir, so a crashed prior instance
             # whose dir uuid happens to collide with ours gets cleaned first.
@@ -1282,8 +1277,9 @@ class HarnessProcessManager:
     def _ensure_instance_dir(self) -> None:
         # Temporary-file cleanup may remove either directory after start().
         # Recreated state needs the same private modes and live-owner claim.
-        self._tmp_parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
-        self._instance_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        # CORAL(S130)
+        ensure_private_dir(self._tmp_parent)
+        ensure_private_dir(self._instance_dir)
         write_owner_claim(self._instance_dir, filename=_AP_PID_FILE)
 
     async def _spawn_entry(
@@ -1326,16 +1322,8 @@ class HarnessProcessManager:
         # payload running in the harness can't impersonate the runner.
         # See ``_build_harness_spawn_env``.
         effective_env: dict[str, str] = _build_harness_spawn_env(env)
-        # S1 (security): on Windows the harness IPC is a loopback-TCP listener
-        # reachable by any local process, so mint a fresh per-spawn bearer token
-        # as the access boundary the uid-isolated UDS provides on POSIX. This is
-        # Windows-only: POSIX keeps the UDS and sets no token, leaving the
-        # scaffold's auth gate inert. The token is delivered via the harness's
-        # private env and presented by our client (below) on every /v1 request.
-        auth_token: str | None = None
-        if IS_WINDOWS:
-            auth_token = secrets.token_urlsafe(32)
-            effective_env[_HARNESS_AUTH_TOKEN_ENV] = auth_token
+        # CORAL(S129)
+        auth_token = secrets.token_urlsafe(32)
 
         parent_pid = os.getpid()
 
@@ -1362,8 +1350,16 @@ class HarnessProcessManager:
         ]
         spawn_started_at = time.monotonic()
         # CORAL(S124): the module picks what a direct exec sends through a launch socket
-        process = await self._spawn_harness_process(runner_argv, effective_env, module_path)
+        # CORAL(S129)
+        process = await self._spawn_harness_process(
+            runner_argv, effective_env, module_path, auth_token
+        )
         try:
+            # CORAL(S129)
+            stdin = getattr(process, "stdin", None)
+            if stdin is not None:
+                stdin.write(auth_token.encode("ascii") + b"\n")
+                stdin.close()
             await _wait_for_bind(process, endpoint, harness, conversation_id)
             # The harness process has bound its socket and is ready to serve —
             # the observable "harness started" edge. Report the spawn->ready
@@ -1399,11 +1395,8 @@ class HarnessProcessManager:
             client = _HarnessHttpClient(
                 transport=endpoint.make_transport(),
                 base_url=endpoint.base_url,
-                # S1 (security): present the per-spawn bearer token (Windows only)
-                # so the harness scaffold accepts this client and rejects any
-                # unauthenticated local peer on the loopback-TCP channel. Empty on
-                # POSIX, where the uid-isolated UDS is the access boundary.
-                headers=({"Authorization": f"Bearer {auth_token}"} if auth_token else {}),
+                # CORAL(S129)
+                headers={"Authorization": f"Bearer {auth_token}"},
                 # See the comment above the constant for rationale.
                 # Connect/write/pool keep the 5s default so a vanished
                 # harness still surfaces quickly; read=None defers
@@ -1448,6 +1441,7 @@ class HarnessProcessManager:
         runner_argv: list[str],
         effective_env: dict[str, str],
         module_path: str,  # CORAL(S124)
+        auth_token: str,
     ) -> Any:
         """Spawn the harness ``_runner``, via the zygote fork path or direct exec.
 
@@ -1470,7 +1464,7 @@ class HarnessProcessManager:
         zygote = self._harness_zygote
         if zygote is not None and not self._harness_zygote_disabled:
             try:
-                return await zygote.fork_harness(runner_argv, effective_env)
+                return await zygote.fork_harness(runner_argv, effective_env, auth_token)
             except ZygoteHarnessUnavailable as exc:
                 _logger.warning(
                     "Harness zygote unavailable (%s); falling back to direct exec", exc
@@ -1487,6 +1481,16 @@ class HarnessProcessManager:
                         fd_env_var=HARNESS_LAUNCH_FD_ENV_VAR,
                     )
                 )
+                # CORAL(S129)
+                if IS_POSIX:
+                    spawn_env, bearer_fds = launch.enter_context(
+                        launch_secrets_in_socket(
+                            {**spawn_env, _HARNESS_AUTH_TOKEN_ENV: auth_token},
+                            (_HARNESS_AUTH_TOKEN_ENV,),
+                            fd_env_var=HARNESS_BEARER_FD_ENV_VAR,
+                        )
+                    )
+                    secret_fds += bearer_fds
             except OSError as exc:
                 # A spawn failure callers handle; the type alone, so no value can surface.
                 raise RuntimeError(
@@ -1500,6 +1504,8 @@ class HarnessProcessManager:
                 "-m",
                 "omnigent.runtime.harnesses._runner",
                 *runner_argv,
+                # CORAL(S129)
+                stdin=None if IS_POSIX else asyncio.subprocess.PIPE,
                 stdout=None,
                 stderr=None,
                 env=spawn_env,  # CORAL(S124)
@@ -1676,14 +1682,20 @@ async def sweep_orphaned_harness_processes(*, tmp_parent: Path | None = None) ->
     """
     root = tmp_parent if tmp_parent is not None else _default_tmp_parent()
     try:
-        if not root.exists():
-            return
+        # CORAL(S130)
+        info = os.lstat(root)
+    except FileNotFoundError:
+        return
     except OSError as exc:
         _logger.warning(
             "cannot access %s for the orphan sweep: %s; skipping sweep",
             root,
             exc,
         )
+        return
+    problem = None if IS_WINDOWS else private_dir_problem(info)
+    if problem is not None:
+        _logger.warning("harness socket root %s %s; skipping the orphan sweep", root, problem)
         return
     try:
         children = list(root.iterdir())
@@ -1696,7 +1708,10 @@ async def sweep_orphaned_harness_processes(*, tmp_parent: Path | None = None) ->
         return
     for child in children:
         try:
-            if not child.is_dir() or not child.name.startswith("ap-"):
+            if not child.name.startswith("ap-"):
+                continue
+            # CORAL(S130)
+            if (not child.is_dir()) if IS_WINDOWS else private_dir_problem(os.lstat(child)):
                 continue
             sentinel = child / _AP_PID_FILE
             if not sentinel.exists():

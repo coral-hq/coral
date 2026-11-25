@@ -460,6 +460,10 @@ sandbox does not confine.
   accepts. On macOS, since S112, a sandboxed step's connect to a harness
   socket under the configured or the per-user default root is denied,
   measured on 27.2.1 (see "Addendum: CRL-166 harness sockets on macOS").
+  Closed by S129: every harness socket, on every platform, now refuses a
+  caller without its per-spawn bearer, which is never in an exec-time
+  environment (see "Addendum: CRL-173 harness bearer and private socket
+  root").
 - **(b) The runner's environment.** A runner's environment as it was at exec
   holds its tunnel binding token (`omnigent/runner/_entry.py`) and, for a
   host-launched runner, the host's initial bearer
@@ -497,7 +501,8 @@ confine ([`../contracts/session-facade.md`](../contracts/session-facade.md),
 "Residuals and limitations"). A per-spawn harness bearer on POSIX would be an
 Omnigent change, a Coral-owned seam; it is recorded here as an owner decision,
 not planned. Reopened by CRL-166: planned as defence in depth in CRL-173 (see
-"Addendum: CRL-166 harness sockets on macOS").
+"Addendum: CRL-166 harness sockets on macOS"). Built in CRL-173 as S129 (see
+"Addendum: CRL-173 harness bearer and private socket root").
 
 | Follow-up | Owner |
 |---|---|
@@ -728,7 +733,8 @@ itself: the probe only measures exposures that already exist.
 
 CRL-166 reopened the decision in "Addendum: probe 15" that a per-spawn harness
 bearer on POSIX is recorded but not planned; it is now planned in CRL-173 (see
-"Addendum: CRL-166 harness sockets on macOS").
+"Addendum: CRL-166 harness sockets on macOS"). It is built as S129 (see
+"Addendum: CRL-173 harness bearer and private socket root").
 
 **Open for the owner.** Whether to run Coral steps on untrusted content is the
 owner's risk decision, stated with its open tickets in "Addendum: CRL-166
@@ -964,7 +970,8 @@ residuals below. S111's process-read rules and their evidence are in
   sandboxed shell could not list `/private/tmp`, yet it connected.
 - From code: the harness socket has no bearer on POSIX (residual (a); the
   per-spawn token is minted only on Windows,
-  `omnigent/runtime/harnesses/process_manager.py`). The protocol is HTTP over
+  `omnigent/runtime/harnesses/process_manager.py`; S129 later added a bearer
+  on every platform). The protocol is HTTP over
   the socket (`omnigent/runtime/harnesses/_scaffold.py`). A `message` event
   during the victim's live turn is injected into that turn, and the victim's
   own runner then sends its tool calls, `coral_submit_handoff` included, to
@@ -1043,7 +1050,10 @@ dir):
   setting cannot fail `resolve_sandbox` into an unsandboxed run: the ACP
   executor runs its agent unsandboxed when `resolve_sandbox` raises an
   `OSError` (`omnigent/inner/acp_executor.py`). A relative root, or one that
-  holds the temp dir or home, is kept with a warning.
+  holds the temp dir or home, is kept with a warning. Since CRL-173 a
+  configured root that is a symlink loop is kept by its plain spelling, with a
+  warning, instead of being left out (see "Addendum: CRL-173 harness bearer
+  and private socket root").
 - **Which profiles.** Every policy `resolve_sandbox` returns, Coral or not:
   the os_env step shell and every spawn-time CLI wrap (the claude CLI, codex,
   pi, qwen, goose, kimi, ACP agents and terminal panes). Coral's host-ops git
@@ -1135,10 +1145,15 @@ names, on macOS 27.2.1.
 - A root that does not exist when the profile is built, and is later created
   as a symlink to another directory, is not covered: the rule names the path
   as it resolved then. The harness process manager does not refuse a
-  symlinked or foreign root (CRL-173).
+  symlinked or foreign root (CRL-173). Closed by S130: the process manager
+  now refuses a symlinked or foreign root.
 - On Linux, a configured root under a path bwrap binds is visible (CRL-173).
 - Processes outside the sandbox still connect: the harness socket has no
-  bearer on POSIX (CRL-173).
+  bearer on POSIX (CRL-173). Since S129 they connect but get a 401 without
+  the per-spawn bearer, on every platform.
+- Since S129 a step that still connects through the gaps above gets a 401
+  without the bearer. See "Addendum: CRL-173 harness bearer and private
+  socket root".
 - Other programs' sockets stayed reachable under S112, such as Docker
   Desktop's and ssh-agent's, and a tmux server on a custom `tmux -S <path>`
   socket, which runs commands outside the sandbox (measured with a throwaway
@@ -1209,7 +1224,10 @@ macOS, where `task_for_pid` is refused even outside the sandbox (measured in
 CRL-165), from driving a harness socket directly; on Linux it does so only
 where ptrace between same-user processes is restricted. It does not stop that
 process from acting as the owner on a single-user server (accepted;
-"Addendum: CRL-159 probe 15 on identity-requiring servers").
+"Addendum: CRL-159 probe 15 on identity-requiring servers"). Built in CRL-173
+as S129 and S130, with the direct-exec token in an inherited launch socket on
+POSIX and on the harness's stdin on Windows (see "Addendum: CRL-173 harness bearer and private socket
+root").
 
 **Open for the owner.** Whether to run Coral steps on untrusted content on
 macOS while CRL-171 is open, and on either platform while CRL-181 and what
@@ -3826,3 +3844,95 @@ its path and uncloned, on macOS, in every network mode, as measured on macOS
 | Mach services that still act for a sandboxed caller, such as one that opens files for it. Screen capture is left to TCC | CRL-207 |
 | macOS releases other than the two measured (27.2.1 locally, 26 in the lane). The lane is not a required check, and the host-start check covers only two rule families, the process-read rules and S128's; a release that does not know `file-clone` fails every launch and the host check closed | CRL-208 |
 | Hosts still on revision 2 | their own rows |
+
+## Addendum: CRL-173 harness bearer and private socket root (2026-11-24)
+
+CRL-173 builds the bearer that "Addendum: CRL-166 harness sockets on macOS"
+reopened ("The bearer decision, reopened"), and closes residual (a) of
+"Addendum: probe 15". Seams S129 and S130 and an amendment to S112
+(`.coral/seams.yaml`) change `omnigent/runtime/harnesses/process_manager.py`,
+`_runner.py`, `_harness_zygote_client.py`, `paths.py`,
+`omnigent/runner/_zygote.py` and `omnigent/inner/sandbox.py`. Facts here are
+from code and the unit and integration tests in the seams; no probe was rerun.
+
+### S129: a per-spawn bearer on every harness socket
+
+**Decision.** Every harness socket requires a bearer, on every platform.
+
+- `HarnessProcessManager` mints `secrets.token_urlsafe(32)` for every spawn.
+  The token is never in the harness's environment or argv, and the spawn
+  environment drops an inherited `OMNIGENT_HARNESS_AUTH_TOKEN`.
+- A POSIX direct exec sends the token in its own launch socket, named by
+  `OMNIGENT_HARNESS_BEARER_FD`, through the launch-socket helpers of
+  "Addendum: CRL-167 secrets out of exec-time environments" and beside the
+  claude-sdk key's socket. A socket, unlike a pipe, cannot be reopened
+  through `/proc/<pid>/fd`. Windows has no `pass_fds`, so a Windows direct
+  exec writes the token to the harness's stdin and closes it. The zygote path
+  sends it as a separate `auth_token` field of the `fork_harness` request,
+  beside `argv` and `env`.
+- The harness's `main` first pops `OMNIGENT_HARNESS_AUTH_TOKEN` from
+  `os.environ`, so no CLI it spawns inherits it. It then reads the bearer
+  socket, which refuses anything but a socket carrying only the token. On
+  Windows it reads stdin instead, refusing a terminal, reading at most 4096
+  bytes and then pointing fd 0 at `/dev/null`. With no token it exits with
+  status 2 and says the spawning runner predates this build.
+- uvicorn serves a raw ASGI gate around the app. Only `lifespan` passes
+  without the bearer. An HTTP or WebSocket request without
+  `Authorization: Bearer <token>` (scheme case-insensitive, compared with
+  `hmac.compare_digest`) gets a 401 or a WebSocket close before the app runs
+  or the body is read, so `/health`, `/docs` and a malformed body get 401 too.
+  The scaffold's `_check_auth` stays as a second layer.
+- On Windows the token used to ride the harness's exec-time environment,
+  was never popped and so reached every agent CLI the harness started. That
+  leak is closed.
+
+### S130: a private harness socket root
+
+**Decision.** The process manager keeps its socket root and each `ap-<uuid>`
+instance dir this user's own private real directories (`ensure_private_dir`
+in `paths.py`).
+
+- Parents are created unchecked, so `/tmp -> /private/tmp` and nested
+  configured roots work. The leaf is created 0700 and opened with
+  `O_NOFOLLOW|O_DIRECTORY`.
+- Refused with a `RuntimeError` naming the path: a symlink, a non-directory,
+  another owner, or group or other write bits.
+- An owned 0755 dir is tightened to 0700. An owned, owner-only dir that the
+  owner cannot open (such as 0300) is kept unchanged.
+- `start()` checks the root before the orphan sweep, and every spawn checks
+  the root and the instance dir again.
+- The orphan sweep never follows a symlink: it skips a root that fails the
+  same checks, with a warning, and any `ap-*` entry that is a symlink, not a
+  directory or another user's.
+- A symlinked configured root is now refused. That includes
+  `OMNIGENT_HARNESS_TMP_PARENT=/tmp` on macOS, where `/tmp` is a symlink;
+  set the real path instead. This reverses the upstream short-alias spelling
+  allowance, which only tested the spelling.
+
+### S112 change: a looping configured root
+
+**Decision.** A configured harness root that is a symlink loop is kept in the
+sandbox deny list by its plain spelling, with a warning, instead of being left
+out. A loop holds no socket, so the rule is harmless, and S130 refuses a
+symlinked root anyway. The default root was already kept.
+
+**Residuals.**
+
+- A runner started before this build sends no token, so it cannot spawn
+  harnesses until it is restarted: the harness exits with status 2.
+- A same-user process can race the root check and the socket bind. The
+  bearer covers it.
+- A same-user process can rename the root away. Its sockets keep working
+  outside S112's subpath deny. This predates CRL-173.
+- The orphan sweep's `lsof` lookup follows hard links planted in an `ap-*`
+  dir. This predates CRL-173, and since the root must be private only the same
+  user can plant them.
+- Freed bytes of earlier tokens can stay in the zygote's heap and be copied
+  into later forks, and each harness holds its token in memory. A same-user
+  process that can read another's memory gets it: on Linux where
+  `ptrace_scope` is 0. On macOS `task_for_pid` is refused (measured in
+  CRL-165).
+- The connect-deny gaps in "Addendum: CRL-166 harness sockets on macOS" (a
+  root other than the two denied, a root inside a write root, a Linux root
+  under a path bwrap binds) still let a step connect. It now gets a 401
+  unless it can read the bearer from memory.
