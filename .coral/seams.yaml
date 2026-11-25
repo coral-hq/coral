@@ -3495,10 +3495,11 @@ seams:
       under another instance's own root, a harness root inside a sandbox write
       root, a root created as a symlink after the profile is built, a Linux
       root under a path bwrap binds and processes outside the sandbox
-      (CRL-173), socket paths found through fsgetpath and other programs'
-      sockets, a tmux server on a custom -S path among them (CRL-174), the
-      codex-native app-server socket and loopback TCP listeners (CRL-177), and
-      other terminals' clip.sock (CRL-171). No CI lane runs macOS (CRL-170).
+      (CRL-173), and the codex-native app-server socket and loopback TCP
+      listeners (CRL-177). Closed since by S127: other programs' sockets
+      outside the process's own dirs, a tmux server on a custom -S path and
+      other terminals' clip.sock among them, whether or not their paths are
+      found through fsgetpath. No CI lane runs macOS (CRL-170).
     files:
       - omnigent/inner/os_env.py
       - omnigent/inner/sandbox.py
@@ -3587,7 +3588,7 @@ seams:
       switched-on opt-outs and credential-free network settings; Windows is
       CRL-197), env construction races and a relative config dir (CRL-182),
       project config a step writes in its worktree (CRL-181), and the inbox
-      sockets (CRL-174).
+      sockets (closed on macOS by S127).
       No CI lane runs macOS (CRL-170). Mechanism, evidence and the full
       residual list: ADR-05, "Addendum: CRL-176 Claude config isolation".
     files:
@@ -3678,7 +3679,7 @@ seams:
       sandbox (CRL-173), a configured app-server wrapper that runs a
       different codex than codex_path, the old codex-native unix socket that
       no current code starts, unknown loopback listeners, other programs'
-      loopback services (CRL-174) and UDP. Linux was not measured, and no CI
+      loopback services (CRL-201) and UDP. Linux was not measured, and no CI
       lane runs macOS (CRL-170).
     files:
       - omnigent/harnesses/codex_native/app_server.py
@@ -3767,10 +3768,10 @@ seams:
       connects or closes; copies from before S116 and the other residuals in
       the CRL-179 addendum stay); a working dir or path grant above the home,
       which the top-level dotfile mask does not cover (CRL-184); project
-      config in the working dir (CRL-181); and the inbox sockets (CRL-174). No
-      CI lane runs macOS (CRL-170). Mechanism, evidence and the full residual
-      list: ADR-05, "Addendum: CRL-178 Claude config isolation for every
-      sandboxed agent".
+      config in the working dir (CRL-181); and the inbox sockets (closed on
+      macOS by S127). No CI lane runs macOS (CRL-170). Mechanism, evidence
+      and the full residual list: ADR-05, "Addendum: CRL-178 Claude config
+      isolation for every sandboxed agent".
     files:
       - omnigent/inner/sandbox.py
       - omnigent/inner/claude_sdk_executor.py
@@ -4951,6 +4952,127 @@ seams:
     tests:
       - tests/e2e/coral/test_sandbox_probe.py
     budget_lines: 40
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S127
+    title: A networked macOS sandbox connects only to its own Unix-domain sockets, the resolver's and those its caller names
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 27.2.1 only: with allow_network true the seatbelt
+      profile's (allow network*) admitted an AF_UNIX connect to any same-user
+      pathname socket S112 did not name, so a sandboxed process reached
+      throwaway listeners at the path shapes of a tmux -S server, Docker
+      Desktop, OrbStack, both ssh-agent forms and Claude Code's inbox and
+      daemon, stream and datagram. Every profile that emits (allow network*)
+      (the os_env step shell, every spawn-time CLI wrap, sandboxed terminal
+      panes) now emits (deny network-outbound (remote unix-socket)) right
+      after it and then allows, in this order: the resolver's socket
+      (/private/var/run/mDNSResponder, without which getaddrinfo fails); each
+      socket on the policy's new allow_unix_socket_paths, spelled by its real
+      dir so a link planted at its name matches nothing; each write root
+      and each socket root on the new allow_unix_socket_roots (a dir counted
+      as the process's own for connects, with no file grant: a forked pane's
+      working tree, writable only through the pane dir); then S112's root and
+      tmux denies; then the scratch and each write root inside a denied root,
+      as S112 allowed them; then one deny per masked entry the profile
+      already lists (a dot-directory, a dotfile or a mask_paths entry) under
+      any of those dirs, since a connect needs no file access; then, for
+      each such entry, a file-write-unlink deny on every dir from its parent
+      up to the outermost write root holding it, because a process could
+      otherwise rename one of those dirs into another own dir, where no deny
+      names the entry (measured: the write root moved into the scratch); then
+      S112's literal denies and the credential-source denies. So in a
+      network-on profile a process can no longer rename, remove or replace
+      those dirs themselves (with the default scan, each write root that
+      holds a masked entry directly, such as a worktree with a dotfile);
+      everything inside them is made, renamed and removed as before. Between
+      filtered rules the later one wins, so a write root's allow stands
+      before S112's denies: a direct connect to a tmux- or harness-shaped
+      socket inside a write root stays refused, and naming a harness, tmux,
+      deny-listed or credential socket reopens nothing. No dir is allowed
+      that is or holds the temp dir, the per-user temp dir (confstr 65537,
+      another dir when TMPDIR is set), /private/var/run, $HOME, the account's
+      home from the password database, a denied root or a deny-listed
+      socket, compared without letter case or Unicode normal form because
+      the sandbox matches paths that way on the default volume; the scratch
+      below the per-user temp dir and literally named sockets stay allowed.
+      The fields travel the launcher wire and clones;
+      with_allowed_unix_sockets fills them, and its one production caller is
+      a terminal pane naming its own clip.sock and, when forked, its tree.
+      Egress, git-ssh and no-network profiles are unchanged, and bwrap
+      ignores the fields. A descriptor inherited or passed by a peer still
+      works: only connect is refused. Not covered: a write root the guards
+      keep off the allow list does not protect the sockets inside it, since
+      a process that can write a dir can rename a socket, or its parent dir,
+      into a dir of its own (Coral's bundle hygiene now refuses a step whose
+      cwd, write_paths or write_files leave the workspace, read from the
+      spelling only, and does not check a bundle's terminals; the rest is
+      CRL-203); a tmux- or terminal-shaped socket inside a write root once
+      the process renames it (CRL-203); a socket another program keeps at a
+      plain name inside a write root (CRL-203); a socket under an entry the
+      profile does not list as masked: a dot-directory below the top level
+      with the default scan, in an allow-listed hidden dir, in a
+      framework-added root, or made after the profile was built (CRL-204);
+      the same rename of a dir above a masked entry still reads masked files
+      wherever these denies are not emitted, which is the other three network
+      modes and any masked entry outside the own dirs (CRL-204);
+      other programs' loopback TCP and UDP services (CRL-201); Linux abstract
+      sockets and sockets under a bound root (CRL-202); Mach services
+      (CRL-171); other macOS releases (CRL-170). docs/AGENT_YAML_SPEC.md says
+      in one sentence that a macOS sandbox refuses Unix-domain socket connects
+      outside the agent's own directories. Mechanism, evidence and the full
+      residual list: ADR-05, "Addendum: CRL-174 other programs' Unix
+      sockets".
+    files:
+      - docs/AGENT_YAML_SPEC.md
+      - omnigent/inner/sandbox.py
+      - omnigent/inner/seatbelt_sandbox.py
+      - omnigent/inner/terminal.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_credential_refresh.py
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/test_terminal.py
+    tests:
+      - tests/inner/test_sandbox.py
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/test_terminal.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_credential_refresh.py
+      - tests/coral/omni/test_bundles.py
+    budget_lines: 120
+    budget_exception:
+      lines: 382
+      reason: >-
+        Counted with git diff --numstat origin/development, added plus
+        removed. tests/inner/sandbox/test_sandbox_behavior.py (382 changed
+        lines): the probe script that connects to each throwaway socket by
+        stream and datagram, through a symlink and a hard link it makes,
+        binds and connects its own, reads a passed and an inherited
+        descriptor, and tries to move a write root and a dir above a masked
+        entry; the rename and edit helpers it now shares with the
+        control-socket probe; the throwaway descriptor-passing peer; and the
+        test that binds a listener at each path shape under throwaway dirs,
+        a throwaway home and a stand-in per-user temp dir and runs the probe
+        outside and inside, through the os_env helper and the CLI wrap.
+        tests/inner/test_seatbelt_sandbox.py (366 changed lines): the
+        placement test in four network modes, the named-socket order and
+        spelling tests, the write-root order test, the eleven guard cases
+        with their fixed fake dirs, the shared-system-dir and socket-root
+        tests, and the masked-entry and kept-in-place cases.
+        omnigent/inner/seatbelt_sandbox.py (148 changed lines): the deny and
+        its allows in the shared-network branch, the two-list own-dir
+        classification with its guards, the home and shared-dir lookups, the
+        letter-case and normal-form helpers, and the masked-entry denies with
+        their file-write-unlink denies. The other files are within budget:
+        omnigent/inner/sandbox.py 72, tests/inner/test_sandbox.py 63,
+        tests/inner/test_terminal.py 39, omnigent/inner/terminal.py 13,
+        tests/inner/test_credential_refresh.py 10, docs/AGENT_YAML_SPEC.md 5.
+      approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false
     upstream_candidate: false

@@ -78,12 +78,19 @@ class SandboxBlockers:
 # change that widens a step's reach deletes older rows; a server-code blocker stays until fixed.
 SEATBELT_1 = HostSandboxPolicy("seatbelt", "1")
 BWRAP_1 = HostSandboxPolicy("bwrap", "1")
+# Revision 2: seatbelt refuses other programs' Unix-domain sockets; bwrap's rules are unchanged.
+SEATBELT_2 = HostSandboxPolicy("seatbelt", "2")
+BWRAP_2 = HostSandboxPolicy("bwrap", "2")
 # The owners of the open pins in probe 15's tests, per policy they were measured at.
 IDENTITY_PROBE_OPEN: Mapping[HostSandboxPolicy, tuple[str, ...]] = MappingProxyType(
     {
         # Other programs' sockets and loopback services; a planted repository config.
         SEATBELT_1: ("CRL-174", "CRL-181"),
         BWRAP_1: ("CRL-174", "CRL-181"),
+        # Other programs' loopback services; a Unix-domain socket inside the step's own
+        # worktree and, on Linux, abstract ones; a planted repository config.
+        SEATBELT_2: ("CRL-201", "CRL-203", "CRL-181"),
+        BWRAP_2: ("CRL-201", "CRL-202", "CRL-203", "CRL-181"),
     }
 )
 # Open owner paths the probe does not measure; each leaves only when it is closed.
@@ -97,6 +104,10 @@ UNPROBED_BLOCKERS: Mapping[HostSandboxPolicy, tuple[str, ...]] = MappingProxyTyp
             "CRL-195",  # a step that reaches the server can guess the owner's password
         ),
         BWRAP_1: ("CRL-181", "CRL-193", "CRL-195"),
+        # As at revision 1, none of them closed with it; and masked files a step can still
+        # read by renaming their parent directory.
+        SEATBELT_2: ("CRL-170", "CRL-171", "CRL-181", "CRL-193", "CRL-195", "CRL-204"),
+        BWRAP_2: ("CRL-181", "CRL-193", "CRL-195", "CRL-204"),
     }
 )
 

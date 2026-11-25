@@ -29,7 +29,11 @@ from omnigent.inner.datamodel import (
     OSEnvSpec,
 )
 from omnigent.inner.egress.proxy import EgressProxy
-from omnigent.inner.sandbox import SandboxPolicy, resolve_sandbox
+from omnigent.inner.sandbox import (
+    SandboxPolicy,
+    resolve_sandbox,
+    with_allowed_unix_sockets,  # CORAL(S127)
+)
 from omnigent.spec.parser import _parse_credential_proxy
 
 
@@ -546,6 +550,10 @@ def test_seatbelt_denies_sources_despite_implicit_read_grant(
         ]
     )
     prepare_credential_proxy_runtime(spec, parent_env={}, sandbox=sandbox)
+    if kind == "unix_socket":
+        # CORAL(S127): no other program's socket connects unnamed, so name the broker; the
+        # credential-source deny must still win.
+        sandbox = with_allowed_unix_sockets(sandbox, [path])
     for protected in (False, True):
         policy = sandbox if protected else replace(sandbox, credential_source_paths=None)
         profile = _build_profile(policy, sandbox.write_roots[0], extra_read_paths=[path.parent])

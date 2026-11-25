@@ -480,6 +480,11 @@ os_env:
     allow_network: true
 ```
 
+<!-- CORAL(S127): what a shared network leaves out on macOS -->
+With a sandbox on macOS, connects to Unix-domain sockets outside the agent's
+own directories (its write paths and its temp dir) are refused, even with
+`allow_network: true`.
+
 On Linux, the `openai-agents` harness supports disposable copy-on-write mounts:
 
 ```yaml

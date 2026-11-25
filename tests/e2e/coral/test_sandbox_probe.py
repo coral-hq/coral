@@ -164,7 +164,9 @@ class Pin:
 
 # Owners, by the exposure an open pin shows.
 ACCEPTED_SINGLE_USER = "accepted: single-user servers are never Enforced (gates-and-inbox.md)"
-OTHER_PROGRAMS = "CRL-174"  # other programs' same-user sockets and loopback services
+LOOPBACK_SERVICES = "CRL-201"  # other programs' loopback TCP services
+LINUX_SOCKETS = "CRL-202"  # Linux: abstract sockets, and a socket under another bound root
+WORKTREE_SOCKETS = "CRL-203"  # a socket another program keeps in a step's write root
 PLANTED_CONFIG = "CRL-181"  # files a step leaves that the owner's tools run unsandboxed
 
 _READ_CLOSED = frozenset({"denied", "hidden"})
@@ -217,7 +219,13 @@ PIN_KINDS: Mapping[str, str] = MappingProxyType(
             "file",
         ),
         **dict.fromkeys(
-            ("harness_socket", "other_unix_socket", "other_abstract_socket"), "socket"
+            (
+                "harness_socket",
+                "other_unix_socket",
+                "other_abstract_socket",
+                "worktree_unix_socket",
+            ),
+            "socket",
         ),
         **dict.fromkeys(("server_loopback", "server_localhost"), "http"),
         **dict.fromkeys(("owner_bare", "owner_bare_localhost"), "owner_http"),
@@ -1304,8 +1312,11 @@ EXPECTED_IDENTITY: dict[str, dict[str, Pin]] = {
         "stored_credentials.read": Pin("denied"),
         "stored_credentials": Pin("denied"),
         "credential_files.cookie_secret": Pin("denied"),
-        "other_unix_socket": Pin("reachable", OTHER_PROGRAMS),
-        "other_loopback_tcp": Pin("reachable", OTHER_PROGRAMS),
+        # Another program's socket is refused wherever it is, but for one inside the step's
+        # own worktree: a write root's sockets count as the step's own.
+        "other_unix_socket": Pin("denied"),
+        "worktree_unix_socket": Pin("reachable", WORKTREE_SOCKETS),
+        "other_loopback_tcp": Pin("reachable", LOOPBACK_SERVICES),
         "worktree_exec_config": Pin("reachable", PLANTED_CONFIG),
         "credential_proxy": Pin("refused"),
     },
@@ -1328,8 +1339,11 @@ EXPECTED_IDENTITY: dict[str, dict[str, Pin]] = {
         "stored_credentials": Pin("hidden"),
         "credential_files.cookie_secret": Pin("hidden"),
         "other_unix_socket": Pin("hidden"),
-        "other_abstract_socket": Pin("reachable", OTHER_PROGRAMS),
-        "other_loopback_tcp": Pin("reachable", OTHER_PROGRAMS),
+        "other_abstract_socket": Pin("reachable", LINUX_SOCKETS),
+        # Not measured in a lane yet: set from the worktree's read-write bind, which shows the
+        # step every file in it, sockets included (worktree_exec_config writes there).
+        "worktree_unix_socket": Pin("reachable", WORKTREE_SOCKETS),
+        "other_loopback_tcp": Pin("reachable", LOOPBACK_SERVICES),
         "worktree_exec_config": Pin("reachable", PLANTED_CONFIG),
         # Not measured in a lane yet: set from other_loopback_tcp, reachable in that run, and
         # the proxy's own refusal.
@@ -1343,16 +1357,17 @@ RECORDED_IDENTITY: dict[str, dict[str, Any]] = {
         **RECORDED["darwin"],
         "server_mode": "accounts",
         "runner_spawn": "direct",
-        "sandbox_policy": "1",
+        "sandbox_policy": "2",
         "gate_integrity": OPEN_SANDBOX_LABEL,
     },
     # Measured in lane run 45187294423; its artifact records the OS and CLI versions it ran.
+    # The policy revision is this checkout's: no bwrap rule changed between the two.
     "linux": {
         "harness_socket_root": "/tmp/crl-*",
         "checkout_read_grant": True,
         "server_mode": "accounts",
         "runner_spawn": "direct",
-        "sandbox_policy": "1",
+        "sandbox_policy": "2",
         "gate_integrity": OPEN_SANDBOX_LABEL,
     },
 }
@@ -1380,6 +1395,7 @@ OUTSIDE_IDENTITY: Mapping[str, str] = MappingProxyType(
         "credential_files.cookie_secret": "reachable",
         "other_unix_socket": "reachable",
         "other_abstract_socket": "reachable",
+        "worktree_unix_socket": "reachable",
         "other_loopback_tcp": "reachable",
         "worktree_exec_config": "reachable",
         # The proxy refuses whoever lacks its session token, sandboxed or not.
@@ -1423,6 +1439,27 @@ def _other_programs() -> Iterator[list[Target]]:
         yield targets
 
 
+@contextlib.contextmanager
+def _worktree_socket(worktree: Path) -> Iterator[Target]:
+    """
+    A throwaway listener at a plain name directly inside a step's own worktree, as a dev
+    server another program keeps there would be; closed and removed on exit. The host binds
+    and checks it through a short link to the worktree and the probe connects by its name
+    from there, so neither address outgrows an AF_UNIX path.
+    """
+    name = f"crl-w-{secrets.token_hex(4)}.sock"
+    short = Path(tempfile.mkdtemp(dir="/tmp", prefix="crl-w-"))
+    with contextlib.ExitStack() as cleanup:
+        cleanup.callback(shutil.rmtree, short, ignore_errors=True)
+        link = short / "w"
+        link.symlink_to(worktree, target_is_directory=True)
+        cleanup.callback((worktree / name).unlink, missing_ok=True)
+        listener = cleanup.enter_context(socket.socket(socket.AF_UNIX))
+        listener.bind(str(link / name))
+        listener.listen()
+        yield Target("worktree_unix_socket", "socket", name, live=_socket_live(link / name))
+
+
 def _broken_outside(verdicts: Mapping[str, str], targets: list[Target]) -> list[str]:
     """Each owner path the run outside the sandbox did not open, as tokens only."""
     keys = [
@@ -1449,9 +1486,10 @@ def test_probe_15_on_a_server_that_requires_identity(
     """
     Whether a step on an accounts server can act as its owner: mint an owner JWT with its
     runner's binding token, use the host's bearer or the CLI's stored credentials, call an
-    owner route bare, read the server's secrets, reach other programs' services, use its
-    own credential proxy without the session token, or plant a repository config the owner's
-    git would run. The runner is spawned directly by the host
+    owner route bare, read the server's secrets, reach other programs' services (a Unix
+    socket outside its worktree and one inside it, a loopback port), use its own credential
+    proxy without the session token, or plant a repository config the owner's git would
+    run. The runner is spawned directly by the host
     daemon, which hands it both tokens through an inherited socket, so its exec-time
     environment holds neither. The same probe runs first outside any sandbox and must open
     every other one of those paths, or the probe is broken rather than the step held.
@@ -1482,6 +1520,7 @@ def test_probe_15_on_a_server_that_requires_identity(
             identity=True,
         ) as stack,
         _other_programs() as other_programs,
+        contextlib.ExitStack() as listeners,
     ):
         client = stack.client
         server = stack.server.server
@@ -1520,6 +1559,7 @@ def test_probe_15_on_a_server_that_requires_identity(
             "gate_integrity": detail["gate_integrity"],
         }
         worktree = Path(detail["target"]["worktree_path"])
+        worktree_socket = listeners.enter_context(_worktree_socket(worktree))
         probe_digest = _sha256(PROBE.read_bytes())
         # Every credential is tried on this server's owner route, and only there.
         on_server = f"{stack.server.base_url} {stack.server.base_url}{sk.RUNS}"
@@ -1563,6 +1603,7 @@ def test_probe_15_on_a_server_that_requires_identity(
             ),
             Target("worktree_exec_config", "plant", plant, live=_absent(worktree / plant)),
             *other_programs,
+            worktree_socket,
             proxy,
         ]
         unproven = _unproven(targets)
@@ -1900,6 +1941,30 @@ def test_the_probe_classifies_sockets_and_urls(tmp_path: Path) -> None:
         "tcp_closed": "hidden",
         **({"abstract_live": "reachable"} if sys.platform == "linux" else {}),
     }
+
+
+def test_a_worktree_socket_is_bound_and_probed_however_long_the_worktree_path(
+    tmp_path: Path,
+) -> None:
+    # Longer than any AF_UNIX address, as a stack's worktree is under pytest's basetemp.
+    worktree = tmp_path / ("w" * 60) / ("t" * 60)
+    worktree.mkdir(parents=True)
+    with _worktree_socket(worktree) as target:
+        sockets = [path for path in worktree.iterdir() if stat.S_ISSOCK(path.lstat().st_mode)]
+        # A plain name directly in the worktree: no dot entry, nothing shaped like tmux's.
+        assert [path.name for path in sockets] == [target.target]
+        assert re.fullmatch(r"crl-w-[0-9a-f]{8}\.sock", target.target)
+        assert _failed_controls([target]) == []
+        reading = _run_probe([target], _probe_env(tmp_path), worktree)
+        elsewhere = _run_probe([target], _probe_env(tmp_path), tmp_path)
+    assert _assert_reading(reading, [target]) == {"worktree_unix_socket": "reachable"}
+    # The name is relative: only a probe run in the worktree finds it.
+    assert _assert_reading(elsewhere, [target]) == {"worktree_unix_socket": "hidden"}
+    # Closed and removed on exit, so a later check of it fails as a failed control.
+    assert list(worktree.iterdir()) == []
+    assert _failed_controls([target]) == [
+        f"worktree_unix_socket: {target.target}: FileNotFoundError"
+    ]
 
 
 @contextlib.contextmanager
@@ -2325,9 +2390,9 @@ def test_lines_that_are_not_verdict_tokens_count_only_as_strays() -> None:
 def test_the_pin_comparator_names_owners_and_directions() -> None:
     kinds = {"socket": "socket", "file": "file", "env": "environ", "mint": "mint", "new": "file"}
     pins = {
-        "socket": Pin("reachable", OTHER_PROGRAMS),
+        "socket": Pin("reachable", WORKTREE_SOCKETS),
         "file": Pin("denied"),
-        "env.names": Pin("A_API_KEY,B_API_KEY", OTHER_PROGRAMS),
+        "env.names": Pin("A_API_KEY,B_API_KEY", LOOPBACK_SERVICES),
         "mint.read": Pin("denied"),
         "mint": Pin("denied"),
     }
@@ -2415,7 +2480,8 @@ def test_every_pin_names_an_owner_exactly_when_it_is_open() -> None:
     problems = {where: _owner_problems(pins) for where, pins in every}
     assert not {where: found for where, found in problems.items() if found}
     owners = {pin.owner for _, pins in every for pin in pins.values()}
-    assert "CRL-159" not in owners
+    # Closed tickets own no pin.
+    assert not {"CRL-159", "CRL-174"} & owners
     for system, pins in EXPECTED_IDENTITY.items():
         # Nothing mints, no owner route answers a bare request, and no residual is accepted.
         assert "minted" not in {pin.verdict for pin in pins.values()}, system
@@ -2476,26 +2542,26 @@ def test_the_gate_label_table_holds_every_open_pin_owner_and_the_declared_blocke
 
 
 def test_the_table_binding_fails_when_the_table_and_the_pins_part() -> None:
-    owners = {OTHER_PROGRAMS, PLANTED_CONFIG}
+    owners = {LOOPBACK_SERVICES, PLANTED_CONFIG}
     declared = ("CRL-170", PLANTED_CONFIG)
-    bound = SandboxBlockers(probed=(OTHER_PROGRAMS, PLANTED_CONFIG), unprobed=declared)
+    bound = SandboxBlockers(probed=(LOOPBACK_SERVICES, PLANTED_CONFIG), unprobed=declared)
     assert _unbound(owners, bound, declared) == []
     # The table emptied while a pin is still open.
     emptied = SandboxBlockers(probed=(PLANTED_CONFIG,), unprobed=declared)
     assert _unbound(owners, emptied, declared) == [
-        f"no table entry for open pins of {OTHER_PROGRAMS}"
+        f"no table entry for open pins of {LOOPBACK_SERVICES}"
     ]
     assert _unbound(owners, SandboxBlockers((), ()), declared) == [
-        f"no table entry for open pins of {OTHER_PROGRAMS}",
         f"no table entry for open pins of {PLANTED_CONFIG}",
+        f"no table entry for open pins of {LOOPBACK_SERVICES}",
         "after the pins' owners the table holds []",
     ]
     # A pin re-pinned closed while the table still names its owner.
     assert _unbound({PLANTED_CONFIG}, bound, declared) == [
-        "after the pins' owners the table holds ['CRL-170', 'CRL-174', 'CRL-181']"
+        "after the pins' owners the table holds ['CRL-170', 'CRL-181', 'CRL-201']"
     ]
     # A declared blocker dropped from the table, though its pin is open too.
-    dropped = SandboxBlockers(probed=(OTHER_PROGRAMS, PLANTED_CONFIG), unprobed=("CRL-170",))
+    dropped = SandboxBlockers(probed=(LOOPBACK_SERVICES, PLANTED_CONFIG), unprobed=("CRL-170",))
     assert _unbound(owners, dropped, declared) == [
         "after the pins' owners the table holds ['CRL-170']"
     ]
@@ -2529,6 +2595,7 @@ def test_the_outside_run_must_open_every_owner_path_it_is_given() -> None:
         Target("stored_credentials", "stored", "auth_tokens.json"),
         Target("owner_bare", "owner_http", "http://127.0.0.1:1/v1/coral/runs"),
         Target("other_unix_socket", "socket", "agent.sock"),
+        Target("worktree_unix_socket", "socket", "crl-w.sock"),
         Target("worktree_exec_config", "plant", "crl-plant"),
     ]
     keys = (
@@ -2538,6 +2605,7 @@ def test_the_outside_run_must_open_every_owner_path_it_is_given() -> None:
         "stored_credentials",
         "owner_bare",
         "other_unix_socket",
+        "worktree_unix_socket",
         "worktree_exec_config",
     )
     required = {key: OUTSIDE_IDENTITY[key] for key in keys}

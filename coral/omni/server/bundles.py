@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from pydantic import BaseModel, ConfigDict
 
@@ -83,6 +83,19 @@ def _enforced_handlers(spec: AgentSpec) -> set[str]:
     }
 
 
+def _stays_in_workspace(path: str) -> bool:
+    """
+    Whether a host resolves *path* to the step's workspace or to something inside it.
+
+    Read from the spelling alone, since the server cannot see the host: relative, with no
+    home prefix and no step up, in either path flavour.
+    """
+    flavours = (PurePosixPath(path), PureWindowsPath(path))
+    return not path.startswith("~") and not any(
+        flavour.anchor or ".." in flavour.parts for flavour in flavours
+    )
+
+
 def _hygiene_violations(spec: AgentSpec, stance: Stance) -> list[str]:
     groups = spec.tool_groups
     enforced = _enforced_handlers(spec)
@@ -136,6 +149,13 @@ def _hygiene_violations(spec: AgentSpec, stance: Stance) -> list[str]:
     if spec.os_env is not None:
         sandbox = spec.os_env.sandbox
         rules["os_env has an OS sandbox"] = sandbox is not None and sandbox.type != "none"
+        # Outside the workspace a write root can be or hold the host's home, its temp dir or a
+        # harness socket root, and a step can move a socket out of any dir or file grant.
+        granted = [grant.path for grant in sandbox.write_path_specs] if sandbox else []
+        granted += (sandbox.write_files or []) if sandbox else []
+        rules["os_env cwd, sandbox write_paths and write_files stay inside the workspace"] = all(
+            _stays_in_workspace(path) for path in (spec.os_env.cwd or ".", *granted)
+        )
     if stance is Stance.REVIEWER:
         sandbox = spec.os_env.sandbox if spec.os_env is not None else None
         rules["reviewer sandbox has no write_paths"] = (

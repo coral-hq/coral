@@ -10,7 +10,8 @@ CORAL_RUNNER_TOKEN = "coral_runner:2"
 # The step sandbox rules this host runs; a host on a revision with no rows reads as unknown. Bump
 # it only for a change that alters a gate row: an in-sandbox pin's open or closed state or owner,
 # or a probed sandbox rule. Outside change detectors and outside control maps never need a bump.
-SANDBOX_POLICY_REVISION = "1"
+# From revision 2 a macOS step's profile refuses other programs' Unix-domain sockets.
+SANDBOX_POLICY_REVISION = "2"
 SANDBOX_POLICY_PREFIX = "coral_sandbox_policy:"
 CORAL_SANDBOX_POLICY_TOKEN = f"{SANDBOX_POLICY_PREFIX}{SANDBOX_POLICY_REVISION}"
 DISABLE_HOST_ENTRY_POINTS_ENV = "CORAL_DISABLE_HOST_ENTRY_POINTS"
