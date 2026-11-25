@@ -4138,7 +4138,9 @@ seams:
       version; other runners launch as before. The hello's capabilities are
       built off the event loop. Not checked: `launchctl print` and the other
       S111 reads (the CI lane covers them). The gate label's CRL-170 blocker
-      row is unchanged. Measured on macOS 26.3.1: about 0.15 s.
+      row is unchanged. Measured on macOS 26.3.1: about 0.15 s. S128 adds
+      its clone and rename checks and has the function return the names of
+      the failed checks, which the refusal names.
     files:
       - omnigent/inner/seatbelt_sandbox.py
       - omnigent/host/frames.py
@@ -4980,16 +4982,16 @@ seams:
       tmux denies; then the scratch and each write root inside a denied root,
       as S112 allowed them; then one deny per masked entry the profile
       already lists (a dot-directory, a dotfile or a mask_paths entry) under
-      any of those dirs, since a connect needs no file access; then, for
-      each such entry, a file-write-unlink deny on every dir from its parent
-      up to the outermost write root holding it, because a process could
-      otherwise rename one of those dirs into another own dir, where no deny
-      names the entry (measured: the write root moved into the scratch); then
-      S112's literal denies and the credential-source denies. So in a
-      network-on profile a process can no longer rename, remove or replace
-      those dirs themselves (with the default scan, each write root that
-      holds a masked entry directly, such as a worktree with a dotfile);
-      everything inside them is made, renamed and removed as before. Between
+      any of those dirs, since a connect needs no file access; then
+      S112's literal denies and the credential-source denies. This seam
+      first also emitted, for each such entry, a file-write-unlink deny on
+      every dir from its parent up to the outermost write root holding it,
+      because a process could otherwise rename one of those dirs into
+      another own dir, where no deny names the entry (measured: the write
+      root moved into the scratch). Those lines moved to S128, which emits
+      them with file-clone for every dir above every denied path, up to /,
+      in every network mode, ahead of the network rules; this seam no
+      longer emits any file rule for them. Between
       filtered rules the later one wins, so a write root's allow stands
       before S112's denies: a direct connect to a tmux- or harness-shaped
       socket inside a write root stays refused, and naming a harness, tmux,
@@ -5016,10 +5018,7 @@ seams:
       plain name inside a write root (CRL-203); a socket under an entry the
       profile does not list as masked: a dot-directory below the top level
       with the default scan, in an allow-listed hidden dir, in a
-      framework-added root, or made after the profile was built (CRL-204);
-      the same rename of a dir above a masked entry still reads masked files
-      wherever these denies are not emitted, which is the other three network
-      modes and any masked entry outside the own dirs (CRL-204);
+      framework-added root, or made after the profile was built (CRL-203);
       other programs' loopback TCP and UDP services (CRL-201); Linux abstract
       sockets and sockets under a bound root (CRL-202); Mach services
       (CRL-171); other macOS releases (CRL-170). docs/AGENT_YAML_SPEC.md says
@@ -5068,10 +5067,136 @@ seams:
         its allows in the shared-network branch, the two-list own-dir
         classification with its guards, the home and shared-dir lookups, the
         letter-case and normal-form helpers, and the masked-entry denies with
-        their file-write-unlink denies. The other files are within budget:
+        their file-write-unlink denies. Those counts are as this seam
+        landed. S128 has since taken over the file-write-unlink denies: it
+        removed 8 of these lines from omnigent/inner/seatbelt_sandbox.py
+        (140 left) and removed or rewrote 23 in
+        tests/inner/test_seatbelt_sandbox.py (343 left), where the
+        kept-in-place cases are now S128's. The other files are within budget:
         omnigent/inner/sandbox.py 72, tests/inner/test_sandbox.py 63,
         tests/inner/test_terminal.py 39, omnigent/inner/terminal.py 13,
         tests/inner/test_credential_refresh.py 10, docs/AGENT_YAML_SPEC.md 5.
+      approver: nicholasjano (delegated)
+    anchor_exempt: []
+    upstream_first: false
+    upstream_candidate: false
+
+  - id: S128
+    title: A macOS sandbox keeps every directory above a denied path in place and uncloned
+    owner: WS-INTEGRATION
+    status: landed
+    category: coral-specific
+    note: >-
+      Measured on macOS 27.2.1 only: a seatbelt deny names a path, and a
+      sandboxed process could change the path of a masked entry without
+      touching the entry. Renaming or swapping a dir above it (the write
+      root into the scratch or a second write root, or a parent dir inside
+      the root) read and wrote masked files in the no-network, egress and
+      git-ssh modes and wherever S127 did not count the root as an own dir.
+      clonefile(2) of a dir above it read them in every mode, S127's denies
+      included, and from a read-only cwd or a read root, since a clone needs
+      only a readable source and a writable place for the copy. Every
+      seatbelt profile (the os_env step shell, every spawn-time CLI wrap,
+      sandboxed terminal panes; Coral or not) now emits, after the mask and
+      home denials and so after every file allow, before the network rules,
+      one (deny file-write-unlink file-clone (literal "<dir>")) for each dir
+      above each path it denies file access to, up to /, each dir once
+      however many entries it is above: the mask entries (dot entries and
+      escaping symlinks of every scanned root, and mask_paths), the
+      $HOME/Library denial and each credential source path, spelled as their
+      own denies spell them. file-write-unlink refuses the dir as a rename
+      source, a swap side and a replaced target, and its removal; file-clone
+      refuses it as a clone source. They replace the file-write-unlink
+      denies S127 emitted in network-on profiles up to the outermost write
+      root; S127's socket denies are unchanged. So a sandboxed process can
+      no longer rename, replace or directory-clone a dir that is above a
+      denied path: with the default scan each scanned root that holds a
+      top-level dot entry, the dirs above a mask_paths entry, the home dir
+      and the parents of each; with the recursive scan every dir with a
+      masked dotfile below it. Measured unchanged: files and dirs made,
+      renamed and removed in such a dir and beside a masked file, atomic
+      saves there, renames of a dir that holds nothing masked, clones of
+      such a dir and of a file, and git (init, add, commit, mv of a dir,
+      branch switches) in a repository below one. A generated Coral step's
+      profile gains one line per dir from its worktree up to / and, where
+      they are not among those, the home dir and its parents (9 lines,
+      about 700 bytes, for a worktree seven dirs deep; no measurable launch
+      cost). process_read_canary_open() (S120),
+      run once per host process (about 0.08 s), now builds its throwaway
+      tree in the per-user temp dir (confstr 65537, on the boot volume
+      wherever TMPDIR points): a writable cwd holding a dir with a
+      mask_paths entry, and a plain dir. Its sandboxed reader also clones
+      that dir and the cwd above it and renames that dir, each of which must
+      be refused, and clones and renames the plain dir, which must work. It
+      returns the names of the checks that failed (empty when all hold); the
+      host logs them and the Coral step refusal names them. So on a macOS
+      release that does not know file-clone (the profile does not load) or
+      does not enforce either half of the rule, the host reports
+      os_sandbox:darwin_seatbelt_canary_open and runs no Coral step, as for
+      the process-read rules. Where even that volume cannot clone a dir (a
+      plain clone outside the sandbox fails with ENOTSUP), only the clone
+      checks are skipped, with a warning: the profile must still load and
+      the rename must still be refused.
+      bwrap is unchanged: its mask is a mount on the entry. The behaviour
+      test's bwrap rows are written from that code and pass in the Linux
+      lane: a masked entry and the write root are mount points (a rename is
+      refused), a second write root is another mount, and a dir above a
+      nested masked entry can be renamed, the mount going with it, so that
+      launch still cannot read the file and leaves it unchanged. But on
+      Linux, once the dir above a mask_paths file is replaced, the real file
+      is unmasked at its new path for every later launch, which masks only
+      the old path (the row pins the replace as open; owner CRL-206). Not
+      covered: a
+      rename that changes only the letter case or Unicode form of a masked
+      entry's or a guarded dir's name, which the sandbox does not check
+      (CRL-205); names that do not exist when the profile is built, a dot
+      name a process makes first as a link, a mask_paths entry spelled
+      through a symlink the process can re-point, and the bwrap replace
+      above (CRL-206); a dir that carries only a Unix-socket deny inside a
+      write root, which can still be moved (CRL-203); entries the profile
+      does not list (a dot entry below the top level with the default scan,
+      or in an allow-listed hidden dir); a masked entry's name, size and
+      times; other macOS releases (CRL-208).
+    files:
+      - docs/AGENT_YAML_SPEC.md
+      - omnigent/host/connect.py
+      - omnigent/inner/seatbelt_sandbox.py
+      - tests/host/test_connect.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/inner/test_seatbelt_sandbox.py
+    tests:
+      - tests/inner/test_seatbelt_sandbox.py
+      - tests/inner/sandbox/test_sandbox_behavior.py
+      - tests/host/test_connect.py
+      - tests/e2e/coral/test_sandbox_probe.py
+    budget_lines: 120
+    budget_exception:
+      lines: 358
+      reason: >-
+        Counted with git diff --numstat origin/development, added plus
+        removed. tests/inner/sandbox/test_sandbox_behavior.py (358 changed
+        lines): the probe script that reads each masked throwaway file by
+        digest directly and after a rename, a swap, a link, a copy, a
+        replace and a directory clone by path and by descriptor, tries to
+        change each, and does a worktree's ordinary edits, atomic saves,
+        renames, clones and git commands; the throwaway tree that returns
+        paths and digests but no bytes; and the test that runs the probe
+        outside and inside on both backends, by the os_env helper and the
+        CLI wrap, with the network on and off and with a read-only cwd, then
+        compares digests on the host before the last move is undone.
+        tests/inner/test_seatbelt_sandbox.py (271 changed lines): the rule's
+        text in four network modes for a writable and a read-only cwd, the
+        once-per-dir case under the recursive scan, the three S127 tests
+        that listed file-write-unlink lines, and the host check's cases by
+        name: the process-read rules, each route a weakened rule leaves open,
+        an operation the release does not know, a deny of every clone, and a
+        volume that cannot clone. omnigent/inner/seatbelt_sandbox.py (185
+        changed lines): the rule block, the dirs-above helper, S127's removed
+        unlink loop, the credential sources resolved once, and the host
+        check's named checks, its clone and rename routes, its tree in the
+        per-user temp dir, its clone-support probe and its failure names. The
+        other files are within budget: omnigent/host/connect.py 8,
+        docs/AGENT_YAML_SPEC.md 6, tests/host/test_connect.py 4.
       approver: nicholasjano (delegated)
     anchor_exempt: []
     upstream_first: false

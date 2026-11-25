@@ -485,6 +485,12 @@ With a sandbox on macOS, connects to Unix-domain sockets outside the agent's
 own directories (its write paths and its temp dir) are refused, even with
 `allow_network: true`.
 
+<!-- CORAL(S128): directories above a masked entry on macOS -->
+With a sandbox on macOS, an agent cannot rename, remove or clone a directory
+that is above a masked entry, such as its working directory when that holds a
+dotfile. Files and directories inside it are unaffected. Spell `mask_paths`
+entries by their real paths, not through a symlink the agent can change.
+
 On Linux, the `openai-agents` harness supports disposable copy-on-write mounts:
 
 ```yaml

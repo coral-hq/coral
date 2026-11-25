@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio  # CORAL(S116)
 import contextlib
 import functools
+import hashlib  # CORAL(S128)
 import json
 import os
 import plistlib
@@ -1621,6 +1622,363 @@ def test_sandbox_cannot_connect_to_other_programs_sockets(
     assert observed_outside == reached, f"failed outside: {outside.stdout}; {outside.stderr}"
     assert observed_inside == kept, f"inside: {observed_inside}; {inside_detail}"
     assert alive, "a listener died during the run, so a refused connect proves nothing"
+
+
+# CORAL(S128): reads each masked throwaway file (path and digest from a file) directly and after
+# moving, swapping, linking, copying or cloning it or a dir above it, then does ordinary edits;
+# prints yes, no or some. ``inside``, it also tries writes and leaves its last move in place.
+_MASKED_ENTRY_PROBE = """
+import contextlib, ctypes, hashlib, json, os, shutil, subprocess, sys
+paths = json.load(open('paths.json'))
+libc = ctypes.CDLL(None, use_errno=True)
+join, darwin, inside = os.path.join, sys.platform == 'darwin', sys.argv[1:] == ['inside']
+work, spare = paths['work'], paths['spare']
+
+def reads(path, name):
+    found = False
+    with contextlib.suppress(OSError), open(path, 'rb') as handle:
+        found = hashlib.sha256(handle.read()).hexdigest() == paths['digests'][name]
+    if inside and name in paths['masked']:
+        with contextlib.suppress(OSError):
+            os.close(os.open(path, os.O_WRONLY | os.O_TRUNC))
+    return found
+
+def reaches(found):
+    hits = [reads(path, name) for path, name in found]
+    return all(hits) or (any(hits) and 'some')
+
+def discard(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.lexists(path):
+        os.unlink(path)
+
+def swapped(first, second, found):
+    os.mkdir(second)
+    if darwin:  # RENAME_SWAP; elsewhere RENAME_EXCHANGE from AT_FDCWD
+        swap, args = libc.renamex_np, (first.encode(), second.encode(), 2)
+    else:
+        swap, args = libc.renameat2, (-100, first.encode(), -100, second.encode(), 2)
+    try:
+        if swap(*args) != 0:
+            return False
+        try:
+            return reaches(found)
+        finally:
+            swap(*args)
+    finally:
+        os.rmdir(second)
+
+def linked(link, entry, name, found):
+    try:
+        link(entry, name)
+    except OSError:
+        return False
+    try:
+        return reaches(found)
+    finally:
+        os.unlink(name)
+
+def copied(source, target, found):
+    try:
+        shutil.copytree(source, target, symlinks=True)
+    except OSError:
+        pass
+    try:
+        return reaches(found)
+    finally:
+        discard(target)
+
+def cloned(source, target, found, by_fd=False):
+    try:
+        if by_fd:
+            fd = os.open(source, os.O_RDONLY)
+            made = libc.fclonefileat(fd, -2, target.encode(), 0) == 0  # into AT_FDCWD
+            os.close(fd)
+        else:
+            made = libc.clonefile(source.encode(), target.encode(), 0) == 0
+        return made and reaches(found)
+    except OSError:
+        return False
+    finally:
+        discard(target)
+
+def saved(directory):
+    target = join(directory, 'saved.txt')
+    try:
+        for text in ('one', 'two'):
+            with open(target + '.tmp', 'w') as handle:
+                handle.write(text)
+            os.replace(target + '.tmp', target)
+        os.unlink(target)
+        return True
+    except OSError:
+        return False
+
+def moves(source, target):
+    try:
+        os.rename(source, target)
+        os.rename(target, source)
+        return True
+    except OSError:
+        return False
+
+def git_works(repo):
+    quiet = ['-c', 'user.name=probe', '-c', 'user.email=probe@example.invalid', '-c', 'gc.auto=0']
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+    steps = ['init -q -b main', 'add -A', 'commit -qm one', 'mv pkg lib', 'commit -qm two',
+             'checkout -q -b side', 'rm -rq lib', 'commit -qm three', 'checkout -q main']
+    try:
+        os.makedirs(join(repo, 'pkg'))
+        with open(join(repo, 'pkg', 'a.txt'), 'w') as handle:
+            handle.write('a')
+        return all(
+            subprocess.run([paths['git'], *quiet, *step.split()], cwd=repo, env=env,
+                           capture_output=True, timeout=60).returncode == 0
+            for step in steps
+        )
+    except OSError:
+        return False
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+__RENAME_PROBE_HELPERS__
+def under(root):
+    return [(join(root, inner), name) for name, inner in paths['in_work'].items()]
+
+def say(name, value):
+    print(name, {True: 'yes', False: 'no'}.get(value, 'some'))
+
+sub, moved, clone = join(work, 'sub'), join(spare, 'w'), join(spare, 'c')
+say('direct', reaches([(path, name) for name, path in paths['masked'].items()]))
+say('root_moved', renamed(work, moved, under(moved)))
+say('root_swapped', swapped(work, moved, under(moved)))
+for name, target in (('parent_moved', sub + '.moved'), ('parent_moved_out', join(spare, 's'))):
+    say(name, renamed(sub, target, [(join(target, 'keys', 'key.txt'), 'key')]))
+for name, entry, inner in paths['entries']:
+    aside = join(os.path.dirname(entry), 'aside-' + name)
+    found = [(join(aside, inner) if inner else aside, name)]
+    say('moved_' + name, renamed(entry, aside, found))
+    say('linked_' + name, linked(os.symlink if inner else os.link, entry, aside, found))
+say('copied', copied(sub, clone, [(join(clone, 'keys', 'key.txt'), 'key')]))
+if darwin:
+    say('root_cloned', cloned(work, clone, under(clone)))
+    say('root_cloned_by_fd', cloned(work, clone, under(clone), by_fd=True))
+    say('parent_cloned', cloned(sub, clone, [(join(clone, 'keys', 'key.txt'), 'key')]))
+    for name, source, held in paths['clones']:
+        say(name, cloned(source, clone, [(join(clone, inner), kind) for inner, kind in held]))
+say('spare_files', edits(spare))
+if paths['cwd_writable']:
+    say('root_files', edits(work))
+    say('parent_files', edits(sub) and edits(join(sub, 'keys')))
+    say('atomic_save', saved(work) and saved(join(sub, 'keys')))
+    say('plain_dir_renamed', moves(join(work, 'plain'), join(work, 'plain.moved')))
+    say('sibling_dir_renamed', moves(join(sub, 'free'), join(sub, 'free.moved')))
+    say('git_repo', git_works(join(work, 'repo')))
+if darwin:
+    plain = join(work, 'plain')
+    say('plain_dir_cloned', cloned(plain, clone, [(join(clone, 'note.txt'), 'note')]))
+    say('file_cloned', cloned(join(plain, 'note.txt'), clone, [(clone, 'note')]))
+# Last: the dir above the nested masked file is moved aside and its path given a new file.
+aside, key = sub + '.aside', join(sub, 'keys', 'key.txt')
+replaced = planted = False
+try:
+    os.rename(sub, aside)
+    replaced = True
+    os.makedirs(os.path.dirname(key))
+    with open(key, 'w') as handle:
+        handle.write('planted')
+    planted = True
+except OSError:
+    pass
+say('parent_replaced', replaced and reads(join(aside, 'keys', 'key.txt'), 'key'))
+say('planted_at_masked_path', planted)
+if replaced and not inside:
+    shutil.rmtree(sub, ignore_errors=True)
+    os.rename(aside, sub)
+""".replace("__RENAME_PROBE_HELPERS__", _RENAME_PROBE_HELPERS)
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _masked_tree(base: Path) -> tuple[dict[str, Path], dict[str, str]]:
+    """
+    CORAL(S128): a throwaway tree of fake values under *base*; each file's path and digest.
+
+    The bytes are not returned, so no assertion message or local holds one.
+    """
+    work, home = base / "wide" / "work", base / "home"
+    files = {
+        "env": work / ".env",
+        "cred": work / ".secrets" / "cred",
+        "key": work / "sub" / "keys" / "key.txt",
+        "wide": work.parent / ".wide-secret",
+        "tool": base / "tools" / ".tool-secret",
+        "library": home / "Library" / "secret",
+        "token": home / "creds" / "token.json",
+        "note": work / "plain" / "note.txt",
+    }
+    for path in files.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"fake-{uuid.uuid4().hex}")
+    for plain in (work / "sub" / "free", base / "spare"):
+        plain.mkdir()
+    return files, {name: _digest(path) for name, path in files.items()}
+
+
+def _sandbox_git() -> str:
+    """CORAL(S128): a git that runs inside a sandbox; macOS's ``/usr/bin/git`` asks xcrun."""
+    tools_git = "/Library/Developer/CommandLineTools/usr/bin/git"
+    found = tools_git if os.path.exists(tools_git) else shutil.which("git")
+    assert found, "git is not installed"
+    return found
+
+
+# CORAL(S128): a masked entry is neither read nor changed by moving or cloning a dir above it
+@pytest.mark.parametrize(
+    ("launch_path", "network", "cwd_is"),
+    [
+        ("helper", "network_on", "writable"),
+        ("helper", "network_off", "writable"),
+        ("launcher", "network_on", "writable"),
+        ("launcher", "network_off", "writable"),
+        ("helper", "network_on", "read_only"),
+    ],
+)
+def test_sandbox_keeps_masked_entries_unread_after_moves_and_clones(
+    tmp_path: Path,
+    active_sandbox_type: str,
+    active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
+    sandbox_pythonpath_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_path: str,
+    network: str,
+    cwd_is: str,
+) -> None:
+    """
+    Fake values sit in a dotfile and a dot-directory of the cwd, in a ``mask_paths`` file two
+    dirs down, in a dotfile of a read root and of a read root above the cwd, and on seatbelt
+    under the home's ``Library`` and in a credential source. A probe run outside reads every
+    one, directly and by each route. Inside it reads none: not directly, not after renaming
+    or swapping the write root, renaming the dir above the nested file inside the root or
+    into a second write root, renaming, linking or copying the entry, nor (seatbelt) after
+    ``clonefile(2)`` of the root, of a dir above the nested file, of either read root, of the
+    home or of the credential source's dir. Its attempts to change them leave every file's
+    bytes as they were. Ordinary work still passes inside: files and dirs made, renamed and
+    removed in the root and beside a masked file, atomic saves, renames of dirs that hold
+    nothing masked, git in a throwaway repository, and clones of a plain dir and file.
+
+    Last, the probe moves the dir above the nested file aside and plants a file at its path,
+    and leaves that for the host to check. Seatbelt refuses the move. On Linux bwrap masks by
+    a mount on the entry, which moves with the dir, so this launch still cannot read the
+    file and leaves it unchanged. But once the dir above a ``mask_paths`` file is replaced, the
+    real file is unmasked at its new path for every later launch, which masks only the old
+    path. The row pins that as open.
+    """
+    import dataclasses
+
+    seatbelt, writable = active_sandbox_type == "darwin_seatbelt", cwd_is == "writable"
+    base = tmp_path.resolve()
+    files, digests = _masked_tree(base)
+    work, spare, home = files["env"].parent, base / "spare", base / "home"
+    masked = ["env", "cred", "key", "wide", "tool", *(["library", "token"] if seatbelt else [])]
+    clones = [
+        ["read_root_cloned", files["tool"].parent, [[".tool-secret", "tool"]]],
+        ["above_cwd_cloned", work.parent, [[".wide-secret", "wide"], ["work/.env", "env"]]],
+        ["home_cloned", home, [["Library/secret", "library"]]],
+        ["credential_dir_cloned", files["token"].parent, [["token.json", "token"]]],
+    ]
+    paths = {
+        "work": str(work),
+        "spare": str(spare),
+        "cwd_writable": writable,
+        "git": _sandbox_git(),
+        "digests": digests,
+        "masked": {name: str(files[name]) for name in masked},
+        "in_work": {name: str(files[name].relative_to(work)) for name in ("env", "cred", "key")},
+        "entries": [
+            ["env", str(files["env"]), ""],
+            ["cred", str(files["cred"].parent), "cred"],
+            ["key", str(files["key"]), ""],
+        ],
+        "clones": [[name, str(source), held] for name, source, held in clones],
+    }
+    (work / "paths.json").write_text(json.dumps(paths))
+    (work / "probe.py").write_text(_MASKED_ENTRY_PROBE)
+    reader_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONPATH": os.environ["PYTHONPATH"],
+        "TMPDIR": tempfile.gettempdir(),
+    }
+    read_paths = [str(work.parent), str(files["tool"].parent)]
+    if seatbelt:
+        # The profile builder reads the home from its environment on both launch paths.
+        monkeypatch.setenv("HOME", str(home))
+        reader_env["HOME"] = str(home)
+        read_paths.append(str(home))
+    spec = OSEnvSpec(
+        type="caller_process",
+        cwd=str(work),
+        sandbox=active_sandbox_spec_factory(
+            write_paths=[*(["."] if writable else []), str(spare)],
+            allow_network=network == "network_on",
+            extra_read_paths=read_paths,
+        ),
+    )
+    policy = dataclasses.replace(resolve_sandbox(spec, work), mask_paths=[files["key"]])
+    if seatbelt:  # bwrap has no home denial, and refuses a credential source it would mount
+        policy = dataclasses.replace(policy, credential_source_paths=[files["token"]])
+    run_reader = functools.partial(
+        subprocess.run, cwd=work, env=reader_env, capture_output=True, text=True, timeout=120
+    )
+
+    def listing() -> list[str]:
+        return sorted(str(path.relative_to(base)) for path in base.rglob("*"))
+
+    before = listing()
+    outside = run_reader([sys.executable, "probe.py"])
+    left_as_found = listing() == before
+    with contextlib.ExitStack() as cleanup:
+        if launch_path == "helper":
+            os_env = create_os_environment(spec, sandbox_policy=policy)
+            cleanup.callback(os_env.close)
+            result = run_async(os_env.shell(shlex.join([sys.executable, "probe.py", "inside"])))
+            inside, inside_detail = str(result.get("stdout", "")), result
+        else:
+            launcher = create_exec_launcher(sys.executable, policy)
+            cleanup.callback(Path(launcher).unlink, missing_ok=True)
+            completed = run_reader([launcher, "probe.py", "inside"])
+            inside, inside_detail = completed.stdout, completed.stderr
+
+    leaks = ["direct", "root_moved", "root_swapped", "parent_moved", "parent_moved_out"]
+    leaks += [f"{how}_{name}" for name in paths["in_work"] for how in ("moved", "linked")]
+    leaks += ["copied"]
+    ordinary = ["spare_files"]
+    if seatbelt:
+        leaks += ["root_cloned", "root_cloned_by_fd", "parent_cloned"]
+        leaks += [str(name) for name, *_ in clones]
+    if writable:
+        ordinary += ["root_files", "parent_files", "atomic_save", "plain_dir_renamed"]
+        ordinary += ["sibling_dir_renamed", "git_repo"]
+    if seatbelt:
+        ordinary += ["plain_dir_cloned", "file_cloned"]
+    # Open on bwrap: its mask moves with the entry, and later launches mask only the old path.
+    planted = writable and not seatbelt
+    last = ["parent_replaced", "planted_at_masked_path"]
+    reached = [f"{name} yes" for name in [*leaks, *ordinary, *last]]
+    kept = [f"{name} no" for name in leaks] + [f"{name} yes" for name in ordinary]
+    kept += ["parent_replaced no", f"planted_at_masked_path {'yes' if planted else 'no'}"]
+    observed_outside, observed_inside = outside.stdout.splitlines(), inside.splitlines()
+    assert observed_outside == reached, f"failed outside: {outside.stdout}; {outside.stderr}"
+    assert left_as_found, "the outside run did not undo its moves or remove its copies"
+    assert observed_inside == kept, f"inside: {observed_inside}; {inside_detail}"
+    # Checked as the probe left it: the nested file is under the dir bwrap let it move aside.
+    moved_aside = work / "sub.aside"
+    assert moved_aside.exists() == planted
+    now_at = files | ({"key": moved_aside / "keys" / "key.txt"} if planted else {})
+    changed = [name for name in files if _digest(now_at[name]) != digests[name]]
+    assert not changed, f"changed from inside the sandbox: {changed}"
 
 
 # CORAL(S114): reaches each loopback harness listener, calls it without its secret, reads the

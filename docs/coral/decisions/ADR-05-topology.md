@@ -502,7 +502,7 @@ not planned. Reopened by CRL-166: planned as defence in depth in CRL-173 (see
 | Follow-up | Owner |
 |---|---|
 | The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | **Run on single-user servers only**, without credentials, in CRL-137 (`tests/e2e/coral/test_sandbox_probe.py`). macOS seatbelt, one local run: a step reaches a sibling's harness socket (before S112, now `denied`, see "Addendum: CRL-166 harness sockets on macOS"), other processes' environments and command lines (the model API key in every claude-sdk CLI's among them; before S111, now `denied`, see "Addendum: CRL-165 process reads on macOS") and the server; the three probed credential files (Claude's, Omnigent's secrets and the host's tunnel tokens, in the stack's isolated home), the config file's key and the stack's bridge dir are `denied`; no other credential store was probed. Linux bwrap, the `coral-e2e` lane: the server is reachable and every other target is `hidden`, the step's own CLI included. A step runs on an allow-listed-token server, and the token was in its runner's and harness's environment as read from outside the sandbox (before S123; now in neither on the zygote path); the step's shell read it on macOS only (before S111; now `denied`). Tables, limits and owners (CRL-165 to CRL-168; the single-user server rows are an accepted residual): "Addendum: CRL-137 probe verdicts". **Run on an accounts server**, with the CLI's stored credentials and owner-JWT minting, in CRL-159: "Addendum: CRL-159 probe 15 on identity-requiring servers" |
-| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced | **Built** in CRL-159 as `gate_integrity` on the run detail; `enforced` needs an accounts server, verified config, no native steps and an empty table row for the run's host. Every row has open blockers today. At policy revision 2 they are CRL-170, CRL-171, CRL-181, CRL-193, CRL-195, CRL-201, CRL-202, CRL-203 and CRL-204 ("Addendum: CRL-159 probe 15 on identity-requiring servers"; "Addendum: CRL-174 other programs' Unix sockets"; [`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md), "Enforced gates") |
+| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced | **Built** in CRL-159 as `gate_integrity` on the run detail; `enforced` needs an accounts server, verified config, no native steps and an empty table row for the run's host. Every row has open blockers today. At policy revision 3 they are CRL-181, CRL-193, CRL-195, CRL-201, CRL-202, CRL-203, CRL-205, CRL-206, CRL-207 and CRL-208; revision 2's rows name CRL-170, CRL-171 and CRL-204 in place of the last four ("Addendum: CRL-159 probe 15 on identity-requiring servers"; "Addendum: CRL-174 other programs' Unix sockets"; "Addendum: CRL-204 masked files and moved directories"; [`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md), "Enforced gates") |
 | Run probe 15 on native steps before HRN-03 enables them | CRL-138 |
 
 ## Addendum: gates on the anchor (2026-11-19)
@@ -2347,8 +2347,10 @@ tokens, what the control run must find and one check (`credential_proxy`);
 the text below describes the test as it is now (see "Addendum: CRL-167
 secrets out of exec-time environments"). CRL-174 later closed
 `other_unix_socket` on macOS, added the `worktree_unix_socket` check and moved
-the sandbox policy to revision 2; the tables below show both revisions (see
-"Addendum: CRL-174 other programs' Unix sockets").
+the sandbox policy to revision 2 (see "Addendum: CRL-174 other programs' Unix
+sockets"). CRL-204 then added the `worktree_masked_file` check and moved the
+policy to revision 3 (see "Addendum: CRL-204 masked files and moved
+directories"). The tables below show every revision.
 
 **The identity probe.**
 `tests/e2e/coral/test_sandbox_probe.py::test_probe_15_on_a_server_that_requires_identity`
@@ -2387,6 +2389,7 @@ Each credential is tried on this server's owner route, `GET /v1/coral/runs`:
 | `other_unix_socket`, `other_abstract_socket` (Linux), `other_loopback_tcp` | `socket`, `tcp` | Connect to throwaway listeners that stand in for other programs' services: a pathname socket under `/tmp/crl-o-*`, an abstract socket with a random name, and a loopback port (`_other_programs`, `test_sandbox_probe.py:1409`) |
 | `worktree_unix_socket` (added by CRL-174) | `socket` | Connect to a throwaway listener at a plain name directly inside the step's own worktree, as a dev server another program keeps there would be (`_worktree_socket`, `test_sandbox_probe.py:1443`) |
 | `worktree_exec_config` | `plant` | Create a nested repository in the worktree whose config names a `core.fsmonitor` hook (`plant_repository`, `probe15.sh:335`) |
+| `worktree_masked_file` (added by CRL-204) | `masked` | Read a dotfile that the fixture repository commits to the worktree, which the step's profile masks: directly, and on macOS also after renaming the worktree into `$TMPDIR` and after `clonefile(2)` of the worktree there (`MASKED`, `probe15.sh`) |
 | `credential_proxy` | `credential_proxy` | Send a model request to the step's own CLI's credential proxy, by its loopback port: with no key, with a wrong key, and on a path that climbs to the model route (`PROXY`, `probe15.sh:261`) |
 | `shell_env_names` | `shell` | Credential-like names in its own environment |
 
@@ -2418,6 +2421,7 @@ same probe outside any sandbox, as the step's user, in the step's worktree
 - it acts as the owner with the stored JWT;
 - it reads the server's environment and the cookie canary;
 - it reaches every listener and writes the plant;
+- it reads the masked file directly, so nothing is moved or cloned;
 - the bare owner route refuses it, and so does the credential proxy, which
   refuses any caller without its session token, sandboxed or not.
 
@@ -2452,6 +2456,7 @@ written to `artifacts/probe15-identity-<platform>.json` before any assertion
 | `worktree_unix_socket` (added by CRL-174) | `reachable` | `reachable`, set by reasoning until the `coral-e2e` lane runs on that change | CRL-203 |
 | `other_loopback_tcp` | `reachable` | `reachable` | CRL-201 |
 | `worktree_exec_config` | `reachable` | `reachable` | CRL-181 |
+| `worktree_masked_file` (added by CRL-204) | `denied` since policy revision 3 (S128) | `denied`: the direct read only, measured in `coral-e2e` lane run 45544757959 | |
 | `credential_proxy` (added by CRL-167) | `refused` | `refused`, set by reasoning until the `coral-e2e` lane runs on that change | |
 
 So a sandboxed step on an accounts server cannot mint an owner JWT, act as
@@ -2460,7 +2465,10 @@ secret or the server's environment, or make a bare owner request. At revision
 1 it could still reach other programs' Unix-domain sockets on macOS; a Docker
 Desktop, OrbStack or `tmux -S` socket would run commands outside the sandbox
 that read the owner's stored JWT. Since revision 2 that connect is refused on
-macOS ("Addendum: CRL-174 other programs' Unix sockets"). It can still reach
+macOS ("Addendum: CRL-174 other programs' Unix sockets"). At revision 2 it
+could still read a masked file of its worktree on macOS by cloning the
+worktree. Since revision 3 that is refused too ("Addendum: CRL-204 masked
+files and moved directories"). It can still reach
 other programs' loopback services (CRL-201), a socket another program keeps in
 the step's worktree (CRL-203) and, on Linux,
 abstract sockets (CRL-202). It can also plant worktree exec config
@@ -2470,8 +2478,8 @@ then runs the hook outside the sandbox was measured on macOS 27.2.1 with git
 
 On Linux, bwrap's pid namespace and mounts hide the other processes, the
 homes and `/tmp`, while the network namespace and the worktree are shared.
-Lane run 45187294423 measured every one of these pins but `credential_proxy`
-and `worktree_unix_socket`, in its `probe15-identity-linux.json` artifact. From a later run, only closed-to-closed
+Lane run 45187294423 measured every one of these pins but `credential_proxy`,
+`worktree_unix_socket` and `worktree_masked_file`, in its `probe15-identity-linux.json` artifact. From a later run, only closed-to-closed
 moves and the socket, TCP and plant checks, with their owners, may be
 re-pinned; an open verdict on a credential path is escalated, never re-pinned
 ([`../testing/tier-b.md`](../testing/tier-b.md), "Pinning probe 15").
@@ -2536,16 +2544,23 @@ Enforced needs both empty (`integrity.py:76-118`):
 | bwrap, revision 1 | CRL-174, CRL-181 | CRL-181, CRL-193, CRL-195 |
 | seatbelt, revision 2 | CRL-201, CRL-203, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195, CRL-204 |
 | bwrap, revision 2 | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-204 |
+| seatbelt, revision 3 | CRL-201, CRL-203, CRL-181 | CRL-208, CRL-207, CRL-181, CRL-193, CRL-195, CRL-205, CRL-206 |
+| bwrap, revision 3 | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-206 |
 
-Revision 2 is what a host on current code reports. The revision-1 rows stay
-for hosts on older code, and CRL-174 is in no other row: it closed with
-revision 2 ("Addendum: CRL-174 other programs' Unix sockets").
+Revision 3 is what a host on current code reports. The revision-1 and
+revision-2 rows stay for hosts on older code. CRL-174 is in no later row: it
+closed with revision 2 ("Addendum: CRL-174 other programs' Unix sockets").
+CRL-204 is in no revision-3 row: it closed with revision 3 ("Addendum: CRL-204
+masked files and moved directories").
 
 The declared blockers:
 
-- CRL-170: no CI lane runs macOS, so an OS or CLI update can void a seatbelt
-  rule unseen.
-- CRL-171: macOS Mach services, the clipboard and Spotlight are not measured.
+- CRL-170, at revisions 1 and 2: no CI lane runs macOS, so an OS or CLI
+  update can void a seatbelt rule unseen. Closed; what remains is CRL-208,
+  from revision 3 ("Addendum: CRL-204 masked files and moved directories").
+- CRL-171, at revisions 1 and 2: macOS Mach services, the clipboard and
+  Spotlight are not measured. Closed; what remains is CRL-207, from
+  revision 3.
 - CRL-181: files a step leaves that the owner's tools run, beyond the probe's
   one shape, such as Claude Code project settings or a direnv `.envrc`. It is
   in both parts, so a fix that closes only the nested `.git` cannot flip the
@@ -2557,8 +2572,16 @@ The declared blockers:
 - CRL-195: a step that reaches the server can guess the owner's password at
   `/auth/login`, which has no rate limit
   (`omnigent/server/routes/accounts_auth.py:289-320`).
-- CRL-204, from revision 2: a step can still read masked files by renaming
-  the directory above them.
+- CRL-204, at revision 2 only: a step can still read masked files by renaming
+  the directory above them. Closed at revision 3 by S128, which also refuses
+  a clone of that directory.
+- CRL-205, from revision 3, seatbelt only: a rename that changes only the
+  letter case or Unicode form of a masked or held name succeeds. Nothing is
+  read after it.
+- CRL-206, from revision 3: masks are tied to paths. On both backends a name
+  made after the profile is built, and a dot name a step makes first as a
+  link, are not covered. On bwrap a nested masked entry's directory can also
+  be replaced, after which later launches mask only the old path.
 
 Tests keep the table bound to the pins.
 `test_the_gate_label_table_holds_every_open_pin_owner_and_the_declared_blockers`
@@ -3206,7 +3229,7 @@ child's `$TMPDIR`):
 (deny network-outbound (remote unix-socket (path-regex #"/tmux-501/[^/]+$")))
 (allow network-outbound (remote unix-socket (subpath "<scratch>")))
 (deny network-outbound (remote unix-socket (subpath "<worktree>/.devenv")))
-(deny file-write-unlink (literal "<worktree>"))
+(deny file-write-unlink (literal "<worktree>"))           ; until CRL-204: item 7
 ```
 
 The order, with the entries this example lacks:
@@ -3225,6 +3248,10 @@ The order, with the entries this example lacks:
    directory, `path-literal` for a file.
 7. One `(deny file-write-unlink (literal ...))` for each directory above such
    an entry, from its parent up to the outermost write root that holds it.
+   Since CRL-204 these lines are gone: S128's
+   `(deny file-write-unlink file-clone ...)` lines hold every directory above
+   every denied path, before the network rules and in every network mode
+   ("Addendum: CRL-204 masked files and moved directories").
 8. Unchanged: the `path-literal` denies of `deny_unix_socket_paths` with their
    write denies, then the credential-source denies.
 
@@ -3297,6 +3324,7 @@ granted root (every level with the recursive scan), or a `mask_paths` entry.
 The `file-write-unlink` denies stop the way around that: moving a directory
 above a masked entry into another own directory, where no deny names the
 entry. Measured: the move is refused, and the masked socket stays refused.
+Since CRL-204 those denies are S128's, which also refuse a clone.
 
 **Which profiles.** Every seatbelt profile that emits `(allow network*)`,
 Coral or not: the step shell, every spawn-time CLI wrap and sandboxed terminal
@@ -3331,7 +3359,10 @@ bwrap ignores the new fields; its mounts decide which sockets exist.
   `mask_paths` entry below the top level, the directories between the write
   root and the entry are held in place too. No such line is emitted when no
   masked entry lies in an own directory, as for a reviewer's read-only working
-  directory.
+  directory. Since CRL-204 every directory above a masked entry is held, up to
+  `/`, in every network mode and for a read-only working directory too, and
+  none can be cloned ("Addendum: CRL-204 masked files and moved
+  directories").
 - **Socket paths are not hidden.** `fsgetpath(2)` still returns the path of a
   named inode, and every path's metadata is readable. The deny does not
   depend on a path being unknown.
@@ -3352,9 +3383,12 @@ identity-requiring servers", "Rows are append-only per policy revision").
 | bwrap, revision 1 (kept) | CRL-174, CRL-181 | CRL-181, CRL-193, CRL-195 |
 | seatbelt, revision 2 | CRL-201, CRL-203, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195, CRL-204 |
 | bwrap, revision 2 | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-204 |
+| seatbelt, revision 3 (added by CRL-204) | CRL-201, CRL-203, CRL-181 | CRL-208, CRL-207, CRL-181, CRL-193, CRL-195, CRL-205, CRL-206 |
+| bwrap, revision 3 (added by CRL-204) | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-206 |
 
 Every row still names open tickets, so every gate still reads
-`not_enforced`:
+`not_enforced` (for revision 3: "Addendum: CRL-204 masked files and moved
+directories"):
 
 | Host | Server | Reason |
 |---|---|---|
@@ -3371,7 +3405,7 @@ What still blocks Enforced at revision 2, per backend:
 | seatbelt, bwrap | a Unix-domain socket another program keeps inside the step's own worktree (`worktree_unix_socket`: probed on seatbelt, set by reasoning on bwrap) | CRL-203 |
 | bwrap | abstract Unix-domain sockets (`other_abstract_socket`, probed), and a socket under another bound root | CRL-202 |
 | seatbelt, bwrap | a planted repository config (`worktree_exec_config`, probed), and other files a step leaves that the owner's tools run | CRL-181 |
-| seatbelt, bwrap | masked files a step can still read by renaming the directory above them | CRL-204 |
+| seatbelt, bwrap | masked files a step can still read by renaming the directory above them | CRL-204 (closed at revision 3 by S128, see "Addendum: CRL-204 masked files and moved directories") |
 | seatbelt | macOS releases and CLI versions other than those measured | CRL-170 |
 | seatbelt | Mach services, the clipboard and Spotlight | CRL-171 |
 | seatbelt, bwrap | the owner's other and earlier runs, and the label's not-checked list | CRL-193 |
@@ -3434,10 +3468,361 @@ seatbelt profiles, on macOS 27.2.1.
 | A grant for one named socket in an agent's spec, for agents that need Docker, a key agent or a database socket | CRL-203 |
 | Coral's bundle rule reads the spelling only. It does not see a symlink inside the worktree that points outside, or a workspace that is itself the home or the temp dir, and it does not check a bundle's terminals | CRL-203 |
 | `~/.npm/_logs`, a write root of every Claude CLI wrap, is by the code an own directory shared by every session's CLI: one sandboxed process can bind a socket there and another connect. Loopback already gives them such a channel | CRL-203 |
-| Masked files read by renaming a parent directory. The new `file-write-unlink` denies are emitted only in network-on profiles, for masked entries in an own directory. In the egress, git-ssh and no-network modes, and for a masked entry elsewhere, a process can still move the directory above the entry and read the files. This is older than S127 | CRL-204 |
-| A socket under an entry the profile does not list as masked: a dot-directory below the top level with the default scan, one in an allow-listed hidden directory or a framework-added root, or one made after the profile was built | CRL-204 |
-| Mach services and XPC, the clipboard and Spotlight. Beside loopback, they are the remaining local route on macOS to services that act for a caller. The resolver's own service surface is among them | CRL-171 |
-| Other macOS releases. The lane runs macOS 26 and is not a required check | CRL-170 |
+| Masked files read by renaming a parent directory. The new `file-write-unlink` denies are emitted only in network-on profiles, for masked entries in an own directory. In the egress, git-ssh and no-network modes, and for a masked entry elsewhere, a process can still move the directory above the entry and read the files. This is older than S127 | CRL-204 (closed by S128, see "Addendum: CRL-204 masked files and moved directories") |
+| A socket under an entry the profile does not list as masked: a dot-directory below the top level with the default scan, one in an allow-listed hidden directory or a framework-added root, or one made after the profile was built | CRL-203 (re-homed from CRL-204, see "Addendum: CRL-204 masked files and moved directories") |
+| Mach services and XPC, the clipboard and Spotlight. Beside loopback, they are the remaining local route on macOS to services that act for a caller. The resolver's own service surface is among them | CRL-171 (closed; what remains is CRL-207, see "Addendum: CRL-204 masked files and moved directories") |
+| Other macOS releases. The lane runs macOS 26 and is not a required check | CRL-170 (closed; what remains is CRL-208, see "Addendum: CRL-204 masked files and moved directories") |
 | Processes outside the sandbox still connect to a harness socket, which has no bearer on POSIX | CRL-173 |
 | A descriptor or a proxied connection from a process outside the sandbox | none while no allowed peer brokers (the rule above) |
 | Single-user servers, where a step acts as the owner | accepted ("Addendum: CRL-159 probe 15 on identity-requiring servers") |
+
+## Addendum: CRL-204 masked files and moved directories (2026-11-24)
+
+CRL-204 closes, on macOS, a sandboxed process's read of a masked file by
+moving or cloning a directory above it. Seam S128 (`.coral/seams.yaml`)
+changes `omnigent/inner/seatbelt_sandbox.py` and `omnigent/host/connect.py`.
+The sandbox policy moves to revision 3. Every measurement here was taken on
+macOS 27.2.1 (26B131), with throwaway trees that hold fake values, compared by
+digest. No real repository, home or credentials file was probed. No bwrap rule
+changed.
+
+**What a mask is.** The sandbox hides some entries of the directories it
+grants. They are the top-level dot entries of the working directory and of
+each granted root, except allow-listed ones such as `.venv` (every level with
+`cwd_hidden_scan_recursive: true`); symlinks that point outside the granted
+roots; and each `mask_paths` entry. For a Coral step that is its worktree's
+`.git`, `.github/`, `.claude/`, `.coral/`, any `.env*` and the like. The list
+is made once per launch, when the profile is built. On macOS each entry gets
+one line:
+
+```
+(deny file-read* file-write* (subpath "<dir>"))     ; a masked directory
+(deny file-read* file-write* (literal "<file>"))    ; anything else
+```
+
+So a mask is a rule about a path, not about the file at it. It refuses reads
+and writes at that path only. The `$HOME/Library` denial and each credential
+source path are denied the same way.
+
+**What was measured before.** Under the profile as revision 2 left it, a
+sandboxed process could change a masked entry's path without touching the
+entry, and then read it at a path no rule names:
+
+| Route | No network, egress or git-ssh; or a write root S127 does not count as the process's own | Network on, write root its own (a Coral implementer) | Read-only working directory (a Coral reviewer) |
+|---|---|---|---|
+| Rename or swap (`RENAME_SWAP`) the write root into the scratch or a second write root | reads and writes | refused (S127) | refused (not writable) |
+| Rename a directory above a nested masked entry, inside the root | reads and writes | refused (S127) | refused |
+| `clonefile(2)` or `fclonefileat` of the write root, or of any directory above the entry | reads | reads | reads |
+| Clone a read root that holds a masked dotfile, or a read-granted home (then `Library`) | reads | reads | reads |
+
+A rename that worked was a write route too: the moved `.env` was appended to.
+A clone needs only a readable source and a writable place on the same volume
+for the copy, and the scratch always is one. So one call copied every masked
+file of a worktree, in every network mode, also from a read-only working
+directory and also after S127.
+
+What did not work, then or now: reading, linking, cloning or copying the
+masked entry itself, renaming it to another name, and reaching it through a
+symlink, `/.vol/<dev>/<ino>`, `openbyid_np`, a named fork or another letter
+case. A rename that changes only the entry's letter case or Unicode form does
+succeed. Nothing is read after it (CRL-205, Residuals).
+
+**The rule.** For every path the profile denies file access to, and every
+directory above that path up to `/`, the profile now holds one line:
+
+```
+;; Dirs above a denied entry: not renamed, removed or cloned
+(deny file-write-unlink file-clone (literal "<directory>"))
+```
+
+- The denied paths are the mask entries, the `$HOME/Library` denial and each
+  credential source path, spelled as their own denies spell them.
+- Each directory is listed once, however many entries lie below it: the
+  nearest first, `/` last.
+- `file-write-unlink` refuses the directory as a rename source, as either side
+  of a swap and as a rename target, and refuses its removal. `file-clone`
+  refuses it as a clone source, by any spelling.
+- Both halves are needed. Measured: the unlink half alone leaves the clones
+  open, and the clone half alone leaves the renames open.
+- The lines go all the way to `/` because a clone needs only read access. A
+  directory above the write roots may be readable: a read-only working
+  directory, a read root, a default read subtree or an interpreter grant.
+- The block stands after the home denials, so after every file allow, and
+  before `;; Network policy`.
+
+It is in every seatbelt profile, Coral or not: the os_env step shell, every
+spawn-time CLI wrap and sandboxed terminal panes, in every network mode
+(shared network, egress, git-ssh and none). It replaces the narrower
+`(deny file-write-unlink (literal ...))` lines that CRL-174 added: those were
+emitted only with the network on, only for masked entries in the process's
+own directories, and only from an entry's parent up to its outermost write
+root ("Addendum: CRL-174 other programs' Unix sockets", order item 7). S127's
+per-entry socket denies are unchanged.
+
+A generated Coral step's profile gains one line for each directory from its
+worktree up to `/`, plus the home directory and its parents where they are not
+already listed. For a worktree seven directories deep that is 9 lines, about
+700 bytes. The launch cost did not change measurably (median of 40
+`sandbox-exec` launches with and without the lines).
+
+**What still works.** Measured inside the sandbox, with the rule:
+
+- creating, renaming and removing files and directories in the working
+  directory and beside a masked file;
+- atomic saves (write a temp file, then rename it over the old one) there;
+- renaming or moving a directory that holds nothing masked, such as a sibling
+  of a masked entry;
+- cloning a file, and a directory that holds nothing masked;
+- making new dot files and dot directories;
+- git in a throwaway repository below a held directory: `init`, `add`,
+  `commit`, `git mv` of a directory and branch switches. With `.git`
+  allow-listed, `status`, `stash`, `checkout` and `worktree add` and
+  `remove` inside the root also work (measured in the design phase).
+
+**What changes for users.**
+
+- **A sandboxed process on macOS can no longer rename, remove, replace or
+  clone a directory that is above a denied path.** In practice that includes
+  its own working directory or worktree root whenever it holds a masked dot
+  entry, such as a worktree's `.git` file, and every directory above it. With
+  the default scan, which Coral's seeds use, the held directories are: each
+  granted root that holds a masked top-level dot entry, each directory above a
+  `mask_paths` entry, the home directory (above the `$HOME/Library` denial,
+  unless a read grant names `Library`), and every parent of each. Removing
+  such a directory never worked while its
+  masked entry was in it, since the entry cannot be unlinked. This holds for
+  every seatbelt-sandboxed agent, not only Coral steps.
+- **With `cwd_hidden_scan_recursive: true`** every directory with a masked
+  dotfile somewhere below it is held. `git mv` of such a directory,
+  `mv node_modules ...` (it holds `.bin`) and a package manager's rename of a
+  package directory that holds dot files are refused. Each of those used to
+  move a masked entry to a path no rule named.
+- **A `mask_paths` entry that does not exist yet** holds its missing parents
+  too. A process that later creates such a parent, such as `build/`, cannot
+  rename or remove it.
+- **Coral steps lose nothing they use.** A step cannot run git, since `.git` is
+  masked, and has no reason to move or clone its worktree. An implementer's
+  renames were already refused by S127; what is new for it is the clone.
+
+**The host-start check.** `file-clone` is an operation no earlier profile
+used. A macOS release that did not know it would refuse every profile, and
+every sandboxed launch would fail. So the sandbox check that each host runs
+once (`process_read_canary_open`, S120) gains a second half.
+
+- It builds a throwaway tree in the per-user temp dir
+  (`confstr(_CS_DARWIN_USER_TEMP_DIR)`), which is on the boot volume wherever
+  `$TMPDIR` points. The tree holds a writable working directory, a directory
+  in it with a `mask_paths` entry, a plain directory, and a second write root
+  where the clones land.
+- Its reader runs outside the sandbox and then inside a profile built for that
+  tree, so the check still costs two launches, about 0.08 s.
+- Inside, three operations must be refused: a clone of the masked entry's
+  directory, a clone of the working directory above it, and a rename of the
+  masked entry's directory. A clone and a rename of the plain directory must
+  work. Outside, all five must work.
+- If any check fails, or the profile does not load, the host reports
+  `os_sandbox:darwin_seatbelt_canary_open`, logs the names of the failed
+  checks and runs no Coral step. The launch refusal names the checks too.
+  This is how the process-read rules already fail.
+- Before the readers run, the host clones the plain directory itself. If that
+  clone fails with `ENOTSUP`, the volume cannot clone a directory (HFS+, exFAT
+  or a network volume). The host then logs a warning and skips only the clone
+  checks: the profile must still load, and the rename must still be refused.
+  Any other error fails closed.
+
+**Probe 15's `worktree_masked_file` check.** A new check of a new kind,
+`masked`, in the identity test
+(`test_probe_15_on_a_server_that_requires_identity`). The stack's fixture
+repository commits a dotfile, `.crl-masked`, that holds a fresh canary. So the
+file is in the worktree before the step's profile is built, and the profile
+masks it as a top-level dot entry. From the step's shell the probe tries three
+routes and compares what it reads with the canary's digest:
+
+1. it reads the file directly;
+2. on macOS, it renames the directory above the file (the worktree, which is
+   the step's working directory) into `$TMPDIR`, reads the file there, and
+   moves the directory back;
+3. on macOS, it calls `clonefile(2)` on that directory through `python3`
+   `ctypes`, reads the clone, and removes it. `cp -c -R` and `ditto --clone`
+   clone file by file and read nothing even without the rule, so they would
+   prove nothing.
+
+The probe prints `reachable` if any read finds the canary. It prints `denied`
+or `hidden` only if every route was refused or found nothing. An empty read is
+`hidden`. On Linux bwrap binds `/dev/null` over a masked file, and the lane
+measured that read as refused, so the check reads `denied` there too (a plain
+bwrap bind does not allow device access). It never prints
+the file's contents. A move or a clone into `$TMPDIR` fails across volumes
+whatever the sandbox allows. So before the two routes, on macOS, the probe
+moves and clones a plain directory that it makes beside the file. If that
+control fails, the check prints `unsupported` (`EXDEV` or `ENOTSUP`) or
+`unclassified`, and both are open verdicts, never closed ones. The host checks
+the file's digest before the probe, between the runs and after the step's run,
+which also shows that the step did not change it.
+
+| | macOS seatbelt | Linux bwrap |
+|---|---|---|
+| Outside the sandbox (the direct read; nothing is moved) | `reachable` | `reachable` |
+| In the step | `denied`, measured | `denied`: the direct read only, measured in the `coral-e2e` lane. It was first set to `hidden` by reasoning; the lane showed the read is refused, not empty |
+| Owner | none: closed | none: closed |
+
+**The control that shows the closed pin is not vacuous.**
+`test_the_masked_file_check_is_closed_only_where_the_profile_keeps_its_dir_in_place`
+(`tests/e2e/coral/test_sandbox_probe.py`) runs the same `probe15.sh` under
+`sandbox-exec`, in a profile of a step's shape: the working directory is its
+write root, the network is on, and a scratch beside it is `$TMPDIR`. The S128
+lines are edited first:
+
+| S128 lines | Verdict |
+|---|---|
+| as built | `denied` |
+| removed | `reachable` |
+| `file-write-unlink` only (revision 2's shape) | `reachable`, through the clone |
+| `file-clone` only | `reachable`, through the rename |
+| `file-write-unlink` swapped for `file-write-create` | `reachable`: the worktree moves out, the file is read, and the move back is refused |
+
+A route counts as refused only when the sandbox's own error (`EPERM`) stops
+it. Any other error, or a move the probe cannot undo, reads open.
+
+The test also checks that the unedited profile named the working directory in
+an S128 line, that every move was undone and every clone removed, and that the
+file's digest did not change.
+
+**Sandbox policy revision 3.** A sandbox rule the probe measures changed, and
+a declared blocker leaves, so a new revision is needed ("Addendum: CRL-159
+probe 15 on identity-requiring servers", "Rows are append-only per policy
+revision").
+
+- `SANDBOX_POLICY_REVISION` is `"3"` (`coral/omni/process_map.py`), so a host
+  on this code reports `coral_sandbox_policy:3`.
+- `coral/gates/integrity.py` gains two rows. The revision-1 and revision-2
+  rows are untouched, so a host on older code keeps the row it was measured
+  under.
+- The probed owners are revision 2's: no pin's owner moved, and the new pin is
+  closed. CRL-204 leaves the declared blockers. On seatbelt CRL-205 and CRL-206
+  join them, and CRL-208 and CRL-207 take the places of CRL-170 and CRL-171
+  (below). On bwrap CRL-206 takes CRL-204's place, because its Linux items
+  are not measured yet.
+
+CRL-170 and CRL-171 are Done, and a row should name live tickets. So the
+revision-3 seatbelt row names the two tickets that own what they left. The
+revision-1 and revision-2 rows keep CRL-170 and CRL-171, since rows are
+append-only. A test fails if a row at the current revision names a closed
+ticket.
+
+- CRL-208, in place of CRL-170: macOS releases other than the two measured,
+  Claude CLI versions other than the lane's, a host-start check that covers
+  only two rule families, and a macOS lane that is not a required check.
+- CRL-207, in place of CRL-171: Mach services that still act for a sandboxed
+  caller.
+
+| Policy | Owners of the open probe pins | Declared blockers no probe measures |
+|---|---|---|
+| seatbelt, revision 1 (kept) | CRL-174, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195 |
+| bwrap, revision 1 (kept) | CRL-174, CRL-181 | CRL-181, CRL-193, CRL-195 |
+| seatbelt, revision 2 (kept) | CRL-201, CRL-203, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195, CRL-204 |
+| bwrap, revision 2 (kept) | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-204 |
+| seatbelt, revision 3 | CRL-201, CRL-203, CRL-181 | CRL-208, CRL-207, CRL-181, CRL-193, CRL-195, CRL-205, CRL-206 |
+| bwrap, revision 3 | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-206 |
+
+Every row still names open tickets, so every gate still reads
+`not_enforced`:
+
+| Host | Server with rows up to revision 1 | Up to revision 2 | Up to revision 3 (this code) |
+|---|---|---|---|
+| revision 1 | `host_sandbox_open` | `host_sandbox_open` | `host_sandbox_open` |
+| revision 2 | `host_sandbox_unknown` | `host_sandbox_open` | `host_sandbox_open` |
+| revision 3 (this code) | `host_sandbox_unknown` | `host_sandbox_unknown` | `host_sandbox_open` |
+| no revision, such as a CLI without a sandbox (`OMNIGENT_CLAUDE_SDK_NO_SANDBOX`) | `host_sandbox_unknown` | `host_sandbox_unknown` | `host_sandbox_unknown` |
+
+What still blocks Enforced at revision 3, per backend:
+
+| Backend | Open path | Owner |
+|---|---|---|
+| seatbelt, bwrap | other programs' loopback TCP services (`other_loopback_tcp`, probed) | CRL-201 |
+| seatbelt, bwrap | a Unix-domain socket another program keeps inside the step's own worktree (`worktree_unix_socket`: probed on seatbelt, set by reasoning on bwrap) | CRL-203 |
+| bwrap | abstract Unix-domain sockets (`other_abstract_socket`, probed), and a socket under another bound root | CRL-202 |
+| seatbelt, bwrap | a planted repository config (`worktree_exec_config`, probed), and other files a step leaves that the owner's tools run | CRL-181 |
+| seatbelt | a rename that changes only the letter case or Unicode form of a masked or held name | CRL-205 |
+| seatbelt, bwrap | masks are tied to paths: names made after the profile is built, a dot name made first as a link, a `mask_paths` link re-pointed; on bwrap also a nested mask whose directory is replaced | CRL-206 |
+| seatbelt | macOS releases other than the two measured, Claude CLI versions other than the lane's, a host-start check that covers only two rule families, and a macOS lane that is not a required check | CRL-208 |
+| seatbelt | Mach services that still act for a sandboxed caller | CRL-207 |
+| seatbelt, bwrap | the owner's other and earlier runs, and the label's not-checked list | CRL-193 |
+| seatbelt, bwrap | password guessing at `/auth/login` | CRL-195 |
+
+A test binds the revision to the rule.
+`tests/coral/test_access_and_process_map.py::test_a_host_reports_revision_3_exactly_when_its_step_profiles_keep_masked_entries_in_place`
+builds a generated implementer's and reviewer's step profile for a workspace
+that holds a dotfile. It fails when the revision is 3 or later and the profile
+lacks `(deny file-write-unlink file-clone (literal "<workspace>"))`, and when
+the revision is earlier and the profile has it. The revision-2 socket test now
+checks "revision 2 or later", so revision 3 stands for both rules.
+
+**What was measured, and where.**
+
+| What | Where | Result |
+|---|---|---|
+| `tests/inner/sandbox/test_sandbox_behavior.py::test_sandbox_keeps_masked_entries_unread_after_moves_and_clones`: one probe, run outside the sandbox and then inside it, through the os_env helper and through a CLI wrap, with the network on and off, and with a writable and a read-only working directory | macOS 27.2.1, local | Outside, every route reads every fake value. Inside, none does: not directly; not after renaming or swapping the write root; not after renaming the directory above a nested `mask_paths` file inside the root or into a second write root; not after renaming, linking or copying the entry; not after a clone, by path or descriptor, of the root, of a directory above the nested file, of a read root, of a read root above the working directory, of the home or of a credential source's directory. Ordinary work passes inside. After the run every masked file has its own bytes at its own path. Before the rule, `root_moved` read with the network off and `root_cloned` with it on |
+| The same test on bwrap (five cases) | `inner-rest` lane, run 45544757959 | pass, with the rows written by reasoning (below); `planted_at_masked_path` is pinned open, owner CRL-206 |
+| Profile text: the rule in four network modes for a writable and a read-only working directory, once per directory under the recursive scan, and the three S127 tests that listed unlink lines (`tests/inner/test_seatbelt_sandbox.py`) | pure text; macOS local | pass |
+| The host-start check (`test_the_canary_*` in the same file) | macOS 27.2.1, local | passes on a healthy host; names each route left open when the rule is removed, when either half is missing and when only the nearest directory is held; reads `step profile load` for an operation the release does not know; the plain-directory control catches a deny of every clone; only the clone checks are skipped where the volume cannot clone |
+| Probe 15 on an accounts server (`test_probe_15_on_a_server_that_requires_identity`), claude 2.1.325 | macOS 27.2.1, local | `worktree_masked_file: denied` in the step and `reachable` outside; the file's digest is unchanged; no other pin moved; the run completed; the label reads `not_enforced` with `host_sandbox_open` |
+| Probe 15 on a single-user server and on one with the allow-listed runner token | macOS 27.2.1, local | both pass with their pins unedited: real steps still run and hand off with the rule |
+| The closed pin's control (above) | macOS 27.2.1, local | as in its table |
+| Probe 15's Linux pin | `coral-e2e` lane, run 45544757959 | `denied`: the direct read of the masked file is refused. The pin was `hidden` by reasoning, and was corrected to the measured closed verdict |
+| The security review: renames, swaps, renames over, clones by path, descriptor and alias spellings, `copyfile`, links, `/.vol`, letter-case and Unicode forms, and real Coral implementer and reviewer profiles, in all four network modes | macOS 27.2.1, local | with S128 every read and write of a masked entry was refused; each route it also ran with the S128 lines stripped read the file there |
+
+The macOS sandbox lane (`.github/workflows/macos-sandbox.yml`) runs the
+profile tests, the behaviour suite and probe 15 on macOS 26, not 27.2.1. It
+passed on this change (run 45544757971), so macOS 26 knows `file-clone` and
+applies the rule. It is not a required check. On a release that does not know
+`file-clone`, every profile fails to load: the lane goes red, and a host on
+that release reads its sandbox check open and runs no Coral step, so it fails
+closed. On one that knows the name but does not check a directory clone's
+source, the clone rows and the host check fail instead.
+
+**Linux, by the code.** bwrap masks by a mount on the entry: `--tmpfs` over a
+directory, `--bind-try /dev/null` over a file, after every other bind. The
+working directory and each write root are bind mounts of their own. So:
+
+- renaming a masked entry, or the working directory, fails with `EBUSY`;
+- a rename into another write root crosses mounts and fails with `EXDEV`;
+- a directory above a nested masked entry can be renamed, and the mount moves
+  with it, so in that launch the file still cannot be read;
+- seccomp denies the mount calls, so a mask cannot be removed;
+- Linux has no directory clone call; a btrfs snapshot is the one
+  directory-level copy (Residuals).
+
+None of this was measured locally: bwrap is not installed on that host. The
+behaviour test's five bwrap cases and the probe's Linux pin were first
+measured in the lanes on this change. The five cases passed as written. The
+probe's pin moved from `hidden` to `denied`, one closed verdict to another. If
+any of those rows ever reads a masked file, that is a bwrap bug to escalate,
+not a pin to move.
+
+**Copies made before.** A worktree or scratch that a step used before
+revision 3 may already hold a clone or a moved copy of a masked file at a
+plain name. S128 does not find such copies.
+
+**Residuals and owners.** S128 keeps every masked entry the profile lists at
+its path and uncloned, on macOS, in every network mode, as measured on macOS
+27.2.1.
+
+| Residual | Owner |
+|---|---|
+| A rename that changes only the letter case or Unicode form of a masked entry's name or a held directory's name succeeds, from writable and read-only profiles alike: the sandbox does not check it. Nothing is read after it: on the default case-insensitive volume every read, move and clone by the new spelling is still refused (measured). A case-sensitive volume was not measured | CRL-205 |
+| Masks are tied to paths. A dot name that a step creates first as a link, before the owner writes to it: the owner's bytes read at the step's other name in that launch, a hard link's other name stays readable and writable in later launches, and a dot symlink reads on every launch (measured). A dot symlink whose target is inside the granted roots is not masked at all | CRL-206 |
+| Names that do not exist when the profile is built: a dot entry made later is not masked in that launch, and a missing `mask_paths` parent, or a fixed temp-file name, that a step makes as a link reads through in that launch (measured) | CRL-206 |
+| A `mask_paths` entry spelled through a symlink inside a write root. The mask and the S128 lines name the resolved path, not the link, so a step can re-point the link. The next launch masks the new target, and the real file reads unmasked, read-only profiles included (measured). Coral's seeds set no `mask_paths` | CRL-206 |
+| Linux: a directory above a nested masked entry can be renamed and its old path given a new file. That launch still cannot read the moved file, but later launches mask only the old path, so the real file stays unmasked at its new path (`planted_at_masked_path`, pinned open by reasoning). Coral steps are not affected: they set no `mask_paths`, and their masked entries are top-level mount points | CRL-206 |
+| Linux: a running sandbox loses a mask when the owner, or host git, replaces the masked entry (an atomic save); a btrfs snapshot of a user-owned subvolume root copies masked files. Both by the kernel's behaviour, not measured | CRL-206 |
+| A directory that carries only a Unix-socket deny inside a write root, such as an S112 denied socket root or a deny-listed socket's grandparent, can still be moved into an own directory, where its socket connects (measured). S128 holds only directories above a path denied file access, and the tmux and terminal shapes are pattern denies with no fixed path. Also a socket under an entry the profile does not list as masked, re-homed from CRL-204 | CRL-203 |
+| A dot entry the profile does not list: below the top level with the default scan, or inside an allow-listed directory such as `.venv` | by design (the scan's trade-off) |
+| A masked entry's name, size, times and extended-attribute names stay visible | by design |
+| A descriptor opened outside the sandbox and handed in still reads | invariant: no launcher passes one |
+| A file the owner hard-linked to a masked file at an unmasked name | by design |
+| Copies of masked files that a step made before revision 3 | none: S128 does not find them |
+| New or nested config a step writes for the owner's tools | CRL-181 |
+| Mach services that still act for a sandboxed caller, such as one that opens files for it. Screen capture is left to TCC | CRL-207 |
+| macOS releases other than the two measured (27.2.1 locally, 26 in the lane). The lane is not a required check, and the host-start check covers only two rule families, the process-read rules and S128's; a release that does not know `file-clone` fails every launch and the host check closed | CRL-208 |
+| Hosts still on revision 2 | their own rows |
