@@ -5138,11 +5138,11 @@ seams:
       checks are skipped, with a warning: the profile must still load and
       the rename must still be refused.
       bwrap is unchanged: its mask is a mount on the entry. The behaviour
-      test's bwrap rows are written from that code and were not run on
-      macOS: a masked entry and the write root are mount points (a rename is
+      test's bwrap rows are written from that code and pass in the Linux
+      lane: a masked entry and the write root are mount points (a rename is
       refused), a second write root is another mount, and a dir above a
       nested masked entry can be renamed, the mount going with it, so that
-      launch still reads the file empty and leaves it unchanged. But on
+      launch still cannot read the file and leaves it unchanged. But on
       Linux, once the dir above a mask_paths file is replaced, the real file
       is unmasked at its new path for every later launch, which masks only
       the old path (the row pins the replace as open; owner CRL-206). Not

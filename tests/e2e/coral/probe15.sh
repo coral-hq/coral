@@ -351,7 +351,7 @@ plant_repository() {
 
 # A masked file ($1) read by its digest ($2): directly and, on macOS, after renaming the dir
 # above it into $TMPDIR and after clonefile(2) of that dir there; each undone. hidden for an
-# empty read (bwrap's /dev/null). A plain dir there must move and clone first, or the routes
+# empty read. A plain dir there must move and clone first, or the routes
 # show nothing: unsupported (EXDEV, ENOTSUP) or unclassified. reachable if any read finds it.
 MASKED='
 import ctypes, errno, hashlib, os, shutil, sys

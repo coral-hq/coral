@@ -2456,7 +2456,7 @@ written to `artifacts/probe15-identity-<platform>.json` before any assertion
 | `worktree_unix_socket` (added by CRL-174) | `reachable` | `reachable`, set by reasoning until the `coral-e2e` lane runs on that change | CRL-203 |
 | `other_loopback_tcp` | `reachable` | `reachable` | CRL-201 |
 | `worktree_exec_config` | `reachable` | `reachable` | CRL-181 |
-| `worktree_masked_file` (added by CRL-204) | `denied` since policy revision 3 (S128) | `hidden`: the direct read only, set by reasoning until the `coral-e2e` lane runs on that change | |
+| `worktree_masked_file` (added by CRL-204) | `denied` since policy revision 3 (S128) | `denied`: the direct read only, measured in `coral-e2e` lane run 45544757959 | |
 | `credential_proxy` (added by CRL-167) | `refused` | `refused`, set by reasoning until the `coral-e2e` lane runs on that change | |
 
 So a sandboxed step on an accounts server cannot mint an owner JWT, act as
@@ -3649,7 +3649,9 @@ routes and compares what it reads with the canary's digest:
 
 The probe prints `reachable` if any read finds the canary. It prints `denied`
 or `hidden` only if every route was refused or found nothing. An empty read is
-`hidden`, since bwrap binds `/dev/null` over a masked file. It never prints
+`hidden`. On Linux bwrap binds `/dev/null` over a masked file, and the lane
+measured that read as refused, so the check reads `denied` there too (a plain
+bwrap bind does not allow device access). It never prints
 the file's contents. A move or a clone into `$TMPDIR` fails across volumes
 whatever the sandbox allows. So before the two routes, on macOS, the probe
 moves and clones a plain directory that it makes beside the file. If that
@@ -3661,7 +3663,7 @@ which also shows that the step did not change it.
 | | macOS seatbelt | Linux bwrap |
 |---|---|---|
 | Outside the sandbox (the direct read; nothing is moved) | `reachable` | `reachable` |
-| In the step | `denied`, measured | `hidden`: the direct read only, set by reasoning until the `coral-e2e` lane runs on this change |
+| In the step | `denied`, measured | `denied`: the direct read only, measured in the `coral-e2e` lane. It was first set to `hidden` by reasoning; the lane showed the read is refused, not empty |
 | Owner | none: closed | none: closed |
 
 **The control that shows the closed pin is not vacuous.**
@@ -3761,22 +3763,23 @@ checks "revision 2 or later", so revision 3 stands for both rules.
 | What | Where | Result |
 |---|---|---|
 | `tests/inner/sandbox/test_sandbox_behavior.py::test_sandbox_keeps_masked_entries_unread_after_moves_and_clones`: one probe, run outside the sandbox and then inside it, through the os_env helper and through a CLI wrap, with the network on and off, and with a writable and a read-only working directory | macOS 27.2.1, local | Outside, every route reads every fake value. Inside, none does: not directly; not after renaming or swapping the write root; not after renaming the directory above a nested `mask_paths` file inside the root or into a second write root; not after renaming, linking or copying the entry; not after a clone, by path or descriptor, of the root, of a directory above the nested file, of a read root, of a read root above the working directory, of the home or of a credential source's directory. Ordinary work passes inside. After the run every masked file has its own bytes at its own path. Before the rule, `root_moved` read with the network off and `root_cloned` with it on |
-| The same test on bwrap (five cases) | not run yet: the `inner-rest` lane is the first run | by reasoning (below); `planted_at_masked_path` is pinned open, owner CRL-206 |
+| The same test on bwrap (five cases) | `inner-rest` lane, run 45544757959 | pass, with the rows written by reasoning (below); `planted_at_masked_path` is pinned open, owner CRL-206 |
 | Profile text: the rule in four network modes for a writable and a read-only working directory, once per directory under the recursive scan, and the three S127 tests that listed unlink lines (`tests/inner/test_seatbelt_sandbox.py`) | pure text; macOS local | pass |
 | The host-start check (`test_the_canary_*` in the same file) | macOS 27.2.1, local | passes on a healthy host; names each route left open when the rule is removed, when either half is missing and when only the nearest directory is held; reads `step profile load` for an operation the release does not know; the plain-directory control catches a deny of every clone; only the clone checks are skipped where the volume cannot clone |
 | Probe 15 on an accounts server (`test_probe_15_on_a_server_that_requires_identity`), claude 2.1.325 | macOS 27.2.1, local | `worktree_masked_file: denied` in the step and `reachable` outside; the file's digest is unchanged; no other pin moved; the run completed; the label reads `not_enforced` with `host_sandbox_open` |
 | Probe 15 on a single-user server and on one with the allow-listed runner token | macOS 27.2.1, local | both pass with their pins unedited: real steps still run and hand off with the rule |
 | The closed pin's control (above) | macOS 27.2.1, local | as in its table |
-| Probe 15's Linux pin | not run yet: the `coral-e2e` lane is the first run | `hidden`, set by reasoning |
+| Probe 15's Linux pin | `coral-e2e` lane, run 45544757959 | `denied`: the direct read of the masked file is refused. The pin was `hidden` by reasoning, and was corrected to the measured closed verdict |
 | The security review: renames, swaps, renames over, clones by path, descriptor and alias spellings, `copyfile`, links, `/.vol`, letter-case and Unicode forms, and real Coral implementer and reviewer profiles, in all four network modes | macOS 27.2.1, local | with S128 every read and write of a masked entry was refused; each route it also ran with the S128 lines stripped read the file there |
 
 The macOS sandbox lane (`.github/workflows/macos-sandbox.yml`) runs the
 profile tests, the behaviour suite and probe 15 on macOS 26, not 27.2.1. It
-has not run on this change yet, and it is not a required check. If macOS 26
-does not know `file-clone`, every profile fails to load. The lane then goes
-red, and a host on that release reads its sandbox check open and runs no Coral
-step: it fails closed. If it knows the name but does not check a directory
-clone's source, the clone rows and the host check fail instead.
+passed on this change (run 45544757971), so macOS 26 knows `file-clone` and
+applies the rule. It is not a required check. On a release that does not know
+`file-clone`, every profile fails to load: the lane goes red, and a host on
+that release reads its sandbox check open and runs no Coral step, so it fails
+closed. On one that knows the name but does not check a directory clone's
+source, the clone rows and the host check fail instead.
 
 **Linux, by the code.** bwrap masks by a mount on the entry: `--tmpfs` over a
 directory, `--bind-try /dev/null` over a file, after every other bind. The
@@ -3785,15 +3788,17 @@ working directory and each write root are bind mounts of their own. So:
 - renaming a masked entry, or the working directory, fails with `EBUSY`;
 - a rename into another write root crosses mounts and fails with `EXDEV`;
 - a directory above a nested masked entry can be renamed, and the mount moves
-  with it, so in that launch the file still reads empty;
+  with it, so in that launch the file still cannot be read;
 - seccomp denies the mount calls, so a mask cannot be removed;
 - Linux has no directory clone call; a btrfs snapshot is the one
   directory-level copy (Residuals).
 
-None of this was measured here: bwrap is not installed on this host. The
-behaviour test's five bwrap cases and the probe's Linux pin are the first
-measurements. If any of those rows reads a masked file, that is a bwrap bug
-to escalate, not a pin to move.
+None of this was measured locally: bwrap is not installed on that host. The
+behaviour test's five bwrap cases and the probe's Linux pin were first
+measured in the lanes on this change. The five cases passed as written. The
+probe's pin moved from `hidden` to `denied`, one closed verdict to another. If
+any of those rows ever reads a masked file, that is a bwrap bug to escalate,
+not a pin to move.
 
 **Copies made before.** A worktree or scratch that a step used before
 revision 3 may already hold a clone or a moved copy of a masked file at a
@@ -3809,7 +3814,7 @@ its path and uncloned, on macOS, in every network mode, as measured on macOS
 | Masks are tied to paths. A dot name that a step creates first as a link, before the owner writes to it: the owner's bytes read at the step's other name in that launch, a hard link's other name stays readable and writable in later launches, and a dot symlink reads on every launch (measured). A dot symlink whose target is inside the granted roots is not masked at all | CRL-206 |
 | Names that do not exist when the profile is built: a dot entry made later is not masked in that launch, and a missing `mask_paths` parent, or a fixed temp-file name, that a step makes as a link reads through in that launch (measured) | CRL-206 |
 | A `mask_paths` entry spelled through a symlink inside a write root. The mask and the S128 lines name the resolved path, not the link, so a step can re-point the link. The next launch masks the new target, and the real file reads unmasked, read-only profiles included (measured). Coral's seeds set no `mask_paths` | CRL-206 |
-| Linux: a directory above a nested masked entry can be renamed and its old path given a new file. That launch still reads the moved file empty, but later launches mask only the old path, so the real file stays unmasked at its new path (`planted_at_masked_path`, pinned open by reasoning). Coral steps are not affected: they set no `mask_paths`, and their masked entries are top-level mount points | CRL-206 |
+| Linux: a directory above a nested masked entry can be renamed and its old path given a new file. That launch still cannot read the moved file, but later launches mask only the old path, so the real file stays unmasked at its new path (`planted_at_masked_path`, pinned open by reasoning). Coral steps are not affected: they set no `mask_paths`, and their masked entries are top-level mount points | CRL-206 |
 | Linux: a running sandbox loses a mask when the owner, or host git, replaces the masked entry (an atomic save); a btrfs snapshot of a user-owned subvolume root copies masked files. Both by the kernel's behaviour, not measured | CRL-206 |
 | A directory that carries only a Unix-socket deny inside a write root, such as an S112 denied socket root or a deny-listed socket's grandparent, can still be moved into an own directory, where its socket connects (measured). S128 holds only directories above a path denied file access, and the tmux and terminal shapes are pattern denies with no fixed path. Also a socket under an entry the profile does not list as masked, re-homed from CRL-204 | CRL-203 |
 | A dot entry the profile does not list: below the top level with the default scan, or inside an allow-listed directory such as `.venv` | by design (the scan's trade-off) |

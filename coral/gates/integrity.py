@@ -95,8 +95,8 @@ IDENTITY_PROBE_OPEN: Mapping[HostSandboxPolicy, tuple[str, ...]] = MappingProxyT
         # worktree and, on Linux, abstract ones; a planted repository config.
         SEATBELT_2: ("CRL-201", "CRL-203", "CRL-181"),
         BWRAP_2: ("CRL-201", "CRL-202", "CRL-203", "CRL-181"),
-        # As at revision 2; the masked file check is closed on both (on Linux by reasoning, the
-        # direct read only, until the lane runs).
+        # As at revision 2; the masked file check is closed on both (on Linux the direct read
+        # only).
         SEATBELT_3: ("CRL-201", "CRL-203", "CRL-181"),
         BWRAP_3: ("CRL-201", "CRL-202", "CRL-203", "CRL-181"),
     }

@@ -220,7 +220,7 @@ worktree there, undoing each. It first moves and clones a plain directory the
 same way; if that fails, the check reads `unsupported` (another volume, or one
 that cannot clone) or `unclassified`, both open. Outside the sandbox it must
 read `reachable` with nothing moved; in the step it is pinned `denied` on
-macOS and `hidden` on Linux, with no owner. The host checks the file's digest
+both platforms, with no owner. The host checks the file's digest
 before the probe, between the runs and after the step's. A macOS test runs
 the same probe in a step-shaped seatbelt profile with the S128 rule edited:
 without the rule, or with either half alone, it must read `reachable` (ADR-05,
@@ -295,8 +295,8 @@ release branch. For each failure in `test_sandbox_probe.py`:
 - The masked-file check of the identity test, from sandbox policy revision 3
   (ADR-05, "Addendum: CRL-204 masked files and moved directories"):
   `worktree_masked_file` is closed with no owner. It is `denied` on macOS,
-  measured locally, and `hidden` on Linux, where it is the direct read only
-  and set by reasoning until the lane runs. A `reachable` or `mismatch` there
+  measured locally and in the macOS lane, and `denied` on Linux, measured in
+  the `coral-e2e` lane, where it is the direct read only. A `reachable` or `mismatch` there
   is a finding, not a re-pin: on macOS it means the S128 rule did not hold on
   that OS, and re-pinning it open needs an owner and a new policy revision.
   `unsupported` means the plain-directory control could not move or clone

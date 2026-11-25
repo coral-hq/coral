@@ -1357,9 +1357,9 @@ EXPECTED_IDENTITY: dict[str, dict[str, Pin]] = {
         "worktree_unix_socket": Pin("reachable", WORKTREE_SOCKETS),
         "other_loopback_tcp": Pin("reachable", LOOPBACK_SERVICES),
         "worktree_exec_config": Pin("reachable", PLANTED_CONFIG),
-        # Not measured in a lane yet, and the direct read only (the probe moves and clones
-        # on macOS alone): set from bwrap binding /dev/null over a masked file, read empty.
-        "worktree_masked_file": Pin("hidden"),
+        # The direct read only (the probe moves and clones on macOS alone). Measured in the
+        # lane: bwrap binds /dev/null over a masked file, and the read is refused, not empty.
+        "worktree_masked_file": Pin("denied"),
         # Not measured in a lane yet: set from other_loopback_tcp, reachable in that run, and
         # the proxy's own refusal.
         "credential_proxy": Pin("refused"),

@@ -1871,8 +1871,8 @@ def test_sandbox_keeps_masked_entries_unread_after_moves_and_clones(
 
     Last, the probe moves the dir above the nested file aside and plants a file at its path,
     and leaves that for the host to check. Seatbelt refuses the move. On Linux bwrap masks by
-    a mount on the entry, which moves with the dir, so this launch still reads the file empty
-    and leaves it unchanged. But once the dir above a ``mask_paths`` file is replaced, the
+    a mount on the entry, which moves with the dir, so this launch still cannot read the
+    file and leaves it unchanged. But once the dir above a ``mask_paths`` file is replaced, the
     real file is unmasked at its new path for every later launch, which masks only the old
     path. The row pins that as open.
     """
