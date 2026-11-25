@@ -34,6 +34,7 @@ from omnigent.inner.executor import (
     ExecutorConfig,
     ExecutorError,
     ExecutorEvent,
+    ExecutorNotice,
     InjectionDeliveryAmbiguous,
     Message,
     ReasoningChunk,
@@ -62,12 +63,14 @@ from omnigent.server.schemas import (
     CreateResponseRequest,
     ElicitationRequestParams,
     ElicitationResult,
+    ErrorEvent,
     InjectionConsumedEvent,
     OutputItemDoneEvent,
     OutputTextDeltaEvent,
     ReasoningStartedEvent,
     ReasoningSummaryTextDeltaEvent,
     ReasoningTextDeltaEvent,
+    RetryErrorDetail,
 )
 
 _logger = logging.getLogger(__name__)
@@ -1104,6 +1107,17 @@ class ExecutorAdapter(HarnessApp):
                         delta=event.delta,
                     ),
                 )
+        # CORAL(S132)
+        elif isinstance(event, ExecutorNotice):
+            ctx.emit(
+                ErrorEvent(
+                    type="response.error",
+                    source="harness",
+                    error=RetryErrorDetail(
+                        code=event.code, message=event.message, title=event.title
+                    ),
+                )
+            )
         elif isinstance(event, ToolCallRequest):
             # Emit observed function_call INLINE (interleaved with text). Queue the tool_use_id
             # so the post-stream dispatch reuses the same call_id for deduplication.

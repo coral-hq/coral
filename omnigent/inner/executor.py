@@ -328,6 +328,16 @@ class TurnCancelled(ExecutorEvent):
     phase: str = "model"
 
 
+# CORAL(S132)
+@dataclass
+class ExecutorNotice(ExecutorEvent):
+    """A warning shown in the session; the turn goes on."""
+
+    code: str
+    title: str
+    message: str
+
+
 @dataclass
 class ExecutorError(ExecutorEvent):
     """Something went wrong.
