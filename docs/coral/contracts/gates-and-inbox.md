@@ -561,8 +561,11 @@ row empties (ADR-05's not-checked list):
 - the step model's tools: the step roster denies only the tools that reach
   other sessions and agents, so a new default Omnigent tool reaches steps
   unseen, and the probe measures the shell only;
-- the orchestrator's and anchor's CLIs, which run outside the sandbox
-  (CRL-180).
+- the Claude CLI wraps (every step's, and the orchestrator's read-only one
+  built in the claude-sdk harness, which reads the run worktree and, from
+  a checkout, the omnigent package), which the probe does not measure: it
+  measures the implementer's shell
+  (ADR-05, "Addendum: CRL-180 every Coral CLI in a sandbox").
 
 Enforced does not cover:
 

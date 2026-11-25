@@ -159,11 +159,22 @@ when the operator sets `OMNIGENT_CLAUDE_SDK_NO_SANDBOX`, when its sandbox
 denies the network, when only the SDK's bundled `claude` is available, or when
 its sandbox cannot be applied, which only the runner log reports (CRL-183).
 
-Coral's orchestrator and anchor have no `os_env`, so, from the code, their CLIs
-run outside the sandbox on every platform, as does every Coral CLI when the
-operator sets `OMNIGENT_CLAUDE_SDK_NO_SANDBOX`. Those CLIs get a private config
-directory too, but they and anything they start are not confined and can reach
-your `~/.claude` (CRL-180). Since CRL-167, on Linux and macOS a step's CLI
+Since CRL-180 every Coral Claude CLI runs in an OS sandbox or does not start.
+Coral's orchestrator has no `os_env`, so its CLI runs in a read-only sandbox of
+its own. It can read its run's worktree, except the dot entries at its top
+level, and write only its own scratch, its private config directory and
+`~/.npm/_logs`, as every Coral step can. It reaches nothing else of your home,
+though it can `stat` any path. Its network is not limited (CRL-209). That was
+measured on macOS 27.2 with a stand-in CLI. Before CRL-180 Coral refused the
+orchestrator's CLI, so a workflow with a decision could not run: it paused at
+its first decision. That was found by reading the code and confirmed at the
+harness. A stack test now runs a decision through the real orchestrator CLI to
+the end, with the model reached directly and through a gateway. Both passed
+locally on macOS 27.2 with claude 2.1.325, and the test runs in CI on Linux
+and on macOS 26. The run anchor's CLI, which starts only if you bind a runner
+to the anchor, is still refused. A Coral CLI under the operator's
+`OMNIGENT_CLAUDE_SDK_NO_SANDBOX` is refused too; before CRL-180 a step's ran
+unconfined as you. Since CRL-167, on Linux and macOS a step's CLI
 takes only a few names from the `env` block of your `~/.claude/settings.json`:
 model names, the telemetry, error-reporting, auto-update and
 non-essential-traffic opt-outs when they are switched on, and proxy and
@@ -182,18 +193,21 @@ hooks, which, from the code, your own Claude Code loads if you open and trust
 that directory (CRL-181). A step or a sandboxed agent can still reach your
 `~/.claude` indirectly, through the channels above to code outside the sandbox,
 such as another program's loopback service (CRL-201) or, on a single-user
-server, the server itself (accepted, above). A step whose sandbox cannot wrap
-its CLI does not start. Coral steps need a system `claude` CLI, or they
-refuse to start: the SDK's bundled one cannot be wrapped in the sandbox. See the ADR-05 addenda on
+server, the server itself (accepted, above). A Coral CLI that cannot run in its
+sandbox does not start, for whatever reason, the operator's
+`OMNIGENT_CLAUDE_SDK_NO_SANDBOX` included. Coral steps and the orchestrator
+need a system `claude` CLI, or they refuse to start: the SDK's bundled one
+cannot be wrapped in the sandbox. See the ADR-05 addenda on
 [harness sockets](docs/coral/decisions/ADR-05-topology.md#addendum-crl-166-harness-sockets-on-macos-2026-11-22),
 [Claude config isolation](docs/coral/decisions/ADR-05-topology.md#addendum-crl-176-claude-config-isolation-2026-11-22),
 [sandboxed agents' Claude config](docs/coral/decisions/ADR-05-topology.md#addendum-crl-178-claude-config-isolation-for-every-sandboxed-agent-2026-11-22),
 [launch temp dir cleanup](docs/coral/decisions/ADR-05-topology.md#addendum-crl-179-launch-temp-dir-cleanup-2026-11-22),
 [identity-requiring servers and gate labels](docs/coral/decisions/ADR-05-topology.md#addendum-crl-159-probe-15-on-identity-requiring-servers-2026-11-23),
 [secrets out of exec-time environments](docs/coral/decisions/ADR-05-topology.md#addendum-crl-167-secrets-out-of-exec-time-environments-2026-11-24),
-[other programs' Unix sockets](docs/coral/decisions/ADR-05-topology.md#addendum-crl-174-other-programs-unix-sockets-2026-11-24)
+[other programs' Unix sockets](docs/coral/decisions/ADR-05-topology.md#addendum-crl-174-other-programs-unix-sockets-2026-11-24),
+[masked files and moved directories](docs/coral/decisions/ADR-05-topology.md#addendum-crl-204-masked-files-and-moved-directories-2026-11-24)
 and
-[masked files and moved directories](docs/coral/decisions/ADR-05-topology.md#addendum-crl-204-masked-files-and-moved-directories-2026-11-24).
+[every Coral CLI in a sandbox](docs/coral/decisions/ADR-05-topology.md#addendum-crl-180-every-coral-cli-in-a-sandbox-2026-11-25).
 
 ## Run Coral from source
 

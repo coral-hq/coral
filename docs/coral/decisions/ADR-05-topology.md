@@ -1334,20 +1334,25 @@ sandboxed agent").
   stances use `os_env` with network on, and no Coral stance turns the network
   off. So a step is newly refused only when its host has no system `claude`
   or its wrap was already failing. From code, Coral's run preflight does not
-  check for the CLI: the run starts, and its first step fails.
-- **Unwrapped CLIs.** A Coral CLI that runs unwrapped gets a private 0700 dir
-  that the executor makes with `mkdtemp` (`omnigent-claude-config-*`, with
+  check for the CLI: the run starts, and its first step fails. Since S129 a
+  Coral CLI that is not wrapped is refused whatever the reason, also under the
+  operator's opt-out and with a network-denying sandbox ("Addendum: CRL-180
+  every Coral CLI in a sandbox").
+- **Unwrapped CLIs.** An isolated CLI that runs unwrapped gets a private 0700
+  dir that the executor makes with `mkdtemp` (`omnigent-claude-config-*`, with
   `projects` as a file), passes in both variables, and removes on `close()`.
-  By design that happens under the operator's
-  `OMNIGENT_CLAUDE_SDK_NO_SANDBOX`, with a network-denying sandbox, and for a
-  spec without `os_env`: the orchestrator and anchor, on every platform. For
-  such a spec `omnigent/runtime/workflow.py` sends no
-  `HARNESS_CLAUDE_SDK_OS_ENV`, so `omnigent/inner/claude_sdk_harness.py`
-  builds the executor with a `caller_process` `os_env` whose sandbox is
-  `none`, and the CLI runs unwrapped (from code). The Linux tight wrap applies
-  only to an executor built with no `os_env` at all, which the harness never
-  does. An unwrapped CLI's config is kept off the user's, but the CLI is not
-  contained (CRL-180).
+  Before S129 that covered a Coral step's CLI under the operator's
+  `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` or with a network-denying sandbox, which
+  ran unwrapped and was not contained. This item first said the orchestrator
+  and anchor CLIs ran unwrapped too. They never started: their specs have no
+  `os_env`, so `omnigent/inner/claude_sdk_harness.py` gave them
+  `sandbox: none`, and S13 refused every turn before any CLI started (found
+  by CRL-180). Since S129 no Coral CLI runs unwrapped: the orchestrator's
+  runs in a read-only sandbox, and the anchor's, like any CLI that is not
+  wrapped, is refused ("Addendum: CRL-180 every Coral CLI in a sandbox"). The
+  executor's own dir remains for direct library callers. The Linux tight wrap
+  applies only to an executor built with no `os_env` at all, which the
+  harness never does.
 - **Unchanged.** Resume does not use the config dir: claude-sdk replays the
   history into a fresh client and runs with `--no-session-persistence`. A
   fresh dir adds no measurable start-up time.
@@ -1457,11 +1462,13 @@ away from the user's Claude config files.
   `~/.claude.json` started inside such a wrap and rewrote a plugin hook,
   which was measured. What S115 leaves open is in "Addendum: CRL-178 Claude
   config isolation for every sandboxed agent".
-- Coral CLIs outside the sandbox: the orchestrator and anchor on every
-  platform, whose specs have no `os_env` (from code), any CLI under the
-  operator's opt-out, and a step whose sandbox denies the network (no Coral
-  stance does). Their config is a private dir, but they run as the user with
-  no sandbox, so they and what they start can reach `~/.claude` (CRL-180).
+- Coral CLIs outside the sandbox. This item first named the orchestrator and
+  anchor, any CLI under the operator's opt-out, and a step whose sandbox
+  denies the network (no Coral stance does). The orchestrator and anchor never
+  started, because S13 refused them; the others ran as the user with no
+  sandbox and could reach `~/.claude`. Since S129 none of them runs
+  unwrapped: the orchestrator runs in a read-only sandbox, and the rest are
+  refused ("Addendum: CRL-180 every Coral CLI in a sandbox").
 - When the executor kills a CLI, its scratch and private config dir stay in
   the temp dir (measured before S113 for the scratch). Such a scratch holds
   about 16 KB of the CLI's config with no credential keys (measured). Read
@@ -1928,7 +1935,8 @@ listed here.
   sandboxes. Read from the 2.1.325 binary, the CLI also moves the copied
   `*Mcpjson*` keys into the working dir's `.claude/settings.local.json` at
   start when it can, as it could under the old wrap (CRL-181).
-- Coral CLIs outside the sandbox are unchanged (CRL-180).
+- Coral CLIs run in a sandbox or not at all since S129 ("Addendum: CRL-180
+  every Coral CLI in a sandbox").
 - On macOS code in the sandbox could still send the user's own Claude Code
   sessions a message through their inbox sockets (read from the binary, not
   measured). Since S127 the connect is refused ("Addendum: CRL-174 other
@@ -2521,9 +2529,10 @@ The reasons, in this order, each at most once (`GateIntegrityReason`,
 | `host_sandbox_open` | the policy's row names a ticket in either part |
 
 `label` is `enforced` only with no reason. Every unknown input fails closed:
-a host whose steps run with `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` reports no
-revision (`coral/omni/process_map.py:33-35`), and a policy with only one part
-recorded has no row (`blocker_table`, `integrity.py:104-115`).
+a host with `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` set reports no revision
+(`host_tokens` in `coral/omni/process_map.py`), and since S129 its Coral CLIs
+are refused; a policy with only one part recorded has no row
+(`blocker_table`, `integrity.py:104-115`).
 `tests/coral/gates/test_integrity.py` checks the rule over every server mode,
 flag value, config fact and host policy it lists, against four tables, and
 `tests/coral/omni/test_gate_integrity_facts.py` how each fact is read.
@@ -2682,8 +2691,11 @@ only when the owner accepts it in this ADR.
     reach other sessions and agents (`coral/omni/policies/guards.py:98-121`),
     so a new default Omnigent tool reaches steps unseen, and the probe
     measures the shell only;
-  - the orchestrator's and anchor's CLIs, which have no `os_env` and run
-    outside the sandbox (CRL-180).
+  - the Claude CLI wraps (every step's, and the orchestrator's read-only one
+    built in the claude-sdk harness, which reads the run worktree and, from
+    a checkout, the omnigent package), which the probe does not measure: it
+    measures the implementer's shell
+    ("Addendum: CRL-180 every Coral CLI in a sandbox").
 - **Not covered by Enforced:** agents the owner runs outside Coral, and other
   accounts that share the owner's OS user; sign-ins the owner approves, such
   as a link a step asks the owner to open (the device grant, when on, reads
@@ -3062,7 +3074,7 @@ sockets").
 | Single-user servers, where a step acts as the owner | accepted ("Addendum: CRL-159 probe 15 on identity-requiring servers") |
 | Behind the proxy a CLI on a plain Anthropic key skips its bootstrap call, its fast-mode status prefetch and the key on its telemetry requests, none of them on a turn's path. The first-party switch does not reach the places that test the raw URL: the side-query beta on hook-agent and named model calls, the `cc_project` attribution tag, the resume cache warm-up, a server-flagged reminder experiment, and one resend without `thinking.display` after a 400 or 422. Read from CLI 2.1.325, not measured | accepted; the detail is in S124's note (`.coral/seams.yaml`) |
 | A settings proxy with a user name, a password, a path or a query is not given to the CLI, whose other traffic uses the proxy it inherits; the harness's scrub still leaves the CLI a proxy without `@` that has a path or a query | accepted |
-| In local Tier B runs a CLI without a private config dir makes two keychain lookups per launch, which the test's own `security` stand-in records ("Addendum: CRL-199 test stacks and the keychain"); the base checkout does the same | CRL-180, CRL-197 |
+| In local Tier B runs a CLI without a private config dir makes two keychain lookups per launch, which the test's own `security` stand-in records ("Addendum: CRL-199 test stacks and the keychain"); the base checkout does the same | CRL-197 |
 
 Console-managed settings and policy limits are not on this list: read from
 CLI 2.1.325, a CLI whose only credential is a key helper was never eligible
@@ -3395,7 +3407,7 @@ directories"):
 | older code, revision 1 | older or current | `host_sandbox_open` |
 | current code, revision 2 | current | `host_sandbox_open` |
 | current code, revision 2 | older, with no revision-2 rows | `host_sandbox_unknown` |
-| a CLI without a sandbox (`OMNIGENT_CLAUDE_SDK_NO_SANDBOX`) | any | no revision: `host_sandbox_unknown` |
+| a host with `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` set, whose Coral CLIs are refused since S129 | any | no revision: `host_sandbox_unknown` |
 
 What still blocks Enforced at revision 2, per backend:
 
@@ -3733,7 +3745,7 @@ Every row still names open tickets, so every gate still reads
 | revision 1 | `host_sandbox_open` | `host_sandbox_open` | `host_sandbox_open` |
 | revision 2 | `host_sandbox_unknown` | `host_sandbox_open` | `host_sandbox_open` |
 | revision 3 (this code) | `host_sandbox_unknown` | `host_sandbox_unknown` | `host_sandbox_open` |
-| no revision, such as a CLI without a sandbox (`OMNIGENT_CLAUDE_SDK_NO_SANDBOX`) | `host_sandbox_unknown` | `host_sandbox_unknown` | `host_sandbox_unknown` |
+| no revision, such as a host with `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` set, whose Coral CLIs are refused since S129 | `host_sandbox_unknown` | `host_sandbox_unknown` | `host_sandbox_unknown` |
 
 What still blocks Enforced at revision 3, per backend:
 
@@ -3826,3 +3838,335 @@ its path and uncloned, on macOS, in every network mode, as measured on macOS
 | Mach services that still act for a sandboxed caller, such as one that opens files for it. Screen capture is left to TCC | CRL-207 |
 | macOS releases other than the two measured (27.2.1 locally, 26 in the lane). The lane is not a required check, and the host-start check covers only two rule families, the process-read rules and S128's; a release that does not know `file-clone` fails every launch and the host check closed | CRL-208 |
 | Hosts still on revision 2 | their own rows |
+
+## Addendum: CRL-180 every Coral CLI in a sandbox (2026-11-25)
+
+CRL-180 makes every Coral Claude CLI run in an OS sandbox or not start at
+all. Seam S129 (`.coral/seams.yaml`) changes `omnigent/runtime/workflow.py`,
+`omnigent/inner/claude_sdk_harness.py` and
+`omnigent/inner/claude_sdk_executor.py`. Coral's run preflight
+(`coral/omni/server/preflight.py`) changes too. No sandbox rule changes, and
+the policy stays at revision 3. Local measurements were taken on macOS 27.2,
+with stand-in processes or the test suite's mock model, against throwaway
+homes that hold fake files, compared by presence or digest. No real home or
+credentials file was probed.
+
+**What the ticket assumed.** The ticket said three kinds of Coral CLI ran
+with no OS sandbox and could reach the user's whole home: the orchestrator's
+and the anchor's, whose specs have no `os_env`; every Coral CLI under the
+operator's `OMNIGENT_CLAUDE_SDK_NO_SANDBOX`; and one whose sandbox denies the
+network. The "Unwrapped CLIs" item of "Addendum: CRL-176 Claude config
+isolation" said the same of the first two.
+
+**What was found.**
+
+- **No orchestrator or anchor CLI had ever started.** For a spec without
+  `os_env` the claude-sdk harness builds the executor with `sandbox: none`.
+  S13's sandbox check refuses every turn of a Coral spec whose sandbox is
+  `none`, before any CLI starts: `coral_sandbox_unavailable`, "Steps that read
+  or change files need an OS sandbox: 'none' does not isolate files." So, from
+  the code, a workflow with a decision paused at its first decision (`infra`,
+  detail `orchestrator:agent.failed`), and every resume failed the same way.
+- This was found by reading the code and confirmed at the harness: executors
+  built by the real harness builder were refused, with and without the
+  opt-out, and a turn with a fake SDK client created no client. Both design
+  reviews confirmed it. CRL-176's security review had built the executor
+  directly, which skips the check, so it saw an unwrapped CLI that the harness
+  never builds. No stack test had run an orchestrator turn.
+- **What did run unconfined.** A Coral step's CLI under the opt-out, which
+  also let the SDK's bundled CLI run on a host without a system `claude`, and
+  a step whose sandbox denies the network, which no seed sets. Such a CLI, and
+  everything it starts, ran as the user. A `/bin/sh` stand-in in that position
+  read a throwaway home's fake secret and `.claude/.credentials.json`, listed
+  and wrote the home, and wrote the workspace. S113's private config dir kept
+  its Claude Code state off the user's, but did not confine it.
+
+**Cases, before and after.**
+
+| # | Case | Before S129 | Since S129 |
+|---|---|---|---|
+| 1 | A step whose `os_env` sandbox wraps its CLI | runs wrapped | runs wrapped (unchanged) |
+| 2 | A step whose wrap fails: a resolve error, an inactive sandbox, a failed trial wrap | refused (S113) | refused |
+| 3 | A step on a host with no system `claude` (only the SDK's bundled CLI) | refused (S113); **ran unwrapped under the opt-out** | refused, under the opt-out too |
+| 4 | Any Coral step under `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` | **ran unwrapped, as the user** | refused |
+| 5 | A step whose sandbox denies the network (no seed sets it) | **ran unwrapped, as the user** | refused |
+| 6 | A step with `sandbox: none` or no sandbox | refused by bundle hygiene and S13 | unchanged |
+| 7 | A step on Windows (job object) | refused by S13 | unchanged |
+| 8 | The orchestrator | refused by S13 on every turn | runs in a read-only sandbox (below) |
+| 9 | The anchor (only if a user binds a runner) | refused by S13 | refused by S13 (unchanged) |
+| 10 | The orchestrator under the opt-out | refused by S13 | refused by S129 |
+| 11 | A Linux tight wrap that cannot be applied | not reachable: the harness never builds an executor without `os_env` | still not reachable; a direct caller that asks for S129's rule is refused |
+| 12 | A Coral session's title or child-summary CLI | as its session | as its session |
+| 13 | A macOS host whose host-start sandbox check is open | the host runs no Coral step runner, the orchestrator's included | unchanged |
+
+No case is recorded as accepted: each Coral CLI runs in an OS sandbox or is
+refused.
+
+**The rule.** `workflow.py` sets `HARNESS_CLAUDE_SDK_REQUIRE_CLI_SANDBOX=1`
+for every `params.coral` spec, and the harness passes it to the executor.
+With it, the executor refuses every turn whose CLI is not wrapped, which means
+no sandbox launcher was built for it, whatever the reason. The refusal comes
+before any CLI, credential proxy or SDK client starts. Its code is
+`coral_sandbox_unavailable`, it is not retryable, and its message is "This
+session's Claude CLI cannot run in its OS sandbox: <reason>." It names the
+first reason that applies:
+
+| Reason | When |
+|---|---|
+| `OMNIGENT_CLAUDE_SDK_NO_SANDBOX is set on its host; unset it there and restart the host` | the operator's opt-out, any non-empty value |
+| `no system claude CLI is installed, and the SDK's bundled one cannot be wrapped` | no `claude` on `PATH`, in a common install dir or named by `OMNIGENT_CLAUDE_PATH` |
+| `the tight wrap could not be applied` | an executor built without `os_env`: direct library callers only |
+| `its agent configures no OS sandbox` | an `os_env` that is not `caller_process`, or a sandbox of type `none` |
+| `its sandbox denies the network, which the CLI needs to reach its model` | `allow_network: false` |
+| `the sandbox could not wrap it; the runner log has the cause` | a resolve error, an inactive sandbox or a failed trial wrap |
+
+- S13's check still runs first and keeps its own message. So `sandbox: none`,
+  which is how the anchor resolves, and Windows' job object read "Steps that
+  read or change files need an OS sandbox: ..." as before. An orchestrator on
+  Linux without bwrap reads "install bwrap".
+- S113's refusal now starts "This session's" too, where it said "This
+  step's". Readers key on the code, not the text.
+- A direct library caller that does not ask for the rule, such as the local
+  Tier B kit, keeps S113's rule.
+- A user sees the refusal as the turn's error in the session's transcript.
+  A step's turn fails `agent.failed`, and the step's failure path runs. For
+  the orchestrator the run pauses `infra` with detail
+  `orchestrator:agent.failed`, and the run's Resume or Retry asks again.
+
+**The orchestrator's read-only sandbox.**
+
+- **Who gets it.** In the same Coral block `workflow.py` writes
+  `HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX` for every Coral spec. It is `"1"`
+  when the spec has no `os_env` and its `params.coral.generated.stance` is
+  `orchestrator`, and empty otherwise. The stance is read defensively: each
+  level must be a mapping and the stance a string. The harness gives the
+  sandbox only when the flag is `"1"` and the spec sent no sandbox payload; a
+  malformed payload keeps `sandbox: none`. The anchor, an unknown stance and a
+  malformed `params.coral` keep `sandbox: none`, which S13 refuses.
+- **What it grants.** The platform's sandbox, seatbelt on macOS or bwrap on
+  Linux, over the CLI's working directory, which for the orchestrator is the
+  run's worktree. That directory is read-only: the sandbox has no write path.
+  The network is on, as for steps. On Windows the type is the job object,
+  and on any other platform `none`; S13 refuses both.
+- **The package grant.** The launcher imports omnigent inside the wrap. So
+  when the omnigent package lies outside the interpreter's prefix, as in an
+  editable checkout, the sandbox grants read access to the package directory,
+  resolved to its real path, as Coral finds a step's. It never grants the
+  repository root, which may hold `.env` files. It grants nothing when that
+  directory is not a package, or is the home or an ancestor of it, `/`
+  included. A missing grant fails closed: the launcher cannot import omnigent
+  and the CLI does not start (measured with a stand-in: `PermissionError` on
+  the package's `__init__.py`).
+- **What the launcher adds**, as for every Coral CLI wrap: the CLI binary and
+  its runtime, a private scratch as `$TMPDIR`, S113's private config dir in
+  it, and `~/.npm/_logs`.
+- **What it does not change.** The runner still sees no `os_env`, so the
+  model is offered no `sys_os_*` tool, and the claude-sdk CLI exposes no file
+  or shell tool of its own (from the code).
+- **Why the anchor stays refused.** Coral treats a bound anchor as drift, and
+  the anchor's working directory is whatever workspace a user binds, which can
+  be the home. This sandbox reads whatever its working directory holds.
+  Measured with a stand-in: a workspace equal to the home let it read plain
+  home files, and a workspace above the home let it read a fake `~/.ssh` key
+  and `~/.claude/.credentials.json`. The orchestrator's working directory is a
+  worktree Coral creates.
+
+**Two hardening items.**
+
+- **No inherited payload or read-only flag.** A harness takes every
+  `HARNESS_CLAUDE_SDK_*` name in its environment as config. The runner's
+  environment sits under the spawn env, so a name the spawn env leaves unset
+  is inherited, and the host forwards any name the operator lists in
+  `OMNIGENT_RUNNER_ENV_PASSTHROUGH`. Measured by the design's security review:
+  a home-wide `HARNESS_CLAUDE_SDK_OS_ENV` passed through that way became the
+  orchestrator's sandbox, its CLI counted as wrapped, and a stand-in in it
+  read a fake `~/.ssh` key and wrote the throwaway home. In this change's
+  review an inherited `HARNESS_CLAUDE_SDK_READ_ONLY_CLI_SANDBOX=1` likewise
+  gave the anchor the orchestrator's sandbox, so its CLI ran, and with the
+  anchor's workspace above the home a stand-in read the fake key and
+  `.credentials.json`. Now
+  `workflow.py` writes both names for every Coral spec, so the spawn env's
+  value wins: the payload empty (a spec with `os_env` then sets its own), and
+  the flag `"1"` or empty.
+- **Launcher markers dropped.** A launcher that inherits
+  `OMNIGENT_LAUNCHER_SPAWN_WRAPPED=1` skips its wrap and runs its target
+  unconfined, while the executor counts the CLI as wrapped. Measured with a
+  stand-in: every home check succeeded. The host's allow-list and S124's drop
+  of passthrough names already kept it out of a Coral CLI's environment
+  (measured). Now S124's scrub of a Coral harness's environment on POSIX also
+  drops it and the two other launcher markers,
+  `OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR` and
+  `OMNIGENT_LAUNCHER_LAUNCH_TMPDIR`, whatever their source. Measured: none is
+  left after the scrub, passed through or inherited. A harness is never
+  started by a launcher, so it needs none of them. The general fix, a nonce
+  per launch, is CRL-210.
+
+**Preflight.** Coral's run preflight now asks the host for an OS sandbox and
+a system `claude` for the orchestrator's claude-sdk plan when the workflow has
+a decision node. Before, a workflow whose only Claude work is a decision
+passed preflight on a host with neither, and its orchestrator would then be
+refused. A workflow without a decision never starts the orchestrator's CLI
+and is checked as before. The failure texts still speak of steps.
+
+**What the orchestrator's model can call.** The orchestrator is tighter than
+a step on what its CLI can reach in the OS. It is not tighter on engine
+tools.
+
+- **Engine tools.** Coral offers the orchestrator `coral_choose_arrow`,
+  `coral_message_agent`, `coral_assign_agents` and `coral_assign_task`
+  (`coral/tools/catalog.py`). Its guard (`coral/omni/policies/guards.py`)
+  allows those four, bare or after `mcp__omnigent__`, and exactly
+  `ToolSearch`, which loads them. The engine checks every call against server
+  state, not against what the model says:
+  - `coral_choose_arrow` is taken only from the run's current orchestrator
+    session, while the run is running, for an open decision, with one of that
+    decision's labelled forward or back arrows and a reason. Loop limits
+    redirect in the engine. A gate is another kind of node, so it cannot be
+    chosen, answered or skipped this way.
+  - `coral_message_agent` sends at most 8,000 characters to a member of the
+    run, into that session's transcript. Now that these turns run, text from a
+    step's report can be relayed into an implementer, which has shell and
+    write tools (CRL-212).
+  - `coral_assign_agents` and `coral_assign_task` answer states that no
+    production code opens yet, so, from the code, they are always refused
+    today. Once a step can be in `merge_conflict`, `coral_assign_task` will
+    send free task text to a member of the run, the same relay as
+    `coral_message_agent` (CRL-212).
+
+**The tool surface.** Everything the model is offered was measured on both
+paths of the stack test below, by tool name. On the direct-key path the CLI
+lists four tools and defers Omnigent's twelve behind `ToolSearch`. Through a
+gateway it lists the twelve directly, with `AskUserQuestion` and `Skill`,
+and offers no `ToolSearch`. "Allowed" is the guard's verdict on each name,
+from `coral/omni/policies/guards.py` and `orchestrator_tool_names()` in
+`coral/tools/catalog.py`.
+
+| Tool | Offered | Allowed by the guard | Reach if called |
+|---|---|---|---|
+| `ToolSearch` | listed (direct-key path) | yes | loads deferred tool schemas, nothing else |
+| `coral_choose_arrow` | deferred, or listed through a gateway | yes | one label of an open decision in its own run; the engine checks it, and a gate cannot be chosen |
+| `coral_message_agent` | deferred, or listed | yes | text to a member of its own run (CRL-212) |
+| `coral_assign_agents` | deferred, or listed | yes | staffs a waiting activation of its own run within its authored bounds; refused today |
+| `coral_assign_task` | deferred, or listed | yes | task text to a member of its own run in `merge_conflict` (CRL-212); refused today |
+| `sys_session_list`, `sys_session_get_info`, `sys_session_get_history` | deferred, or listed | no | would list and read the user's other sessions |
+| `sys_session_message` | deferred, or listed | no | would start turns in other sessions |
+| `sys_session_rename` | deferred, or listed | no | would rename its own session |
+| `sys_cancel_task` | deferred, or listed | no | would cancel its own async tasks |
+| `load_skill` | deferred, or listed | no | would load a spec skill; the orchestrator has none |
+| `ui_open_file` | deferred, or listed | no | would ask the user's UI to open a file |
+| `AskUserQuestion` | listed | no | would show a question card to the run's user |
+| `Skill` | listed | no | the CLI's skill tool |
+| `DeferredToolPlaceholder` | listed (direct-key path) | no | internal to the CLI |
+
+The CLI's file and shell tools (`Bash`, `Read`, `Edit`, `Write`) and
+Omnigent's `sys_os_*` tools are not offered.
+
+- **How each call is checked.** A call to one of the CLI's own tools goes
+  through the executor's tool-call policy hook (S21) before the CLI runs it;
+  `AskUserQuestion` goes through its own hook's policy check. A call to an
+  Omnigent tool (`mcp__omnigent__*`) is checked on the server, when its `/mcp`
+  endpoint takes the call, before the runner executes it. The orchestrator's
+  guard decides in both places.
+- **Result.** Every tool that would reach beyond the run is denied. What the
+  guard allows stays inside the run. `coral_message_agent` can relay text
+  inside the run today, and `coral_assign_task` could once a step can be in
+  `merge_conflict` (CRL-212). On a running stack the test's gateway row
+  calls `sys_session_list` before its choice: the call's result is the
+  guard's denial, marked `[orchestrator]`, and the run still completes on the
+  chosen arrow. With the guard made to allow everything (in memory), the same
+  call returned the stack's sessions and the test failed. The denial text the
+  model reads still says the orchestrator can only call `coral_choose_arrow`
+  (CRL-212).
+
+**Reach of the sandbox, as measured.** Seatbelt on macOS 27.2: a stand-in in
+the sandbox as designed and as built, with a throwaway home and a workspace
+outside it, and the behaviour test below.
+
+| Path | Reach |
+|---|---|
+| The working directory (the run's worktree) | read-only. Its top-level dot entries, such as `.env`, `.git` and `.claude`, are masked. Nested dotfiles, such as `sub/.env`, are readable. A top-level symlink to a home file does not read through |
+| The home | denied: plain files, `~/.ssh`, `~/.claude/.credentials.json`, `~/.config/gh`, `~/.omnigent`, `~/Library`, listing and writing (fake files) |
+| `~/.npm/_logs` | read and write (accepted, as for every Coral CLI wrap; "Addendum: CRL-176 Claude config isolation") |
+| Any path | can be `stat`ed |
+| The scratch (`$TMPDIR`) and the private config dir in it | writable |
+| The omnigent package directory | read-only, when granted. Its symlinks that point outside it do not read through |
+| The repository root | not granted |
+| The interpreter's install root (here the checkout's `.venv`) | readable |
+| The network | on, with no egress limit (CRL-209); loopback TCP connects |
+| Other programs' Unix sockets in the home, a throwaway dir or the workspace; other processes' arguments | denied |
+
+On Linux, from the code: bwrap mounts nothing of the home but `~/.npm/_logs`,
+binds the working directory and the grants read-only, and masks the top-level
+dot entries with a tmpfs or `/dev/null`. The behaviour test's bwrap row runs
+in the `inner-rest` lane.
+
+**What was measured, and where.**
+
+| What | Where | Result |
+|---|---|---|
+| The orchestrator before S129: executors from the real harness builder, and one turn with a fake SDK client | macOS 27.2, local | refused by S13, with and without the opt-out; no client created |
+| A `/bin/sh` stand-in through `prepare_claude_cli_path(..., isolate_config=True)`, in the sandbox and unwrapped | macOS 27.2, local, seatbelt | in the sandbox: no home read, list or write, the workspace read but not written, the config dir in its scratch. Without the package grant the launcher died with `PermissionError`. Unwrapped: every home check and the workspace write succeeded |
+| The reach table above, and the hardening items | macOS 27.2, local, seatbelt | as stated |
+| `tests/inner/sandbox/test_sandbox_behavior.py::test_a_coral_cli_without_os_env_runs_read_only_in_its_sandbox`: the sandbox as the harness builds it, wrapping the interpreter, with a throwaway home and a workspace that holds a fake `.env`, `.git/config` and a symlink to a home file. It runs the home probe from the wrap's scratch, so the probe's link, symlink and rename checks can make names. An unwrapped control runs the same probe on a second seeded home, from a scratch beside the launcher's | macOS 27.2, local (seatbelt); the `inner-rest` lane (bwrap) | seatbelt: passed; its file, run with the title and CI-lane files, gave 83 passed and 41 skipped (bwrap rows, and one test that needs other CLIs). Inside, every home check fails, the config dir is private, the workspace's plain file reads and none of the fakes does, `~/Documents/notes.txt` included, nothing in the workspace can be written, and the home and workspace are unchanged. The control passes every home check and reads every fake. bwrap: runs in the lane. The expected grant follows the stance's rule; only the editable layout was run |
+| `tests/e2e/coral/test_skeleton.py::test_a_decision_runs_through_a_real_orchestrator_cli`: a `start -> decide` workflow with two labelled arrows, the real Claude CLI and the mock model, which chooses the second-declared label. Two rows: `direct-key` (a host key with no endpoint, so the CLI defers its MCP tools) and `gateway` (the host's credential names the mock, so it lists them) | macOS 27.2, local, claude 2.1.325; the `coral-e2e` lane (Linux, bwrap) and the macOS sandbox lane (macOS 26) | local: both rows passed, alone (14.2 s with two workers) and with the whole file (6 passed, 1 skipped, the opt-in live run, 202 s). `direct-key`: `ToolSearch`, then `coral_choose_arrow`. `gateway`: `sys_session_list`, whose result was the guard's `[orchestrator]` denial, then `coral_choose_arrow`. Each run completed on the chosen arrow, `hold`, which the run log records, with one orchestrator session, whose CLI ran under a launcher with a private config dir. Each stack's keychain stand-in recorded only expected calls (13 and 11). With the engine made to walk the first labelled arrow (in memory), both rows failed; with the guard made to allow everything, the gateway row failed. The lanes: runs there |
+| The same stack test with the opt-out set on the stack's host (a variant run, not kept as a test) | macOS 27.2, local | the run paused `infra`, `orchestrator:agent.failed`, with the opt-out reason. The session's title CLI was refused with the same message |
+| `tests/runner/test_background_session_title.py::test_a_coral_claude_sdk_title_keeps_its_session_sandbox` | local | a title CLI gets its session's flags and payload unchanged, and the session's payload and read-only flag outweigh the runner's, empty ones included |
+| Unit tests: the refusal table and the marker scrub (`tests/inner/test_claude_sdk_executor.py`), the sandbox and its grant (`tests/inner/test_claude_sdk_harness.py`), the flags and inherited names (`tests/runtime/test_claude_sdk_spawn_env.py`), every seed's and step bundle's sandbox (`tests/coral/omni/test_bundles.py`), and preflight (`tests/coral/omni/test_preflight_facts.py`) | macOS 27.2, local; CI runs them | the five files: 917 passed; `tests/coral/omni`: 1294 passed, 1 skipped (a Linux-only test). They pin each refused case with its exact message, the anchor refused, the sandbox's shape and grant, and the flags a runner's environment cannot change |
+
+Not measured: bwrap locally (no bwrap on that host), and the installed
+layout, where the package lies under the interpreter's prefix and nothing is
+granted; a unit test pins that grant only.
+
+**No new policy revision.** S129 changes no rule that probe 15 measures and
+no in-sandbox pin. The orchestrator's sandbox reuses the existing profile
+rules, and the refusal runs outside the sandbox. Probe 15 measures the
+implementer's shell, in a workflow with no decision. So the policy stays at
+revision 3, and `coral/gates/integrity.py` is unchanged ("Addendum: CRL-159
+probe 15 on identity-requiring servers"). A host with the opt-out set still
+reports no revision, so its gates read `host_sandbox_unknown`; its Coral CLIs
+are now refused. The orchestrator's CLI wrap joins the label's not-checked
+list, which CRL-193 owns: the probe does not measure it, and the harness
+builds it outside the policy revision, so a later change to it would not move
+the revision.
+
+**What changes for operators and developers.**
+
+- Workflows with a decision can run. Their orchestrator's CLI starts for the
+  first time, and its title CLI makes one short model call, as steps' already
+  do.
+- A host with `OMNIGENT_CLAUDE_SDK_NO_SANDBOX` set runs no Coral CLI. Its
+  steps and its orchestrators are refused with the opt-out reason. Unset it
+  there and restart the host. Other agents on that host keep the opt-out's
+  old effect (CRL-183).
+- There is no development override. To debug a Coral CLI, unset the opt-out,
+  or build an executor directly, as the local Tier B kit does.
+- Preflight asks for a sandbox and a system `claude` for a workflow with a
+  decision, even when it has no step.
+- S113's refusal message starts "This session's" instead of "This step's".
+
+**Residuals and owners.** S129 keeps every Coral Claude CLI in an OS sandbox
+or refuses it, as measured on macOS 27.2.
+
+| Residual | Owner |
+|---|---|
+| Coral CLIs, the orchestrator's included, have unrestricted egress: anything in a CLI's tree can send the worktree, nested dotfiles included, to any host | CRL-209 |
+| A launcher trusts an inherited "already wrapped" marker. S129 drops it only from a Coral harness's environment; launchers the runner starts itself, such as tool helpers and terminals, still honour it. Other inherited `HARNESS_CLAUDE_SDK_*` names in a Coral harness (`_CWD`, `_BUNDLE_DIR`, `_PERMISSION_MODE`) widen no wrap, but the operator can set them | CRL-210 |
+| Bundle hygiene does not bound a step payload's `read_paths`, `cwd_allow_hidden`, `mask_paths`, `allow_network` or `type`; only the seed lock does. S129 refuses network off and a type other than `caller_process` when a turn starts | CRL-211 |
+| Text from a step's report steers the orchestrator: it can relay text into any member's transcript, and pick among a decision's authored arrows | CRL-212 |
+| A run's own step can get its orchestrator and reviewers refused by planting enough top-level dot entries in the shared worktree to overflow the sandbox profile (measured with 4,000 entries). It fails closed, and such a step can already spoil its run | accepted, no ticket |
+| `~/.npm/_logs` read and write, and `stat` of any path | accepted ("Addendum: CRL-176 Claude config isolation") |
+| Single-user servers, where any local process is the owner, the orchestrator's CLI tree included | accepted ("Addendum: CRL-159 probe 15 on identity-requiring servers") |
+| Other programs' loopback services | CRL-201 |
+| Linux abstract Unix sockets, through the shared network namespace | CRL-202 |
+| A Unix socket another program keeps in a step's own worktree (measured denied for the orchestrator's read-only sandbox) | CRL-203 |
+| Mach services that still act for a sandboxed caller; the keychain result rests on the file denial | CRL-207 |
+| macOS releases and Claude CLI versions other than those measured; the macOS lane is not a required check; bwrap was not run locally | CRL-208 |
+| Masks are tied to paths: dot entries made after a launch, and renames that change only a masked name's letter case or Unicode form | CRL-206, CRL-205 |
+| An empty or relative entry in the host's `PYTHONPATH` lets a launcher's unwrapped host pass import modules from the CLI's working directory, which a step can write (every Coral launcher, before S129 too) | CRL-181 |
+| A planted repository config that the owner's own tools run | CRL-181 |
+| Other Omnigent agents' claude-sdk CLIs that run unwrapped by design or after a fault, the opt-out included | CRL-183, CRL-197 |
+| claude-native steps, behind the off-by-default `claude_native_steps` sub-feature; the gate label reports `native_steps_enabled` | CRL-138, CRL-197 |
+| The gate label measures no CLI wrap, and not the owner's other runs; bwrap's `bind_host_proc` under `OMNIGENT_HOST_SANDBOX_BACKEND` | CRL-193 |
+
+The anchor's user-chosen workspace, which the reviews raised against giving
+the anchor this sandbox, does not arise: the anchor stays refused.

@@ -16,7 +16,7 @@ SANDBOX_POLICY_REVISION = "3"
 SANDBOX_POLICY_PREFIX = "coral_sandbox_policy:"
 CORAL_SANDBOX_POLICY_TOKEN = f"{SANDBOX_POLICY_PREFIX}{SANDBOX_POLICY_REVISION}"
 DISABLE_HOST_ENTRY_POINTS_ENV = "CORAL_DISABLE_HOST_ENTRY_POINTS"
-# Any non-empty value leaves a step's CLI unsandboxed, as the claude-sdk executor reads it.
+# Any non-empty value turns off the claude-sdk executor's CLI wrap; a Coral CLI is then refused.
 CLAUDE_SDK_NO_SANDBOX_ENV = "OMNIGENT_CLAUDE_SDK_NO_SANDBOX"
 
 
@@ -32,7 +32,8 @@ def host_tokens(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
     source = os.environ if env is None else env
     if host_entry_points_disabled(source):
         return ()
-    # A host whose steps run unsandboxed claims no sandbox policy, so the gate label reads unknown.
+    # Under the opt-out a Coral CLI is refused, and the host still claims no sandbox policy,
+    # so the gate label reads unknown.
     if source.get(CLAUDE_SDK_NO_SANDBOX_ENV):
         return (CORAL_RUNNER_TOKEN,)
     return (CORAL_RUNNER_TOKEN, CORAL_SANDBOX_POLICY_TOKEN)
