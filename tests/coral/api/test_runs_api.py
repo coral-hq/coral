@@ -1034,7 +1034,14 @@ async def test_the_detail_labels_its_gates_for_the_owner_alone_and_names_no_host
     [
         pytest.param(HostSandboxPolicy("bwrap", "1"), False, ["host_sandbox_open"], id="bwrap"),
         pytest.param(
+            HostSandboxPolicy("seatbelt", "2"), False, ["host_sandbox_open"], id="seatbelt-2"
+        ),
+        pytest.param(HostSandboxPolicy("bwrap", "2"), False, ["host_sandbox_open"], id="bwrap-2"),
+        pytest.param(
             HostSandboxPolicy("seatbelt", "0"), False, ["host_sandbox_unknown"], id="old-revision"
+        ),
+        pytest.param(
+            HostSandboxPolicy("seatbelt", "3"), False, ["host_sandbox_unknown"], id="new-revision"
         ),
         pytest.param(
             HostSandboxPolicy("none", "1"), False, ["host_sandbox_unknown"], id="no-sandbox"

@@ -502,7 +502,7 @@ not planned. Reopened by CRL-166: planned as defence in depth in CRL-173 (see
 | Follow-up | Owner |
 |---|---|
 | The Tier B sandbox probe on macOS seatbelt and Linux bwrap: connect to a sibling's harness socket, read sibling runners' environments (`/proc/<pid>/environ`, `ps eww`), sibling bridge dirs and the user's credential files; and from the step shell: HTTP to the Omnigent server on loopback and the configured URL, with no credentials and with the CLI's stored credentials; before the walking skeleton is declared done. It also settles whether a Coral step can run on a server with the allow-listed token, and whether a runner started with `OMNIGENT_RUNNER_TUNNEL_TOKEN` exported passes it to the harness child (the strip list does not name it) | **Run on single-user servers only**, without credentials, in CRL-137 (`tests/e2e/coral/test_sandbox_probe.py`). macOS seatbelt, one local run: a step reaches a sibling's harness socket (before S112, now `denied`, see "Addendum: CRL-166 harness sockets on macOS"), other processes' environments and command lines (the model API key in every claude-sdk CLI's among them; before S111, now `denied`, see "Addendum: CRL-165 process reads on macOS") and the server; the three probed credential files (Claude's, Omnigent's secrets and the host's tunnel tokens, in the stack's isolated home), the config file's key and the stack's bridge dir are `denied`; no other credential store was probed. Linux bwrap, the `coral-e2e` lane: the server is reachable and every other target is `hidden`, the step's own CLI included. A step runs on an allow-listed-token server, and the token was in its runner's and harness's environment as read from outside the sandbox (before S123; now in neither on the zygote path); the step's shell read it on macOS only (before S111; now `denied`). Tables, limits and owners (CRL-165 to CRL-168; the single-user server rows are an accepted residual): "Addendum: CRL-137 probe verdicts". **Run on an accounts server**, with the CLI's stored credentials and owner-JWT minting, in CRL-159: "Addendum: CRL-159 probe 15 on identity-requiring servers" |
-| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced | **Built** in CRL-159 as `gate_integrity` on the run detail; `enforced` needs an accounts server, verified config, no native steps and an empty table row for the run's host. Every row has open blockers today: CRL-170, CRL-171, CRL-174, CRL-181, CRL-193, CRL-195 ("Addendum: CRL-159 probe 15 on identity-requiring servers"; [`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md), "Enforced gates") |
+| Label a gate Enforced only when that probe passes and the server runs a mode that requires identity, in which steps hold no owner credential; gates on single-user or auth-off servers are never Enforced | **Built** in CRL-159 as `gate_integrity` on the run detail; `enforced` needs an accounts server, verified config, no native steps and an empty table row for the run's host. Every row has open blockers today. At policy revision 2 they are CRL-170, CRL-171, CRL-181, CRL-193, CRL-195, CRL-201, CRL-202, CRL-203 and CRL-204 ("Addendum: CRL-159 probe 15 on identity-requiring servers"; "Addendum: CRL-174 other programs' Unix sockets"; [`../contracts/gates-and-inbox.md`](../contracts/gates-and-inbox.md), "Enforced gates") |
 | Run probe 15 on native steps before HRN-03 enables them | CRL-138 |
 
 ## Addendum: gates on the anchor (2026-11-19)
@@ -1018,7 +1018,9 @@ dir):
   probe's `omnigent-tmux-replies-*/s`, and the user's default tmux socket,
   `tmux-<uid>/<label>` under `/tmp` or any `TMUX_TMPDIR` (`-L` picks the
   label). A terminal's `clip.sock` is not matched. A server on a `tmux -S`
-  path elsewhere is not matched (CRL-174).
+  path elsewhere is not matched by these rules. Since S127 it is refused with
+  every other program's Unix-domain socket ("Addendum: CRL-174 other programs'
+  Unix sockets").
 - **Placement.** The denies follow every network allow in every network mode,
   the egress and git-ssh `path-literal` allows included.
 - **Re-allows.** Only where `(allow network*)` was emitted, the policy's own
@@ -1068,8 +1070,10 @@ renames above.
   user tmux server's shape, and a pane socket that is deny-listed in a write
   root. Outside, every connect works. Inside:
   - the harness, default-root and tmux connects are refused;
-  - `clip.sock` connects, and so do the probe's own sockets in its `$TMPDIR`
-    (a nested terminal's shape included), in a write root under the harness
+  - `clip.sock` connects (another terminal's; since S127 it is refused, and
+    the test now expects that), and so do the probe's own sockets in its
+    `$TMPDIR` (a nested terminal's shape included), in a write root under the
+    harness
     root and, on the CLI-wrap path, in S109's launch dir;
   - renaming the pane's socket or its dir is refused, while editing files in
     the dir works;
@@ -1135,18 +1139,21 @@ names, on macOS 27.2.1.
 - On Linux, a configured root under a path bwrap binds is visible (CRL-173).
 - Processes outside the sandbox still connect: the harness socket has no
   bearer on POSIX (CRL-173).
-- Other programs' sockets stay reachable, such as Docker Desktop's and
-  ssh-agent's, and a tmux server on a custom `tmux -S <path>` socket, which
-  runs commands outside the sandbox (measured with a throwaway server). So does
-  Claude Code's cross-session inbox, which, read from the CLI binary, takes
+- Other programs' sockets stayed reachable under S112, such as Docker
+  Desktop's and ssh-agent's, and a tmux server on a custom `tmux -S <path>`
+  socket, which runs commands outside the sandbox (measured with a throwaway
+  server). So did Claude Code's cross-session inbox, which, read from the CLI binary, takes
   messages without a token on macOS; that was not measured. On Linux, bwrap
   shares the host's network namespace when the network is on
   (`omnigent/inner/bwrap_sandbox.py`), so other programs' abstract sockets stay
-  reachable there; that is from code, not measured (CRL-174).
+  reachable there; that was from code, and was later measured (CRL-202).
+  Closed on macOS by S127 for sockets outside the process's own directories
+  ("Addendum: CRL-174 other programs' Unix sockets").
 - `netstat` no longer lists socket paths, but the paths are not hidden:
   `fsgetpath(2)` still returns the path of a named inode, and every path's
-  metadata is readable. That matters for sockets the rules do not name
-  (CRL-174).
+  metadata is readable. That mattered for sockets the rules did not name.
+  Since S127 the profile refuses every Unix-domain socket it does not allow,
+  so the deny does not depend on a path being unknown.
 - Loopback TCP listeners. A step with the network on can still connect to
   them, so each one must refuse a caller without its secret. The codex-native
   app-server WebSocket was the only Omnigent one that did not. Since S114 it
@@ -1169,9 +1176,10 @@ names, on macOS 27.2.1.
   same-user process outside the sandbox can read the file (CRL-173);
   the old codex-native socket under `~/.omnigent/codex-native/`, which no
   current code starts, has no gate; new loopback listeners, other programs'
-  loopback services (CRL-174) and UDP are not covered. Linux was not
+  loopback services (CRL-201) and UDP are not covered. Linux was not
   measured.
-- Other Omnigent terminals' clipboard sockets stay reachable (CRL-171).
+- Other Omnigent terminals' clipboard sockets stayed reachable under S112.
+  Since S127 a pane reaches only its own.
 - Since S113 a Coral step's sandboxed Claude CLI, and since S115 every other
   claude-sdk CLI in a bwrap or seatbelt sandbox, no longer gets the user's
   `~/.claude` or `~/.claude.json`. CLIs that run outside a sandbox still do.
@@ -1204,8 +1212,9 @@ process from acting as the owner on a single-user server (accepted;
 "Addendum: CRL-159 probe 15 on identity-requiring servers").
 
 **Open for the owner.** Whether to run Coral steps on untrusted content on
-macOS while CRL-171 is open, and on either platform while CRL-174 and CRL-181
-are open, is the owner's risk decision (on a single-user server a step acts
+macOS while CRL-171 is open, and on either platform while CRL-181 and what
+CRL-174 left open (CRL-201, CRL-202, CRL-203) are open, is the owner's risk
+decision (on a single-user server a step acts
 as the owner on both platforms, an accepted residual). S111 and S112 closed
 the process reads and the connect to harness sockets under the configured and
 per-user default roots. S113 closed a sandboxed step CLI's access to the
@@ -1259,7 +1268,9 @@ wrote `sessions/` keys, wrote `backups/`, read and rewrote `.claude.json`, and
 read `.credentials.json`. The host saw the changes. Read from the CLI binary,
 not measured: the user's Claude Code runs plugin hooks and the user-scope MCP
 servers in `.claude.json`, prepends `session-env` scripts to its Bash tool's
-commands, and keeps each live session's inbox key in `sessions/` (CRL-174).
+commands, and keeps each live session's inbox key in `sessions/`. Since S127
+a sandboxed process on macOS cannot connect to those inboxes ("Addendum:
+CRL-174 other programs' Unix sockets").
 
 For a Coral step no direct way in was found. The model has no native shell,
 and with `skills: none` the CLI starts no user MCP server (measured) and loads
@@ -1498,14 +1509,16 @@ away from the user's Claude config files.
 - `~/.npm/_logs` stays readable and writable, and a step can plant a symlink
   there (measured); what npm does with it was not measured. It stays, as an
   accepted residual with no ticket, for npm-installed CLIs' error logs.
-- On macOS a step can still send the user's own Claude Code sessions a message
-  through their inbox sockets, which take messages without a token on macOS
-  (read from the binary, not measured). It can also confirm guessed names
-  under `~/.claude/sessions` with `stat`, but cannot list or read them
-  (CRL-174). A step's own CLI no longer publishes its inbox key in the shared
-  `~/.claude/sessions`.
+- On macOS a step could still send the user's own Claude Code sessions a
+  message through their inbox sockets, which take messages without a token on
+  macOS (read from the binary, not measured). Since S127 the connect is
+  refused ("Addendum: CRL-174 other programs' Unix sockets"). A step can
+  still confirm guessed names under `~/.claude/sessions` with `stat`, but cannot
+  list or read them. A step's own CLI no longer publishes its inbox key in the
+  shared `~/.claude/sessions`.
 - Other channels to unsandboxed code are unchanged by S113: other programs'
-  sockets and loopback services (CRL-174), and the owner on a single-user
+  loopback services (CRL-201), their Unix-domain sockets on macOS until S127,
+  and the owner on a single-user
   server (accepted; "Addendum: CRL-159 probe 15 on identity-requiring
   servers"). Since S114 Omnigent's loopback listeners each refuse a
   caller without its secret, except a codex-native app-server started by a
@@ -1916,11 +1929,13 @@ listed here.
   `*Mcpjson*` keys into the working dir's `.claude/settings.local.json` at
   start when it can, as it could under the old wrap (CRL-181).
 - Coral CLIs outside the sandbox are unchanged (CRL-180).
-- On macOS code in the sandbox can still send the user's own Claude Code
+- On macOS code in the sandbox could still send the user's own Claude Code
   sessions a message through their inbox sockets (read from the binary, not
-  measured). It can also `stat` guessed names under `~/.claude/sessions`
-  (CRL-174). Other channels to unsandboxed code are unchanged: other
-  programs' sockets and loopback services (CRL-174), Omnigent's loopback
+  measured). Since S127 the connect is refused ("Addendum: CRL-174 other
+  programs' Unix sockets"). It can still `stat` guessed names under
+  `~/.claude/sessions`. Other channels to unsandboxed code are unchanged:
+  other programs' loopback services (CRL-201), their Unix-domain sockets on
+  macOS until S127, Omnigent's loopback
   listeners, each gated by its secret since S114 except a codex-native
   app-server under a Codex without `--ws-auth` (noted on CRL-177; see
   "Addendum: CRL-166 harness sockets on macOS"), and the owner on a
@@ -2330,7 +2345,10 @@ credentials. The Linux pins were measured in `coral-e2e` lane run
 lane runs macOS (CRL-170). CRL-167 later changed how the runner gets its
 tokens, what the control run must find and one check (`credential_proxy`);
 the text below describes the test as it is now (see "Addendum: CRL-167
-secrets out of exec-time environments").
+secrets out of exec-time environments"). CRL-174 later closed
+`other_unix_socket` on macOS, added the `worktree_unix_socket` check and moved
+the sandbox policy to revision 2; the tables below show both revisions (see
+"Addendum: CRL-174 other programs' Unix sockets").
 
 **The identity probe.**
 `tests/e2e/coral/test_sandbox_probe.py::test_probe_15_on_a_server_that_requires_identity`
@@ -2366,7 +2384,8 @@ Each credential is tried on this server's owner route, `GET /v1/coral/runs`:
 | `stored_credentials` | `stored` | Act as the owner with the host's stored JWT |
 | `server_environ` | `environ` | Read the server's environment, which holds the cookie secret |
 | `credential_files.cookie_secret` | `file` | Read a canary where `omnigent server` keeps its cookie secret by default, `~/.omnigent/artifacts/accounts-cookie-secret` in the host's home (`omnigent/cli.py:5091-5096`) |
-| `other_unix_socket`, `other_abstract_socket` (Linux), `other_loopback_tcp` | `socket`, `tcp` | Connect to throwaway listeners that stand in for other programs' services: a pathname socket under `/tmp/crl-o-*`, an abstract socket with a random name, and a loopback port (`_other_programs`, `test_sandbox_probe.py:1396`) |
+| `other_unix_socket`, `other_abstract_socket` (Linux), `other_loopback_tcp` | `socket`, `tcp` | Connect to throwaway listeners that stand in for other programs' services: a pathname socket under `/tmp/crl-o-*`, an abstract socket with a random name, and a loopback port (`_other_programs`, `test_sandbox_probe.py:1409`) |
+| `worktree_unix_socket` (added by CRL-174) | `socket` | Connect to a throwaway listener at a plain name directly inside the step's own worktree, as a dev server another program keeps there would be (`_worktree_socket`, `test_sandbox_probe.py:1443`) |
 | `worktree_exec_config` | `plant` | Create a nested repository in the worktree whose config names a `core.fsmonitor` hook (`plant_repository`, `probe15.sh:335`) |
 | `credential_proxy` | `credential_proxy` | Send a model request to the step's own CLI's credential proxy, by its loopback port: with no key, with a wrong key, and on a path that climbs to the model route (`PROXY`, `probe15.sh:261`) |
 | `shell_env_names` | `shell` | Credential-like names in its own environment |
@@ -2428,26 +2447,31 @@ written to `artifacts/probe15-identity-<platform>.json` before any assertion
 | `server_environ` | `denied` | `hidden` | |
 | `stored_credentials`, and its `.read` | `denied` | `hidden` | |
 | `credential_files.cookie_secret` | `denied` | `hidden` | |
-| `other_unix_socket` | `reachable` | `hidden` | CRL-174 (macOS) |
-| `other_abstract_socket` | not probed | `reachable` | CRL-174 |
-| `other_loopback_tcp` | `reachable` | `reachable` | CRL-174 |
+| `other_unix_socket` | `denied` since policy revision 2 (S127); `reachable` at revision 1 | `hidden` | |
+| `other_abstract_socket` | not probed | `reachable` | CRL-202 |
+| `worktree_unix_socket` (added by CRL-174) | `reachable` | `reachable`, set by reasoning until the `coral-e2e` lane runs on that change | CRL-203 |
+| `other_loopback_tcp` | `reachable` | `reachable` | CRL-201 |
 | `worktree_exec_config` | `reachable` | `reachable` | CRL-181 |
 | `credential_proxy` (added by CRL-167) | `refused` | `refused`, set by reasoning until the `coral-e2e` lane runs on that change | |
 
 So a sandboxed step on an accounts server cannot mint an owner JWT, act as
 the owner with the host's bearer or the stored credentials, read the cookie
-secret or the server's environment, or make a bare owner request. It can still
-reach other programs' sockets and loopback services (CRL-174); a Docker
+secret or the server's environment, or make a bare owner request. At revision
+1 it could still reach other programs' Unix-domain sockets on macOS; a Docker
 Desktop, OrbStack or `tmux -S` socket would run commands outside the sandbox
-that read the owner's stored JWT. It can also plant worktree exec config
+that read the owner's stored JWT. Since revision 2 that connect is refused on
+macOS ("Addendum: CRL-174 other programs' Unix sockets"). It can still reach
+other programs' loopback services (CRL-201), a socket another program keeps in
+the step's worktree (CRL-203) and, on Linux,
+abstract sockets (CRL-202). It can also plant worktree exec config
 (CRL-181). The probe shows only the write. That the owner's own `git status`
 then runs the hook outside the sandbox was measured on macOS 27.2.1 with git
 2.54.0 during this ticket's design review.
 
 On Linux, bwrap's pid namespace and mounts hide the other processes, the
 homes and `/tmp`, while the network namespace and the worktree are shared.
-Lane run 45187294423 measured every one of these pins but `credential_proxy`,
-in its `probe15-identity-linux.json` artifact. From a later run, only closed-to-closed
+Lane run 45187294423 measured every one of these pins but `credential_proxy`
+and `worktree_unix_socket`, in its `probe15-identity-linux.json` artifact. From a later run, only closed-to-closed
 moves and the socket, TCP and plant checks, with their owners, may be
 re-pinned; an open verdict on a credential path is escalated, never re-pinned
 ([`../testing/tier-b.md`](../testing/tier-b.md), "Pinning probe 15").
@@ -2510,6 +2534,12 @@ Enforced needs both empty (`integrity.py:76-118`):
 |---|---|---|
 | seatbelt, revision 1 | CRL-174, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195 |
 | bwrap, revision 1 | CRL-174, CRL-181 | CRL-181, CRL-193, CRL-195 |
+| seatbelt, revision 2 | CRL-201, CRL-203, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195, CRL-204 |
+| bwrap, revision 2 | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-204 |
+
+Revision 2 is what a host on current code reports. The revision-1 rows stay
+for hosts on older code, and CRL-174 is in no other row: it closed with
+revision 2 ("Addendum: CRL-174 other programs' Unix sockets").
 
 The declared blockers:
 
@@ -2527,6 +2557,8 @@ The declared blockers:
 - CRL-195: a step that reaches the server can guess the owner's password at
   `/auth/login`, which has no rate limit
   (`omnigent/server/routes/accounts_auth.py:289-320`).
+- CRL-204, from revision 2: a step can still read masked files by renaming
+  the directory above them.
 
 Tests keep the table bound to the pins.
 `test_the_gate_label_table_holds_every_open_pin_owner_and_the_declared_blockers`
@@ -2611,7 +2643,8 @@ only when the owner accepts it in this ADR.
   - bwrap's `bind_host_proc` under a vetted outer sandbox (`lakebox`,
     `phoenix-kubernetes`; `omnigent/inner/bwrap_sandbox.py:225`), which the
     policy token does not show;
-  - databases reached over loopback, beyond the CRL-174 pins: a database on a
+  - databases reached over loopback, beyond the `other_loopback_tcp` pin
+    (CRL-201): a database on a
     network host does not count as server state;
   - `coral_sandbox_policy:` claims from tool providers, which any installed
     provider can send; claims that differ read unknown;
@@ -2977,7 +3010,9 @@ revision"). This change alters none:
 No row ever named CRL-167, since S111 and the pid namespace already closed
 the in-sandbox reads. A host on older code and one on this code therefore
 have the same rows, and the label reads the same for both. The table and the
-tests that bind it to the pins are unchanged.
+tests that bind it to the pins are unchanged. CRL-174 later did alter a gate
+row and moved the revision to 2 ("Addendum: CRL-174 other programs' Unix
+sockets").
 
 **Residuals and owners.**
 
@@ -3109,3 +3144,300 @@ fake keys; only names and counts were read.
 | Omnigent's other E2E helpers copy the caller's `PATH` into their processes (read from a sample) | none: no lane of this fork runs those tests, the inherited `E2E Tests` workflow being disabled |
 | The stack sample (`test_tier_b_sample.py`, `test_tier_b_reviewer_stack.py`) runs with the developer's real `HOME` and no stand-ins | accepted: opt-in, for clean machines only |
 | A caller that reaches the keychain without `PATH` in a stack process: only the throwaway `HOME` is in its way | CRL-200 |
+
+## Addendum: CRL-174 other programs' Unix sockets (2026-11-24)
+
+CRL-174 closes, on macOS, a sandboxed process's connect to other programs'
+Unix-domain sockets. S112 denied the sockets it names: harness roots and tmux
+servers. Every other pathname socket of the same user stayed reachable. Seam
+S127 (`.coral/seams.yaml`) changes `omnigent/inner/sandbox.py`,
+`omnigent/inner/seatbelt_sandbox.py` and `omnigent/inner/terminal.py`. The
+sandbox policy moves to revision 2. Every measurement here was taken on macOS
+27.2.1 (26B131) with claude 2.1.325, a mock model and throwaway sockets only.
+No real service's socket was connected to, listed or read. No bwrap rule
+changed, so Linux is as it was.
+
+**What was measured before.** A sandboxed process with the network on, under
+the profile as S112 left it, connected to a throwaway listener at each of
+these path shapes:
+
+| Throwaway listener | Shape of | Before S127 |
+|---|---|---|
+| `<dir>/custom.sock` | a tmux server started with `tmux -S <path>` | connects |
+| `<home>/.docker/run/docker.sock` | Docker Desktop | connects |
+| `<home>/.orbstack/run/docker.sock` | OrbStack | connects |
+| `<dir>/ssh-<random>/agent.<n>` | an OpenSSH agent | connects |
+| `<dir>/com.apple.launchd.<random>/Listeners` | launchd's ssh-agent | connects |
+| `<home>/.claude/cc-socks/<pid>.sock` | a Claude Code session's inbox | connects |
+| `<dir>/cc-daemon-<uid>/<id>/control.sock` | the Claude Code daemon | connects |
+| a datagram socket, by `connect` and by `sendto` | a syslog-style service | connects |
+| `<dir>/tmux-<uid>/default` | the default tmux server | refused (S112) |
+
+`<home>` is a throwaway home, never the real one. Two real throwaway services
+showed what a connect is worth:
+
+- A tmux server on a throwaway `-S` path ran `run-shell` for the sandboxed
+  client. The command ran in the server, outside the sandbox.
+- A fresh `ssh-agent` with no keys answered `ssh-add -l` from inside the
+  sandbox.
+
+**Root cause.** With `allow_network: true`, the default, the profile emits
+`(allow network*)`. That admits a Unix-domain `connect(2)` to any pathname
+socket, and seatbelt decides the connect by its network rules alone, whatever
+the file rules say. S112 kept the allow and denied named paths. A list of
+other programs' paths is never complete: `tmux -S` and an agent socket have no
+fixed path. S127 turns the default around for Unix-domain sockets.
+
+**The rule.** An implementer's step shell with `write_paths: ["."]`, a
+configured harness root `/tmp/crl-x`, uid 501 and one masked dot-directory
+(`.devenv`) in its worktree now gets these network lines (`<scratch>` is the
+child's `$TMPDIR`):
+
+```
+(allow network*)                                          ; existing
+(deny network-outbound (remote unix-socket))
+(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
+(allow network-outbound (remote unix-socket (subpath "<worktree>")))
+;; Omnigent harness and tmux control sockets              ; S112, unchanged
+(deny network-outbound (remote unix-socket (subpath "/private/tmp/crl-x")))
+(deny network-outbound (remote unix-socket (subpath "/private/tmp/omnigent-501")))
+(deny network-outbound (remote unix-socket (path-regex #"/omnigent-terminal-[^/]+/tmux\.sock$")))
+(deny network-outbound (remote unix-socket (path-regex #"/omnigent-tmux-replies-[^/]+/s$")))
+(deny network-outbound (remote unix-socket (path-regex #"/tmux-501/[^/]+$")))
+(allow network-outbound (remote unix-socket (subpath "<scratch>")))
+(deny network-outbound (remote unix-socket (subpath "<worktree>/.devenv")))
+(deny file-write-unlink (literal "<worktree>"))
+```
+
+The order, with the entries this example lacks:
+
+1. `(allow network*)`, then the deny of every Unix-domain socket, once.
+2. `path-literal` allows: the DNS resolver's socket, then each socket the
+   caller named (`allow_unix_socket_paths`).
+3. `subpath` allows: each write root, then each directory the caller named as
+   the process's own for sockets (`allow_unix_socket_roots`), that passes the
+   guards below and is not inside a denied root.
+4. S112's denies: each harness root, the per-user default root and the three
+   tmux patterns.
+5. `subpath` allows: the scratch, and each write root or named directory
+   strictly inside a denied root, as S112 allowed them.
+6. One deny per masked entry under a directory of 3 or 5: `subpath` for a
+   directory, `path-literal` for a file.
+7. One `(deny file-write-unlink (literal ...))` for each directory above such
+   an entry, from its parent up to the outermost write root that holds it.
+8. Unchanged: the `path-literal` denies of `deny_unix_socket_paths` with their
+   write denies, then the credential-source denies.
+
+Why this order. A filtered deny beats the unfiltered `(allow network*)`
+wherever it stands. Between filtered rules the later one wins.
+
+- The deny of every socket comes before every allow, or the allows would be
+  dead.
+- The resolver and caller-named allows come before S112's denies, so naming a
+  harness socket, a tmux socket, a deny-listed socket or a credential source
+  reopens nothing.
+- The write-root allows also come before S112's denies. Placed after them,
+  they reopened what S112 closes: a tmux-shaped socket inside a write root
+  went from refused to reachable (measured in the design review). In this
+  order S112's denies still win inside a write root.
+- The scratch and the directories inside a denied root come after S112's
+  denies, because those denies would otherwise shut them. The CLI's launch
+  directory sits under the harness root.
+- The masked-entry denies and the literal denies come last, so no allow above
+  them reopens those paths.
+
+**What a process may still connect to, and why.**
+
+| Allowed | Why | Without it |
+|---|---|---|
+| The DNS resolver's socket, `/private/var/run/mDNSResponder` | `getaddrinfo` connects to it for every name but `localhost` | Measured: Python fails with `EAI_NONAME`, `curl` exits 6, Node reports `ENOTFOUND`. The rule must spell `/private/var/run`; a `/var/run` spelling matches nothing |
+| Sockets the caller names (`allow_unix_socket_paths`) | A terminal pane's own `clip.sock`. Its directory holds the deny-listed `tmux.sock`, so the directory is never the pane's own for sockets | The pane's copy helper cannot reach its clipboard bridge |
+| The scratch, the child's `$TMPDIR` | `multiprocessing`, tool daemons, and a wrapped CLI's private config directory | A tool binds a socket in `$TMPDIR` and then cannot connect to it |
+| Each write root, such as a writable worktree | A process's own servers: test suites and dev tools that listen on a socket in the worktree | Measured: the bind succeeds and the connect fails with `EPERM` |
+| A forked pane's fork root (`allow_unix_socket_roots`) | A forked terminal pane works in a copy of the tree that is writable only through the pane's directory, which the guards keep off the list | The pane's own sockets in its tree stop connecting |
+
+Only code sets the two caller-named fields. No spec key reaches them. Their
+one production caller is a terminal pane, which names its own `clip.sock` and,
+when forked, its fork root. A named socket is spelled by its real directory,
+so a link planted at its name matches nothing. Only `connect` is refused: a
+socket pair, a bind, and a descriptor that the process inherits or that a peer
+passes to it work as before (measured).
+
+**The guards.** A write root or named directory gets no allow when it is, or
+holds, one of these:
+
+- the temp dir, where other sessions' scratch directories live;
+- the macOS per-user temp dir and `/private/var/run`, which every program
+  keeps sockets in;
+- `$HOME`, or the account's home from the password database. Docker, OrbStack
+  and Claude Code keep their sockets under the home. Both are read, because a
+  spawner can point `$HOME` elsewhere;
+- a denied harness root or a deny-listed socket.
+
+Paths are compared without letter case and without Unicode normal form,
+because the sandbox matches paths that way on the default macOS volume. A
+home granted as a write root in upper case stays off the list (measured). The
+scratch below the per-user temp dir, and sockets named by their literal path,
+stay allowed.
+
+A guard only withholds the allow. It does not protect the sockets in that
+directory: a process that can write a directory can rename a socket, or the
+directory above it, into a directory of its own and then connect (CRL-203).
+So Coral also refuses, when it builds a step's bundle, a step whose `cwd`,
+`write_paths` or `write_files` leave the workspace
+(`coral/omni/server/bundles.py`). The server reads the spelling only: an
+absolute path, a `~` prefix or a `..` step is refused.
+
+**Masked entries.** A connect needs no file access, so a socket under a
+masked dot-directory of a write root would connect although its files cannot
+be read. The profile therefore denies sockets under each masked entry that
+lies in one of the process's own directories. "Masked" means an entry the
+profile already lists: a top-level dot entry of the working directory or of a
+granted root (every level with the recursive scan), or a `mask_paths` entry.
+The `file-write-unlink` denies stop the way around that: moving a directory
+above a masked entry into another own directory, where no deny names the
+entry. Measured: the move is refused, and the masked socket stays refused.
+
+**Which profiles.** Every seatbelt profile that emits `(allow network*)`,
+Coral or not: the step shell, every spawn-time CLI wrap and sandboxed terminal
+panes. It is not limited to Coral steps, because the reachable sockets voided
+the file rules of any sandbox. The egress, git-ssh and no-network profiles
+hold none of the new lines: they emit no `(allow network*)`, so the default
+deny already refused every Unix-domain connect but the one each mode allows.
+bwrap ignores the new fields; its mounts decide which sockets exist.
+
+**What changes for users.**
+
+- **A sandboxed agent on macOS with the network on loses other programs'
+  Unix-domain sockets**, whether it is a Coral step or not. That covers
+  Docker, OrbStack and similar clients, key agents such as ssh-agent and
+  gpg-agent, and databases reached over a Unix-domain socket. A database that
+  also listens on `localhost` stays reachable there. Git over ssh has the
+  `git_ssh` broker (`docs/AGENT_YAML_SPEC.md`). For any other socket outside
+  the agent's own directories, a socket directly under `/tmp` included, the
+  only way through today is `sandbox.type: none`. A grant for one named
+  socket is CRL-203.
+- **Other terminals' clipboard sockets are refused.** A pane reaches only its
+  own `clip.sock`.
+- **A step can no longer rename, remove or replace the directories above a
+  masked entry**: each directory from the entry's parent up to the outermost
+  write root that holds it. With the default scan, which Coral's seeds use,
+  masked entries are top-level, so this is each write root that holds one
+  directly. For a Coral implementer step that is the worktree root: by the
+  code, a linked worktree's root holds a `.git` entry and the default mask
+  exempts only `.venv`. Everything inside those directories is made, renamed
+  and removed as before, and the process's own sockets there still bind,
+  connect and unlink (measured). With `cwd_hidden_scan_recursive: true`, or a
+  `mask_paths` entry below the top level, the directories between the write
+  root and the entry are held in place too. No such line is emitted when no
+  masked entry lies in an own directory, as for a reviewer's read-only working
+  directory.
+- **Socket paths are not hidden.** `fsgetpath(2)` still returns the path of a
+  named inode, and every path's metadata is readable. The deny does not
+  depend on a path being unknown.
+
+**Sandbox policy revision 2.** `other_unix_socket` on macOS moved from open to
+closed, a sandbox rule the probe measures changed, and the open pins have new
+owners. Each alone needs a new revision ("Addendum: CRL-159 probe 15 on
+identity-requiring servers", "Rows are append-only per policy revision").
+
+- `SANDBOX_POLICY_REVISION` is `"2"` (`coral/omni/process_map.py`), so a host
+  on this code reports `coral_sandbox_policy:2`.
+- `coral/gates/integrity.py` gains two rows. The revision-1 rows are
+  untouched, so a host on older code keeps the row it was measured under.
+
+| Policy | Owners of the open probe pins | Declared blockers no probe measures |
+|---|---|---|
+| seatbelt, revision 1 (kept) | CRL-174, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195 |
+| bwrap, revision 1 (kept) | CRL-174, CRL-181 | CRL-181, CRL-193, CRL-195 |
+| seatbelt, revision 2 | CRL-201, CRL-203, CRL-181 | CRL-170, CRL-171, CRL-181, CRL-193, CRL-195, CRL-204 |
+| bwrap, revision 2 | CRL-201, CRL-202, CRL-203, CRL-181 | CRL-181, CRL-193, CRL-195, CRL-204 |
+
+Every row still names open tickets, so every gate still reads
+`not_enforced`:
+
+| Host | Server | Reason |
+|---|---|---|
+| older code, revision 1 | older or current | `host_sandbox_open` |
+| current code, revision 2 | current | `host_sandbox_open` |
+| current code, revision 2 | older, with no revision-2 rows | `host_sandbox_unknown` |
+| a CLI without a sandbox (`OMNIGENT_CLAUDE_SDK_NO_SANDBOX`) | any | no revision: `host_sandbox_unknown` |
+
+What still blocks Enforced at revision 2, per backend:
+
+| Backend | Open path | Owner |
+|---|---|---|
+| seatbelt, bwrap | other programs' loopback TCP services (`other_loopback_tcp`, probed) | CRL-201 |
+| seatbelt, bwrap | a Unix-domain socket another program keeps inside the step's own worktree (`worktree_unix_socket`: probed on seatbelt, set by reasoning on bwrap) | CRL-203 |
+| bwrap | abstract Unix-domain sockets (`other_abstract_socket`, probed), and a socket under another bound root | CRL-202 |
+| seatbelt, bwrap | a planted repository config (`worktree_exec_config`, probed), and other files a step leaves that the owner's tools run | CRL-181 |
+| seatbelt, bwrap | masked files a step can still read by renaming the directory above them | CRL-204 |
+| seatbelt | macOS releases and CLI versions other than those measured | CRL-170 |
+| seatbelt | Mach services, the clipboard and Spotlight | CRL-171 |
+| seatbelt, bwrap | the owner's other and earlier runs, and the label's not-checked list | CRL-193 |
+| seatbelt, bwrap | password guessing at `/auth/login` | CRL-195 |
+
+A test binds the revision to the rule.
+`tests/coral/test_access_and_process_map.py::test_a_host_reports_revision_2_exactly_when_its_step_profiles_refuse_unix_sockets`
+builds the profile of a generated implementer's and reviewer's step. It fails
+when the revision is not `"1"` and the deny of every Unix-domain socket does
+not directly follow `(allow network*)`, and when the revision is `"1"` and it
+does. So a host cannot report revision 2 without the rule.
+
+**What was measured, and where.**
+
+| What | Where | Result |
+|---|---|---|
+| `tests/inner/sandbox/test_sandbox_behavior.py::test_sandbox_cannot_connect_to_other_programs_sockets`: one probe, run outside the sandbox and then inside it through the os_env helper and through a CLI wrap, against throwaway listeners under `/tmp` and a throwaway home | macOS 27.2.1, local | Outside, every connect works. Inside: every shape in the table above is refused, and so are another terminal's `clip.sock`, the Docker shape through a symlink, a hard link made inside or planted outside, a tmux- or terminal-shaped socket inside a write root, a socket under a masked entry, and a socket in a home granted as a write root in upper case. The process's own sockets in its scratch, its working directory and a write root connect, and so do the pane's own `clip.sock`, the resolver, a forked pane's fork root, and a passed or inherited descriptor. Moving a write root, or a directory above a masked entry, is refused, and the masked sockets stay refused afterwards |
+| The same test on bwrap | not run yet: the `inner-rest` lane is the first run | by reasoning: bwrap hides `/tmp`, so other programs' lines read refused there too |
+| Profile text: placement in the four network modes, named sockets, write roots before S112's denies, each guard, masked entries and the directories held in place (`tests/inner/test_seatbelt_sandbox.py`) | pure text; macOS local | pass |
+| The S112 behaviour test, `test_sandbox_cannot_connect_to_omnigent_control_sockets` | macOS 27.2.1, local | passes with one changed line: another terminal's `clip.sock` is now refused |
+| Probe 15 on an accounts server (`test_probe_15_on_a_server_that_requires_identity`) | macOS 27.2.1, local | `other_unix_socket: denied` (was `reachable`), `worktree_unix_socket: reachable`, `other_loopback_tcp: reachable`; no other pin moved, the run completed, and the label reads `not_enforced` with `host_sandbox_open` |
+| Probe 15 on a single-user server and on one with the allow-listed runner token | macOS 27.2.1, local | both pass with their pins unedited: real steps still run and hand off |
+| Probe 15's Linux pins | not run yet: the `coral-e2e` lane is the first run | `worktree_unix_socket: reachable` is set by reasoning (bwrap binds the worktree read-write, so a socket in it is visible). The other Linux verdicts are unchanged from lane run 45187294423; only their owners changed |
+| A real stack with every Unix-domain connect refused and no allow at all, in the design phase | macOS 27.2.1, local | the steps of two stack tests ran and handed off: a Coral turn needs none of them. The resolver allow is for tools a step runs |
+
+Without the deny of every socket, every other-program line of the behaviour
+test read reachable. With the write-root allows after S112's denies, the tmux-
+and terminal-shaped sockets inside a write root did. With case-sensitive
+guards, the upper-case home did. Without the masked-entry denies, the masked
+socket did.
+
+The macOS sandbox lane (`.github/workflows/macos-sandbox.yml`) runs the
+profile tests, the behaviour suite and probe 15 on macOS 26, not 27.2.1. It
+has not run on this change yet, and it is not a required check. An unknown
+filter makes `sandbox-exec` refuse the profile, which fails closed. If the
+planted hard link reads reachable there, that is a finding about that OS, not
+a test bug: which path the kernel reports for a hard-linked socket was
+measured on 27.2.1 only.
+
+**No allowed peer opens a socket for a step.** Seatbelt does not police
+descriptors: only `connect` is refused. So S127 holds only while no server a
+step can reach acts as a broker. A server on the allow list, and any process that hands a sandboxed
+child a descriptor, must never open or proxy a socket on the child's behalf.
+By the code none of Omnigent's does today: the clipboard bridge loads a tmux
+buffer and passes nothing back, the CLI's tools are an in-process server on
+its stdio, and the credential proxy has a fixed upstream. The resolver is a
+system daemon; that it opens no socket for a client is general knowledge, not
+measured. A new allowed peer must keep this rule.
+
+**Residuals and owners.** S127 stops a sandboxed process's `connect` to
+Unix-domain pathname sockets outside its own directories, in network-on
+seatbelt profiles, on macOS 27.2.1.
+
+| Residual | Owner |
+|---|---|
+| Loopback TCP. A step with the network on still connects to other programs' loopback listeners, on both platforms (`other_loopback_tcp`). That reaches another single-user Omnigent or Coral server on the machine, where the caller is the owner; Docker's TCP API where it is switched on; and debugger and dev-server ports. Seatbelt can allow one loopback port but cannot say "the ports this process bound", so a loopback deny would break every local server a step starts (measured). UDP is not covered either | CRL-201 |
+| Linux abstract Unix-domain sockets: bwrap shares the host's network namespace when the network is on (measured in lane run 45187294423). Also a pathname socket under any other root bwrap binds (the worktree's is CRL-203) | CRL-202 |
+| A socket another program keeps at a plain name inside a step's write root, such as a dev server's in the worktree (`worktree_unix_socket`, measured reachable on macOS) | CRL-203 |
+| The rename route. A write root the guards keep off the allow list does not protect its sockets: a process that can write a directory can rename a socket, or the directory above it, into its scratch or another own directory and connect. The same holds for a tmux- or terminal-shaped socket inside a write root once the process renames it: S112's patterns refuse only the direct connect | CRL-203 |
+| A grant for one named socket in an agent's spec, for agents that need Docker, a key agent or a database socket | CRL-203 |
+| Coral's bundle rule reads the spelling only. It does not see a symlink inside the worktree that points outside, or a workspace that is itself the home or the temp dir, and it does not check a bundle's terminals | CRL-203 |
+| `~/.npm/_logs`, a write root of every Claude CLI wrap, is by the code an own directory shared by every session's CLI: one sandboxed process can bind a socket there and another connect. Loopback already gives them such a channel | CRL-203 |
+| Masked files read by renaming a parent directory. The new `file-write-unlink` denies are emitted only in network-on profiles, for masked entries in an own directory. In the egress, git-ssh and no-network modes, and for a masked entry elsewhere, a process can still move the directory above the entry and read the files. This is older than S127 | CRL-204 |
+| A socket under an entry the profile does not list as masked: a dot-directory below the top level with the default scan, one in an allow-listed hidden directory or a framework-added root, or one made after the profile was built | CRL-204 |
+| Mach services and XPC, the clipboard and Spotlight. Beside loopback, they are the remaining local route on macOS to services that act for a caller. The resolver's own service surface is among them | CRL-171 |
+| Other macOS releases. The lane runs macOS 26 and is not a required check | CRL-170 |
+| Processes outside the sandbox still connect to a harness socket, which has no bearer on POSIX | CRL-173 |
+| A descriptor or a proxied connection from a process outside the sandbox | none while no allowed peer brokers (the rule above) |
+| Single-user servers, where a step acts as the owner | accepted ("Addendum: CRL-159 probe 15 on identity-requiring servers") |

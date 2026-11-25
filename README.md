@@ -42,17 +42,25 @@ The workflow engine is designed and is next on the
 run Coral from source.
 
 Run Coral steps only on content you trust. On macOS a step's shell can read
-and write your clipboard (CRL-171). It can still connect to other programs'
-local sockets, such as Docker Desktop's, a tmux server started with
-`tmux -S <path>`, or a Claude Code session's message inbox, which, from the
-CLI binary, lets it send your own Claude Code a message (CRL-174). Since
+and write your clipboard (CRL-171). Since
 CRL-165 it can no longer read other processes' environments or command lines.
 Since CRL-166 it can no longer connect to the harness sockets of other Omnigent
 sessions under this host's socket root or the default `/tmp/omnigent-<uid>`, to
 other Omnigent terminals' tmux servers, or to your own tmux server's default
-socket (`tmux-<uid>`, with `-L` labels and `TMUX_TMPDIR`). Both were measured
-on macOS 27.2.1; a macOS CI lane (CRL-170) now runs the sandbox tests and
-probe 15 on changes to the files they depend on and weekly, and is not a
+socket (`tmux-<uid>`, with `-L` labels and `TMUX_TMPDIR`). Since CRL-174, on
+macOS a step with network on can no longer connect to any other program's
+Unix-domain socket outside its own directories, such as Docker Desktop's, an
+ssh-agent's, a tmux server started with `tmux -S <path>`, or a Claude Code
+session's message inbox. It still connects to sockets in its scratch
+directory and in a worktree it may write, so a socket another program keeps
+inside that worktree stays reachable (CRL-203). The refusal applies to every
+sandboxed agent with network on, not only Coral steps: on macOS such an agent
+can no longer use Docker, a key agent or a database over a Unix-domain
+socket. Git over SSH has its own `sandbox.git_ssh` setting; for any other
+such socket the only way through today is `sandbox.type: none`, until a grant
+for one named socket exists (CRL-203). All three were measured on macOS
+27.2.1; a macOS CI lane (CRL-170) now runs the sandbox tests and probe 15 on
+macOS 26, on changes to the files they depend on and weekly, and is not a
 required check. Since CRL-167, on
 Linux and macOS a Coral step's Claude CLI no longer holds your model API key,
 in its environment or on its command line. The key stays in a proxy on
@@ -74,16 +82,24 @@ claude-native's relays, the runner's direct-attach listener and OpenCode's
 server already required their own secrets. That was measured on macOS 26.3.1
 only. A Codex without `--ws-auth` still runs its app-server with no token,
 which only the runner log reports (noted on CRL-177). Other loopback
-listeners, including other programs' services (CRL-174), and UDP are not
-covered. On Linux a step can also reach other programs' abstract sockets
-(CRL-174), measured in `coral-e2e` lane run 45187294423. On a single-user
+listeners, including other programs' services (CRL-201), and UDP are not
+covered, on macOS or Linux: a step can still reach another single-user
+Omnigent or Coral server on the machine, Docker's TCP API, or a debugger or
+dev-server port. Linux is unchanged: a step there can also reach other
+programs' abstract sockets, measured in `coral-e2e` lane run 45187294423,
+and, by the code, a socket under any directory its sandbox binds (CRL-202).
+On a single-user
 server, on any platform, a step can act as you, the owner, so neither a human
 gate nor the sandbox is a security control there. That is accepted: such a
 server never labels a gate Enforced. On a server that signs users in with
 accounts, a sandboxed step could not get your sign-in token (measured on macOS
-27.2.1, and on Linux in that lane run). Six open issues still keep every gate
-labelled not Enforced: other programs' sockets (CRL-174), files a step leaves
-for your own tools (CRL-181), macOS Mach services, the clipboard and Spotlight
+27.2.1, and on Linux in that lane run). Nine open issues still keep every gate
+labelled not Enforced: other programs' loopback services (CRL-201), Linux
+abstract sockets and sockets in directories the sandbox binds (CRL-202), a
+socket another program keeps in a step's worktree on macOS (CRL-203), files a
+step leaves for your own tools (CRL-181), masked files that a step can still
+read by renaming the directory above them (CRL-204), macOS Mach services, the
+clipboard and Spotlight
 (CRL-171), macOS and CLI updates that no CI lane checks (CRL-170), an owner
 credential that a step of another or an earlier run obtained (CRL-193), and
 password guessing at sign-in (CRL-195). A run's detail says why in
@@ -157,17 +173,18 @@ agent in its working directory, can add Claude Code project settings, such as
 hooks, which, from the code, your own Claude Code loads if you open and trust
 that directory (CRL-181). A step or a sandboxed agent can still reach your
 `~/.claude` indirectly, through the channels above to code outside the sandbox,
-such as your own Claude Code's inbox (CRL-174) or, on a single-user server, the
-server itself (accepted, above). A step whose sandbox cannot wrap its CLI does
-not start. Coral steps need a system `claude` CLI, or they refuse to start: the
-SDK's bundled one cannot be wrapped in the sandbox. See the ADR-05 addenda on
+such as another program's loopback service (CRL-201) or, on a single-user
+server, the server itself (accepted, above). A step whose sandbox cannot wrap
+its CLI does not start. Coral steps need a system `claude` CLI, or they
+refuse to start: the SDK's bundled one cannot be wrapped in the sandbox. See the ADR-05 addenda on
 [harness sockets](docs/coral/decisions/ADR-05-topology.md#addendum-crl-166-harness-sockets-on-macos-2026-11-22),
 [Claude config isolation](docs/coral/decisions/ADR-05-topology.md#addendum-crl-176-claude-config-isolation-2026-11-22),
 [sandboxed agents' Claude config](docs/coral/decisions/ADR-05-topology.md#addendum-crl-178-claude-config-isolation-for-every-sandboxed-agent-2026-11-22),
 [launch temp dir cleanup](docs/coral/decisions/ADR-05-topology.md#addendum-crl-179-launch-temp-dir-cleanup-2026-11-22),
-[identity-requiring servers and gate labels](docs/coral/decisions/ADR-05-topology.md#addendum-crl-159-probe-15-on-identity-requiring-servers-2026-11-23)
+[identity-requiring servers and gate labels](docs/coral/decisions/ADR-05-topology.md#addendum-crl-159-probe-15-on-identity-requiring-servers-2026-11-23),
+[secrets out of exec-time environments](docs/coral/decisions/ADR-05-topology.md#addendum-crl-167-secrets-out-of-exec-time-environments-2026-11-24)
 and
-[secrets out of exec-time environments](docs/coral/decisions/ADR-05-topology.md#addendum-crl-167-secrets-out-of-exec-time-environments-2026-11-24).
+[other programs' Unix sockets](docs/coral/decisions/ADR-05-topology.md#addendum-crl-174-other-programs-unix-sockets-2026-11-24).
 
 ## Run Coral from source
 

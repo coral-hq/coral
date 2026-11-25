@@ -265,6 +265,18 @@ release branch. For each failure in `test_sandbox_probe.py`:
 - "Moved from its pins": re-pin only a move between closed verdicts (such as
   `hidden` and `denied`), the socket, TCP and plant checks with their owners,
   and the single-user `owner_bare` checks with the accepted residual.
+- The socket and TCP checks of the identity test, at sandbox policy revision 2
+  (ADR-05, "Addendum: CRL-174 other programs' Unix sockets"):
+  - `other_unix_socket`, another program's socket under `/tmp`, is closed on
+    both platforms: `denied` on macOS since S127, `hidden` on Linux. On macOS
+    a `reachable` there means the sandbox rule did not hold on that OS. Treat
+    it as a finding: re-pinning it open needs an owner and a new policy
+    revision.
+  - `worktree_unix_socket`, a throwaway listener at a plain name inside the
+    step's own worktree, is pinned `reachable` with owner CRL-203. On Linux it
+    is set by reasoning until the lane runs.
+  - `other_abstract_socket` (Linux only) is `reachable`, owner CRL-202.
+  - `other_loopback_tcp` is `reachable` on both platforms, owner CRL-201.
 - Any open verdict on a credential path is escalated to a person and a ticket,
   never re-pinned: a `.read` other than `denied` or `hidden`; `minted`,
   `mismatch`, `refused` or `not_present` on `mint`, `bearer` or `stored`;
