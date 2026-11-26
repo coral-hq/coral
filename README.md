@@ -183,6 +183,11 @@ a proxy with a user name or password, go to the step's key proxy instead.
 These endpoint and network settings count only from a settings file outside
 the step's working directory, under the default or an absolute
 `CLAUDE_CONFIG_DIR`; an endpoint in any other settings file stops the step.
+Since CRL-182 a Coral CLI does not start at all when the host's
+`CLAUDE_CONFIG_DIR`, `HOME`, `XDG_CONFIG_HOME` or `ANTHROPIC_CONFIG_DIR` is a
+relative path or points inside the session's working directory, or when your
+Claude settings file would lie there; the error names the variable, and an
+absolute path outside the working directory and a host restart fix it.
 Everything else in the block is dropped, so a provider switch there, such as
 Bedrock or Vertex, no longer applies to steps: a step runs on the key or
 provider from `uv run coral setup`. With a gateway provider the block never
