@@ -1399,10 +1399,21 @@ _ALLOWED_IMPORTS = frozenset(
 
 @pytest.mark.parametrize("module", ["simulate", "simcase"])
 def test_simulate_modules_import_only_pure_names(module: str) -> None:
-    """Simulate executes nothing: no I/O, process or network module, no app-tier code."""
+    """Simulate executes nothing: no I/O, process or network module, no app-tier code.
+
+    Only the CLI's ``main`` reads files.
+    """
     tree = ast.parse((REPO / "coral" / "engine" / f"{module}.py").read_text())
+    cli = {
+        id(inner)
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+        for inner in ast.walk(node)
+    }
     imported: list[str] = []
     for node in ast.walk(tree):
+        if id(node) in cli:
+            continue
         if isinstance(node, ast.Import):
             imported.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):

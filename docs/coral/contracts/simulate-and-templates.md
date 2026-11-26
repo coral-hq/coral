@@ -11,7 +11,7 @@
   `coral/stores/workflows.py`; the simulate pool in
   `coral/omni/server/plugin.py` (`simulations_lifespan`) over `InFlight` in
   `coral/api/run_service.py`; the shared activation cap `DEFAULT_RUN_ACTIVATIONS` in
-  `coral/bridge/config.py`; the web client in `web/src/workflows/api/client.ts`, the
+  `coral/engine/types.py` (re-exported by `coral/bridge/config.py`); the web client in `web/src/workflows/api/client.ts`, the
   desk's Templates tab in `web/src/workflows/desk/`, and the editor's Simulate panel in
   `web/src/workflows/simulate/` and `web/src/workflows/editor/`.
 - **Related:** [`runs-api.md`](runs-api.md) (the other workflow routes, preflight's
@@ -279,6 +279,16 @@ request: one valid document near the 256 KiB cap took about 13 s to validate alo
 development machine, so a large workflow can reach the timeout. `:validate` and `:save`
 run the same validation on Starlette's shared pool, with no Coral cap.
 
+### The CLI
+
+`python -m coral.engine.simulate WORKFLOW [--script FILE]`, or `just coral simulate ...`
+from any directory, prints the body the route would answer for the file's text and
+script, as one JSON document, and exits 0. It runs in the pure tier with a default
+`ValidateContext()` (no harness facts) and `DEFAULT_RUN_ACTIVATIONS`, with no pool, auth
+or timeout. The script is JSON or YAML, read like a case file, and defaults to empty. An
+unreadable or non-UTF-8 file or an invalid script prints one line to stderr, never
+quoting a value, and exits 2.
+
 ## Templates
 
 ### The registry
@@ -473,6 +483,16 @@ hook formats it).
     it or reset."
   - Closing the panel aborts its request and forgets the answers; the server's work goes
     on (above).
+  - **Save as case** shows once a simulation ends without `needs_input`, is current, the
+    editor has no unsaved changes and it has at most 200 steps. It posts the answers'
+    script and the result's `outcome`, `steps`, `gates_reached`, `limits_hit` and session
+    total as `expect`. 409s show their own messages.
+- **Saved cases** (`simulate/SavedCases.tsx`), below the editor: each case's name, its
+  last result (Passed, Failed, Error or Not run) with the mismatch lines of a failed or
+  errored one, Run and Delete. Saving the workflow refreshes the list.
+- **Run** is a preset: it opens the panel and posts the case's script with the editor's
+  YAML, so the canvas shows the result's overlay; answers then go on from there.
+- **Template cards** list their cases' names, which `:use` copies as saved cases.
 
 ## Proof
 
@@ -487,6 +507,8 @@ hook formats it).
   the pool's caps, 422s, key choice and races, and the case routes: ownership, conflicts,
   re-run on save, template copies. `tests/coral/stores/test_workflow_store.py`: `create`
   and `workflow_keys`; `tests/stores/coral/test_simulation_case_store.py`: the case store.
+- `tests/coral/engine/test_simulate_cli.py`: the CLI prints what the route answers, and
+  its exit codes.
 - Vitest beside the web files: the client, the Templates tab, the editor and the panel.
 
 ## Residuals
@@ -507,7 +529,6 @@ hook formats it).
 
 | Work | Owner |
 |---|---|
-| Saved cases and presets in the editor, a Simulate CLI | CRL-186 |
 | Timers, retries and blocked handoffs in scripts, a step-through trace, an optional exhaustive check | CRL-187 |
 | Template parameters, a Use-template dialog, confirmed done-when commands | CRL-188 |
 | More built-in templates: the two-reviewer review loop, PR review, single-agent steps | CRL-189 |

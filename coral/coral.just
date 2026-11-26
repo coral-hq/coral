@@ -29,6 +29,12 @@ openapi:
 openapi-check:
     cd .. && uv run --no-sync python -m coral.omni.server.openapi --check
 
+# Simulate a workflow file and print the simulate route's JSON: `just coral simulate WORKFLOW [--script FILE]`.
+[no-cd]
+[positional-arguments]
+simulate *args:
+    uv run --no-sync python -m coral.engine.simulate "$@"
+
 # Run Tier B: the real claude CLI against mock_llm_server. Skips without the claude CLI;
 # the stack sample also needs CORAL_TIER_B_STACK_SAMPLE=1.
 test-e2e:
