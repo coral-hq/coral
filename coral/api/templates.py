@@ -19,10 +19,17 @@ from coral.alerts.types import normalize_owner
 from coral.api.errors import CoralApiError, CoralRoute, error_responses
 from coral.api.run_models import EmptyRequest
 from coral.api.schemas import SavedWorkflowOut, TemplateOut
-from coral.api.workflows import saved_workflow_out
+from coral.api.workflows import run_case, saved_workflow_out
+from coral.engine.simcase import SimCase
 from coral.model.ids import validate_workflow_id
 from coral.omni.protocols import Viewer
-from coral.stores.workflows import WorkflowDefinitionStore, WorkflowKeyTaken, WorkflowTooLargeError
+from coral.stores.workflows import (
+    MAX_WORKFLOW_CASES,
+    CaseRun,
+    WorkflowDefinitionStore,
+    WorkflowKeyTaken,
+    WorkflowTooLargeError,
+)
 from coral.templates import (
     BuiltinTemplate,
     TemplateError,
@@ -77,6 +84,7 @@ def _template_out(template: BuiltinTemplate) -> TemplateOut:
         name=template.name,
         description=template.description,
         yaml=template.yaml_text,
+        cases=list(template.cases),
     )
 
 
@@ -131,6 +139,7 @@ def create_templates_router(
         if template is None:
             raise CoralApiError("not_found", TEMPLATE_NOT_FOUND, 404)
         owner = normalize_owner(viewer.user_id)
+        cases: list[tuple[SimCase, CaseRun]] | None = None
         for attempt in range(MAX_USE_ATTEMPTS):
             taken = store.workflow_keys(workspace_id=workspace_id, prefix=template.id)
             # Concurrent uses race for the same numbered key; the last try takes a random one.
@@ -142,6 +151,11 @@ def create_templates_router(
             # A row's key is always the id its YAML names.
             if result.graph is None or result.report is None or result.graph.workflow_id != key:
                 raise TemplateError(f"built-in template {template.id!r} does not load as {key!r}")
+            if cases is None:
+                cases = [
+                    (case, run_case(result.graph, result.report.runnable, case))
+                    for case in template.cases[:MAX_WORKFLOW_CASES]
+                ]
             try:
                 definition = store.create(
                     workspace_id=workspace_id,
@@ -151,6 +165,7 @@ def create_templates_router(
                     compiled=result.graph,
                     runnable=result.report.runnable,
                     owner=owner,
+                    cases=cases,
                 )
             except WorkflowTooLargeError as error:
                 raise CoralApiError("payload_too_large", str(error), 413) from error

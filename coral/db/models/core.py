@@ -546,9 +546,10 @@ class SimulationCaseRow(CoralBase):
     workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     workflow_id: Mapped[str] = mapped_column(String(32), nullable=False)
-    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    name: Mapped[str] = mapped_column(CaseSensitiveString(256), nullable=False)
     script: Mapped[str] = mapped_column(CAPPED_TEXT, nullable=False)
     expectation: Mapped[str | None] = mapped_column(CAPPED_TEXT, nullable=True, default=None)
+    last_mismatches: Mapped[str | None] = mapped_column(CAPPED_TEXT, nullable=True, default=None)
     last_version_id: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
     last_result: Mapped[int | None] = mapped_column(SmallInteger, nullable=True, default=None)
     last_run_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
@@ -564,6 +565,9 @@ class SimulationCaseRow(CoralBase):
             "workflow_id",
             "created_at",
             "id",
+        ),
+        Index(
+            "uq_coral_simulation_cases_name", "workspace_id", "workflow_id", "name", unique=True
         ),
         make_enum_check_constraint(
             "last_result",

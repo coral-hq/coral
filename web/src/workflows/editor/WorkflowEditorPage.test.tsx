@@ -20,6 +20,9 @@ const api = vi.hoisted(() => ({
   saveWorkflow: vi.fn(),
   validateWorkflow: vi.fn(),
   simulateWorkflow: vi.fn(),
+  listWorkflowCases: vi.fn(),
+  saveWorkflowCase: vi.fn(),
+  deleteWorkflowCase: vi.fn(),
 }));
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ClientModule>()),
@@ -162,6 +165,7 @@ beforeEach(() => {
     compiled: MINIMAL_COMPILED,
   } satisfies ValidateResponse);
   api.simulateWorkflow.mockResolvedValue(simulatedReviewLoop(REVIEW_LOOP_SIMULATIONS.approved));
+  api.listWorkflowCases.mockResolvedValue([]);
 });
 afterEach(cleanup);
 
@@ -228,6 +232,82 @@ describe("WorkflowEditorPage", () => {
     await waitFor(() => expect(save).toBeEnabled(), SLOW);
     fireEvent.click(save);
     await waitFor(() => expect(api.saveWorkflow).toHaveBeenCalledWith(`${MINIMAL_YAML}\n`));
+  });
+
+  it("refetches the saved cases after a save, which re-runs them", async () => {
+    api.saveWorkflow.mockResolvedValue({ ...detail });
+    renderEditor();
+    const save = await screen.findByRole("button", { name: "Save" });
+    await waitFor(() => expect(api.listWorkflowCases).toHaveBeenCalledTimes(1));
+    expect(api.listWorkflowCases).toHaveBeenCalledWith("w1", expect.anything());
+    fireEvent.change(screen.getByLabelText("yaml"), { target: { value: `${MINIMAL_YAML}\n` } });
+    await waitFor(() => expect(save).toBeEnabled(), SLOW);
+    fireEvent.click(save);
+    await waitFor(() => expect(api.listWorkflowCases).toHaveBeenCalledTimes(2));
+  });
+
+  it("runs a saved case as a preset in the Simulate panel and paints its path", async () => {
+    const script = {
+      inputs: [{ node_id: "review", kind: "label" as const, values: ["approved"] }],
+    };
+    api.listWorkflowCases.mockResolvedValue([
+      {
+        id: "c1",
+        name: "Approved first time",
+        script,
+        expect: { outcome: "completed" },
+        last_result: "passed",
+        mismatches: [],
+        last_run_at: 2,
+        created_at: 1,
+      },
+    ]);
+    renderEditor();
+    const canvas = await screen.findByTestId("canvas-nodes");
+    expect(screen.queryByTestId("simulate-panel")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Run Approved first time" }));
+    expect(screen.getByTestId("simulate-panel")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Simulate" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    await waitFor(() => expect(canvas).toHaveAttribute("data-overlay", "on"));
+    expect(api.simulateWorkflow).toHaveBeenCalledTimes(1);
+    expect(api.simulateWorkflow).toHaveBeenCalledWith(MINIMAL_YAML, script, expect.anything());
+  });
+
+  it("runs a failed saved case in the open Simulate panel and shows its mismatch line", async () => {
+    const script = {
+      inputs: [{ node_id: "review", kind: "label" as const, values: ["approved"] }],
+    };
+    const line = "steps: expected [implement:done, review:approved], got [implement:done]";
+    api.listWorkflowCases.mockResolvedValue([
+      {
+        id: "c2",
+        name: "Approved first time",
+        script,
+        expect: { outcome: "completed" },
+        last_result: "failed",
+        mismatches: [line],
+        last_run_at: 2,
+        created_at: 1,
+      },
+    ]);
+    api.simulateWorkflow
+      .mockResolvedValueOnce(simulatedReviewLoop(REVIEW_LOOP_SIMULATIONS.needs_review))
+      .mockResolvedValueOnce(simulatedReviewLoop(REVIEW_LOOP_SIMULATIONS.approved));
+    renderEditor();
+    const canvas = await screen.findByTestId("canvas-nodes");
+    expect(await screen.findByText(line)).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Simulate" }));
+    await screen.findByText(`Choose a result for ${isolated("Review")}:`);
+    fireEvent.click(screen.getByRole("button", { name: "Run Approved first time" }));
+    expect(await screen.findByText("The run completes.")).toBeInTheDocument();
+    expect(screen.getByTestId("simulate-panel")).toBeInTheDocument();
+    expect(canvas).toHaveAttribute("data-overlay", "on");
+    expect(api.simulateWorkflow).toHaveBeenCalledTimes(2);
+    expect(api.simulateWorkflow).toHaveBeenLastCalledWith(MINIMAL_YAML, script, expect.anything());
   });
 
   it("offers retry when the workflow cannot be loaded", async () => {

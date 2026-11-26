@@ -7,11 +7,15 @@ vi.mock("@/lib/identity", () => ({ authenticatedFetch }));
 import {
   WorkflowsApiError,
   createFromTemplate,
+  deleteWorkflowCase,
   getWorkflowByKey,
   listTemplates,
+  listWorkflowCases,
   listWorkflows,
+  saveWorkflowCase,
   simulateWorkflow,
   validateWorkflow,
+  workflowCasesQueryKey,
 } from "./client";
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -118,5 +122,51 @@ describe("workflows client", () => {
       status: 503,
       code: null,
     });
+  });
+
+  it("lists a workflow's cases and rejects a payload that is not a list", async () => {
+    const saved = { id: "c1", name: "N" };
+    authenticatedFetch.mockResolvedValueOnce(json([saved]));
+    const controller = new AbortController();
+    expect(await listWorkflowCases("w/1", controller.signal)).toEqual([saved]);
+    const [url, init] = authenticatedFetch.mock.calls[0];
+    expect(url).toBe("/v1/coral/workflows/w%2F1/cases");
+    expect(init).toEqual({ signal: controller.signal });
+
+    authenticatedFetch.mockResolvedValueOnce(json({ cases: [] }));
+    await expect(listWorkflowCases("w1")).rejects.toBeInstanceOf(WorkflowsApiError);
+    expect(workflowCasesQueryKey("w1")).toEqual(["coral-workflow-cases", "w1"]);
+  });
+
+  it("posts a case to the workflow's cases and keeps a refusal's code", async () => {
+    const body = {
+      name: "Approved",
+      script: { inputs: [{ node_id: "review", kind: "label" as const, values: ["approved"] }] },
+      expect: { outcome: "completed" as const, steps: ["review:approved"] },
+    };
+    authenticatedFetch.mockResolvedValueOnce(json({ id: "c1", ...body }, 201));
+    expect((await saveWorkflowCase("w?1", body)).id).toBe("c1");
+    const [url, init] = authenticatedFetch.mock.calls[0];
+    expect(url).toBe("/v1/coral/workflows/w%3F1/cases");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual(body);
+
+    const envelope = { error: { code: "case_exists", message: "Taken.", details: null } };
+    authenticatedFetch.mockResolvedValueOnce(json(envelope, 409));
+    await expect(saveWorkflowCase("w1", body)).rejects.toMatchObject({
+      status: 409,
+      code: "case_exists",
+    });
+  });
+
+  it("deletes a case, reading no body from the 204", async () => {
+    authenticatedFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await expect(deleteWorkflowCase("w1", "c/1#")).resolves.toBeUndefined();
+    const [url, init] = authenticatedFetch.mock.calls[0];
+    expect(url).toBe("/v1/coral/workflows/w1/cases/c%2F1%23");
+    expect(init.method).toBe("DELETE");
+
+    authenticatedFetch.mockResolvedValueOnce(json({}, 404));
+    await expect(deleteWorkflowCase("w1", "c1")).rejects.toMatchObject({ status: 404 });
   });
 });

@@ -6,11 +6,12 @@
 - **Code:** the simulator in `coral/engine/simulate.py` and its saved cases in
   `coral/engine/simcase.py` (pure tier); the template registry and its package data in
   `coral/templates/`; the simulate route in `coral/api/workflows.py`; the template routes
-  in `coral/api/templates.py`; schemas in `coral/api/schemas.py`; the insert-only `create`
-  and `workflow_keys` in `coral/stores/workflows.py`; the simulate pool in
+  in `coral/api/templates.py`; the case routes in `coral/api/workflows.py`; schemas in
+  `coral/api/schemas.py`; the insert-only `create`, `workflow_keys` and the case methods in
+  `coral/stores/workflows.py`; the simulate pool in
   `coral/omni/server/plugin.py` (`simulations_lifespan`) over `InFlight` in
   `coral/api/run_service.py`; the shared activation cap `DEFAULT_RUN_ACTIVATIONS` in
-  `coral/bridge/config.py`; the web client in `web/src/workflows/api/client.ts`, the
+  `coral/engine/types.py` (re-exported by `coral/bridge/config.py`); the web client in `web/src/workflows/api/client.ts`, the
   desk's Templates tab in `web/src/workflows/desk/`, and the editor's Simulate panel in
   `web/src/workflows/simulate/` and `web/src/workflows/editor/`.
 - **Related:** [`runs-api.md`](runs-api.md) (the other workflow routes, preflight's
@@ -26,6 +27,9 @@ Every route is under `/v1/coral`, tagged `coral`, and needs a signed-in caller
 | Method and path | `operationId` | Body | Success | Refusals |
 |---|---|---|---|---|
 | `POST /workflows:simulate` | `coral_simulate_workflow` | `SimulateRequest` | 200 `SimulatedResult` or `InvalidResult` | 401, 403, 422, 503 |
+| `GET /workflows/{workflow_id}/cases` | `coral_list_workflow_cases` | none | 200 `SavedCaseOut[]` | 401, 403, 404, 422 |
+| `POST /workflows/{workflow_id}/cases` | `coral_save_workflow_case` | `SimCase` | 201 `SavedCaseOut` | 401, 403, 404, 409, 413, 422 |
+| `DELETE /workflows/{workflow_id}/cases/{case_id}` | `coral_delete_workflow_case` | none | 204 | 401, 403, 404, 422 |
 | `GET /templates` | `coral_list_templates` | none | 200 `TemplateOut[]` | 401, 403 |
 | `POST /templates/{template_id}:use` | `coral_use_template` | `EmptyRequest` (`{}`) | 201 `SavedWorkflowOut` | 401, 403, 404, 409, 413, 422 |
 
@@ -275,6 +279,16 @@ request: one valid document near the 256 KiB cap took about 13 s to validate alo
 development machine, so a large workflow can reach the timeout. `:validate` and `:save`
 run the same validation on Starlette's shared pool, with no Coral cap.
 
+### The CLI
+
+`python -m coral.engine.simulate WORKFLOW [--script FILE]`, or `just coral simulate ...`
+from any directory, prints the body the route would answer for the file's text and
+script, as one JSON document, and exits 0. It runs in the pure tier with a default
+`ValidateContext()` (no harness facts) and `DEFAULT_RUN_ACTIVATIONS`, with no pool, auth
+or timeout. The script is JSON or YAML, read like a case file, and defaults to empty. An
+unreadable or non-UTF-8 file or an invalid script prints one line to stderr, never
+quoting a value, and exits 2.
+
 ## Templates
 
 ### The registry
@@ -321,8 +335,9 @@ arrow field except copy, done-when, `attempts` and loop limits.
 
 ### Listing
 
-`GET /v1/coral/templates` answers `[{id, name, description, yaml}]` in gallery order; today
-exactly `implement-review-loop`, whose `yaml` is the packaged text. It reads no store.
+`GET /v1/coral/templates` answers `[{id, name, description, yaml, cases}]` in gallery
+order; today exactly `implement-review-loop`, whose `yaml` is the packaged text and whose
+`cases` are its `.sim.yaml` cases in file order. It reads no store.
 
 ### Using a template
 
@@ -340,7 +355,8 @@ never replaces one.
 4. It rewrites the id with `with_workflow_id`, validates the text, and requires the
    compiled workflow id to equal the key; a mismatch raises `TemplateError` and stores
    nothing.
-5. It calls `store.create` once, with the caller as owner, and answers 201
+5. It calls `store.create` once, with the caller as owner and the template's first 20
+   cases, each with its run on the compiled copy (run once per request), and answers 201
    `SavedWorkflowOut`, the shape `POST /workflows` answers.
 6. Only when a concurrent insert took the key does it read the keys again and retry, with
    at most 3 inserts in all. The third takes a random suffix.
@@ -380,8 +396,9 @@ cases:
 - `cases`: 1-64 cases, names unique, 1-120 characters, under the script values' text rule.
 - `script` is a `SimScript`. `expect` needs `outcome`; `steps` (`node_id:result` per
   answered step, in order), `gates_reached`, `limits_hit` and `sessions` (the total,
-  0-1 000 000) are optional, and only the fields set are compared. Unknown fields are
-  refused.
+  0-1 000 000) are optional, and only the fields set are compared. Each list holds at most
+  200 items of 1-320 characters (`MAX_EXPECTED_ITEMS`, `MAX_EXPECTED_ITEM_CHARS`) under the
+  same text rule. Unknown fields are refused.
 - `load_cases(text)` reads the file under the workflow loader's guards (256 KiB, no
   aliases or merge keys, string keys only, no duplicates, 32 levels, integers of at most 64
   characters) and accepts only JSON-compatible YAML: strings, numbers written as JSON writes
@@ -396,7 +413,43 @@ hits `a4`'s limit and reaches the gate (7 sessions); and a rejected change. CI r
 `tests/coral/templates/test_builtin_templates.py`, with
 `max_activations=DEFAULT_RUN_ACTIVATIONS`, and the simulate route's tests check that the
 route answers each case as the engine does. The registry refuses a template whose cases do
-not load. The cases are not served yet.
+not load. `GET /templates` serves them as `cases`, and `:use` copies them.
+
+### Saved cases per workflow
+
+A workflow's cases are rows of `coral_simulation_cases` (migration
+`coral_0007_simulation_cases` adds `last_mismatches` and a unique `(workspace_id,
+workflow_id, name)` index), read and written through `SqlWorkflowDefinitionStore`.
+
+- **Ownership.** Every case route resolves the caller, then the store loads the workflow
+  in the same session and applies the workflow's own visibility. A workflow the caller
+  cannot see, an id that is not 32 hex characters, or a case of another workflow is 404:
+  "Workflow not found." or "Case not found.", never echoing an id. `created_by` is the
+  caller.
+- **`SavedCaseOut`** is `{id, name, script, expect, last_result, mismatches, last_run_at,
+  created_at}`, listed by `created_at`, then `name`. `last_result` is `passed`, `failed`,
+  `error` or `null` (not run); `mismatches` are `check_case`'s lines, each cut to 500
+  characters.
+- **When a case runs.** `POST` runs it inline on the stored definition; every save of the
+  workflow re-runs all its cases after the save commits; `:use` runs the template's cases
+  before the insert. All use `max_activations=DEFAULT_RUN_ACTIVATIONS`. A workflow that is
+  not runnable, or has unresolved facts, records `error` with the one line
+  `workflow: not runnable` and is not simulated.
+- **Stale results.** A result is stored only if the workflow's content hash is still the
+  one it ran on: a `POST` racing a save stores the case as not run, and a re-run for
+  content that a newer save replaced records nothing. A save's re-run that fails in the
+  store is logged; the save still answers 200.
+- **Refusals.** They are checked before the case is simulated. A duplicate name is 409 `case_exists`; a 21st case is 409
+  `case_limit_reached` (`MAX_WORKFLOW_CASES = 20`); a body the models refuse is 422; a
+  script or expectation over the stored size cap is 413 `payload_too_large`, "The case is
+  too large to store.".
+- **Residuals.** A legacy workflow with no owner lets any user of its workspace list, add
+  and delete its cases, as saving it does; its first saver claims the cases too. A save
+  runs up to 20 bounded simulations inline on Starlette's pool, and a `POST` one, with
+  no simulate-pool cap: a graph within every bound measured 3.3 s per run, so a save can
+  take about a minute. A listing of 20 cases at the script and expectation bounds is
+  about 9 MB. Cases follow the
+  definition id: a save that changes the YAML `id:` makes a new definition without them.
 
 **The web fixture.** `tests/coral/api/simulate_contract.py` records what the route answers
 for four scripts on the template into `web/src/workflows/fixtures/reviewLoopSimulations.json`,
@@ -430,6 +483,16 @@ hook formats it).
     it or reset."
   - Closing the panel aborts its request and forgets the answers; the server's work goes
     on (above).
+  - **Save as case** shows once a simulation ends without `needs_input`, is current, the
+    editor has no unsaved changes and it has at most 200 steps. It posts the answers'
+    script and the result's `outcome`, `steps`, `gates_reached`, `limits_hit` and session
+    total as `expect`. 409s show their own messages.
+- **Saved cases** (`simulate/SavedCases.tsx`), below the editor: each case's name, its
+  last result (Passed, Failed, Error or Not run) with the mismatch lines of a failed or
+  errored one, Run and Delete. Saving the workflow refreshes the list.
+- **Run** is a preset: it opens the panel and posts the case's script with the editor's
+  YAML, so the canvas shows the result's overlay; answers then go on from there.
+- **Template cards** list their cases' names, which `:use` copies as saved cases.
 
 ## Proof
 
@@ -441,8 +504,11 @@ hook formats it).
   cases, the shape test and `with_workflow_id`. `tests/coral/test_packaging.py` checks that
   the wheel holds both template files and that the registry reads them installed.
 - `tests/coral/api/test_workflows_api.py` and `test_templates_api.py`: the routes, auth,
-  the pool's caps, 422s, key choice and races. `tests/coral/stores/test_workflow_store.py`:
-  `create` and `workflow_keys`.
+  the pool's caps, 422s, key choice and races, and the case routes: ownership, conflicts,
+  re-run on save, template copies. `tests/coral/stores/test_workflow_store.py`: `create`
+  and `workflow_keys`; `tests/stores/coral/test_simulation_case_store.py`: the case store.
+- `tests/coral/engine/test_simulate_cli.py`: the CLI prints what the route answers, and
+  its exit codes.
 - Vitest beside the web files: the client, the Templates tab, the editor and the panel.
 
 ## Residuals
@@ -463,7 +529,6 @@ hook formats it).
 
 | Work | Owner |
 |---|---|
-| Saved test cases per workflow, preset simulations from a template's cases, a Simulate CLI | CRL-186 |
 | Timers, retries and blocked handoffs in scripts, a step-through trace, an optional exhaustive check | CRL-187 |
 | Template parameters, a Use-template dialog, confirmed done-when commands | CRL-188 |
 | More built-in templates: the two-reviewer review loop, PR review, single-agent steps | CRL-189 |

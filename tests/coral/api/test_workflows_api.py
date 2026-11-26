@@ -15,9 +15,11 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 
 import coral
 import coral.api.workflows as workflows_api
+import coral.stores.workflows as workflow_store
 from coral.api.run_service import InFlight, server_busy
 from coral.api.workflows import (
     MAX_LOAD_ISSUES,
@@ -29,12 +31,13 @@ from coral.api.workflows import (
 from coral.bridge.config import DEFAULT_RUN_ACTIVATIONS
 from coral.bridge.executors import BoundedThreads
 from coral.db.models_workflows import CoralBase
+from coral.engine.simcase import MAX_EXPECTED_ITEMS
 from coral.engine.simulate import MAX_SCRIPT_INPUTS, MAX_STEP_SEATS, SimLimit, simulate
 from coral.model import LoadError, load
 from coral.omni.server.access import request_viewer
 from coral.omni.server.openapi import coral_openapi
 from coral.omni.server.openapi_ts import TS_PATH
-from coral.stores.workflows import SqlWorkflowDefinitionStore
+from coral.stores.workflows import MAX_WORKFLOW_CASES, SqlWorkflowDefinitionStore
 from coral.templates import builtin_template
 from coral.validate import ValidateContext
 from coral.validate.pipeline import CheckResult
@@ -806,3 +809,314 @@ def test_simulate_reads_and_writes_no_stored_workflow(simulations: InFlight) -> 
     body = _simulation(TestClient(app, headers={HEADER: ALICE}), fixture_text("minimal"))
 
     assert body["simulation"]["outcome"] == "completed"
+
+
+CASE_NOT_FOUND = {"error": {"code": "not_found", "message": "Case not found.", "details": None}}
+SAVED_CASE_FIELDS = {
+    "id",
+    "name",
+    "script",
+    "expect",
+    "last_result",
+    "mismatches",
+    "last_run_at",
+    "created_at",
+}
+
+
+def _one_step() -> str:
+    return workflow_text(
+        [start(), step("work"), end()],
+        [arrow("a1", "start", "work"), arrow("a2", "work", "end")],
+    )
+
+
+def _two_steps() -> str:
+    return workflow_text(
+        [start(), step("work"), step("check"), end()],
+        [arrow("a1", "start", "work"), arrow("a2", "work", "check"), arrow("a3", "check", "end")],
+    )
+
+
+def _case(name: str = "one step", **expect: Any) -> dict[str, Any]:
+    return {
+        "name": name,
+        "script": {"inputs": []},
+        "expect": {"outcome": "completed", "steps": ["work:done"], **expect},
+    }
+
+
+def _cases_path(workflow_id: str) -> str:
+    return f"{WORKFLOWS}/{workflow_id}/cases"
+
+
+def _saved(client: TestClient, yaml_text: str) -> str:
+    response = client.post(WORKFLOWS, json={"yaml": yaml_text})
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
+def _cases(client: TestClient, workflow_id: str) -> list[dict[str, Any]]:
+    response = client.get(_cases_path(workflow_id))
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_a_posted_case_runs_and_fails_once_an_edit_changes_its_path(client: TestClient) -> None:
+    workflow_id = _saved(client, _one_step())
+
+    posted = client.post(_cases_path(workflow_id), json=_case())
+
+    assert posted.status_code == 201, posted.text
+    body = posted.json()
+    assert set(body) == SAVED_CASE_FIELDS
+    assert (body["name"], body["last_result"], body["mismatches"]) == ("one step", "passed", [])
+    assert (body["last_run_at"], body["created_at"]) == (SAVED_AT, SAVED_AT)
+    assert body["expect"]["steps"] == ["work:done"]
+    assert _cases(client, workflow_id) == [body]
+
+    assert _saved(client, _two_steps()) == workflow_id
+
+    [failed] = _cases(client, workflow_id)
+    assert (failed["id"], failed["last_result"]) == (body["id"], "failed")
+    assert failed["mismatches"] == ["steps: expected [work:done], got [work:done, check:done]"]
+
+    assert _saved(client, _one_step()) == workflow_id
+    assert _cases(client, workflow_id)[0]["last_result"] == "passed"
+
+
+def test_a_case_on_a_workflow_that_is_not_runnable_is_an_error_and_never_simulates(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        workflows_api, "check_case", lambda *_args, **_kwargs: pytest.fail("simulated")
+    )
+    workflow_id = _saved(client, fixture_text("deadlock_join"))
+
+    body = client.post(_cases_path(workflow_id), json=_case()).json()
+
+    assert (body["last_result"], body["mismatches"]) == ("error", ["workflow: not runnable"])
+    _saved(client, fixture_text("deadlock_join"))
+    assert _cases(client, workflow_id)[0]["mismatches"] == ["workflow: not runnable"]
+
+
+def test_a_mismatch_line_is_clipped_before_it_is_stored(client: TestClient) -> None:
+    workflow_id = _saved(client, _one_step())
+    long_steps = ["x" * 300] * 3
+
+    body = client.post(_cases_path(workflow_id), json=_case(steps=long_steps)).json()
+
+    [line] = body["mismatches"]
+    assert body["last_result"] == "failed"
+    assert len(line) == MAX_LOAD_TEXT_CHARS and line.endswith("…")
+
+
+def test_a_deleted_case_is_gone_and_a_second_delete_is_not_found(client: TestClient) -> None:
+    workflow_id = _saved(client, _one_step())
+    kept = client.post(_cases_path(workflow_id), json=_case("kept")).json()
+    dropped = client.post(_cases_path(workflow_id), json=_case("dropped")).json()
+
+    deleted = client.delete(f"{_cases_path(workflow_id)}/{dropped['id']}")
+    again = client.delete(f"{_cases_path(workflow_id)}/{dropped['id']}")
+
+    assert (deleted.status_code, deleted.content) == (204, b"")
+    assert (again.status_code, again.json()) == (404, CASE_NOT_FOUND)
+    assert [item["id"] for item in _cases(client, workflow_id)] == [kept["id"]]
+
+
+def test_a_duplicate_name_and_a_case_past_the_cap_are_conflicts(client: TestClient) -> None:
+    workflow_id = _saved(client, _one_step())
+    for index in range(MAX_WORKFLOW_CASES):
+        assert client.post(_cases_path(workflow_id), json=_case(f"c{index}")).status_code == 201
+
+    duplicate = client.post(_cases_path(workflow_id), json=_case("c0"))
+    over = client.post(_cases_path(workflow_id), json=_case("extra"))
+
+    assert (duplicate.status_code, duplicate.json()["error"]["code"]) == (409, "case_exists")
+    assert (over.status_code, over.json()["error"]["code"]) == (409, "case_limit_reached")
+    assert len(_cases(client, workflow_id)) == MAX_WORKFLOW_CASES
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({}, id="empty"),
+        pytest.param({**_case(), "extra": 1}, id="unknown-field"),
+        pytest.param(_case(name=""), id="empty-name"),
+        pytest.param(_case(name="x" * 121), id="long-name"),
+        pytest.param({**_case(), "expect": {"outcome": "done"}}, id="bad-outcome"),
+        pytest.param(_case(steps=["a:done"] * (MAX_EXPECTED_ITEMS + 1)), id="many-steps"),
+        pytest.param(_case(gates_reached=["g" * 1000]), id="long-gate"),
+    ],
+)
+def test_a_malformed_or_oversized_case_is_refused_and_stores_nothing(
+    client: TestClient, body: dict[str, Any]
+) -> None:
+    workflow_id = _saved(client, _one_step())
+
+    response = client.post(_cases_path(workflow_id), json=body)
+
+    assert (response.status_code, response.json()["error"]["code"]) == (422, "validation_failed")
+    assert _cases(client, workflow_id) == []
+
+
+def test_a_case_too_large_to_store_is_refused_with_a_fixed_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow_id = _saved(client, _one_step())
+    monkeypatch.setattr(workflow_store, "MAX_STORED_BYTES", 16)
+
+    response = client.post(_cases_path(workflow_id), json=_case())
+
+    assert (response.status_code, response.json()) == (
+        413,
+        {
+            "error": {
+                "code": "payload_too_large",
+                "message": "The case is too large to store.",
+                "details": None,
+            }
+        },
+    )
+    monkeypatch.undo()
+    assert _cases(client, workflow_id) == []
+
+
+@pytest.mark.parametrize("workflow_id", ["0" * 32, "x" * 300, "%00"])
+def test_the_case_routes_of_an_unknown_workflow_are_not_found(
+    client: TestClient, workflow_id: str
+) -> None:
+    for response in (
+        client.get(_cases_path(workflow_id)),
+        client.post(_cases_path(workflow_id), json=_case()),
+        client.delete(f"{_cases_path(workflow_id)}/{'0' * 32}"),
+    ):
+        assert (response.status_code, response.json()) == (404, NOT_FOUND)
+
+
+def test_another_users_workflow_cases_are_not_found_on_every_case_route(
+    store: SqlWorkflowDefinitionStore,
+) -> None:
+    alice, bob = _client(store), _client(store, BOB)
+    workflow_id = _saved(alice, _one_step())
+    case_id = alice.post(_cases_path(workflow_id), json=_case()).json()["id"]
+
+    for response in (
+        bob.get(_cases_path(workflow_id)),
+        bob.post(_cases_path(workflow_id), json=_case("bobs")),
+        bob.delete(f"{_cases_path(workflow_id)}/{case_id}"),
+    ):
+        assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert [item["id"] for item in _cases(alice, workflow_id)] == [case_id]
+
+
+def test_a_case_of_another_workflow_is_not_found_through_this_one(client: TestClient) -> None:
+    first = _saved(client, _one_step())
+    other = _saved(client, fixture_text("loop"))
+    case_id = client.post(_cases_path(first), json=_case()).json()["id"]
+
+    for case_path in (case_id, "x" * 300):
+        response = client.delete(f"{_cases_path(other)}/{case_path}")
+        assert (response.status_code, response.json()) == (404, CASE_NOT_FOUND)
+    assert len(_cases(client, first)) == 1
+
+
+def test_every_case_route_needs_a_permitted_caller(store: SqlWorkflowDefinitionStore) -> None:
+    workflow_id = _saved(_client(store), _one_step())
+    path = _cases_path(workflow_id)
+
+    for client, status, code in (
+        (_client(store, user=None), 401, "unauthenticated"),
+        (_client(store, auth_provider=CROSSED_ACCOUNT), 403, "not_permitted"),
+    ):
+        for response in (
+            client.get(path),
+            client.post(path, json=_case()),
+            client.delete(f"{path}/{'0' * 32}"),
+        ):
+            assert (response.status_code, response.json()["error"]["code"]) == (status, code)
+    assert _cases(_client(store), workflow_id) == []
+
+
+def test_the_case_routes_declare_their_refusals() -> None:
+    paths = coral_openapi()["paths"]
+    cases = paths[f"{WORKFLOWS}/{{workflow_id}}/cases"]
+    one = paths[f"{WORKFLOWS}/{{workflow_id}}/cases/{{case_id}}"]
+
+    assert {
+        cases["get"]["operationId"]: set(cases["get"]["responses"]),
+        cases["post"]["operationId"]: set(cases["post"]["responses"]),
+        one["delete"]["operationId"]: set(one["delete"]["responses"]),
+    } == {
+        "coral_list_workflow_cases": {"200", "401", "403", "404", "422"},
+        "coral_save_workflow_case": {"201", "401", "403", "404", "409", "413", "422"},
+        "coral_delete_workflow_case": {"204", "401", "403", "404", "422"},
+    }
+
+
+def test_an_unchanged_resave_keeps_each_cases_result(client: TestClient) -> None:
+    workflow_id = _saved(client, _one_step())
+    passing = client.post(_cases_path(workflow_id), json=_case("passing")).json()
+    failing = client.post(_cases_path(workflow_id), json=_case("failing", steps=[])).json()
+
+    assert _saved(client, _one_step()) == workflow_id
+
+    assert _cases(client, workflow_id) == [failing, passing]
+    assert failing["last_result"] == "failed"
+
+
+def test_cases_are_listed_by_creation_then_name(store: SqlWorkflowDefinitionStore) -> None:
+    now = [SAVED_AT]
+    store._clock = lambda: now[0]
+    client = _client(store)
+    workflow_id = _saved(client, _one_step())
+    for at, name in ((SAVED_AT, "zeta"), (SAVED_AT + 1, "beta"), (SAVED_AT + 1, "alpha")):
+        now[0] = at
+        assert client.post(_cases_path(workflow_id), json=_case(name)).status_code == 201
+
+    assert [item["name"] for item in _cases(client, workflow_id)] == ["zeta", "alpha", "beta"]
+
+
+def test_a_draft_that_cannot_run_marks_its_cases_error_until_a_fix_passes_them(
+    client: TestClient,
+) -> None:
+    workflow_id = _saved(client, _one_step())
+    case_id = client.post(_cases_path(workflow_id), json=_case()).json()["id"]
+    broken = workflow_text([start(), step("work"), end()], [arrow("a1", "start", "work")])
+
+    assert _saved(client, broken) == workflow_id
+    [errored] = _cases(client, workflow_id)
+    assert (errored["id"], errored["last_result"]) == (case_id, "error")
+    assert errored["mismatches"] == ["workflow: not runnable"]
+
+    assert _saved(client, _one_step()) == workflow_id
+    [fixed] = _cases(client, workflow_id)
+    assert (fixed["id"], fixed["last_result"], fixed["mismatches"]) == (case_id, "passed", [])
+
+
+def test_a_save_whose_case_rerun_fails_in_the_store_still_answers_its_save(
+    store: SqlWorkflowDefinitionStore, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow_id = _saved(client, _one_step())
+    client.post(_cases_path(workflow_id), json=_case())
+
+    def refuse(**_kwargs: object) -> None:
+        raise OperationalError("UPDATE", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(store, "record_case_runs", refuse)
+
+    assert _saved(client, _one_step()) == workflow_id
+
+
+def test_a_refused_case_is_refused_before_it_is_simulated(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow_id = _saved(client, _one_step())
+    assert client.post(_cases_path(workflow_id), json=_case()).status_code == 201
+    runs: list[object] = []
+    monkeypatch.setattr(workflows_api, "check_case", lambda *args, **kwargs: runs.append(args))
+
+    response = client.post(_cases_path(workflow_id), json=_case())
+
+    assert (response.status_code, response.json()["error"]["code"]) == (409, "case_exists")
+    assert runs == []

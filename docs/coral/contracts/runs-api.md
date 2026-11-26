@@ -102,6 +102,8 @@ Every refusal from a Coral route has one shape (`CoralRoute`, `coral/api/errors.
 | `not_a_git_repo` | 400 | The start's repository is not a git repository |
 | `start_key_conflict` | 409 | The start key was used with another request, or by an older registration of the same user id; a key whose run cannot be read back (`details.reason: "engine.load_failed"`) |
 | `workflow_key_taken` | 409 | A save of a key another owner holds |
+| `case_exists` | 409 | A saved case with that name already exists on the workflow |
+| `case_limit_reached` | 409 | A workflow already holds its 20 saved cases |
 | `illegal_transition` | 409 | An action the run cannot take (`details.status`, `pause_reason`, and `reason` when known); a refused retry (`details.reason`, "Actions"); a gate `already_answered`, `no_longer_waiting` or `run_paused` (`details.reason`); an Inbox ack of an open gate alert |
 | `stale_visit` | 409 | A gate visit asked again since |
 | `worktree_failed` | 409 | The host could not create the worktree, and it is not locked |

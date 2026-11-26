@@ -181,6 +181,13 @@ function TemplateCard({ template }: { template: TemplateOut }) {
     <div className="flex flex-col gap-2 rounded-lg border border-border p-4">
       <h3 className="font-medium text-foreground text-ui">{template.name}</h3>
       <p className="flex-1 text-muted-foreground text-ui">{template.description}</p>
+      {template.cases.length > 0 && (
+        <ul aria-label="Cases" className="flex flex-col gap-0.5 text-muted-foreground text-xs">
+          {template.cases.map((templateCase) => (
+            <li key={templateCase.name}>{templateCase.name}</li>
+          ))}
+        </ul>
+      )}
       {useTemplate.isError && (
         <p className="text-destructive text-xs">Couldn't create the workflow. Try again.</p>
       )}

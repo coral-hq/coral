@@ -36,6 +36,7 @@ TERMINAL_STATUSES: frozenset[RunStatus] = frozenset({"completed", "failed", "can
 Rules = Literal[1, 2]
 PREVIOUS_RULES: Final = 1
 RULES: Final = 2
+DEFAULT_RUN_ACTIVATIONS = 100
 
 
 class _Frozen(BaseModel):

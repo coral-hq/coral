@@ -13,7 +13,14 @@ from pydantic import (
     model_validator,
 )
 
-from coral.engine.simulate import SimOutcome, SimScript, check_script_text, simulate
+from coral.engine.simulate import (
+    MAX_NODE_ID_CHARS,
+    MAX_VALUE_CHARS,
+    SimOutcome,
+    SimScript,
+    check_script_text,
+    simulate,
+)
 from coral.model.ir import CompiledGraph
 from coral.model.loader import LoadError, load_yaml_data
 
@@ -22,12 +29,20 @@ MAX_CASE_NAME_CHARS = 120
 MAX_CASES = 64
 # Far above any simulation's total, so a mismatch line stays short to print.
 MAX_EXPECTED_SESSIONS = 1_000_000
+MAX_EXPECTED_ITEMS = 200
+MAX_EXPECTED_ITEM_CHARS = MAX_NODE_ID_CHARS + 1 + MAX_VALUE_CHARS
 
 CaseName = Annotated[
     str,
     StringConstraints(min_length=1, max_length=MAX_CASE_NAME_CHARS),
     AfterValidator(check_script_text),
 ]
+ExpectedItem = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=MAX_EXPECTED_ITEM_CHARS),
+    AfterValidator(check_script_text),
+]
+ExpectedItems = Annotated[tuple[ExpectedItem, ...], Field(max_length=MAX_EXPECTED_ITEMS)]
 
 
 class _Frozen(BaseModel):
@@ -41,9 +56,9 @@ class SimExpect(_Frozen):
     """
 
     outcome: SimOutcome
-    steps: tuple[str, ...] | None = None
-    gates_reached: tuple[str, ...] | None = None
-    limits_hit: tuple[str, ...] | None = None
+    steps: ExpectedItems | None = None
+    gates_reached: ExpectedItems | None = None
+    limits_hit: ExpectedItems | None = None
     sessions: int | None = Field(default=None, ge=0, le=MAX_EXPECTED_SESSIONS)
 
 

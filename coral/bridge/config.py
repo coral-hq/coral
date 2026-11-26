@@ -8,7 +8,7 @@ from types import MappingProxyType
 
 from pydantic import ValidationError
 
-from coral.engine.types import EngineConfig
+from coral.engine.types import DEFAULT_RUN_ACTIVATIONS, EngineConfig
 from coral.stores.protocols import RunStartSpec
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -37,8 +37,6 @@ FEED_BATCH = 32
 MAX_RUN_ACTIVATIONS = 1_000
 MAX_REJECTED_CALL_LIMIT = 10
 MAX_LIVE_SLOTS = 32
-# The activation cap of a run whose start names none; a simulation stops at it too.
-DEFAULT_RUN_ACTIVATIONS = 100
 # Live slots and open decisions together: each can add a row to one commit (a create,
 # a nudge, a request or a re-request), beside the orchestrator create, the anchor and
 # timer rows, within the commit's cap.

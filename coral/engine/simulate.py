@@ -21,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Annotated, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import (
     AfterValidator,
@@ -30,6 +30,8 @@ from pydantic import (
     Field,
     JsonValue,
     StringConstraints,
+    TypeAdapter,
+    ValidationError,
     model_validator,
 )
 
@@ -42,6 +44,7 @@ from coral.engine.machines.activation import (
 from coral.engine.projection import RunView, project
 from coral.engine.reducer import transition
 from coral.engine.types import (
+    DEFAULT_RUN_ACTIVATIONS,
     RULES,
     Activation,
     AnswerGate,
@@ -732,3 +735,58 @@ def _trace_digest(log: Sequence[LogEntry]) -> str:
         digest.update(canonical_json(entry.model_dump(mode="json")))
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Print what ``POST /v1/coral/workflows:simulate`` returns for a workflow and script file."""
+    import argparse
+    import sys
+    from pathlib import Path
+
+    from coral.model.loader import load_yaml_data
+    from coral.validate import ValidateContext
+    from coral.validate.pipeline import check_text
+
+    parser = argparse.ArgumentParser(prog="python -m coral.engine.simulate")
+    parser.add_argument("workflow", type=Path)
+    parser.add_argument("--script", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        text = args.workflow.read_bytes().decode("utf-8")
+        script = SimScript()
+        if args.script is not None:
+            script_text = args.script.read_bytes().decode("utf-8")
+            script = SimScript.model_validate(load_yaml_data(script_text))
+    except OSError as error:
+        print(f"simulate: cannot read {error.filename}: {error.strerror}", file=sys.stderr)
+        return 2
+    except UnicodeDecodeError:
+        print("simulate: a file is not UTF-8 text", file=sys.stderr)
+        return 2
+    except ValidationError as error:
+        print(f"simulate: the script is not valid ({error.error_count()} errors)", file=sys.stderr)
+        return 2
+    checked = check_text(text, ValidateContext())
+    body: dict[str, Any]
+    if checked.load_error is not None:
+        body = {"valid": False, "runnable": False, "load_error": checked.load_error}
+    else:
+        assert checked.graph is not None and checked.report is not None
+        graph = checked.graph
+        runnable = checked.report.runnable
+        body = {
+            "valid": True,
+            "runnable": runnable,
+            "content_hash": graph.content_hash,
+            "problems": list(checked.report.problems),
+            "compiled": graph,
+            "simulation": simulate(graph, script, max_activations=DEFAULT_RUN_ACTIVATIONS).result
+            if runnable and not graph.analysis.unresolved
+            else None,
+        }
+    sys.stdout.buffer.write(TypeAdapter(Any).dump_json(body) + b"\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

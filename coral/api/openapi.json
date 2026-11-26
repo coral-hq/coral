@@ -571,6 +571,8 @@
               "not_a_git_repo",
               "start_key_conflict",
               "workflow_key_taken",
+              "case_exists",
+              "case_limit_reached",
               "profile_exists",
               "profile_key_taken",
               "stale_revision",
@@ -3356,6 +3358,75 @@
         "title": "RunView",
         "type": "object"
       },
+      "SavedCaseOut": {
+        "description": "A workflow's saved Simulate case with the result of its last run.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "expect": {
+            "$ref": "#/components/schemas/SimExpect"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_result": {
+            "anyOf": [
+              {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "error"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Result"
+          },
+          "last_run_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run At"
+          },
+          "mismatches": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mismatches",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "script": {
+            "$ref": "#/components/schemas/SimScript"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "script",
+          "expect",
+          "last_result",
+          "mismatches",
+          "last_run_at",
+          "created_at"
+        ],
+        "title": "SavedCaseOut",
+        "type": "object"
+      },
       "SavedWorkflowOut": {
         "description": "The definition a save stored, with the validation of what was saved.",
         "properties": {
@@ -3416,6 +3487,120 @@
           "compiled"
         ],
         "title": "SavedWorkflowOut",
+        "type": "object"
+      },
+      "SimCase": {
+        "additionalProperties": false,
+        "properties": {
+          "expect": {
+            "$ref": "#/components/schemas/SimExpect"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "script": {
+            "$ref": "#/components/schemas/SimScript"
+          }
+        },
+        "required": [
+          "name",
+          "script",
+          "expect"
+        ],
+        "title": "SimCase",
+        "type": "object"
+      },
+      "SimExpect": {
+        "additionalProperties": false,
+        "description": "What a case expects; only the fields it sets are compared.\n\n``steps`` holds ``node_id:result`` per answered step, in order; ``sessions`` the total.",
+        "properties": {
+          "gates_reached": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 320,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gates Reached"
+          },
+          "limits_hit": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 320,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limits Hit"
+          },
+          "outcome": {
+            "enum": [
+              "completed",
+              "failed",
+              "cancelled",
+              "paused",
+              "needs_input",
+              "rejected",
+              "stalled",
+              "step_limit",
+              "unsupported"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "maximum": 1000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessions"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 320,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "title": "SimExpect",
         "type": "object"
       },
       "SimInput": {
@@ -4217,6 +4402,13 @@
       "TemplateOut": {
         "description": "A built-in workflow template: its workflow's id, name and description, and its YAML.",
         "properties": {
+          "cases": {
+            "items": {
+              "$ref": "#/components/schemas/SimCase"
+            },
+            "title": "Cases",
+            "type": "array"
+          },
           "description": {
             "title": "Description",
             "type": "string"
@@ -4238,7 +4430,8 @@
           "id",
           "name",
           "description",
-          "yaml"
+          "yaml",
+          "cases"
         ],
         "title": "TemplateOut",
         "type": "object"
@@ -7090,6 +7283,259 @@
           }
         },
         "summary": "Get Workflow",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/workflows/{workflow_id}/cases": {
+      "get": {
+        "description": "The saved cases of one of the caller's workflows, with their last results.",
+        "operationId": "coral_list_workflow_cases",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SavedCaseOut"
+                  },
+                  "title": "Response Coral List Workflow Cases",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "List Workflow Cases",
+        "tags": [
+          "coral"
+        ]
+      },
+      "post": {
+        "description": "Save a case on one of the caller's workflows and run it on the stored definition.",
+        "operationId": "coral_save_workflow_case",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimCase"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedCaseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Save Workflow Case",
+        "tags": [
+          "coral"
+        ]
+      }
+    },
+    "/v1/coral/workflows/{workflow_id}/cases/{case_id}": {
+      "delete": {
+        "description": "Delete one of the saved cases of one of the caller's workflows.",
+        "operationId": "coral_delete_workflow_case",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "title": "Case Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoralErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Delete Workflow Case",
         "tags": [
           "coral"
         ]

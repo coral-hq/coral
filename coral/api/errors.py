@@ -29,6 +29,8 @@ ErrorCode = Literal[
     "not_a_git_repo",
     "start_key_conflict",
     "workflow_key_taken",
+    "case_exists",
+    "case_limit_reached",
     "profile_exists",
     "profile_key_taken",
     "stale_revision",

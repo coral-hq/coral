@@ -85,6 +85,53 @@ describe("useSimulation", () => {
     expect(result.current.stale).toBe(false);
   });
 
+  it("posts a preset script while open, as answers that round-trip to the same script", async () => {
+    const script = {
+      inputs: [
+        { node_id: "review", kind: "label" as const, values: ["changes_requested", "approved"] },
+        { node_id: "approve_change", kind: "gate" as const, values: ["approve"] },
+      ],
+    };
+    const { result } = renderSimulation();
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    act(() => result.current.runScript(script));
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    expect(api.simulateWorkflow).toHaveBeenCalledTimes(2);
+    expect(api.simulateWorkflow).toHaveBeenLastCalledWith("v1", script, expect.anything());
+    expect(result.current.answers).toEqual([
+      { nodeId: "review", kind: "label", value: "changes_requested" },
+      { nodeId: "review", kind: "label", value: "approved" },
+      { nodeId: "approve_change", kind: "gate", value: "approve" },
+    ]);
+  });
+
+  it("posts a preset given while closed when it opens, instead of an empty script", async () => {
+    const script = {
+      inputs: [{ node_id: "review", kind: "label" as const, values: ["approved"] }],
+    };
+    const { result, rerender } = renderSimulation("v1", false);
+    act(() => result.current.runScript(script));
+    expect(api.simulateWorkflow).not.toHaveBeenCalled();
+    rerender({ yaml: "v1", enabled: true });
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    expect(api.simulateWorkflow).toHaveBeenCalledTimes(1);
+    expect(api.simulateWorkflow).toHaveBeenCalledWith("v1", script, expect.anything());
+
+    rerender({ yaml: "v1", enabled: false });
+    rerender({ yaml: "v1", enabled: true });
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    expect(api.simulateWorkflow).toHaveBeenLastCalledWith("v1", { inputs: [] }, expect.anything());
+  });
+
+  it("posts an empty script for a preset without inputs", async () => {
+    const { result } = renderSimulation();
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    api.simulateWorkflow.mockClear();
+    act(() => result.current.runScript({}));
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    expect(api.simulateWorkflow).toHaveBeenCalledWith("v1", { inputs: [] }, expect.anything());
+  });
+
   it("never posts while the YAML changes; it reports the result stale", async () => {
     // WHY: answers belong to the text they were chosen for; only an explicit re-run moves on.
     const { result, rerender } = renderSimulation("v1");

@@ -134,7 +134,12 @@ def test_coral_migration_chain_revisions_and_lineage() -> None:
     script = ScriptDirectory.from_config(config)
 
     heads = script.get_heads()
-    assert heads == ["coral_0006_profiles"]
+    assert heads == ["coral_0007_simulation_cases"]
+
+    rev_cases = script.get_revision("coral_0007_simulation_cases")
+    assert rev_cases is not None
+    assert rev_cases.down_revision == "coral_0006_profiles"
+    assert len(rev_cases.revision) <= 32
 
     rev_profiles = script.get_revision("coral_0006_profiles")
     assert rev_profiles is not None

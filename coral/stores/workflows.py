@@ -9,18 +9,22 @@ Creating one only inserts: a key any definition holds is refused, whoever owns i
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol, cast
 
 from sqlalchemy import ColumnElement, Engine, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from coral.db import encode, make_named_managed_session_maker
+from coral.db import SimulationCaseRow, encode, make_named_managed_session_maker
+from coral.db.enum_codecs import decode_simulation_case_status, encode_simulation_case_status
 from coral.db.models_workflows import MAX_STORED_BYTES, WorkflowRow
+from coral.engine.simcase import SimCase, SimExpect
+from coral.engine.simulate import SimScript
 from coral.model import CompiledGraph
 
 _RUNNABLE = "runnable"
@@ -33,6 +37,36 @@ class WorkflowTooLargeError(ValueError):
 
 class WorkflowKeyTaken(Exception):
     """A definition the caller may not replace holds this workflow key in the workspace."""
+
+
+class CaseExists(Exception):
+    """The workflow already has a case with this name."""
+
+
+class CaseLimitReached(Exception):
+    """The workflow already has :data:`MAX_WORKFLOW_CASES` cases."""
+
+
+MAX_WORKFLOW_CASES = 20
+
+CaseStatus = Literal["passed", "failed", "error"]
+
+
+@dataclass(frozen=True)
+class CaseRun:
+    status: CaseStatus
+    mismatches: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SavedCase:
+    id: str
+    workflow_id: str
+    case: SimCase
+    last_result: CaseStatus | None
+    mismatches: tuple[str, ...]
+    last_run_at: int | None
+    created_at: int
 
 
 @dataclass(frozen=True)
@@ -74,6 +108,7 @@ class WorkflowDefinitionStore(Protocol):
         compiled: CompiledGraph,
         runnable: bool,
         owner: str | None,
+        cases: Sequence[tuple[SimCase, CaseRun]] = (),
     ) -> WorkflowDefinition: ...
 
     def workflow_keys(self, *, workspace_id: int, prefix: str) -> frozenset[str]: ...
@@ -89,6 +124,34 @@ class WorkflowDefinitionStore(Protocol):
     def list_definitions(
         self, *, workspace_id: int, owner: str | None
     ) -> list[WorkflowDefinition]: ...
+
+    def list_cases(
+        self, *, workspace_id: int, workflow_id: str, owner: str | None
+    ) -> list[SavedCase] | None: ...
+
+    def add_case(
+        self,
+        *,
+        workspace_id: int,
+        workflow_id: str,
+        owner: str | None,
+        case: SimCase,
+        result: CaseRun,
+        content_hash: str,
+    ) -> SavedCase | None: ...
+
+    def delete_case(
+        self, *, workspace_id: int, workflow_id: str, case_id: str, owner: str | None
+    ) -> bool: ...
+
+    def record_case_runs(
+        self,
+        *,
+        workspace_id: int,
+        workflow_id: str,
+        runs: Mapping[str, CaseRun],
+        content_hash: str,
+    ) -> None: ...
 
 
 def check_stored_size(field: str, value: str) -> None:
@@ -145,6 +208,60 @@ class _Stored:
 def _visible_to(row: WorkflowRow, owner: str | None) -> bool:
     """Whether ``owner`` may read ``row``: its own, or a legacy row with no owner."""
     return row.user_id is None or row.user_id == owner
+
+
+def _case_row(
+    case: SimCase,
+    run: CaseRun | None,
+    *,
+    workspace_id: int,
+    workflow_id: str,
+    owner: str | None,
+    now: int,
+) -> SimulationCaseRow:
+    script = case.script.model_dump_json()
+    expectation = case.expect.model_dump_json()
+    check_stored_size("script", script)
+    check_stored_size("expectation", expectation)
+    row = SimulationCaseRow(
+        workspace_id=workspace_id,
+        id=uuid.uuid4().hex,
+        workflow_id=workflow_id,
+        name=case.name,
+        script=script,
+        expectation=expectation,
+        created_by=owner,
+        created_at=now,
+        updated_at=now,
+    )
+    if run is not None:
+        _record(row, run, now)
+    return row
+
+
+def _record(row: SimulationCaseRow, run: CaseRun, now: int) -> None:
+    row.last_result = encode_simulation_case_status(run.status)
+    row.last_mismatches = json.dumps(list(run.mismatches))
+    row.last_run_at = now
+    row.updated_at = now
+
+
+def _to_saved_case(row: SimulationCaseRow) -> SavedCase:
+    return SavedCase(
+        id=row.id,
+        workflow_id=row.workflow_id,
+        case=SimCase(
+            name=row.name,
+            script=SimScript.model_validate_json(row.script),
+            expect=SimExpect.model_validate_json(cast(str, row.expectation)),
+        ),
+        last_result=None
+        if row.last_result is None
+        else cast(CaseStatus, decode_simulation_case_status(row.last_result)),
+        mismatches=tuple(json.loads(row.last_mismatches)) if row.last_mismatches else (),
+        last_run_at=row.last_run_at,
+        created_at=row.created_at,
+    )
 
 
 def _to_definition(row: WorkflowRow) -> WorkflowDefinition:
@@ -247,21 +364,33 @@ class SqlWorkflowDefinitionStore:
         compiled: CompiledGraph,
         runnable: bool,
         owner: str | None,
+        cases: Sequence[tuple[SimCase, CaseRun]] = (),
     ) -> WorkflowDefinition:
-        """Insert a new definition owned by ``owner``; an existing one is never changed.
+        """Insert a new definition owned by ``owner``, with ``cases``; an existing one is
+        never changed.
 
         :raises WorkflowKeyTaken: when any definition holds the key, whatever its owner,
             including one a concurrent insert added after this one looked.
-        :raises WorkflowTooLargeError: when the YAML or compiled JSON exceeds the cap.
+        :raises WorkflowTooLargeError: when the YAML, compiled JSON or a case exceeds the cap.
+        :raises CaseLimitReached: when there are more than :data:`MAX_WORKFLOW_CASES` cases.
         """
+        if len(cases) > MAX_WORKFLOW_CASES:
+            raise CaseLimitReached(workflow_key)
         stored = _Stored.of(yaml_text, compiled, runnable)
+        now = self._clock()
         row = stored.new_row(
             workspace_id=workspace_id,
             workflow_key=workflow_key,
             name=name,
             owner=owner,
-            now=self._clock(),
+            now=now,
         )
+        case_rows = [
+            _case_row(
+                case, run, workspace_id=workspace_id, workflow_id=row.id, owner=owner, now=now
+            )
+            for case, run in cases
+        ]
         try:
             with self._write_session("create_definition") as session:
                 held = self._find_by_key(
@@ -270,6 +399,8 @@ class SqlWorkflowDefinitionStore:
                 if held is not None:
                     raise WorkflowKeyTaken(workflow_key)
                 session.add(row)
+                session.flush()
+                session.add_all(case_rows)
                 session.flush()
                 created = _to_definition(row)
         except IntegrityError as error:
@@ -328,3 +459,136 @@ class SqlWorkflowDefinitionStore:
                 .order_by(WorkflowRow.workflow_key)
             ).all()
             return [_to_definition(row) for row in rows if _visible_to(row, owner)]
+
+    def _visible_row(
+        self,
+        session: Session,
+        *,
+        workspace_id: int,
+        workflow_id: str,
+        owner: str | None,
+        lock: bool = False,
+    ) -> WorkflowRow | None:
+        row = session.get(WorkflowRow, (workspace_id, workflow_id), with_for_update=lock)
+        return row if row is not None and _visible_to(row, owner) else None
+
+    def list_cases(
+        self, *, workspace_id: int, workflow_id: str, owner: str | None
+    ) -> list[SavedCase] | None:
+        """The workflow's cases by creation time and name; ``None`` when it is not visible."""
+        with self._session("list_cases") as session:
+            if (
+                self._visible_row(
+                    session, workspace_id=workspace_id, workflow_id=workflow_id, owner=owner
+                )
+                is None
+            ):
+                return None
+            rows = session.scalars(
+                select(SimulationCaseRow)
+                .where(
+                    SimulationCaseRow.workspace_id == workspace_id,
+                    SimulationCaseRow.workflow_id == workflow_id,
+                )
+                .order_by(SimulationCaseRow.created_at, SimulationCaseRow.name)
+            ).all()
+            return [_to_saved_case(row) for row in rows]
+
+    def add_case(
+        self,
+        *,
+        workspace_id: int,
+        workflow_id: str,
+        owner: str | None,
+        case: SimCase,
+        result: CaseRun,
+        content_hash: str,
+    ) -> SavedCase | None:
+        """Add ``case`` with ``result``, or not run when the workflow changed since
+        ``content_hash``; ``None`` when the workflow is not visible.
+
+        :raises CaseExists: when the workflow has a case with this name.
+        :raises CaseLimitReached: when the workflow has :data:`MAX_WORKFLOW_CASES` cases.
+        :raises WorkflowTooLargeError: when the script or expectation exceeds the cap.
+        """
+        now = self._clock()
+        try:
+            with self._write_session("add_case") as session:
+                workflow = self._visible_row(
+                    session,
+                    workspace_id=workspace_id,
+                    workflow_id=workflow_id,
+                    owner=owner,
+                    lock=True,
+                )
+                if workflow is None:
+                    return None
+                names = session.scalars(
+                    select(SimulationCaseRow.name).where(
+                        SimulationCaseRow.workspace_id == workspace_id,
+                        SimulationCaseRow.workflow_id == workflow_id,
+                    )
+                ).all()
+                if case.name in names:
+                    raise CaseExists(case.name)
+                if len(names) >= MAX_WORKFLOW_CASES:
+                    raise CaseLimitReached(workflow_id)
+                current = bytes(workflow.content_hash).hex() == content_hash
+                row = _case_row(
+                    case,
+                    result if current else None,
+                    workspace_id=workspace_id,
+                    workflow_id=workflow_id,
+                    owner=owner,
+                    now=now,
+                )
+                session.add(row)
+                session.flush()
+                return _to_saved_case(row)
+        except IntegrityError as error:
+            raise CaseExists(case.name) from error
+
+    def delete_case(
+        self, *, workspace_id: int, workflow_id: str, case_id: str, owner: str | None
+    ) -> bool:
+        """Delete the workflow's case; ``False`` when the workflow or case is not visible."""
+        with self._write_session("delete_case") as session:
+            if (
+                self._visible_row(
+                    session, workspace_id=workspace_id, workflow_id=workflow_id, owner=owner
+                )
+                is None
+            ):
+                return False
+            row = session.get(SimulationCaseRow, (workspace_id, case_id))
+            if row is None or row.workflow_id != workflow_id:
+                return False
+            session.delete(row)
+            return True
+
+    def record_case_runs(
+        self,
+        *,
+        workspace_id: int,
+        workflow_id: str,
+        runs: Mapping[str, CaseRun],
+        content_hash: str,
+    ) -> None:
+        """Store each run on the workflow's case with that id, unless the workflow changed
+        since ``content_hash``."""
+        if not runs:
+            return
+        now = self._clock()
+        with self._write_session("record_case_runs") as session:
+            workflow = session.get(WorkflowRow, (workspace_id, workflow_id), with_for_update=True)
+            if workflow is None or bytes(workflow.content_hash).hex() != content_hash:
+                return
+            rows = session.scalars(
+                select(SimulationCaseRow).where(
+                    SimulationCaseRow.workspace_id == workspace_id,
+                    SimulationCaseRow.workflow_id == workflow_id,
+                    SimulationCaseRow.id.in_(list(runs)),
+                )
+            ).all()
+            for row in rows:
+                _record(row, runs[row.id], now)
