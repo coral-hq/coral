@@ -29,7 +29,6 @@ openapi:
 openapi-check:
     cd .. && uv run --no-sync python -m coral.omni.server.openapi --check
 
-# Simulate a workflow file and print the simulate route's JSON: `just coral simulate WORKFLOW [--script FILE]`.
 [no-cd]
 [positional-arguments]
 simulate *args:
